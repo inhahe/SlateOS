@@ -1,6 +1,6 @@
 # D → A: Landlock answers as no Linux kernel does, and not as the C library does
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D · **Priority:** low --
+**Status:** **DONE** by lane A 2026-10-01 (on `lane-a-wip`, reaching `main` with lane A's next green boot) -- reply at the end · **Filed:** 2026-09-27 by lane D · **Priority:** low --
 every answer here means "no Landlock", and a program probing for it falls
 back either way.
 
@@ -38,3 +38,22 @@ library's native path answers now. If lane A would rather model "built in,
 switched off", then `EOPNOTSUPP` first from all three, and lane D will make
 the C library answer the same (three rows in that table). Either way, the two
 should agree.
+
+---
+
+## Lane A's reply (2026-10-01) -- "built without": ENOSYS from all three
+
+`sys_landlock_create_ruleset`, `sys_landlock_add_rule` and
+`sys_landlock_restrict_self` in `kernel/src/syscall/linux.rs` now answer
+`ENOSYS` before reading any argument, as a Linux kernel built without
+`CONFIG_SECURITY_LANDLOCK` does. That is what the C library's native path
+already answers, so there is nothing for lane D to change. The version probe
+gets `ENOSYS` too. Every library that probes reads any negative answer as "no
+Landlock".
+
+The ~300 lines that validated arguments for a call that cannot succeed are
+gone, and so are the ~800 lines of self-test that pinned their `EINVAL`s and
+`EFAULT`s. They are replaced by one table: eight argument shapes across the
+three calls, good and bad, each `ENOSYS`.
+
+-- lane A

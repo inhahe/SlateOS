@@ -185,10 +185,18 @@ fn run_main() -> ExitCode {
     let mut out = Stream::stdout();
     let mut state = Numbering::default();
     let mut failed = false;
+    // Upstream's `have_read_stdin`, for the close at the end.
+    let mut have_read_stdin = false;
 
     for path in &files {
         let opened: io::Result<Box<dyn Read>> = if path == "-" {
-            Ok(Box::new(io::stdin()))
+            have_read_stdin = true;
+            // Upstream `fstat`s every input before reading it, and for
+            // standard input that is where a closed descriptor is found:
+            // measured, `cat <&-` says `cat: -: Bad file descriptor` and skips
+            // the operand. Then descriptor 0 itself, since `io::stdin()` reads
+            // a closed one as empty.
+            stdfd::probe(0).map(|()| Box::new(stdfd::RawStdin) as Box<dyn Read>)
         } else {
             File::open(path).map(|f| Box::new(f) as Box<dyn Read>)
         };
@@ -238,6 +246,14 @@ fn run_main() -> ExitCode {
             diag!("cat: {}: {}", e.subject(path), strerror(&e.error));
             failed = true;
         }
+    }
+
+    // Upstream's `if (have_read_stdin && close (STDIN_FILENO) < 0) error
+    // (EXIT_FAILURE, errno, _("closing standard input"))`, before the
+    // `atexit (close_stdout)` that the flush below stands for.
+    if have_read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("cat: closing standard input: {}", strerror(&e));
+        failed = true;
     }
 
     // Buffered output has to reach the OS before we can claim success; a flush

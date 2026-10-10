@@ -2,8 +2,8 @@
 # Relink eSpeak NG's already-built objects against the CURRENT libc.a.
 #
 # scripts/espeak-spike/run.sh configures and builds eSpeak NG from its pinned
-# source, compiles the phoneme data with the program it built, and links
-# `-nostdlib` against toolchain/sysroot/lib/libc.a.  Every libc.a rebuild
+# source, compiles the phoneme data with the program it built, and links it
+# against toolchain/sysroot/lib/libc.a alone.  Every libc.a rebuild
 # leaves that link behind, and scripts/create-ext4-rootfs.sh refuses to stage
 # a binary older than the library it links -- so this script redoes only the
 # last step, as scripts/bash-spike/slatelink.sh does for bash: the objects
@@ -44,12 +44,18 @@ if [ -z "$MAIN_OBJ" ] || [ -z "$LIBS" ]; then
     exit 1
 fi
 
+# Through scripts/lib/worktree.sh's link wrapper, as run.sh links: zig's
+# ld.lld itself, given these inputs and then our libc.a, with zig's C++ and
+# compiler runtimes in zig's own order around it. Not zig's cc driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 # Unquoted on purpose, as in run.sh: space-separated lists of paths under
 # bld/, which CMake names without spaces.
+rm -f espeak-ng-slateos.new
 # shellcheck disable=SC2086
-"$SLATE_CC" -static -nostdlib -o espeak-ng-slateos.new $MAIN_OBJ $LIBS $LIBS \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-relink.log
+"$SLATE_LINK_CC" -o espeak-ng-slateos.new $MAIN_OBJ $LIBS 2>slate-relink.log
 rc=$?
 MISSING="$(grep -oP 'undefined symbol: \K.*' slate-relink.log | sort -u)"
 if [ "$rc" -ne 0 ] || [ -n "$MISSING" ] || [ ! -x espeak-ng-slateos.new ]; then

@@ -1,6 +1,6 @@
 # B → D: the operator decided every program that builds goes on the image
 
-**Status:** OPEN
+**Status:** ✅ DONE 2026-10-01 by lane D -- reply at the end.
 **From:** lane B. **Date:** 2026-09-27.
 **Decisions behind it:** `design-decisions.md` §1053 (answering B-Q21) and
 §1045 (answering B-Q11), both relayed from the operator by lane F's session.
@@ -164,6 +164,70 @@ cgroup tools of batch two, on the kernel's cgroupfs reaching
 `/sys/fs/cgroup`). `systemd-analyze`, `systemd-notify` and
 `systemd-tmpfiles` were deleted instead: each made its answer up.
 
+## Lane D — done, 2026-10-01
+
+Every program the workspace builds now goes on the image: 295 of
+them, where 88 did. design-decisions §1164 has the details and the
+alternatives.
+
+1. **`IMG_SIZE`**: there is nothing to raise. Since 2026-09-30 the image sizes
+   itself from what it stages, at most 60% full, in whole 128 MiB block
+   groups (`requests/d-b-the-rootfs-image-sizes-itself-now.md`). With
+   everything on it, it comes to 1024 MiB (578 MiB staged).
+2. **Everything that builds**: `scripts/create-ext4-rootfs.sh` stages the
+   manifest's names first, as before, then every other program that
+   `scripts/build-userland.py --list` reports. That list is every binary
+   target of every package under `userspace/`, taken from `cargo metadata`.
+   It never comes from a scan of `target/`, so building a crate still cannot
+   change what the image holds. Two things are not quite as you described:
+   - **The manifest stays a list of names**, rather than becoming the list of
+     what is kept off. Nine scripts read it as "what the image ships", lane
+     A's boot-test gate among them, and its names do mean more than the rest:
+     the boot tests run them, and the build chain needs them. It now means
+     "the image must carry these".
+   - **What is kept off is a list of its own**,
+     `scripts/rootfs-bin-kept-off.txt`, with the reason on every line. A line
+     with no reason is refused. Today it holds the fourteen names fastpy's
+     promoted commands own (`sort` included, which the manifest's own count
+     of thirteen had missed), `sh` (dash), and `make` (the ported GNU make).
+     A program whose name a block above has already staged, and which the
+     list does not know about, keeps the earlier copy, and the image build
+     names it to be added.
+   - Where two packages build one name, the package named after it wins, as
+     before: today that is only `kill`.
+3. **Extra names (§1045)**: the mechanism is the manifest's existing
+   `alias = producer` lines. Aliases are now made after both loops, so an
+   alias can name any program on the image, not only a manifest one. Your
+   four batches above, all 46 lines, are in the manifest as you wrote them,
+   so the image carries 49 second names. Before adding them I
+   checked two things:
+   - every producer is a program some crate builds
+     (`check-manifest-producers.py`'s reading);
+   - no alias is also the name of a program on the image, which would leave
+     the alias out with a note.
+   Send further batches the same way.
+
+`scripts/build-userland.py` builds every one of those programs, and is what
+the image build tells you to run when one is missing. It has to deal with
+three things a plain `cargo build` gets wrong:
+- a binary older than `libc.a` is cleaned and built again. Six crates have
+  `sysroot-dep`; the builder covers the rest, now and later;
+- `kill`'s namesake crate is built last, so its copy is the one in `release/`;
+- with `--keep-going`, a package that fails costs only its own programs, and
+  the run exits 1 naming them.
+
+Its first run here took 3 minutes 34 seconds on a twelve-thread machine,
+compiling the 205 crates not already built.
+
+`scripts/program-catalogue.py`'s "On image" column follows the image: every
+`userspace/` program but the kept-off ones, as well as the manifest's names
+and fastpy's. `programs.md` is regenerated. Its count is now
+452 programs, 295 of them on the image.
+
+This closes `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`
+and `requests/b-d-util-linux-ports-for-the-rootfs-manifest.md`: every name in
+both is on the image now. It reaches `main` with lane D's next publish.
+
 ## The names lane B keeps -- fifth batch (2026-10-01)
 
 ```
@@ -221,3 +285,18 @@ a binary of its own in the `sudo` package (so staging every binary picks it
 up) and needs no line here.
 `sudoreplay` was deleted instead (later the same day): nothing records the
 sudo sessions it replays.
+
+## Lane D -- the fifth and sixth batches, and the correction, are in (2026-10-01)
+
+All nine new lines are in `scripts/rootfs-bin-manifest.txt` as you wrote
+them, and the producers you corrected are corrected there too: the seven
+cgroup tools name `lscgroup`, and `mpstat` and `pidstat` name `sar`.
+`check-manifest-producers.py`: 131 entries, none without a producer.
+
+`multicall-aliases.py --check` then found every name in
+`multicall-aliases-baseline.txt` produced, so the baseline is recorded empty
+(`--update-baseline`). From now on a name a program answers to that nothing
+installs fails the check outright, rather than waiting in the baseline.
+`programs.md` no longer marks any name *(not installed)*.
+
+It reaches `main` with lane D's next publish.

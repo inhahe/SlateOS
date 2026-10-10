@@ -95,7 +95,10 @@ same file, asked of lane D with the lines to add
 `gzcat` (gzip); `clear`, `reset`, `tset` (tput); `groupadd`, `groupdel`,
 `groupmod`, `userdel`, `usermod` (useradd); `w` (who); `unzip` (zip). Each is
 implemented and tested in its crate and needs no permission its program
-lacks; they leave the ledger when the lines land.
+lacks; they leave the ledger when the lines land. (2026-10-08: `clear` and
+`tset` are programs of their own now, ncurses 6.4's in coreutils, and
+`reset` is `tset`'s second name, as ncurses ships it; `userspace/tput` is
+retired -- `requests/b-d-clear-reset-and-tset-are-their-own-programs-now.md`.)
 
 Deleted next, as whole crates, each for a subsystem SlateOS has not got and
 does not plan: **`userspace/audit`** (`auditctl`, `auditd`, `ausearch`,

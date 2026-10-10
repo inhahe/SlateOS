@@ -7,8 +7,13 @@
 # One fixture a line, three fields separated by blanks:
 #
 #   name      the fixture, services/<name>/: its ELF, and its argv[0]
-#   grants    "-" for none, or "file" for one wildcard File capability
-#             (READ | WRITE | EXECUTE | METADATA)
+#   grants    "-" for none, or a comma-separated list of kinds, each at
+#             most once:
+#               file   one wildcard File capability
+#                      (READ | WRITE | EXECUTE | METADATA)
+#               creds  (Process, SET_CREDENTIALS): set its own uid, gid and
+#                      supplementary groups, as the fastpy-setuid rung grants
+#             e.g. "file,creds"
 #   seconds   how long it may take, from spawn to exit: 1 to 600
 #
 # A fixture goes on only after it has passed in a lane D boot: none of

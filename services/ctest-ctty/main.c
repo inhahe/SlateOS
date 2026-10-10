@@ -147,11 +147,15 @@ int main(void)
     if (tcgetpgrp(-1) != -1)            return 17;
     if (errno != EBADF)                 return 18;
 
-    /* Likewise a bad pgrp: EINVAL beats ENOTTY, so a caller that passes 0
-     * learns its argument is wrong rather than being told it has no
-     * terminal (which would be true but useless). */
+    /* Likewise a bad pgrp: EINVAL beats ENOTTY, so a caller that passes a
+     * negative group learns its argument is wrong rather than being told it
+     * has no terminal (which would be true but useless). Group 0 is not
+     * malformed, only absent, and goes through the terminal's checks as in
+     * Linux's tiocspgrp -- ENOTTY here, ESRCH with a terminal -- since lane
+     * A's f4f5778ba; it was EINVAL up front before, which is what these
+     * checks asserted until 2026-10-05. */
     errno = 0;
-    if (tcsetpgrp(0, 0) != -1)          return 19;
+    if (tcsetpgrp(0, -1) != -1)         return 19;
     if (errno != EINVAL)                return 20;
 
     /* ---------------------------------------------------------------- *
@@ -171,11 +175,18 @@ int main(void)
     if (tcgetpgrp(0) != me)             return 24;
 
     /* A group no live process holds cannot be foregrounded: the kernel
-     * checks membership, so this is EPERM and not a silently accepted id
-     * that would send `^C` to nobody. */
+     * checks membership, so this is refused and not a silently accepted id
+     * that would send `^C` to nobody.  Linux's tiocspgrp refuses it with
+     * ESRCH -- find_vpid finds no such group -- and keeps EPERM for a group
+     * that exists in another session; lane A's kernel answers so since its
+     * f4f5778ba.  Until that is on main, main's kernel answers EPERM, and a
+     * fixture demanding ESRCH would fail every lane's boot but lane A's, so
+     * either is accepted for now: the refusal, and 27's "it did not move",
+     * are the property.  ESRCH alone once main has f4f5778ba
+     * (known-issues/D-CTEST-CTTY-ACCEPTS-EPERM-UNTIL-MAIN-HAS-LANE-AS-ESRCH.md). */
     errno = 0;
     if (tcsetpgrp(0, NO_GROUP) != -1)   return 25;
-    if (errno != EPERM)                 return 26;
+    if (errno != ESRCH && errno != EPERM) return 26;
     if (tcgetpgrp(0) != me)             return 27;   /* and it did not move */
 
     /* A redundant TIOCSCTTY by the session that already owns the terminal
@@ -311,9 +322,11 @@ done:
 
     /* And now the check this pair was always about, finally reachable: the
      * foreground group names live membership, not just a number, so the
-     * reaped child's empty group cannot be foregrounded. */
+     * reaped child's empty group cannot be foregrounded.  ESRCH, as 26 says
+     * -- the group went with its last member -- or EPERM until main has
+     * lane A's f4f5778ba. */
     if (retook != -1)                   return 85;
-    if (retook_errno != EPERM)          return 86;
+    if (retook_errno != ESRCH && retook_errno != EPERM) return 86;
 
     /* Give the terminal up.  The foreground group is still the reaped
      * child's — an empty group — so the SIGHUP/SIGCONT hangup reaches

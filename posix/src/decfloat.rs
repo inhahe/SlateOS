@@ -657,7 +657,8 @@ impl Decimal<DigitBuf> {
         let tz = m.trailing_zeros();
         let m = m >> tz;
         let e = e.saturating_add(i32::try_from(tz).unwrap_or(0));
-        let m_bits = u64::from(u64::BITS - m.leading_zeros());
+        // `bits(m)`; `m` is not 0 here, which returned above.
+        let m_bits = u64::from(m.checked_ilog2().map_or(0, |top| top + 1));
         let e_bits = if e >= 0 {
             u64::from(e.unsigned_abs())
         } else {
@@ -1878,7 +1879,10 @@ fn round_to_binary<S: AsRef<[u64]> + AsMut<[u64]>>(
     // below the least normal number -- whose top bit is `prec - 1 + min_exp`.
     let tiny = {
         let (m, _) = round_at(drop_full);
-        let top = i32::try_from(u128::BITS - m.leading_zeros()).unwrap_or(0) - 1;
+        // The top bit's place: -1 for a significand rounded to 0.
+        let top = m
+            .checked_ilog2()
+            .map_or(-1, |top| i32::try_from(top).unwrap_or(i32::MAX));
         top.saturating_add(exp_full) < i32::try_from(prec).unwrap_or(0) - 1 + fmt.min_exp
     };
 

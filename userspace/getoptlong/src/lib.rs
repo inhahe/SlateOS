@@ -805,6 +805,7 @@ impl Program {
             keep_going: false,
             long_only: false,
             distinct_entries: false,
+            short_only: false,
             done: false,
         }
     }
@@ -870,6 +871,8 @@ pub struct Parser<'a> {
     long_only: bool,
     /// See [`Parser::distinct_entries`].
     distinct_entries: bool,
+    /// See [`Parser::short_only`].
+    short_only: bool,
     done: bool,
 }
 
@@ -920,6 +923,22 @@ impl<'a> Parser<'a> {
         } else {
             self.word
         }
+    }
+
+    /// Take the next word of argv as a value the *program* decided an
+    /// option has: glibc's `optarg = argv[optind++]`, done by hand.
+    ///
+    /// Only `patch` needs it, for the hack upstream keeps for CVS 1.9: when
+    /// the last four words are `-b SUFFIX ORIGFILE PATCHFILE`, the `-b` --
+    /// which takes no value -- takes `SUFFIX` as `-z`'s, and the walk goes
+    /// on after it. `None` while a bundle like `-ab` is half-read, since its
+    /// next letter, not the next word, is what comes next; and `None` at the
+    /// end of argv.
+    pub fn take_word(&mut self) -> Option<OsString> {
+        if !self.cluster.is_empty() {
+            return None;
+        }
+        self.next_word()
     }
 
     /// Whether glibc's `getopt_long` would have **stopped** by now: every word
@@ -1003,6 +1022,18 @@ impl<'a> Parser<'a> {
     #[must_use]
     pub fn distinct_entries(mut self, set: bool) -> Self {
         self.distinct_entries = set;
+        self
+    }
+
+    /// Plain `getopt`, which has no long options at all: a word that starts
+    /// with two dashes (and is not just `--`) is a bundle of short options
+    /// like any other, its second dash the first of them. So `tput
+    /// --version` says `invalid option -- '-'`, where `getopt_long` with an
+    /// empty table would say `unrecognized option '--version'`. Measured
+    /// against ncurses' `tput`, `clear` and `tset`.
+    #[must_use]
+    pub fn short_only(mut self, set: bool) -> Self {
+        self.short_only = set;
         self
     }
 
@@ -1193,8 +1224,8 @@ impl<'a> Parser<'a> {
             return Some(Ok(Opt::Operand(arg)));
         }
         Some(match bytes.strip_prefix(b"--") {
-            Some(body) => self.take_long(body, &bytes),
-            None => {
+            Some(body) if !self.short_only => self.take_long(body, &bytes),
+            _ => {
                 let body = bytes.get(1..).unwrap_or_default();
                 // `strchr(optstring, c)`, as glibc asks it: any byte of the
                 // option string counts, `:` included, which is what decides
@@ -2258,6 +2289,26 @@ mod tests {
     }
 
     #[test]
+    fn a_word_taken_by_hand_is_not_seen_again() {
+        // patch's `-b SUFFIX ORIGFILE PATCHFILE`: the program takes `SUFFIX`
+        // itself, and the walk resumes after it.
+        let args = argv(&["-c", "suf", "f"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.take_word(), Some(OsString::from("suf")));
+        assert_eq!(p.optind(), 2);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[2]));
+        assert_eq!(p.take_word(), None, "nothing left");
+
+        // Mid-bundle there is no next word to give: `-f` is still owed.
+        let args = argv(&["-cf", "x"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.take_word(), None);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'f'));
+    }
+
+    #[test]
     fn optind_after_a_double_dash_is_past_it() {
         // `--` is consumed by the parser and never yielded, so a scan that
         // resumed from `optind` must not see it again — otherwise `nice -- -5`
@@ -2431,6 +2482,34 @@ mod tests {
         assert_eq!(
             every(GETOPT.parse(&args, "W", &longs)),
             vec![Ok(Opt::Short(b'W', None))]
+        );
+    }
+
+    #[test]
+    fn plain_getopt_reads_two_dashes_as_short_options() {
+        // `tput --version`: the second dash is an option letter, and not one
+        // the string lists.
+        let args = argv(&["--version"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "ST:Vvx", &[]).short_only(true)),
+            vec![Err("invalid option -- '-'".into())]
+        );
+        // One that is listed is taken, and so is the rest of the bundle; a
+        // bare `--` still ends the options.
+        let args = argv(&["--x", "--", "--V"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "x-", &[]).short_only(true)),
+            vec![
+                Ok(Opt::Short(b'-', None)),
+                Ok(Opt::Short(b'x', None)),
+                Ok(Opt::Operand(&args[2])),
+            ]
+        );
+        // Without it, the same word is a long option.
+        let args = argv(&["--version"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "ST:Vvx", &[])),
+            vec![Err("unrecognized option '--version'".into())]
         );
     }
 

@@ -1,0 +1,22 @@
+# s16_8ch.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 36942 48716 48000 8 16 7200
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 4096 8 16 48000 f47793c2949473cb
+frame 4096 3104 8 16 48000 9908adeec0a74e4d
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 8 16 48000 f47793c2949473cb
+frame 4096 3104 8 16 48000 9908adeec0a74e4d
+seek 2400
+frame 2400 1696 8 16 48000 f346516def7c1885
+frame 4096 3104 8 16 48000 9908adeec0a74e4d
+seek 3601
+frame 3601 495 8 16 48000 3d3ded2bb86818fd
+frame 4096 3104 8 16 48000 9908adeec0a74e4d
+seek 7199
+frame 7199 1 8 16 48000 a274833bed77f096
+seek 7205
+seek-failed

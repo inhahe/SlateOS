@@ -1,0 +1,6 @@
+# pgs_cropped.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 1280 720
+state 1000 7ba61d2194526229173292c1b220f87a
+state 2000 851323904ebdf92f89f6138bf29fb820
+state 3000 de94e3a27a99a3a632b17417e8985e98
+state 4000 7b3ba1b1b5fedb562f08fe3428e99dc2

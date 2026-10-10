@@ -105,6 +105,12 @@ use coreutils::userspec::{Spec, parse_user_spec};
 use pwdb::Db;
 use std::ffi::OsString;
 
+// Before `main`, so that `stdfd::restore` in `imp::main` has something to
+// restore. It called `restore` without this until 2026-10-07, and so restored
+// nothing: a closed standard output stayed the `/dev/null` the runtime put
+// there, and `chown -v ... >&-` reported success.
+coreutils::guard_std_fds!();
+
 /// `chown`'s usage status is 1 — measured: `chown; echo $?` prints 1.
 const CHOWN: Program = Program::new("chown", 1);
 

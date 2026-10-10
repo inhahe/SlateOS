@@ -1206,8 +1206,10 @@ fn run() -> std::process::ExitCode {
 
     let outcome: Result<Result<(), String>, Abort> = (|| {
         if s.operands.is_empty() {
-            let stdin = std::io::stdin();
-            let mut input = stdin.lock();
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty,
+            // where upstream's `numfmt <&-` is `numfmt: error reading input:
+            // Bad file descriptor`.
+            let mut input = std::io::BufReader::new(coreutils::stdfd::RawStdin);
             let mut line = Vec::new();
             let mut header = s.header;
             while header > 0 {

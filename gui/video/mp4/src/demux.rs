@@ -48,6 +48,9 @@ pub struct Demuxer<R> {
     streams: Vec<Stream>,
     /// FFmpeg reads nothing of a data track whose samples all last nothing.
     discarded: Vec<bool>,
+    /// The tracks whose packets are given out ([`Demuxer::select_tracks`]);
+    /// `None` for every track.
+    selected: Option<Vec<usize>>,
 }
 
 /// FFmpeg's `AV_TIME_BASE`: the microseconds tracks are compared in.
@@ -88,6 +91,7 @@ impl<R: Read + Seek> Demuxer<R> {
             tracks,
             streams,
             discarded,
+            selected: None,
         };
         for s in &mut d.streams {
             s.current_sample = 0;
@@ -111,6 +115,33 @@ impl<R: Read + Seek> Demuxer<R> {
         &self.tracks
     }
 
+    /// From here on, give out only the packets of `tracks` (by their place in
+    /// [`Self::tracks`]); `None` gives out every track's again.
+    ///
+    /// Another track's samples are passed over unread, as FFmpeg passes over
+    /// a discarded stream's (`mov_read_packet`). Each still takes its turn in
+    /// the order the packets come in, so a selected track's come out as they
+    /// do among the others; and another track's sample past the end of the
+    /// file no longer ends the reading, as a read of it did. A program
+    /// reading one stream through a handle of its own -- the sound beside
+    /// the pictures -- then reads that stream's bytes alone.
+    pub fn select_tracks(&mut self, tracks: Option<&[usize]>) {
+        self.selected = tracks.map(<[usize]>::to_vec);
+    }
+
+    /// Read ahead `bytes` at a time from here on: 64 KiB at first, which
+    /// reads a file through in few reads. A program reading one track of
+    /// several ([`Self::select_tracks`]) reads each of its samples where it
+    /// lies, and what is read ahead past them is mostly the others' bytes.
+    ///
+    /// # Errors
+    ///
+    /// When the source cannot be put back where reading is; reading goes on
+    /// as it was.
+    pub fn set_read_ahead(&mut self, bytes: usize) -> Result<(), Error> {
+        self.r.set_read_ahead(bytes)
+    }
+
     /// The next packet, in FFmpeg's order: by position among tracks' samples
     /// within a second of each other, by time otherwise
     /// (`mov_find_next_sample`). `None` at the end.
@@ -130,7 +161,8 @@ impl<R: Read + Seek> Demuxer<R> {
                 return Ok(None);
             };
             sc.current_sample = sc.current_sample.saturating_add(1);
-            let discarded = self.discarded.get(i).copied().unwrap_or(false);
+            let discarded = self.discarded.get(i).copied().unwrap_or(false)
+                || self.selected.as_ref().is_some_and(|s| !s.contains(&i));
             let mut data = Vec::new();
             if !discarded {
                 let pos = u64::try_from(sample.pos).unwrap_or(u64::MAX);
@@ -402,10 +434,10 @@ fn track(s: &Stream, d: &Description) -> Track {
     Track {
         id: u32::try_from(s.id).unwrap_or(0),
         kind: s.kind,
-        codec: if s.kind == Kind::Audio || s.kind == Kind::Video {
-            d.codec
-        } else {
+        codec: if s.kind == Kind::Data {
             Codec::Other
+        } else {
+            d.codec
         },
         codec_tag: d.codec_tag,
         config: s.extradata.first().cloned().unwrap_or_default(),

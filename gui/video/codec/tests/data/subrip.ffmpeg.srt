@@ -1,0 +1,228 @@
+1
+00:00:01,000 --> 00:00:02,000
+Plain text
+
+2
+00:00:02,500 --> 00:00:03,500
+<i>Italic</i> and <b>bold</b> and <u>underline</u> and <s>strike</s>
+
+3
+00:00:04,000 --> 00:00:05,000
+<i>Upper</i> <b>BOLD</b> <u>Under</u>
+
+4
+00:00:05,500 --> 00:00:06,500
+<i>unclosed</i>
+
+5
+00:00:07,000 --> 00:00:08,000
+closing without opening
+
+6
+00:00:08,500 --> 00:00:09,500
+<b><i>both</i></b> mis-nested
+
+7
+00:00:10,000 --> 00:00:11,000
+<i><i>twice</i> inner</i> outer
+
+8
+00:00:11,500 --> 00:00:12,500
+<font color="#ff0000">hex</font> <font color="#00ff00">upper hex</font>
+
+9
+00:00:13,000 --> 00:00:14,000
+<font color="#ff0000">named</font> <font color="#000080">navy</font> <font color="#fafad2">long name</font>
+
+10
+00:00:14,500 --> 00:00:15,500
+<font color="#ff00ff">bare hash</font> single quotes <font color="#00ff00">no hash</font>
+
+11
+00:00:16,000 --> 00:00:17,000
+<font color="#80ff00">eight digits</font> three digits
+
+12
+00:00:17,500 --> 00:00:18,500
+bad name empty
+
+13
+00:00:19,000 --> 00:00:20,000
+<font face="Arial"><font size="20">face and size</font></font>
+
+14
+00:00:20,500 --> 00:00:21,500
+<font size="40">size</font> <font size="12">bare size</font> bad size
+
+15
+00:00:22,000 --> 00:00:23,000
+<font face="Times New Roman">spaced face</font> <font face="Courier">bare face</font>
+
+16
+00:00:23,500 --> 00:00:24,500
+<font color="#ff0000"><font face="Arial"><font size="30">all three</font></font></font>
+
+17
+00:00:25,000 --> 00:00:26,000
+<font color="#ff0000"><font color="#00ff00">inner<font color="#ff0000"> outer</font></font></font>
+
+18
+00:00:26,500 --> 00:00:27,500
+stray close no attributes
+
+19
+00:00:28,000 --> 00:00:29,000
+<font color="#123456"><font size="10">upper attributes</font></font>
+
+20
+00:00:29,500 --> 00:00:30,500
+Two
+lines
+
+21
+00:00:31,000 --> 00:00:32,000
+Three
+short
+lines
+
+22
+00:00:32,500 --> 00:00:33,500
+{\an8}Top
+
+23
+00:00:34,000 --> 00:00:35,000
+{\an1}Bottom left second alignment
+
+24
+00:00:35,500 --> 00:00:36,500
+ass in srt bold pos
+
+25
+00:00:37,000 --> 00:00:38,000
+{comment} kept {\an5} middle
+
+26
+00:00:38,500 --> 00:00:39,500
+a
+b 
+ c \h d
+
+27
+00:00:40,000 --> 00:00:41,000
+unknown attr 
+ break
+
+28
+00:00:41,500 --> 00:00:42,500
+a <b> c <3 << >></b>
+
+29
+00:00:43,000 --> 00:00:44,000
+& &amp; &lt;tag&gt; &quot;q&quot; &nbsp;x &#65;
+
+30
+00:00:44,500 --> 00:00:45,500
+leading spaces
+
+31
+00:00:46,000 --> 00:00:47,000
+<i>   inner leading</i>
+
+32
+00:00:47,500 --> 00:00:48,500
+trailing in tag <i>x   </i>
+
+33
+00:00:49,000 --> 00:00:50,000
+été 日本語 😀
+
+34
+00:00:50,500 --> 00:00:51,500
+<b>bold
+across lines</b>
+
+35
+00:00:52,000 --> 00:00:53,000
+<i></i>empty tag
+
+36
+00:00:53,500 --> 00:00:54,500
+<i>a<b>b<u>c</u>d</b>e</i>
+
+37
+00:00:55,000 --> 00:00:56,000
+paragraph div
+
+38
+00:00:56,500 --> 00:00:57,500
+self closing 
+ slash
+
+39
+00:00:58,000 --> 00:00:59,000
+<i>spaced tag</i>
+
+40
+00:00:59,500 --> 00:01:00,500
+line
+
+41
+00:01:01,000 --> 00:01:02,000
+<font size="20"><font color="#ff0000">size first</font></font>
+
+42
+00:01:02,500 --> 00:01:03,500
+<font color="#ff0000"><font size="20"><font face="Arial">color size face</font></font></font>
+
+43
+00:01:04,000 --> 00:01:05,000
+padded <font color="#ff0000">no space</font>
+
+44
+00:01:05,500 --> 00:01:06,500
+out of range {\an0}zero letter
+
+45
+00:01:07,000 --> 00:01:08,000
+{\an8}two first
+
+46
+00:01:08,500 --> 00:01:09,500
+{ \an8}space before space after
+
+47
+00:01:10,000 --> 00:01:11,000
+{unclosed brace
+
+48
+00:01:11,500 --> 00:01:12,500
+}stray close brace
+
+49
+00:01:13,000 --> 00:01:14,000
+<i>a</i> mixed case close
+
+50
+00:01:14,500 --> 00:01:15,500
+<b>x</b><b>y</b> adjacent
+
+51
+00:01:16,000 --> 00:01:17,000
+<font color="#ff0000">a<font color="#00ff00">b<font color="#ff0000">c</font>after</font></font>
+
+52
+00:01:17,500 --> 00:01:18,500
+<b><i>x</i></b>yz
+
+53
+00:01:19,000 --> 00:01:20,000
+<font color="#ff0000"><font size="30">x</font></font>y
+
+54
+00:01:20,500 --> 00:01:21,500
+tab	here
+
+55
+00:01:22,000 --> 00:01:23,000
+​zero width
+

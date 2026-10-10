@@ -631,6 +631,17 @@ pub fn pending_count() -> usize {
     })
 }
 
+/// Whether CPU `cpu` has a timer queued. Its timers are fired only by its own
+/// timer interrupt ([`process_expired`]), so an idle AP keeps its tick while
+/// this is true (`smp::ap_entry`'s idle loop). `false` for a CPU past the
+/// table.
+#[must_use]
+pub fn has_pending_on(cpu: usize) -> bool {
+    CPU_TIMERS
+        .get(cpu)
+        .is_some_and(|list| crate::cpu::without_interrupts(|| list.lock().len() > 0))
+}
+
 /// Query total timers fired since boot.
 pub fn fired_count() -> u64 {
     TOTAL_FIRED.load(Ordering::Relaxed)

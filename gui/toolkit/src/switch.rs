@@ -57,6 +57,7 @@ use crate::palette::{Palette, emphasized, readable_on};
 use crate::render::RenderCommand;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::text::scaled;
 use crate::widget::CheckState;
 use crate::widget_style::ToggleStyle;
 
@@ -71,6 +72,19 @@ pub const WIDTH: f32 = 40.0;
 
 /// A switch's height where the caller has no layout of its own to fit.
 pub const HEIGHT: f32 = 20.0;
+
+/// A switch's width at the user's text size ([`WIDTH`] at the default): a
+/// switch beside a label grows with it.
+#[must_use]
+pub fn width() -> f32 {
+    scaled(WIDTH)
+}
+
+/// A switch's height at the user's text size ([`HEIGHT`] at the default).
+#[must_use]
+pub fn height() -> f32 {
+    scaled(HEIGHT)
+}
 
 /// Draw an on/off switch's shapes: the track, then the knob that sits on it.
 ///
@@ -92,11 +106,11 @@ pub fn switch(
     on: bool,
     track: Color,
 ) -> [RenderCommand; 2] {
-    let knob = height - INSET * 2.0;
+    let knob = height - scaled(INSET) * 2.0;
     let knob_x = if on {
-        x + width - knob - INSET
+        x + width - knob - scaled(INSET)
     } else {
-        x + INSET
+        x + scaled(INSET)
     };
     [
         RenderCommand::FillRect {
@@ -109,7 +123,7 @@ pub fn switch(
         },
         RenderCommand::FillRect {
             x: knob_x,
-            y: y + INSET,
+            y: y + scaled(INSET),
             width: knob,
             height: knob,
             color: readable_on(track),
@@ -154,7 +168,7 @@ pub fn shapes(p: &Palette, rect: Rect, on: bool, track: Color) -> Vec<RenderComm
 /// if that is less.
 #[must_use]
 pub fn box_in(rect: Rect) -> Rect {
-    let side = checkbox::SIZE.min(rect.h.max(0.0));
+    let side = scaled(checkbox::SIZE).min(rect.h.max(0.0));
     Rect::new(rect.x, rect.y + (rect.h - side) / 2.0, side, side)
 }
 
@@ -338,6 +352,28 @@ mod tests {
             } => (*x, *y, *width, *height, *color, corner_radii.top_left),
             other => panic!("expected a FillRect, got {other:?}"),
         }
+    }
+
+    /// **A switch follows the user's text size** (on this test's thread): at
+    /// twice the size the room it offers is twice as large, and its knob
+    /// keeps twice the inset from the track's ends.
+    #[test]
+    fn a_switch_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert!((width() - WIDTH * 2.0).abs() < 0.01);
+        assert!((height() - HEIGHT * 2.0).abs() < 0.01);
+        let [_, knob] = switch(
+            0.0,
+            0.0,
+            width(),
+            height(),
+            false,
+            Color::rgba(0, 0, 0, 255),
+        );
+        let (x, y, w, _, _, _) = rect(&knob);
+        assert!((x - INSET * 2.0).abs() < 0.01, "{x}");
+        assert!((y - INSET * 2.0).abs() < 0.01, "{y}");
+        assert!((w - (height() - INSET * 4.0)).abs() < 0.01, "{w}");
     }
 
     /// Every hue the palette can be asked to make its accent.

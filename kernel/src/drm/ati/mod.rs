@@ -210,6 +210,8 @@ pub fn probe_hardware() -> Option<backend::AtiBackend> {
 
     exercise_modeset(&mut backend);
     backend.report();
+    // Verified, mapped and mode-set: the card is this driver's.
+    crate::pci::bind_driver(backend.device().pci_address, "ati");
     Some(backend)
 }
 

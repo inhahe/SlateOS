@@ -1,8 +1,13 @@
 //! C string functions required by the C runtime.
 //!
 //! These are not strictly POSIX but are required by virtually every
-//! C program.  A real libc would provide optimized (SIMD) versions;
-//! these are correct reference implementations.
+//! C program.  The memory primitives and `strlen` are the fast ones a libc
+//! needs (SSE2, `rep movsb`; see "The engines" below), and the functions
+//! that scan, copy, compare and search C strings are built on them or on
+//! the same 16-byte blocks ("The scanners"): `strstr`, `memmem` and
+//! `strcasestr` in linear time.  The case-insensitive comparisons, the
+//! tokenizers and the wide-character functions (`wchar.rs`, but for
+//! `wcsstr`, which shares `strstr`'s search) are still plain loops.
 //!
 //! Includes: `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`,
 //! `memrchr`, `memccpy`, `mempcpy`, `memmem`, `rawmemchr`,
@@ -51,57 +56,382 @@
 //! add a function here that gnulib also replaces, give it the same treatment
 //! and add it to that script's `REPLACEABLE` set.
 
+use core::arch::x86_64::__m128i;
+
 use crate::types::SizeT;
+
+// ---------------------------------------------------------------------------
+// The engines behind memcpy, memmove, memset, memcmp, memchr and strlen
+// ---------------------------------------------------------------------------
+//
+// These are the hottest functions in the system: every `Vec` and `String`
+// copy in the Rust userland reaches this `memcpy` (the sysroot builds
+// `compiler_builtins` without its `mem` feature, so `libc.a` supplies the
+// symbol), and every C string this `strlen`.  Until 2026-10-06 each was a
+// byte loop, which LLVM left a byte loop -- `memcpy` compiled to a `movb`
+// pair, `strlen` to a `cmpb` -- at about 1.5 GB/s.  `posix/benches/mem.rs`
+// measures them.
+//
+// - **Small sizes** (under [`SMALL`] bytes): two loads and two stores of the
+//   widest power of two not wider than the size, one at each end, the two
+//   overlapping in the middle -- glibc's small-size paths.  All loads come
+//   before any store, so it is a correct `memmove` as well.
+// - **Medium sizes**: 16-byte SSE2 loads and stores.  SSE2 is in every
+//   x86-64 and in the sysroot's target spec.
+// - **Large forward copies and fills** (from [`REP_THRESHOLD`] bytes):
+//   `rep movsb` / `rep stosb`, which every x86-64 since Ivy Bridge runs at
+//   memory bandwidth (ERMS); glibc switches at the same 2 KiB for 16-byte
+//   vectors.
+//
+// THE LOOPS ARE ASSEMBLY, NOT RUST.  LLVM's loop-idiom pass turns a copy or
+// fill loop into a call to `memcpy`, `memmove` or `memset` -- inside those
+// very functions, a call to themselves.  It refrains only inside a function
+// of exactly that name, which a helper is not.  `memchr`, `memcmp` and
+// `strlen` copy nothing, and are Rust over SSE2 intrinsics where they read
+// within their bounds; `strlen`, which has no bound, is assembly too (below).
+//
+// EVERY HELPER WITH SSE ASSEMBLY SAYS SO: `#[target_feature(enable =
+// "sse2")]`, and `#[inline]` rather than `#[inline(always)]`, which may not
+// be combined with it.  The libc's own target has SSE2, so there it changes
+// nothing.  But pre-push gate 40 type-checks posix for the stock
+// `x86_64-unknown-none`, a soft-float target with SSE off, where an
+// `xmm_reg` operand is refused unless the function enables SSE itself.  That
+// target can type-check this code and no more: it cannot generate code for
+// SSE2 vectors, so nothing builds posix for it (the root `Cargo.toml`'s
+// `default-members` note).
+
+/// Below this many bytes, a copy or fill is a few overlapping loads and
+/// stores; from it up, a loop.
+const SMALL: usize = 32;
+
+/// From this many bytes, a forward copy or a fill is `rep movsb`/`rep stosb`.
+const REP_THRESHOLD: usize = 2048;
+
+/// Copy `n < SMALL` bytes from `src` to `dst`, which may overlap either way:
+/// every load is done before any store.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes.
+#[inline(always)]
+unsafe fn copy_small(dst: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: each access lies within the first `n` bytes of `src` or `dst`,
+    // which the caller vouches for, and is an unaligned access of a plain
+    // integer.
+    unsafe {
+        if n >= 16 {
+            let head = src.cast::<u128>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(16)).cast::<u128>().read_unaligned();
+            dst.cast::<u128>().write_unaligned(head);
+            dst.add(n.wrapping_sub(16))
+                .cast::<u128>()
+                .write_unaligned(tail);
+        } else if n >= 8 {
+            let head = src.cast::<u64>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(8)).cast::<u64>().read_unaligned();
+            dst.cast::<u64>().write_unaligned(head);
+            dst.add(n.wrapping_sub(8))
+                .cast::<u64>()
+                .write_unaligned(tail);
+        } else if n >= 4 {
+            let head = src.cast::<u32>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(4)).cast::<u32>().read_unaligned();
+            dst.cast::<u32>().write_unaligned(head);
+            dst.add(n.wrapping_sub(4))
+                .cast::<u32>()
+                .write_unaligned(tail);
+        } else if n >= 2 {
+            let head = src.cast::<u16>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(2)).cast::<u16>().read_unaligned();
+            dst.cast::<u16>().write_unaligned(head);
+            dst.add(n.wrapping_sub(2))
+                .cast::<u16>()
+                .write_unaligned(tail);
+        } else if n == 1 {
+            dst.write(src.read());
+        }
+    }
+}
+
+/// Copy `n >= SMALL` bytes forward: correct when the regions do not overlap
+/// or `dst` is below `src`.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn copy_forward(dst: *mut u8, src: *const u8, n: usize) {
+    if n >= REP_THRESHOLD {
+        // SAFETY: the caller's bounds; `rep movsb` copies `rcx` bytes from
+        // `rsi` to `rdi` upwards (the ABI keeps the direction flag clear),
+        // with the architecture's byte-at-a-time semantics -- so a
+        // destination below an overlapping source is copied correctly.
+        unsafe {
+            core::arch::asm!(
+                "rep movsb",
+                inout("rcx") n => _,
+                inout("rdi") dst => _,
+                inout("rsi") src => _,
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
+    // SAFETY: the caller's bounds.  The last 16 bytes are loaded before the
+    // loops and stored after them: they cover the remainder, and they are
+    // read before the loops' stores can reach them when `dst` is below `src`.
+    // Blocks of 64 bytes, then of 16, go upwards from the start, each read
+    // whole before any of it is written; with `dst` below `src` a block's
+    // stores reach only source bytes below its end, already read.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {tail}, xmmword ptr [{src} + {n16}]",
+            "xor {off:e}, {off:e}",
+            "2:",
+            "lea {end}, [{off} + 64]",
+            "cmp {end}, {n16}",
+            "ja 3f",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu {x1}, xmmword ptr [{src} + {off} + 16]",
+            "movdqu {x2}, xmmword ptr [{src} + {off} + 32]",
+            "movdqu {x3}, xmmword ptr [{src} + {off} + 48]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {x1}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {x2}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {x3}",
+            "add {off}, 64",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, {n16}",
+            "jae 5f",
+            "4:",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "add {off}, 16",
+            "cmp {off}, {n16}",
+            "jb 4b",
+            "5:",
+            "movdqu xmmword ptr [{dst} + {n16}], {tail}",
+            src = in(reg) src,
+            dst = in(reg) dst,
+            n16 = in(reg) n.wrapping_sub(16),
+            off = out(reg) _,
+            end = out(reg) _,
+            x0 = out(xmm_reg) _,
+            x1 = out(xmm_reg) _,
+            x2 = out(xmm_reg) _,
+            x3 = out(xmm_reg) _,
+            tail = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// Copy `n >= SMALL` bytes backward: for `dst` above an overlapping `src`.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn copy_backward(dst: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller's bounds.  The first 16 bytes are loaded before the
+    // loops and stored after them: they cover the remainder, read before any
+    // store.  Blocks of 64 bytes, then of 16, go from the top down, each read
+    // whole before any of it is written; with `dst` above `src` a block's
+    // stores reach only source bytes at or above its start, already read.
+    // `rep movsb` backwards (`std`) is microcoded a byte at a time on most
+    // cores, so it is not used.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {head}, xmmword ptr [{src}]",
+            "mov {off}, {n}",
+            "2:",
+            "cmp {off}, 80",
+            "jb 3f",
+            "sub {off}, 64",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu {x1}, xmmword ptr [{src} + {off} + 16]",
+            "movdqu {x2}, xmmword ptr [{src} + {off} + 32]",
+            "movdqu {x3}, xmmword ptr [{src} + {off} + 48]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {x1}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {x2}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {x3}",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, 16",
+            "jbe 5f",
+            "4:",
+            "sub {off}, 16",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "cmp {off}, 16",
+            "ja 4b",
+            "5:",
+            "movdqu xmmword ptr [{dst}], {head}",
+            src = in(reg) src,
+            dst = in(reg) dst,
+            n = in(reg) n,
+            off = out(reg) _,
+            x0 = out(xmm_reg) _,
+            x1 = out(xmm_reg) _,
+            x2 = out(xmm_reg) _,
+            x3 = out(xmm_reg) _,
+            head = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// `byte` in each of a `u64`'s eight bytes.
+#[inline(always)]
+fn broadcast(byte: u8) -> u64 {
+    u64::from(byte).wrapping_mul(0x0101_0101_0101_0101)
+}
+
+/// Fill `n < SMALL` bytes at `dst` with `byte`, two overlapping stores at
+/// most.
+///
+/// # Safety
+///
+/// `dst` writable for `n` bytes.
+#[inline(always)]
+unsafe fn fill_small(dst: *mut u8, byte: u8, n: usize) {
+    let word = broadcast(byte);
+    // SAFETY: each store lies within the first `n` bytes of `dst`, which the
+    // caller vouches for; unaligned stores of plain integers.
+    unsafe {
+        if n >= 16 {
+            let wide = u128::from(word) | (u128::from(word) << 64);
+            dst.cast::<u128>().write_unaligned(wide);
+            dst.add(n.wrapping_sub(16))
+                .cast::<u128>()
+                .write_unaligned(wide);
+        } else if n >= 8 {
+            dst.cast::<u64>().write_unaligned(word);
+            dst.add(n.wrapping_sub(8))
+                .cast::<u64>()
+                .write_unaligned(word);
+        } else if n >= 4 {
+            #[allow(clippy::cast_possible_truncation)] // the low half of a repeated byte
+            let w = word as u32;
+            dst.cast::<u32>().write_unaligned(w);
+            dst.add(n.wrapping_sub(4)).cast::<u32>().write_unaligned(w);
+        } else if n >= 2 {
+            #[allow(clippy::cast_possible_truncation)] // the low quarter, likewise
+            let w = word as u16;
+            dst.cast::<u16>().write_unaligned(w);
+            dst.add(n.wrapping_sub(2)).cast::<u16>().write_unaligned(w);
+        } else if n == 1 {
+            dst.write(byte);
+        }
+    }
+}
+
+/// Fill `n >= SMALL` bytes at `dst` with `byte`.
+///
+/// # Safety
+///
+/// `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn fill_large(dst: *mut u8, byte: u8, n: usize) {
+    if n >= REP_THRESHOLD {
+        // SAFETY: the caller's bound; `rep stosb` stores `al` into `rcx`
+        // bytes upwards from `rdi`.
+        unsafe {
+            core::arch::asm!(
+                "rep stosb",
+                inout("rcx") n => _,
+                inout("rdi") dst => _,
+                in("al") byte,
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
+    // SAFETY: the caller's bound: the last 16 bytes, then blocks of 64 and
+    // of 16 bytes from the start until the last 16 are reached.
+    unsafe {
+        core::arch::asm!(
+            "movq {v}, {pattern}",
+            "punpcklqdq {v}, {v}",
+            "movdqu xmmword ptr [{dst} + {n16}], {v}",
+            "xor {off:e}, {off:e}",
+            "2:",
+            "lea {end}, [{off} + 64]",
+            "cmp {end}, {n16}",
+            "ja 3f",
+            "movdqu xmmword ptr [{dst} + {off}], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {v}",
+            "add {off}, 64",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, {n16}",
+            "jae 5f",
+            "4:",
+            "movdqu xmmword ptr [{dst} + {off}], {v}",
+            "add {off}, 16",
+            "cmp {off}, {n16}",
+            "jb 4b",
+            "5:",
+            dst = in(reg) dst,
+            n16 = in(reg) n.wrapping_sub(16),
+            pattern = in(reg) broadcast(byte),
+            off = out(reg) _,
+            end = out(reg) _,
+            v = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
 
 /// Copy `n` bytes from `src` to `dest`.  Regions must not overlap.
 ///
-/// Returns `dest`.
+/// Returns `dest`.  See the engines above for how.
 ///
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    // SAFETY: Caller guarantees no overlap and valid pointers.
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dest.add(i) = *src.add(i);
+    // SAFETY: the caller's bounds, which the engines need.
+    unsafe {
+        if n < SMALL {
+            copy_small(dest, src, n);
+        } else {
+            copy_forward(dest, src, n);
         }
-        i = i.wrapping_add(1);
     }
     dest
 }
 
 /// Copy `n` bytes from `src` to `dest`.  Regions may overlap.
 ///
-/// Returns `dest`.
+/// Returns `dest`.  A destination below the source, or past its end, is
+/// copied forward; one inside it, backward.
 ///
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    if (dest as usize) < (src as usize) {
-        // Copy forward.
-        let mut i: usize = 0;
-        while i < n {
-            unsafe {
-                *dest.add(i) = *src.add(i);
-            }
-            i = i.wrapping_add(1);
-        }
-    } else if (dest as usize) > (src as usize) {
-        // Copy backward.
-        let mut i = n;
-        while i > 0 {
-            i = i.wrapping_sub(1);
-            unsafe {
-                *dest.add(i) = *src.add(i);
-            }
+    // SAFETY: the caller's bounds, which the engines need.  Forward is right
+    // when `dest - src` (wrapping) is at least `n`: `dest` below `src`, or at
+    // or past its end.  Otherwise `dest` starts inside the source.
+    unsafe {
+        if n < SMALL {
+            copy_small(dest, src, n);
+        } else if (dest as usize).wrapping_sub(src as usize) >= n {
+            copy_forward(dest, src, n);
+        } else {
+            copy_backward(dest, src, n);
         }
     }
-    // If dest == src, no copy needed.
     dest
 }
 
@@ -114,70 +444,641 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
 /// `dest` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: SizeT) -> *mut u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dest.add(i) = val;
+    // C's `(unsigned char)c`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = c as u8;
+    // SAFETY: the caller's bound, which the engines need.
+    unsafe {
+        if n < SMALL {
+            fill_small(dest, byte, n);
+        } else {
+            fill_large(dest, byte, n);
         }
-        i = i.wrapping_add(1);
     }
     dest
 }
 
+/// The difference of the first bytes that differ in a 16-byte block whose
+/// equality mask (`pmovmskb` of `pcmpeqb`, a bit set for each equal byte)
+/// is not all ones, as `memcmp` answers it: `a`'s byte less `b`'s.
+///
+/// # Safety
+///
+/// `a` and `b` readable for 16 bytes.
+#[inline(always)]
+unsafe fn first_difference(a: *const u8, b: *const u8, equal: u32) -> i32 {
+    let at = (!equal).trailing_zeros() as usize;
+    // SAFETY: `!equal` has a bit below 16 set (`equal` is not 0xFFFF), so
+    // `at < 16`, within the caller's 16 bytes.
+    unsafe { i32::from(a.add(at).read()).wrapping_sub(i32::from(b.add(at).read())) }
+}
+
 /// Compare `n` bytes of `s1` and `s2`.
 ///
-/// Returns 0 if equal, negative if s1 < s2, positive if s1 > s2.
+/// Returns 0 if equal, else the difference of the first differing bytes as
+/// unsigned values (`s1`'s less `s2`'s), as glibc's does: negative if `s1`
+/// sorts first.  Sixteen bytes a step (SSE2), never reading past `n`.
 ///
 /// # Safety
 ///
 /// `s1` and `s2` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b {
-            return i32::from(a).wrapping_sub(i32::from(b));
+    use core::arch::x86_64::{__m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8};
+    /// The equality mask of the 16 bytes at `a` and `b`.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` readable for 16 bytes.
+    #[inline(always)]
+    #[allow(clippy::cast_sign_loss)] // pmovmskb's 16 bits, never negative
+    unsafe fn equal16(a: *const u8, b: *const u8) -> u32 {
+        // SAFETY: the caller's 16 bytes; unaligned loads.
+        unsafe {
+            let x = _mm_loadu_si128(a.cast::<__m128i>());
+            let y = _mm_loadu_si128(b.cast::<__m128i>());
+            _mm_movemask_epi8(_mm_cmpeq_epi8(x, y)) as u32
         }
-        i = i.wrapping_add(1);
+    }
+    // SAFETY: every read below lies within the first `n` bytes of both
+    // strings, which the caller vouches for.
+    unsafe {
+        if n >= 16 {
+            let mut i = 0usize;
+            while n.wrapping_sub(i) >= 16 {
+                let (a, b) = (s1.add(i), s2.add(i));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    return first_difference(a, b, equal);
+                }
+                i = i.wrapping_add(16);
+            }
+            if i < n {
+                // The last 16 bytes, overlapping some already found equal,
+                // which cannot hold the first difference.
+                let at = n.wrapping_sub(16);
+                let (a, b) = (s1.add(at), s2.add(at));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    return first_difference(a, b, equal);
+                }
+            }
+            return 0;
+        }
+        let mut i = 0usize;
+        while i < n {
+            let (a, b) = (s1.add(i).read(), s2.add(i).read());
+            if a != b {
+                return i32::from(a).wrapping_sub(i32::from(b));
+            }
+            i = i.wrapping_add(1);
+        }
     }
     0
 }
 
+/// `byte` in all sixteen lanes of a vector.
+#[inline(always)]
+fn splat(byte: u8) -> __m128i {
+    // SAFETY: an `__m128i` is sixteen bytes, and any bits are a valid one.
+    unsafe { core::mem::transmute::<[u8; 16], __m128i>([byte; 16]) }
+}
+
+/// The bytes of the 16 at `p` that equal `needle`'s: bit `i` set for byte
+/// `i`.
+///
+/// # Safety
+///
+/// `p` readable for 16 bytes.
+#[inline(always)]
+unsafe fn matches16(p: *const u8, needle: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8};
+    // SAFETY: the caller's 16 bytes; an unaligned load.
+    unsafe {
+        let chunk = _mm_loadu_si128(p.cast::<__m128i>());
+        // pmovmskb's 16 bits: never negative.
+        _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, needle)) as u32
+    }
+}
+
 /// Find the first occurrence of byte `c` in the first `n` bytes of `s`.
 ///
-/// Returns a pointer to the byte, or NULL if not found.
+/// Returns a pointer to the byte, or NULL if not found.  Sixteen bytes a
+/// step (SSE2), never reading past `n`.
 ///
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: SizeT) -> *const u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    while i < n {
-        if unsafe { *s.add(i) } == val {
-            return unsafe { s.add(i) };
+    // C's `(unsigned char)c`.
+    let byte = c as u8;
+    // SAFETY: every read below lies within the first `n` bytes of `s`, which
+    // the caller vouches for.
+    unsafe {
+        if n >= 16 {
+            let needle = splat(byte);
+            let mut i = 0usize;
+            // Sixty-four bytes a step while they last: four blocks' matches
+            // ORed, so one test a step; the block that matched is found
+            // after.
+            while n.wrapping_sub(i) >= 64 {
+                if matches64(s.add(i), needle) != 0 {
+                    let mut at = i;
+                    loop {
+                        let mask = matches16(s.add(at), needle);
+                        if mask != 0 {
+                            return s.add(at.wrapping_add(mask.trailing_zeros() as usize));
+                        }
+                        at = at.wrapping_add(16);
+                    }
+                }
+                i = i.wrapping_add(64);
+            }
+            while n.wrapping_sub(i) >= 16 {
+                let mask = matches16(s.add(i), needle);
+                if mask != 0 {
+                    return s.add(i.wrapping_add(mask.trailing_zeros() as usize));
+                }
+                i = i.wrapping_add(16);
+            }
+            if i < n {
+                // The last 16 bytes, overlapping some already searched.
+                let at = n.wrapping_sub(16);
+                let mask = matches16(s.add(at), needle);
+                if mask != 0 {
+                    return s.add(at.wrapping_add(mask.trailing_zeros() as usize));
+                }
+            }
+            return core::ptr::null();
         }
-        i = i.wrapping_add(1);
+        let mut i = 0usize;
+        while i < n {
+            if s.add(i).read() == byte {
+                return s.add(i);
+            }
+            i = i.wrapping_add(1);
+        }
     }
     core::ptr::null()
 }
 
+/// Whether any of the 64 bytes at `p` equals `needle`'s: nonzero if so.
+///
+/// # Safety
+///
+/// `p` readable for 64 bytes.
+#[inline(always)]
+unsafe fn matches64(p: *const u8, needle: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128};
+    // SAFETY: the caller's 64 bytes; unaligned loads.
+    unsafe {
+        let at = |k: usize| _mm_cmpeq_epi8(_mm_loadu_si128(p.add(k).cast::<__m128i>()), needle);
+        let any = _mm_or_si128(_mm_or_si128(at(0), at(16)), _mm_or_si128(at(32), at(48)));
+        // pmovmskb's 16 bits: never negative.
+        _mm_movemask_epi8(any) as u32
+    }
+}
+
+/// The aligned scan the unbounded scanners share: the first byte at or
+/// after `s` that `stop16` marks, where `stop16(block)` is the mask of the
+/// stops in the 16-byte-aligned block at `block` and `stop64(chunk)` is
+/// nonzero when the 64-byte-aligned chunk at `chunk` holds one.  The first
+/// block's bytes below `s` are not looked at; then 16 bytes a step over the
+/// first 64 and on to a 64-byte boundary, and 64 a step after -- glibc's
+/// SSE2 shape, where the four blocks are folded with `pminub` and tested
+/// once.
+///
+/// Every read is aligned and starts at a byte at or below the first not yet
+/// examined, so lies in a page that byte occupies: a 64-byte-aligned chunk
+/// lies within one page as a 16-byte block does.
+///
+/// # Safety
+///
+/// The bytes from `s` to the first stop are readable, and there is a stop.
+#[inline(always)]
+unsafe fn scan_aligned(
+    s: *const u8,
+    stop16: impl Fn(*const u8) -> u32,
+    stop64: impl Fn(*const u8) -> u32,
+) -> *const u8 {
+    let skip = (s as usize & 15) as u32;
+    let mut block = s.wrapping_sub(skip as usize);
+    let first = stop16(block).wrapping_shr(skip);
+    if first != 0 {
+        return s.wrapping_add(first.trailing_zeros() as usize);
+    }
+    block = block.wrapping_add(16);
+    // Sixteen at a time over the first 64 bytes -- most strings end there,
+    // and a 64-byte step, with the search for its block after, costs a short
+    // string more than it saves (measured: 5.4 ns against 8.4 for 64 bytes)
+    // -- then on to a 64-byte boundary.
+    // (Two loops, each with one simple condition: tested together, the pair
+    // cost every step six instructions more.)
+    let short_end = (s as usize).wrapping_add(64);
+    while (block as usize) < short_end {
+        let mask = stop16(block);
+        if mask != 0 {
+            return block.wrapping_add(mask.trailing_zeros() as usize);
+        }
+        block = block.wrapping_add(16);
+    }
+    while !(block as usize).is_multiple_of(64) {
+        let mask = stop16(block);
+        if mask != 0 {
+            return block.wrapping_add(mask.trailing_zeros() as usize);
+        }
+        block = block.wrapping_add(16);
+    }
+    loop {
+        if stop64(block) != 0 {
+            // One of its four blocks holds the stop.
+            loop {
+                let mask = stop16(block);
+                if mask != 0 {
+                    return block.wrapping_add(mask.trailing_zeros() as usize);
+                }
+                block = block.wrapping_add(16);
+            }
+        }
+        block = block.wrapping_add(64);
+    }
+}
+
+/// The zero bytes of the 16-byte-aligned block at `block`, as a mask.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn zeros16(block: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable block, aligned as the memory operand of
+    // `pcmpeqb` needs.
+    unsafe {
+        core::arch::asm!(
+            "pxor {zero}, {zero}",
+            "pcmpeqb {zero}, xmmword ptr [{block}]",
+            "pmovmskb {mask:e}, {zero}",
+            block = in(reg) block,
+            zero = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is zero: the four blocks' unsigned minimum, compared with zero.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn zeros64(chunk: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page; each
+    // memory operand is 16-byte aligned, as `pminub` needs.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {low}, xmmword ptr [{chunk}]",
+            "pminub {low}, xmmword ptr [{chunk} + 16]",
+            "pminub {low}, xmmword ptr [{chunk} + 32]",
+            "pminub {low}, xmmword ptr [{chunk} + 48]",
+            "pxor {zero}, {zero}",
+            "pcmpeqb {low}, {zero}",
+            "pmovmskb {mask:e}, {low}",
+            chunk = in(reg) chunk,
+            low = out(xmm_reg) _,
+            zero = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
 /// Compute the length of a C string (excluding null terminator).
+///
+/// Aligned loads, compared with zero (SSE2): 16 bytes a step to a 64-byte
+/// boundary, then 64 ([`scan_aligned`]).  An aligned load never crosses a
+/// page boundary, so though it may read bytes past the terminator, they are
+/// in a page the string occupies and the read cannot fault -- how glibc's
+/// and every other fast `strlen` reads.  The loads are assembly, rather
+/// than intrinsics, because those bytes are past the end of the object as
+/// Rust sees it.
 ///
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
-    let mut len: usize = 0;
-    while unsafe { *s.add(len) } != 0 {
-        len = len.wrapping_add(1);
+    // SAFETY (both): `scan_aligned` passes an aligned block or chunk that
+    // holds a readable byte.
+    let stop16 = |block: *const u8| unsafe { zeros16(block) };
+    let stop64 = |chunk: *const u8| unsafe { zeros64(chunk) };
+    // SAFETY: the caller's string is readable to its terminator, which is
+    // the stop.
+    let end = unsafe { scan_aligned(s, stop16, stop64) };
+    (end as usize).wrapping_sub(s as usize)
+}
+
+// ---------------------------------------------------------------------------
+// The scanners behind the rest of the string functions
+// ---------------------------------------------------------------------------
+//
+// `strlen`'s method, for every function that reads a C string: aligned
+// 16-byte blocks, which never cross a page, so a block holding one byte of
+// the string is readable whole even where the rest of it lies past the
+// terminator.  Those reads are assembly for the reason `strlen`'s are: as
+// Rust sees them they leave the object.  `strcmp` cannot align two strings
+// at once, so it reads unaligned runs of sixteen, and a byte at a time where
+// a run would cross a page.  Searches given a length (`memrchr`) stay inside
+// it and use the intrinsics, as `memchr` does.
+//
+// The copying functions find the length and then `memcpy`: two passes at
+// 10-20 GB/s beat one at 1.5.  `strspn`'s family looks each byte up in a
+// 256-bit set instead of walking the set's string for it, and `strstr`,
+// `memmem` and `strcasestr` are the Two-Way search ([`TwoWay`]), linear in
+// their inputs where the loops they replace took the product of the
+// lengths.
+//
+// A helper that a `mod gnu_*` member shares with another member is
+// `#[inline(always)]`: inlined, it is defined in no member, so neither refers
+// to the other (`scripts/check-libc-shape.py`, CHECK 5).
+
+/// The smallest page an x86-64 maps.  Sixteen bytes that cross no multiple
+/// of it cross no page, whatever the page size: SlateOS's 16 KiB pages are
+/// multiples of it.
+const PAGE: usize = 4096;
+
+/// A page offset's bits.
+const IN_PAGE: usize = PAGE - 1;
+
+/// The last offset in a page at which sixteen bytes still fit.
+const LAST_IN_PAGE: usize = PAGE - 16;
+
+/// Whether the sixteen bytes from `p` lie within one page.
+#[inline(always)]
+fn within_page(p: *const u8) -> bool {
+    p as usize & IN_PAGE <= LAST_IN_PAGE
+}
+
+/// The bytes of the 16-byte-aligned block at `block` that are zero, and
+/// those equal to `needle`'s: bit `i` of each mask for byte `i`.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte, which makes all
+/// sixteen readable: an aligned block lies within one page.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn block_masks(block: *const u8, needle: __m128i) -> (u32, u32) {
+    let zeros: u32;
+    let hits: u32;
+    // SAFETY: the caller's readable block, aligned as `movdqa` needs.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {chunk}, xmmword ptr [{block}]",
+            "pxor {zero}, {zero}",
+            "pcmpeqb {zero}, {chunk}",
+            "pcmpeqb {chunk}, {needle}",
+            "pmovmskb {zeros:e}, {zero}",
+            "pmovmskb {hits:e}, {chunk}",
+            block = in(reg) block,
+            needle = in(xmm_reg) needle,
+            chunk = out(xmm_reg) _,
+            zero = out(xmm_reg) _,
+            zeros = lateout(reg) zeros,
+            hits = lateout(reg) hits,
+            options(nostack, readonly, pure, preserves_flags),
+        );
     }
-    len
+    (zeros, hits)
+}
+
+/// Where `strcmp` stops in the sixteen bytes at `a` and `b`: bit `i` set
+/// where the two differ, or agree on the terminator.
+///
+/// # Safety
+///
+/// `a` and `b` readable for sixteen bytes each.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn stops16(a: *const u8, b: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {y}, xmmword ptr [{b}]",
+            // 0xFF where the bytes are equal, then (the unsigned minimum
+            // with `a`'s) `a`'s byte where they are equal and 0 where not.
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            // 0xFF where that is 0: a difference, or the terminator in both.
+            "pxor {x}, {x}",
+            "pcmpeqb {y}, {x}",
+            "pmovmskb {mask:e}, {y}",
+            a = in(reg) a,
+            b = in(reg) b,
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// `a`'s byte less `b`'s, as unsigned values: how the comparisons answer.
+///
+/// # Safety
+///
+/// `a` and `b` readable.
+#[inline(always)]
+unsafe fn byte_difference(a: *const u8, b: *const u8) -> i32 {
+    // SAFETY: the caller's bytes.
+    unsafe { i32::from(a.read()).wrapping_sub(i32::from(b.read())) }
+}
+
+/// The index of the highest bit set in `mask`, which is not 0.
+#[inline(always)]
+fn highest_bit(mask: u32) -> usize {
+    // `leading_zeros` is 0 to 31 here, and 31 ^ x is 31 - x for those.
+    (31 ^ mask.leading_zeros()) as usize
+}
+
+/// The first byte of the C string at `s` that is `byte` or its terminator:
+/// `strchrnul`, which `strchr` and `strstr` share.
+///
+/// # Safety
+///
+/// `s` is a readable C string.
+#[inline(always)]
+unsafe fn byte_or_nul(s: *const u8, byte: u8) -> *const u8 {
+    let needle = splat(byte);
+    // SAFETY (both): `scan_aligned` passes an aligned block or chunk that
+    // holds a readable byte.
+    let stop16 = |block: *const u8| unsafe { zero_or_byte16(block, needle) };
+    let stop64 = |chunk: *const u8| unsafe { zero_or_byte64(chunk, needle) };
+    // SAFETY: the string is readable to its terminator, which is a stop.
+    unsafe { scan_aligned(s, stop16, stop64) }
+}
+
+/// The bytes of the 16-byte-aligned block at `block` that are zero or
+/// `needle`'s, as a mask: `min(x, x ^ needle)` is zero exactly there.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn zero_or_byte16(block: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable, aligned block.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {x}, xmmword ptr [{block}]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pxor {t}, {t}",
+            "pcmpeqb {x}, {t}",
+            "pmovmskb {mask:e}, {x}",
+            block = in(reg) block,
+            needle = in(xmm_reg) needle,
+            x = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is zero or `needle`'s: each block's `min(x, x ^ needle)`, their
+/// minimum, compared with zero.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn zero_or_byte64(chunk: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {acc}, xmmword ptr [{chunk}]",
+            "movdqa {t}, {acc}",
+            "pxor {t}, {needle}",
+            "pminub {acc}, {t}",
+            "movdqa {x}, xmmword ptr [{chunk} + 16]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 32]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 48]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "pxor {t}, {t}",
+            "pcmpeqb {acc}, {t}",
+            "pmovmskb {mask:e}, {acc}",
+            chunk = in(reg) chunk,
+            needle = in(xmm_reg) needle,
+            acc = out(xmm_reg) _,
+            x = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is `needle`'s: each block XORed with it, their unsigned minimum,
+/// compared with zero.  `rawmemchr`'s, which stops at no terminator.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn byte64(chunk: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {acc}, xmmword ptr [{chunk}]",
+            "pxor {acc}, {needle}",
+            "movdqa {x}, xmmword ptr [{chunk} + 16]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 32]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 48]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "pxor {x}, {x}",
+            "pcmpeqb {acc}, {x}",
+            "pmovmskb {mask:e}, {acc}",
+            chunk = in(reg) chunk,
+            needle = in(xmm_reg) needle,
+            acc = out(xmm_reg) _,
+            x = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// The length of the C string at `s`, or `max` if its first `max` bytes
+/// hold no terminator: `strnlen`, which the bounded copies share.
+///
+/// # Safety
+///
+/// `s` readable for `max` bytes, or to a terminator within them.
+#[inline(always)]
+unsafe fn length_within(s: *const u8, max: usize) -> usize {
+    if max == 0 {
+        return 0;
+    }
+    let skip = (s as usize & 15) as u32;
+    let none = splat(0);
+    // SAFETY: `s`'s first byte is readable (`max` is not 0), so its block
+    // is.  A later block is read only while it starts below `max` and no
+    // terminator came before it: at a byte the caller vouches for.
+    unsafe {
+        let (zeros, _) = block_masks(s.wrapping_sub(skip as usize), none);
+        let first = zeros.wrapping_shr(skip);
+        if first != 0 {
+            return (first.trailing_zeros() as usize).min(max);
+        }
+        let mut at = 16usize.wrapping_sub(skip as usize);
+        while at < max {
+            let (zeros, _) = block_masks(s.wrapping_add(at), none);
+            if zeros != 0 {
+                return at.wrapping_add(zeros.trailing_zeros() as usize).min(max);
+            }
+            at = at.saturating_add(16);
+        }
+    }
+    max
 }
 
 /// Own archive member — gnulib replaces `strnlen`. See the module header.
@@ -186,42 +1087,161 @@ mod gnu_strnlen {
 
     /// Compute the length of a C string, limited to `maxlen`.
     ///
+    /// Sixteen bytes a step, as `strlen`, reading nothing from a block
+    /// that starts at or past `maxlen`.
+    ///
     /// # Safety
     ///
     /// `s` must be valid for at least `maxlen` bytes, or be
     /// null-terminated before `maxlen`.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: SizeT) -> SizeT {
-        let mut len: usize = 0;
-        while len < maxlen && unsafe { *s.add(len) } != 0 {
-            len = len.wrapping_add(1);
-        }
-        len
+        // SAFETY: the caller's bytes, as `length_within` needs them.
+        unsafe { length_within(s, maxlen) }
     }
 }
 pub use gnu_strnlen::strnlen;
 
+/// The last offset in a page at which 64 bytes still fit.
+const LAST64_IN_PAGE: usize = PAGE - 64;
+
+/// Whether the 64 bytes from `p` lie within one page.
+#[inline(always)]
+fn within_page64(p: *const u8) -> bool {
+    p as usize & IN_PAGE <= LAST64_IN_PAGE
+}
+
+/// Nonzero when the 64 bytes at `a` and `b` hold a place where `strcmp`
+/// stops: [`stops16`]'s lanes for four runs of sixteen, folded with their
+/// unsigned minimum and tested once.
+///
+/// # Safety
+///
+/// `a` and `b` readable for 64 bytes each.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn stops64(a: *const u8, b: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            // Each run: `a`'s byte where the two agree, 0 where they do not
+            // (`stops16`'s `pcmpeqb` and `pminub`); the four folded with
+            // their minimum, which is 0 in a lane where any run stops.
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {acc}, xmmword ptr [{b}]",
+            "pcmpeqb {acc}, {x}",
+            "pminub {acc}, {x}",
+            "movdqu {x}, xmmword ptr [{a} + 16]",
+            "movdqu {y}, xmmword ptr [{b} + 16]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "movdqu {x}, xmmword ptr [{a} + 32]",
+            "movdqu {y}, xmmword ptr [{b} + 32]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "movdqu {x}, xmmword ptr [{a} + 48]",
+            "movdqu {y}, xmmword ptr [{b} + 48]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "pxor {x}, {x}",
+            "pcmpeqb {acc}, {x}",
+            "pmovmskb {mask:e}, {acc}",
+            a = in(reg) a,
+            b = in(reg) b,
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            acc = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// `strncmp`, which `strcmp` is with no bound: sixteen bytes a step over
+/// the first 64 -- most comparisons end there -- then 64 a step, where
+/// neither run of 64 crosses a page and the bound lies beyond them; a run of
+/// sixteen where that fits; a byte at a time near a page's end.
+///
+/// # Safety
+///
+/// Both strings valid for `n` bytes or terminated before `n`.
+#[inline(always)]
+unsafe fn compare_strings(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    let mut i = 0usize;
+    // SAFETY: both strings are readable to their terminators or for `n`
+    // bytes, and nothing is compared past the first difference, the first
+    // terminator (a shorter string's terminator is a difference) or `n`.  A
+    // run of 64 or of 16 is read only where neither crosses a page, so each
+    // shares a page with its string's byte `i`, which is readable; it may
+    // reach past `n` or a terminator, but no stop there is acted on.
+    // Otherwise one byte of each.
+    unsafe {
+        while i < n {
+            let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
+            let left = n.wrapping_sub(i);
+            if i >= 64 && left > 64 && within_page64(a) && within_page64(b) {
+                if stops64(a, b) == 0 {
+                    i = i.wrapping_add(64);
+                    continue;
+                }
+                // One of its four runs holds the stop, below `left`.
+                let mut k = 0usize;
+                loop {
+                    let stops = stops16(a.add(k), b.add(k));
+                    if stops != 0 {
+                        let at = k.wrapping_add(stops.trailing_zeros() as usize);
+                        return byte_difference(a.add(at), b.add(at));
+                    }
+                    k = k.wrapping_add(16);
+                }
+            }
+            if within_page(a) && within_page(b) {
+                let stops = stops16(a, b);
+                if stops != 0 {
+                    let at = stops.trailing_zeros() as usize;
+                    if at >= left {
+                        return 0;
+                    }
+                    return byte_difference(a.add(at), b.add(at));
+                }
+                if left <= 16 {
+                    return 0;
+                }
+                i = i.wrapping_add(16);
+            } else {
+                let (x, y) = (a.read(), b.read());
+                if x != y || x == 0 {
+                    return i32::from(x).wrapping_sub(i32::from(y));
+                }
+                i = i.wrapping_add(1);
+            }
+        }
+    }
+    0
+}
+
 /// Compare two C strings.
 ///
-/// Returns 0 if equal, negative if s1 < s2, positive if s1 > s2.
+/// Returns 0 if equal, else the difference of the first differing bytes
+/// as unsigned values (`s1`'s less `s2`'s): negative if `s1` sorts first.
+/// Sixteen bytes a step, then 64 past the first 64 ([`compare_strings`]);
+/// a byte at a time where a run would cross a page.
 ///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
-    let mut i: usize = 0;
-    loop {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b || a == 0 {
-            return i32::from(a).wrapping_sub(i32::from(b));
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: the caller's terminated strings, with no bound.
+    unsafe { compare_strings(s1, s2, usize::MAX) }
 }
 
-/// Compare at most `n` bytes of two C strings.
+/// Compare at most `n` bytes of two C strings, as `strcmp`.
 ///
 /// # Safety
 ///
@@ -229,19 +1249,13 @@ pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
 /// null-terminated before `n`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b || a == 0 {
-            return i32::from(a).wrapping_sub(i32::from(b));
-        }
-        i = i.wrapping_add(1);
-    }
-    0
+    // SAFETY: the caller's strings and bound.
+    unsafe { compare_strings(s1, s2, n) }
 }
 
 /// Copy a C string (including null terminator).
+///
+/// `strlen`, then `memcpy`.
 ///
 /// # Safety
 ///
@@ -249,16 +1263,9 @@ pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 
 /// a valid null-terminated string.  Regions must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *src.add(i) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            break;
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: the caller's string, and room for it with its terminator.
+    unsafe {
+        memcpy(dest, src, strlen(src).wrapping_add(1));
     }
     dest
 }
@@ -268,57 +1275,46 @@ pub unsafe extern "C" fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
 /// # Safety
 ///
 /// `dest` must be valid for `n` bytes.  `src` must be a valid
-/// null-terminated string.
+/// null-terminated string, or hold `n` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    let mut i: usize = 0;
-    // Copy up to null or n bytes.
-    while i < n {
-        let c = unsafe { *src.add(i) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            // Pad remainder with nulls.
-            i = i.wrapping_add(1);
-            while i < n {
-                unsafe {
-                    *dest.add(i) = 0;
-                }
-                i = i.wrapping_add(1);
-            }
-            return dest;
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: `src` is read to its terminator or for `n` bytes, and `dest`
+    // written for `n`: the string's `len` bytes, then `n - len` zeros.
+    unsafe {
+        let len = length_within(src, n);
+        memcpy(dest, src, len);
+        memset(dest.add(len), 0, n.wrapping_sub(len));
     }
     dest
 }
 
 /// Find the first occurrence of `c` in string `s`.
 ///
-/// Returns pointer to the character, or NULL.
+/// Returns pointer to the character, or NULL.  `c` may be 0, which finds
+/// the terminator.
 ///
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    loop {
-        let ch = unsafe { *s.add(i) };
-        if ch == val {
-            return unsafe { s.add(i) };
+    // C's `(char)c`.
+    let byte = c as u8;
+    // SAFETY: the caller's string; `byte_or_nul` answers a byte of it.
+    unsafe {
+        let found = byte_or_nul(s, byte);
+        if found.read() == byte {
+            found
+        } else {
+            core::ptr::null()
         }
-        if ch == 0 {
-            return core::ptr::null();
-        }
-        i = i.wrapping_add(1);
     }
 }
 
 /// Own archive member — gnulib replaces `strchrnul`. See the module header.
 mod gnu_strchrnul {
+    use super::*;
+
     /// Like `strchr`, but returns a pointer to the null terminator if
     /// `c` is not found (instead of null).
     ///
@@ -329,39 +1325,51 @@ mod gnu_strchrnul {
     /// `s` must be a valid null-terminated string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
-        let val = c as u8;
-        let mut i: usize = 0;
-        loop {
-            // SAFETY: s is a valid null-terminated string.
-            let ch = unsafe { *s.add(i) };
-            if ch == val || ch == 0 {
-                return unsafe { s.add(i) };
-            }
-            i = i.wrapping_add(1);
-        }
+        // SAFETY: the caller's string.
+        unsafe { byte_or_nul(s, c as u8) }
     }
 }
 pub use gnu_strchrnul::strchrnul;
 
 /// Find the last occurrence of `c` in string `s`.
 ///
+/// One pass: the last block that held `c` is remembered until the block
+/// holding the terminator.
+///
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
-    let val = c as u8;
-    let mut last: *const u8 = core::ptr::null();
-    let mut i: usize = 0;
-    loop {
-        let ch = unsafe { *s.add(i) };
-        if ch == val {
-            last = unsafe { s.add(i) };
+    let needle = splat(c as u8);
+    let skip = (s as usize & 15) as u32;
+    let mut block = s.wrapping_sub(skip as usize);
+    let mut last = core::ptr::null();
+    // SAFETY: as `byte_or_nul`'s: each block read starts at a byte of the
+    // string not yet examined, the first holding `s`.
+    unsafe {
+        let (zeros, hits) = block_masks(block, needle);
+        // Bit `i` of the masks is the byte at `base + i`; the first block's
+        // bytes below `s` are not the string's.
+        let (mut zeros, mut hits, mut base) =
+            (zeros.wrapping_shr(skip), hits.wrapping_shr(skip), s);
+        loop {
+            if zeros != 0 {
+                // The terminator's block: what counts is up to the
+                // terminator, inclusive -- `c` may be 0.
+                let hits = hits & (zeros ^ zeros.wrapping_sub(1));
+                if hits != 0 {
+                    return base.wrapping_add(highest_bit(hits));
+                }
+                return last;
+            }
+            if hits != 0 {
+                last = base.wrapping_add(highest_bit(hits));
+            }
+            block = block.wrapping_add(16);
+            base = block;
+            (zeros, hits) = block_masks(block, needle);
         }
-        if ch == 0 {
-            return last;
-        }
-        i = i.wrapping_add(1);
     }
 }
 
@@ -375,23 +1383,11 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
 /// Both must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
-    // Find end of dest.
-    let mut i: usize = 0;
-    while unsafe { *dest.add(i) } != 0 {
-        i = i.wrapping_add(1);
-    }
-    // Copy src.
-    let mut j: usize = 0;
-    loop {
-        let c = unsafe { *src.add(j) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            break;
-        }
-        i = i.wrapping_add(1);
-        j = j.wrapping_add(1);
+    // SAFETY: the caller's strings, and room after `dest`'s for `src` with
+    // its terminator.
+    unsafe {
+        let end = dest.add(strlen(dest));
+        memcpy(end, src, strlen(src).wrapping_add(1));
     }
     dest
 }
@@ -401,97 +1397,530 @@ pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
 /// # Safety
 ///
 /// `dest` must have enough space for the combined string (up to n extra
-/// bytes + null terminator).
+/// bytes + null terminator).  `src` must be a valid null-terminated
+/// string, or hold `n` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    // Find end of dest.
-    let mut i: usize = 0;
-    while unsafe { *dest.add(i) } != 0 {
-        i = i.wrapping_add(1);
-    }
-    // Copy up to n bytes from src.
-    let mut j: usize = 0;
-    while j < n {
-        let c = unsafe { *src.add(j) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            return dest;
-        }
-        i = i.wrapping_add(1);
-        j = j.wrapping_add(1);
-    }
-    // Null-terminate.
+    // SAFETY: the caller's strings, `src` read to its terminator or for
+    // `n` bytes, and room after `dest`'s for those and a terminator.
     unsafe {
-        *dest.add(i) = 0;
+        let end = dest.add(strlen(dest));
+        let len = length_within(src, n);
+        memcpy(end, src, len);
+        end.add(len).write(0);
     }
     dest
+}
+
+/// A needle prepared for the Two-Way search (Crochemore and Perrin, 1991)
+/// as glibc's and gnulib's `str-two-way.h` do it: the first place the needle
+/// occurs in a haystack, in time linear in the two lengths and constant
+/// space.  The loops it replaced compared the whole needle at every
+/// position: `strstr` of a thousand `a`s and a `b` in a megabyte of `a`s
+/// was a billion steps.
+///
+/// The needle is split at a *critical factorization*: a right half,
+/// compared first, at a mismatch in which no occurrence can start before
+/// the mismatch lines up, and a left half compared only when the right half
+/// matched.  A needle whose left half repeats at the right half's period is
+/// *periodic*: after a failure there, the search moves by the period and
+/// remembers how much of the right half then already matches.
+///
+/// Elements compare through `canon`: the identity, or ASCII case folding
+/// for `strcasestr`.  `T` is a byte here and a wide character for
+/// `wcsstr`.
+pub(crate) struct TwoWay<T, C> {
+    needle: *const T,
+    len: usize,
+    canon: C,
+    /// Where the right half starts.
+    suffix: usize,
+    /// How far the needle moves after a failure in the left half.
+    shift: usize,
+    /// Whether the left half repeats at the right half's period.
+    periodic: bool,
+}
+
+impl<T: Copy + Ord, C: Fn(T) -> T + Copy> TwoWay<T, C> {
+    /// Prepare `needle`, of `len` elements, at least one.
+    ///
+    /// # Safety
+    ///
+    /// `needle` readable for `len` elements for as long as `self` is used.
+    #[inline(always)]
+    pub(crate) unsafe fn new(needle: *const T, len: usize, canon: C) -> Self {
+        let mut this = Self {
+            needle,
+            len,
+            canon,
+            suffix: 0,
+            shift: 1,
+            periodic: false,
+        };
+        // SAFETY: the caller's `len` elements.
+        let (suffix, period) = unsafe { this.critical_factorization() };
+        this.suffix = suffix;
+        // SAFETY (each `at`): `i < suffix` and `i + period < suffix + period
+        // <= len`, which the first clause checks.
+        this.periodic = suffix.checked_add(period).is_some_and(|end| end <= len)
+            && (0..suffix).all(|i| unsafe { this.at(i) == this.at(i.wrapping_add(period)) });
+        this.shift = if this.periodic {
+            period
+        } else {
+            // Halves that differ: a failure in the left half moves the
+            // needle past the longer one.
+            suffix.max(len.wrapping_sub(suffix)).wrapping_add(1)
+        };
+        this
+    }
+
+    /// The needle's element `i`, through `canon`.
+    ///
+    /// # Safety
+    ///
+    /// `i < len`.
+    #[inline(always)]
+    unsafe fn at(&self, i: usize) -> T {
+        // SAFETY: the caller's index, within the needle.
+        (self.canon)(unsafe { self.needle.add(i).read() })
+    }
+
+    /// glibc's `critical_factorization`: where the right half starts, and
+    /// its period.  Of the maximal suffixes in the element order and in
+    /// its reverse, the right half is the one that starts later.
+    ///
+    /// # Safety
+    ///
+    /// The needle's `len` elements are readable.
+    #[inline(always)]
+    unsafe fn critical_factorization(&self) -> (usize, usize) {
+        if self.len < 3 {
+            return (self.len.wrapping_sub(1), 1);
+        }
+        // SAFETY: the caller's elements.
+        let ((before, period), (before_rev, period_rev)) =
+            unsafe { (self.maximal_suffix(false), self.maximal_suffix(true)) };
+        // `usize::MAX` stands for -1, which adding 1 maps to 0.
+        if before_rev.wrapping_add(1) < before.wrapping_add(1) {
+            (before.wrapping_add(1), period)
+        } else {
+            (before_rev.wrapping_add(1), period_rev)
+        }
+    }
+
+    /// The needle's maximal suffix in the element order, or (`reverse`) in
+    /// its opposite: the index of the element before it (`usize::MAX`, for
+    /// -1, when it is the whole needle) and its period.  glibc's loop,
+    /// renamed: `cand` is the candidate suffix's start, `offset` the place
+    /// in its current period.
+    ///
+    /// # Safety
+    ///
+    /// The needle's `len` elements are readable.
+    #[inline(always)]
+    unsafe fn maximal_suffix(&self, reverse: bool) -> (usize, usize) {
+        let mut before = usize::MAX;
+        let (mut cand, mut offset, mut period) = (0usize, 1usize, 1usize);
+        while cand.wrapping_add(offset) < self.len {
+            // SAFETY: `cand + offset < len`, and `before < cand` (as signed
+            // numbers: -1 at first), so `before + offset < len` too.
+            let (ahead, known) = unsafe {
+                (
+                    self.at(cand.wrapping_add(offset)),
+                    self.at(before.wrapping_add(offset)),
+                )
+            };
+            if ahead == known {
+                // Through a repetition of the current period.
+                if offset == period {
+                    cand = cand.wrapping_add(period);
+                    offset = 1;
+                } else {
+                    offset = offset.wrapping_add(1);
+                }
+            } else if (ahead < known) != reverse {
+                // A smaller suffix: its period is the whole prefix so far.
+                cand = cand.wrapping_add(offset);
+                offset = 1;
+                period = cand.wrapping_sub(before);
+            } else {
+                // A larger suffix: start again from it.
+                before = cand;
+                cand = cand.wrapping_add(1);
+                offset = 1;
+                period = 1;
+            }
+        }
+        (before, period)
+    }
+
+    /// The first place the needle occurs in `hay`, or null.  `fits(end)`
+    /// answers whether the haystack has `end` elements, so a C string's
+    /// length need be found only as far as the search goes.
+    ///
+    /// # Safety
+    ///
+    /// `hay` readable for as many elements as `fits` admits.
+    #[inline(always)]
+    pub(crate) unsafe fn find(
+        &self,
+        hay: *const T,
+        mut fits: impl FnMut(usize) -> bool,
+    ) -> *const T {
+        let (len, suffix) = (self.len, self.suffix);
+        // How much of the right half is known to match: after a periodic
+        // needle's shift, all but its last `shift` elements.
+        let mut memory = 0usize;
+        let mut j = 0usize;
+        while fits(j.saturating_add(len)) {
+            // SAFETY (each `hay` read below): an index below `j + len`, which
+            // `fits` admitted.  Each `at`'s index is below `len`.
+            unsafe {
+                // The right half, from what is not known to match.
+                let mut i = suffix.max(memory);
+                while i < len && self.at(i) == (self.canon)(hay.add(j.wrapping_add(i)).read()) {
+                    i = i.wrapping_add(1);
+                }
+                if i < len {
+                    // No occurrence starts before the mismatch lines up.
+                    j = j.saturating_add(i.wrapping_sub(suffix).wrapping_add(1));
+                    memory = 0;
+                    continue;
+                }
+                // The left half, down to what is known to match; `i` is one
+                // past the element compared.
+                let mut i = suffix;
+                while i > memory
+                    && self.at(i.wrapping_sub(1))
+                        == (self.canon)(hay.add(j.wrapping_add(i).wrapping_sub(1)).read())
+                {
+                    i = i.wrapping_sub(1);
+                }
+                if i <= memory {
+                    return hay.wrapping_add(j);
+                }
+            }
+            j = j.saturating_add(self.shift);
+            if self.periodic {
+                memory = len.wrapping_sub(self.shift);
+            }
+        }
+        core::ptr::null()
+    }
+}
+
+/// `TwoWay::find`'s `fits` for a C-string haystack: whether it has `end`
+/// bytes before its terminator, looking only as far as asked -- `end` and
+/// 512 bytes more each time, as glibc does -- so a match near the start of
+/// a long string costs nothing for the rest of it.  Finding the length
+/// first would make a loop of `strstr` calls along a string quadratic.
+///
+/// # Safety
+///
+/// `hay` is a readable C string for as long as the answer is used.
+#[inline(always)]
+unsafe fn in_string(hay: *const u8) -> impl FnMut(usize) -> bool {
+    let mut known = 0usize;
+    move |end| {
+        if end > known {
+            // SAFETY: the haystack is readable to its terminator, and
+            // `known` never passes it.
+            let more = unsafe {
+                length_within(
+                    hay.wrapping_add(known),
+                    end.wrapping_sub(known).saturating_add(512),
+                )
+            };
+            known = known.saturating_add(more);
+        }
+        end <= known
+    }
+}
+
+/// The byte itself: what `strstr` and `memmem` compare.
+#[inline(always)]
+fn exact(byte: u8) -> u8 {
+    byte
 }
 
 /// Find the first occurrence of substring `needle` in `haystack`.
 ///
 /// Returns a pointer to the beginning of the match, or NULL if not found.
+/// The Two-Way search ([`TwoWay`]): linear time, constant space.
 ///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
-    // Empty needle matches everything.
-    if unsafe { *needle } == 0 {
-        return haystack;
+    // SAFETY: the caller's strings.  The haystack is read only as far as
+    // `in_string` admits, which is never past its terminator.
+    unsafe {
+        let nlen = strlen(needle);
+        match nlen {
+            // Empty needle matches everything.
+            0 => haystack,
+            1 => {
+                let found = byte_or_nul(haystack, needle.read());
+                if found.read() == 0 {
+                    core::ptr::null()
+                } else {
+                    found
+                }
+            }
+            // A haystack shorter than the needle holds no match, which is
+            // cheaper to see than the needle's factorization is to make.
+            _ if length_within(haystack, nlen) < nlen => core::ptr::null(),
+            _ => TwoWay::new(needle, nlen, exact).find(haystack, in_string(haystack)),
+        }
+    }
+}
+
+/// A set of bytes, as `strspn`'s family takes one: a bit for each value.
+///
+/// Four 64-bit words, byte `b`'s bit in word `b / 64`: a lookup is a load,
+/// a shift and a test.  (Two `u128` halves were half the speed of the byte
+/// loop they replaced: a variable shift of a `u128` is several
+/// instructions.)
+struct ByteSet([u64; 4]);
+
+impl ByteSet {
+    /// The bytes of the C string `set`, which never include its
+    /// terminator.
+    ///
+    /// # Safety
+    ///
+    /// `set` is a readable C string.
+    #[inline(always)]
+    unsafe fn of(set: *const u8) -> Self {
+        let mut bytes = Self([0; 4]);
+        let mut i = 0usize;
+        loop {
+            // SAFETY: up to the terminator, which ends the loop.
+            let byte = unsafe { set.add(i).read() };
+            if byte == 0 {
+                return bytes;
+            }
+            bytes.insert(byte);
+            i = i.wrapping_add(1);
+        }
     }
 
-    let mut h: usize = 0;
-    while unsafe { *haystack.add(h) } != 0 {
-        let mut j: usize = 0;
-        loop {
-            let n = unsafe { *needle.add(j) };
-            if n == 0 {
-                // Full match.
-                return unsafe { haystack.add(h) };
-            }
-            let hc = unsafe { *haystack.add(h.wrapping_add(j)) };
-            if hc != n {
-                break;
-            }
-            j = j.wrapping_add(1);
+    #[inline(always)]
+    fn insert(&mut self, byte: u8) {
+        // `byte / 64` is below 4: the compiler drops the check, and there is
+        // no index to lint.
+        if let Some(word) = self.0.get_mut(usize::from(byte >> 6)) {
+            *word |= 1u64.wrapping_shl(u32::from(byte & 63));
         }
-        h = h.wrapping_add(1);
     }
-    core::ptr::null()
+
+    #[inline(always)]
+    fn contains(&self, byte: u8) -> bool {
+        self.0
+            .get(usize::from(byte >> 6))
+            .is_some_and(|word| word.wrapping_shr(u32::from(byte & 63)) & 1 != 0)
+    }
+}
+
+/// How many bytes of the C string `s` precede the first that is in the C
+/// string `reject`, or its terminator: `strcspn`, which `strpbrk` shares.
+///
+/// # Safety
+///
+/// `s` and `reject` are readable C strings.
+#[inline(always)]
+unsafe fn span_outside(s: *const u8, reject: *const u8) -> usize {
+    // SAFETY: the caller's set string, read to its terminator at most.
+    let first = unsafe { reject.read() };
+    if first == 0 {
+        // SAFETY: the caller's string.
+        return unsafe { strlen(s) };
+    }
+    // SAFETY: the byte after one that was not the terminator.
+    if unsafe { reject.add(1).read() } == 0 {
+        // One byte, the commonest case: `strchrnul`'s scan.
+        // SAFETY: the caller's string.
+        return (unsafe { byte_or_nul(s, first) } as usize).wrapping_sub(s as usize);
+    }
+    // SAFETY: the caller's set string.
+    if let Some(len) = unsafe { small_set_size(reject) } {
+        let mut storage = core::mem::MaybeUninit::uninit();
+        // SAFETY: `len` bytes of the caller's set string, at most sixteen.
+        let set = unsafe { small_set(&mut storage, reject, len) };
+        let stop16 = |block: *const u8| {
+            // SAFETY: `scan_aligned` passes an aligned block that holds a
+            // readable byte.
+            let bytes = unsafe { load_block(block) };
+            members(set, bytes) | zero_bytes(bytes)
+        };
+        let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
+        // SAFETY: the caller's string; its terminator is a stop.
+        let end = unsafe { scan_aligned(s, stop16, stop64) };
+        return (end as usize).wrapping_sub(s as usize);
+    }
+    // SAFETY: the caller's strings.  The set holds the terminator, so the
+    // loop stops at `s`'s at the latest.
+    unsafe {
+        let mut set = ByteSet::of(reject);
+        set.insert(0);
+        let mut i = 0usize;
+        while !set.contains(s.add(i).read()) {
+            i = i.wrapping_add(1);
+        }
+        i
+    }
+}
+
+// A SMALL SET: at most sixteen bytes, each broadcast to a vector that a
+// block of the string is compared with.  `strspn`'s and `strcspn`'s sets are
+// almost always this small -- whitespace, a few separators, the digits -- so
+// sixteen bytes of the string are tested a step, one `pcmpeqb` and `por` a
+// member, where the bit set looks a byte up at a time.  A byte listed twice
+// is simply compared twice.  The vectors are a plain array the caller keeps
+// in a local: kept in a struct, LLVM built the array and then copied it in,
+// a 256-byte `memcpy` on every call, and returned in an `Option`, zeroed it
+// first as well.
+
+/// How many bytes the C string `set` has, if at most sixteen: whether it is
+/// a small set.
+///
+/// # Safety
+///
+/// `set` is a readable C string.
+#[inline(always)]
+unsafe fn small_set_size(set: *const u8) -> Option<usize> {
+    // SAFETY: the caller's string, read to its terminator or 17 bytes.
+    let len = unsafe { length_within(set, 17) };
+    (len <= 16).then_some(len)
+}
+
+/// The first `len` bytes of `set` (at most sixteen), each broadcast to a
+/// vector, written into `storage` where the caller keeps it: the small set,
+/// as a slice of it.  Only the vectors used are written, and nothing is
+/// moved -- `core::array::from_fn` built the array elsewhere and copied it
+/// in, 256 bytes a call.
+///
+/// # Safety
+///
+/// `set` readable for `len` bytes.
+#[inline(always)]
+unsafe fn small_set(
+    storage: &mut core::mem::MaybeUninit<[__m128i; 16]>,
+    set: *const u8,
+    len: usize,
+) -> &[__m128i] {
+    let base = storage.as_mut_ptr().cast::<__m128i>();
+    let len = len.min(16);
+    for i in 0..len {
+        // SAFETY: `i < len <= 16`, within `storage`; the caller's bytes.
+        unsafe { base.add(i).write(splat(set.add(i).read())) };
+    }
+    // SAFETY: the first `len` vectors are written, and `storage` outlives
+    // the slice.
+    unsafe { core::slice::from_raw_parts(base, len) }
+}
+
+/// The bytes of `block` that are in `set` (its members, broadcast), as a
+/// 16-bit mask.
+#[inline(always)]
+fn members(set: &[__m128i], block: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8, _mm_or_si128};
+    let mut any = splat(0);
+    for byte in set {
+        // SAFETY: register arithmetic; SSE2 is in the target.
+        any = unsafe { _mm_or_si128(any, _mm_cmpeq_epi8(block, *byte)) };
+    }
+    // SAFETY: as above.  pmovmskb's 16 bits: never negative.
+    unsafe { _mm_movemask_epi8(any) as u32 }
+}
+
+/// The sixteen bytes of the 16-byte-aligned block at `block`, in a vector.
+///
+/// Assembly, as the scanners' loads are: past a string's terminator, they
+/// leave the object as Rust sees it.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn load_block(block: *const u8) -> __m128i {
+    let bytes: __m128i;
+    // SAFETY: the caller's readable, aligned block.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {bytes}, xmmword ptr [{block}]",
+            block = in(reg) block,
+            bytes = out(xmm_reg) bytes,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    bytes
+}
+
+/// The zero bytes of `block`, as a 16-bit mask.
+#[inline(always)]
+fn zero_bytes(block: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8};
+    // SAFETY: register arithmetic; SSE2 is in the target.  pmovmskb's 16
+    // bits: never negative.
+    unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(block, splat(0))) as u32 }
+}
+
+/// `scan_aligned`'s 64-byte test made of four 16-byte ones: nonzero when
+/// any of the chunk's blocks holds a stop.  For `stop16`s with no cheaper
+/// 64-byte form; `scan_aligned` gives it only chunks whose blocks it may
+/// read.
+#[inline(always)]
+fn four_blocks(chunk: *const u8, stop16: impl Fn(*const u8) -> u32) -> u32 {
+    stop16(chunk)
+        | stop16(chunk.wrapping_add(16))
+        | stop16(chunk.wrapping_add(32))
+        | stop16(chunk.wrapping_add(48))
 }
 
 /// Compute the length of the initial segment of `s` consisting
 /// entirely of bytes in `accept`.
 ///
+/// Sixteen bytes a step against a set of up to sixteen (a small set);
+/// a byte a step, looked up in a 256-bit set, against a larger one.
+///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::many_single_char_names)] // POSIX function signature, C convention variables.
 pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
-    let mut i: usize = 0;
-    'outer: loop {
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            return i;
-        }
-        let mut j: usize = 0;
-        loop {
-            let a = unsafe { *accept.add(j) };
-            if a == 0 {
-                break 'outer;
-            }
-            if c == a {
-                break;
-            }
-            j = j.wrapping_add(1);
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: the caller's set string.
+    if unsafe { accept.read() } == 0 {
+        return 0;
     }
-    i
+    // SAFETY: the caller's set string.
+    if let Some(len) = unsafe { small_set_size(accept) } {
+        let mut storage = core::mem::MaybeUninit::uninit();
+        // SAFETY: `len` bytes of the caller's set string, at most sixteen.
+        let set = unsafe { small_set(&mut storage, accept, len) };
+        let stop16 = |block: *const u8| {
+            // SAFETY: `scan_aligned` passes an aligned block that holds a
+            // readable byte.
+            !members(set, unsafe { load_block(block) }) & 0xFFFF
+        };
+        let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
+        // SAFETY: the caller's string.  The set never holds the terminator,
+        // so it is a stop.
+        let end = unsafe { scan_aligned(s, stop16, stop64) };
+        return (end as usize).wrapping_sub(s as usize);
+    }
+    // SAFETY: the caller's strings.  The set never holds the terminator, so
+    // the loop stops at `s`'s at the latest.
+    unsafe {
+        let set = ByteSet::of(accept);
+        let mut i = 0usize;
+        while set.contains(s.add(i).read()) {
+            i = i.wrapping_add(1);
+        }
+        i
+    }
 }
 
 /// Compute the length of the initial segment of `s` consisting
@@ -501,27 +1930,9 @@ pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::many_single_char_names)]
 pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            return i;
-        }
-        let mut j: usize = 0;
-        loop {
-            let r = unsafe { *reject.add(j) };
-            if r == 0 {
-                break;
-            }
-            if c == r {
-                return i;
-            }
-            j = j.wrapping_add(1);
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: the caller's strings.
+    unsafe { span_outside(s, reject) }
 }
 
 /// Find the first occurrence in `s` of any byte in `accept`.
@@ -532,26 +1943,16 @@ pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::many_single_char_names)]
 pub unsafe extern "C" fn strpbrk(s: *const u8, accept: *const u8) -> *const u8 {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            return core::ptr::null();
+    // SAFETY: the caller's strings; `span_outside` stops at a byte of `s`,
+    // its terminator at the latest.
+    unsafe {
+        let at = s.add(span_outside(s, accept));
+        if at.read() == 0 {
+            core::ptr::null()
+        } else {
+            at
         }
-        let mut j: usize = 0;
-        loop {
-            let a = unsafe { *accept.add(j) };
-            if a == 0 {
-                break;
-            }
-            if c == a {
-                return unsafe { s.add(i) };
-            }
-            j = j.wrapping_add(1);
-        }
-        i = i.wrapping_add(1);
     }
 }
 
@@ -597,70 +1998,52 @@ pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
     } else {
         s
     };
-
-    // Skip leading delimiters.
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *start.add(i) };
-        if c == 0 {
-            // All delimiters, no token.
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
-            }
-            return core::ptr::null_mut();
-        }
-        if !unsafe { is_delim(c, delim) } {
-            break;
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: `start` is the caller's string, or where the last call left
+    // off in it; `delim` is the caller's.
+    let (token, next) = unsafe { next_token(start, delim) };
+    unsafe {
+        core::ptr::addr_of_mut!(SAVED).write(next);
     }
-
-    let token = unsafe { start.add(i) };
-
-    // Find end of token.
-    let mut k: usize = 0;
-    loop {
-        let c = unsafe { *token.add(k) };
-        if c == 0 {
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
-            }
-            return token;
-        }
-        if unsafe { is_delim(c, delim) } {
-            unsafe {
-                *token.add(k) = 0;
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(token.add(k.wrapping_add(1)));
-            }
-            return token;
-        }
-        k = k.wrapping_add(1);
-    }
+    token
 }
 
-/// Check if a byte is in the delimiter set.
-#[inline]
-unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
-    let mut j: usize = 0;
-    loop {
-        let d = unsafe { *delim.add(j) };
-        if d == 0 {
-            return false;
+/// The next token of the writable C string at `start`, as `strtok` and
+/// `strtok_r` take one: past the bytes in `delim`, up to the next such
+/// byte -- which becomes the token's terminator -- or the string's end.
+/// Returns the token (null when only delimiters were left) and where the
+/// next search starts (null when the string is used up).
+///
+/// `strspn` and `strcspn`'s set lookups: the loops these replaced walked
+/// `delim` once for every byte of the string.
+///
+/// # Safety
+///
+/// `start` is a writable C string and `delim` a readable one.
+#[inline(always)]
+unsafe fn next_token(start: *mut u8, delim: *const u8) -> (*mut u8, *mut u8) {
+    // SAFETY: the caller's strings.  Each span ends at a byte of `start`,
+    // its terminator at the latest, which is where the token's end is
+    // written.
+    unsafe {
+        let token = start.add(strspn(start, delim));
+        if token.read() == 0 {
+            return (core::ptr::null_mut(), core::ptr::null_mut());
         }
-        if c == d {
-            return true;
+        let end = token.add(span_outside(token, delim));
+        if end.read() == 0 {
+            return (token, core::ptr::null_mut());
         }
-        j = j.wrapping_add(1);
+        end.write(0);
+        (token, end.add(1))
     }
 }
 
 /// Each error number's text in the C locale, which is glibc's to the letter
 /// (`posix/tools/oracle/strname_harness.py`); None for a number that is no
 /// error's -- 41 and 58, which Linux left unused, and past 133. The one table
-/// [`strerror`], [`strerrordesc_np`] and [`sys_errlist`] all read.
-const fn error_text(errnum: i32) -> Option<&'static core::ffi::CStr> {
+/// [`strerror`], [`strerrordesc_np`] and [`sys_errlist`] all read -- and
+/// printf's `%m`.
+pub(crate) const fn error_text(errnum: i32) -> Option<&'static core::ffi::CStr> {
     Some(match errnum {
         0 => c"Success",
         1 => c"Operation not permitted",
@@ -890,21 +2273,51 @@ pub use gnu_strndup::strndup;
 
 /// Own archive member — gnulib replaces `memrchr`. See the module header.
 mod gnu_memrchr {
+    use super::*;
+
     /// Find the last occurrence of byte `c` in the first `n` bytes of `s`.
     ///
-    /// Scans backward from position `n-1`.
+    /// Scans backward from position `n-1`, sixteen bytes a step (SSE2),
+    /// never reading outside the `n`.
     ///
     /// # Safety
     ///
     /// `s` must be valid for `n` bytes.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
-        let val = c as u8;
-        let mut i = n;
-        while i > 0 {
-            i = i.wrapping_sub(1);
-            if unsafe { *s.add(i) } == val {
-                return unsafe { s.add(i) };
+        // C's `(unsigned char)c`.
+        let byte = c as u8;
+        // SAFETY: every read below lies within the first `n` bytes of `s`,
+        // which the caller vouches for.
+        unsafe {
+            if n >= 16 {
+                let needle = splat(byte);
+                let mut end = n;
+                while end >= 16 {
+                    let at = end.wrapping_sub(16);
+                    let mask = matches16(s.add(at), needle);
+                    if mask != 0 {
+                        return s.add(at.wrapping_add(highest_bit(mask)));
+                    }
+                    end = at;
+                }
+                if end > 0 {
+                    // The first `end` bytes: the sixteen at the start, of
+                    // which those from `end` on were searched already.
+                    let below = !u32::MAX.wrapping_shl(end as u32);
+                    let mask = matches16(s, needle) & below;
+                    if mask != 0 {
+                        return s.add(highest_bit(mask));
+                    }
+                }
+                return core::ptr::null();
+            }
+            let mut i = n;
+            while i > 0 {
+                i = i.wrapping_sub(1);
+                if s.add(i).read() == byte {
+                    return s.add(i);
+                }
             }
         }
         core::ptr::null()
@@ -971,27 +2384,93 @@ pub extern "C" fn ffsll(i: i64) -> i32 {
     ffsl(i)
 }
 
+/// Where `strcasecmp` stops in the sixteen bytes at `a` and `b`: bit `i` set
+/// where the two differ once ASCII letters are folded to lower case, or
+/// agree on the terminator.  A byte is upper case when `byte - 'A'` is at
+/// most 25 as an unsigned number -- `pminub` and `pcmpeqb`, SSE2 having no
+/// unsigned compare -- and folds by gaining 0x20.  Then `strcmp`'s stops
+/// (`stops16`) over the folded bytes.
+///
+/// # Safety
+///
+/// `a` and `b` readable for sixteen bytes each.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn folded_stops16(a: *const u8, b: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {y}, xmmword ptr [{b}]",
+            // `a`'s bytes, folded: 0x20 added where `x - 'A' <= 25`.
+            "movdqa {t}, {x}",
+            "psubb {t}, {upper_a}",
+            "movdqa {u}, {t}",
+            "pminub {u}, {letters}",
+            "pcmpeqb {u}, {t}",
+            "pand {u}, {case_bit}",
+            "por {x}, {u}",
+            // `b`'s, the same.
+            "movdqa {t}, {y}",
+            "psubb {t}, {upper_a}",
+            "movdqa {u}, {t}",
+            "pminub {u}, {letters}",
+            "pcmpeqb {u}, {t}",
+            "pand {u}, {case_bit}",
+            "por {y}, {u}",
+            // `stops16` over the folded bytes.
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pxor {t}, {t}",
+            "pcmpeqb {y}, {t}",
+            "pmovmskb {mask:e}, {y}",
+            a = in(reg) a,
+            b = in(reg) b,
+            upper_a = in(xmm_reg) splat(b'A'),
+            letters = in(xmm_reg) splat(25),
+            case_bit = in(xmm_reg) splat(0x20),
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            u = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// `a`'s byte less `b`'s, each folded to lower case: how the
+/// case-insensitive comparisons answer, as glibc's.
+///
+/// # Safety
+///
+/// `a` and `b` readable.
+#[inline(always)]
+unsafe fn folded_difference(a: *const u8, b: *const u8) -> i32 {
+    // SAFETY: the caller's bytes.
+    let (x, y) = unsafe { (a.read(), b.read()) };
+    i32::from(x.to_ascii_lowercase()).wrapping_sub(i32::from(y.to_ascii_lowercase()))
+}
+
 /// Compare two strings, case-insensitive.
+///
+/// ASCII letters compare as lower case; the answer is the difference of the
+/// first folded bytes that differ, as glibc's.  Sixteen bytes a step, as
+/// `strcmp`.
 ///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
-    let mut i: usize = 0;
-    loop {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        let la = a.to_ascii_lowercase();
-        let lb = b.to_ascii_lowercase();
-        if la != lb || a == 0 {
-            return i32::from(la).wrapping_sub(i32::from(lb));
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: as `strncasecmp`'s, with no bound.
+    unsafe { strncasecmp(s1, s2, usize::MAX) }
 }
 
-/// Compare at most `n` bytes of two strings, case-insensitive.
+/// Compare at most `n` bytes of two strings, case-insensitive, as
+/// `strcasecmp`.
 ///
 /// # Safety
 ///
@@ -999,16 +2478,36 @@ pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
 /// null-terminated before `n`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        let la = a.to_ascii_lowercase();
-        let lb = b.to_ascii_lowercase();
-        if la != lb || a == 0 {
-            return i32::from(la).wrapping_sub(i32::from(lb));
+    let mut i = 0usize;
+    // SAFETY: as `strncmp`'s: nothing is compared past the first
+    // difference, the first terminator or `n`, and a run of sixteen is read
+    // only where neither crosses a page, sharing one with its string's byte
+    // `i`, which is readable.
+    unsafe {
+        while i < n {
+            let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
+            if within_page(a) && within_page(b) {
+                let left = n.wrapping_sub(i);
+                let stops = folded_stops16(a, b);
+                if stops != 0 {
+                    let at = stops.trailing_zeros() as usize;
+                    if at >= left {
+                        return 0;
+                    }
+                    return folded_difference(a.add(at), b.add(at));
+                }
+                if left <= 16 {
+                    return 0;
+                }
+                i = i.wrapping_add(16);
+            } else {
+                let (x, y) = (a.read(), b.read());
+                if !x.eq_ignore_ascii_case(&y) || x == 0 {
+                    return folded_difference(a, b);
+                }
+                i = i.wrapping_add(1);
+            }
         }
-        i = i.wrapping_add(1);
     }
     0
 }
@@ -1064,16 +2563,11 @@ mod gnu_stpcpy {
     /// `src` must be a valid null-terminated string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
-        let mut i: usize = 0;
-        loop {
-            let c = unsafe { *src.add(i) };
-            unsafe {
-                *dest.add(i) = c;
-            }
-            if c == 0 {
-                return unsafe { dest.add(i) };
-            }
-            i = i.wrapping_add(1);
+        // SAFETY: the caller's string, and room for it with its terminator.
+        unsafe {
+            let len = super::strlen(src);
+            super::memcpy(dest, src, len.wrapping_add(1));
+            dest.add(len)
         }
     }
 }
@@ -1092,28 +2586,14 @@ mod gnu_stpncpy {
     /// `dest` must have space for at least `n` bytes.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-        let mut i: usize = 0;
-        // Copy up to n chars from src.
-        while i < n {
-            let c = unsafe { *src.add(i) };
-            unsafe {
-                *dest.add(i) = c;
-            }
-            if c == 0 {
-                let result = unsafe { dest.add(i) };
-                // Fill remainder with nulls.
-                i = i.wrapping_add(1);
-                while i < n {
-                    unsafe {
-                        *dest.add(i) = 0;
-                    }
-                    i = i.wrapping_add(1);
-                }
-                return result;
-            }
-            i = i.wrapping_add(1);
+        // SAFETY: `src` is read to its terminator or for `n` bytes, and
+        // `dest` written for `n`: the string's `len` bytes, then zeros.
+        unsafe {
+            let len = super::length_within(src, n);
+            super::memcpy(dest, src, len);
+            super::memset(dest.add(len), 0, n.wrapping_sub(len));
+            dest.add(len)
         }
-        unsafe { dest.add(n) }
     }
 }
 pub use gnu_stpncpy::stpncpy;
@@ -1143,41 +2623,20 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
     if s.is_null() {
         return core::ptr::null_mut();
     }
-
-    let begin = s;
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            // Reached end of string — no more tokens.
-            unsafe {
-                *stringp = core::ptr::null_mut();
-            }
-            return begin;
+    // SAFETY: `s` is the caller's writable string and `delim` its set; the
+    // span ends at a byte of `s`, its terminator at the latest.
+    unsafe {
+        let end = s.add(span_outside(s, delim));
+        if end.read() == 0 {
+            // The last token: nothing follows it.
+            *stringp = core::ptr::null_mut();
+        } else {
+            // The delimiter becomes the token's terminator.
+            end.write(0);
+            *stringp = end.add(1);
         }
-
-        // Check if c is a delimiter.
-        let mut j: usize = 0;
-        loop {
-            let d = unsafe { *delim.add(j) };
-            if d == 0 {
-                break;
-            }
-            if c == d {
-                // Replace delimiter with null and advance past it.
-                unsafe {
-                    *s.add(i) = 0;
-                }
-                unsafe {
-                    *stringp = s.add(i.wrapping_add(1));
-                }
-                return begin;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        i = i.wrapping_add(1);
     }
+    s
 }
 
 /// Own archive member — gnulib replaces `strverscmp`. See the module header.
@@ -1349,45 +2808,12 @@ pub unsafe extern "C" fn strtok_r(s: *mut u8, delim: *const u8, saveptr: *mut *m
     } else {
         s
     };
-
-    // Skip leading delimiters.
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *start.add(i) };
-        if c == 0 {
-            unsafe {
-                *saveptr = core::ptr::null_mut();
-            }
-            return core::ptr::null_mut();
-        }
-        if !unsafe { is_delim(c, delim) } {
-            break;
-        }
-        i = i.wrapping_add(1);
-    }
-
-    let token = unsafe { start.add(i) };
-
-    // Find end of token.
-    let mut k: usize = 0;
-    loop {
-        let c = unsafe { *token.add(k) };
-        if c == 0 {
-            unsafe {
-                *saveptr = core::ptr::null_mut();
-            }
-            return token;
-        }
-        if unsafe { is_delim(c, delim) } {
-            unsafe {
-                *token.add(k) = 0;
-            }
-            unsafe {
-                *saveptr = token.add(k.wrapping_add(1));
-            }
-            return token;
-        }
-        k = k.wrapping_add(1);
+    // SAFETY: `start` is the caller's string, or where the last call left
+    // off in it; `delim` is the caller's, and `saveptr` writable.
+    unsafe {
+        let (token, next) = next_token(start, delim);
+        *saveptr = next;
+        token
     }
 }
 
@@ -1403,19 +2829,19 @@ pub unsafe extern "C" fn strtok_r(s: *mut u8, delim: *const u8, saveptr: *mut *m
 /// `dest` must be valid for `n` bytes.  `src` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memccpy(dest: *mut u8, src: *const u8, c: i32, n: usize) -> *mut u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    while i < n {
-        let byte = unsafe { *src.add(i) };
-        unsafe {
-            *dest.add(i) = byte;
+    // SAFETY: the caller's `n` bytes each side.  `memchr` reads within
+    // them, and the copy is of those up to the byte it found, inclusive, or
+    // all of them.
+    unsafe {
+        let found = memchr(src, c, n);
+        if found.is_null() {
+            memcpy(dest, src, n);
+            return core::ptr::null_mut();
         }
-        if byte == val {
-            return unsafe { dest.add(i.wrapping_add(1)) };
-        }
-        i = i.wrapping_add(1);
+        let len = (found as usize).wrapping_sub(src as usize).wrapping_add(1);
+        memcpy(dest, src, len);
+        dest.add(len)
     }
-    core::ptr::null_mut()
 }
 
 /// Locale-aware string comparison.
@@ -1818,7 +3244,8 @@ mod gnu_strcasestr {
     ///
     /// Returns a pointer to the first occurrence of `needle` in
     /// `haystack`, ignoring ASCII case differences.  Returns null if not
-    /// found.  If `needle` is empty, returns `haystack`.
+    /// found.  If `needle` is empty, returns `haystack`.  The Two-Way
+    /// search over case-folded bytes: linear time, constant space.
     ///
     /// # Safety
     ///
@@ -1828,52 +3255,27 @@ mod gnu_strcasestr {
         if haystack.is_null() || needle.is_null() {
             return core::ptr::null_mut();
         }
-
-        // SAFETY: Both pointers are valid null-terminated strings.
-        let nlen = unsafe { strlen(needle) };
-        if nlen == 0 {
-            return haystack.cast_mut();
-        }
-
-        let hlen = unsafe { strlen(haystack) };
-        if nlen > hlen {
-            return core::ptr::null_mut();
-        }
-
-        let end = hlen.wrapping_sub(nlen);
-        let mut i: usize = 0;
-        while i <= end {
-            if unsafe { casecmp_n(haystack.add(i), needle, nlen) } {
-                return unsafe { haystack.add(i).cast_mut() };
+        // SAFETY: the caller's strings.  The haystack is read only as far
+        // as `in_string` admits, which is never past its terminator.
+        unsafe {
+            let nlen = strlen(needle);
+            if nlen == 0 {
+                return haystack.cast_mut();
             }
-            i = i.wrapping_add(1);
+            // A haystack shorter than the needle holds no match.
+            if length_within(haystack, nlen) < nlen {
+                return core::ptr::null_mut();
+            }
+            TwoWay::new(needle, nlen, to_lower)
+                .find(haystack, in_string(haystack))
+                .cast_mut()
         }
-
-        core::ptr::null_mut()
     }
 }
 pub use gnu_strcasestr::strcasestr;
 
-/// Compare `n` bytes of two strings, case-insensitively.
-///
-/// # Safety
-///
-/// Both pointers must be readable for `n` bytes.
-unsafe fn casecmp_n(a: *const u8, b: *const u8, n: usize) -> bool {
-    let mut j: usize = 0;
-    while j < n {
-        // SAFETY: j < n, both pointers valid for n bytes.
-        let ca = unsafe { *a.add(j) };
-        let cb = unsafe { *b.add(j) };
-        if to_lower(ca) != to_lower(cb) {
-            return false;
-        }
-        j = j.wrapping_add(1);
-    }
-    true
-}
-
 /// ASCII lowercase.
+#[inline(always)]
 fn to_lower(c: u8) -> u8 {
     if c.is_ascii_uppercase() {
         #[allow(clippy::arithmetic_side_effects)]
@@ -1900,15 +3302,17 @@ pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
     if s.is_null() || n == 0 {
         return;
     }
-
-    // Use volatile writes so the compiler cannot elide them.
-    let mut i: usize = 0;
-    while i < n {
-        // SAFETY: s is valid for n bytes; i < n.
-        unsafe {
-            core::ptr::write_volatile(s.add(i), 0);
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: the caller's `n` writable bytes.
+    unsafe {
+        memset(s, 0, n);
+    }
+    // glibc's barrier: assembly the compiler must assume reads the zeroed
+    // bytes through `s` (it declares no `nomem` or `readonly`), so the
+    // `memset` before it is not a dead store it may drop.  Volatile byte
+    // stores did the same at a byte a store.
+    // SAFETY: the template is a comment; it executes nothing.
+    unsafe {
+        core::arch::asm!("/* {0} */", in(reg) s, options(nostack, preserves_flags));
     }
 }
 
@@ -1932,16 +3336,12 @@ mod gnu_mempcpy {
     /// `dest` and `src` must be valid for `n` bytes and must not overlap.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mempcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-        let mut i: usize = 0;
-        while i < n {
-            // SAFETY: Caller guarantees both pointers valid for n bytes.
-            unsafe {
-                *dest.add(i) = *src.add(i);
-            }
-            i = i.wrapping_add(1);
+        // SAFETY: the caller's `n` bytes each side; `dest + n` is one past
+        // the end, valid pointer arithmetic.
+        unsafe {
+            memcpy(dest, src, n);
+            dest.add(n)
         }
-        // SAFETY: dest + n is one-past-end, valid for pointer arithmetic.
-        unsafe { dest.add(n) }
     }
 }
 pub use gnu_mempcpy::mempcpy;
@@ -1961,9 +3361,8 @@ pub use gnu_mempcpy::mempcpy;
 /// - If `needlelen` is 0, returns `haystack` (empty pattern always matches).
 /// - If `needlelen > haystacklen`, returns NULL.
 ///
-/// Uses a simple linear scan.  For large inputs, a KMP or Two-Way
-/// algorithm would be faster, but the simple version is correct and
-/// sufficient for the buffer sizes we encounter.
+/// A one-byte needle is `memchr`; a longer one the Two-Way search
+/// ([`TwoWay`]): linear time, constant space.
 ///
 /// # Safety
 ///
@@ -1983,32 +3382,13 @@ pub unsafe extern "C" fn memmem(
     if haystack.is_null() || needle.is_null() || needlelen > haystacklen {
         return core::ptr::null();
     }
-
-    // Scan positions: only need to check up to haystacklen - needlelen.
-    let limit = haystacklen.wrapping_sub(needlelen);
-    let mut i: usize = 0;
-    while i <= limit {
-        // Check if needle matches at position i.
-        let mut j: usize = 0;
-        let mut matched = true;
-        while j < needlelen {
-            // SAFETY: i + j < haystacklen (since i <= limit and
-            // j < needlelen, so i + j <= haystacklen - needlelen +
-            // needlelen - 1 = haystacklen - 1). Both pointers valid.
-            if unsafe { *haystack.add(i.wrapping_add(j)) != *needle.add(j) } {
-                matched = false;
-                break;
-            }
-            j = j.wrapping_add(1);
+    // SAFETY: the caller's lengths, which `fits` holds the search to.
+    unsafe {
+        if needlelen == 1 {
+            return memchr(haystack, i32::from(needle.read()), haystacklen);
         }
-        if matched {
-            // SAFETY: haystack + i is within bounds.
-            return unsafe { haystack.add(i) };
-        }
-        i = i.wrapping_add(1);
+        TwoWay::new(needle, needlelen, exact).find(haystack, |end| end <= haystacklen)
     }
-
-    core::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
@@ -2017,6 +3397,8 @@ pub unsafe extern "C" fn memmem(
 
 /// Own archive member — gnulib replaces `rawmemchr`. See the module header.
 mod gnu_rawmemchr {
+    use super::*;
+
     /// Search for a byte in memory without a length bound.
     ///
     /// Like `memchr` but assumes the byte `c` WILL be found somewhere in
@@ -2031,14 +3413,14 @@ mod gnu_rawmemchr {
     /// function reads past the end of valid memory (undefined behavior).
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
-        let target = c as u8;
-        let mut p = s;
-        // SAFETY: Caller guarantees c exists in the buffer, so we will
-        // find it before reading invalid memory.
-        while unsafe { *p } != target {
-            p = unsafe { p.add(1) };
-        }
-        p
+        let needle = splat(c as u8);
+        // SAFETY (both): `scan_aligned` passes an aligned block or chunk
+        // that holds a readable byte.
+        let stop16 = |block: *const u8| unsafe { block_masks(block, needle).1 };
+        let stop64 = |chunk: *const u8| unsafe { byte64(chunk, needle) };
+        // SAFETY: the caller vouches the byte occurs, so every byte up to it
+        // is readable, and it is the stop.
+        unsafe { scan_aligned(s, stop16, stop64) }
     }
 }
 pub use gnu_rawmemchr::rawmemchr;
@@ -2103,6 +3485,1251 @@ pub static sys_errlist: [SyncPtr; 134] = {
 
 #[cfg(test)]
 mod tests {
+    /// The engines behind `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`
+    /// and `strlen`, against what byte loops answer: every size to 300 (the
+    /// small paths, the boundary at `SMALL`, the 16-byte loops) and either
+    /// side of each threshold, every alignment of source and destination,
+    /// every overlap of a move in both directions, and the bytes around
+    /// what was written left alone.
+    #[allow(clippy::cast_possible_truncation, clippy::indexing_slicing)]
+    mod engines {
+        use super::super::{REP_THRESHOLD, SMALL, memchr, memcmp, memcpy, memmove, memset, strlen};
+
+        fn sizes() -> Vec<usize> {
+            let mut v: Vec<usize> = (0..=300).collect();
+            for t in [SMALL, REP_THRESHOLD, 4096] {
+                v.extend([t - 17, t - 16, t - 1, t, t + 1, t + 15, t + 16, t + 17]);
+            }
+            v.extend([10_000, 65_537]);
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+
+        /// The alignments tried at size `n`: all pairs while it is small,
+        /// a spread above.
+        fn offsets(n: usize) -> Vec<(usize, usize)> {
+            if n <= 96 {
+                (0..16).flat_map(|a| (0..16).map(move |b| (a, b))).collect()
+            } else {
+                vec![(0, 0), (1, 0), (0, 1), (3, 7), (8, 8), (15, 1), (15, 15)]
+            }
+        }
+
+        /// Bytes no two near neighbours of which are equal, high ones too.
+        fn pattern(len: usize, seed: u8) -> Vec<u8> {
+            (0..len)
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(seed) ^ ((i >> 8) as u8))
+                .collect()
+        }
+
+        #[test]
+        fn memcpy_is_a_byte_copy() {
+            for n in sizes() {
+                for (s, d) in offsets(n) {
+                    let src = pattern(n + 16, 5);
+                    let mut dst = vec![0xEE_u8; n + 48];
+                    // SAFETY: `src` holds `s + n` bytes and `dst` `16 + d + n`.
+                    let r = unsafe { memcpy(dst.as_mut_ptr().add(16 + d), src.as_ptr().add(s), n) };
+                    assert_eq!(r, dst.as_mut_ptr().wrapping_add(16 + d));
+                    assert_eq!(
+                        &dst[16 + d..16 + d + n],
+                        &src[s..s + n],
+                        "n {n}, at {s}/{d}"
+                    );
+                    assert!(dst[..16 + d].iter().all(|&b| b == 0xEE), "n {n}: before");
+                    assert!(dst[16 + d + n..].iter().all(|&b| b == 0xEE), "n {n}: after");
+                }
+            }
+        }
+
+        #[test]
+        fn memmove_is_a_byte_move_every_way_it_overlaps() {
+            for n in sizes() {
+                let shifts: Vec<isize> = if n <= 300 {
+                    (-40..=40).collect()
+                } else {
+                    vec![-40, -17, -16, -15, -1, 0, 1, 15, 16, 17, 40]
+                };
+                for shift in shifts {
+                    let from = 48usize;
+                    let to = from.wrapping_add_signed(shift);
+                    let mut buf = pattern(n + 96, 11);
+                    let mut want = buf.clone();
+                    want.copy_within(from..from + n, to);
+                    // SAFETY: `buf` holds `max(from, to) + n` bytes.
+                    unsafe { memmove(buf.as_mut_ptr().add(to), buf.as_ptr().add(from), n) };
+                    assert!(buf == want, "n {n}, shift {shift}");
+                }
+            }
+            // Two separate buffers, as memcpy's case.
+            let src = pattern(5000, 3);
+            let mut dst = vec![0u8; 5000];
+            // SAFETY: both hold 5000 bytes.
+            unsafe { memmove(dst.as_mut_ptr(), src.as_ptr(), 5000) };
+            assert_eq!(dst, src);
+        }
+
+        #[test]
+        fn memset_fills_with_the_low_byte_of_c() {
+            for n in sizes() {
+                for (d, _) in offsets(n).into_iter().filter(|&(_, b)| b == 0 || b == 7) {
+                    for (c, byte) in [
+                        (0, 0u8),
+                        (0x5A, 0x5A),
+                        (0xFF, 0xFF),
+                        (-1, 0xFF),
+                        (0x15A, 0x5A),
+                    ] {
+                        let mut buf = vec![0xEE_u8; n + 48];
+                        // SAFETY: `buf` holds `16 + d + n` bytes.
+                        let r = unsafe { memset(buf.as_mut_ptr().add(16 + d), c, n) };
+                        assert_eq!(r, buf.as_mut_ptr().wrapping_add(16 + d));
+                        assert!(
+                            buf[16 + d..16 + d + n].iter().all(|&b| b == byte),
+                            "n {n}, c {c}"
+                        );
+                        assert!(buf[..16 + d].iter().all(|&b| b == 0xEE), "n {n}: before");
+                        assert!(buf[16 + d + n..].iter().all(|&b| b == 0xEE), "n {n}: after");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn memcmp_answers_the_first_difference_as_unsigned_bytes() {
+            for n in sizes().into_iter().filter(|&n| n <= 4200) {
+                let a = pattern(n + 16, 9);
+                for (s, d) in offsets(n).into_iter().take(9) {
+                    let mut b = vec![0u8; n + 16];
+                    b[d..d + n].copy_from_slice(&a[s..s + n]);
+                    let (pa, pb) = (a.as_ptr().wrapping_add(s), b.as_ptr().wrapping_add(d));
+                    // SAFETY: both hold `n` bytes from these offsets.
+                    assert_eq!(unsafe { memcmp(pa, pb, n) }, 0, "n {n}: equal");
+                    let mut at: Vec<usize> = if n <= 64 {
+                        (0..n).collect()
+                    } else {
+                        vec![0, 1, 15, 16, 17, n / 2, n - 17, n - 16, n - 1]
+                    };
+                    at.dedup();
+                    for p in at {
+                        for (x, y) in [(0x00u8, 0xFFu8), (0x80, 0x7F), (0x41, 0x42), (0xFE, 0x01)] {
+                            let mut a2 = a[s..s + n].to_vec();
+                            let mut b2 = a2.clone();
+                            a2[p] = x;
+                            b2[p] = y;
+                            // A later difference the other way does not count.
+                            if p + 1 < n {
+                                a2[p + 1] = 0x00;
+                                b2[p + 1] = 0xFF;
+                            }
+                            // SAFETY: both hold `n` bytes.
+                            let got = unsafe { memcmp(a2.as_ptr(), b2.as_ptr(), n) };
+                            assert_eq!(got, i32::from(x) - i32::from(y), "n {n}, at {p}");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn memchr_finds_the_first_and_reads_no_further_than_n() {
+            for n in sizes().into_iter().filter(|&n| n <= 4200) {
+                for (s, _) in offsets(n).into_iter().take(5) {
+                    // A buffer with no 0x80 in it, and the needle placed.
+                    let mut buf: Vec<u8> = pattern(n + 32, 1)
+                        .into_iter()
+                        .map(|b| if b == 0x80 { 0x81 } else { b })
+                        .collect();
+                    let base = buf.as_ptr().wrapping_add(s);
+                    // SAFETY: `buf` holds `s + n` bytes.
+                    assert!(unsafe { memchr(base, 0x80, n) }.is_null(), "n {n}: absent");
+                    // Past 64 bytes, each of a 64-byte step's four blocks,
+                    // either side of the steps' boundaries, the middle and
+                    // the end.
+                    let at: Vec<usize> = if n <= 64 {
+                        (0..n).collect()
+                    } else {
+                        [
+                            0,
+                            15,
+                            16,
+                            17,
+                            31,
+                            32,
+                            47,
+                            48,
+                            63,
+                            64,
+                            65,
+                            127,
+                            128,
+                            129,
+                            n / 2,
+                            n - 1,
+                        ]
+                        .into_iter()
+                        .filter(|&p| p < n)
+                        .collect()
+                    };
+                    for p in at {
+                        buf[s + p] = 0x80;
+                        if p + 3 < n {
+                            buf[s + p + 3] = 0x80; // a later one does not count
+                        }
+                        let base = buf.as_ptr().wrapping_add(s);
+                        for c in [0x80, 0x180, -128] {
+                            // SAFETY: as above.
+                            let got = unsafe { memchr(base, c, n) };
+                            assert_eq!(got, base.wrapping_add(p), "n {n}, at {p}, c {c}");
+                        }
+                        buf[s + p] = 0x81;
+                        if p + 3 < n {
+                            buf[s + p + 3] = 0x81;
+                        }
+                    }
+                    // Just past `n` is not looked at.
+                    buf[s + n] = 0x80;
+                    let base = buf.as_ptr().wrapping_add(s);
+                    // SAFETY: as above.
+                    assert!(
+                        unsafe { memchr(base, 0x80, n) }.is_null(),
+                        "n {n}: past the end"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn strlen_counts_to_the_terminator_at_any_alignment() {
+            let mut lengths: Vec<usize> = (0..=200).collect();
+            lengths.extend([255, 256, 257, 4095, 4096, 4097, 70_000]);
+            for len in lengths {
+                for start in 0..48usize {
+                    if len > 300 && start % 7 != 0 {
+                        continue;
+                    }
+                    let mut buf: Vec<u8> = (0..start + len + 64)
+                        .map(|i| 0x80 | (i as u8) | 1)
+                        .collect();
+                    buf[start + len] = 0;
+                    // SAFETY: a NUL-terminated string at `start`.
+                    assert_eq!(
+                        unsafe { strlen(buf.as_ptr().add(start)) },
+                        len,
+                        "len {len}, at {start}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The scanners and what is built on them, against byte loops: every
+    /// alignment, every length to past several blocks, the byte sought at
+    /// every place, and every needle and haystack over small alphabets.
+    /// Then (`guarded`) each with its strings against pages that fault, to
+    /// show it reads nothing outside its strings' pages.
+    mod scanners {
+        use super::super::{
+            memccpy, memchr, memcmp, memcpy, memmem, mempcpy, memrchr, memset, rawmemchr, stpcpy,
+            stpncpy, strcasestr, strcat, strchr, strchrnul, strcmp, strcpy, strcspn, strlen,
+            strncat, strncmp, strncpy, strnlen, strpbrk, strrchr, strspn, strstr,
+        };
+
+        /// The bytes the searches look for, a low one and a high one;
+        /// [`filler`] never holds either.
+        const SOUGHT: [u8; 2] = [b'q', 0xE9];
+
+        /// What surrounds a placed string: neither a terminator nor sought.
+        const FILL: u8 = b'Z';
+
+        /// Source and destination alignments for the copies.
+        const ALIGNS: [(usize, usize); 7] =
+            [(0, 0), (1, 0), (0, 1), (3, 9), (15, 15), (15, 1), (8, 8)];
+
+        /// `len` bytes, none 0 or sought, low and high, varying with `seed`.
+        fn filler(len: usize, seed: usize) -> Vec<u8> {
+            (0..len)
+                .map(|i| {
+                    let b = ((i * 37 + seed * 11) % 250) as u8 + 1;
+                    if SOUGHT.contains(&b) { b + 1 } else { b }
+                })
+                .collect()
+        }
+
+        /// `bytes` and a terminator.
+        fn terminated(bytes: &[u8]) -> Vec<u8> {
+            let mut v = bytes.to_vec();
+            v.push(0);
+            v
+        }
+
+        /// `bytes` at `align` past a 16-byte boundary, [`FILL`] around
+        /// them: the buffer, and where they start in it.
+        fn place(bytes: &[u8], align: usize) -> (Vec<u8>, usize) {
+            let mut buf = vec![FILL; bytes.len() + 96];
+            let at = (16 - buf.as_ptr() as usize % 16) % 16 + align;
+            buf[at..at + bytes.len()].copy_from_slice(bytes);
+            (buf, at)
+        }
+
+        /// Room for `room` bytes at `align` past a 16-byte boundary, 0xEE
+        /// throughout and around: the buffer, and where the room starts.
+        fn destination(room: usize, align: usize) -> (Vec<u8>, usize) {
+            let buf = vec![0xEE; room + 96];
+            let at = (16 - buf.as_ptr() as usize % 16) % 16 + align;
+            (buf, at)
+        }
+
+        /// That nothing of `buf` outside `written` changed from 0xEE.
+        fn untouched_outside(buf: &[u8], written: core::ops::Range<usize>, what: &str) {
+            assert!(
+                buf[..written.start].iter().all(|&b| b == 0xEE),
+                "{what}: before"
+            );
+            assert!(
+                buf[written.end..].iter().all(|&b| b == 0xEE),
+                "{what}: after"
+            );
+        }
+
+        /// How far `found` is from `base`, or `None` for null.
+        fn offset(found: *const u8, base: *const u8) -> Option<usize> {
+            (!found.is_null()).then(|| found as usize - base as usize)
+        }
+
+        #[test]
+        fn strnlen_counts_to_the_terminator_or_the_limit() {
+            for len in 0..=80 {
+                let s = terminated(&filler(len, len));
+                for align in 0..16 {
+                    let (buf, at) = place(&s, align);
+                    let p = buf.as_ptr().wrapping_add(at);
+                    let limits = [0, 1, 2, 15, 16, 17, 31, 32, 33, 48, 64, 100, usize::MAX];
+                    for max in limits
+                        .into_iter()
+                        .chain([len.saturating_sub(1), len, len + 1])
+                    {
+                        // SAFETY: a terminated string.
+                        let got = unsafe { strnlen(p, max) };
+                        assert_eq!(got, len.min(max), "len {len}, align {align}, max {max}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn strnlen_of_a_run_with_no_terminator_is_its_limit() {
+            for max in 0..=80 {
+                let run = filler(max, 3);
+                for align in 0..16 {
+                    let (buf, at) = place(&run, align);
+                    // SAFETY: `max` readable bytes.
+                    let got = unsafe { strnlen(buf.as_ptr().add(at), max) };
+                    assert_eq!(got, max, "max {max}, align {align}");
+                }
+            }
+        }
+
+        #[test]
+        fn strchr_strchrnul_and_rawmemchr_find_the_first() {
+            // Past 64 bytes for the 64-byte steps, which begin at the first
+            // 64-byte boundary.
+            for len in (0..=70).chain([100, 127, 128, 129, 200]) {
+                for align in 0..16 {
+                    for sought in SOUGHT {
+                        let c = i32::from(sought);
+                        for first in 0..=len {
+                            let mut s = filler(len, align);
+                            if first < len {
+                                s[first] = sought;
+                                if first + 5 < len {
+                                    s[first + 5] = sought;
+                                }
+                            }
+                            let (buf, at) = place(&terminated(&s), align);
+                            let p = buf.as_ptr().wrapping_add(at);
+                            let found = (first < len).then_some(first);
+                            let what = format!("len {len}, align {align}, {sought:#x} at {first}");
+                            // SAFETY: a terminated string; `rawmemchr` is
+                            // asked only for bytes in it.
+                            unsafe {
+                                assert_eq!(offset(strchr(p, c), p), found, "{what}");
+                                // C passes a `char` as an int, negative for
+                                // a high byte where `char` is signed.
+                                assert_eq!(
+                                    offset(strchr(p, c - 256), p),
+                                    found,
+                                    "{what}: as negative"
+                                );
+                                assert_eq!(
+                                    offset(strchrnul(p, c), p),
+                                    Some(found.unwrap_or(len)),
+                                    "{what}"
+                                );
+                                if let Some(first) = found {
+                                    assert_eq!(offset(rawmemchr(p, c), p), Some(first), "{what}");
+                                }
+                                assert_eq!(
+                                    offset(strchr(p, 0), p),
+                                    Some(len),
+                                    "{what}: the terminator"
+                                );
+                                assert_eq!(offset(strchrnul(p, 0), p), Some(len), "{what}");
+                                assert_eq!(offset(rawmemchr(p, 0), p), Some(len), "{what}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn strrchr_finds_the_last() {
+            for len in 0..=70 {
+                for align in 0..16 {
+                    for sought in SOUGHT {
+                        for first in 0..=len {
+                            for gap in [0, 1, 17] {
+                                let mut s = filler(len, align + 1);
+                                let mut last = None;
+                                if first < len {
+                                    s[first] = sought;
+                                    last = Some(first);
+                                    if gap > 0 && first + gap < len {
+                                        s[first + gap] = sought;
+                                        last = Some(first + gap);
+                                    }
+                                }
+                                let (buf, at) = place(&terminated(&s), align);
+                                let p = buf.as_ptr().wrapping_add(at);
+                                // SAFETY: a terminated string.
+                                unsafe {
+                                    assert_eq!(
+                                        offset(strrchr(p, i32::from(sought)), p),
+                                        last,
+                                        "len {len}, align {align}, {sought:#x} at {first} and +{gap}"
+                                    );
+                                    assert_eq!(offset(strrchr(p, 0), p), Some(len), "len {len}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn memrchr_finds_the_last_within_its_bytes() {
+            let sought = SOUGHT[0];
+            for n in 0..=70 {
+                for align in 0..16 {
+                    for last in 0..=n {
+                        // The byte sought just before `s` and from `n` on,
+                        // where it must not be found.
+                        let mut bytes = vec![sought; 16];
+                        bytes.extend(filler(n, align));
+                        bytes.extend([sought; 16]);
+                        if last < n {
+                            bytes[16 + last] = sought;
+                            if last >= 3 {
+                                bytes[16 + last - 3] = sought;
+                            }
+                        }
+                        let (buf, at) = place(&bytes, align);
+                        let s = buf.as_ptr().wrapping_add(at + 16);
+                        // SAFETY: `n` readable bytes from `s`.
+                        let got = unsafe { memrchr(s, i32::from(sought), n) };
+                        assert_eq!(
+                            offset(got, s),
+                            (last < n).then_some(last),
+                            "n {n}, align {align}, last {last}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// `strncmp` as a byte loop over terminated strings.
+        fn byte_strncmp(a: &[u8], b: &[u8], n: usize) -> i32 {
+            for (&x, &y) in a.iter().zip(b).take(n) {
+                if x != y || x == 0 {
+                    return i32::from(x) - i32::from(y);
+                }
+            }
+            0
+        }
+
+        /// Pairs to compare: equal; differing at each place, by low and
+        /// high bytes; and one a prefix of the other.
+        fn comparison_pairs() -> Vec<(Vec<u8>, Vec<u8>)> {
+            let mut pairs = Vec::new();
+            for len in 0..=40 {
+                let base = filler(len, len);
+                pairs.push((base.clone(), base.clone()));
+                for d in 0..len {
+                    for v in [0x01, 0x7F, 0x80, 0xFF] {
+                        if v != base[d] {
+                            let mut other = base.clone();
+                            other[d] = v;
+                            pairs.push((base.clone(), other));
+                        }
+                    }
+                    pairs.push((base.clone(), base[..d].to_vec()));
+                }
+            }
+            pairs
+        }
+
+        #[test]
+        fn strcmp_and_strncmp_answer_as_byte_loops() {
+            for (a, b) in comparison_pairs() {
+                for (x, y) in [(&a, &b), (&b, &a)] {
+                    let (x, y) = (terminated(x), terminated(y));
+                    for (ax, ay) in [(0, 0), (1, 0), (0, 1), (5, 11), (15, 15), (15, 0), (8, 3)] {
+                        let (bx, px) = place(&x, ax);
+                        let (by, py) = place(&y, ay);
+                        let (p, q) = (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(
+                                strcmp(p, q),
+                                byte_strncmp(&x, &y, usize::MAX),
+                                "{x:?} {y:?}"
+                            );
+                            for n in [
+                                0,
+                                1,
+                                15,
+                                16,
+                                17,
+                                31,
+                                32,
+                                33,
+                                x.len() - 1,
+                                x.len(),
+                                usize::MAX,
+                            ] {
+                                assert_eq!(
+                                    strncmp(p, q, n),
+                                    byte_strncmp(&x, &y, n),
+                                    "{x:?} {y:?}, n {n}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// `strncasecmp` as a byte loop over terminated strings.
+        fn byte_strncasecmp(a: &[u8], b: &[u8], n: usize) -> i32 {
+            for (&x, &y) in a.iter().zip(b).take(n) {
+                let (lx, ly) = (x.to_ascii_lowercase(), y.to_ascii_lowercase());
+                if lx != ly || x == 0 {
+                    return i32::from(lx) - i32::from(ly);
+                }
+            }
+            0
+        }
+
+        #[test]
+        fn strcasecmp_and_strncasecmp_answer_as_byte_loops() {
+            use super::super::{strcasecmp, strncasecmp};
+            // Every pair of strings to two bytes over the bytes either side
+            // of each case's letters, and two high bytes, which C's locale
+            // does not fold.
+            let short = all_strings(b"@AZ[`az{\xc1\xe1", 2);
+            for x in &short {
+                for y in &short {
+                    let (x, y) = (terminated(x), terminated(y));
+                    for (ax, ay) in [(0, 0), (3, 14)] {
+                        let (bx, px) = place(&x, ax);
+                        let (by, py) = place(&y, ay);
+                        let (p, q) = (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(
+                                strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{x:?} {y:?}"
+                            );
+                            for n in [0, 1, 2] {
+                                assert_eq!(
+                                    strncasecmp(p, q, n),
+                                    byte_strncasecmp(&x, &y, n),
+                                    "{x:?} {y:?}, n {n}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // The comparison pairs, one side's case changed along it -- which
+            // must make no difference.
+            for (a, b) in comparison_pairs() {
+                let changed: Vec<u8> = b
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| match i % 3 {
+                        0 => c.to_ascii_uppercase(),
+                        1 => c.to_ascii_lowercase(),
+                        _ => c,
+                    })
+                    .collect();
+                for (x, y) in [(&a, &changed), (&changed, &a)] {
+                    let (x, y) = (terminated(x), terminated(y));
+                    for (ax, ay) in [(0, 0), (1, 0), (5, 11), (15, 15)] {
+                        let (bx, px) = place(&x, ax);
+                        let (by, py) = place(&y, ay);
+                        let (p, q) = (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(
+                                strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{x:?} {y:?}"
+                            );
+                            for n in [1, 15, 16, 17, x.len() - 1, usize::MAX] {
+                                assert_eq!(
+                                    strncasecmp(p, q, n),
+                                    byte_strncasecmp(&x, &y, n),
+                                    "{x:?} {y:?}, n {n}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Long strings, for the 64-byte steps past the first 64: equal, and
+        /// differing in each of a step's four runs and either side of the
+        /// steps' boundaries, by a low and a high byte, at several
+        /// alignments, and a prefix of each length.
+        #[test]
+        fn strcmp_and_strncmp_over_long_strings() {
+            for len in [64, 65, 100, 127, 128, 129, 200, 300] {
+                let base = filler(len, len + 3);
+                let mut pairs = vec![(base.clone(), base.clone())];
+                let places = [
+                    0, 15, 16, 63, 64, 65, 79, 80, 95, 96, 111, 112, 127, 128, 150, 191, 192, 255,
+                    299,
+                ];
+                for d in places.into_iter().filter(|&d| d < len) {
+                    for v in [0x01, 0xFF] {
+                        if v != base[d] {
+                            let mut other = base.clone();
+                            other[d] = v;
+                            pairs.push((base.clone(), other));
+                        }
+                    }
+                    pairs.push((base.clone(), base[..d].to_vec()));
+                }
+                for (a, b) in &pairs {
+                    for (x, y) in [(a, b), (b, a)] {
+                        let (x, y) = (terminated(x), terminated(y));
+                        for (ax, ay) in [(0, 0), (1, 0), (7, 13), (15, 15)] {
+                            let (bx, px) = place(&x, ax);
+                            let (by, py) = place(&y, ay);
+                            let (p, q) =
+                                (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                            // SAFETY: terminated strings.
+                            unsafe {
+                                assert_eq!(
+                                    strcmp(p, q),
+                                    byte_strncmp(&x, &y, usize::MAX),
+                                    "len {len}, at {ax}/{ay}"
+                                );
+                                for n in [63, 64, 65, 100, 128, 129, len, usize::MAX] {
+                                    assert_eq!(
+                                        strncmp(p, q, n),
+                                        byte_strncmp(&x, &y, n),
+                                        "len {len}, n {n}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Equal runs straddling a page boundary at every offset near it,
+            // so the 64-byte steps give way to sixteen and to single bytes.
+            let base = terminated(&filler(400, 5));
+            for k in (60..=200).step_by(7) {
+                let ((mut bx, ox), (mut by, oy)) = (straddling(), straddling());
+                let (sx, sy) = (ox - k, oy - (k / 2 + 1));
+                bx[sx..sx + base.len()].copy_from_slice(&base);
+                by[sy..sy + base.len()].copy_from_slice(&base);
+                let (p, q) = (bx.as_ptr().wrapping_add(sx), by.as_ptr().wrapping_add(sy));
+                // SAFETY: terminated strings.
+                unsafe {
+                    assert_eq!(strcmp(p, q), 0, "{k} before the boundary");
+                    assert_eq!(strncmp(p, q, 350), 0, "{k} before the boundary");
+                }
+            }
+        }
+
+        /// A buffer of three pages' size and the offset in it of a page
+        /// boundary with a page on either side.
+        fn straddling() -> (Vec<u8>, usize) {
+            let buf = vec![FILL; 3 * 4096];
+            let boundary = (4096 - buf.as_ptr() as usize % 4096) % 4096 + 4096;
+            (buf, boundary)
+        }
+
+        /// The byte-at-a-time path, where sixteen bytes would cross a page.
+        #[test]
+        fn strcmp_and_strncmp_across_a_page_boundary() {
+            let base = filler(60, 9);
+            for k1 in 1..=40 {
+                for k2 in [1, 2, 15, 16, 17, 33, 40] {
+                    for d in [None, Some(0), Some(k1 - 1), Some(k1), Some(k2), Some(59)] {
+                        let x = terminated(&base);
+                        let mut y = base.clone();
+                        if let Some(d) = d {
+                            y[d] = if y[d] == 0xFF { 0x01 } else { 0xFF };
+                        }
+                        let y = terminated(&y);
+                        let ((mut bx, ox), (mut by, oy)) = (straddling(), straddling());
+                        let (sx, sy) = (ox - k1, oy - k2);
+                        bx[sx..sx + x.len()].copy_from_slice(&x);
+                        by[sy..sy + y.len()].copy_from_slice(&y);
+                        let (p, q) = (bx.as_ptr().wrapping_add(sx), by.as_ptr().wrapping_add(sy));
+                        let what = format!("{k1} and {k2} before the boundary, differing at {d:?}");
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(strcmp(p, q), byte_strncmp(&x, &y, usize::MAX), "{what}");
+                            assert_eq!(strcmp(q, p), byte_strncmp(&y, &x, usize::MAX), "{what}");
+                            for n in [k1, k2, 30, 61, usize::MAX] {
+                                assert_eq!(
+                                    strncmp(p, q, n),
+                                    byte_strncmp(&x, &y, n),
+                                    "{what}, n {n}"
+                                );
+                            }
+                            assert_eq!(
+                                super::super::strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{what}: strcasecmp"
+                            );
+                            assert_eq!(
+                                super::super::strncasecmp(p, q, 30),
+                                byte_strncasecmp(&x, &y, 30),
+                                "{what}: strncasecmp"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn strcpy_and_stpcpy_copy_the_string_and_its_terminator() {
+            for len in 0..=70 {
+                let src = terminated(&filler(len, 1));
+                for (sa, da) in ALIGNS {
+                    let (sbuf, sat) = place(&src, sa);
+                    let s = sbuf.as_ptr().wrapping_add(sat);
+                    for stp in [false, true] {
+                        let (mut dbuf, dat) = destination(len + 1, da);
+                        let d = dbuf.as_mut_ptr().wrapping_add(dat);
+                        // SAFETY: a terminated string, and room for it.
+                        let r = unsafe { if stp { stpcpy(d, s) } else { strcpy(d, s) } };
+                        let what = format!("len {len}, at {sa}/{da}, stpcpy {stp}");
+                        assert_eq!(r, if stp { d.wrapping_add(len) } else { d }, "{what}");
+                        assert_eq!(&dbuf[dat..=dat + len], &src[..], "{what}");
+                        untouched_outside(&dbuf, dat..dat + len + 1, &what);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn strncpy_and_stpncpy_copy_then_pad_to_n() {
+            for len in 0..=70 {
+                let src = terminated(&filler(len, 2));
+                for (sa, da) in ALIGNS {
+                    let (sbuf, sat) = place(&src, sa);
+                    let s = sbuf.as_ptr().wrapping_add(sat);
+                    for n in [0, 1, len.saturating_sub(1), len, len + 1, len + 20] {
+                        for stp in [false, true] {
+                            let (mut dbuf, dat) = destination(n, da);
+                            let d = dbuf.as_mut_ptr().wrapping_add(dat);
+                            // SAFETY: a terminated string, and `n` bytes of room.
+                            let r = unsafe {
+                                if stp {
+                                    stpncpy(d, s, n)
+                                } else {
+                                    strncpy(d, s, n)
+                                }
+                            };
+                            let copied = len.min(n);
+                            let what = format!("len {len}, n {n}, at {sa}/{da}, stpncpy {stp}");
+                            assert_eq!(r, if stp { d.wrapping_add(copied) } else { d }, "{what}");
+                            assert_eq!(&dbuf[dat..dat + copied], &src[..copied], "{what}");
+                            assert!(
+                                dbuf[dat + copied..dat + n].iter().all(|&b| b == 0),
+                                "{what}: padding"
+                            );
+                            untouched_outside(&dbuf, dat..dat + n, &what);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn strcat_and_strncat_append_and_terminate() {
+            for len in 0..=40 {
+                let src = terminated(&filler(len, 4));
+                for prefix_len in [0, 1, 5, 16, 17] {
+                    let prefix = filler(prefix_len, 9);
+                    for (sa, da) in ALIGNS {
+                        let (sbuf, sat) = place(&src, sa);
+                        let s = sbuf.as_ptr().wrapping_add(sat);
+                        for n in [
+                            None,
+                            Some(0),
+                            Some(1),
+                            Some(len.saturating_sub(1)),
+                            Some(len),
+                            Some(len + 5),
+                        ] {
+                            let (mut dbuf, dat) = destination(prefix_len + len + 1, da);
+                            dbuf[dat..dat + prefix_len].copy_from_slice(&prefix);
+                            dbuf[dat + prefix_len] = 0;
+                            let d = dbuf.as_mut_ptr().wrapping_add(dat);
+                            // SAFETY: terminated strings, and room for both.
+                            let r = unsafe {
+                                match n {
+                                    None => strcat(d, s),
+                                    Some(n) => strncat(d, s, n),
+                                }
+                            };
+                            let what =
+                                format!("len {len}, prefix {prefix_len}, n {n:?}, at {sa}/{da}");
+                            assert_eq!(r, d, "{what}");
+                            let mut want = prefix.clone();
+                            want.extend_from_slice(&src[..n.map_or(len, |n| len.min(n))]);
+                            want.push(0);
+                            assert_eq!(&dbuf[dat..dat + want.len()], &want[..], "{what}");
+                            untouched_outside(&dbuf, dat..dat + want.len(), &what);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn mempcpy_and_memccpy_copy_and_point_past() {
+            let stop_byte = SOUGHT[1];
+            for n in 0..=70 {
+                for (sa, da) in ALIGNS {
+                    for stop in (0..n).step_by(3).chain([n]) {
+                        let mut bytes = filler(n, 5);
+                        if stop < n {
+                            bytes[stop] = stop_byte;
+                        }
+                        let (sbuf, sat) = place(&bytes, sa);
+                        let s = sbuf.as_ptr().wrapping_add(sat);
+                        let what = format!("n {n}, stop {stop}, at {sa}/{da}");
+
+                        let (mut dbuf, dat) = destination(n, da);
+                        let d = dbuf.as_mut_ptr().wrapping_add(dat);
+                        // SAFETY: `n` bytes each side.
+                        let r = unsafe { mempcpy(d, s, n) };
+                        assert_eq!(r, d.wrapping_add(n), "{what}");
+                        assert_eq!(&dbuf[dat..dat + n], &bytes[..], "{what}");
+                        untouched_outside(&dbuf, dat..dat + n, &what);
+
+                        for c in [i32::from(stop_byte), i32::from(stop_byte) - 256] {
+                            let (mut dbuf, dat) = destination(n, da);
+                            let d = dbuf.as_mut_ptr().wrapping_add(dat);
+                            // SAFETY: `n` bytes each side.
+                            let r = unsafe { memccpy(d, s, c, n) };
+                            let copied = if stop < n { stop + 1 } else { n };
+                            assert_eq!(
+                                offset(r.cast_const(), d),
+                                (stop < n).then_some(stop + 1),
+                                "{what}"
+                            );
+                            assert_eq!(&dbuf[dat..dat + copied], &bytes[..copied], "{what}");
+                            untouched_outside(&dbuf, dat..dat + copied, &what);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Every string over `alphabet` up to `max_len` long.
+        fn all_strings(alphabet: &[u8], max_len: usize) -> Vec<Vec<u8>> {
+            let mut all = vec![Vec::new()];
+            let mut longest: Vec<Vec<u8>> = vec![Vec::new()];
+            for _ in 0..max_len {
+                longest = longest
+                    .iter()
+                    .flat_map(|s| {
+                        alphabet.iter().map(move |&c| {
+                            let mut t = s.clone();
+                            t.push(c);
+                            t
+                        })
+                    })
+                    .collect();
+                all.extend(longest.iter().cloned());
+            }
+            all
+        }
+
+        #[test]
+        fn strspn_strcspn_and_strpbrk_answer_as_byte_loops() {
+            let every: Vec<u8> = (1..=255).collect();
+            let sets: [&[u8]; 8] = [
+                b"",
+                b"a",
+                b"ab",
+                b"a ,\x01",
+                b"\x80\xff",
+                b"\x7f\x80",
+                b"zyxwvutsrqponmlkjihgfedcba",
+                &every,
+            ];
+            let alphabet = b"ab ,\x01\x7f\x80\xffZ";
+            let mut strings = all_strings(alphabet, 3);
+            for k in 0..alphabet.len() {
+                for len in [17, 40, 100] {
+                    strings.push(
+                        (0..len)
+                            .map(|i| alphabet[(i * 7 + k) % alphabet.len()])
+                            .collect(),
+                    );
+                }
+            }
+            for set in sets {
+                if !set.is_empty() {
+                    // A long run of members, then one that is not.
+                    let mut run: Vec<u8> = set.iter().copied().cycle().take(70).collect();
+                    run.push(if set.contains(&b'Q') { b'q' } else { b'Q' });
+                    strings.push(run);
+                }
+            }
+            for set in sets {
+                let set_c = terminated(set);
+                for s in &strings {
+                    let sc = terminated(s);
+                    let spn = s.iter().take_while(|b| set.contains(b)).count();
+                    let cspn = s.iter().take_while(|b| !set.contains(b)).count();
+                    let what = format!("{s:?} against {set:?}");
+                    // SAFETY: terminated strings.
+                    unsafe {
+                        assert_eq!(strspn(sc.as_ptr(), set_c.as_ptr()), spn, "strspn {what}");
+                        assert_eq!(strcspn(sc.as_ptr(), set_c.as_ptr()), cspn, "strcspn {what}");
+                        assert_eq!(
+                            offset(strpbrk(sc.as_ptr(), set_c.as_ptr()), sc.as_ptr()),
+                            (cspn < s.len()).then_some(cspn),
+                            "strpbrk {what}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// `strtok_r` and `strsep` over every string of up to six bytes from
+        /// letters and two delimiters, for several sets, against Rust's
+        /// `split`: `strtok_r` drops the empty fields, `strsep` keeps them.
+        #[test]
+        fn strtok_r_and_strsep_split_as_split_does() {
+            use super::super::{strsep, strtok_r};
+            let sets: [&[u8]; 5] = [b"", b",", b",;", b"a", b";,a\xff"];
+            for s in all_strings(b"ab,;\xff", 6) {
+                for set in sets {
+                    let delim = terminated(set);
+                    let fields: Vec<&[u8]> = s.split(|b| set.contains(b)).collect();
+                    let what = format!("{s:?} on {set:?}");
+
+                    let mut buf = terminated(&s);
+                    let mut save = core::ptr::null_mut();
+                    let mut tokens = Vec::new();
+                    let mut from = buf.as_mut_ptr();
+                    loop {
+                        // SAFETY: a writable terminated string, then null
+                        // with the save pointer, as strtok_r is called.
+                        let t = unsafe { strtok_r(from, delim.as_ptr(), &raw mut save) };
+                        if t.is_null() {
+                            break;
+                        }
+                        // SAFETY: a token is a terminated string in `buf`.
+                        let len = unsafe { strlen(t) };
+                        tokens.push(unsafe { core::slice::from_raw_parts(t, len) }.to_vec());
+                        from = core::ptr::null_mut();
+                    }
+                    let want: Vec<&[u8]> =
+                        fields.iter().copied().filter(|f| !f.is_empty()).collect();
+                    assert_eq!(tokens, want, "strtok_r {what}");
+
+                    let mut buf = terminated(&s);
+                    let mut rest = buf.as_mut_ptr();
+                    let mut got = Vec::new();
+                    loop {
+                        // SAFETY: `rest` is null or a writable terminated
+                        // string in `buf`.
+                        let t = unsafe { strsep(&raw mut rest, delim.as_ptr()) };
+                        if t.is_null() {
+                            break;
+                        }
+                        // SAFETY: as above.
+                        let len = unsafe { strlen(t) };
+                        got.push(unsafe { core::slice::from_raw_parts(t, len) }.to_vec());
+                    }
+                    assert_eq!(got, fields, "strsep {what}");
+                }
+            }
+        }
+
+        /// A string as the searches take it: the bytes, terminated, and
+        /// terminated with every `k`th letter upper-case (to which
+        /// `strcasestr` is blind).
+        struct Text {
+            raw: Vec<u8>,
+            c: Vec<u8>,
+            mixed: Vec<u8>,
+        }
+
+        impl Text {
+            fn new(raw: &[u8], k: usize) -> Self {
+                let c = terminated(raw);
+                let mixed = c
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| {
+                        if i % k == 0 {
+                            b.to_ascii_uppercase()
+                        } else {
+                            b
+                        }
+                    })
+                    .collect();
+                Self {
+                    raw: raw.to_vec(),
+                    c,
+                    mixed,
+                }
+            }
+        }
+
+        /// `strstr`, `memmem` and `strcasestr` on one pair, against trying
+        /// every place.
+        fn check_search(hay: &Text, needle: &Text) {
+            let want = if needle.raw.is_empty() {
+                Some(0)
+            } else {
+                hay.raw
+                    .windows(needle.raw.len())
+                    .position(|w| w == &needle.raw[..])
+            };
+            let (h, n) = (&hay.raw, &needle.raw);
+            // SAFETY: terminated strings, and the slices' lengths.
+            unsafe {
+                assert_eq!(
+                    offset(strstr(hay.c.as_ptr(), needle.c.as_ptr()), hay.c.as_ptr()),
+                    want,
+                    "strstr {h:?} {n:?}"
+                );
+                assert_eq!(
+                    offset(memmem(h.as_ptr(), h.len(), n.as_ptr(), n.len()), h.as_ptr()),
+                    want,
+                    "memmem {h:?} {n:?}"
+                );
+                assert_eq!(
+                    offset(
+                        strcasestr(hay.mixed.as_ptr(), needle.mixed.as_ptr()).cast_const(),
+                        hay.mixed.as_ptr()
+                    ),
+                    want,
+                    "strcasestr {h:?} {n:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_two_way_searches_agree_with_trying_every_place() {
+            for (alphabet, needles, hays) in [(&b"ab"[..], 6, 11), (&b"abc"[..], 4, 7)] {
+                let needles: Vec<Text> = all_strings(alphabet, needles)
+                    .iter()
+                    .map(|s| Text::new(s, 2))
+                    .collect();
+                let hays: Vec<Text> = all_strings(alphabet, hays)
+                    .iter()
+                    .map(|s| Text::new(s, 3))
+                    .collect();
+                for needle in &needles {
+                    for hay in &hays {
+                        check_search(hay, needle);
+                    }
+                }
+            }
+        }
+
+        /// Needles to forty bytes, mostly repetitions of a short word (the
+        /// periodic needles, where the search's memory matters), some with
+        /// a byte changed, in haystacks of the same word, some holding the
+        /// needle.
+        #[test]
+        fn the_two_way_searches_agree_on_long_periodic_needles() {
+            let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut next = move |below: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % below as u64) as usize
+            };
+            for _ in 0..4000 {
+                let word: Vec<u8> = (0..next(5) + 1).map(|_| b"ab"[next(2)]).collect();
+                let needle_len = next(40) + 1;
+                let mut needle: Vec<u8> = word.iter().copied().cycle().take(needle_len).collect();
+                if next(2) == 0 {
+                    let at = next(needle_len);
+                    needle[at] = b"abc"[next(3)];
+                }
+                let hay_len = next(200);
+                let mut hay: Vec<u8> = word.iter().copied().cycle().take(hay_len).collect();
+                if next(3) == 0 && hay_len >= needle_len {
+                    let at = next(hay_len - needle_len + 1);
+                    hay[at..at + needle_len].copy_from_slice(&needle);
+                }
+                check_search(&Text::new(&hay, 3), &Text::new(&needle, 2));
+            }
+        }
+
+        /// `a`x5000 `b` in `a`x200000: what a search trying every place does
+        /// worst, a billion comparisons.  Two-Way's are a few hundred
+        /// thousand, so this finishes at once.
+        #[test]
+        fn a_long_periodic_needle_takes_linear_time() {
+            let mut hay = vec![b'a'; 200_000];
+            let mut needle = vec![b'a'; 5_000];
+            needle.push(b'b');
+            check_search(&Text::new(&hay, 3), &Text::new(&needle, 2));
+            hay.push(b'b');
+            let (hay, needle) = (Text::new(&hay, 3), Text::new(&needle, 2));
+            check_search(&hay, &needle);
+            // SAFETY: terminated strings.
+            let found = unsafe { strstr(hay.c.as_ptr(), needle.c.as_ptr()) };
+            assert_eq!(offset(found, hay.c.as_ptr()), Some(195_000));
+        }
+
+        /// The functions run with their strings against the edges of a page
+        /// between two that fault (`crate::guard_pages`).
+        #[cfg(any(windows, target_os = "linux"))]
+        mod guarded {
+            use super::*;
+            use crate::guard_pages::Guarded;
+
+            /// Strings whose terminator is a page's last byte: nothing may
+            /// read the next page.  A read there faults, and takes the test
+            /// process with it.
+            #[test]
+            fn nothing_reads_past_a_strings_page() {
+                let (g, h, out) = (Guarded::new(), Guarded::new(), Guarded::new());
+                let every: Vec<u8> = (1..=255).chain([0]).collect();
+                // Long enough, too, for the 64-byte steps to reach the page's
+                // last chunks.
+                for len in (0..=48).chain([63, 64, 65, 100, 127, 128, 129, 200, 255]) {
+                    let s = terminated(&filler(len, len));
+                    let (p, q) = (g.at_end(&s), h.at_end(&s));
+                    let c = i32::from(SOUGHT[0]);
+                    // Destinations ending where `out`'s page does.
+                    let d = out.end().wrapping_sub(len + 1);
+                    // SAFETY: terminated strings ending at their pages' ends,
+                    // and room for them before `out`'s.
+                    unsafe {
+                        assert_eq!(strlen(p), len);
+                        assert_eq!(strnlen(p, usize::MAX), len);
+                        assert!(strchr(p, c).is_null());
+                        assert_eq!(offset(strchrnul(p, c), p), Some(len));
+                        assert!(strrchr(p, c).is_null());
+                        assert_eq!(offset(rawmemchr(p, 0), p), Some(len));
+                        assert_eq!(strcmp(p, q), 0);
+                        assert_eq!(strncmp(p, q, usize::MAX), 0);
+                        assert_eq!(super::super::super::strcasecmp(p, q), 0);
+                        assert_eq!(super::super::super::strncasecmp(p, q, usize::MAX), 0);
+                        assert_eq!(strspn(p, every.as_ptr()), len);
+                        assert_eq!(strcspn(p, b"q\0".as_ptr()), len);
+                        assert_eq!(strcspn(p, b"q\xe9\0".as_ptr()), len);
+                        assert!(strpbrk(p, b"q\xe9\0".as_ptr()).is_null());
+                        assert!(strstr(p, b"q\0".as_ptr()).is_null());
+                        assert!(strstr(p, b"qq\0".as_ptr()).is_null());
+                        assert!(strcasestr(p, b"QQ\0".as_ptr()).is_null());
+                        assert_eq!(strcpy(d, p), d);
+                        assert_eq!(stpcpy(d, p), d.wrapping_add(len));
+                        d.write(0);
+                        assert_eq!(strcat(d, p), d);
+                        assert_eq!(strncpy(d, p, len + 1), d);
+                        assert_eq!(core::slice::from_raw_parts(d, len + 1), &s[..]);
+                    }
+                    // A small set's sixteen-a-step scan, over a
+                    // string of its members to the page's last byte.
+                    let members = terminated(&vec![b'a'; len]);
+                    let m = g.at_end(&members);
+                    // SAFETY: a terminated string ending at its page's end.
+                    unsafe {
+                        assert_eq!(strspn(m, b"ab\0".as_ptr()), len);
+                        assert_eq!(strcspn(m, b"xyz\0".as_ptr()), len);
+                    }
+                }
+                // Runs with no terminator, ending at the page's end.
+                for n in 0..=48 {
+                    let run = filler(n, 2);
+                    let (p, q) = (g.at_end(&run), h.at_end(&run));
+                    let c = i32::from(SOUGHT[0]);
+                    let d = out.end().wrapping_sub(n);
+                    // SAFETY: `n` readable bytes at each, and room for them
+                    // before `out`'s page end.
+                    unsafe {
+                        assert_eq!(strnlen(p, n), n);
+                        assert_eq!(strncmp(p, q, n), 0);
+                        assert_eq!(super::super::super::strncasecmp(p, q, n), 0);
+                        assert!(memchr(p, c, n).is_null());
+                        assert!(memrchr(p, c, n).is_null());
+                        assert_eq!(memcmp(p, q, n), 0);
+                        assert!(memmem(p, n, b"qq".as_ptr(), 2).is_null());
+                        assert_eq!(strncpy(d, p, n), d);
+                        assert_eq!(stpncpy(d, p, n), d.wrapping_add(n));
+                        assert_eq!(memcpy(d, p, n), d);
+                        assert_eq!(memset(d, 0x41, n), d);
+                        let e = out.end().wrapping_sub(n + 1);
+                        e.write(0);
+                        assert_eq!(strncat(e, p, n), e);
+                        assert_eq!(core::slice::from_raw_parts(e, n), &run[..]);
+                    }
+                }
+            }
+
+            /// Runs starting at a page's first byte: nothing may read the
+            /// page before.
+            #[test]
+            fn nothing_reads_before_a_buffers_page() {
+                let (g, h, out) = (Guarded::new(), Guarded::new(), Guarded::new());
+                for n in 0..=48 {
+                    let run = filler(n, 6);
+                    let (p, q) = (g.at_start(&run), h.at_start(&run));
+                    let c = i32::from(SOUGHT[0]);
+                    let d = out.start();
+                    // SAFETY: `n` readable bytes at each, and room at `d`.
+                    unsafe {
+                        assert!(memrchr(p, c, n).is_null());
+                        assert!(memchr(p, c, n).is_null());
+                        assert_eq!(memcmp(p, q, n), 0);
+                        assert!(memmem(p, n, b"qq".as_ptr(), 2).is_null());
+                        assert_eq!(memcpy(d, p, n), d);
+                        assert_eq!(memset(d, 0x41, n), d);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn strcasecmp_l_and_strncasecmp_l_are_the_one_locales_comparisons() {
         let (a, b) = (b"HeLLo\0", b"hello, world\0");
@@ -3314,6 +5941,19 @@ mod tests {
     // -----------------------------------------------------------------------
     // strcoll — locale-aware string comparison (C locale = strcmp)
     // -----------------------------------------------------------------------
+
+    /// GNU make's configure probe for a working `strcoll`
+    /// (`AC_FUNC_STRCOLL`), which `scripts/make-spike/run.sh` answers `yes`
+    /// for SlateOS (`ac_cv_func_strcoll_works`) without running it.
+    #[test]
+    fn make_configures_strcoll_probe_passes() {
+        // SAFETY: NUL-terminated literals.
+        unsafe {
+            assert!(strcoll(b"abc\0".as_ptr(), b"def\0".as_ptr()) < 0);
+            assert!(strcoll(b"ABC\0".as_ptr(), b"DEF\0".as_ptr()) < 0);
+            assert!(strcoll(b"123\0".as_ptr(), b"456\0".as_ptr()) < 0);
+        }
+    }
 
     #[test]
     fn test_strcoll_equal() {

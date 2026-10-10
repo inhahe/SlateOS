@@ -474,14 +474,19 @@ done <<'CASES'
 ~df -a /proc
 
 # --- diagnostics -------------------------------------------------------------
+# The two with `/` beside the bad operand are masked, as the table cases are:
+# `/` is WSL's own disk, and anything writing to it between the two runs moves
+# its free space. It did, during a full `all-diff.sh` whose builds were
+# writing there: `df / nosuchfile` differed in nothing but the used and
+# available counts, by 36 KB.
 df nosuchfile
-df / nosuchfile
+~df / nosuchfile
 df nosuchfile nosuchfile
 df --total nosuchfile
 df -i nosuchfile
 df --output=target nosuchfile
 df ""
-df / ""
+~df / ""
 df --output=nosuch
 df --output=size,size
 df --output=size,
@@ -515,6 +520,35 @@ df --nosuchoption
 df --t
 df --s
 df --output nosuchfile
+
+# --- the descriptors, as the program was given them ---
+# Standard output full or closed is gnulib's `close_stdout`: a reason when the
+# failure comes at the close, none when a write before it failed, and nothing
+# said for a closed descriptor nothing was written to. Until 2026-10-08 `df`
+# printed its help and version with `print!`, which panics when the write
+# fails, and its table through Rust's own `Stdout`, which calls a closed
+# descriptor's EBADF success -- and the runtime had put `/dev/null` there
+# anyway -- so `df / >&-` exited 0, and `df / >/dev/full` exited 1 saying
+# nothing.
+df --version >/dev/full
+df --version >&-
+df --help >/dev/full
+df --help >&-
+df / >/dev/full
+df / >&-
+df -h / >/dev/full
+df -i / >&-
+df --total / >/dev/full
+df nosuchfile >&-
+df nosuchfile / >/dev/full
+df nosuchfile / >&-
+df --bogus >&-
+df --bogus >/dev/full
+~df / 2>/dev/full
+df nosuchfile 2>/dev/full
+df nosuchfile 2>&-
+~df / 2>&-
+~df / </dev/null <&-
 
 # --- deliberate differences --------------------------------------------------
 !our --help is ours to word|df --help

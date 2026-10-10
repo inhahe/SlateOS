@@ -83,7 +83,9 @@
 //! did not happen. It buffers the way stdio does (line-buffered to a terminal,
 //! block-buffered otherwise, unbuffered on stderr), so the interleaving of a
 //! utility's output with its diagnostics matches what the same program does
-//! under glibc.
+//! under glibc — and by glibc's own arithmetic ([`crate::stdio::xsputn`]), so
+//! that what is still held when the stream is closed is what glibc would hold,
+//! which decides whether a full disk's last word has a reason in it.
 //!
 //! ## The same question about descriptor 2: [`crate::diag!`] and [`close_stderr`]
 //!
@@ -132,20 +134,23 @@
 //! to reach the caller's local variable; the stream therefore has to be
 //! reachable from anywhere, exactly as `stdout` is.
 //!
-//! ## What this module deliberately does not do
+//! ## `SIGPIPE`
 //!
-//! It does not restore `SIGPIPE`. Rust masks it, so `yes | head -1` yields
-//! `EPIPE` here where GNU's `yes` dies of the signal and reports 141. That
-//! divergence is *forced*: the target kernel has no Unix signals at all (see
-//! `design.txt` — "No Unix signals for process control"), so there is no
-//! behaviour to restore, only a different one to invent.
+//! [`restore`] puts `SIGPIPE` back to the disposition the process inherited,
+//! undoing the runtime's "ignored" as it undoes the runtime's `/dev/null`s.
+//! Inherited at its default, as it nearly always is, `yes | head -1` ends
+//! `yes` with the signal: no diagnostic, status 141, as GNU's. Inherited
+//! ignored (`trap '' PIPE`), the write fails with `EPIPE`, and the utility
+//! reports it as GNU's does, as the write error it then is.
 //!
-//! What it does instead is name the case once, in [`reader_gone`], so that a
-//! utility answering it inherits the tree's established convention — say
-//! nothing, keep the status the run had already earned — rather than deriving
-//! it again and landing somewhere slightly different. Without that, every
-//! caller of [`write_error`] would print `prog: write error: Broken pipe`
-//! where GNU prints nothing at all.
+//! Until 2026-10-07 it was left ignored, because the target sent no `SIGPIPE`
+//! to die of (design-decisions §377), and every utility answered `EPIPE` by
+//! saying nothing and keeping the status it had earned. Lane D's C library
+//! raises the signal now (§1176), and §1060 records the change. The old
+//! convention survives in [`reader_gone`], which still answers yes wherever
+//! the signal was not put back, so that a utility not yet converted to
+//! [`restore`] stays quiet rather than printing `prog: write error: Broken
+//! pipe`.
 //!
 //! ## Host builds
 //!
@@ -182,9 +187,33 @@ mod imp {
         // The same, and for the same reason, as `write` above.
         fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         fn close(fd: i32) -> i32;
+        // As `nohup.rs` and `sh.rs` declare it: two declarations of one C
+        // symbol must agree (`clashing_extern_declarations`).
+        fn dup2(oldfd: i32, newfd: i32) -> i32;
         // Declared as the standard library declares it, for the reason given
         // at `write`.
         fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
+        // `*const u8`, as `dirfd.rs` declares it: two declarations of one C
+        // symbol must agree (`clashing_extern_declarations`).
+        fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32;
+    }
+
+    /// `AT_FDCWD`, `R_OK` and `AT_EACCESS`: the Linux values.
+    const AT_FDCWD: i32 = -100;
+    const R_OK: i32 = 4;
+    const AT_EACCESS: i32 = 0x200;
+
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        // A name from argv cannot hold a NUL, and a `--files0-from` list is cut
+        // at them, so this is unreachable; `EINVAL` is what a kernel would say.
+        let c_path = std::ffi::CString::new(path).map_err(|_| io::Error::from_raw_os_error(22))?;
+        // SAFETY: `c_path` is a NUL-terminated string that outlives the call,
+        // and `faccessat` only reads it.
+        if unsafe { faccessat(AT_FDCWD, c_path.as_ptr().cast::<u8>(), R_OK, AT_EACCESS) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     pub fn is_tty(fd: i32) -> bool {
@@ -337,6 +366,42 @@ mod imp {
         Ok(unsafe { std::fs::File::from_raw_fd(dup) })
     }
 
+    /// `F_SETFD` and `FD_CLOEXEC`, for [`move_to`] (with [`stdopen`]'s
+    /// `F_GETFD`): the Linux values.
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+
+    pub fn move_to(file: std::fs::File, fd: i32) -> io::Result<()> {
+        use std::os::fd::IntoRawFd;
+
+        let raw = file.into_raw_fd();
+        if raw == fd {
+            // The open landed on `fd` itself. The standard library opened it
+            // close-on-exec, which a `dup2` onto `fd` would have cleared;
+            // clear it here, so that `fd` is the same either way.
+            // SAFETY: `F_GETFD` and `F_SETFD` read and write only the
+            // descriptor's flags, and `fd` is open: it is the file just
+            // opened, which this function now owns as `fd`.
+            let flags = unsafe { fcntl(fd, F_GETFD) };
+            // SAFETY: as above.
+            if flags < 0 || unsafe { fcntl(fd, F_SETFD, flags & !FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        // SAFETY: `dup2` acts only on the descriptor table, and `raw` is a
+        // live descriptor this function now owns.
+        let rc = unsafe { dup2(raw, fd) };
+        let failure = (rc < 0).then(io::Error::last_os_error);
+        // The original's close is not reported: nothing was read or written
+        // through it, so it has nothing to say that the caller could act on,
+        // and `dup2`'s verdict is the one that matters.
+        // SAFETY: `raw` is owned here -- `into_raw_fd` gave up the `File`'s
+        // claim on it -- and is closed exactly once, on both paths.
+        unsafe { close(raw) };
+        failure.map_or(Ok(()), Err)
+    }
+
     pub fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             // SAFETY: `buf` is a live, writable slice, and `read` stores at
@@ -374,15 +439,19 @@ mod imp {
         }))
     }
 
-    pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
-        use std::io::{Seek, SeekFrom};
+    pub fn seek(fd: i32, to: std::io::SeekFrom) -> io::Result<u64> {
+        use std::io::Seek;
 
         /// `EBADF`, for the negative number `borrowed` declines.
         const EBADF: i32 = 9;
         let Some(mut f) = borrowed(fd) else {
             return Err(io::Error::from_raw_os_error(EBADF));
         };
-        f.seek(SeekFrom::Current(delta))
+        f.seek(to)
+    }
+
+    pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
+        seek(fd, std::io::SeekFrom::Current(delta))
     }
 
     pub fn read_at(fd: i32, buf: &mut [u8], offset: u64) -> io::Result<usize> {
@@ -424,6 +493,12 @@ mod imp {
 #[cfg(not(target_os = "linux"))]
 mod imp {
     use std::io::{self, Write};
+
+    /// No `euidaccess` without libc: whether the name exists is the nearest
+    /// question the standard library can ask.
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        std::fs::metadata(crate::quote::os_from_bytes(path)).map(drop)
+    }
 
     pub fn is_tty(_fd: i32) -> bool {
         // No `isatty` without libc, and the answer only decides buffering. The
@@ -498,6 +573,11 @@ mod imp {
 
     /// No `lseek(2)` without libc, and nothing here to seek: the runtime's
     /// standard input keeps its own position.
+    pub fn seek(_fd: i32, _to: io::SeekFrom) -> io::Result<u64> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// As [`seek`].
     pub fn seek_current(_fd: i32, _delta: i64) -> io::Result<u64> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
@@ -519,6 +599,12 @@ mod imp {
     pub fn close_file(file: std::fs::File) -> io::Result<()> {
         drop(file);
         Ok(())
+    }
+
+    /// No `dup2(2)` without libc, so nothing can be put on a descriptor.
+    pub fn move_to(file: std::fs::File, _fd: i32) -> io::Result<()> {
+        drop(file);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
@@ -584,6 +670,72 @@ pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
     imp::fd_safer(file)
 }
 
+/// gnulib's `open_safer`, as a method on [`std::fs::OpenOptions`]: the open,
+/// then [`fd_safer`], so that the file never takes descriptor 0, 1 or 2.
+///
+/// # Where, and only where, upstream does it
+///
+/// Not every program: whether a file opened with a standard descriptor
+/// closed lands *on* that descriptor is observable, and upstream decides it
+/// per program. In coreutils 9.4 the safer opens come from per-file headers
+/// -- `stdio--.h` (a safe `fopen`) in `comm`, `csplit`, `digest.c` (the
+/// `*sum` programs and `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`,
+/// `shuf`, `tee`, `tsort` and `uniq`; `fcntl--.h` (a safe `open`) in
+/// `copy.c` (`cp`, `mv`, `install`), `shred`, `split` and `tail`;
+/// `stdlib--.h` for `sort`'s and `tac`'s temporary files; `unistd--.h` in
+/// `nohup`; `openat_safer` for `ln`'s target directory; and gnulib's `fts`
+/// and `randread` -- and `system.h`, which every program includes, carries
+/// none of them. So `cat`, `sort`'s inputs, `paste`, `wc` and the rest open
+/// plainly, and a file opened with standard input closed *is* standard
+/// input: measured, `sort f - <&-` sorts `f` once and exits 0 (its
+/// `xfclose` leaves descriptor 0 open, so `-` finds `f` at its end), and
+/// `paste f - <&-` says `standard input is closed` (it checks for exactly
+/// that descriptor). A port opens as its upstream does, and these are for
+/// the programs whose upstream is safe -- what `tee` needed: `printf
+/// 'hello\n' | tee out.txt >&-` wrote `hello` into `out.txt` twice and
+/// exited 0, where GNU's writes it once and says `tee: 'standard output':
+/// Bad file descriptor`. `known-issues-resolved/TD-B-GUARDED-PROGRAMS-OPEN-
+/// FILES-WITHOUT-OPEN-SAFER.md` lists, program by program, which were
+/// converted and which were measured and left as they are.
+pub trait OpenSafer {
+    /// [`std::fs::OpenOptions::open`], kept off descriptors 0-2.
+    ///
+    /// # Errors
+    ///
+    /// What the open said, or `EMFILE` from moving the file up.
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File>;
+}
+
+impl OpenSafer for std::fs::OpenOptions {
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File> {
+        self.open(path).and_then(fd_safer)
+    }
+}
+
+/// [`std::fs::File::open`], kept off descriptors 0-2: `open_safer (name,
+/// O_RDONLY)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn open_read_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open_safer(path)
+}
+
+/// [`std::fs::File::create`], kept off descriptors 0-2: `open_safer (name,
+/// O_WRONLY | O_CREAT | O_TRUNC, 0666)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn create_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_safer(path)
+}
+
 /// Whether `fd` is a terminal — `isatty(3)`.
 ///
 /// The module already asks this to choose stdout's buffering, and several
@@ -624,6 +776,19 @@ pub fn is_tty(fd: i32) -> bool {
 /// refusing to run.
 pub fn probe(fd: i32) -> io::Result<()> {
     imp::probe(fd)
+}
+
+/// `euidaccess (path, R_OK)`: whether this process may read `path`, asked
+/// without opening it. That matters for a FIFO, whose open would wait for a
+/// writer, and it is how `sort`'s `check_inputs` refuses an unreadable
+/// operand before reading any of them.
+///
+/// # Errors
+///
+/// Whatever `faccessat(2)` reports -- `ENOENT`, `EACCES` and the like. Off
+/// Linux, whether the name exists at all.
+pub fn readable(path: &[u8]) -> io::Result<()> {
+    imp::readable(path)
 }
 
 /// `fstat(2)` on a descriptor: what [`probe`] asks, with the answer kept.
@@ -727,6 +892,47 @@ pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     imp::read_fd(fd, buf)
 }
 
+/// Descriptor 0 as an [`io::Read`]: [`read`] on it, and nothing buffered.
+///
+/// The drop-in for `io::stdin()` in a program that has to see a closed
+/// standard input. `std`'s answers `EBADF` with end of input (see [`read`]),
+/// which made `cat <&-` print nothing and exit 0 where GNU says
+/// `cat: -: Bad file descriptor` -- see `known-issues/`
+/// `B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`. Put a
+/// `BufReader` in front of it where the program reads lines. It never closes
+/// descriptor 0: [`close_stdin`] does that, where upstream does.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdin;
+
+impl io::Read for RawStdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        crate::stdfd::read(0, buf)
+    }
+}
+
+/// Descriptor 1 as an [`io::Write`]: [`write_some`] on it, and nothing
+/// buffered.
+///
+/// [`RawStdin`]'s other half, for a program that reports its own write errors
+/// as they happen -- upstream's `fwrite (...) != n` checks -- rather than
+/// through a [`Stream`] and [`close_stdout`]. `io::stdout()` will not do for
+/// that: `std` answers a write's `EBADF` with success, so once
+/// [`guard_std_fds!`](crate::guard_std_fds) keeps a closed descriptor 1
+/// closed, `tr a b >&-` would have exited 0 where GNU reports
+/// `write error: Bad file descriptor`. Put a `BufWriter` in front of it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdout;
+
+impl io::Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        crate::stdfd::write_some(1, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `lseek (fd, delta, SEEK_CUR)` on a descriptor this process does not own:
 /// what stdio does at `exit` to give back what it read ahead of a shared
 /// standard input. See [`crate::stdio::StdioReader`].
@@ -737,6 +943,19 @@ pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
 /// for a closed descriptor. Always an error off Linux.
 pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
     imp::seek_current(fd, delta)
+}
+
+/// `lseek(2)` to anywhere on a descriptor this process does not own: stdio's
+/// `fseek` and `rewind` on a standard stream -- `rewind (stdin)` in
+/// `xxd -r`, which moves the position the shell's next command reads from.
+/// See [`crate::stdio::StdioReader::seek`].
+///
+/// # Errors
+///
+/// Whatever `lseek(2)` reports, as [`seek_current`]. Always an error off
+/// Linux.
+pub fn seek(fd: i32, to: io::SeekFrom) -> io::Result<u64> {
+    imp::seek(fd, to)
 }
 
 /// `pread(2)`: read at `offset` without moving the descriptor's position.
@@ -797,6 +1016,65 @@ pub fn close_descriptor(fd: i32) -> io::Result<()> {
     imp::close_fd(fd)
 }
 
+/// gnulib's `fd_reopen` once the file is open, and the second half of glibc's
+/// `freopen`: put `file` on descriptor `fd`, consuming it.
+///
+/// `dup2` it there and close the original -- unless the open already landed on
+/// `fd`, as it does when `fd` is closed and every lower descriptor open, since
+/// an open takes the lowest free number. That case is not an optimisation:
+/// `dup2 (fd, fd)` succeeds and does nothing, and closing the original would
+/// then close `fd` itself. `shuf -o FILE` did exactly that with standard
+/// output closed, and wrote its output to no descriptor at all (`nohup` had met
+/// the trap first, and kept a private copy of this until it moved here). Either
+/// way `fd` ends without close-on-exec, as a `dup2` onto it leaves it.
+///
+/// # Errors
+///
+/// What `dup2` or `fcntl` said. `Unsupported` off Linux, where there is no
+/// descriptor table to arrange.
+pub fn move_to(file: std::fs::File, fd: i32) -> io::Result<()> {
+    imp::move_to(file, fd)
+}
+
+/// How [`freopen`] opens its file: stdio's `"r"` or `"w"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reopen {
+    /// `"r"`: `O_RDONLY`.
+    Read,
+    /// `"w"`: `O_WRONLY | O_CREAT | O_TRUNC`, mode 0666 less the umask.
+    Write,
+}
+
+/// glibc's `freopen (name, mode, stream)` for the standard stream on `fd`:
+/// open `path`, then [`move_to`] `fd`, where the stream reads or writes.
+///
+/// Upstream's `uniq`, `shuf`, `tsort`, `dircolors`, `du --files0-from` and
+/// `ptx` take operands so, under `stdio--.h`'s `freopen_safer` -- whose
+/// guarding of the lower descriptors changes nothing once glibc has moved the
+/// file onto the stream's own number. A port that opened the operand as an
+/// ordinary file instead put it on whichever descriptor was free, and that is
+/// observable with a standard descriptor closed: `uniq f /nonexistent/x >&-`
+/// opened `f` *as* descriptor 1, closed it while reporting the output's
+/// failure, and aborted on the standard library's I/O-safety check.
+///
+/// # Errors
+///
+/// When the open fails, glibc's `freopen` closes `fd` before it returns, and
+/// `errno` is then that close's when it fails -- `EBADF`, when the stream was
+/// closed to begin with -- and the open's own otherwise. Measured, GNU's
+/// `tsort nosuch <&-` says `tsort: nosuch: Bad file descriptor`, and so does
+/// this. Otherwise what [`move_to`] said.
+pub fn freopen<P: AsRef<std::path::Path>>(path: P, mode: Reopen, fd: i32) -> io::Result<()> {
+    let opened = match mode {
+        Reopen::Read => std::fs::File::open(path),
+        Reopen::Write => std::fs::File::create(path),
+    };
+    match opened {
+        Ok(file) => move_to(file, fd),
+        Err(e) => Err(close_descriptor(fd).err().unwrap_or(e)),
+    }
+}
+
 /// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,
 /// which is process-global in stdio for the same reason it is here.
 ///
@@ -840,6 +1118,23 @@ pub fn diag_bytes(bytes: &[u8]) {
 /// standard output by then, so there is nothing the skipped flush would have
 /// put first.
 pub fn diag_bytes_in_handler(bytes: &[u8]) {
+    diag_bytes_ahead_of_stdout(bytes);
+}
+
+/// [`diag_bytes`] without delivering standard output first: glibc's
+/// `fprintf (stderr, …)`, for an upstream that writes a complaint itself
+/// rather than through `error()`.
+///
+/// Only `error()` flushes `stdout` before it speaks. stdio's own writes to
+/// `stderr` do not, so such a complaint overtakes whatever standard output
+/// is still holding, and the order is observable when the two share a
+/// destination. procps' `pwdx` reports a process it cannot read this way;
+/// measured against procps 4.0.4, `pwdx A GONE B 2>&1 | cat` prints
+/// `GONE: No such process` first, and A's and B's directories after it,
+/// when the buffer is delivered at exit.
+///
+/// A failure is recorded for [`close_stderr`], as every diagnostic's is.
+pub fn diag_bytes_ahead_of_stdout(bytes: &[u8]) {
     if write_all(2, bytes).is_err() {
         DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
     }
@@ -974,15 +1269,23 @@ fn is_earlier_failure(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<EarlierFailure>())
 }
 
-/// Whether a failed write failed because the reader went away.
+/// Whether a failed write is one to stay quiet about because the reader went
+/// away -- standing in for the `SIGPIPE` this process would have died of.
 ///
-/// The one write failure a utility does not report. GNU answers it by dying of
-/// `SIGPIPE`: no diagnostic, status 141, and the pipeline ends. SlateOS does
-/// not use Unix signals for process control (`design.txt`) and Rust masks the
-/// signal anyway, so "die of `SIGPIPE`" has no translation — the faithful one
-/// is to stay quiet and keep whatever status the run had already earned, which
-/// is also what upstream's own `EPIPE` branches do where it has them
-/// (`tee`'s `--output-error` default, `iopoll`'s callers).
+/// GNU answers a broken pipe by dying of `SIGPIPE`: no diagnostic, status 141.
+/// Since [`restore`] puts `SIGPIPE` back to the disposition the process
+/// inherited (2026-10-07), a utility that called it does the same: it is dead
+/// before any `EPIPE` reaches it. If it gets one anyway, it was started with
+/// `SIGPIPE` ignored, and then GNU's answer is the write error itself --
+/// `seq: write error: Broken pipe` under `trap '' PIPE` -- so this is false
+/// and the error is reported like any other.
+///
+/// It is true only where `SIGPIPE` was *not* restored: a utility not yet
+/// converted to the [`restore`] funnel, still running with the runtime's
+/// "ignored", and the build host. There an `EPIPE` stands in for the signal,
+/// and the faithful answer is to stay quiet and keep the status the run had
+/// earned (design-decisions §377, which made that the rule for everyone
+/// while the target had no `SIGPIPE`).
 ///
 /// `cut`, `head`, `tail` and `uniq` each derived that convention separately,
 /// with the same paragraph of comment copied between them. It lives here now
@@ -1005,7 +1308,24 @@ fn is_earlier_failure(err: &io::Error) -> bool {
 /// four utilities wrong to save three lines in the rest.
 #[must_use]
 pub fn reader_gone(err: &io::Error) -> bool {
-    err.kind() == io::ErrorKind::BrokenPipe
+    err.kind() == io::ErrorKind::BrokenPipe && !stdfdguard::sigpipe_restored()
+}
+
+/// Ignore `SIGPIPE` from now on, as an upstream that calls
+/// `signal (SIGPIPE, SIG_IGN)` does -- `tee` in its `--output-error` modes,
+/// `split --filter` -- so that a write into a broken pipe returns `EPIPE` for
+/// the program to act on. Call it after [`restore`]. Does nothing off Linux.
+pub fn ignore_sigpipe() {
+    stdfdguard::ignore_sigpipe();
+}
+
+/// gawk's `die_via_sigpipe`: `SIGPIPE` put back to its default and sent, so
+/// the program ends with status 141 whatever disposition it inherited -- what
+/// gawk does when standard output's reader has gone, `trap '' PIPE` or not.
+/// Returns only where the signal is blocked; does nothing off Linux. See
+/// [`stdfdguard::die_via_sigpipe`].
+pub fn die_via_sigpipe() {
+    stdfdguard::die_via_sigpipe();
 }
 
 /// The last thing a utility does with its standard output: gnulib's
@@ -1048,10 +1368,48 @@ pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: 
     close_stdout_bytes(program.as_bytes(), out, earned, failure)
 }
 
+/// gnulib's `atexit (close_stdin)`, for the utilities upstream registers it
+/// in -- `cp`, `install`, `ln`, `mv` and `rm`, the ones whose `-i` reads
+/// answers from standard input.
+///
+/// `stdin` is the stream the answers were read through, which this closes
+/// (see [`crate::stdio::StdioReader::close_stdin`]): read-ahead goes back to
+/// a seekable descriptor, so `{ rm -i a; cat; } < answers` leaves `cat` the
+/// lines `rm` did not use, and a stream on which a read failed is reported --
+///
+/// ```text
+/// ln: error closing file: Bad file descriptor
+/// ```
+///
+/// -- before [`close_stdout`] does its work, whose own failure is reported
+/// after it. Either failure is status 1, whatever was earned: upstream's
+/// handler `_exit`s with `exit_failure`.
+pub fn close_stdin_and_stdout(
+    program: &str,
+    stdin: crate::stdio::StdioReader,
+    out: Stream,
+    earned: ExitCode,
+) -> ExitCode {
+    let failed = stdin.close_stdin().err();
+    match &failed {
+        Some(Some(e)) => diag_line(&format!("{program}: error closing file: {}", strerror(e))),
+        Some(None) => diag_line(&format!("{program}: error closing file")),
+        None => {}
+    }
+    let status = close_stdout(program, out, earned);
+    if failed.is_some() {
+        // `_exit (exit_failure)`, after `close_stdout` has had its say. A
+        // diagnostic lost on the way is status 1 as well, so nothing is
+        // hidden by not asking.
+        ExitCode::FAILURE
+    } else {
+        status
+    }
+}
+
 /// [`close_stdout_with`] for a program named by bytes -- see
-/// [`write_error_bytes`]. procps' `close_stdout` is gnulib's in all that
-/// matters here: silent for a reader that left (`EPIPE`), `write error`
-/// otherwise, and `failure` for that or for a lost diagnostic.
+/// [`write_error_bytes`]. A procps program wants [`close_stdout_procps`]
+/// instead, which differs from this when the reader has gone.
 pub fn close_stdout_bytes(program: &[u8], out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
     let after_stdout = match out.finish() {
         Ok(()) => earned,
@@ -1062,6 +1420,59 @@ pub fn close_stdout_bytes(program: &[u8], out: Stream, earned: ExitCode, failure
         }
     };
     close_stderr(after_stdout, failure)
+}
+
+/// procps-ng's `close_stdout` (`local/fileutils.c`), which every procps
+/// program registers with `atexit`: [`close_stdout_bytes`], except that a
+/// reader that has gone is never reported.
+///
+/// procps' copy skips its report whenever `errno` is `EPIPE`, where gnulib's
+/// does so only for a program that asked it to. So a procps program whose
+/// `SIGPIPE` is ignored -- `trap '' PIPE`, or a parent that ignored it -- and
+/// whose reader has gone says nothing and keeps the status it had earned,
+/// where a GNU one says `write error: Broken pipe` and exits 1. Measured on
+/// Ubuntu's procps 4.0.4 with `{ sleep 0.3; free; } | true` under
+/// `trap '' PIPE`: `free`, `uptime`, `vmstat`, `w`, `pgrep` and `pwdx` are
+/// all silent, status 0. (With `SIGPIPE` at its default the write kills the
+/// program first, here as there.)
+///
+/// Any other failure is reported as [`close_stdout_bytes`] reports it --
+/// `pwdx: write error: No space left on device`, or a bare `write error` for
+/// one that happened before the close -- with status 1, procps'
+/// `EXIT_FAILURE` for every program. `program` is the name procps prints,
+/// `program_invocation_short_name`.
+///
+/// One case is approximated. When a write failed part way through the run
+/// and the close had nothing left to fail on, procps decides by whatever
+/// `errno` it finds at exit: the last failing call's, which is `EPIPE` if
+/// nothing has failed since the pipe broke. This decides by the stream's
+/// first failure, and the two differ only if some call that was not a write
+/// to standard output failed in between.
+#[must_use]
+pub fn close_stdout_procps(program: &[u8], out: Stream, earned: ExitCode) -> ExitCode {
+    let after_stdout = match procps_close_failure(out) {
+        None => earned,
+        Some(e) => {
+            write_error_bytes(program, &e);
+            ExitCode::FAILURE
+        }
+    };
+    close_stderr(after_stdout, 1)
+}
+
+/// procps' `close_stream (stdout)` and the `errno == EPIPE` test after it:
+/// the failure its `close_stdout` reports, or `None` when it says nothing.
+fn procps_close_failure(out: Stream) -> Option<io::Error> {
+    let broke_earlier = out
+        .error()
+        .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe);
+    match out.finish() {
+        Ok(()) => None,
+        // `errno == EPIPE`: from the close's own write, or left by an earlier
+        // one.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe || broke_earlier => None,
+        Err(e) => Some(e),
+    }
 }
 
 /// The last word on the exit status: gnulib's `close_stream (stderr)`.
@@ -1160,23 +1571,18 @@ pub fn exit_now(earned: u8, failure: u8) -> ! {
     std::process::exit(i32::from(status))
 }
 
-/// How much a [`Stream`] holds before it goes to the descriptor.
-///
-/// stdio picks this from the destination's `st_blksize`; 4096 is what that is
-/// on every filesystem these utilities are run on, and the only thing the size
-/// decides is how often `write(2)` is called.
-const BUFFER: usize = 4096;
-
 /// Whether output accumulates, and for how long.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Buffering {
     /// Every write goes straight out. What stdio does for stderr, so that a
     /// diagnostic survives whatever happens next.
     None,
-    /// Flushed at each newline. What stdio does for a stream on a terminal,
-    /// and the reason a prompt appears before the thing it is prompting for.
+    /// Written through each newline, and when full. What stdio does for a
+    /// stream on a terminal, and the reason a prompt appears before the thing
+    /// it is prompting for.
     Line,
-    /// Flushed when full. What stdio does for a stream on a file or a pipe.
+    /// Written when a write finds the buffer full. What stdio does for a
+    /// stream on a file or a pipe.
     Block,
 }
 
@@ -1188,6 +1594,13 @@ enum Buffering {
 struct Inner {
     buf: Vec<u8>,
     mode: Buffering,
+    /// The buffer's size, chosen at the first write as stdio chooses it, from
+    /// the descriptor's `st_blksize` ([`crate::stdio::buffer_size`]): 4096 for
+    /// a file, a pipe or `/dev/full` on Linux, 1024 for a terminal. `None`
+    /// until then, which matters as much as the size does: the first write
+    /// finds no buffer to put anything in, so its whole blocks go straight
+    /// out ([`crate::stdio::xsputn`]).
+    size: Option<usize>,
     /// The first delivery failure. Sticky: a later success does not clear it,
     /// because the bytes lost to the first one are still lost.
     error: Option<io::Error>,
@@ -1198,6 +1611,7 @@ impl Inner {
         Self {
             buf: Vec::new(),
             mode,
+            size: None,
             error: None,
         }
     }
@@ -1220,43 +1634,88 @@ impl Inner {
 
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self, fd: i32) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.drain_checked(fd);
+    }
+
+    /// [`Inner::drain`], also handing back this push's own failure --
+    /// stdio's `fflush` returning `EOF`. Nothing buffered is success,
+    /// whatever failed before, as an `fflush` with nothing to write is.
+    fn drain_checked(&mut self, fd: i32) -> io::Result<()> {
         if self.buf.is_empty() {
-            return;
+            return Ok(());
         }
         before_diagnostic(fd);
         let result = imp::write_all(fd, &self.buf);
         self.buf.clear();
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 
-    /// One `write`, honouring the buffering mode. Never fails; see [`Stream`].
+    /// One `write`, honouring the buffering mode: stdio's `fwrite`, through
+    /// glibc's own arithmetic ([`crate::stdio::xsputn`]). Never fails; see
+    /// [`Stream`].
+    ///
+    /// The arithmetic is not a detail. It decides what is still held when the
+    /// stream is closed, and so whether [`Stream::finish`] after a failure has
+    /// a reason to give. Measured against glibc 2.39 onto `/dev/full`: four
+    /// writes of 1024 bytes leave a full buffer for the close to fail on
+    /// (`write error: No space left on device`) where five leave nothing (a
+    /// bare `write error`), and a line-buffered `x\nxxx` loses its `xxx` with
+    /// the failed line. Draining everything once 4096 bytes had accumulated,
+    /// as this did until 2026-10-07, got all three backwards -- and on a disk
+    /// that fills part-way it wrote out the remainder glibc keeps for the
+    /// close. The `glibc_measured` test holds the table.
     fn put(&mut self, fd: i32, bytes: &[u8]) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.put_checked(fd, bytes);
+    }
+
+    /// [`Inner::put`], also handing back the failure of a write this call
+    /// made -- the flush of a buffer it filled, or its own bytes going
+    /// straight out: stdio's `fwrite` coming up short, `fprintf` returning a
+    /// negative count.
+    fn put_checked(&mut self, fd: i32, bytes: &[u8]) -> io::Result<()> {
         before_diagnostic(fd);
-        match self.mode {
-            Buffering::None => {
-                if let Err(e) = imp::write_all(fd, bytes) {
-                    self.record(fd, e);
-                }
-            }
-            Buffering::Line => {
-                self.buf.extend_from_slice(bytes);
-                // Everything up to and including the last newline goes now;
-                // a partial line waits for the rest of itself.
-                if let Some(end) = self.buf.iter().rposition(|&b| b == b'\n') {
-                    let rest = self.buf.split_off(end.saturating_add(1));
-                    self.drain(fd);
-                    self.buf = rest;
-                }
-            }
-            Buffering::Block => {
-                self.buf.extend_from_slice(bytes);
-                if self.buf.len() >= BUFFER {
-                    self.drain(fd);
-                }
-            }
+        if bytes.is_empty() {
+            // Nothing to write allocates nothing, as `fwrite` of nothing does
+            // not: the first real write is still the first.
+            return Ok(());
         }
+        let line = match self.mode {
+            Buffering::None => {
+                return imp::write_all(fd, bytes).map_err(|e| {
+                    let copy = clone_error(&e);
+                    self.record(fd, e);
+                    copy
+                });
+            }
+            Buffering::Line => true,
+            Buffering::Block => false,
+        };
+        let first = self.size.is_none();
+        // An `fstat` that fails is not a failure to report: glibc's
+        // `_IO_file_doallocate` asks the same question, takes no answer as
+        // `BUFSIZ`, and the write goes on to meet the descriptor itself.
+        let size = *self
+            .size
+            .get_or_insert_with(|| crate::stdio::buffer_size(imp::metadata(fd).ok().as_ref()));
+        let mut held = std::mem::take(&mut self.buf);
+        if first {
+            held.reserve(size);
+        }
+        let result = crate::stdio::xsputn(&mut held, size, first, line, bytes, &mut |b| {
+            imp::write_all(fd, b)
+        });
+        self.buf = held;
+        result.map_err(|e| {
+            let copy = clone_error(&e);
+            self.record(fd, e);
+            copy
+        })
     }
 }
 
@@ -1315,12 +1774,18 @@ fn flush_stdout() {
 /// In glibc it is `error()` that flushes, not `fputs (…, stderr)`, so this
 /// generalises: *any* write to descriptor 2 flushes descriptor 1 first, not
 /// only one that came from a diagnostic-shaped call. That is a superset of
-/// upstream's behaviour and the difference is unobservable here, because every
-/// one of these utilities reaches standard error through `error()` and nothing
-/// else — there is no call site in the family that wants an unflushed one.
-/// Making it a property of the descriptor rather than of the call is what stops
-/// the two spellings from drifting apart again, which is the same argument
-/// [`Inner::record`] makes about the lost-diagnostic flag.
+/// upstream's behaviour and the difference is unobservable for a utility that
+/// reaches standard error through `error()` alone, or that writes nothing to
+/// standard output before it does -- which is all of the family that writes
+/// through a `Stream` on descriptor 2. Making it a property of the descriptor
+/// rather than of the call is what stops the two spellings from drifting apart
+/// again, which is the same argument [`Inner::record`] makes about the
+/// lost-diagnostic flag.
+///
+/// The one utility that does want an unflushed complaint after output it has
+/// buffered -- procps' `pwdx`, whose report of a process it cannot read is a
+/// bare `fprintf (stderr, …)` -- writes it with [`diag_bytes_ahead_of_stdout`]
+/// instead.
 ///
 /// It cannot deadlock. Descriptor 1's state is the only thing behind the lock,
 /// and this is reached only from a write to descriptor 2, whose state is always
@@ -1399,6 +1864,19 @@ impl Stream {
         Self::new(1, Buffering::Line)
     }
 
+    /// From here on, buffer by line: `setlinebuf (stream)` part way through a
+    /// run, for a utility that calls it after its options rather than before.
+    ///
+    /// `vmstat` does, and the order shows: its `--help`, `--version` and `-f`
+    /// are written before the call, block-buffered, so on a full disk they
+    /// fail at the close with the reason (`vmstat: write error: No space left
+    /// on device`), where the reports written after it fail line by line and
+    /// the close has none to give. What is already buffered stays buffered,
+    /// as glibc's `setvbuf` leaves it.
+    pub fn set_line_buffered(&mut self) {
+        self.with(|inner, _| inner.mode = Buffering::Line);
+    }
+
     /// Standard error, unbuffered, as stdio has it.
     #[must_use]
     pub fn stderr() -> Self {
@@ -1418,22 +1896,15 @@ impl Stream {
         if fd == 1 {
             // A handle onto the shared state. The mode is (re)applied because
             // it is this call that knows whether descriptor 1 is a terminal;
-            // the buffer and the error flag are deliberately left alone, since
-            // an earlier handle's pending bytes and earlier handle's failure
-            // both still belong to the stream.
-            with_stdout(|inner| {
-                inner.mode = mode;
-                inner.buf.reserve(BUFFER.saturating_sub(inner.buf.len()));
-            });
+            // the buffer, its size and the error flag are deliberately left
+            // alone, since an earlier handle's pending bytes, its first write
+            // and its failure all still belong to the stream.
+            with_stdout(|inner| inner.mode = mode);
             return Self { fd, own: None };
-        }
-        let mut inner = Inner::new(mode);
-        if mode != Buffering::None {
-            inner.buf.reserve(BUFFER);
         }
         Self {
             fd,
-            own: Some(inner),
+            own: Some(Inner::new(mode)),
         }
     }
 
@@ -1496,6 +1967,39 @@ impl Stream {
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self) {
         self.with(Inner::drain);
+    }
+
+    /// `fflush`, with its verdict: push what is buffered, and say whether
+    /// *that* push failed -- not whether anything ever did, which
+    /// [`Stream::errored`] answers. Nothing buffered is success, whatever
+    /// failed before, as `fflush` with nothing to write is.
+    ///
+    /// For a utility that reports a failed flush in its own words before
+    /// [`close_stdout`] has its say: findutils' `cleanup` ends `if (fflush
+    /// (stdout) == EOF) nonfatal_nontarget_file_error (errno, "standard
+    /// output")`, and `-printf`'s `\c` is a checked `fflush` of its stream.
+    ///
+    /// # Errors
+    ///
+    /// This flush's failure, which the stream keeps as well, as it keeps any.
+    pub fn flush_now(&mut self) -> io::Result<()> {
+        self.with(Inner::drain_checked)
+    }
+
+    /// A write that says whether it failed: stdio's `fwrite` coming up short,
+    /// or `fprintf` returning a negative count -- which happens when the call
+    /// itself had to write and the write failed: a buffer it filled could
+    /// not be flushed, or its bytes went straight out (an unbuffered stream)
+    /// and did not arrive. The failure is kept as well, as any write's is.
+    ///
+    /// For a utility that checks its writes one by one, as findutils'
+    /// `checked_fprintf` does for `-printf`, and `list_file` for `-ls`.
+    ///
+    /// # Errors
+    ///
+    /// The failure of a write this call made.
+    pub fn write_checked(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.with(|inner, fd| inner.put_checked(fd, bytes))
     }
 
     /// Give up on the stream: forget what is still buffered, and forget the
@@ -1602,7 +2106,7 @@ impl Drop for Stream {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{BUFFER, Buffering, Inner, Stream};
+    use super::{Buffering, Inner, Stream};
     use std::io::Write;
     use std::sync::{Mutex, PoisonError};
 
@@ -1645,6 +2149,33 @@ mod tests {
         SHARED.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// `write_checked` reports the failure of a write *it* made -- the flush
+    /// of a buffer it filled, or its own bytes on an unbuffered stream -- and
+    /// not before; `flush_now` reports its own push failing, and nothing
+    /// when there was nothing to push, whatever failed earlier.
+    #[test]
+    fn checked_writes_and_flushes_report_their_own_failures() {
+        let mut s = broken(Buffering::Block);
+        // Held in the buffer: nothing has been written, so nothing failed.
+        assert!(s.write_checked(b"abc").is_ok());
+        assert!(!s.errored());
+        // The push of what is held fails, and says so.
+        assert!(s.flush_now().is_err());
+        assert!(s.errored());
+        // Nothing left to push: success, though the stream has failed.
+        assert!(s.flush_now().is_ok());
+        assert!(s.errored());
+
+        // A write that fills the buffer fails in that very call.
+        let mut b = broken(Buffering::Block);
+        assert!(b.write_checked(&vec![b'x'; 20_000]).is_err());
+
+        // Unbuffered: every write goes out at once, and fails at once.
+        let mut u = broken(Buffering::None);
+        assert!(u.write_checked(b"x").is_err());
+        assert!(u.write_checked(b"").is_ok());
+    }
+
     #[test]
     fn write_never_reports_failure_but_finish_does() {
         let mut s = broken(Buffering::Block);
@@ -1659,13 +2190,59 @@ mod tests {
         assert!(s.errored(), "an unbuffered write is attempted at once");
     }
 
+    /// `setlinebuf` part way: a line held while block-buffered stays held,
+    /// and the next newline after the switch writes it out.
     #[test]
-    fn block_buffered_holds_until_full() {
+    fn switching_to_line_buffering_keeps_what_is_held() {
         let mut s = broken(Buffering::Block);
+        let _ = s.write(b"one\n");
+        assert!(!s.errored(), "block-buffered, a line is held");
+        s.set_line_buffered();
+        assert!(!s.errored(), "the switch itself writes nothing");
+        assert_eq!(inner(&s).buf, b"one\n");
+        let _ = s.write(b"two\n");
+        assert!(s.errored(), "a line finished now is written, and fails");
+    }
+
+    /// What a stream on a descriptor nothing can be asked about chooses as its
+    /// buffer: glibc's `BUFSIZ`, which is where a failed `fstat` leaves it.
+    const UNKNOWN: usize = 8192;
+
+    #[test]
+    fn block_buffered_holds_until_a_write_finds_it_full() {
+        let mut s = broken(Buffering::Block);
+        assert_eq!(inner(&s).size, None, "no buffer before the first write");
         let _ = s.write(b"x");
         assert!(!s.errored(), "one byte does not reach the descriptor yet");
-        let _ = s.write(&vec![b'y'; BUFFER]);
-        assert!(s.errored(), "crossing the buffer size does");
+        assert_eq!(inner(&s).size, Some(UNKNOWN), "the first write chose it");
+        // Exactly full is still held: stdio writes the buffer only when a
+        // byte needs room in it.
+        let _ = s.write(&vec![b'y'; UNKNOWN - 1]);
+        assert!(!s.errored(), "a full buffer waits for the next write");
+        let _ = s.write(b"z");
+        assert!(s.errored(), "which writes it");
+        assert!(
+            inner(&s).buf.is_empty(),
+            "and loses the byte that needed the room, as fwrite does"
+        );
+    }
+
+    #[test]
+    fn a_first_write_of_a_whole_buffer_goes_straight_out() {
+        // No buffer exists before the first write, so nothing fits in it:
+        // its whole blocks are written at once, and a failure there leaves
+        // nothing held.
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(&vec![b'a'; UNKNOWN + 5]);
+        assert!(s.errored());
+        assert!(inner(&s).buf.is_empty());
+    }
+
+    #[test]
+    fn nothing_written_chooses_no_buffer() {
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(b"");
+        assert_eq!(inner(&s).size, None, "the next write is still the first");
     }
 
     #[test]
@@ -1678,14 +2255,124 @@ mod tests {
     }
 
     #[test]
-    fn line_buffered_keeps_the_tail_after_the_last_newline() {
+    fn a_failed_line_takes_the_rest_of_its_write_with_it() {
         let mut s = broken(Buffering::Line);
         let _ = s.write(b"a\nb");
+        assert!(s.errored());
+        assert!(
+            inner(&s).buf.is_empty(),
+            "fwrite stops at the failure, so nothing is left for the close"
+        );
+    }
+
+    /// A stream on a descriptor that takes everything: `/dev/null`, whose
+    /// block size is 4096. Linux only -- the host has no descriptor to write
+    /// to but the runner's own.
+    #[cfg(target_os = "linux")]
+    fn null(mode: Buffering) -> (Stream, std::fs::File) {
+        use std::os::fd::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        (Stream::new(f.as_raw_fd(), mode), f)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn line_buffered_keeps_the_tail_after_the_last_newline() {
+        let (mut s, _keep) = null(Buffering::Line);
+        let _ = s.write(b"a\nb");
+        assert!(!s.errored());
         assert_eq!(
             inner(&s).buf,
             b"b",
             "the tail is held back, not sent or dropped"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn block_buffered_keeps_the_remainder_past_the_last_whole_block() {
+        let (mut s, _keep) = null(Buffering::Block);
+        let _ = s.write(b"x");
+        assert_eq!(inner(&s).size, Some(4096), "/dev/null's st_blksize");
+        // 4095 fill the buffer, which goes; 4096 of the 4106 left go
+        // directly; 10 are held.
+        let _ = s.write(&[b'y'; 4095 + 4096 + 10]);
+        assert_eq!(inner(&s).buf.len(), 10);
+    }
+
+    /// The writes the probe measured, made through a `Stream` onto
+    /// `/dev/full`, against what glibc 2.39's stdout held at `fclose`,
+    /// whether `ferror` was set by then, and so which of gnulib's two
+    /// sentences `close_stdout` ends with: the reason (the close had
+    /// something to write, and failed) or none (an earlier write failed and
+    /// nothing was left). Measured on 2026-10-07 with a C program doing the
+    /// same `fwrite`s, `setvbuf (stdout, NULL, _IOLBF, 0)` for the
+    /// line-buffered rows.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn glibc_measured() {
+        /// One measured case: what is written, how many times, whether
+        /// line-buffered -- and glibc's bytes still held at the close,
+        /// whether `ferror` was set by then, and whether the close's verdict
+        /// carried a reason.
+        struct Row {
+            piece: &'static [u8],
+            times: usize,
+            line: bool,
+            pending: usize,
+            ferror: bool,
+            reason: bool,
+        }
+        const fn row(
+            piece: &'static [u8],
+            times: usize,
+            line: bool,
+            pending: usize,
+            ferror: bool,
+            reason: bool,
+        ) -> Row {
+            Row {
+                piece,
+                times,
+                line,
+                pending,
+                ferror,
+                reason,
+            }
+        }
+        let rows = [
+            row(&[b'x'; 5000], 1, false, 0, true, false),
+            row(&[b'x'; 4096], 1, false, 0, true, false),
+            row(&[b'x'; 100], 50, false, 900, true, true),
+            row(&[b'x'; 1024], 4, false, 4096, false, true),
+            row(&[b'x'; 1024], 5, false, 0, true, false),
+            row(b"x\nxxx", 1, true, 0, true, false),
+            row(b"x\nxxx", 2, true, 0, true, false),
+            row(&[b'x'; 5000], 1, true, 0, true, false),
+        ];
+        for r in &rows {
+            let mode = if r.line {
+                Buffering::Line
+            } else {
+                Buffering::Block
+            };
+            let (mut s, _keep) = full(mode);
+            for _ in 0..r.times {
+                let _ = s.write(r.piece);
+            }
+            let what = format!("{} x {}, line {}", r.piece.len(), r.times, r.line);
+            assert_eq!(inner(&s).buf.len(), r.pending, "pending: {what}");
+            assert_eq!(s.errored(), r.ferror, "ferror: {what}");
+            let e = s.finish().unwrap_err();
+            assert_eq!(
+                !super::is_earlier_failure(&e),
+                r.reason,
+                "reason: {what}, got {e}"
+            );
+        }
     }
 
     #[test]
@@ -1757,8 +2444,11 @@ mod tests {
         // descriptor -1 fails without an errno -- and not the sentinel.
         assert!(!super::is_earlier_failure(&e));
 
+        // Two writes: one, `first\nsecond`, would lose `second` with the
+        // failed line, as glibc's does, and leave the close nothing.
         let mut s = broken(Buffering::Line);
-        let _ = s.write(b"first\nsecond, pending");
+        let _ = s.write(b"first\n");
+        let _ = s.write(b"second, pending");
         let e = s.finish().unwrap_err();
         assert!(
             !super::is_earlier_failure(&e),
@@ -1770,6 +2460,69 @@ mod tests {
     fn a_stream_that_never_failed_finishes_clean() {
         let s = Stream::new(-1, Buffering::Line);
         assert!(s.finish().is_ok(), "nothing written, nothing to fail");
+    }
+
+    /// A pipe whose reader has gone. This test binary runs with `SIGPIPE`
+    /// ignored, as every Rust program starts, so a write to it is `EPIPE`.
+    /// The writer is returned to keep the descriptor open for the test.
+    #[cfg(target_os = "linux")]
+    fn readerless(mode: Buffering) -> (Stream, std::io::PipeWriter) {
+        use std::os::fd::AsRawFd;
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        (Stream::new(writer.as_raw_fd(), mode), writer)
+    }
+
+    /// procps' `close_stdout` says nothing when the reader has gone, whether
+    /// the close's own write met the broken pipe or an earlier one did and
+    /// left the close nothing to write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procps_says_nothing_of_a_reader_that_has_gone() {
+        let (mut s, _keep) = readerless(Buffering::Block);
+        let _ = s.write(b"held until the close");
+        assert!(super::procps_close_failure(s).is_none(), "at the close");
+
+        let (mut s, _keep) = readerless(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        assert!(s.errored(), "the newline sent it, and it failed");
+        assert!(super::procps_close_failure(s).is_none(), "before the close");
+    }
+
+    /// ... and reports anything else as gnulib's does: the close's own
+    /// failure with its reason, an earlier one alone without.
+    #[test]
+    fn procps_reports_every_other_failure() {
+        let (mut s, _keep) = full(Buffering::Block);
+        let _ = s.write(b"held until the close");
+        let e = super::procps_close_failure(s).expect("a failing close");
+        assert!(!super::is_earlier_failure(&e));
+
+        let (mut s, _keep) = full(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        let e = super::procps_close_failure(s).expect("an earlier failure");
+        assert!(super::is_earlier_failure(&e));
+
+        let s = Stream::new(-1, Buffering::Line);
+        assert!(
+            super::procps_close_failure(s).is_none(),
+            "nothing written, nothing to report"
+        );
+    }
+
+    /// `fprintf (stderr, …)` leaves what standard output holds where it is:
+    /// only `error()` flushes it first.
+    #[test]
+    fn a_complaint_ahead_of_stdout_leaves_its_buffer_alone() {
+        let _shared = shared();
+        let mut out = Stream::stdout();
+        let _ = out.write(b"pending");
+        super::diag_bytes_ahead_of_stdout(b"");
+        assert!(
+            super::with_stdout(|inner| !inner.buf.is_empty()),
+            "the complaint should have gone ahead of it"
+        );
+        super::flush_stdout();
     }
 
     /// The one test that touches the process-global flag, and it is one test
@@ -1983,5 +2736,201 @@ mod tests {
         assert_eq!(text, b"kept");
         drop(file);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Whether `fd` is close-on-exec: `fcntl (fd, F_GETFD) & FD_CLOEXEC`.
+    #[cfg(target_os = "linux")]
+    fn close_on_exec(fd: i32) -> bool {
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        // SAFETY: `F_GETFD` (1) only reads the descriptor's flags.
+        let flags = unsafe { fcntl(fd, 1) };
+        assert!(flags >= 0, "descriptor {fd} is not open");
+        flags & 1 != 0
+    }
+
+    /// A file of `text` in the temporary directory, for the tests below.
+    #[cfg(target_os = "linux")]
+    fn scratch_file(tag: &str, text: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("stdfd-{tag}-{}", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Everything readable from `fd`, which is then closed: the descriptors
+    /// the tests below arrange belong to nothing else.
+    #[cfg(target_os = "linux")]
+    fn drain_and_close(fd: i32) -> Vec<u8> {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+
+        // SAFETY: the caller put a file on `fd` and nothing else owns it, so
+        // the `File` may take it and close it, once.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut text = Vec::new();
+        file.read_to_end(&mut text).unwrap();
+        text
+    }
+
+    // The descriptors the tests below arrange are 901-905: far above any file
+    // the rest of the suite holds open, one per test since they run at once,
+    // and under the default soft limit of 1024 that `dup2` is held to. Each
+    // test first closes its own, ignoring the answer: nothing else uses it, so
+    // the close either frees it or finds it free already.
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn move_to_puts_the_file_on_the_descriptor_without_close_on_exec() {
+        const FD: i32 = 901;
+        let path = scratch_file("move-to", b"moved");
+        let _ = super::close_descriptor(FD);
+        super::move_to(std::fs::File::open(&path).unwrap(), FD).unwrap();
+        let cloexec = close_on_exec(FD);
+        let text = drain_and_close(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!cloexec, "a dup2 onto the descriptor clears close-on-exec");
+        assert_eq!(text, b"moved");
+    }
+
+    /// The case that closed `shuf -o`'s output: the open already landed on
+    /// the descriptor wanted.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn move_to_the_descriptor_it_is_on_keeps_it_open() {
+        use std::os::fd::AsRawFd;
+
+        let path = scratch_file("move-to-self", b"stays");
+        let file = std::fs::File::open(&path).unwrap();
+        let fd = file.as_raw_fd();
+        assert!(
+            close_on_exec(fd),
+            "the standard library opens close-on-exec"
+        );
+        super::move_to(file, fd).unwrap();
+        let cloexec = close_on_exec(fd);
+        let text = drain_and_close(fd);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!cloexec, "the same descriptor a dup2 would have left");
+        assert_eq!(text, b"stays");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_for_reading_puts_the_file_on_the_descriptor() {
+        const FD: i32 = 902;
+        let path = scratch_file("freopen-read", b"read me");
+        let _ = super::close_descriptor(FD);
+        super::freopen(&path, super::Reopen::Read, FD).unwrap();
+        let text = drain_and_close(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(text, b"read me");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_for_writing_creates_and_truncates() {
+        const FD: i32 = 903;
+        let path = scratch_file("freopen-write", b"old and longer");
+        let _ = super::close_descriptor(FD);
+        super::freopen(&path, super::Reopen::Write, FD).unwrap();
+        let wrote = super::write_all(FD, b"new");
+        let closed = super::close_descriptor(FD);
+        let text = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(wrote.is_ok() && closed.is_ok(), "{wrote:?} {closed:?}");
+        assert_eq!(text, b"new");
+    }
+
+    /// glibc's rule: a failed open closes the stream's descriptor, and the
+    /// error is that close's when it fails -- `EBADF` for a stream that was
+    /// closed already, which is GNU's `tsort nosuch <&-`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_failing_on_a_closed_descriptor_reports_ebadf() {
+        const FD: i32 = 904;
+        let _ = super::close_descriptor(FD);
+        let e = super::freopen("/nonexistent/stdfd-freopen", super::Reopen::Read, FD)
+            .expect_err("opened a file that does not exist");
+        assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
+    }
+
+    /// And with the stream open, the open's own error -- after which the
+    /// descriptor is closed, as glibc closes it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_failing_on_an_open_descriptor_reports_the_open_and_closes_it() {
+        const FD: i32 = 905;
+        let path = scratch_file("freopen-fail", b"x");
+        let _ = super::close_descriptor(FD);
+        super::move_to(std::fs::File::open(&path).unwrap(), FD).unwrap();
+        let e = super::freopen("/nonexistent/stdfd-freopen", super::Reopen::Write, FD)
+            .expect_err("created a file in a directory that does not exist");
+        let after = super::imp::close_fd(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "got {e}");
+        assert_eq!(
+            after.err().and_then(|e| e.raw_os_error()),
+            Some(9),
+            "the descriptor is closed afterwards"
+        );
+    }
+
+    /// The three safer opens open as the calls they replace do. Where the
+    /// descriptor lands needs one of 0-2 closed, which a test cannot do safely
+    /// (see the test above); `tee-diff.sh`'s closed-stdout cases and
+    /// `awk-diff.sh`'s `wfile_closed_case` hold that end to end.
+    #[test]
+    fn the_safer_opens_open_as_the_plain_ones_do() {
+        use super::OpenSafer;
+        use std::io::{Read, Write};
+
+        let dir = std::env::temp_dir().join(format!("stdfd-open-safer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+
+        // `create_safer`: creates, and truncates what is there.
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"first")
+            .unwrap();
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"2nd")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd");
+
+        // `open_read_safer`: reads, and refuses to write.
+        let mut text = Vec::new();
+        super::open_read_safer(&path)
+            .unwrap()
+            .read_to_end(&mut text)
+            .unwrap();
+        assert_eq!(text, b"2nd");
+        assert!(
+            super::open_read_safer(&path)
+                .unwrap()
+                .write_all(b"x")
+                .is_err()
+        );
+        assert!(super::open_read_safer(dir.join("missing")).is_err());
+
+        // `open_safer`: the options are the caller's, passed through.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open_safer(&path)
+            .unwrap()
+            .write_all(b"+")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd+");
+        let refused = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open_safer(&path)
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1548,8 +1548,8 @@ pub(crate) struct Frame<'a> {
 
 /// libvpx's `vp9_pack_bitstream`: the uncompressed header, the compressed
 /// header's size and the header itself, then the tiles, each but the last
-/// after its size.
-pub(crate) fn pack_frame(f: Frame<'_>) -> Vec<u8> {
+/// after its size -- written on up to `threads` threads ([`write_tiles`]).
+pub(crate) fn pack_frame(f: Frame<'_>, threads: usize) -> Vec<u8> {
     let h = f.header;
     if f.seg.enabled && f.seg.update_map {
         choose_segmap_coding_method(f.seg, f.mi, f.last_seg_map, h.key_frame, h.log2_tile_cols);
@@ -1563,12 +1563,45 @@ pub(crate) fn pack_frame(f: Frame<'_>) -> Vec<u8> {
     let mut out = wb.finish();
     out.extend_from_slice(&compressed);
 
-    // encode_tiles.
+    let tiles = write_tiles(&h, f.fc, f.seg, f.mi, f.ext, f.tile_tokens, threads);
+    let last = tiles.len().saturating_sub(1);
+    for (i, data) in tiles.into_iter().enumerate() {
+        if i < last {
+            let size = u32::try_from(data.len()).unwrap_or(u32::MAX);
+            out.extend_from_slice(&size.to_be_bytes());
+        }
+        out.extend_from_slice(&data);
+    }
+    out
+}
+
+/// One tile column's tiles, in tile-row order.
+type ColumnTiles = Vec<Vec<u8>>;
+
+/// libvpx's `encode_tiles`, and on several threads its `encode_tiles_mt`:
+/// each tile's bytes, tile rows first.
+///
+/// One thread writes a tile column's tiles in order, since VP9 carries the
+/// above contexts down a column from one tile row to the next; the columns,
+/// which share nothing, go to up to `threads` threads, each with contexts of
+/// its own -- a column touches only its own span of them. The bytes are the
+/// same on any number of threads.
+///
+/// A thread that panics -- a bug, which would panic on one thread too --
+/// panics this one with the same payload.
+fn write_tiles(
+    h: &FrameHeader,
+    fc: &FrameContext,
+    seg: &Segmentation,
+    mi: &MiGrid,
+    ext: &[BlockExt],
+    tile_tokens: &[Vec<TokenExtra>],
+    threads: usize,
+) -> Vec<Vec<u8>> {
     let mi_cols = h.mi_cols();
     let mi_rows = h.mi_rows();
     let tile_cols = 1usize << h.log2_tile_cols;
     let tile_rows = 1usize << h.log2_tile_rows;
-    let mut partition = PartitionContexts::new(mi_cols);
     let offset = |i: usize, mis: usize, log2: u32| {
         header::tile_offset(
             u32::try_from(i).unwrap_or(u32::MAX),
@@ -1576,42 +1609,89 @@ pub(crate) fn pack_frame(f: Frame<'_>) -> Vec<u8> {
             log2,
         ) as usize
     };
-    let mi: &MiGrid = f.mi;
-    let seg: &Segmentation = f.seg;
-    let fc: &FrameContext = f.fc;
-    for tile_row in 0..tile_rows {
-        for tile_col in 0..tile_cols {
-            let tokens = f
-                .tile_tokens
-                .get(tile_row * tile_cols + tile_col)
-                .map_or(&[][..], Vec::as_slice);
-            let cols = offset(tile_col, mi_cols, h.log2_tile_cols)
-                ..offset(tile_col + 1, mi_cols, h.log2_tile_cols);
-            let rows = offset(tile_row, mi_rows, h.log2_tile_rows)
-                ..offset(tile_row + 1, mi_rows, h.log2_tile_rows);
-            let mut tw = TileWriter {
-                h: &h,
-                fc,
-                seg,
-                mi,
-                ext: f.ext,
-                tokens,
-                pos: 0,
-                partition: &mut partition,
-                mi_col_start: cols.start,
-                w: BoolWriter::new(),
-            };
-            tw.write_tile(rows, cols);
-            debug_assert_eq!(tw.pos, tokens.len(), "a tile's tokens were not all written");
-            let data = tw.w.finish();
-            if tile_col + 1 < tile_cols || tile_row + 1 < tile_rows {
-                let size = u32::try_from(data.len()).unwrap_or(u32::MAX);
-                out.extend_from_slice(&size.to_be_bytes());
+    let write_column = |tile_col: usize| -> ColumnTiles {
+        let mut partition = PartitionContexts::new(mi_cols);
+        let cols = offset(tile_col, mi_cols, h.log2_tile_cols)
+            ..offset(tile_col + 1, mi_cols, h.log2_tile_cols);
+        (0..tile_rows)
+            .map(|tile_row| {
+                let tokens = tile_tokens
+                    .get(tile_row * tile_cols + tile_col)
+                    .map_or(&[][..], Vec::as_slice);
+                let rows = offset(tile_row, mi_rows, h.log2_tile_rows)
+                    ..offset(tile_row + 1, mi_rows, h.log2_tile_rows);
+                let mut tw = TileWriter {
+                    h,
+                    fc,
+                    seg,
+                    mi,
+                    ext,
+                    tokens,
+                    pos: 0,
+                    partition: &mut partition,
+                    mi_col_start: cols.start,
+                    w: BoolWriter::new(),
+                };
+                tw.write_tile(rows, cols.clone());
+                debug_assert_eq!(tw.pos, tokens.len(), "a tile's tokens were not all written");
+                tw.w.finish()
+            })
+            .collect()
+    };
+    let workers = threads.clamp(1, tile_cols);
+    // Columns dealt out in turn: hand i takes columns i, i + workers, ...
+    let hand = |i: usize| -> Vec<(usize, ColumnTiles)> {
+        (i..tile_cols)
+            .step_by(workers)
+            .map(|c| (c, write_column(c)))
+            .collect()
+    };
+    let mut columns: Vec<ColumnTiles> = vec![Vec::new(); tile_cols];
+    let mut keep = |written: Vec<(usize, ColumnTiles)>| {
+        for (c, tiles) in written {
+            if let Some(slot) = columns.get_mut(c) {
+                *slot = tiles;
             }
-            out.extend_from_slice(&data);
+        }
+    };
+    if workers == 1 {
+        keep(hand(0));
+    } else {
+        std::thread::scope(|scope| {
+            let hand = &hand;
+            let mut handles = Vec::with_capacity(workers);
+            let mut here = vec![0];
+            for i in 1..workers {
+                match std::thread::Builder::new().spawn_scoped(scope, move || hand(i)) {
+                    Ok(handle) => handles.push(handle),
+                    // A thread that cannot be made leaves its hand to this one.
+                    Err(_) => here.push(i),
+                }
+            }
+            for i in here {
+                keep(hand(i));
+            }
+            for handle in handles {
+                match handle.join() {
+                    Ok(written) => keep(written),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+        });
+    }
+    // Tile rows first.
+    let mut tiles = Vec::with_capacity(tile_cols * tile_rows);
+    for tile_row in 0..tile_rows {
+        for column in &mut columns {
+            tiles.push(
+                column
+                    .get_mut(tile_row)
+                    .map(core::mem::take)
+                    .unwrap_or_default(),
+            );
         }
     }
-    out
+    tiles
 }
 
 #[cfg(test)]

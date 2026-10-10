@@ -126,7 +126,10 @@ impl Stat {
 //   byte  [8]       entry type                 (0=file, 1=dir, 2=volume label,
 //                                               3=symlink, 4=char dev, 5=block dev;
 //                                               see `dirent::KERNEL_TYPE_*`)
-//   bytes [9..12]   reserved (zero)
+//   bytes [9..12]   device number              (u24, little-endian: the
+//                                               filesystem's minor under major
+//                                               0; 0 = unknown, as a kernel
+//                                               before 2026-10-01 gives)
 //   bytes [12..16]  hard link count            (u32, little-endian; 0 if not provided)
 //   bytes [16..20]  permission bits            (u32; 0 = unknown, synthesize by type)
 //   bytes [20..24]  uid                        (u32)
@@ -191,6 +194,7 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
 
     let size = le_u64(raw, 0);
     let entry_type = raw[8];
+    let dev_minor = u32::from(raw[9]) | (u32::from(raw[10]) << 8) | (u32::from(raw[11]) << 16);
     let nlinks = le_u32(raw, 12);
     let permissions = le_u32(raw, 16);
     let uid = le_u32(raw, 20);
@@ -240,6 +244,13 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
         default_perm
     };
     buf.st_mode = type_bits | perm_bits;
+    // The filesystem's device: one small number per mounted filesystem,
+    // reused after an unmount, as Linux numbers its anonymous devices -- so
+    // `(st_dev, st_ino)` names one file, and a mount point is where `st_dev`
+    // changes. Until 2026-10-01 every file's was 0, so two files on two
+    // filesystems with one inode number looked like a hard link to `tar`,
+    // `rsync -H`, `cp -a` and `du`, and `find -xdev` saw no mounts.
+    buf.st_dev = crate::crt::gnu_dev_makedev(0, dev_minor);
     buf.st_ino = ino;
     buf.st_size = i64::try_from(size).unwrap_or(i64::MAX);
     buf.st_nlink = if nlinks == 0 { 1 } else { u64::from(nlinks) };
@@ -537,6 +548,33 @@ mod tests {
         assert_eq!(st.st_blksize, 4096);
         // 4096 / 512 = 8 blocks.
         assert_eq!(st.st_blocks, 8);
+    }
+
+    /// Bytes 9 to 11 are the filesystem's device, a minor under major 0,
+    /// encoded as glibc's `makedev` encodes it; 0 is a kernel that does not
+    /// say, and stays 0.
+    #[test]
+    fn test_fill_from_fsstat_device_is_a_minor_under_major_zero() {
+        let mut st = Stat::zeroed();
+        for (bytes, minor) in [
+            ([0u8, 0, 0], 0u32),
+            ([7, 0, 0], 7),
+            ([0x2c, 0x01, 0], 300),
+            ([0x34, 0x12, 0x05], 0x05_1234),
+        ] {
+            let mut raw = raw_fsstat(10, 0, 1);
+            raw[9..12].copy_from_slice(&bytes);
+            fill_from_fsstat(&mut st, &raw);
+            assert_eq!(crate::crt::gnu_dev_major(st.st_dev), 0, "{minor}");
+            assert_eq!(crate::crt::gnu_dev_minor(st.st_dev), minor, "{minor}");
+            assert_eq!(
+                st.st_dev,
+                u64::from(minor & 0xff) | (u64::from(minor & !0xff) << 12),
+                "{minor}"
+            );
+        }
+        // The rest of the record is read as before.
+        assert_eq!((st.st_size, st.st_nlink), (10, 1));
     }
 
     #[test]

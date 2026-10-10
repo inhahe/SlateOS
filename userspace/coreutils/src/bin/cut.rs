@@ -52,11 +52,14 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quotef};
 use coreutils::setfields::{self, Range};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 
 /// Measured: `cut --zzz-bogus; echo $?` is 1.
 const CUT: Program = Program::new("cut", 1);
@@ -132,34 +135,41 @@ struct Draft {
     line_delim: Option<u8>,
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1. See [`stdfd::close_stdout`].
 fn main() -> ExitCode {
     stdfd::close_stderr(run_main(), 1)
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args, getopt::posixly_correct()) {
+    let mut out = Stream::stdout();
+    let earned = match parse_args(&args, getopt::posixly_correct()) {
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1. The
+        // stream records a failure for the funnel; it never returns one.
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("cut (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"cut (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
-        Ok(Request::Run(options, files)) => run(&options, &files),
+        Ok(Request::Run(options, files)) => run(&options, &files, &mut out),
         Err(e) => {
             // The referral, when there is one, is part of the message, and only
             // the first line carries the `cut: ` prefix — which is what GNU
-            // prints, including for the two-line `-s` diagnostic.
+            // prints, including for the two-line `-s` diagnostic. Nothing has
+            // been written, so there is nothing for `close_stdout` to find.
             diag!("cut: {e}");
-            ExitCode::from(u8::try_from(e.status).unwrap_or(1))
+            return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
-    }
+    };
+    stdfd::close_stdout("cut", out, earned)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names
@@ -783,75 +793,74 @@ fn cut_stream<R: Read, W: Write>(
     }
 }
 
-/// One operand. `Ok(true)` means it was processed; `Ok(false)` that it failed
-/// and has been reported; `Err` is a *write* failure, which is fatal for the
-/// whole run rather than for this file.
-fn cut_file<W: Write>(name: &OsString, options: &Options, out: &mut W) -> io::Result<bool> {
+/// One operand: upstream's `cut_file`. `false` means it failed and has been
+/// reported.
+///
+/// A failed *write* is not this function's to report. The [`Stream`] records
+/// it and `close_stdout` words it at the end, as upstream's stdio and its
+/// `atexit (close_stdout)` do, so `cut_stream`'s `Err` cannot happen here.
+fn cut_file(name: &OsString, options: &Options, out: &mut Stream) -> bool {
     let bytes = arg_bytes(name);
-    let read_error = |e: &io::Error| {
-        diag!("cut: {}: {}", quotef(&bytes), strerror(e));
-    };
-
-    if bytes == b"-" {
-        let mut input = Input::new(io::stdin());
-        cut_stream(&mut input, out, options)?;
-        if let Some(e) = input.error.as_ref() {
-            read_error(e);
-            return Ok(false);
+    let error = if bytes == b"-" {
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        let mut input = Input::new(stdfd::RawStdin);
+        // A `Stream` never returns a write failure (see above), so there is
+        // nothing in this result to report.
+        let _ = cut_stream(&mut input, out, options);
+        input.error
+    } else {
+        let file = match File::open(name) {
+            Ok(f) => f,
+            Err(e) => {
+                diag!("cut: {}: {}", quotef(&bytes), strerror(&e));
+                return false;
+            }
+        };
+        let read_error = {
+            let mut input = Input::new(&file);
+            // As above: nothing to report in it.
+            let _ = cut_stream(&mut input, out, options);
+            input.error
+        };
+        // `else if (fclose (stream) == EOF) err = errno;`: a failed close is
+        // the error reported, whatever the read said.
+        match stdfd::close(file) {
+            Err(e) => Some(e),
+            Ok(()) => read_error,
         }
-        return Ok(true);
-    }
-
-    let file = match File::open(name) {
-        Ok(f) => f,
-        Err(e) => {
+    };
+    match error {
+        Some(e) => {
             diag!("cut: {}: {}", quotef(&bytes), strerror(&e));
-            return Ok(false);
+            false
         }
-    };
-    let mut input = Input::new(file);
-    cut_stream(&mut input, out, options)?;
-    if let Some(e) = input.error.as_ref() {
-        read_error(e);
-        return Ok(false);
+        None => true,
     }
-    Ok(true)
 }
 
-fn run(options: &Options, files: &[OsString]) -> ExitCode {
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
     let default = [OsString::from("-")];
     let operands: &[OsString] = if files.is_empty() { &default } else { files };
     let mut ok = true;
+    let mut have_read_stdin = false;
 
     for name in operands {
-        match cut_file(name, options, &mut out) {
-            Ok(good) => ok &= good,
-            Err(e) => return write_failure(&e, ok),
-        }
+        have_read_stdin |= name == "-";
+        ok &= cut_file(name, options, out);
     }
 
-    if let Err(e) = out.flush() {
-        return write_failure(&e, ok);
+    // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) { error (0,
+    // errno, "-"); ok = false; }`. Measured, `cut -c1 <&-` says
+    // `cut: -: Bad file descriptor` twice: the read, then this.
+    if have_read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("cut: -: {}", strerror(&e));
+        ok = false;
     }
     if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     }
-}
-
-/// A failed write. GNU dies of `SIGPIPE` when the reader goes away, printing
-/// nothing; Rust masks that signal, so the same situation arrives as `EPIPE`
-/// and has to be recognised and kept quiet. Any other write failure is
-/// upstream's `write_error()`.
-fn write_failure(e: &io::Error, ok: bool) -> ExitCode {
-    if e.kind() == ErrorKind::BrokenPipe {
-        return ExitCode::from(u8::from(!ok));
-    }
-    diag!("cut: write error: {}", strerror(e));
-    ExitCode::from(1)
 }
 
 /// An operand's bytes. Paths are bytes on the target and 16-bit units on the

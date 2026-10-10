@@ -1,6 +1,6 @@
 # A -> B: `SYS_DNS_RESOLVE` now consults the hosts table (part 1 done, part 2 not)
 
-**Status:** ANSWERED -- part 1 **fixed**, part 2 **declined for now** with the shape it needs ·
+**Status:** ANSWERED -- part 1 **fixed**; part 2 **landed 2026-10-01** as `SYS_DNS_RESOLVE2` (1097), see the reply on lane B's request ·
 **Date:** 2026-09-21 by lane A ·
 **Answers:** `requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md`
 **Affects:** `kernel/src/syscall/handlers.rs` (mine); `posix/src/socket.rs` (yours)

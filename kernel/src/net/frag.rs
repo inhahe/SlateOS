@@ -15,8 +15,8 @@
 //!   8-byte block, matching the fragment-offset granularity).
 //! - Total datagram length is determined when the last fragment arrives
 //!   (MF = 0); its offset × 8 + data length = total payload length.
-//! - Entries expire after [`REASSEMBLY_TIMEOUT_NS`] (30 s for IPv4 per
-//!   RFC 791 §3.2; 60 s for IPv6 per RFC 8200 §4.5).
+//! - Entries expire after [`REASSEMBLY_TIMEOUT_V4_NS`] (30 s, RFC 791 §3.2)
+//!   or [`REASSEMBLY_TIMEOUT_V6_NS`] (60 s, RFC 8200 §4.5).
 //! - Maximum reassembled payload: 65515 bytes (IPv4) / 65535 bytes (IPv6).
 //!
 //! ## IPv6 Fragment Header (RFC 8200 §4.5)

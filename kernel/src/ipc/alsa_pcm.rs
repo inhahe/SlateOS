@@ -319,6 +319,8 @@ pub fn is_capture(handle: AlsaPcmHandle) -> Option<bool> {
 /// The current ALSA state-machine state (`STATE_*`), or `None` if stale.
 #[must_use]
 pub fn state(handle: AlsaPcmHandle) -> Option<u32> {
+    // A drain that has finished reads as finished.
+    settle_drain(handle);
     ALSA_PCM_TABLE.lock().get(&handle.id()).map(|p| p.state)
 }
 
@@ -486,6 +488,8 @@ pub fn prepare(handle: AlsaPcmHandle) -> KernelResult<()> {
         pcm.mixer_stream
     };
     if let Some(sid) = mixer_to_clear {
+        // Prepared from PAUSED, the slot must not stay paused in the mix.
+        audio_mixer::set_paused(sid, false);
         audio_mixer::clear(sid);
     }
     Ok(())
@@ -533,32 +537,90 @@ pub fn drop_stream(handle: AlsaPcmHandle) -> KernelResult<()> {
         pcm.mixer_stream
     };
     if let Some(sid) = mixer_to_clear {
+        // Dropped from PAUSED, the slot must not stay paused in the mix.
+        audio_mixer::set_paused(sid, false);
         audio_mixer::clear(sid);
     }
     Ok(())
 }
 
-/// Drain the substream (`DRAIN`): stop accepting new frames and return to
-/// `SETUP` once the buffered frames have been consumed.
+/// Drain the substream (`DRAIN`): stop accepting new frames, let the queued
+/// ones play out, then return to `SETUP` -- as ALSA's `snd_pcm_drain`:
 ///
-/// Our mixer pulls frames asynchronously, so we do a non-blocking drain: the
-/// already-buffered frames remain queued for the mixer and the state returns to
-/// `SETUP`.  (A blocking drain that waits for the ring to empty is a future
-/// refinement; non-blocking is correct for the `SND_PCM_NONBLOCK` path ALSA-lib
-/// uses for event-driven clients.)
+/// - a blocking descriptor waits until the mixer ring is empty (the output
+///   pump plays it out), interruptibly;
+/// - a non-blocking one moves to `DRAINING` and answers `WouldBlock`
+///   (`EAGAIN`) while frames remain; the state reads `SETUP` once they have
+///   played ([`settle_drain`]), which the caller watches for;
+/// - a paused stream is resumed first, or it would never empty; a capture
+///   stream and one with nothing queued go to `SETUP` at once; an
+///   unconfigured one (`OPEN`) is left as it is.
 ///
 /// # Errors
 ///
-/// [`KernelError::InvalidHandle`] if the instance is stale.
-pub fn drain(handle: AlsaPcmHandle) -> KernelResult<()> {
-    let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table
-        .get_mut(&handle.id())
-        .ok_or(KernelError::InvalidHandle)?;
-    if pcm.state != STATE_OPEN {
+/// [`KernelError::InvalidHandle`] if the instance is stale; `WouldBlock` as
+/// above; `Interrupted` for a signal during the wait.
+pub fn drain(handle: AlsaPcmHandle, nonblocking: bool) -> KernelResult<()> {
+    let pid = crate::ipc::waiters::current_user_pid();
+    let task = crate::sched::current_task_id();
+    loop {
+        let (slot, resumed) = {
+            let mut table = ALSA_PCM_TABLE.lock();
+            let pcm = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
+            if pcm.state == STATE_OPEN {
+                return Ok(());
+            }
+            if pcm.capture || pcm.mixer_stream.is_none() {
+                pcm.state = STATE_SETUP;
+                return Ok(());
+            }
+            let resumed = pcm.state == STATE_PAUSED;
+            if matches!(pcm.state, STATE_PREPARED | STATE_RUNNING | STATE_PAUSED) {
+                pcm.state = STATE_DRAINING;
+            }
+            (pcm.mixer_stream, resumed)
+        };
+        if let (Some(sid), true) = (slot, resumed) {
+            audio_mixer::set_paused(sid, false);
+        }
+        if settle_drain(handle) {
+            return Ok(());
+        }
+        if nonblocking {
+            return Err(KernelError::WouldBlock);
+        }
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return Err(KernelError::Interrupted);
+        }
+        wait_for_room(pid, task, handle, || {
+            slot.is_none_or(|sid| audio_mixer::buffered(sid) == 0)
+        });
+    }
+}
+
+/// A draining substream whose ring has emptied is finished: move it to
+/// `SETUP`. Returns whether the substream is now out of `DRAINING` (or was
+/// never in it). Called wherever the state is looked at, so a non-blocking
+/// drain completes without anyone having to wait in the kernel.
+pub fn settle_drain(handle: AlsaPcmHandle) -> bool {
+    let slot = {
+        let table = ALSA_PCM_TABLE.lock();
+        match table.get(&handle.id()) {
+            Some(pcm) if pcm.state == STATE_DRAINING => pcm.mixer_stream,
+            _ => return true,
+        }
+    };
+    if slot.is_some_and(|sid| audio_mixer::buffered(sid) > 0) {
+        return false;
+    }
+    if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id())
+        && pcm.state == STATE_DRAINING
+    {
         pcm.state = STATE_SETUP;
     }
-    Ok(())
+    true
 }
 
 /// Pause (`enable == true`) or resume (`enable == false`) a running substream.
@@ -569,21 +631,24 @@ pub fn drain(handle: AlsaPcmHandle) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] for an illegal pause/resume transition
 ///   (pause requires `RUNNING`, resume requires `PAUSED`).
 pub fn pause(handle: AlsaPcmHandle, enable: bool) -> KernelResult<()> {
-    let mut table = ALSA_PCM_TABLE.lock();
-    let pcm = table
-        .get_mut(&handle.id())
-        .ok_or(KernelError::InvalidHandle)?;
-    match (enable, pcm.state) {
-        (true, STATE_RUNNING) => {
-            pcm.state = STATE_PAUSED;
-            Ok(())
+    let slot = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+        match (enable, pcm.state) {
+            (true, STATE_RUNNING) => pcm.state = STATE_PAUSED,
+            (false, STATE_PAUSED) => pcm.state = STATE_RUNNING,
+            _ => return Err(KernelError::InvalidArgument),
         }
-        (false, STATE_PAUSED) => {
-            pcm.state = STATE_RUNNING;
-            Ok(())
-        }
-        _ => Err(KernelError::InvalidArgument),
+        pcm.mixer_stream
+    };
+    // The mix leaves a paused stream's ring alone; told after the table lock
+    // is released (the module's lock order).
+    if let Some(sid) = slot {
+        audio_mixer::set_paused(sid, enable);
     }
+    Ok(())
 }
 
 /// Reset the substream position (`RESET`): zero the application pointer and
@@ -669,6 +734,8 @@ pub fn set_buffer_size(handle: AlsaPcmHandle, frames: u64) {
 /// mixer call is made while `ALSA_PCM_TABLE` is held.
 #[must_use]
 pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
+    // A drain that has finished reads as finished.
+    settle_drain(handle);
     let (
         state,
         frames_written,
@@ -807,15 +874,77 @@ pub fn write_frames(handle: AlsaPcmHandle, data: &[u8]) -> KernelResult<usize> {
 /// fd is immediately ready to be configured).
 #[must_use]
 pub fn writable(handle: AlsaPcmHandle) -> bool {
-    let table = ALSA_PCM_TABLE.lock();
-    match table.get(&handle.id()) {
-        None => false,
-        Some(pcm) if pcm.capture => false,
-        Some(pcm) => match pcm.mixer_stream {
-            Some(sid) => audio_mixer::writable(sid),
-            None => true,
-        },
+    // The slot is read under the table lock and the mixer asked after it is
+    // released: no mixer call under `ALSA_PCM_TABLE` (the module's lock
+    // order, which this broke until 2026-10-02).
+    let slot = {
+        let table = ALSA_PCM_TABLE.lock();
+        match table.get(&handle.id()) {
+            None => return false,
+            Some(pcm) if pcm.capture => return false,
+            Some(pcm) => pcm.mixer_stream,
+        }
+    };
+    slot.is_none_or(audio_mixer::writable)
+}
+
+/// [`write_frames`] for a blocking descriptor: wait for room until all of
+/// `data` is queued, as ALSA's `snd_pcm_lib_write` does, rather than answer
+/// `WouldBlock` when the ring is full. The output pump ([`crate::audio_out`])
+/// makes the room, and wakes the wait.
+///
+/// Returns the bytes queued: all of `data`, or fewer when a signal or an
+/// error ended the wait after some were.
+///
+/// # Errors
+///
+/// As [`write_frames`] when nothing was queued, and `Interrupted` for a
+/// signal that arrived before any was.
+pub fn write_frames_blocking(handle: AlsaPcmHandle, data: &[u8]) -> KernelResult<usize> {
+    let pid = crate::ipc::waiters::current_user_pid();
+    let task = crate::sched::current_task_id();
+    let mut done = 0usize;
+    loop {
+        let rest = data.get(done..).unwrap_or(&[]);
+        if rest.is_empty() {
+            return Ok(done);
+        }
+        match write_frames(handle, rest) {
+            Ok(n) => {
+                done = done.saturating_add(n);
+                continue;
+            }
+            Err(KernelError::WouldBlock) => {}
+            Err(e) => return if done > 0 { Ok(done) } else { Err(e) },
+        }
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(KernelError::Interrupted)
+            };
+        }
+        wait_for_room(pid, task, handle, || writable(handle));
     }
+}
+
+/// Park until the pump next takes from the rings -- unless `ready` is already
+/// true once registered, the register-then-recheck that loses no wake.
+fn wait_for_room(
+    pid: u64,
+    task: crate::sched::task::TaskId,
+    handle: AlsaPcmHandle,
+    ready: impl Fn() -> bool,
+) {
+    audio_mixer::register_room_waiter(task);
+    if !ready() {
+        crate::ipc::waiters::park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Io, handle.raw()),
+        );
+    }
+    audio_mixer::deregister_room_waiter(task);
 }
 
 /// Is a capture substream readable right now?
@@ -966,9 +1095,22 @@ pub fn self_test() -> KernelResult<()> {
     );
     pause(p, false)?;
     check!(state(p) == Some(STATE_RUNNING), "resume -> RUNNING");
-    // DRAIN -> SETUP, then re-prepare and START explicitly.
-    drain(p)?;
-    check!(state(p) == Some(STATE_SETUP), "drain -> SETUP");
+    // DRAIN, non-blocking: the 2 queued frames have not played -- nothing
+    // pulls the mixer here but the output pump, if a card is running one --
+    // so it answers WouldBlock in DRAINING (or Ok, the pump having played
+    // them already). Once they are played out, the state reads SETUP.
+    match drain(p, true) {
+        Ok(()) | Err(KernelError::WouldBlock) => {}
+        Err(e) => return Err(e),
+    }
+    let mut played = [0u8; 64];
+    // What the card would have read; how much is the mixer's business.
+    let _ = audio_mixer::mix_output(&mut played);
+    check!(
+        state(p) == Some(STATE_SETUP),
+        "drain -> SETUP once played out"
+    );
+    // Then re-prepare and START explicitly.
     prepare(p)?;
     start(p)?;
     check!(state(p) == Some(STATE_RUNNING), "explicit start -> RUNNING");

@@ -836,8 +836,8 @@ const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 /// `target` cannot hold it and its NUL -- what fit written all the same.
 fn b64_ntop(src: &[u8], target: &mut [u8]) -> Option<usize> {
     let mut n = 0usize;
-    let mut chunks = src.chunks_exact(3);
-    for c in &mut chunks {
+    let (groups, rest) = src.as_chunks::<3>();
+    for c in groups {
         if n + 4 > target.len() {
             return None;
         }
@@ -847,7 +847,6 @@ fn b64_ntop(src: &[u8], target: &mut [u8]) -> Option<usize> {
         target[n + 3] = BASE64[usize::from(c[2] & 0x3f)];
         n += 4;
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut input = [0u8; 3];
         input[..rest.len()].copy_from_slice(rest);

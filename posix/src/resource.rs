@@ -584,19 +584,24 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
 
 /// Get resource usage.
 ///
-/// On the kernel target, `ru_utime` is filled from the aggregate kernel
-/// "system" cycles (kernel + user code that's not IRQ/softirq/idle) and
-/// `ru_stime` is filled from aggregate IRQ + softirq cycles, both via
-/// `SYS_CPU_TIMES`.  All other fields are zeroed — we don't yet track
-/// per-process page-fault counts, RSS, I/O bytes, etc.
+/// The kernel's own accounting, through `SYS_PROCESS_GET_RUSAGE`: the
+/// calling process -- every thread it has and has had -- for
+/// `RUSAGE_SELF`, the descendants it has reaped for `RUSAGE_CHILDREN`, the
+/// calling thread for `RUSAGE_THREAD`. CPU time, page faults, context
+/// switches and (but for `RUSAGE_CHILDREN`) the peak resident set are real;
+/// every other field is zero because no counter exists behind it anywhere
+/// in the system (design-decisions §319).
 ///
-/// For `RUSAGE_CHILDREN` we return all-zero (no terminated-children
-/// accounting yet) so callers can still distinguish "no children" from
-/// EINVAL.  This matches glibc's behavior on systems without child
-/// tracking.
+/// Until 2026-10-06 this read `SYS_CPU_TIMES` -- the *machine's* system
+/// and interrupt time since boot -- and reported it as the caller's, every
+/// process the same growing number, with `RUSAGE_CHILDREN` all zero
+/// (`requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`;
+/// the kernel's call has existed since 2026-08-16).
 ///
-/// On host builds, the buffer is zero-filled (preserves existing test
-/// behavior).
+/// The fields are filled by [`rusage_from_counters`], the converter `wait4`
+/// uses for a reaped child: the kernel builds both images from one set of
+/// counters, so a parent reading its child's usage and the child reading its
+/// own cannot disagree.
 ///
 /// Validation order matches Linux's `kernel/sys.c::sys_getrusage`:
 ///
@@ -630,59 +635,165 @@ pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
         return -1;
     }
 
-    // SAFETY: Caller guarantees usage is valid for one Rusage.
-    unsafe {
-        core::ptr::write_bytes(usage, 0, 1);
+    let mut info = RusageInfo::default();
+    let r = kernel_rusage(who, &mut info);
+    if r < 0 {
+        // The kernel refuses a `who` the caller may not observe rather than
+        // answer with someone else's usage.
+        #[allow(clippy::cast_possible_truncation)] // -1 or 0 by translate's contract
+        return errno::translate(r) as i32;
     }
-
-    // On the kernel target, populate user/system CPU times from kernel
-    // aggregate stats.  RUSAGE_CHILDREN stays all-zero (no child tracking).
-    #[cfg(target_os = "none")]
-    {
-        if who == RUSAGE_SELF || who == RUSAGE_THREAD {
-            let system_ns = read_cpu_time_field_ns(0);
-            let irq_ns = read_cpu_time_field_ns(1);
-            let softirq_ns = read_cpu_time_field_ns(2);
-
-            // SAFETY: We just zero-filled the buffer above; pointer is valid.
-            unsafe {
-                (*usage).ru_utime = ns_to_timeval(system_ns);
-                (*usage).ru_stime = ns_to_timeval(irq_ns.saturating_add(softirq_ns));
-            }
-        }
-    }
-
+    // SAFETY: the caller guarantees `usage` is valid for one Rusage; the
+    // whole struct is written, its unmeasured fields and musl's reserved
+    // tail as zero.
+    unsafe { usage.write(rusage_from_counters(&info.counters())) };
     0
 }
 
-/// Read one aggregate-CPU-time field from the kernel.
-///
-/// Returns 0 on any negative return (out-of-range selector, etc.) so
-/// callers can use the value directly as a saturating-zero monotonic
-/// counter.
-#[cfg(target_os = "none")]
-#[allow(clippy::cast_sign_loss)]
-fn read_cpu_time_field_ns(which: u64) -> u64 {
-    let raw = crate::syscall::syscall1(crate::syscall::SYS_CPU_TIMES, which);
-    if raw < 0 { 0 } else { raw as u64 }
+/// `SYS_PROCESS_GET_RUSAGE`'s record (`kernel/src/syscall/handlers.rs`,
+/// `RUSAGE_INFO_SIZE`): the six counters `WaitInfo` ends with, in the same
+/// order and units, and then the peak resident set.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RusageInfo {
+    /// User CPU time, microseconds.
+    pub utime_us: u64,
+    /// System CPU time, microseconds.
+    pub stime_us: u64,
+    /// Faults resolved without I/O.
+    pub minflt: u64,
+    /// Faults that required I/O.
+    pub majflt: u64,
+    /// Voluntary context switches.
+    pub nvcsw: u64,
+    /// Involuntary context switches.
+    pub nivcsw: u64,
+    /// Peak resident set size, KiB; 0 for `RUSAGE_CHILDREN`, whose address
+    /// spaces are gone by the time anyone asks.
+    pub maxrss_kib: u64,
 }
 
-/// Convert a nanosecond duration into a POSIX `Timeval` (seconds + microseconds).
-#[cfg(target_os = "none")]
-#[allow(clippy::cast_possible_wrap)]
-fn ns_to_timeval(ns: u64) -> crate::time::Timeval {
-    const NS_PER_SEC: u64 = 1_000_000_000;
-    const NS_PER_USEC: u64 = 1_000;
-    let secs = ns / NS_PER_SEC;
-    let usec = (ns % NS_PER_SEC) / NS_PER_USEC;
-    crate::time::Timeval {
-        tv_sec: if secs > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            secs as i64
-        },
-        tv_usec: usec as i64,
+// The kernel writes 56 bytes; a record of another size would read its tail
+// as zero, or leave fields this side never sees.
+const _: () = assert!(core::mem::size_of::<RusageInfo>() == 56);
+
+impl RusageInfo {
+    /// The counters, as [`rusage_from_counters`] takes them.
+    pub(crate) const fn counters(&self) -> Counters {
+        Counters {
+            utime_us: self.utime_us,
+            stime_us: self.stime_us,
+            minflt: self.minflt,
+            majflt: self.majflt,
+            nvcsw: self.nvcsw,
+            nivcsw: self.nivcsw,
+            maxrss_kib: self.maxrss_kib,
+        }
     }
+}
+
+/// The counters the kernel keeps for a process, its reaped children or a
+/// thread -- `WaitInfo`'s last six and [`RusageInfo`]'s first six, in the
+/// same order and units -- and the peak resident set, which a reaped
+/// child's report has no counterpart for (0 there).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counters {
+    /// User CPU time, microseconds.
+    pub utime_us: u64,
+    /// System CPU time, microseconds.
+    pub stime_us: u64,
+    /// Minor faults.
+    pub minflt: u64,
+    /// Major faults.
+    pub majflt: u64,
+    /// Voluntary context switches.
+    pub nvcsw: u64,
+    /// Involuntary context switches.
+    pub nivcsw: u64,
+    /// Peak resident set size, KiB.
+    pub maxrss_kib: u64,
+}
+
+/// Render the kernel's counters as the `struct rusage` that `getrusage`,
+/// `wait3` and `wait4` promise: the measured fields filled, saturating
+/// rather than wrapping, and the rest zero -- not a false zero, since no
+/// counter exists behind them (design-decisions §319). The one converter
+/// for every path that reports usage.
+#[must_use]
+pub(crate) fn rusage_from_counters(c: &Counters) -> Rusage {
+    let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    Rusage {
+        ru_utime: us_to_timeval(c.utime_us),
+        ru_stime: us_to_timeval(c.stime_us),
+        ru_maxrss: count(c.maxrss_kib),
+        ru_minflt: count(c.minflt),
+        ru_majflt: count(c.majflt),
+        ru_nvcsw: count(c.nvcsw),
+        ru_nivcsw: count(c.nivcsw),
+        ..Rusage::default()
+    }
+}
+
+/// Split microseconds into a `timeval`, saturating rather than wrapping.
+#[inline]
+#[must_use]
+pub(crate) fn us_to_timeval(us: u64) -> crate::time::Timeval {
+    const US_PER_SEC: u64 = 1_000_000;
+    crate::time::Timeval {
+        tv_sec: i64::try_from(us / US_PER_SEC).unwrap_or(i64::MAX),
+        // `% 1_000_000` is < 2^20, so this conversion cannot fail.
+        tv_usec: i64::try_from(us % US_PER_SEC).unwrap_or(0),
+    }
+}
+
+/// Ask the kernel for `who`'s usage. 0, or the kernel's negative error.
+#[cfg(target_os = "none")]
+fn kernel_rusage(who: i32, info: &mut RusageInfo) -> i64 {
+    // `who` crosses as the sign-extended register the kernel reads back as
+    // an `i32` (`RUSAGE_CHILDREN` is -1).
+    #[allow(clippy::cast_sign_loss)]
+    let who_arg = i64::from(who) as u64;
+    crate::syscall::syscall3(
+        crate::syscall::SYS_PROCESS_GET_RUSAGE,
+        who_arg,
+        (&raw mut *info) as u64,
+        core::mem::size_of::<RusageInfo>() as u64,
+    )
+}
+
+/// The host has no kernel keeping counters: under test, what the test set
+/// for `who` ([`set_test_rusage`]); otherwise nothing measured.
+#[cfg(not(target_os = "none"))]
+#[allow(clippy::unnecessary_wraps)] // the target's shape
+fn kernel_rusage(who: i32, info: &mut RusageInfo) -> i64 {
+    #[cfg(test)]
+    {
+        if let Some(answer) = TEST_RUSAGE.with(|t| t.get()) {
+            let (want, result, record) = answer;
+            if want == who {
+                if result < 0 {
+                    return result;
+                }
+                *info = record;
+            }
+        }
+    }
+    let _ = (who, &info);
+    0
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// The host tests' kernel: `(who, result, record)` for one `who`.
+    static TEST_RUSAGE: core::cell::Cell<Option<(i32, i64, RusageInfo)>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Make this host test thread's kernel answer `who` with `result` and, when
+/// that is not an error, `record`.
+#[cfg(test)]
+pub(crate) fn set_test_rusage(answer: Option<(i32, i64, RusageInfo)>) {
+    TEST_RUSAGE.with(|t| t.set(answer));
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,6 +1806,85 @@ mod tests {
         assert_eq!(usage.ru_nsignals, 0);
         assert_eq!(usage.ru_nvcsw, 0);
         assert_eq!(usage.ru_nivcsw, 0);
+    }
+
+    /// `getrusage` reports the kernel's counters for the `who` asked -- here
+    /// the host stand-in's -- converted as `wait4` converts a reaped
+    /// child's: microseconds split into a `timeval`, counts saturating, the
+    /// unmeasured fields and musl's reserved tail written as zero. It
+    /// reported the machine's system and interrupt time until 2026-10-06.
+    #[test]
+    fn getrusage_reports_the_kernels_counters_for_who() {
+        let record = RusageInfo {
+            utime_us: 1_500_000,
+            stime_us: 250_001,
+            minflt: 7,
+            majflt: 2,
+            nvcsw: 30,
+            nivcsw: 4,
+            maxrss_kib: 2048,
+        };
+        for who in [RUSAGE_SELF, RUSAGE_CHILDREN, RUSAGE_THREAD] {
+            set_test_rusage(Some((who, 0, record)));
+            let mut usage = Rusage {
+                ru_nswap: 99,
+                __reserved: [-1; 16],
+                ..Rusage::default()
+            };
+            assert_eq!(getrusage(who, &mut usage), 0, "{who}");
+            assert_eq!(
+                (usage.ru_utime.tv_sec, usage.ru_utime.tv_usec),
+                (1, 500_000)
+            );
+            assert_eq!(
+                (usage.ru_stime.tv_sec, usage.ru_stime.tv_usec),
+                (0, 250_001)
+            );
+            assert_eq!(
+                (
+                    usage.ru_minflt,
+                    usage.ru_majflt,
+                    usage.ru_nvcsw,
+                    usage.ru_nivcsw,
+                    usage.ru_maxrss
+                ),
+                (7, 2, 30, 4, 2048)
+            );
+            assert_eq!(usage.ru_nswap, 0, "an unmeasured field is zero");
+            assert_eq!(usage.__reserved, [0; 16], "musl's reserved tail is written");
+        }
+        // Another `who`'s record is not this one's.
+        set_test_rusage(Some((RUSAGE_CHILDREN, 0, record)));
+        let mut usage = Rusage::default();
+        assert_eq!(getrusage(RUSAGE_SELF, &mut usage), 0);
+        assert_eq!(usage.ru_minflt, 0);
+        // Saturating, never wrapping.
+        set_test_rusage(Some((
+            RUSAGE_SELF,
+            0,
+            RusageInfo {
+                utime_us: u64::MAX,
+                minflt: u64::MAX,
+                ..RusageInfo::default()
+            },
+        )));
+        assert_eq!(getrusage(RUSAGE_SELF, &mut usage), 0);
+        assert_eq!(usage.ru_utime.tv_sec, 18_446_744_073_709);
+        assert_eq!(usage.ru_minflt, i64::MAX);
+        // A refusal: the kernel's error, translated, and nothing written.
+        set_test_rusage(Some((
+            RUSAGE_THREAD,
+            errno::native::PERMISSION_DENIED,
+            record,
+        )));
+        let mut usage = Rusage {
+            ru_minflt: 5,
+            ..Rusage::default()
+        };
+        assert_eq!(getrusage(RUSAGE_THREAD, &mut usage), -1);
+        assert_eq!(errno::get_errno(), errno::EACCES);
+        assert_eq!(usage.ru_minflt, 5, "nothing written on a refusal");
+        set_test_rusage(None);
     }
 
     #[test]

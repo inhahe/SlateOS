@@ -142,9 +142,22 @@ pub fn check() {
         // they legitimately send no heartbeats.  Reset stale count so
         // we don't carry over a partial count from before the CPU went
         // idle.
-        if crate::sched::cpu_is_idle(cpu) {
+        //
+        // Tickless idle is `apic::timer_stopped_on`. `sched::cpu_is_idle`,
+        // which this used to test alone, is the scheduler's idle *fallback*
+        // -- not where an AP idles -- so every idle AP was reported locked up
+        // ("heartbeat stuck at 0" for one that went idle at once), and
+        // "recovered" when it next ran a task (known-issues
+        // A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU).
+        if crate::apic::timer_stopped_on(cpu) || crate::sched::cpu_is_idle(cpu) {
             if let Some(sc) = STALE_COUNT.get(cpu) {
                 sc.store(0, Ordering::Relaxed);
+            }
+            if let Some(ls) = LAST_SEEN.get(cpu) {
+                ls.store(
+                    HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed)),
+                    Ordering::Relaxed,
+                );
             }
             continue;
         }

@@ -2,7 +2,12 @@
 # Does the cross-compiled musl bash actually execute? Run it on Linux first —
 # a static musl ELF runs unchanged there, so this isolates "did the port work"
 # from "does SlateOS load it".
-B=/tmp/bash-cross/bash
+#
+# The musl copy cross2.sh links from the same objects as the shipped bash
+# (build/spike/bash-musl.elf). It read /tmp/bash-cross/bash until 2026-10-05,
+# a tree that moved under $SLATE_WORK long before.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+B="$SLATE_SPIKE/bash-musl.elf"
 ls -l "$B"
 file "$B"
 echo "=== --version ==="

@@ -88,6 +88,8 @@ without its stdlib is 11 MB on the image that produces a process dying before
 | `--without-ensurepip`, `--disable-test-modules` | Megabytes of *Python* source. Cannot affect which libc symbols the interpreter core references. |
 | `ac_cv_file__dev_ptmx=no`, `ac_cv_file__dev_ptc=no` | `configure` cannot stat files on the target and hard-errors if left to guess. |
 | `ac_cv_buggy_getaddrinfo=no` | `configure` detects the well-known broken-`getaddrinfo` bug by **running** a test program. A cross build cannot, so it assumes the bug is present and errors out. Asserting "not buggy" is the correct cross answer and what distro cross-recipes do. The alternative `configure` suggests, `--disable-ipv6`, would silently compile a *different* interpreter with a smaller socket surface — the opposite of what a spike measuring libc surface wants. If our `getaddrinfo` is genuinely buggy that is a `posix/src` bug to fix, not a reason to build less of CPython. |
+| `CC` = the link wrapper | Since 2026-10-05 `configure`'s link checks are answered by our `libc.a`, not zig's musl, and `make` links the image's interpreter. See defect 3. |
+| `ac_cv_working_tzset=yes`, `--with-computed-gotos`, `ac_cv_aligned_required=no`, `ac_cv_broken_sem_getvalue=no`, `ac_cv_pthread_system_supported=yes` | Answers to tests `configure` would *run*, which a cross build cannot: each is SlateOS's, measured, and Ubuntu's glibc build of 3.12 records the same. See defect 3. |
 
 ## The two defects — why stage 1 measured the wrong interpreter
 
@@ -128,6 +130,39 @@ sysroot*. `MAKE_EXIT` is now 0 with zero error lines.
 The general lesson, which is not specific to CPython: **in a cross build, a
 probe that consults the host is not a failed probe, it is a wrong answer.**
 
+### 3. `configure` asked zig's musl, not our libc
+
+Measured 2026-10-05. `CC` was zig's `cc` for musl, so every function
+`configure` looked for was looked for in zig's musl `libc.a` -- and four that
+ours has, musl has not: `close_range`, `sem_clockwait`, `getwd`, `tmpnam_r`.
+CPython then used none of them on SlateOS. The one that mattered:
+`subprocess` closes a child's inherited descriptors with `close_range`, and
+without it falls back to listing `/proc/self/fd` through
+`syscall(SYS_getdents64)`, which our `syscall()` answers `ENOSYS` (and the
+kernel's `/proc/<pid>/fd` lists nothing for a native process anyway). So
+`close_fds=True`, the default, closed nothing -- read from both sides'
+code; no boot rung runs Python's `subprocess` yet.
+
+And a cross build cannot *run* configure's test programs, so each such test
+took its cross-compiling default. Compared with Ubuntu 24.04's `python3.12`
+(built on glibc 2.39, our library's reference): `time.tzset` was missing,
+the eval loop dispatched by `switch` instead of computed gotos,
+`multiprocessing.Semaphore.get_value()` raised, and two more defaults were
+wrong for x86-64 and for us (aligned access, `PTHREAD_SCOPE_SYSTEM`).
+
+Now `CC` is `slate_make_link_wrappers`' wrapper (as LLVM's build has it),
+which compiles each source of a one-step compile-and-link call -- autoconf's
+shape for every link test -- and links the objects itself; the run tests
+are answered with SlateOS's measured answers; and `pyconfig.h`
+differs from Ubuntu's only by the libraries SlateOS has not got (zlib, bz2,
+lzma, sqlite3, readline, curses, libffi, gdbm, bluetooth, dtrace), by
+`HAVE_DEV_PTMX` (no such file in devfs, and unread: CPython has `openpty`),
+and by two facts of musl's headers (`HAVE_STROPTS_H`,
+`HAVE_DECL_RTLD_MEMBER`) -- measured 2026-10-05. The
+interpreter `make` links is the image's; `python-control`, the same objects
+linked against musl with `control-shim.c` standing in for the four functions
+musl lacks, is what runs here.
+
 ### Three archives that live outside `libpython`
 
 Once modules went static, `_decimal`, `pyexpat`, `_elementtree` and the SHA-2
@@ -159,6 +194,14 @@ agree exactly:
 | **`MISSING_BY_SET_DIFFERENCE`** | **0** | **0** |
 | **`MISSING_AT_LINK`** (ld.lld's own report) | **0** | **0** |
 | `SLATE_LINK_EXIT` | 0 | 0 |
+
+Both columns' links were made with `zig cc -nostdlib`, which, it turned out on
+2026-10-01, puts zig's own musl `libc.a` behind ours on every link, so a
+function ours lacked would have come from musl rather than counting as missing
+(known-issues `D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC`). The first measure
+never involved the linker, and the link is now zig's `ld.lld` with exactly its
+inputs (`slate_make_link_wrappers` in `scripts/lib/worktree.sh`); relinked
+that way, the interpreter still has nothing undefined.
 
 The jump from 363 to 478 is the 52 extra C extension modules arriving, not a
 regression: those 115 symbols were always going to be needed by an interpreter
@@ -308,6 +351,16 @@ code object. Without it every traceback on SlateOS would name
 `/tmp/cpython-spike-<lane>/zipsrc/json/…`, a build-machine scratch directory
 that does not exist on the target and never will.
 
+**Added to the tree** beside `Lib/`: the one module `make install` puts in the
+library that `Lib/` does not hold, `_sysconfigdata__linux_x86_64-linux-gnu.py`,
+which configure writes into the build directory (`pybuilddir.txt` names it).
+`sysconfig` imports it for every `get_config_var`, `get_config_vars`,
+`get_path` and `get_paths`, so until 2026-10-05, when the zip first carried
+it, each of those raised `ModuleNotFoundError` on SlateOS. Its values are the
+cross build's -- prefix `/usr/local`, `LIBDIR` `/usr/local/lib`, where the
+image keeps this zip. `stdlib.sh` checks `get_config_var` and `get_path` in its
+workload, and the rootfs recipe warns, without stopping, when a zip lacks it.
+
 Dropped from the tree, with reasons: `test/` (~30 MB, and `--disable-test-modules`
 already removed its C half), `idlelib/` + `tkinter/` + `turtledemo/` (need Tcl/Tk),
 `lib2to3/` (removed upstream in 3.13), `ensurepip/` (we build `--without-ensurepip`),
@@ -321,8 +374,8 @@ thing.
 
 ## What `stdlib.sh` proves, and where
 
-The verification runs against the musl-linked control interpreter that `make`
-builds from the *identical objects* with the identical `MODLIBS`. `run.sh`
+The verification runs against the musl-linked control interpreter, `python-control`,
+that `run.sh` links from the *identical objects* with the identical `MODLIBS`. `run.sh`
 proves CPython compiles; `slatelink.sh` proves it links against our `libc.a`;
 this closes the remaining gap on the host, so that the only thing left untested
 is SlateOS itself.

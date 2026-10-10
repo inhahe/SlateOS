@@ -1,0 +1,27 @@
+[package]
+name = "sound"
+version = "0.1.0"
+edition = "2024"
+description = "System sounds: a sound file decoded, made the kernel mixer's stream, and played through the ALSA PCM device -- and the built-in sounds for a theme that brings none."
+
+[lib]
+path = "src/lib.rs"
+
+# The shell's sounds -- a notification arriving, the recycle bin emptied, a
+# screenshot taken -- and the login screen's. A sound theme's files are Ogg
+# (Vorbis, or Opus) or WAV, as the freedesktop sound theme specification has
+# them; the decoders are lane F's, held to Xiph's own sample for sample.
+[dependencies]
+# Ogg files taken apart into their streams' packets.
+ogg = { path = "../video/ogg" }
+# The sound of most `.oga` files a sound theme ships.
+vorbis = { path = "../video/vorbis" }
+# The sound of `.opus` files, decoded at 48 kHz: the mixer's own rate.
+opus = { path = "../video/opus" }
+
+[dev-dependencies]
+# Test fixtures only: a private temp directory per test, removed on drop.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

@@ -2191,6 +2191,16 @@ pub unsafe extern "C" fn fwrite_unlocked(
     unsafe { fwrite_items(ptr, size, nmemb, f) }
 }
 
+/// Where `byte` first occurs in `window`: the line readers' scan of a
+/// buffer, by the library's `memchr` -- sixteen bytes a step, where
+/// `iter().position` took one.
+#[inline]
+fn find_byte(window: &[u8], byte: u8) -> Option<usize> {
+    // SAFETY: the slice's own bytes.
+    let found = unsafe { crate::string::memchr(window.as_ptr(), i32::from(byte), window.len()) };
+    (!found.is_null()).then(|| (found as usize).wrapping_sub(window.as_ptr() as usize))
+}
+
 /// `fgets`'s body: glibc's `_IO_fgets`.  At most `n - 1` bytes, through the
 /// first newline.  NULL if nothing was read, or if an error *new to this
 /// call* stopped it (other than `EAGAIN`, where glibc returns the part read,
@@ -2230,7 +2240,7 @@ unsafe fn fgets_raw(s: *mut u8, n: i32, f: *mut File) -> *mut u8 {
                     usize::try_from(file.rend.offset_from(file.rpos)).unwrap_or(0),
                 )
             };
-            let (line, nl) = match avail.iter().position(|&b| b == b'\n') {
+            let (line, nl) = match find_byte(avail, b'\n') {
                 Some(i) => (i.wrapping_add(1), true),
                 None => (avail.len(), false),
             };
@@ -2499,7 +2509,7 @@ pub(crate) unsafe fn getdelim_raw(
                 file.rpos,
                 usize::try_from(file.rend.offset_from(file.rpos)).unwrap_or(0),
             );
-            let hit = window.iter().position(|&b| b == d);
+            let hit = find_byte(window, d);
             let len = hit.map_or(window.len(), |i| i.wrapping_add(1));
             let Some(needed) = cur.checked_add(len).and_then(|x| x.checked_add(1)) else {
                 errno::set_errno(errno::EOVERFLOW);
@@ -3978,6 +3988,43 @@ pub fn capture_std_stream(stream: *mut u8, f: impl FnOnce()) -> std::vec::Vec<u8
         unsafe { sync(file) };
     }
     sink
+}
+
+/// What `f` writes to standard output and to standard error, both caught at
+/// once, as [`capture_std_stream`] catches one -- for code whose answer goes
+/// to one and its complaints to the other in a single call (argp's).
+#[cfg(test)]
+pub fn capture_std_streams(f: impl FnOnce()) -> (std::vec::Vec<u8>, std::vec::Vec<u8>) {
+    let _g = lock_std_streams_for_test();
+    let (Some(out), Some(err)) = (
+        stream_to_file(stdout_stream()),
+        stream_to_file(stderr_stream()),
+    ) else {
+        panic!("capture_std_streams: no standard streams");
+    };
+    let mut out_sink: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut err_sink: std::vec::Vec<u8> = std::vec::Vec::new();
+    {
+        // SAFETY: static streams, which outlive the guards; locked in one
+        // order, standard output first.
+        let _lo = unsafe { locked(out) };
+        // SAFETY: as above.
+        let _le = unsafe { locked(err) };
+        // SAFETY: locked.
+        first_use(unsafe { &mut *out });
+        // SAFETY: locked.
+        first_use(unsafe { &mut *err });
+        // SAFETY: locked; the sinks outlive the swaps, undone first.
+        let _so = unsafe { Swapped::new(out, (&raw mut out_sink).cast()) };
+        // SAFETY: as above.
+        let _se = unsafe { Swapped::new(err, (&raw mut err_sink).cast()) };
+        f();
+        // SAFETY: locked.
+        unsafe { sync(out) };
+        // SAFETY: locked.
+        unsafe { sync(err) };
+    }
+    (out_sink, err_sink)
 }
 
 /// A stream's far end swapped for [`capture_std_stream`]'s sink, and put

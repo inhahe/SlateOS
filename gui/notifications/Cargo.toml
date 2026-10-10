@@ -16,5 +16,10 @@ oswindow = { path = "../window" }
 # suppressed. See known-issues.md.
 tzrules = { path = "../../tzrules" }
 
+[dev-dependencies]
+# The sweep that proves every colour drawn is the palette's
+# (`palette_check::assert_drawn_from`), in both modes.
+appearance = { path = "../appearance", features = ["testing"] }
+
 [lints]
 workspace = true

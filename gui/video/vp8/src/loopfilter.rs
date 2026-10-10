@@ -33,8 +33,8 @@
     reason = "values are clamped to i8 before they become i8, and turned back into pixels by flipping the top bit, as libvpx's signed chars are"
 )]
 
-use crate::frame::Frame;
-use crate::modes::{B_PRED, ModeGrid, SPLITMV};
+use crate::frame::{Frame, Target};
+use crate::modes::{B_PRED, ModeGrid, ModeInfo, SPLITMV};
 
 /// The highest filter level.
 pub(crate) const MAX_LOOP_FILTER: usize = 63;
@@ -387,82 +387,106 @@ pub(crate) fn filter_row(
     simple: bool,
     key_frame: bool,
 ) {
-    let frame_type = usize::from(!key_frame);
+    let mut t = frame.target();
     for mb_col in 0..grid.mb_cols {
-        let mi = grid.get(mb_row, mb_col);
-        let skip_lf = mi.mode != B_PRED && mi.mode != SPLITMV && mi.mb_skip_coeff;
-        let mode_index = usize::from(MODE_LF_LUT[usize::from(mi.mode.min(9))]);
-        let level =
-            lfi.lvl[usize::from(mi.segment_id & 3)][usize::from(mi.ref_frame & 3)][mode_index];
-        if level == 0 {
-            continue;
-        }
-        let level = usize::from(level);
-        if simple {
-            let y = &mut frame.planes[0];
-            let (at, stride) = (y.at(mb_col * 16, mb_row * 16), y.stride);
-            let (mblim, blim) = (lfi.mblim[level], lfi.blim[level]);
-            if mb_col > 0 {
-                simple_edge(&mut y.data, at, 1, stride, mblim);
-            }
-            if !skip_lf {
-                for k in [4, 8, 12] {
-                    simple_edge(&mut y.data, at + k, 1, stride, blim);
-                }
-            }
-            if mb_row > 0 {
-                simple_edge(&mut y.data, at, stride, 1, mblim);
-            }
-            if !skip_lf {
-                for k in [4, 8, 12] {
-                    simple_edge(&mut y.data, at + k * stride, stride, 1, blim);
-                }
-            }
-            continue;
-        }
-        let mb = Thresholds {
-            edge: lfi.mblim[level],
-            interior: lfi.lim[level],
-            hev: lfi.hev_thr[frame_type][level],
-        };
-        let b = Thresholds {
-            edge: lfi.blim[level],
-            ..mb
-        };
-        // libvpx's order: the left edge, the inner vertical edges, the top
-        // edge, the inner horizontal edges; each over luma then chroma.
+        filter_mb(
+            &mut t,
+            grid.get(mb_row, mb_col),
+            lfi,
+            (mb_row, mb_col),
+            simple,
+            key_frame,
+        );
+    }
+}
+
+/// Filter the macroblock at `(mb_row, mb_col)` of `t`, whose modes are `mi`:
+/// its left edge, the edges inside it, its top edge -- the order libvpx's
+/// row filters take, and its threads take a macroblock at a time
+/// (`mt_decode_mb_rows`). Its left and top edges reach three pixels into
+/// the macroblocks there.
+pub(crate) fn filter_mb(
+    t: &mut Target<'_>,
+    mi: &ModeInfo,
+    lfi: &LoopFilterInfo,
+    (mb_row, mb_col): (usize, usize),
+    simple: bool,
+    key_frame: bool,
+) {
+    let frame_type = usize::from(!key_frame);
+    let skip_lf = mi.mode != B_PRED && mi.mode != SPLITMV && mi.mb_skip_coeff;
+    let mode_index = usize::from(MODE_LF_LUT[usize::from(mi.mode.min(9))]);
+    let level = lfi.lvl[usize::from(mi.segment_id & 3)][usize::from(mi.ref_frame & 3)][mode_index];
+    if level == 0 {
+        return;
+    }
+    let level = usize::from(level);
+    if simple {
+        let (at, stride) = (t.at(0, mb_col * 16, mb_row * 16), t.strides[0]);
+        let y = &mut *t.planes[0];
+        let (mblim, blim) = (lfi.mblim[level], lfi.blim[level]);
         if mb_col > 0 {
-            for (p, plane) in frame.planes.iter_mut().enumerate() {
-                let (size, count) = if p == 0 { (16, 2) } else { (8, 1) };
-                let (at, stride) = (plane.at(mb_col * size, mb_row * size), plane.stride);
-                mb_edge(&mut plane.data, at, 1, stride, count, mb);
-            }
+            simple_edge(y, at, 1, stride, mblim);
         }
         if !skip_lf {
-            for (p, plane) in frame.planes.iter_mut().enumerate() {
-                let (size, count) = if p == 0 { (16, 2) } else { (8, 1) };
-                let (at, stride) = (plane.at(mb_col * size, mb_row * size), plane.stride);
-                let inner: &[usize] = if p == 0 { &[4, 8, 12] } else { &[4] };
-                for &k in inner {
-                    block_edge(&mut plane.data, at + k, 1, stride, count, b);
-                }
+            for k in [4, 8, 12] {
+                simple_edge(y, at + k, 1, stride, blim);
             }
         }
         if mb_row > 0 {
-            for (p, plane) in frame.planes.iter_mut().enumerate() {
-                let (size, count) = if p == 0 { (16, 2) } else { (8, 1) };
-                let (at, stride) = (plane.at(mb_col * size, mb_row * size), plane.stride);
-                mb_edge(&mut plane.data, at, stride, 1, count, mb);
-            }
+            simple_edge(y, at, stride, 1, mblim);
         }
         if !skip_lf {
-            for (p, plane) in frame.planes.iter_mut().enumerate() {
-                let (size, count) = if p == 0 { (16, 2) } else { (8, 1) };
-                let (at, stride) = (plane.at(mb_col * size, mb_row * size), plane.stride);
-                let inner: &[usize] = if p == 0 { &[4, 8, 12] } else { &[4] };
-                for &k in inner {
-                    block_edge(&mut plane.data, at + k * stride, stride, 1, count, b);
-                }
+            for k in [4, 8, 12] {
+                simple_edge(y, at + k * stride, stride, 1, blim);
+            }
+        }
+        return;
+    }
+    let mb = Thresholds {
+        edge: lfi.mblim[level],
+        interior: lfi.lim[level],
+        hev: lfi.hev_thr[frame_type][level],
+    };
+    let b = Thresholds {
+        edge: lfi.blim[level],
+        ..mb
+    };
+    // Each plane's macroblock: where it starts, its stride, and how many
+    // eight-pixel runs an edge of it is.
+    let place = |t: &Target<'_>, p: usize| {
+        let (size, count) = if p == 0 { (16, 2) } else { (8, 1) };
+        (t.at(p, mb_col * size, mb_row * size), t.strides[p], count)
+    };
+    // libvpx's order: the left edge, the inner vertical edges, the top
+    // edge, the inner horizontal edges; each over luma then chroma.
+    if mb_col > 0 {
+        for p in 0..3 {
+            let (at, stride, count) = place(t, p);
+            mb_edge(t.planes[p], at, 1, stride, count, mb);
+        }
+    }
+    if !skip_lf {
+        for p in 0..3 {
+            let (at, stride, count) = place(t, p);
+            let inner: &[usize] = if p == 0 { &[4, 8, 12] } else { &[4] };
+            for &k in inner {
+                block_edge(t.planes[p], at + k, 1, stride, count, b);
+            }
+        }
+    }
+    if mb_row > 0 {
+        for p in 0..3 {
+            let (at, stride, count) = place(t, p);
+            mb_edge(t.planes[p], at, stride, 1, count, mb);
+        }
+    }
+    if !skip_lf {
+        for p in 0..3 {
+            let (at, stride, count) = place(t, p);
+            let inner: &[usize] = if p == 0 { &[4, 8, 12] } else { &[4] };
+            for &k in inner {
+                block_edge(t.planes[p], at + k * stride, stride, 1, count, b);
             }
         }
     }

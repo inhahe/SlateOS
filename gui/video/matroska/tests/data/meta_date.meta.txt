@@ -1,0 +1,8 @@
+# meta_date.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag title=
+tag encoder=dated
+tag creation_time=2020-01-02T03:04:05.678901Z
+stream 0 track
+tag language=eng

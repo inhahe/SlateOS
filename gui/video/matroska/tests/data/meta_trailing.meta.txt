@@ -1,0 +1,27 @@
+# meta_trailing.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag title=Trailing
+tag encoder=hand
+tag ALBUM/ARTIST=Someone
+tag ALBUM/ARTIST/URL=u
+tag ALBUM/TITLE=Titre
+tag ALBUM/TITLE-fre=Titre
+stream 0 track
+tag language=eng
+tag track=3
+tag ENCODER=x
+stream 1 picture png 217 42c022341743ddfe829c4c4cf0fdb278
+tag filename=cover.png
+tag mimetype=image/png
+tag title=Front
+stream 2 attachment ttf 30 58bde98916a78f528eff2862bc092c92
+tag filename=f.ttf
+tag mimetype=application/x-truetype-font
+tag NOTE=a font
+chapter 1 0 400000000
+tag title=Start
+chapter 2 400000000 700000000
+tag TITLE=Tagged middle
+chapter 3 700000000 900000000
+tag title=End

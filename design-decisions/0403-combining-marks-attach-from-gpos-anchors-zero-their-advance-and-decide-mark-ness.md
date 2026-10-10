@@ -89,3 +89,5 @@ with GSUB and kerning), `gui/font/src/sfnt.rs` (`Face::is_mark`,
 (`ShapedGlyph::offset`), `gui/font/src/scaled.rs` (`shape`'s fourth pass,
 `attach_marks`, `glyph_mask`, `draw_text`), `gui/font/src/system.rs`,
 `gui/compositor/src/main.rs` (`RenderEngine::draw_text`).
+
+**Revisited 2026-10-05 (lane F):** point 2 is superseded by §1359 -- where a face has a `GlyphClassDef`, the class alone decides mark-ness, as HarfBuzz reads it; attachment, which the union existed for, is by lookup coverage in `gpos.rs` whatever the class.

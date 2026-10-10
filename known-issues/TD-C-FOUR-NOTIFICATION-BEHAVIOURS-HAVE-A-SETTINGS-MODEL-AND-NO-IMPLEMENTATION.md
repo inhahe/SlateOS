@@ -1,14 +1,39 @@
 ## TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION
 
-**In short:** the desktop can show you a notification and let you dismiss it,
-and that is all it can do. It cannot put the banner somewhere else, make it
-disappear on its own after a while, group several from one program together,
-or forget old ones. A 2,526-line module in the shell described settings for all
-four as though they existed. That module was deleted on 2026-09-15 because
-nothing anywhere read it; this entry is what it knew, kept so the next person
-builds the behaviour rather than a second copy of the settings for it.
+**In short:** when this was written, the desktop could show you a
+notification and let you dismiss it, and that was all. Since then its
+notifications pop up and go by themselves, and are kept across a restart for
+as long as the user says (both below). What they still cannot do is group
+several from one program together. A 2,526-line module in the shell
+described settings for all four as though they existed. That module was
+deleted on 2026-09-15 because nothing anywhere read it; this entry is what it
+knew, kept so the next person builds the behaviour rather than a second copy
+of the settings for it.
 
 **Date:** 2026-09-15. **Lane:** C.
+
+**Narrowed 2026-09-29 -- two of the four behaviours exist now, neither as a
+setting.** Notifications pop up and go by themselves (design-decisions §1447,
+`gui/desktop/src/toasts.rs`): after 4, 6 or 10 seconds by priority, an urgent
+one when closed -- the `AutoDismissDelay` this entry called the one a user
+would miss first, with the time fixed by priority rather than chosen. They
+appear in one place, the bottom-right corner above the taskbar -- a
+`BannerPosition` with one value. And a notification's right-click menu
+(§1450) turns its program off, which is `AppNotificationPrefs`' "enabled".
+Still not built: `GroupingMode` (the pane groups by time, never by program)
+and `HistoryRetention` (the pane keeps a notification until it is dismissed,
+and forgets them all when the desktop restarts, so there is as yet no
+history old enough to retire). The order below still holds for either:
+behaviour first, then the field in `gui/notifsettings`, then the control.
+
+**Narrowed 2026-10-05 -- three of the four exist; `GroupingMode` is what is
+left.** The notifications are kept across a restart now, and forgotten after
+a week (design-decisions §1468, `gui/desktop/src/notif_history.rs`): the
+behaviour first, then the field -- `notifsettings::HistoryRetention`,
+`history.days` in `notifications.yaml`, 0 to 365 -- and the control is asked
+of lane E (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+So of the four concepts below only grouping several notifications from one
+program together has neither behaviour nor setting.
 
 **What was deleted.** `gui/desktop/src/notification_settings.rs` -- an island
 under `scripts/orphan-modules-baseline.txt`, referenced by nothing but its own

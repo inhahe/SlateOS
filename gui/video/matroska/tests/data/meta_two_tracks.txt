@@ -1,0 +1,5 @@
+# meta_two_tracks.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+stream 1 snow 1/1000
+packet 0 0 N/A 8 184 K__ 4a608bb1507a52cbb1e67131e2dc3842 -
+packet 1 0 N/A 8 198 K__ edc1c9cb63192932dd3e25c069ad05e5 -

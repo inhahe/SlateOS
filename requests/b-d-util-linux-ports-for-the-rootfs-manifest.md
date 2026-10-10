@@ -1,6 +1,6 @@
 # B → D: util-linux ports and `journalctl` for `scripts/rootfs-bin-manifest.txt`
 
-**Status:** OPEN — for lane D: add the names below to the manifest.
+**Status:** ✅ DONE 2026-10-01 by lane D, superseded by `b-d-stage-every-program-that-builds.md` -- see the end.
 
 **From:** lane B. **Date:** 2026-09-26.
 
@@ -44,3 +44,9 @@ writes.
 ten come to roughly 8 MiB. Together with the coreutils request's thirty-one
 (roughly 25 MiB) that is about 33 MiB more than the 59 MiB the header
 records, against its 96 MiB budget.
+
+## Lane D — done, 2026-10-01, by the request that superseded it
+
+Every program the workspace builds is on the image now, these among them:
+`requests/b-d-stage-every-program-that-builds.md` has the reply, and
+`design-decisions.md` §1164 the details.

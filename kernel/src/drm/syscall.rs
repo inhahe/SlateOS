@@ -217,10 +217,14 @@ pub fn sys_drm_gem_mmap(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::OutOfMemory);
     }
 
+    // SHARED: the display engine scans these frames out, so they are shared
+    // by design -- a fork must not turn them copy-on-write, or the parent's
+    // next draw would land in a private copy nobody displays.
     let page_flags = PageFlags::PRESENT
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::WRITABLE
-        | PageFlags::NO_EXECUTE;
+        | PageFlags::NO_EXECUTE
+        | PageFlags::SHARED;
 
     let hhdm = match page_table::hhdm() {
         Some(h) => h,

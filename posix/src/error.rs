@@ -198,9 +198,7 @@ fn report(
         Some(print_progname) => print_progname(),
         None => {
             // SAFETY: a plain read of the pointer `__libc_start_main` set.
-            put_cstr(out, unsafe {
-                core::ptr::addr_of!(crate::crt::__progname_full).read()
-            });
+            put_cstr(out, unsafe { crate::crt::progname_full_slot().read() });
             put(out, if at.is_some() { b":" } else { b": " });
         }
     }
@@ -469,8 +467,8 @@ mod tests {
 
     /// The program's name in the host's messages: `crt`'s default.
     fn full() -> String {
-        // SAFETY: a plain read of a static C string's pointer.
-        let p = unsafe { core::ptr::addr_of!(crate::crt::__progname_full).read() };
+        // SAFETY: a plain read of this thread's name, a C string's pointer.
+        let p = unsafe { crate::crt::progname_full_slot().read() };
         // SAFETY: a C string.
         unsafe { core::ffi::CStr::from_ptr(p.cast()) }
             .to_string_lossy()

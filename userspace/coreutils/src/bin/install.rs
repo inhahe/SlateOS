@@ -160,7 +160,17 @@ enum Request {
     Run(Box<Flags>, Vec<OsString>),
 }
 
+// Before `main`, so that `stdfd::restore` still sees the descriptors
+// `install` was given: `install -v a b >&-` is `write error: Bad file
+// descriptor`, as GNU's is, not a run that reported into the `/dev/null`
+// Rust's runtime would have put there.
+coreutils::guard_std_fds!();
+
+/// The descriptors as given, then the funnel: a diagnostic that could not be
+/// written turns the earned status into a failure, as upstream's `atexit
+/// (close_stdout)` does on every exit path.
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -174,13 +184,20 @@ fn run_main() -> ExitCode {
         diag!("install: {w}");
     }
     match parsed {
+        // Through standard output's `Stream` to `close_stdout`: `print!` would
+        // panic on a full disk and pass a closed descriptor as success.
         Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
+            let mut out = Stream::stdout();
+            // A failed write is the stream's to remember and the close's to
+            // report.
+            let _ = out.write_all(help_text().as_bytes());
+            stdfd::close_stdout("install", out, ExitCode::SUCCESS)
         }
         Ok(Request::Version) => {
-            println!("install (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
+            let mut out = Stream::stdout();
+            // As above.
+            let _ = out.write_all(b"install (SlateOS coreutils) 0.1.0\n");
+            stdfd::close_stdout("install", out, ExitCode::SUCCESS)
         }
         Ok(Request::Run(flags, operands)) => {
             // Before anything is created: `install.c:808`.

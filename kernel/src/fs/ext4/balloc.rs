@@ -442,7 +442,15 @@ pub fn free_block(
     Ok(())
 }
 
-/// Free a contiguous range of blocks.
+/// Free a contiguous range of blocks: one bitmap read and one write per block
+/// group the range touches. (It used to free block by block, reading and
+/// writing a bitmap each time: two million round trips to free an 8 GiB
+/// file, which a truncate now asks for.)
+///
+/// A block in the range that is already free is a filesystem error (a double
+/// free): the range's other blocks are still freed, and the call then answers
+/// `InvalidArgument`, as [`free_block`] does for a single block.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn free_blocks(
     reader: &BlockReader,
     sb: &mut ParsedSuperblock,
@@ -450,10 +458,59 @@ pub fn free_blocks(
     start_block: u64,
     count: u32,
 ) -> KernelResult<()> {
-    // For simplicity, free each block individually.
-    // A production implementation would batch within the same group.
-    for i in 0..u64::from(count) {
-        free_block(reader, sb, group_descs, start_block.saturating_add(i))?;
+    let blocks_per_group = u64::from(sb.raw.s_blocks_per_group);
+    let first_data = u64::from(sb.raw.s_first_data_block);
+    if count == 0 {
+        return Ok(());
+    }
+    if blocks_per_group == 0 || start_block < first_data {
+        return Err(KernelError::InvalidArgument);
+    }
+    let end = start_block
+        .checked_add(u64::from(count))
+        .ok_or(KernelError::InvalidArgument)?;
+    let mut double_free = false;
+    let mut cur = start_block;
+    while cur < end {
+        let relative = cur - first_data;
+        let group = relative / blocks_per_group;
+        let group_idx = usize::try_from(group).map_err(|_| KernelError::InvalidArgument)?;
+        let group_end = first_data + (group + 1) * blocks_per_group;
+        let seg_end = end.min(group_end);
+        let first_bit = relative % blocks_per_group;
+
+        let gd = group_descs
+            .get_mut(group_idx)
+            .ok_or(KernelError::InvalidArgument)?;
+        let mut bitmap = read_block_bitmap(reader, sb, gd)?;
+        let mut freed = 0u64;
+        for offset in 0..(seg_end - cur) {
+            let bit =
+                u32::try_from(first_bit + offset).map_err(|_| KernelError::InvalidArgument)?;
+            if bitmap_test(&bitmap, bit) {
+                bitmap_clear(&mut bitmap, bit);
+                freed += 1;
+            } else {
+                double_free = true;
+            }
+        }
+        // Write bitmap (stamps checksum in GD).
+        write_block_bitmap(reader, sb, gd, &bitmap)?;
+        for _ in 0..freed {
+            increment_gd_free_blocks(gd, sb.is_64bit);
+        }
+        sb.free_block_count = sb.free_block_count.saturating_add(freed);
+        update_sb_free_blocks(&mut sb.raw, sb.free_block_count, sb.is_64bit);
+        // Coherence (design-decisions §38), as `free_block` does: these
+        // blocks may come back as regular-file data, written past the
+        // buffer cache, so no stale metadata entry may outlive them.
+        for block_nr in cur..seg_end {
+            reader.invalidate_block(block_nr);
+        }
+        cur = seg_end;
+    }
+    if double_free {
+        return Err(KernelError::InvalidArgument);
     }
     Ok(())
 }

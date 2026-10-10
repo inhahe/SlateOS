@@ -403,6 +403,49 @@ CORPUS = [
     # A combining grapheme joiner, which is ignorable *and* a combining mark.
     # The two properties are not exclusive, and the mark path must not keep it.
     "a\\u034fb",
+    # A mark *after* a variation selector the face has no glyph for. The
+    # selector's missing-glyph box loses its width before the acute is
+    # measured back to its `a` (HarfBuzz's `zero_width_default_ignorables`
+    # precedes `propagate_attachment_offsets`); lose it afterwards and the
+    # acute lands a whole box to the left of its letter. 157 faces did, until
+    # 2026-10-05.
+    "a\\ufe0f\\u0301",
+    # --- kerning across a mark ---
+    #
+    # A face whose kerning is the legacy `kern` table kerns these pairs across
+    # the accent, as HarfBuzz's `hb_kern_machine_t` reads that table with
+    # `IgnoreMarks` -- about ninety host faces disagreed until 2026-10-05. And
+    # where `GPOS` attaches the accent, the legacy kern is read inside the pass,
+    # before the attachment is measured, so the accent stays on its letter
+    # (Segoe UI Italic and Tahoma put it 92 and 24 units off). The first string
+    # also holds Linux Libertine's Graphite build, whose `GDEF` classes its
+    # combining diaeresis a base: it keeps its width, whatever the `mark`
+    # lookup's coverage says.
+    "V\\u0308A",
+    "T\\u0301o",
+    # --- joining outside Arabic ---
+    #
+    # N'Ko and Mongolian join through HarfBuzz's USE shaper and Syriac through
+    # its Arabic one, and a face can call either off by filing its features
+    # under `DFLT` -- or, for the USE scripts only, under `latn` -- which takes
+    # the letters' joining forms away with it. Each word below joins in the
+    # faces made for it (Ebrima, Estrangelo Edessa, Mongolian Baiti) and in
+    # nothing else on the host.
+    "\\u07ca\\u07cb\\u07cc",
+    "\\u0712\\u0713\\u0714",
+    "\\u1820\\u1821\\u1822",
+    # --- emoji sequences ---
+    #
+    # A colour face draws these as one picture only if the shaper forms the
+    # ligature the face writes for the whole sequence: a family joined by
+    # ZWJs, a flag from two regional indicators, a keycap from a digit, VS16
+    # and the enclosing keycap, a hand with its skin tone. A face without them
+    # draws the parts, which is a different question with the same answer
+    # from both halves.
+    "\\U0001f468\\u200d\\U0001f469\\u200d\\U0001f467",
+    "\\U0001f1fa\\U0001f1f8",
+    "1\\ufe0f\\u20e3",
+    "\\U0001f44d\\U0001f3fd",
     # --- language ---
     #
     # A language selects a LangSysRecord in place of the script's default

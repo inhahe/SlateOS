@@ -265,7 +265,8 @@ fn run_main() -> ExitCode {
         files.push(OsString::from("-"));
     }
 
-    let mut stdin = Source::new(Box::new(io::stdin().lock()));
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+    let mut stdin = Source::new(Box::new(BufReader::new(stdfd::RawStdin)));
 
     let outcome = if settings.serial {
         paste_serial(&files, &mut stdin, &settings, &mut out)
@@ -279,8 +280,25 @@ fn run_main() -> ExitCode {
     // overrides its status, so a run that failed for its own reason still
     // delivers what it had written -- and still says so if it could not.
     let earned = match outcome {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+        Ok(ok) => {
+            // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) error
+            // (EXIT_FAILURE, errno, "-")`. Only a run that did not end in a
+            // fatal error gets here, and by then every `-` operand has been
+            // read. Measured, `paste - <&-` says `paste: -: Bad file
+            // descriptor` twice: the read, then this.
+            let mut closed = true;
+            if files.iter().any(|f| f == "-")
+                && let Err(e) = stdfd::close_stdin()
+            {
+                diag!("paste: -: {}", strerror(&e));
+                closed = false;
+            }
+            if ok && closed {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
         Err(trouble) => trouble.report(),
     };
 

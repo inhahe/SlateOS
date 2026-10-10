@@ -28,6 +28,14 @@ compiled with `zig c++` against zig's musl headers, then linked `-nostdlib`
 against `toolchain/sysroot/lib/libc.a` plus zig's `libc++`, `libc++abi`,
 `libunwind` and `libcompiler_rt`.
 
+> **2026-10-01:** `zig c++ -nostdlib` turned out to put zig's own musl
+> `libc.a` behind ours on every link, so a function ours lacked would have
+> come from musl rather than counting as missing (known-issues
+> `D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC`). The link is now zig's `ld.lld`
+> with exactly its inputs (`slate_make_link_wrappers` in
+> `scripts/lib/worktree.sh`), and relinked that way CMake has nothing
+> undefined: the results below stand.
+
 Configure and the full build both succeed on a cross toolchain with no source
 changes — 19 static archives, on the first attempt. The link did not, and the
 twenty names it was missing were the finding:

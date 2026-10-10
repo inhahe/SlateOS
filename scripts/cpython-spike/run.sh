@@ -61,10 +61,77 @@ echo "BUILD_PYTHON=$("$BUILD_PY" -V 2>&1)"
 
 TARBALL="Python-$VER.tar.xz"
 [ -f "$TARBALL" ] || curl -sSLO "https://www.python.org/ftp/python/$VER/$TARBALL"
+
+# CONFIGURED AGAINST SLATEOS'S libc.a, NOT ZIG'S MUSL (2026-10-05)
+#
+# CC is the link wrapper (scripts/lib/worktree.sh, slate_make_link_wrappers):
+# it compiles with zig's cc and links with zig's ld.lld against our libc.a
+# alone, so every function configure looks for is answered by the library the
+# interpreter will run on. Until 2026-10-05 configure linked its checks
+# against zig's musl, which has not got close_range, sem_clockwait, getwd or
+# tmpnam_r, so CPython used none of them on SlateOS, where all four are there.
+# Without close_range, subprocess's close_fds closed nothing: _posixsubprocess
+# fell back to listing /proc/self/fd with getdents64, which a native process
+# cannot (known-issues
+# D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC).
+#
+# The interpreter `make` links is therefore SlateOS's, and does not run under
+# WSL. What stdlib.sh and the fastpy check run there is python-control, linked
+# at the end of this script from the same objects against musl.
+SYSCOPY="/tmp/slate-sysroot-cpython-$SLATE_LANE"
+mkdir -p "$SYSCOPY"
+cp "$SLATE_SYSROOT/libc.a" "$SLATE_SYSROOT/libunwind.a" "$SYSCOPY/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SYSCOPY" || exit 1
+
+# configure's answers to the questions it would answer by RUNNING a test
+# program, which a cross build cannot; left alone, it takes each one's
+# cross-compiling default. Each is SlateOS's true answer, measured, and each
+# is also what Ubuntu 24.04's python3.12, built on glibc 2.39, our library's
+# reference, records (sysconfig):
+#
+#   ac_cv_working_tzset=yes        our tzset is glibc's (posix/src/tz.rs replays
+#       glibc 2.39's answers). glibc itself fails configure's test -- for
+#       TZ=UTC+0 it sets tzname[1] to "UTC" where the test wants "" -- and
+#       Ubuntu's build has time.tzset all the same. The default, no, left the
+#       image's Python without time.tzset.
+#   --with-computed-gotos          a compiler feature zig's clang has; the
+#       default, no, compiled the slower switch dispatch into the eval loop.
+#   ac_cv_aligned_required=no      x86-64 needs no aligned access.
+#   ac_cv_broken_sem_getvalue=no   our sem_getvalue reads the count
+#       (posix/src/semaphore.rs); the default, yes, made
+#       multiprocessing's Semaphore.get_value() raise.
+#   ac_cv_pthread_system_supported=yes  pthread_attr_setscope takes
+#       PTHREAD_SCOPE_SYSTEM and refuses PROCESS with ENOTSUP, as Linux's.
+#
+# py_cv_module_xxlimited{,_35}=n/a: two test modules for the limited C API,
+# built as shared objects whatever MODULE_BUILDTYPE says. A shared object has
+# no place on SlateOS, and the link wrapper refuses one, which made `make`
+# exit 2 over the pair; --disable-test-modules does not cover them.
+CONFIGURE_ANSWERS=(
+    ac_cv_file__dev_ptmx=no
+    ac_cv_file__dev_ptc=no
+    ac_cv_buggy_getaddrinfo=no
+    ac_cv_working_tzset=yes
+    ac_cv_aligned_required=no
+    ac_cv_broken_sem_getvalue=no
+    ac_cv_pthread_system_supported=yes
+    py_cv_module_xxlimited=n/a
+    py_cv_module_xxlimited_35=n/a
+)
+
+# A tree configured another way -- for musl, as before 2026-10-05, with other
+# answers, or through another link wrapper -- is rebuilt from the tarball
+# rather than reused: config.status would otherwise keep the old answers, and
+# the build would carry them. The wrapper is in the stamp by its contents.
+STAMP="CC=$(sha256sum < "$SLATE_LINK_CC" | cut -c1-16) ${CONFIGURE_ANSWERS[*]} --with-computed-gotos"
+if [ -d "Python-$VER" ] && [ "$(cat "Python-$VER/.slate-configure" 2>/dev/null)" != "$STAMP" ]; then
+    echo "CONFIGURATION_CHANGED: rebuilding Python-$VER from the tarball"
+    rm -rf "Python-$VER"
+fi
 [ -d "Python-$VER" ] || tar xf "$TARBALL"
 cd "Python-$VER"
 
-export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
+export CC="$SLATE_LINK_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 
 # Blind pkg-config. This is not tidiness, it is the difference between a usable
 # interpreter and a toy.
@@ -90,8 +157,10 @@ export PKG_CONFIG_LIBDIR=/nonexistent-slateos-cross PKG_CONFIG_PATH=
 #   megabytes of Python source that cannot affect which libc symbols the
 #   interpreter core references.
 # ac_cv_file__dev_pt*: configure cannot stat files on the target, and left to
-#   guess it errors out. We do intend to have a pty layer; saying "no" here only
-#   keeps configure from probing a filesystem that does not exist yet.
+#   guess it errors out. "no" is the literal answer: devfs has no /dev/ptmx node
+#   -- our libc opens the name itself (posix/src/file.rs, open_pty_device) --
+#   and it changes nothing, since CPython reaches a pty through openpty, which
+#   it has (HAVE_OPENPTY), and reads HAVE_DEV_PTMX only without it.
 # ac_cv_buggy_getaddrinfo=no: configure detects the well-known broken-getaddrinfo
 #   bug by *running* a test program. It cannot run a target binary in a cross
 #   build, so it assumes the bug is present and hard-errors ("You must get
@@ -125,15 +194,15 @@ if [ ! -f config.status ]; then
         --disable-shared \
         --without-ensurepip \
         --disable-test-modules \
-        ac_cv_file__dev_ptmx=no \
-        ac_cv_file__dev_ptc=no \
-        ac_cv_buggy_getaddrinfo=no \
+        --with-computed-gotos \
+        "${CONFIGURE_ANSWERS[@]}" \
         >conf.log 2>&1 && echo "CONFIGURE_EXIT=0" || {
             echo "CONFIGURE_EXIT=$?"
             echo "--- last 40 lines of conf.log ---"
             tail -40 conf.log
             exit 1
         }
+    printf '%s\n' "$STAMP" > .slate-configure
 else
     echo "CONFIGURE_EXIT=0 (config.status already present; delete $WORK to redo)"
 fi
@@ -150,5 +219,29 @@ grep -E "^[^ ]+\.c:[0-9]+:[0-9]+: error|Error [0-9]" make.log | head -20 || echo
 echo "--- modules that failed to build ---"
 sed -n '/Following modules built successfully/,/^$/p' make.log | head -5 || true
 sed -n '/necessary bits to build these .* modules/,/^$/p' make.log | head -10 || true
+
+# The control interpreter: the same objects, linked against zig's musl so that
+# it runs under WSL, where stdlib.sh and the fastpy check run it. The objects
+# call what our libc has, and musl has not got all of it; control-shim.c stands
+# in for the difference, in this link only -- its comment says why that is
+# safe. The image's interpreter is slatelink.sh's, against our libc.a alone.
+EXTRA_A=()
+for a in Modules/_decimal/libmpdec/libmpdec.a Modules/expat/libexpat.a Modules/_hacl/libHacl_Hash_*.a; do
+    [ -f "$a" ] && EXTRA_A+=("$a")
+done
+rm -f python-control control-shim.o
+CONTROL_RC=0
+"$SLATE_CC" -O2 -c -o control-shim.o "$SLATE_ROOT/scripts/cpython-spike/control-shim.c" \
+    >control-link.log 2>&1 \
+    && "$SLATE_CC" -o python-control Programs/python.o "libpython${VER%.*}.a" "${EXTRA_A[@]}" \
+        control-shim.o -lm >>control-link.log 2>&1 \
+    || CONTROL_RC=$?
+echo "CONTROL_LINK_EXIT=$CONTROL_RC"
+# A symbol named here is one our libc gained and musl lacks: control-shim.c's.
+grep -o "undefined symbol: .*" control-link.log | sort -u | head -20 || true
+if [ ! -x python-control ]; then
+    echo "NO_CONTROL_INTERPRETER -- see $PWD/control-link.log"
+    exit 1
+fi
 
 echo "CPYTHON_SPIKE_BUILD_DONE"

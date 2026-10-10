@@ -1,0 +1,612 @@
+1
+00:00:01,000 --> 00:00:02,000
+<font color="#f0f8ff">aliceblue</font>
+
+2
+00:00:02,500 --> 00:00:03,500
+<font color="#faebd7">antiquewhite</font>
+
+3
+00:00:04,000 --> 00:00:05,000
+<font color="#00ffff">aqua</font>
+
+4
+00:00:05,500 --> 00:00:06,500
+<font color="#7fffd4">aquamarine</font>
+
+5
+00:00:07,000 --> 00:00:08,000
+<font color="#f0ffff">azure</font>
+
+6
+00:00:08,500 --> 00:00:09,500
+<font color="#f5f5dc">beige</font>
+
+7
+00:00:10,000 --> 00:00:11,000
+<font color="#ffe4c4">bisque</font>
+
+8
+00:00:11,500 --> 00:00:12,500
+<font color="#000000">black</font>
+
+9
+00:00:13,000 --> 00:00:14,000
+<font color="#ffebcd">blanchedalmond</font>
+
+10
+00:00:14,500 --> 00:00:15,500
+<font color="#0000ff">blue</font>
+
+11
+00:00:16,000 --> 00:00:17,000
+<font color="#8a2be2">blueviolet</font>
+
+12
+00:00:17,500 --> 00:00:18,500
+<font color="#a52a2a">brown</font>
+
+13
+00:00:19,000 --> 00:00:20,000
+<font color="#deb887">burlywood</font>
+
+14
+00:00:20,500 --> 00:00:21,500
+<font color="#5f9ea0">cadetblue</font>
+
+15
+00:00:22,000 --> 00:00:23,000
+<font color="#7fff00">chartreuse</font>
+
+16
+00:00:23,500 --> 00:00:24,500
+<font color="#d2691e">chocolate</font>
+
+17
+00:00:25,000 --> 00:00:26,000
+<font color="#ff7f50">coral</font>
+
+18
+00:00:26,500 --> 00:00:27,500
+<font color="#6495ed">cornflowerblue</font>
+
+19
+00:00:28,000 --> 00:00:29,000
+<font color="#fff8dc">cornsilk</font>
+
+20
+00:00:29,500 --> 00:00:30,500
+<font color="#dc143c">crimson</font>
+
+21
+00:00:31,000 --> 00:00:32,000
+<font color="#00ffff">cyan</font>
+
+22
+00:00:32,500 --> 00:00:33,500
+<font color="#00008b">darkblue</font>
+
+23
+00:00:34,000 --> 00:00:35,000
+<font color="#008b8b">darkcyan</font>
+
+24
+00:00:35,500 --> 00:00:36,500
+<font color="#b8860b">darkgoldenrod</font>
+
+25
+00:00:37,000 --> 00:00:38,000
+<font color="#a9a9a9">darkgray</font>
+
+26
+00:00:38,500 --> 00:00:39,500
+<font color="#006400">darkgreen</font>
+
+27
+00:00:40,000 --> 00:00:41,000
+darkgrey
+
+28
+00:00:41,500 --> 00:00:42,500
+<font color="#bdb76b">darkkhaki</font>
+
+29
+00:00:43,000 --> 00:00:44,000
+<font color="#8b008b">darkmagenta</font>
+
+30
+00:00:44,500 --> 00:00:45,500
+<font color="#556b2f">darkolivegreen</font>
+
+31
+00:00:46,000 --> 00:00:47,000
+<font color="#ff8c00">darkorange</font>
+
+32
+00:00:47,500 --> 00:00:48,500
+<font color="#9932cc">darkorchid</font>
+
+33
+00:00:49,000 --> 00:00:50,000
+<font color="#8b0000">darkred</font>
+
+34
+00:00:50,500 --> 00:00:51,500
+<font color="#e9967a">darksalmon</font>
+
+35
+00:00:52,000 --> 00:00:53,000
+<font color="#8fbc8f">darkseagreen</font>
+
+36
+00:00:53,500 --> 00:00:54,500
+<font color="#483d8b">darkslateblue</font>
+
+37
+00:00:55,000 --> 00:00:56,000
+<font color="#2f4f4f">darkslategray</font>
+
+38
+00:00:56,500 --> 00:00:57,500
+darkslategrey
+
+39
+00:00:58,000 --> 00:00:59,000
+<font color="#00ced1">darkturquoise</font>
+
+40
+00:00:59,500 --> 00:01:00,500
+<font color="#9400d3">darkviolet</font>
+
+41
+00:01:01,000 --> 00:01:02,000
+<font color="#ff1493">deeppink</font>
+
+42
+00:01:02,500 --> 00:01:03,500
+<font color="#00bfff">deepskyblue</font>
+
+43
+00:01:04,000 --> 00:01:05,000
+<font color="#696969">dimgray</font>
+
+44
+00:01:05,500 --> 00:01:06,500
+dimgrey
+
+45
+00:01:07,000 --> 00:01:08,000
+<font color="#1e90ff">dodgerblue</font>
+
+46
+00:01:08,500 --> 00:01:09,500
+<font color="#b22222">firebrick</font>
+
+47
+00:01:10,000 --> 00:01:11,000
+<font color="#fffaf0">floralwhite</font>
+
+48
+00:01:11,500 --> 00:01:12,500
+<font color="#228b22">forestgreen</font>
+
+49
+00:01:13,000 --> 00:01:14,000
+<font color="#ff00ff">fuchsia</font>
+
+50
+00:01:14,500 --> 00:01:15,500
+<font color="#dcdcdc">gainsboro</font>
+
+51
+00:01:16,000 --> 00:01:17,000
+<font color="#f8f8ff">ghostwhite</font>
+
+52
+00:01:17,500 --> 00:01:18,500
+<font color="#ffd700">gold</font>
+
+53
+00:01:19,000 --> 00:01:20,000
+<font color="#daa520">goldenrod</font>
+
+54
+00:01:20,500 --> 00:01:21,500
+<font color="#808080">gray</font>
+
+55
+00:01:22,000 --> 00:01:23,000
+<font color="#008000">green</font>
+
+56
+00:01:23,500 --> 00:01:24,500
+<font color="#adff2f">greenyellow</font>
+
+57
+00:01:25,000 --> 00:01:26,000
+grey
+
+58
+00:01:26,500 --> 00:01:27,500
+<font color="#f0fff0">honeydew</font>
+
+59
+00:01:28,000 --> 00:01:29,000
+<font color="#ff69b4">hotpink</font>
+
+60
+00:01:29,500 --> 00:01:30,500
+<font color="#cd5c5c">indianred</font>
+
+61
+00:01:31,000 --> 00:01:32,000
+<font color="#4b0082">indigo</font>
+
+62
+00:01:32,500 --> 00:01:33,500
+<font color="#fffff0">ivory</font>
+
+63
+00:01:34,000 --> 00:01:35,000
+<font color="#f0e68c">khaki</font>
+
+64
+00:01:35,500 --> 00:01:36,500
+<font color="#e6e6fa">lavender</font>
+
+65
+00:01:37,000 --> 00:01:38,000
+<font color="#fff0f5">lavenderblush</font>
+
+66
+00:01:38,500 --> 00:01:39,500
+<font color="#7cfc00">lawngreen</font>
+
+67
+00:01:40,000 --> 00:01:41,000
+<font color="#fffacd">lemonchiffon</font>
+
+68
+00:01:41,500 --> 00:01:42,500
+<font color="#add8e6">lightblue</font>
+
+69
+00:01:43,000 --> 00:01:44,000
+<font color="#f08080">lightcoral</font>
+
+70
+00:01:44,500 --> 00:01:45,500
+<font color="#e0ffff">lightcyan</font>
+
+71
+00:01:46,000 --> 00:01:47,000
+<font color="#fafad2">lightgoldenrodyellow</font>
+
+72
+00:01:47,500 --> 00:01:48,500
+lightgray
+
+73
+00:01:49,000 --> 00:01:50,000
+<font color="#90ee90">lightgreen</font>
+
+74
+00:01:50,500 --> 00:01:51,500
+<font color="#d3d3d3">lightgrey</font>
+
+75
+00:01:52,000 --> 00:01:53,000
+<font color="#ffb6c1">lightpink</font>
+
+76
+00:01:53,500 --> 00:01:54,500
+<font color="#ffa07a">lightsalmon</font>
+
+77
+00:01:55,000 --> 00:01:56,000
+<font color="#20b2aa">lightseagreen</font>
+
+78
+00:01:56,500 --> 00:01:57,500
+<font color="#87cefa">lightskyblue</font>
+
+79
+00:01:58,000 --> 00:01:59,000
+<font color="#778899">lightslategray</font>
+
+80
+00:01:59,500 --> 00:02:00,500
+lightslategrey
+
+81
+00:02:01,000 --> 00:02:02,000
+<font color="#b0c4de">lightsteelblue</font>
+
+82
+00:02:02,500 --> 00:02:03,500
+<font color="#ffffe0">lightyellow</font>
+
+83
+00:02:04,000 --> 00:02:05,000
+<font color="#00ff00">lime</font>
+
+84
+00:02:05,500 --> 00:02:06,500
+<font color="#32cd32">limegreen</font>
+
+85
+00:02:07,000 --> 00:02:08,000
+<font color="#faf0e6">linen</font>
+
+86
+00:02:08,500 --> 00:02:09,500
+<font color="#ff00ff">magenta</font>
+
+87
+00:02:10,000 --> 00:02:11,000
+<font color="#800000">maroon</font>
+
+88
+00:02:11,500 --> 00:02:12,500
+<font color="#66cdaa">mediumaquamarine</font>
+
+89
+00:02:13,000 --> 00:02:14,000
+<font color="#0000cd">mediumblue</font>
+
+90
+00:02:14,500 --> 00:02:15,500
+<font color="#ba55d3">mediumorchid</font>
+
+91
+00:02:16,000 --> 00:02:17,000
+<font color="#9370d8">mediumpurple</font>
+
+92
+00:02:17,500 --> 00:02:18,500
+<font color="#3cb371">mediumseagreen</font>
+
+93
+00:02:19,000 --> 00:02:20,000
+<font color="#7b68ee">mediumslateblue</font>
+
+94
+00:02:20,500 --> 00:02:21,500
+<font color="#00fa9a">mediumspringgreen</font>
+
+95
+00:02:22,000 --> 00:02:23,000
+<font color="#48d1cc">mediumturquoise</font>
+
+96
+00:02:23,500 --> 00:02:24,500
+<font color="#c71585">mediumvioletred</font>
+
+97
+00:02:25,000 --> 00:02:26,000
+<font color="#191970">midnightblue</font>
+
+98
+00:02:26,500 --> 00:02:27,500
+<font color="#f5fffa">mintcream</font>
+
+99
+00:02:28,000 --> 00:02:29,000
+<font color="#ffe4e1">mistyrose</font>
+
+100
+00:02:29,500 --> 00:02:30,500
+<font color="#ffe4b5">moccasin</font>
+
+101
+00:02:31,000 --> 00:02:32,000
+<font color="#ffdead">navajowhite</font>
+
+102
+00:02:32,500 --> 00:02:33,500
+<font color="#000080">navy</font>
+
+103
+00:02:34,000 --> 00:02:35,000
+<font color="#fdf5e6">oldlace</font>
+
+104
+00:02:35,500 --> 00:02:36,500
+<font color="#808000">olive</font>
+
+105
+00:02:37,000 --> 00:02:38,000
+<font color="#6b8e23">olivedrab</font>
+
+106
+00:02:38,500 --> 00:02:39,500
+<font color="#ffa500">orange</font>
+
+107
+00:02:40,000 --> 00:02:41,000
+<font color="#ff4500">orangered</font>
+
+108
+00:02:41,500 --> 00:02:42,500
+<font color="#da70d6">orchid</font>
+
+109
+00:02:43,000 --> 00:02:44,000
+<font color="#eee8aa">palegoldenrod</font>
+
+110
+00:02:44,500 --> 00:02:45,500
+<font color="#98fb98">palegreen</font>
+
+111
+00:02:46,000 --> 00:02:47,000
+<font color="#afeeee">paleturquoise</font>
+
+112
+00:02:47,500 --> 00:02:48,500
+<font color="#d87093">palevioletred</font>
+
+113
+00:02:49,000 --> 00:02:50,000
+<font color="#ffefd5">papayawhip</font>
+
+114
+00:02:50,500 --> 00:02:51,500
+<font color="#ffdab9">peachpuff</font>
+
+115
+00:02:52,000 --> 00:02:53,000
+<font color="#cd853f">peru</font>
+
+116
+00:02:53,500 --> 00:02:54,500
+<font color="#ffc0cb">pink</font>
+
+117
+00:02:55,000 --> 00:02:56,000
+<font color="#dda0dd">plum</font>
+
+118
+00:02:56,500 --> 00:02:57,500
+<font color="#b0e0e6">powderblue</font>
+
+119
+00:02:58,000 --> 00:02:59,000
+<font color="#800080">purple</font>
+
+120
+00:02:59,500 --> 00:03:00,500
+rebeccapurple
+
+121
+00:03:01,000 --> 00:03:02,000
+<font color="#ff0000">red</font>
+
+122
+00:03:02,500 --> 00:03:03,500
+<font color="#bc8f8f">rosybrown</font>
+
+123
+00:03:04,000 --> 00:03:05,000
+<font color="#4169e1">royalblue</font>
+
+124
+00:03:05,500 --> 00:03:06,500
+<font color="#8b4513">saddlebrown</font>
+
+125
+00:03:07,000 --> 00:03:08,000
+<font color="#fa8072">salmon</font>
+
+126
+00:03:08,500 --> 00:03:09,500
+<font color="#f4a460">sandybrown</font>
+
+127
+00:03:10,000 --> 00:03:11,000
+<font color="#2e8b57">seagreen</font>
+
+128
+00:03:11,500 --> 00:03:12,500
+<font color="#fff5ee">seashell</font>
+
+129
+00:03:13,000 --> 00:03:14,000
+<font color="#a0522d">sienna</font>
+
+130
+00:03:14,500 --> 00:03:15,500
+<font color="#c0c0c0">silver</font>
+
+131
+00:03:16,000 --> 00:03:17,000
+<font color="#87ceeb">skyblue</font>
+
+132
+00:03:17,500 --> 00:03:18,500
+<font color="#6a5acd">slateblue</font>
+
+133
+00:03:19,000 --> 00:03:20,000
+<font color="#708090">slategray</font>
+
+134
+00:03:20,500 --> 00:03:21,500
+slategrey
+
+135
+00:03:22,000 --> 00:03:23,000
+<font color="#fffafa">snow</font>
+
+136
+00:03:23,500 --> 00:03:24,500
+<font color="#00ff7f">springgreen</font>
+
+137
+00:03:25,000 --> 00:03:26,000
+<font color="#4682b4">steelblue</font>
+
+138
+00:03:26,500 --> 00:03:27,500
+<font color="#d2b48c">tan</font>
+
+139
+00:03:28,000 --> 00:03:29,000
+<font color="#008080">teal</font>
+
+140
+00:03:29,500 --> 00:03:30,500
+<font color="#d8bfd8">thistle</font>
+
+141
+00:03:31,000 --> 00:03:32,000
+<font color="#ff6347">tomato</font>
+
+142
+00:03:32,500 --> 00:03:33,500
+<font color="#40e0d0">turquoise</font>
+
+143
+00:03:34,000 --> 00:03:35,000
+<font color="#ee82ee">violet</font>
+
+144
+00:03:35,500 --> 00:03:36,500
+<font color="#f5deb3">wheat</font>
+
+145
+00:03:37,000 --> 00:03:38,000
+<font color="#ffffff">white</font>
+
+146
+00:03:38,500 --> 00:03:39,500
+<font color="#f5f5f5">whitesmoke</font>
+
+147
+00:03:40,000 --> 00:03:41,000
+<font color="#ffff00">yellow</font>
+
+148
+00:03:41,500 --> 00:03:42,500
+<font color="#9acd32">yellowgreen</font>
+
+149
+00:03:43,000 --> 00:03:44,000
+darkyellow
+
+150
+00:03:44,500 --> 00:03:45,500
+lightred
+
+151
+00:03:46,000 --> 00:03:47,000
+transparent
+
+152
+00:03:47,500 --> 00:03:48,500
+<font color="#ff0000">RED</font>
+
+153
+00:03:49,000 --> 00:03:50,000
+<font color="#fafad2">LightGoldenRodYellow</font>
+

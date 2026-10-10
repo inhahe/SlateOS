@@ -1,0 +1,12 @@
+# vobsub_dvd.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 720 576
+state 1000 754dd5b9506281d06fa8183bdf861dfd
+state 1500 8b47db8dd02a56d4a6a2cd8be5483bd8
+state 1750 552f3bec50420e22ce95c0e6b91e4f13
+state 2001 560a6eb7189cef2e710e7ceab48d97dc
+state 3000 754dd5b9506281d06fa8183bdf861dfd
+state 3500 560a6eb7189cef2e710e7ceab48d97dc
+state 4001 754dd5b9506281d06fa8183bdf861dfd
+state 4501 560a6eb7189cef2e710e7ceab48d97dc
+state 5000 754dd5b9506281d06fa8183bdf861dfd
+state 6000 560a6eb7189cef2e710e7ceab48d97dc

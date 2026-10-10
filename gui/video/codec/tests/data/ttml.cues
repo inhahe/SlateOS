@@ -1,0 +1,44 @@
+# ttml.mp4: ttconv's reading of its samples, said as videocodec says it (generate_subtitle_fixtures.py).
+damaged 1
+cue 1000000000 2500000000 2
+text 0000 - "Plain text"
+cue 1000000000 2000000000 8
+text 0000 - "at the top"
+cue 1000000000 2000000000 4
+text 0000 - "at the left"
+cue 3000000000 4000000000 2
+text 1000 - "bold"
+text 0000 - ", "
+text 0100 - "italic"
+text 0000 - ", "
+text 0010 - "under"
+text 0000 - ", "
+text 0001 - "struck"
+cue 5000000000 6000000000 2
+text 1000 ffff00 "loud yellow "
+text 1100 00ffff "quiet cyan"
+text 1000 ffff00 " loud again"
+cue 7000000000 8000000000 2
+text 0000 - "two"
+break
+text 0000 - "lines"
+cue 9000000000 10000000000 2
+text 0000 - "spaced out"
+cue 11000000000 12000000000 2
+text 0000 - "kept   spaces"
+cue 13000000000 14000000000 2
+text 0000 ff0000 "half red"
+text 0000 - " "
+text 0000 0080ff "rgb"
+text 0000 - " white"
+cue 17000000000 18000000000 2
+text 0000 - "seen  and on"
+cue 19000000000 20000000000 2
+text 0010 - "under "
+text 1010 - "and bold"
+text 0010 - " "
+text 0000 - "not under"
+cue 21000000000 22000000000 2
+text 0000 - "a"
+break
+text 0000 - "b"

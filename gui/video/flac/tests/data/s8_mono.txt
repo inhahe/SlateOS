@@ -1,0 +1,18 @@
+# s8_mono.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 1090 1090 8000 1 8 2400
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 2400 1 8 8000 da9e1ba34538eb4a
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 2400 1 8 8000 da9e1ba34538eb4a
+seek 800
+frame 800 1600 1 8 8000 5a5a943dc339d8f6
+seek 1201
+frame 1201 1199 1 8 8000 2f61f050a6f47df5
+seek 2399
+frame 2399 1 1 8 8000 628d76068409fb8c
+seek 2405
+seek-failed

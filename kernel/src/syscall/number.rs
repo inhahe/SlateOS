@@ -107,6 +107,8 @@ pub const SYS_SLEEP: u64 = 11;
 /// | `MAP_NOCACHE` | 3   | Disable CPU caching (for MMIO)           |
 /// | `MAP_MMIO`    | 4   | Map specific phys addr from `arg3`       |
 /// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
+/// | `MAP_LAZY`    | 6   | Demand-paged rather than committed       |
+/// | `MAP_SHARED`  | 7   | Shared with every process forked from it |
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub const SYS_MMAP: u64 = 20;
@@ -131,6 +133,19 @@ pub const MAP_FIXED: u64 = 1 << 5;
 /// committed allocation (the default per design spec: "committed
 /// memory by default, lazy allocation opt-in").
 pub const MAP_LAZY: u64 = 1 << 6;
+/// Mmap flag: anonymous memory **shared** with every process that inherits it
+/// by `fork`, rather than copied on write -- POSIX `MAP_SHARED |
+/// MAP_ANONYMOUS`, the everyday way to share memory with a child.
+///
+/// The pages are marked `PageFlags::SHARED`. Fork then maps the same frames
+/// into the child, writable on both sides, and a futex word in them is one
+/// futex in every process that maps them. Always committed: a lazily faulted
+/// page would be faulted separately in each process and share nothing, so
+/// `MAP_SHARED | MAP_LAZY` is `InvalidArgument`, and the per-process lazy
+/// default does not apply. Ignored with `MAP_MMIO`, whose device memory is
+/// shared already. Since 2026-10-01; it was ignored before, so "map it
+/// shared, then fork" did not exist.
+pub const MAP_SHARED: u64 = 1 << 7;
 
 /// Unmap a previously mapped region.
 ///
@@ -984,6 +999,27 @@ pub const SYS_SHM_MAP: u64 = 233;
 /// present is not an error.
 pub const SYS_SHM_UNMAP: u64 = 234;
 
+/// Map a shared memory region at an address the caller chooses -- what
+/// System V `shmat` does with a non-null address.
+///
+/// `arg0`: shared memory handle.
+/// `arg1`: flags: `MAP_READ` | `MAP_WRITE`, as for [`SYS_SHM_MAP`]; with
+///         `MAP_FIXED`, whatever is already mapped in the range is unmapped
+///         first (Linux's `SHM_REMAP`), and without it an occupied range is
+///         refused.
+/// `arg2`: the address.  0 lets the kernel choose, exactly as `SYS_SHM_MAP`
+///         does.  Anything else must be 16 KiB-aligned and, with the region's
+///         length, lie inside the general mmap window
+///         (`0x60_0000_0000..0x6f_0000_0000`); otherwise `InvalidArgument`,
+///         which is also the answer for an occupied range (Linux's `EINVAL`).
+///
+/// Returns: the address mapped.
+///
+/// A number of its own rather than a third argument to [`SYS_SHM_MAP`]:
+/// that call's callers pass two arguments, and a two-argument syscall wrapper
+/// leaves `arg2`'s register holding whatever it last held.
+pub const SYS_SHM_MAP_AT: u64 = 235;
+
 /// Create a new eventfd counter.
 ///
 /// `arg0`: initial counter value (typically 0).
@@ -1069,9 +1105,16 @@ pub const SYS_CP_CREATE: u64 = 250;
 ///
 /// `arg0`: completion port handle.
 /// `arg1`: source type (0=channel, 1=pipe_read, 2=pipe_write, 3=eventfd,
-///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion).
-/// `arg2`: source handle (raw u64).
+///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion,
+///         8=service listener -- ready when a connection is waiting to be
+///         accepted, the handle `SYS_SERVICE_REGISTER` returned; since
+///         2026-10-01).
+/// `arg2`: source handle (raw u64). The caller must hold it, as that
+///         source's own syscalls require.
 /// `arg3`: `user_data` — arbitrary u64 returned with events.
+///
+/// A channel is ready when a message is waiting or the peer has closed; a
+/// listener when a connection is waiting or the listener is gone.
 ///
 /// Returns: 0 on success.
 pub const SYS_CP_REGISTER: u64 = 251;
@@ -1090,6 +1133,13 @@ pub const SYS_CP_UNREGISTER: u64 = 252;
 /// `arg0`: completion port handle.
 /// `arg1`: pointer to event buffer (array of `CpEventRaw`).
 /// `arg2`: buffer capacity (max events to return).
+///
+/// Parks until a registered source is ready: channels, pipes, eventfds and
+/// listeners wake it themselves; timers and io_rings post to it; process exit
+/// and semaphores are re-checked on a backoff from 0.5 ms to 20 ms. Until
+/// 2026-10-01 it woke only for a post, so a port waiting on a channel slept
+/// through its messages. A deliverable signal ends the wait with
+/// `Interrupted`, as any blocking call.
 ///
 /// Returns: number of events written to buffer.
 pub const SYS_CP_WAIT: u64 = 253;
@@ -1453,11 +1503,8 @@ pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 /// Query the calling process's capabilities.
 pub const SYS_CAP_QUERY: u64 = 400;
 
-/// Request a capability the calling process does not hold.
-///
-/// Submits a request to the security policy handler (eventually a GUI
-/// dialog, initially console-based).  The request includes a reason
-/// string displayed to the user for approval/denial.
+/// Request authority over a whole class the calling process does not hold:
+/// [`SYS_CAP_REQUEST_FOR`] with object 0.
 ///
 /// `arg0`: resource type (`ResourceType` as u16, zero-extended).
 /// `arg1`: rights bitfield (`Rights` as u32, zero-extended).
@@ -1465,13 +1512,11 @@ pub const SYS_CAP_QUERY: u64 = 400;
 /// `arg3`: length of reason string in bytes (max 256).
 ///
 /// Returns: request ID (positive u64) on success, negative error on failure.
-///
-/// Errors:
-/// - `InvalidArgument` — invalid resource type or zero-length reason.
-/// - `ResourceExhausted` — too many pending requests.
+/// Errors as [`SYS_CAP_REQUEST_FOR`]'s.
 pub const SYS_CAP_REQUEST: u64 = 401;
 
-/// Check the status of a pending capability request.
+/// Check the status of a capability request -- the caller's own, or, for the
+/// handler ([`SYS_CAP_BROKER_REGISTER`]), any.
 ///
 /// `arg0`: request ID (from `SYS_CAP_REQUEST`).
 ///
@@ -1479,7 +1524,8 @@ pub const SYS_CAP_REQUEST: u64 = 401;
 ///          3=TimedOut, 4=Cancelled), negative error on failure.
 ///
 /// Errors:
-/// - `NotFound` — no request with that ID exists.
+/// - `NotFound` — no such request that the caller may see. Until 2026-10-08
+///   any process could read any request's status.
 pub const SYS_CAP_REQUEST_STATUS: u64 = 402;
 
 /// Cancel a pending capability request.
@@ -1741,7 +1787,9 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 ///
 /// The recorded handles merely *alias* handles the process already owns
 /// (`ipc_handles`), which survive exec — they are not duplicated and are
-/// never closed by the kernel on this path.
+/// never closed by the kernel on this path.  The handles of the descriptors
+/// it does *not* keep, the close-on-exec ones, go to
+/// [`SYS_PROCESS_SET_EXEC_CLOSE`], which closes them at a successful exec.
 ///
 /// `arg0`: pointer to an array of `FdMapEntry`.
 /// `arg1`: entry count.
@@ -2001,14 +2049,18 @@ pub const SYS_PROCESS_GET_NICE: u64 = 531;
 /// out-of-range inputs are clamped. The mapping nice→priority is monotonic and
 /// sends nice `0` to the default priority level (see `thread::nice_to_priority`).
 ///
-/// **Policy lives in userspace.** Like `SYS_PROCESS_SET_CREDENTIALS`, the
-/// `CAP_SYS_NICE` check that guards a priority *raise* (negative nice) is done
-/// by the userspace posix `nice`/`setpriority` wrappers; the kernel trusts
-/// them and only performs the mutation, always targeting the caller's own
-/// process. Fails only if the caller has no owning process.
+/// **The kernel decides a raise** (a nice below the current one): it must be
+/// within the process's `RLIMIT_NICE`, or the process must hold a Thread
+/// capability with IO_REALTIME (`CAP_SYS_NICE`, design-decisions §326);
+/// otherwise `ResourceExhausted` ("resource limit reached"). Until 2026-10-01
+/// this was left to libc's wrappers, like `SYS_PROCESS_SET_CREDENTIALS`'s
+/// check before it, and a program calling 532 directly could reach nice -20,
+/// the top scheduler priority (`proc::priority`, §1503). Always the
+/// caller's own process; [`SYS_PROCESS_SET_PRIORITY`] names others.
 ///
-/// Returns the *previous* nice value, biased by +20 (`0..=39`). Chosen number
-/// 532 (next free slot after 531).
+/// Returns the *previous* nice value, biased by +20 (`0..=39`);
+/// `NoSuchProcess` for a caller with no process. Chosen number 532 (next free
+/// slot after 531).
 pub const SYS_PROCESS_SET_NICE: u64 = 532;
 
 // ---------------------------------------------------------------------------
@@ -2049,9 +2101,41 @@ pub const SYS_PROCESS_SET_NICE: u64 = 532;
 /// invoked as `trampoline(signum: u64 /* rdi */, ctx: *mut SignalContext
 /// /* rsi */)`.
 ///
-/// Returns: 0 on success, negative `KernelError` code on failure (e.g.
-/// the caller is not associated with a process).
+/// `arg1`: frame flags. [`SIGNAL_FRAME_SIGINFO`] asks for the extended frame:
+/// the `SignalContext` followed by the signal's `siginfo`
+/// (`proc::signal::SignalInfoTail`). Other bits are ignored, so that a libc
+/// built for a later kernel can ask for more and read from the answer what it
+/// got.
+///
+/// Returns: the flags the kernel will honour -- [`SIGNAL_FRAME_SIGINFO`] when
+/// it will build the extended frame, 0 otherwise (always 0 when unregistering;
+/// and 0 from every kernel before 2026-10-01, which ignored `arg1`, so libc
+/// can tell an older kernel by the answer and keep reading the short frame).
+/// Negative `KernelError` code on failure (e.g. the caller is not associated
+/// with a process). The choice goes with the trampoline: kept across `fork`,
+/// dropped at `exec` (`requests/d-a-put-each-signal-s-siginfo-in-the-native-
+/// frame.md`).
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
+
+/// [`SYS_SIGNAL_REGISTER`]'s `arg1` bit asking for the extended signal frame.
+///
+/// The frame is then `SIGNAL_FRAME_EXTENDED_SIZE` (160) bytes: today's 136-byte
+/// `SignalContext`, unchanged and still all `SYS_SIGNAL_RETURN` reads,
+/// followed at offset 136 by
+///
+/// ```text
+/// 136  si_code   i32   SI_USER, SI_QUEUE, SI_TKILL, SI_KERNEL, CLD_*, ...
+/// 140  si_pid    u32   the sender -- for SIGCHLD the child; 0 from the kernel
+/// 144  si_uid    u32   the sender's real uid -- for SIGCHLD the child's
+/// 148  (pad)     u32   0
+/// 152  si_value  u64   sigqueue's value; for SIGCHLD the child's si_status
+///                      (exit status, or the signal that killed it)
+/// ```
+///
+/// The context stays 16-byte aligned and the fake return slot stays 8 bytes
+/// below it, so a trampoline written for the short frame runs unchanged on
+/// the long one.
+pub const SIGNAL_FRAME_SIGINFO: u64 = 1;
 
 /// Post a signal to a target process's pending set, or to every member of
 /// a process group.
@@ -2071,17 +2155,24 @@ pub const SYS_SIGNAL_REGISTER: u64 = 522;
 /// target has no trampoline registered, the kernel applies the default
 /// action (terminating signals kill the process; others are dropped).
 ///
-/// For the group forms the membership is resolved *before* the signal
-/// number is validated, so signalling a group that does not exist reports
+/// The target is resolved *before* the signal number is validated, so
+/// signalling a process or group that does not exist reports
 /// `NoSuchProcess` even when the signal number is also bad — the same
 /// ordering Linux's `kill_something_info` uses, and the more useful
-/// diagnostic (the caller learns the group is gone).  Delivery to the
-/// members is best-effort: the call succeeds if *any* member accepted the
-/// signal, and otherwise reports the last member's error.
+/// diagnostic (the caller learns the target is gone).  Delivery to a
+/// group's members is best-effort: the call succeeds if *any* member
+/// accepted the signal, and otherwise reports the last member's error.
+///
+/// Authority, per target: the caller itself, its child, any process for a
+/// kernel task, or a process the caller holds a Process capability with
+/// DELETE rights for. Signal 0 checks all of that and posts nothing -- for a
+/// single process as well as a group since 2026-10-01; before, a single
+/// process refused it with `InvalidArgument`, contrary to this page.
 ///
 /// Returns: 0 on success, negative `KernelError` code on failure
-/// (`NoSuchProcess` if the PID or group is unknown, `InvalidArgument` for
-/// an out-of-range signal number).
+/// (`NoSuchProcess` if the PID or group is unknown, `ProcessExited` for a
+/// zombie, `InvalidArgument` for an out-of-range signal number,
+/// `PermissionDenied` without the authority above).
 pub const SYS_SIGNAL_SEND: u64 = 523;
 
 /// Return from a signal handler (sigreturn).
@@ -2095,7 +2186,12 @@ pub const SYS_SIGNAL_SEND: u64 = 523;
 /// return to the caller.
 pub const SYS_SIGNAL_RETURN: u64 = 524;
 
-/// Set the calling process's blocked-signal mask.
+/// Set the calling thread's blocked-signal mask.
+///
+/// The mask is the calling thread's own, as Linux's `sigprocmask` and
+/// `pthread_sigmask` both set the caller's: another thread's is untouched, and
+/// a new thread starts with its creator's. (Until 2026-10-07 there was one
+/// mask per process.)
 ///
 /// `arg0`: new 64-bit blocked mask (bit `n-1` blocks signal `n`).
 /// `arg1`: pointer to a `u64` that receives the previous mask, or 0 if
@@ -2110,7 +2206,8 @@ pub const SYS_SIGNAL_RETURN: u64 = 524;
 /// Returns: 0 on success, negative `KernelError` code on failure.
 pub const SYS_SIGNAL_MASK: u64 = 525;
 
-/// Query the calling process's pending-signal set.
+/// Query the signals pending for the calling thread: those sent to its
+/// process and those sent to it alone.
 ///
 /// `arg0`: pointer to a `u64` that receives the pending set (bit `n-1`
 ///         set means signal `n` is pending), observed without clearing
@@ -2137,7 +2234,9 @@ pub const SYS_SIGNAL_PENDING: u64 = 526;
 ///
 /// A native process keeps its `sigaction` dispositions in **userspace**
 /// (the posix crate's table); the kernel only knows whether a signal
-/// *trampoline* is registered.  So `SYS_SIGNAL_SEND(self, SIGTSTP)` cannot
+/// *trampoline* is registered, and which signals are ignored
+/// ([`SYS_SIGNAL_SET_IGNORED`]) -- not, of the rest, which have a handler
+/// and which the default action.  So `SYS_SIGNAL_SEND(self, SIGTSTP)` cannot
 /// express "the default action applies": `classify_post_info` sees a
 /// registered trampoline, marks the signal pending for handler delivery,
 /// and control lands back in the very userspace dispatcher that just
@@ -2982,31 +3081,44 @@ pub const SYS_FS_STATVFS: u64 = 608;
 /// Size of the output buffer for `SYS_FS_STATVFS`.
 pub const FS_STATVFS_SIZE: usize = 64;
 
-/// Acquire an advisory file lock (flock).
+/// Take an advisory whole-file lock (`flock`) by path, for the calling
+/// process, without waiting.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
 /// `arg2`: lock type (0 = shared/read, 1 = exclusive/write).
-/// `arg3`: owner ID (typically the process/task ID of the caller).
+/// `arg3`: ignored since 2026-10-01.
 ///
 /// ## Semantics
 ///
+/// - The lock is the **calling process's**. It ends at
+///   [`SYS_FS_FUNLOCK`] or the process's exit.
 /// - Shared locks are compatible with other shared locks but not
 ///   exclusive locks.
 /// - Exclusive locks are incompatible with all other locks.
-/// - If the owner already holds a lock, it is upgraded or downgraded.
+/// - Asking for the other type converts the lock, and, as on Linux, a
+///   conversion first gives up the lock held. So a refused upgrade leaves
+///   the process with none.
+///
+/// `arg3` was the owner, taken from the caller as given. A process could
+/// take a lock in another's name, and through `SYS_FS_FUNLOCK` release
+/// anyone's. libc passed its own pid, which is what the kernel uses now, so
+/// its calls are unchanged. A lock that belongs to an open file description,
+/// as BSD and Linux `flock` locks do, and that can wait, is
+/// [`SYS_FS_FLOCK_HANDLE`]'s.
 ///
 /// Returns: 0 on success, `WOULD_BLOCK` if the lock is held by
-/// another process, or negative error code.
+/// another owner, or negative error code.
 pub const SYS_FS_FLOCK: u64 = 609;
 
 /// Release an advisory file lock.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
-/// `arg2`: owner ID.
+/// `arg2`: ignored since 2026-10-01: the lock released is the calling
+/// process's own (see [`SYS_FS_FLOCK`]).
 ///
-/// If the owner doesn't hold a lock on this file, this is a no-op.
+/// If the caller doesn't hold a lock on this file, this is a no-op.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_FUNLOCK: u64 = 640;
@@ -3114,7 +3226,7 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// the two cannot drift.
 ///
 /// `ino` is the backing filesystem's inode number for the object the name
-/// refers to, and is the same value [`SYS_FS_GET_META`] reports as `st_ino`
+/// refers to, and is the same value [`SYS_FS_STAT`] reports as `st_ino`
 /// for that object; `0` means the filesystem has no stable per-object
 /// identity (FAT files with no allocated cluster, `procfs`, `sysfs`,
 /// `devfs`, `iso9660`), not that the entry is deleted. It was appended
@@ -3143,16 +3255,26 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// If the buffer is too small, entries are truncated (not an error).
 pub const SYS_FS_READDIR_AT: u64 = 647;
 
-/// Create a temporary file (no directory entry).
+/// Open a regular file with no name in a directory, as Linux's `O_TMPFILE`
+/// does: it exists only through the handle returned, and goes at its last
+/// close unless [`SYS_FS_LINK_HANDLE`] names it first.
 ///
-/// `arg0`: pointer to directory path string (where to create).
+/// `arg0`: pointer to the directory's path.
 /// `arg1`: path length (bytes).
-/// `arg2`: open flags bitfield.
+/// `arg2`: open flags: the access mode, which must allow writing; `APPEND`;
+/// `EXCL`, which forbids naming it (Linux's `O_TMPFILE | O_EXCL`). The file's
+/// mode is 0600.
 ///
-/// Creates an unnamed temporary file in the specified directory.
-/// The file is automatically deleted when the handle is closed.
+/// Errors: `InvalidArgument` for flags that do not allow writing;
+/// `NotADirectory`; `NotSupported` on a filesystem that cannot keep a file
+/// with no name (FAT, the pseudo filesystems), as Linux answers
+/// `EOPNOTSUPP`.
 ///
-/// Returns: file handle on success, negative error code on failure.
+/// Until 2026-10-01 it created a *named* file that nothing deleted and
+/// returned a handle its caller could not use, then refused until handles
+/// held files rather than names (design-decisions §1508).
+///
+/// Returns: the file handle.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
 /// Pre-allocate disk space for a file.
@@ -3182,6 +3304,40 @@ pub const SYS_FS_SEEK_DATA: u64 = 650;
 ///
 /// Returns: offset of next hole, or EOF if no holes.
 pub const SYS_FS_SEEK_HOLE: u64 = 651;
+
+/// Read from a file handle at an explicit offset, leaving the handle's
+/// position where it was (POSIX `pread`).
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to the receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: offset to read from; above `i64::MAX` is `InvalidArgument`.
+///
+/// The position is neither read nor moved, so threads sharing a handle can
+/// read it concurrently at their own offsets -- what libc's `pread` family
+/// promises, and could only emulate with seek-read-seek, racing every other
+/// user of the position, until this existed. Streams through a bounded
+/// kernel buffer, as `SYS_FS_READ` does.
+///
+/// Returns: bytes read (0 at or past end of file), or a negative error code.
+/// Chosen number 1080.
+pub const SYS_FS_PREAD: u64 = 1080;
+
+/// Write to a file handle at an explicit offset, leaving the handle's
+/// position where it was (POSIX `pwrite`).
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to the data.
+/// `arg2`: data length.
+/// `arg3`: offset to write at; above `i64::MAX` is `InvalidArgument`.
+///
+/// On a handle opened with `APPEND` the **offset still wins**, as POSIX has
+/// it and as this kernel's Linux `pwrite64` does (Linux itself appends, and
+/// lists that under BUGS) -- design-decisions.md, "positional writes on an
+/// append handle".
+///
+/// Returns: bytes written, or a negative error code. Chosen number 1081.
+pub const SYS_FS_PWRITE: u64 = 1081;
 
 /// Mount a filesystem at a target path.
 ///
@@ -3663,7 +3819,10 @@ pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 /// Zero-means-unchanged is this kernel's existing convention (`SYS_FS_SET_TIMES`),
 /// not `utimensat(2)`'s `UTIME_OMIT`/`UTIME_NOW` sentinels. Translating those is
 /// the POSIX layer's job, and it already does it for the path-based call; making
-/// the pinned variant differ would mean two conventions for one operation.
+/// the pinned variant differ would mean two conventions for one operation. The
+/// convention's other half is the same here too: `u64::MAX` is now
+/// (`fs::vfs::TIME_NOW`), and both now is `touch`, which an append-only file
+/// allows where given times are `NotPermitted` (`SYS_FS_SET_TIMES`).
 ///
 /// This is the member of the set that runs on *every* copied entry rather than
 /// once per directory, since restoring mtime is the last thing `cp -p` and every
@@ -3811,7 +3970,7 @@ pub const SYS_FS_TRASH: u64 = 618;
 
 /// List items in the recycle bin.
 ///
-/// `arg0`: pointer to output buffer for [`TrashListEntry`] array.
+/// `arg0`: pointer to an output buffer of [`FS_TRASH_ENTRY_SIZE`]-byte records.
 /// `arg1`: buffer capacity (max number of entries).
 ///
 /// Each entry is 528 bytes: 256 (trash name) + 256 (original path) + 8 (size) + 8 (flags).
@@ -3992,9 +4151,16 @@ pub const SYS_FS_SET_PERMS: u64 = 631;
 
 /// Set file timestamps.
 ///
-/// `arg0`: pointer to null-terminated path string.
-/// `arg1`: accessed_ns (0 = leave unchanged).
-/// `arg2`: modified_ns (0 = leave unchanged).
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: accessed_ns, nanoseconds since the epoch; 0 leaves it unchanged,
+/// `u64::MAX` makes it now (`fs::vfs::TIME_NOW`, Linux's `UTIME_NOW`).
+/// `arg3`: modified_ns, likewise.
+/// `arg4`: flags — bit 0 `NO_FOLLOW` stamps a final symlink itself.
+///
+/// Both now is `touch`, which an append-only file allows; any other change
+/// to its times is `NotPermitted`, as on Linux, and so is any change to an
+/// immutable file's (`fs::attr_policy`). A caller that reads the clock and
+/// passes the time is setting a given time.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_SET_TIMES: u64 = 632;
@@ -4095,6 +4261,17 @@ pub const FS_DIR_ENTRY_SIZE: usize = 264;
 
 // ---------------------------------------------------------------------------
 // Networking syscalls (800–999)
+//
+// The handles `SYS_TCP_CONNECT`, `SYS_TCP_ACCEPT`, `SYS_TCP_BIND` and
+// `SYS_UDP_BIND` return are the caller's (`net::native_socket`, since
+// 2026-10-02): opaque numbers from a counter that never repeats, from 1, and
+// usable only by a process that holds one -- another process naming the same
+// number gets `InvalidHandle`, as does a handle whose socket has ended.
+// A fork, or a spawn passing it on (`fd_handle_type::TCP_SOCKET`/
+// `UDP_SOCKET`), adds a holder; each holder's close, exit or exec drops
+// one; the last closes the socket. Until then a handle was the socket's
+// slot index, which any process with the `Socket` capability could count
+// through and use.
 // ---------------------------------------------------------------------------
 
 /// Open a TCP connection to a remote host.
@@ -4200,7 +4377,9 @@ pub const SYS_UDP_BIND: u64 = 810;
 
 /// Send a UDP datagram.
 ///
-/// `arg0`: socket handle (for source port) OR 0 (use ephemeral port).
+/// `arg0`: the sending socket's handle, whose port is the source port. (Doc
+///         until 2026-10-02 said 0 meant "an ephemeral port"; it never did
+///         -- 0 named slot 0 -- and now names nothing: `InvalidHandle`.)
 /// `arg1`: destination IPv4 address (u32, network byte order).
 /// `arg2`: destination port.
 /// `arg3`: pointer to data buffer.
@@ -5140,6 +5319,19 @@ pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 /// `poll(2)`'s treatment of a bad fd: one bad entry in a large set must not
 /// deny the caller readiness for the other 99.
 ///
+/// Since 2026-10-01 two native kinds join the set, both truly blockable:
+/// - a **channel** end (`ResourceType::Channel`) -- `POLLIN` when a message is
+///   waiting, `POLLHUP` when the peer has closed (a receive answers
+///   `ChannelClosed`);
+/// - a **service listener** (`ResourceType::Service`, the handle
+///   `SYS_SERVICE_REGISTER` returned) -- `POLLIN` when a connection is
+///   waiting to be accepted, or the listener is gone.
+///
+/// So a server can wait on its listener and its clients' channels together
+/// (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`;
+/// lane F's `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`
+/// point 4).
+///
 /// Chosen number 1066, at the high-water mark — see
 /// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.
 pub const SYS_WAIT_MULTIPLE: u64 = 1066;
@@ -5216,15 +5408,20 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
 
-/// `SYS_ITIMER_SET` — arm, re-arm or disarm the calling process's real
-/// interval timer, and report what it held before.
+/// `SYS_ITIMER_SET` — arm, re-arm or disarm one of the calling process's
+/// interval timers, and report what it held before.
 ///
 /// `(which, value_ns, interval_ns) -> ok2(prev_value_ns, prev_interval_ns)`
 ///
-/// The timer counts wall-clock time and raises `SIGALRM` in the calling process
-/// when it expires. A non-zero `interval_ns` re-arms it to that period after
-/// each expiry; zero makes it one-shot. `value_ns == 0` disarms it regardless
-/// of `interval_ns`, matching `setitimer(2)`.
+/// `which` is Linux's: `ITIMER_REAL` (0) counts wall-clock time and raises
+/// `SIGALRM`; `ITIMER_VIRTUAL` (1) counts the process's user time and raises
+/// `SIGVTALRM`; `ITIMER_PROF` (2) counts its user plus system time and raises
+/// `SIGPROF` -- the two CPU-time ones checked at the 10 ms tick, a tick added
+/// to the value as Linux adds it ([`crate::proc::cputimer`]). A non-zero
+/// `interval_ns` re-arms the timer to that period after each expiry; zero
+/// makes it one-shot. `value_ns == 0` disarms it regardless of `interval_ns`,
+/// matching `setitimer(2)` (a CPU-time one keeps the interval, which it
+/// reports, as Linux's does).
 ///
 /// **Nanoseconds, not `struct itimerval`.** The native ABI does not carry
 /// Linux's four-field `{tv_sec, tv_usec}` pair: [`crate::proc::itimer`] stores
@@ -5249,11 +5446,9 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
-///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
-///   process, which this kernel does not account for per-process. Refusing is
-///   honest; accepting would reproduce, one layer down, the exact "reports
-///   success and arms nothing" defect this call exists to remove.
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
+///   (Until 2026-10-08 `ITIMER_VIRTUAL` and `ITIMER_PROF` were refused here,
+///   the kernel keeping no per-process CPU time to count them on.)
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// No capability is required: the timer belongs to the calling process and
@@ -5266,17 +5461,19 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 /// Chosen number 1069, next free slot after 1068.
 pub const SYS_ITIMER_SET: u64 = 1069;
 
-/// `SYS_ITIMER_GET` — report the calling process's real interval timer.
+/// `SYS_ITIMER_GET` — report one of the calling process's interval timers.
 ///
 /// `(which) -> ok2(value_ns, interval_ns)`
 ///
-/// `value_ns` is the time remaining until the next `SIGALRM`, not the value the
-/// timer was armed with, and is zero when the timer is disarmed. Reading does
-/// not disturb the timer.
+/// `which` as for [`SYS_ITIMER_SET`]. `value_ns` is the time remaining until
+/// the timer's next signal (for a CPU-time one, the process's CPU time still
+/// to use; a tick if it is already due), not the value the timer was armed
+/// with, and is zero when the timer is disarmed. Reading does not disturb the
+/// timer.
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// Chosen number 1070, next free slot after 1069.
@@ -5310,6 +5507,8 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 /// `sigaltstack`, the mask from `sigaction` -- and a kernel holding one without
 /// the other can decide nothing.
 ///
+/// The stack is the calling thread's, as `sigaltstack(2)`'s is: a new thread
+/// starts with none, the thread that forks passes its own to the child.
 /// Inherited across `fork` and cleared by `execve`, matching `sigaltstack(2)`.
 /// The clear is not tidiness: after `execve` the address named a buffer in an
 /// address space that no longer exists, so keeping it would put the next signal
@@ -5328,10 +5527,13 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 /// Chosen number 1071, next free slot after 1070.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
-/// Set the system's host name: `hostname_set(ptr, len) -> 0`.
+/// Set the host name: `hostname_set(ptr, len) -> 0`.
 ///
 /// The kernel primitive behind POSIX `sethostname`. `ptr`/`len` name a UTF-8
-/// byte string in the caller's address space; `len` 0 clears the name.
+/// byte string in the caller's address space; `len` 0 clears the name. The
+/// name is the caller's UTS namespace's (`crate::utsns`): the system's in the
+/// root namespace, a private one's after [`SYS_NAMESPACE_UNSHARE`] or in a
+/// container.
 ///
 /// **Why this exists, which is the part worth reading.** Until 2026-09-10 our
 /// libc's `sethostname` wrote a `static mut` in the *calling program's own*
@@ -5366,7 +5568,8 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 /// Chosen number 1072, next free slot after 1071.
 pub const SYS_HOSTNAME_SET: u64 = 1072;
 
-/// Set the system's NIS/YP domain name: `domainname_set(ptr, len) -> 0`.
+/// Set the NIS/YP domain name, the caller's UTS namespace's as for the host
+/// name: `domainname_set(ptr, len) -> 0`.
 ///
 /// The kernel primitive behind POSIX `setdomainname`. Same arguments, same
 /// capability and the same errors as [`SYS_HOSTNAME_SET`]; see that constant
@@ -5490,11 +5693,1525 @@ pub const SYS_PROCESS_GET_CWD: u64 = 1078;
 pub const SYS_PROCESS_UMASK: u64 = 1079;
 
 // ---------------------------------------------------------------------------
+// Secure Boot (1082-1084) -- design-decisions §978, the operator's A-Q21
+// ---------------------------------------------------------------------------
+
+/// Enrol a Secure Boot entry:
+/// `secureboot_enroll(type, subject_ptr, subject_len, fp_ptr, fp_len) -> id`.
+///
+/// `type`: 0 `PK`, 1 `KEK`, 2 `db`, 3 `dbx`, 4 `MOK`; any other value is
+/// `InvalidArgument`, never a default. `subject`: UTF-8, 1..=256 bytes.
+/// `fp`: the entry's SHA-256 -- a certificate's fingerprint for `PK`/`KEK`,
+/// an image's hash for a `db`/`dbx`/`MOK` hash entry -- as `SHA256:` and 64
+/// hex digits, or the 64 digits alone. Returns the new entry's id.
+///
+/// Requires `(Process, ENROLL_SECUREBOOT)`, checked before any argument is
+/// read. `AlreadyExists` for an entry of the same type and fingerprint,
+/// `ResourceExhausted` when the table is full.
+///
+/// **The kernel never parses a certificate.** The caller -- `sbctl` --
+/// computes the fingerprint; an X.509 parser on attacker-supplied bytes in
+/// the most privileged place in the system, to produce one string, is the
+/// trade `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`
+/// declined.
+///
+/// No getter: `/proc/secureboot` publishes the entries, as `/proc/keylayout`
+/// does for [`SYS_KEYLAYOUT_SET`].
+///
+/// Chosen number 1082, next free slot after 1081.
+pub const SYS_SECUREBOOT_ENROLL: u64 = 1082;
+
+/// Remove a Secure Boot entry by id: `secureboot_remove(id) -> 0`.
+///
+/// Requires `(Process, ENROLL_SECUREBOOT)`. `NotFound` for an unknown id.
+///
+/// Chosen number 1083.
+pub const SYS_SECUREBOOT_REMOVE: u64 = 1083;
+
+/// Ask whether an image may run:
+/// `secureboot_verify(name_ptr, name_len, hash_ptr, hash_len, out_ptr) -> 0`.
+///
+/// `name`: 0..=256 bytes of any value -- it may be a path, and a path is not
+/// forced into UTF-8 -- recorded with the verdict. `hash`: the image's
+/// SHA-256, in the form [`SYS_SECUREBOOT_ENROLL`] takes. Writes 16 bytes to
+/// `out_ptr`, four little-endian `u32`s:
+///
+/// | offset | field | values |
+/// |---|---|---|
+/// | 0 | listing | 0 in `db`/`MOK`, 1 in `dbx` (wins over `db`), 2 in neither |
+/// | 4 | entry id | the deciding entry's id, 0 for "in neither" |
+/// | 8 | enforced | 1 if the state enforces (`Enabled`, strict), else 0 |
+/// | 12 | may run | 1 or 0: when enforcing, 1 only if listed in `db`/`MOK` |
+///
+/// An unlisted image is refused when enforcing: the signature check that
+/// might admit it needs certificate code the kernel does not have, and a
+/// verifier does not pass what it cannot check.
+///
+/// Needs no right: the entries it consults are published in
+/// `/proc/secureboot`. `InvalidArgument` for a hash that is not a SHA-256
+/// value -- refused, never treated as "unlisted". `InvalidAddress` for an
+/// output that cannot be written, checked before the verdict is recorded, so
+/// a refused call leaves no record.
+///
+/// Chosen number 1084.
+pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
+
+// ---------------------------------------------------------------------------
+// Joining a thread with a time limit (1085)
+// ---------------------------------------------------------------------------
+
+/// Join a thread, waiting at most a time:
+/// `thread_join_timeout(target_task, out_ptr, timeout_ns) -> 0`.
+///
+/// As [`SYS_THREAD_JOIN`] -- the same target, the same exit value written to
+/// `out_ptr` (if non-zero), `Cancelled` for a thread that was killed -- with
+/// `timeout_ns` of the monotonic clock as the most it waits: 0 answers at once
+/// (`pthread_tryjoin_np`), `u64::MAX` waits for ever. A thread still running
+/// when the time is up answers `TimedOut`, which is not `WouldBlock`: that one
+/// still means another thread is already joining it.
+///
+/// A sibling rather than a third argument to [`SYS_THREAD_JOIN`], because
+/// callers of that one never set the third argument register, and whatever it
+/// held would have been read as a time limit
+/// (`requests/d-a-a-thread-join-that-does-not-wait.md`).
+///
+/// Chosen number 1085, next free slot after 1084.
+pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
+
+// ---------------------------------------------------------------------------
+// Sending a signal with a value, and to a thread (1086-1087)
+// ---------------------------------------------------------------------------
+
+/// Send a signal carrying a value: `signal_queue(pid, sig, value) -> 0`, the
+/// native `sigqueue(3)`.
+///
+/// The target receives `si_code = SI_QUEUE`, the caller's pid and real uid as
+/// the sender, and `value` as `si_value` -- in the extended frame
+/// ([`SIGNAL_FRAME_SIGINFO`]), and in the Linux `rt_sigframe` for a Linux-ABI
+/// target. Before it, a native `sigqueue` had only [`SYS_SIGNAL_SEND`], which
+/// carries no value.
+///
+/// `sigqueue`'s rules: `pid` is one process, never a group, so anything not
+/// above zero answers `NoSuchProcess` (Linux's `ESRCH` for the same call).
+/// Then, in Linux's order: `NoSuchProcess` for no such process,
+/// `ProcessExited` for a zombie, `InvalidArgument` for a signal outside
+/// `0..=64`, `PermissionDenied` without [`SYS_SIGNAL_SEND`]'s authority.
+/// Signal 0 checks all of that and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 4.
+/// Chosen number 1086, next free slot after 1085.
+pub const SYS_SIGNAL_QUEUE: u64 = 1086;
+
+/// Send a signal to a thread of a process: `signal_tgkill(tgid, tid, sig) ->
+/// 0`, the native `tgkill(2)`.
+///
+/// Checks that thread `tid` belongs to process `tgid` and posts in the same
+/// step, so that a thread id reused since the caller learnt it cannot carry
+/// the signal into another process. The target receives `si_code = SI_TKILL`
+/// and the caller's pid and real uid. The signal is for that thread alone:
+/// it waits on the thread's own queue, is taken by it, and is blocked when it
+/// blocks it (until 2026-10-07 it went to the process, whichever thread
+/// returned to userspace first). A fatal, stop or continue default still acts
+/// on the whole process, as Linux's does.
+///
+/// Errors in Linux's order: `InvalidArgument` for a `tgid` or `tid` not above
+/// zero; `NoSuchProcess` when `tid` is not a thread of `tgid`; then as
+/// [`SYS_SIGNAL_QUEUE`] for the process (zombie, signal number, authority).
+/// The check is the kernel's and needs no capability: libc's had to look in
+/// `/proc/<tgid>/task/<tid>`, which a process with no File capability may
+/// not. Signal 0 checks and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 5.
+/// Chosen number 1087, next free slot after 1086.
+pub const SYS_SIGNAL_TGKILL: u64 = 1087;
+
+// ---------------------------------------------------------------------------
+// The nice of a named process, group or user (1088-1089)
+// ---------------------------------------------------------------------------
+
+/// Read a nice: `process_get_priority(which, who) -> nice + 20`, the native
+/// `getpriority(2)`.
+///
+/// `which` is 0 (one process; `who` is a pid), 1 (a process group; a pgid) or
+/// 2 (a user; a uid), and `who` 0 means the caller's own. For a group or a
+/// user the answer is the lowest nice -- the most favoured member -- as
+/// Linux's. Biased by +20, as [`SYS_PROCESS_GET_NICE`]'s, so it is never
+/// negative. Reading needs no authority, as on Linux, where `/proc` shows it
+/// to anyone.
+///
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing live
+/// is named.
+///
+/// `requests/e-ad-renicing-another-process-renices-the-caller.md`: before it a
+/// native program could name no process but itself, and libc's `getpriority`
+/// read the caller whatever it was asked. Chosen number 1088, next free slot
+/// after 1087.
+pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
+
+/// Set a nice: `process_set_priority(which, who, nice + 20) -> 0`, the native
+/// `setpriority(2)`.
+///
+/// `which` and `who` as [`SYS_PROCESS_GET_PRIORITY`]; the nice biased by +20,
+/// as [`SYS_PROCESS_SET_NICE`] takes it, and clamped. Each named process is
+/// changed only if the caller may change it (`proc::priority`, §1503):
+///
+/// - **authority** -- it is the caller or the caller's child, or the caller
+///   holds a Process capability with DELETE rights for it: who may signal
+///   it may renice it. Else `PermissionDenied` (libc: `EPERM`).
+/// - **a raise** (below its current nice) -- within its `RLIMIT_NICE`, or
+///   the caller holds a Thread capability with IO_REALTIME. Else
+///   `ResourceExhausted` (libc: `EACCES`).
+///
+/// A refusal for one member does not stop the others. The answer is Linux's
+/// fold: `NoSuchProcess` when nothing is named, else the last refusal, else 0.
+/// Chosen number 1089, next free slot after 1088.
+pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
+
+// ---------------------------------------------------------------------------
+// Closing close-on-exec descriptors at a native exec (1090)
+// ---------------------------------------------------------------------------
+
+/// Name the handles the caller's next successful `exec` closes:
+/// `process_set_exec_close(entries_ptr, count) -> count`.
+///
+/// A native process's descriptor table is libc's, in userspace. Before
+/// `exec` libc hands the kernel the descriptors to *keep*
+/// ([`SYS_PROCESS_SET_EXEC_FDS`]). This is the other half: the handles of the
+/// descriptors it drops as close-on-exec and no kept descriptor shares. The
+/// kernel closes them once the new image is in, past the point of no return,
+/// each as `close()` would. So a close-on-exec pipe's reader sees end-of-file
+/// when the exec happens, not when the new program exits -- which is what
+/// `std::process::Command`'s fork path waits for, and what made it, the
+/// GUI terminal's first spawn and an sshd session hang until the child
+/// exited (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+///
+/// - `entries_ptr` points at `FdMapEntry`s, as `SYS_PROCESS_SET_EXEC_FDS`
+///   takes them. `handle_type` and `handle` are read; `fd` is ignored.
+/// - An empty list clears it. A handle type the kernel does not know refuses
+///   the whole list (`InvalidArgument`).
+/// - Every exec attempt takes the list. A failed one leaves the handles open,
+///   as POSIX requires, and drops the list, so send it before each attempt.
+/// - A handle the caller does not hold, a console handle, and a TCP or UDP
+///   socket are left open. Sockets are shared rather than counted across a
+///   fork, so closing one would close it for every holder.
+/// - A handle also named by a kept descriptor is not closed.
+///
+/// Chosen number 1090, next free slot after 1089.
+pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
+
+// ---------------------------------------------------------------------------
+// Watch events whose paths are not cut (1091)
+// ---------------------------------------------------------------------------
+
+/// Read pending filesystem-watch events as variable-length records:
+/// `fs_watch_read_records(watch_id, buf, buf_len) -> bytes`.
+///
+/// [`SYS_FS_WATCH_READ`]'s records are a fixed 528 bytes with 256 for each
+/// path, so a path longer than 255 bytes arrives cut -- and a cut name is
+/// another file's name. These carry each path whole, the shape of Linux's
+/// `inotify_event` (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`
+/// part 4). Each record, little-endian, starting 8-byte aligned:
+///
+/// ```text
+/// 0   u64  watch id
+/// 8   u32  event type, as SYS_FS_WATCH_READ's (0 created ... 255 overflow)
+/// 12  u8   1 if the subject is a directory, else 0
+/// 13  [3]  zero
+/// 16  u32  path length in bytes, without its NUL
+/// 20  u32  new-path length (renames; 0 otherwise), without its NUL
+/// 24  the path, a NUL, the new path, a NUL, zero padding to a multiple of 8
+/// ```
+///
+/// Returns the bytes written: as many whole records as fit, in order, with
+/// the rest left queued; 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit (it stays queued) -- Linux's `EINVAL` for
+/// an `inotify` read too small for one event. `InvalidHandle` for an unknown
+/// watch.
+///
+/// Chosen number 1091, next free slot after 1090.
+pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
+
+// ---------------------------------------------------------------------------
+// Which CPU the caller is on (1092)
+// ---------------------------------------------------------------------------
+
+/// The CPU the calling thread is running on, and its NUMA node:
+/// `cpu_current() -> cpu | node << 32`, the native `getcpu(2)`.
+///
+/// One return value and no pointers, so it is cheap and cannot fault:
+/// `sched_getcpu()` is asked on hot paths, by allocators choosing a per-CPU
+/// arena. Before it, libc had no way to ask and answered CPU 0 everywhere,
+/// piling every thread onto CPU 0's shard
+/// (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The node is 0
+/// until there is NUMA topology; the Linux `getcpu` gives the same answer.
+/// As on Linux, the thread may have moved by the time the answer is read.
+///
+/// Chosen number 1092, next free slot after 1091.
+pub const SYS_CPU_CURRENT: u64 = 1092;
+
+// ---------------------------------------------------------------------------
+// POSIX record locks for native programs (1093)
+// ---------------------------------------------------------------------------
+
+/// A POSIX byte-range record lock on an open file -- `fcntl`'s `F_GETLK`,
+/// `F_SETLK` and `F_SETLKW` for a native program:
+/// `fs_record_lock(handle, op, flock_ptr) -> 0`.
+///
+/// The table is the one the Linux `fcntl` uses (`fs::reclock`), through the
+/// same code (`syscall::record_lock`), so a native and a Linux program see
+/// each other's locks. Before it, a native program could not reach the
+/// table at all, and its libc granted every lock: two holders of one
+/// exclusive range, SQLite's whole defence against two writers included
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`).
+///
+/// - `handle`: a file handle the caller holds.
+/// - `op`: [`RECORD_LOCK_GET`], [`RECORD_LOCK_SET`] or
+///   [`RECORD_LOCK_SET_WAIT`]. Anything else is `InvalidArgument`.
+/// - `flock_ptr`: the caller's `struct flock`, in the x86-64 Linux layout:
+///   `l_type` i16 at 0, `l_whence` i16 at 2, `l_start` i64 at 8, `l_len`
+///   i64 at 16, `l_pid` i32 at 24, 32 bytes in all. Read for every op, and
+///   rewritten for `RECORD_LOCK_GET`.
+///
+/// The lock belongs to the calling **process**. It ends when the process
+/// exits, when it releases it, or when it closes the handle: closing *any*
+/// descriptor for the file releases all the process's locks on it (POSIX).
+/// So libc must tell the kernel when it closes a descriptor that shares its
+/// handle with one still open. A release over the whole file does that:
+/// `RECORD_LOCK_SET` with `F_UNLCK`, `SEEK_SET`, start 0, length 0.
+///
+/// Errors (libc's errno in brackets):
+/// - `InvalidHandle` (`EBADF`): a handle the caller does not hold, or a lock
+///   its open mode does not allow. `F_RDLCK` needs it open for reading,
+///   `F_WRLCK` for writing.
+/// - `InvalidArgument` (`EINVAL`): an unknown op, `l_type` or `l_whence`; a
+///   range before byte 0 or past a signed 64-bit offset; `F_UNLCK` with
+///   `RECORD_LOCK_GET`.
+/// - `InvalidAddress` (`EFAULT`): `flock_ptr`.
+/// - `WouldBlock` (`EAGAIN`): `RECORD_LOCK_SET`, and another process's lock
+///   is in the way.
+/// - `Deadlock` (`EDEADLK`): `RECORD_LOCK_SET_WAIT`, and waiting would never
+///   end: a process in the way is itself waiting on the caller.
+/// - `Interrupted` (`EINTR`): a signal arrived during the wait. The call is
+///   restarted instead when the handler has `SA_RESTART`.
+/// - `ResourceExhausted`: the lock table is full. libc maps this code to
+///   `ENOMEM` generally; POSIX's errno for it here is `ENOLCK`.
+///
+/// Chosen number 1093, next free slot after 1092.
+pub const SYS_FS_RECORD_LOCK: u64 = 1093;
+
+/// [`SYS_FS_RECORD_LOCK`] op: `F_GETLK`. Would the lock be granted? If not,
+/// `struct flock` is rewritten to describe the first lock in the way: its
+/// type, its range from byte 0 (`l_whence` becomes `SEEK_SET`), and its
+/// holder's pid (-1 for an OFD lock taken through the Linux ABI). If so,
+/// `l_type` becomes `F_UNLCK` and nothing else changes.
+pub const RECORD_LOCK_GET: u64 = 0;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLK`. Take the lock now, or `WouldBlock`;
+/// with `F_UNLCK`, release the range.
+pub const RECORD_LOCK_SET: u64 = 1;
+/// [`SYS_FS_RECORD_LOCK`] op: `F_SETLKW`. Take the lock, waiting while
+/// another process's lock is in the way.
+pub const RECORD_LOCK_SET_WAIT: u64 = 2;
+
+// ---------------------------------------------------------------------------
+// flock on an open file (1094)
+// ---------------------------------------------------------------------------
+
+/// BSD `flock(2)` on an open file: `fs_flock_handle(handle, op) -> 0`.
+///
+/// A whole-file advisory lock that belongs to the **open file
+/// description**, as BSD and Linux `flock` locks do: every descriptor
+/// sharing the handle (a `dup`, a `fork`) shares the lock. It ends at
+/// `FLOCK_UN` or at the description's final close. Two separate opens of
+/// one file are separate owners, even in one process. The table is the
+/// Linux `flock(2)`'s, so native and Linux programs exclude each other.
+///
+/// - `handle`: a file handle the caller holds. Any open mode will do, as
+///   on Linux.
+/// - `op`: [`FLOCK_SH`], [`FLOCK_EX`] or [`FLOCK_UN`], optionally with
+///   [`FLOCK_NB`]. Linux's values.
+///
+/// Without `FLOCK_NB`, a request another owner's lock is in the way of
+/// **waits** until it is free. A signal ends the wait (`Interrupted`, so
+/// libc's `EINTR`), or restarts it under `SA_RESTART`, as Linux restarts
+/// `flock`. With `FLOCK_NB` it is `WouldBlock` (`EWOULDBLOCK`) at once.
+/// Asking for the other type converts the lock, and a conversion first gives
+/// up the lock held, as on Linux.
+///
+/// Errors: `InvalidArgument` (`EINVAL`) for an op that is not exactly one of
+/// the three, optionally with `FLOCK_NB`, checked first; `InvalidHandle`
+/// (`EBADF`) for a handle the caller does not hold; `ResourceExhausted` for
+/// a full table (POSIX's `ENOLCK`; libc maps the code to `ENOMEM`
+/// generally).
+///
+/// The path-based [`SYS_FS_FLOCK`] locks for the calling process instead and
+/// never waits; it stays for callers built against it.
+///
+/// Chosen number 1094, next free slot after 1093.
+pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
+
+/// [`SYS_FS_FLOCK_HANDLE`] op: a shared lock (Linux `LOCK_SH`).
+pub const FLOCK_SH: u64 = 1;
+/// [`SYS_FS_FLOCK_HANDLE`] op: an exclusive lock (Linux `LOCK_EX`).
+pub const FLOCK_EX: u64 = 2;
+/// [`SYS_FS_FLOCK_HANDLE`] op flag: do not wait (Linux `LOCK_NB`).
+pub const FLOCK_NB: u64 = 4;
+/// [`SYS_FS_FLOCK_HANDLE`] op: release (Linux `LOCK_UN`).
+pub const FLOCK_UN: u64 = 8;
+
+// ---------------------------------------------------------------------------
+// An open description's status flags (1095)
+// ---------------------------------------------------------------------------
+
+/// Set an open description's status flags, as Linux's `fcntl(F_SETFL)` does:
+/// `fs_set_status_flags(handle, flags) -> 0`.
+///
+/// - `handle`: a file handle the caller holds.
+/// - `flags`: the native open flags. `APPEND` is taken from them; the access
+///   mode and the creation bits (`CREATE`, `EXCL`, `TRUNCATE`, `DIRECTORY`,
+///   `NOFOLLOW`, `NO_SYMLINKS`) are ignored, as `F_SETFL` ignores them. A bit
+///   above bit 8 is `InvalidArgument`.
+///
+/// It acts on the description: every descriptor sharing the handle sees it.
+/// With `APPEND` set, each write lands at the file's end as it is when the
+/// write lands. libc's `F_SETFL` emulated it with a seek to the end before
+/// each write, two calls another appender could get between (lane D's
+/// request, 2026-10-01).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory` for a directory handle.
+///
+/// Chosen number 1095, the next free slot after 1094.
+pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
+
+// ---------------------------------------------------------------------------
+// Naming the file a handle holds (1096)
+// ---------------------------------------------------------------------------
+
+/// Give the file a handle holds a name, as Linux's
+/// `linkat(fd, "", newdirfd, newpath, AT_EMPTY_PATH)` does:
+/// `fs_link_handle(handle, path, path_len) -> 0`.
+///
+/// - A file made by [`SYS_FS_TMPFILE`] without `EXCL` gets its first name,
+///   and no longer goes at its last close: the way to write a file fully
+///   and then publish it in one step.
+/// - A file with a name gets another, as `SYS_FS_LINK` gives one.
+/// - A file deleted while open, or made with `EXCL`, is `NotFound`, as
+///   Linux answers `ENOENT`.
+///
+/// The new name is asked as `SYS_FS_LINK` asks it: File WRITE, write access
+/// to its directory, the same filesystem (`CrossDevice`), not taken
+/// (`AlreadyExists`).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory`; `NotSupported` for a file on a filesystem without
+/// hard links.
+///
+/// Chosen number 1096, the next free slot after 1095.
+pub const SYS_FS_LINK_HANDLE: u64 = 1096;
+
+// ---------------------------------------------------------------------------
+// A name's addresses, as a DNS answer gives them (1097)
+// ---------------------------------------------------------------------------
+
+/// Every address of a name, its canonical name, and why there is none:
+/// `dns_resolve2(name, name_len, family, out, out_len) -> count`.
+///
+/// What `getaddrinfo` needs from a resolver, which [`SYS_DNS_RESOLVE`]'s one
+/// IPv4 address is not (lane D's request
+/// `d-a-sys-dns-resolve-answers-one-ipv4-address`).
+///
+/// - `name`, `name_len`: the name, at most 253 bytes.
+/// - `family`: `AF_UNSPEC` (0) for AAAA and A records, `AF_INET` (2) for A,
+///   `AF_INET6` (10) for AAAA -- Linux's values.
+/// - `out`, `out_len`: the answer, little-endian:
+///   - `u16` the record count, `u16` the canonical name's length;
+///   - the canonical name (the end of the CNAME chain, `AI_CANONNAME`) and a
+///     NUL;
+///   - per record, 18 bytes: `u16` family (2 or 10), then 16 address bytes,
+///     an IPv4 address in the first 4 and zeros after.
+///
+/// The records are in the order the answer gave them, IPv6 first for
+/// `AF_UNSPEC`; sorting them for a connection (RFC 6724) is the caller's.
+/// At most 64. The kernel's hosts table (`localhost`) and a container's
+/// peers answer before the network, and answers are cached by their TTL.
+///
+/// Returns the record count, at least 1.
+///
+/// Errors:
+/// - `NotFound`: the name does not exist (NXDOMAIN; `EAI_NONAME`).
+/// - `NoAddress` (-707): it exists with no address of the family asked
+///   (NODATA; `EAI_NODATA`).
+/// - `TimedOut`: no answer; `WouldBlock`: the server failed for now
+///   (SERVFAIL); `ConnectionRefused`: it refused -- all `EAI_AGAIN`.
+/// - `TooManyLinks`: a CNAME chain too long; `IoError`: an answer that
+///   could not be read -- `EAI_FAIL`.
+/// - `BufferTooSmall`: `out_len` cannot hold the answer; nothing is written.
+/// - `InvalidArgument`: a family other than the three, or a name that is
+///   not UTF-8; `PermissionDenied` without the Socket capability.
+///
+/// Chosen number 1097, the next free slot after 1096.
+pub const SYS_DNS_RESOLVE2: u64 = 1097;
+
+/// Report which signals the calling process ignores (`SIG_IGN`).
+///
+/// - `arg0`: the ignored set, bit `n - 1` for signal `n`, as
+///   [`SYS_SIGNAL_MASK`] numbers them. The *whole* set: send it whenever a
+///   disposition moves to or from `SIG_IGN` (`signal`, `sigaction`, `sigset`,
+///   `bsd_signal`).
+/// - `arg1`: a `u64` out-pointer for the previous set, or 0.
+/// - `arg2`: flags. `SIGNAL_IGNORED_NOCLDWAIT` (1): `SIGCHLD` has
+///   `SA_NOCLDWAIT`. Others must be 0.
+///
+/// The one part of a native process's dispositions the kernel keeps, and why
+/// it must: an `exec` keeps ignored signals ignored and a `fork` or spawn
+/// passes them on, where the new image's libc table starts empty -- it reads
+/// this back with [`SYS_SIGNAL_GET_IGNORED`] at start-up -- and the kernel
+/// acts on it:
+/// - an ignored signal is discarded when sent, before anything in the target
+///   runs; one that is blocked stays pending, and is discarded when unblocked
+///   if it is still ignored then;
+/// - a pending signal *newly* ignored is discarded, blocked or not (POSIX);
+/// - `SIGCHLD` ignored: an exiting child is reaped at once, not left a
+///   zombie, and sends no `SIGCHLD`; a `wait` with none left is `ECHILD`.
+///   `SA_NOCLDWAIT`: the same, but `SIGCHLD` is still sent;
+/// - `SIGTTIN`/`SIGTTOU` ignored let a background job's terminal access
+///   through as POSIX says (a read fails `EIO`, a write proceeds).
+///
+/// `SA_NOCLDWAIT` is cleared by an `exec`, like the rest of a handler's
+/// flags; the ignored set is kept.
+///
+/// Returns 0. Errors: `InvalidArgument` if the set names `SIGKILL` (9) or
+/// `SIGSTOP` (19), which cannot be ignored, or for an unknown flag;
+/// `InvalidAddress` for an unwritable out-pointer -- checked first, so a
+/// failed call changes nothing.
+///
+/// Chosen number 1098, the next free slot after 1097.
+pub const SYS_SIGNAL_SET_IGNORED: u64 = 1098;
+
+/// [`SYS_SIGNAL_SET_IGNORED`]'s flag: `SIGCHLD` carries `SA_NOCLDWAIT`.
+pub const SIGNAL_IGNORED_NOCLDWAIT: u64 = 1;
+
+/// Read the calling process's ignored set: the signals that came to it
+/// ignored -- kept across `exec`, passed on by `fork` and spawn -- and any it
+/// has reported since through [`SYS_SIGNAL_SET_IGNORED`].
+///
+/// - `arg0`: a `u64` out-pointer for the set, bit `n - 1` for signal `n`.
+///
+/// For libc's start-up, to seed its handler table: a program `nohup`
+/// started finds `SIGHUP` (bit 0) set here. Through a pointer rather than
+/// the return value because signal 64's bit is the sign bit.
+///
+/// Returns 0. Errors: `InvalidArgument` for a null pointer, `InvalidAddress`
+/// for an unwritable one.
+///
+/// Chosen number 1099, the next free slot after 1098.
+pub const SYS_SIGNAL_GET_IGNORED: u64 = 1099;
+
+/// Restrict a process's threads, or one thread, to some CPUs -- the native
+/// `sched_setaffinity`.
+///
+/// - `arg0`: the target -- a process id, or with [`SCHED_AFFINITY_THREAD`] a
+///   thread id. 0 is the caller: its process, or with the flag the calling
+///   thread.
+/// - `arg1`: the mask, bit N for CPU N.
+/// - `arg2`: flags: [`SCHED_AFFINITY_THREAD`].
+///
+/// The mask is kept as given, so a CPU it names that comes online later is
+/// used, but it must name a CPU that is online now. A process target sets
+/// every thread the process has; threads it starts later, and processes it
+/// spawns or forks, take their creator's mask. A thread running on a CPU it
+/// may no longer use moves at once.
+///
+/// Who may: the same rule as for signalling the target's process -- the
+/// process itself, its parent, or a holder of a `Process` capability for it
+/// with `DELETE` rights. A kernel task is no process's to move.
+///
+/// Returns 0. Errors: `InvalidArgument` for a mask with no online CPU or an
+/// unknown flag; `NoSuchProcess` for no such process or thread;
+/// `PermissionDenied` as above. Checked in that order, as Linux checks
+/// `ESRCH`, `EPERM`, `EINVAL`, except that the flags come first.
+///
+/// Chosen number 1100, the next free slot after 1099.
+pub const SYS_SCHED_SET_AFFINITY: u64 = 1100;
+
+/// Read the CPUs a process or a thread may run on now -- the native
+/// `sched_getaffinity`.
+///
+/// - `arg0`: the target, as [`SYS_SCHED_SET_AFFINITY`]'s. A process reads as
+///   its main thread, as on Linux (its first thread, once the main one has
+///   exited).
+/// - `arg1`: a `u64` out-pointer for the mask: the target's, less the CPUs
+///   that are not online.
+/// - `arg2`: flags: [`SCHED_AFFINITY_THREAD`].
+///
+/// Any process may read any other's, as on Linux -- it is what
+/// `/proc/<pid>/status`'s `Cpus_allowed` publishes anyway.
+///
+/// Returns 0. Errors: `InvalidArgument` for a null pointer or an unknown
+/// flag, `NoSuchProcess`, `InvalidAddress` for an unwritable pointer.
+///
+/// Chosen number 1101, the next free slot after 1100.
+pub const SYS_SCHED_GET_AFFINITY: u64 = 1101;
+
+/// [`SYS_SCHED_SET_AFFINITY`] and [`SYS_SCHED_GET_AFFINITY`]'s flag: the
+/// target is a thread id, not a process id.
+pub const SCHED_AFFINITY_THREAD: u64 = 1;
+
+/// Where the calling process's main image's program headers are -- what a
+/// C library reads at start-up to find its thread-local storage template
+/// (`PT_TLS`), and what a Linux-ABI process is told through `AT_PHDR`,
+/// `AT_PHNUM` and `AT_PHENT`.
+///
+/// - `arg0`: a pointer to 16 bytes that receive `{ u64 vaddr; u16 phnum;
+///   u16 phentsize; u32 reserved = 0 }`.
+///
+/// The address is a loaded segment's when one holds the headers, and
+/// otherwise a read-only copy the loader mapped for the purpose, so a
+/// linker script that leaves the headers out of every segment no longer
+/// costs a program its `__thread` variables
+/// (`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`).
+///
+/// Returns 0. Errors: `NotFound` for an image with no program headers;
+/// `InvalidArgument` for a null pointer; `InvalidAddress` for an
+/// unwritable one; `NoSuchProcess` from a kernel task.
+///
+/// Chosen number 1102, the next free slot after 1101.
+pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
+
+/// Whether the process at the other end of a service connection holds that
+/// service's key -- the "system-issued key" a service may require before it
+/// serves (design-decisions §1518: the credential service will not reveal a
+/// password to a program without one).
+///
+/// - `arg0`: a channel handle the caller holds -- for a service, the end it
+///   accepted.
+///
+/// A key is a `(Service, key_id(name), READ)` capability for the service's
+/// own name; the channel remembers which service it was made to, so the
+/// caller never names the key and cannot be made to check another
+/// service's. The peer is the process the kernel recorded at connect time,
+/// and it must still hold its end, so a pid that has since been reused by
+/// another process does not answer for it.
+///
+/// Returns 1 (the peer holds the key) or 0. Errors: `NotFound` for a channel
+/// not made by connecting to a service, or whose peer has no recorded
+/// identity; `InvalidHandle` / `PermissionDenied` for a handle the caller
+/// does not hold.
+///
+/// Chosen number 1103, the next free slot after 1102.
+pub const SYS_CHANNEL_PEER_HAS_KEY: u64 = 1103;
+
+// ---------------------------------------------------------------------------
+// Unix-domain sockets by name (1104-1118)
+//
+// The native door to `ipc::unix_socket`, which the Linux table reaches through
+// socket/bind/connect/... (`AF_UNIX`): the C library's `socket(AF_UNIX, ...)`
+// is built on these. A socket is a handle the calling process holds (its
+// `ipc_handles`, type `UnixSocket`): closed when it exits, one more holder
+// when it forks.
+//
+// Names. Calls that take a name take `name_ptr`/`name_len` and a flags bit:
+// with `UNIX_NAME_ABSTRACT` the bytes are an abstract name (no node, Linux's
+// `sun_path[0] == 0`); without it they are an **absolute** path -- the
+// library resolves a relative `sun_path` against its own working directory,
+// as every native path call expects.
+//
+// Errors are the kernel's own: `AddrInUse` for a name in use,
+// `ConnectionRefused` for nothing listening (or not a socket's node),
+// `WrongSocketType` for a socket of the other kind, `NotConnected`,
+// `ConnectAlready` for a connected stream connecting again, `MsgSize` for a
+// datagram over 64 KiB, `WouldBlock` for `UNIX_NONBLOCK` when the call would
+// wait, `ChannelClosed` for a stream whose peer has gone.
+// ---------------------------------------------------------------------------
+
+/// Name flag: the name is abstract, not a path.
+pub const UNIX_NAME_ABSTRACT: u64 = 1 << 0;
+/// Call flag: return `WouldBlock` rather than wait.
+pub const UNIX_NONBLOCK: u64 = 1 << 1;
+/// Receive flag: leave what was read in place (`MSG_PEEK`).
+pub const UNIX_PEEK: u64 = 1 << 2;
+
+/// `SYS_UNIX_SOCKET(kind)` -- a new socket: `kind` 1 stream, 2 datagram, 5
+/// sequenced packets (Linux's `SOCK_*` numbers). Returns its handle.
+pub const SYS_UNIX_SOCKET: u64 = 1104;
+/// `SYS_UNIX_PAIR(kind)` -- two connected sockets of `kind` (`socketpair`).
+/// Returns both handles (the two-value return).
+pub const SYS_UNIX_PAIR: u64 = 1105;
+/// `SYS_UNIX_BIND(handle, name_ptr, name_len, mode, flags)` -- bind to a name.
+/// A path makes a socket node there with permission bits `mode` (already
+/// umask-masked); `mode` is ignored for an abstract name.
+pub const SYS_UNIX_BIND: u64 = 1106;
+/// `SYS_UNIX_LISTEN(handle, backlog)` -- listen on a bound stream socket;
+/// `backlog` is clamped to 1..=128.
+pub const SYS_UNIX_LISTEN: u64 = 1107;
+/// `SYS_UNIX_ACCEPT(handle, flags)` -- the next connection, as a new handle
+/// (`UNIX_NONBLOCK`: `WouldBlock` when none is waiting). The client's
+/// address is `SYS_UNIX_NAME(new, 1, ...)`.
+pub const SYS_UNIX_ACCEPT: u64 = 1108;
+/// `SYS_UNIX_CONNECT(handle, name_ptr, name_len, flags)` -- connect a stream
+/// (waits while the listener's backlog is full, unless `UNIX_NONBLOCK`), or
+/// set a datagram socket's destination.
+pub const SYS_UNIX_CONNECT: u64 = 1109;
+/// `SYS_UNIX_SEND(handle, buf, len, name_ptr, name_len, flags)` -- send:
+/// with `name_ptr` 0, down the connection (or to the datagram destination
+/// `connect` set); with a name, one datagram there. Returns bytes sent (a
+/// stream may take fewer than `len`).
+pub const SYS_UNIX_SEND: u64 = 1110;
+/// `SYS_UNIX_RECV(handle, buf, cap, info_ptr, flags)` -- receive into `buf`;
+/// returns bytes copied (0 is end of file). If `info_ptr` is not 0 it
+/// receives a [`UNIX_RECV_INFO_LEN`]-byte record: the datagram's whole length
+/// (u64), the sender's pid (u64), uid (u32), gid (u32), whether those are
+/// known (u32), and the sender's address as [`SYS_UNIX_NAME`] writes one.
+pub const SYS_UNIX_RECV: u64 = 1111;
+/// `SYS_UNIX_NAME(handle, which, out_ptr)` -- the socket's own address
+/// (`which` 0) or its peer's (1), as a [`UNIX_ADDR_LEN`]-byte record: kind
+/// (u32: 0 unnamed, 1 path, 2 abstract), length (u32), then the bytes
+/// (108, unused ones zero).
+pub const SYS_UNIX_NAME: u64 = 1112;
+/// `SYS_UNIX_PEER_CRED(handle, out_ptr)` -- the connected peer's pid (u64),
+/// uid (u32) and gid (u32), as the kernel recorded them at connect/listen.
+/// `NoAddress` when there is no process to report (a kernel peer).
+pub const SYS_UNIX_PEER_CRED: u64 = 1113;
+/// `SYS_UNIX_SHUTDOWN(handle, how)` -- 0 receives, 1 sends, 2 both.
+pub const SYS_UNIX_SHUTDOWN: u64 = 1114;
+/// `SYS_UNIX_CLOSE(handle)` -- let go of the socket; it ends with its last
+/// holder, its name then leading nowhere.
+pub const SYS_UNIX_CLOSE: u64 = 1115;
+/// `SYS_UNIX_POLL(handle)` -- readiness: 0x01 readable, 0x04 writable, 0x08
+/// error, 0x10 hang-up.
+pub const SYS_UNIX_POLL: u64 = 1116;
+/// `SYS_UNIX_SET_OPTION(handle, option, value)` -- set one of the socket's
+/// options (the `UNIX_OPT_*` below). An option the kernel does not know is
+/// `NotSupported` (the library's `ENOPROTOOPT`); a value the option does not
+/// take is `InvalidArgument`.
+pub const SYS_UNIX_SET_OPTION: u64 = 1117;
+/// `SYS_UNIX_GET_OPTION(handle, option)` -- one of the socket's options, as
+/// the return value.
+pub const SYS_UNIX_GET_OPTION: u64 = 1118;
+
+/// Option: whether receives hand back the sender's credentials (Linux's
+/// `SO_PASSCRED`), 0 or 1; off on a new socket, and an accepted connection
+/// starts with its listener's. [`SYS_UNIX_RECV`]'s info record carries the
+/// credentials either way -- this is the setting the C library's `recvmsg`
+/// reads to decide whether to write an `SCM_CREDENTIALS` control message. It
+/// is the socket's rather than the library's so that every holder of the
+/// socket (after `fork` or `exec`) sees the same one, as on Linux.
+pub const UNIX_OPT_PASSCRED: u64 = 1;
+/// Option: how long a blocking receive or accept waits before `WouldBlock`
+/// (Linux's `SO_RCVTIMEO`), in nanoseconds; 0 for as long as it takes, as
+/// Linux's `{0, 0}`. An accepted connection starts with its listener's. A
+/// signal ends a wait that has a limit with `Interrupted`, which the library
+/// reports as `EINTR`, not a restart (Linux's `sock_intr_errno`).
+pub const UNIX_OPT_RCVTIMEO: u64 = 2;
+/// Option: the same for a blocking send or connect (Linux's `SO_SNDTIMEO`).
+pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// Option, read only: how many bytes a receive would find waiting -- the C
+/// library's `ioctl(FIONREAD)` (Linux's `SIOCINQ`), counted as Linux counts
+/// them: everything queued at a stream or sequenced-packet socket, only the
+/// next datagram at a datagram socket. A listener answers `InvalidArgument`
+/// (`EINVAL`), as on Linux; setting it is `NotSupported`, like any option
+/// the kernel does not set.
+pub const UNIX_OPT_INQ: u64 = 4;
+
+// ---------------------------------------------------------------------------
+// The device door (1119-1123)
+//
+// The Linux device ABI, reached natively: a native program opens a device
+// node through the door and drives it with exactly the requests and argument
+// layouts a Linux program's `ioctl`/`read`/`write` carry -- the kernel's own
+// Linux handlers answer both, so the C library passes them straight through
+// (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Today's
+// devices are the sound card's: the PCM substreams (`/dev/snd/pcmC0D0p`
+// playback, `/dev/snd/pcmC0D0c` capture) and the control device
+// (`/dev/snd/controlC0`).
+//
+// **Every call in the family answers as the device's ABI does: a value >= 0,
+// or a negated Linux errno** -- not a kernel error code -- which the C library
+// hands to `errno` unchanged. An interrupted wait answers the restart sentinel,
+// as every slow native call does.
+//
+// A PCM handle is held by the process that opened it (its `ipc_handles`, type
+// `AlsaPcm`, 22): closed when it exits, one more holder when it forks, and
+// waitable with `SYS_WAIT_MULTIPLE` (kind 22) -- writable while its ring has
+// room, readable for capture. The control device keeps nothing per open: its
+// handle is always [`DEVICE_CONTROL_HANDLE`].
+// ---------------------------------------------------------------------------
+
+/// Call flag: the descriptor is non-blocking (`O_NONBLOCK`): a write or a
+/// `DRAIN` that would wait answers `EAGAIN` instead.
+pub const DEVICE_NONBLOCK: u64 = 1 << 0;
+/// Device kind: an ALSA PCM substream.
+pub const DEVICE_KIND_PCM: u64 = 1;
+/// Device kind: the ALSA control device.
+pub const DEVICE_KIND_CONTROL: u64 = 2;
+/// The control device's handle: it holds nothing per open.
+pub const DEVICE_CONTROL_HANDLE: u64 = 1;
+
+/// `SYS_DEVICE_OPEN(path_ptr, path_len)` -- open a device node by its path;
+/// returns the handle, and its kind as the second value. `ENOENT` for a path
+/// the door does not serve, `ENODEV` when the device is absent (no sound card).
+pub const SYS_DEVICE_OPEN: u64 = 1119;
+/// `SYS_DEVICE_IOCTL(kind, handle, request, arg, flags)` -- one request, as a
+/// Linux `ioctl(fd, request, arg)` on the node (`request` is the low 32 bits,
+/// as Linux reads it). `ENOTTY` for a request the device does not know.
+pub const SYS_DEVICE_IOCTL: u64 = 1120;
+/// `SYS_DEVICE_READ(kind, handle, buf, len, flags)` -- as `read(2)` on the node.
+pub const SYS_DEVICE_READ: u64 = 1121;
+/// `SYS_DEVICE_WRITE(kind, handle, buf, len, flags)` -- as `write(2)` on the
+/// node: a blocking PCM write waits until all of it is queued.
+pub const SYS_DEVICE_WRITE: u64 = 1122;
+/// `SYS_DEVICE_CLOSE(kind, handle)` -- let go of the handle.
+pub const SYS_DEVICE_CLOSE: u64 = 1123;
+
+// Seals on a file (1124-1125): `fs::sealing`, design-decisions 1526.
+
+/// `SYS_FS_ADD_SEALS(handle, seals)` -- seal the file `handle` holds,
+/// whatever its name now. `seals` in Linux's `F_SEAL_*` bits: `0x01`
+/// `F_SEAL_SEAL` (no more seals), `0x02` `F_SEAL_SHRINK`, `0x04`
+/// `F_SEAL_GROW`, `0x08` `F_SEAL_WRITE` (no write, and here no truncate
+/// either), `0x20` `F_SEAL_EXEC` (no change to an execute bit). Seals add up
+/// and are never removed; they end with the file. The VFS refuses what they
+/// forbid with `NotPermitted`, on every route to the file.
+///
+/// The handle must be the caller's and open for writing -- Linux's rule for
+/// `F_ADD_SEALS` -- else `NotPermitted`; any other bit, or none,
+/// `InvalidArgument`; a file sealed with `F_SEAL_SEAL` already,
+/// `NotPermitted`. Returns the file's seals after, in the same bits.
+pub const SYS_FS_ADD_SEALS: u64 = 1124;
+
+/// `SYS_FS_GET_SEALS(handle)` -- the seals of the file `handle` holds, in
+/// `SYS_FS_ADD_SEALS`'s bits; 0 for none. Any handle of the caller's.
+pub const SYS_FS_GET_SEALS: u64 = 1125;
+
+// Deferred filesystem operations (1126-1128): `fs::deferred_ops`,
+// design-decisions 1529, for `rm`/`mv` and the file manager to offer "do it
+// when the volume can"
+// (`requests/b-ade-deferred-ops-needs-a-syscall-and-a-queue-that-can-live-off-the-volume.md`).
+
+/// `SYS_FS_DEFER(op, path, path_len, dest, dest_len, reason)` -- queue a
+/// delete (`op` 1) or rename (`op` 2, to `dest`) of the name `path` that
+/// cannot happen now, to run when its volume is mounted or remounted
+/// read-write. `reason`, for the queue's reader only: 1 the volume is busy, 2
+/// read-only, 3 full. Returns the entry's id.
+///
+/// The kernel takes everything that decides what is done and for whom: the
+/// file is the one `path` names now (the final component not followed), by
+/// its inode on its volume, and the caller's uid, gid and groups are recorded.
+/// It must be allowed now what it asks (rule 3: never escalate a denial) and
+/// is checked again when the operation runs. `File` capability with
+/// `DELETE` for a delete, `WRITE` for a rename.
+///
+/// `InvalidArgument`: an unknown `op` or `reason`, an empty or relative path
+/// (paths are absolute here, as for every native path call), a rename with
+/// no `dest` or a delete with one. `NotFound`: no such name (an absent
+/// volume's paths included -- an absent volume cannot be queued for).
+/// `NotSupported`: a filesystem without stable inode numbers or a UUID.
+/// `DeviceBusy`: `path` or `dest` is a mount point. `CrossDevice`: `dest` on
+/// another volume. `PermissionDenied`/`NotPermitted`: the caller could not do
+/// it with nothing in the way. `ResourceExhausted`: the volume has 4096
+/// entries. Otherwise what kept both places from taking the entry -- the
+/// volume itself, then the system volume's `/var/lib/deferred-ops/<uuid>/`.
+pub const SYS_FS_DEFER: u64 = 1126;
+
+/// `SYS_FS_DEFER_LIST(path, path_len, buf, buf_len)` -- the queued operations
+/// of the volume `path` is on that the caller may see -- its own, or every
+/// one for root -- written to `buf`: for each, an `id=<n>` line, the entry's
+/// own `key=value` lines (`fs::deferred_ops`'s format) and a blank line.
+/// Returns the bytes written; `BufferTooSmall` with nothing written when they
+/// would not fit in `buf_len` (or past 16 MiB). `File` capability with `READ`.
+pub const SYS_FS_DEFER_LIST: u64 = 1127;
+
+/// `SYS_FS_DEFER_CANCEL(path, path_len, id)` -- cancel entry `id` of the
+/// volume `path` is on. Whoever queued it, or root; anyone else
+/// `NotPermitted`. `NotFound` for no such entry. `File` capability with
+/// `DELETE`.
+pub const SYS_FS_DEFER_CANCEL: u64 = 1128;
+
+// UDP over IPv6, and the multicast options (1129-1134): `net::udp`. What a
+// native responder on a multicast group -- mDNS on 224.0.0.251 and ff02::fb
+// -- needs beyond the IPv4 calls (design-decisions 1532): IPv6 datagrams, an
+// IPv6 group to join, and the TTL and loop settings Linux keeps per socket.
+// Handles are the networking section's: the caller's, from `SYS_UDP_BIND`.
+
+/// `SYS_UDP_SEND6(handle, addr_ptr, port, buf, len)` -- send a datagram from
+/// socket `handle` to the IPv6 address at `addr_ptr` (16 bytes, network
+/// order) and `port`. To a group, the socket's multicast hop limit applies
+/// and, unless its loop option is off, this machine's members of the group
+/// get it too.
+pub const SYS_UDP_SEND6: u64 = 1129;
+/// `SYS_UDP_RECV6(handle, buf, cap, src_ptr, flags)` -- `SYS_UDP_RECV`, for
+/// the socket's IPv6 datagrams. `src_ptr`, unless null, gets 18 bytes: the
+/// source address (16, network order), then the source port (2,
+/// little-endian, as `SYS_UDP_RECV`'s). `flags`: `MSG_PEEK` (0x02),
+/// `MSG_TRUNC` (0x20). `WouldBlock` with none queued.
+pub const SYS_UDP_RECV6: u64 = 1130;
+/// `SYS_UDP_MCAST_JOIN6(handle, group_ptr)` -- join the IPv6 group at
+/// `group_ptr` (16 bytes, in `ff00::/8`), as `SYS_UDP_MCAST_JOIN` joins an
+/// IPv4 one: the socket gets what is sent to the group on its port.
+pub const SYS_UDP_MCAST_JOIN6: u64 = 1131;
+/// `SYS_UDP_MCAST_LEAVE6(handle, group_ptr)` -- leave it.
+pub const SYS_UDP_MCAST_LEAVE6: u64 = 1132;
+/// `SYS_UDP_SET_OPTION(handle, option, value)` -- set one of the socket's
+/// multicast options, as Linux's `setsockopt` reads it: 1 the IPv4 TTL
+/// (0-255, or -1 for the default, 1), 2 IPv4 loop (0 off, anything else
+/// on), 3 the IPv6 hop limit (0-255, or -1 for 1), 4 IPv6 loop (0 or 1). A
+/// TTL or hop limit of 0 keeps a datagram on this machine. `InvalidArgument`
+/// for an option that does not exist or a value it does not take.
+pub const SYS_UDP_SET_OPTION: u64 = 1133;
+/// `SYS_UDP_GET_OPTION(handle, option)` -- the option's value: a TTL or hop
+/// limit, or 1/0 for a loop setting.
+pub const SYS_UDP_GET_OPTION: u64 = 1134;
+
+/// `SYS_NET_RAW_MCAST(addrs_ptr, count)` -- set the multicast Ethernet
+/// addresses the network cards pass up, for the raw NIC owner (the netstack
+/// daemon, which knows its groups): `count` six-byte addresses at
+/// `addrs_ptr`, each a group address (low bit of the first byte set).
+/// Replaces the previous set; `count` 0 passes none. Broadcast and frames to
+/// the card's own address pass regardless. The cards filter by hash, so a
+/// few other groups get through too: the receiver still checks the
+/// destination. Releasing the NIC puts the kernel stack's own set back.
+/// `PermissionDenied` unless the caller holds the raw claim;
+/// `InvalidArgument` for more than `net::mcast_filter::MAX_ADDRS` (128)
+/// addresses or a unicast one. See `net::mcast_filter`.
+pub const SYS_NET_RAW_MCAST: u64 = 1135;
+
+/// `SYS_SIGNAL_EXIT_SELF(sig)` -- end the calling process as killed by
+/// `sig`, which must be a signal whose default action terminates. The
+/// parent's `wait` reports `WIFSIGNALED` with `WTERMSIG == sig`, which an
+/// exit status cannot: 128 to 255 is an exit. For a process whose own
+/// dispatcher decided a signal's default action applies (libc's
+/// `apply_default_action`, `abort`). Self-only, so no capability, like
+/// [`SYS_SIGNAL_STOP_SELF`]. Does not return; `InvalidArgument` for a
+/// signal that is not fatal by default.
+pub const SYS_SIGNAL_EXIT_SELF: u64 = 1136;
+
+/// `SYS_PIDFD_OPEN(pid, flags)` -- a handle on process `pid` that becomes
+/// readable once the process has exited: Linux's `pidfd_open` for the native
+/// ABI (requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md). Wait on
+/// it with [`SYS_WAIT_MULTIPLE`], kind `ResourceType::Process` (6): `POLLIN`
+/// from the moment the process is a zombie, whether or not its parent has
+/// reaped it. The handle's value is the pid (pids are never reused);
+/// holding it is what lets the caller wait on it. `flags` must be 0 --
+/// `PIDFD_NONBLOCK` is a descriptor flag, the library's. No capability: as on
+/// Linux, anyone may watch a process end. Pids are the global ones, as every
+/// other call's (`pidns` is not yet wired into the syscalls).
+/// `InvalidArgument` for pid 0 or flags; `NoSuchProcess` for a pid with no
+/// process (one already reaped included).
+pub const SYS_PIDFD_OPEN: u64 = 1137;
+/// `SYS_PIDFD_CLOSE(handle)` -- give back a handle [`SYS_PIDFD_OPEN`] made.
+/// `InvalidHandle` if the caller does not hold it.
+pub const SYS_PIDFD_CLOSE: u64 = 1138;
+
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec): load the ELF kernel image at
+/// `image_ptr` (`image_len` bytes in the caller's address space), flush every
+/// filesystem and disk, stop every other CPU, and jump into it, handing it
+/// the command line at `cmdline_ptr` as the bootloader would. The new kernel
+/// boots through its ordinary boot path. Does not return when the restart
+/// happens.
+///
+/// - `(image_ptr, image_len)` = `(0, 0)`: the running kernel's own image,
+///   the file the bootloader loaded.
+/// - `(cmdline_ptr, cmdline_len)` = `(0, 0)`: the running kernel's command
+///   line; a pointer with length 0, an empty one. No NUL byte.
+/// - `arg4` and `arg5` must be 0.
+///
+/// Requires a `Process` capability carrying
+/// [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) -- the caller
+/// chooses the image, a larger trust question than rebooting, so it is its own
+/// right and not implied by any reboot authority. `PermissionDenied` without
+/// it; `InvalidArgument` for an image that is not a kernel (refused before
+/// anything is flushed or stopped), an image over 128 MiB, a command line
+/// over 4096 bytes or with a NUL, or one length without its pointer;
+/// `OutOfMemory` when no free memory can hold the image; `NotSupported` for
+/// `(0, 0)` when the bootloader did not say where the running image is. The
+/// orderly stop of services before it is the caller's (`powerctl reload`).
+pub const SYS_POWER_RELOAD: u64 = 1139;
+
+/// `SYS_MEMORY_ADVISE(addr, len, advice)` -- `madvise(2)` for native programs:
+/// the same call the Linux ABI's `madvise` makes, taking Linux's `MADV_*`
+/// values and answering Linux's errnos (as `-errno`), for the C library to
+/// pass through unchanged -- the convention of the device door
+/// ([`SYS_DEVICE_OPEN`]). It covers the advice that is a promise, not a hint:
+/// `MADV_DONTNEED` (and `_LOCKED`, `MADV_FREE`) leave the range reading as
+/// zeros (a private file mapping: as the file), `MADV_REMOVE` zeroes shared
+/// memory for every sharer, `MADV_WIPEONFORK` / `MADV_DONTFORK` (and their
+/// undoing) shape what the next fork copies. Acts only on the caller's own
+/// memory, so it needs no capability. Lane D's request
+/// `requests/d-a-a-native-program-has-no-madvise.md`.
+pub const SYS_MEMORY_ADVISE: u64 = 1140;
+
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` -- the per-process POSIX timers
+/// (`timer_create(2)` and family) for native programs: the Linux ABI's own
+/// calls, answering Linux's errnos as `-errno` (the device door's convention,
+/// [`SYS_MEMORY_ADVISE`]'s), so the C library passes them through. Lane D's
+/// request `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`.
+///
+/// | `op` | call | arguments | answer |
+/// |---|---|---|---|
+/// | [`POSIX_TIMER_CREATE`] | `timer_create` | `a` clock id, `b` `struct sigevent *` or 0 | the new timer's id |
+/// | [`POSIX_TIMER_SETTIME`] | `timer_settime` | `a` id, `b` flags, `c` new `struct itimerspec *`, `d` old one or 0 | 0 |
+/// | [`POSIX_TIMER_GETTIME`] | `timer_gettime` | `a` id, `b` `struct itimerspec *` | 0 |
+/// | [`POSIX_TIMER_GETOVERRUN`] | `timer_getoverrun` | `a` id | the overrun count |
+/// | [`POSIX_TIMER_DELETE`] | `timer_delete` | `a` id | 0 |
+///
+/// The structures are Linux's x86-64 ones: `struct sigevent` 64 bytes
+/// (`sigev_value` at 0, `sigev_signo` at 8, `sigev_notify` at 12, the thread
+/// id at 16), `struct itimerspec` 32 (`it_interval`, then `it_value`, each two
+/// `int64_t`s). Clocks `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`
+/// and `CLOCK_TAI` (`TIMER_ABSTIME` on the wall clocks follows clock steps);
+/// the CPU-time clocks are `-EOPNOTSUPP` here, the alarm clocks `-EPERM`.
+/// `SIGEV_SIGNAL`, `SIGEV_NONE`, and `SIGEV_THREAD_ID` naming one of the
+/// caller's threads (the signal then waits for that thread alone). An
+/// expiry's signal is delivered with `si_code` `SI_TIMER` (-2), and
+/// the frame's `si_pid`, `si_uid` and `si_value` slots hold the timer id, the
+/// overrun count and the `sigev_value` -- the offsets `siginfo_t`'s `_timer`
+/// member gives `si_timerid`, `si_overrun` and `si_value`. Two timers on one
+/// signal each deliver; a periodic timer's skipped expiries are its overrun.
+/// Timers are not inherited by `fork` and are deleted by `exec`. An unknown
+/// `op` is `-EINVAL`. No capability: a process's own timers only.
+pub const SYS_POSIX_TIMER: u64 = 1141;
+/// [`SYS_POSIX_TIMER`] operation: `timer_create`.
+pub const POSIX_TIMER_CREATE: u64 = 0;
+/// [`SYS_POSIX_TIMER`] operation: `timer_settime`.
+pub const POSIX_TIMER_SETTIME: u64 = 1;
+/// [`SYS_POSIX_TIMER`] operation: `timer_gettime`.
+pub const POSIX_TIMER_GETTIME: u64 = 2;
+/// [`SYS_POSIX_TIMER`] operation: `timer_getoverrun`.
+pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
+/// [`SYS_POSIX_TIMER`] operation: `timer_delete`.
+pub const POSIX_TIMER_DELETE: u64 = 4;
+
+/// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
+/// `prctl(PR_SET_DUMPABLE)` sets for Linux programs and `/proc` consults (a
+/// process that is not dumpable can be inspected only by root or a holder of
+/// a capability for it). [`DUMPABLE_GET`] answers the flag (0 or 1, or 2 if
+/// the kernel set it so); [`DUMPABLE_SET`] sets it to `value`, which must be
+/// 0 (`SUID_DUMP_DISABLE`) or 1 (`SUID_DUMP_USER`) -- anything else is
+/// `-EINVAL`, as Linux's `prctl` answers. Linux errnos as `-errno`, like
+/// [`SYS_POSIX_TIMER`]. `fork` copies the flag and `exec` resets it to 1.
+pub const SYS_PROCESS_DUMPABLE: u64 = 1142;
+/// [`SYS_PROCESS_DUMPABLE`] operation: read the flag.
+pub const DUMPABLE_GET: u64 = 0;
+/// [`SYS_PROCESS_DUMPABLE`] operation: set the flag.
+pub const DUMPABLE_SET: u64 = 1;
+
+/// `SYS_PROCESS_GETGROUPS(count, list_ptr) -> n` -- the calling process's
+/// supplementary groups, as [`SYS_PROCESS_SETGROUPS`] stored them, with
+/// Linux's `getgroups(2)` contract: `count == 0` answers how many and writes
+/// nothing; a `count` short of that is `InvalidArgument`; otherwise the gids
+/// go to `list_ptr` as `u32`s (`PageFault` if it faults) and their number is
+/// the answer. No capability: a process's own credentials are no secret from
+/// it, as [`SYS_PROCESS_GET_CREDENTIALS`] needs none. Until 2026-10-07 the C
+/// library read them off `/proc/self/status`, which takes a File capability
+/// and a `/proc` in the process's root
+/// (requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md).
+pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
+
+/// `SYS_MMAP_FILE(addr, length, prot, flags, handle, offset) -> address` --
+/// map part of an open file (a handle from `SYS_FS_OPEN`) into the caller,
+/// with Linux's `mmap(2)` values and answers: `prot` its `PROT_*`, `flags`
+/// its `MAP_SHARED`/`MAP_PRIVATE`/`MAP_FIXED`, `offset` 4 KiB-aligned, and
+/// Linux errnos as `-errno` (`EACCES` for a handle not open for reading,
+/// `EBADF` for one the caller does not hold, `ENOSYS` for a writable shared
+/// mapping, which nothing writes back yet). The same body as the Linux ABI's
+/// file `mmap`: a private mapping is demand-paged from the file, and the
+/// address space keeps its own reference to the file, so the handle may be
+/// closed after. Until 2026-10-07 a native program could not map a file at
+/// all (requests/d-a-a-native-program-cannot-map-a-file.md).
+pub const SYS_MMAP_FILE: u64 = 1144;
+
+/// `SYS_MEMORY_LOCK(op, a, b, c)` -- keep memory in RAM: Linux's `mlock`
+/// family behind one number, with its arguments, and its errnos as `-errno`.
+/// A locked page is never swapped out (`crate::mm::mlock`).
+///
+/// | `op` | Linux call | `a`, `b`, `c` |
+/// |---|---|---|
+/// | [`MEMORY_LOCK_RANGE`] | `mlock2` | `addr`, `len`, `flags` (`MLOCK_ONFAULT` 1) |
+/// | [`MEMORY_UNLOCK_RANGE`] | `munlock` | `addr`, `len` |
+/// | [`MEMORY_LOCK_ALL`] | `mlockall` | `flags` (`MCL_CURRENT` 1, `MCL_FUTURE` 2, `MCL_ONFAULT` 4) |
+/// | [`MEMORY_UNLOCK_ALL`] | `munlockall` | -- |
+///
+/// Locking needs a non-zero `RLIMIT_MEMLOCK` (8 MiB by default) or the
+/// `MEMORY_LOCK` right on a `ResourceLimit` capability (`EPERM`), and stays
+/// within the limit without that right (`ENOMEM`). After `MCL_FUTURE`, a
+/// `SYS_MMAP` or `SYS_MMAP_FILE` past the limit is refused (with
+/// `ResourceExhausted` and `-EAGAIN` respectively), and one within it is
+/// locked and faulted in. Until 2026-10-07 a native program had no call,
+/// and its library's `mlock` locked nothing
+/// (requests/d-a-mlock-locks-nothing.md).
+pub const SYS_MEMORY_LOCK: u64 = 1145;
+/// [`SYS_MEMORY_LOCK`] operation: lock a range (`mlock2`).
+pub const MEMORY_LOCK_RANGE: u64 = 0;
+/// [`SYS_MEMORY_LOCK`] operation: unlock a range (`munlock`).
+pub const MEMORY_UNLOCK_RANGE: u64 = 1;
+/// [`SYS_MEMORY_LOCK`] operation: lock every mapping (`mlockall`).
+pub const MEMORY_LOCK_ALL: u64 = 2;
+/// [`SYS_MEMORY_LOCK`] operation: unlock every mapping (`munlockall`).
+pub const MEMORY_UNLOCK_ALL: u64 = 3;
+
+/// `SYS_THREAD_SCHEDULER(op, tid, a, b)` -- a thread's scheduling policy,
+/// which is how a thread becomes real-time: Linux's `sched_setscheduler`
+/// family for one thread (`tid` 0 is the calling one), with its policy
+/// numbers -- `SCHED_OTHER` 0, `SCHED_FIFO` 1, `SCHED_RR` 2, `SCHED_BATCH` 3,
+/// `SCHED_IDLE` 5 -- and its errnos as `-errno`. The Linux ABI's calls share
+/// the body.
+///
+/// | `op` | Linux call | `a`, `b` | answer |
+/// |---|---|---|---|
+/// | [`SCHEDULER_GET`] | `sched_getscheduler` and `sched_getparam` | -- | bits 0..32: the policy, with `SCHED_RESET_ON_FORK` (0x4000_0000) or'd in; bits 32..40: the real-time priority |
+/// | [`SCHEDULER_SET`] | `sched_setscheduler` | `policy` (0x4000_0000 or'd in sets `SCHED_RESET_ON_FORK`; -1 keeps the thread's policy, as `sched_setparam`), `priority` (1..=99 real-time, 0 otherwise) | 0 |
+/// | [`SCHEDULER_RR_INTERVAL`] | `sched_rr_get_interval` | -- | the thread's time slice, in nanoseconds: 100 ms under `SCHED_RR`, 0 under `SCHED_FIFO` |
+///
+/// `SCHED_FIFO` and `SCHED_RR` run a thread in the real-time band, levels
+/// 0-7, above every ordinary thread; `SCHED_FIFO` has no time slice
+/// (design-decisions 1544). Who may set (`EPERM` otherwise): the thread's
+/// own process, its parent, or a holder of a `Process` capability with
+/// `DELETE` for it -- and for a real-time policy past the process's
+/// `RLIMIT_RTPRIO`, which is 0 by default, the `IO_REALTIME` right on a
+/// `Thread` capability. `ESRCH` for no such thread; `EINVAL` for an unknown
+/// `op` or policy, or a priority that does not suit the policy. Reading
+/// needs no right. Until 2026-10-07 a native program had no way to be
+/// real-time (requests/d-a-real-time-scheduling-has-no-class-to-run-in.md).
+pub const SYS_THREAD_SCHEDULER: u64 = 1146;
+/// [`SYS_THREAD_SCHEDULER`] operation: read the policy and priority.
+pub const SCHEDULER_GET: u64 = 0;
+/// [`SYS_THREAD_SCHEDULER`] operation: set them (`sched_setscheduler`).
+pub const SCHEDULER_SET: u64 = 1;
+/// [`SYS_THREAD_SCHEDULER`] operation: the time slice
+/// (`sched_rr_get_interval`).
+pub const SCHEDULER_RR_INTERVAL: u64 = 2;
+
+/// `SYS_MEMBARRIER(cmd, flags, cpu_id)` -- Linux's `membarrier(2)`, its
+/// commands, flags and errnos (as `-errno`), for native programs: the Linux
+/// ABI's call is the same body. A barrier command returns once every CPU
+/// running a thread of the caller's process (`PRIVATE_EXPEDITED` and its
+/// `SYNC_CORE` form, after the matching `REGISTER_*`, `EPERM` otherwise), or
+/// of any process (`GLOBAL_EXPEDITED`), has been interrupted -- so has passed
+/// a full memory barrier, and will pass a serializing instruction before it
+/// runs that code again (`cpusync`). `GLOBAL` waits instead for every CPU to
+/// pass a quiescent state (`rcu::synchronize`), as Linux's `synchronize_rcu`.
+/// `PRIVATE_EXPEDITED_RSEQ` also restarts each interrupted thread's rseq
+/// critical section (`crate::rseq`), on one CPU with `MEMBARRIER_CMD_FLAG_CPU`.
+/// `QUERY` (0) answers them all. Until 2026-10-07 a native program had no
+/// call, and the
+/// Linux ABI's fenced the calling CPU alone
+/// (requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md).
+pub const SYS_MEMBARRIER: u64 = 1147;
+
+/// `SYS_RSEQ(rseq, len, flags, sig)` -- Linux's `rseq(2)`, its arguments and
+/// errnos (as `-errno`), for native programs: the Linux ABI's call is the
+/// same body (`crate::rseq::rseq`). Registers the calling thread's 32-byte,
+/// 32-byte-aligned `struct rseq` with the abort signature `sig` (`flags` 0),
+/// or unregisters it (`flags` 1, the same three values). While registered,
+/// the kernel keeps the area's `cpu_id` the CPU the thread runs on, and sends
+/// a critical section the thread is switched out, moved or signalled in to
+/// its abort address (design-decisions 1546). Until 2026-10-08 only the Linux
+/// ABI could register an area; the exit-path work was always ABI-blind.
+pub const SYS_RSEQ: u64 = 1148;
+
+/// `SYS_PTRACE(request, pid, addr, data)` -- Linux's `ptrace(2)`, its
+/// requests, arguments and errnos (as `-errno`), for native programs: the
+/// Linux ABI's call is the same body (`crate::proc::ptrace::ptrace`), so a C
+/// library's `ptrace()` passes straight through -- `PTRACE_PEEK*` stores the
+/// word at `data`, as the raw Linux call does. A debugger starts its program
+/// with `PTRACE_TRACEME` in the child (which gives the parent `DEBUG` over
+/// it) and an exec; stops come back through `SYS_PROCESS_WAIT_STATUS` as
+/// `WIFSTOPPED`, with or without `WUNTRACED`. Attaching to a process the
+/// caller did not start is `EPERM` (design-decisions 1547; lane D's
+/// `requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`).
+pub const SYS_PTRACE: u64 = 1149;
+
+// ---------------------------------------------------------------------------
+// The capability request broker's answering side (1150-1155)
+// ---------------------------------------------------------------------------
+//
+// A program asks the user for authority it does not hold; one program -- the
+// desktop's security dialog -- is told of each request and answers it, an
+// approval granting what was asked (`crate::cap::request`, design-decisions
+// 1548; lane C's `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`).
+
+/// `cap_broker_register()` -- become the one process that answers capability
+/// requests. Needs `(CapBroker, 0, WRITE)`.
+///
+/// Returns the handle of a channel end on which the kernel tells the caller
+/// of requests: one message per event, a 16-byte header (`u32` kind, `u32`
+/// status, `u64` request id; little-endian) and, for a new request, its record
+/// (`crate::cap::request::RECORD_HEADER_LEN` has the layout). Kinds: 1 a new
+/// request, 2 a request ended (status: how), 3 events were lost (the queue
+/// was full) -- read the whole list again with [`SYS_CAP_REQUEST_LIST`].
+/// Requests already pending are sent at once. The channel can be waited on
+/// with [`SYS_WAIT_MULTIPLE`] (`POLLIN`); it closes when the caller stops
+/// being the handler.
+///
+/// The caller's exit unregisters it, refusing what was pending.
+///
+/// Errors: `PermissionDenied` without the capability; `AlreadyExists` if a
+/// process is the handler already.
+pub const SYS_CAP_BROKER_REGISTER: u64 = 1150;
+
+/// `cap_broker_unregister()` -- stop answering capability requests: every
+/// pending request is refused, and the channel closes.
+///
+/// Errors: `PermissionDenied` if the caller is not the handler.
+pub const SYS_CAP_BROKER_UNREGISTER: u64 = 1151;
+
+/// `cap_request_decide(id, verdict)` -- answer request `id`: `verdict` 1
+/// allows, which puts the capability in the asker's table in the same step;
+/// 0 denies. Returns the request's final status (1 Approved, 2 Denied, 4
+/// Cancelled when the asker was gone by the time it was allowed).
+///
+/// Errors: `PermissionDenied` if the caller is not the handler, or the
+/// request is its own; `NotFound` for no such request; `TimedOut` if it
+/// timed out before the answer; `InvalidArgument` if it had already ended or
+/// `verdict` is neither 0 nor 1.
+pub const SYS_CAP_REQUEST_DECIDE: u64 = 1152;
+
+/// `cap_request_list(buf, len)` -- every pending request's record, back to
+/// back (the layout of [`SYS_CAP_BROKER_REGISTER`]'s records), for a handler
+/// that starts -- or restarts after a crash -- with requests waiting.
+///
+/// Returns the bytes the list takes: with `len` 0, nothing is copied (ask the
+/// size first); otherwise all of it is copied. The handler's only.
+///
+/// Errors: `PermissionDenied` if the caller is not the handler;
+/// `BufferTooSmall` if `len` is non-zero and too small (the list may have
+/// grown: ask again).
+pub const SYS_CAP_REQUEST_LIST: u64 = 1153;
+
+/// `cap_request_for(type, id, rights, reason, reason_len)` -- ask the user for
+/// `rights` on the object `(type, id)`: a process, thread, port or interrupt
+/// line by its number, or 0 for the whole class. `reason` (UTF-8, at most 256
+/// bytes) is shown to the user. Returns the request's id.
+///
+/// With no handler registered the request is refused as it is filed (its
+/// status reads 2, Denied).
+///
+/// Errors: `InvalidArgument` for an object that cannot be asked for -- a
+/// handle (a channel, a pipe, a terminal end), the right to answer requests,
+/// or a numbered object of a class-only type -- no rights or a bit that is no
+/// declared right, or a reason that is empty, too long or not UTF-8; `NoSuchProcess` for a process or thread
+/// that is not there; `ResourceExhausted` when 32 requests are pending, or 4
+/// of the caller's.
+pub const SYS_CAP_REQUEST_FOR: u64 = 1154;
+
+/// `cap_request_wait(id, timeout_ns)` -- wait until the caller's request `id`
+/// is answered or ends; return its status as [`SYS_CAP_REQUEST_STATUS`] does.
+/// `timeout_ns` `u64::MAX` waits for as long as the request lasts (it times
+/// out on its own after 30 s); 0 asks without waiting.
+///
+/// Errors: `NotFound` if the caller filed no such request; `TimedOut` when
+/// `timeout_ns` passes first (the request goes on); `WouldBlock` for 0 on a
+/// pending request; `Interrupted` for a signal.
+pub const SYS_CAP_REQUEST_WAIT: u64 = 1155;
+
+/// `SYS_CPU_CLOCK(op, clockid)` -- the CPU-time clocks for native programs:
+/// how much processor time a process or one of its threads has used. The
+/// Linux ABI's own clocks, named by Linux's clock ids and answering Linux's
+/// errnos as `-errno` (the convention of [`SYS_POSIX_TIMER`]), for the C
+/// library's `clock_gettime`, `clock_getres`, `clock()`,
+/// `clock_getcpuclockid` and `pthread_getcpuclockid`.
+///
+/// | `op` | call | answer |
+/// |---|---|---|
+/// | [`CPU_CLOCK_GETTIME`] | `clock_gettime` | the clock's value, in nanoseconds |
+/// | [`CPU_CLOCK_GETRES`] | `clock_getres` | its resolution, in nanoseconds |
+/// | [`CPU_CLOCK_NANOSLEEP`] | `clock_nanosleep` | 0 once the clock reads the time |
+///
+/// `CPU_CLOCK_NANOSLEEP` takes `arg2` the flags (`TIMER_ABSTIME` 1), `arg3`
+/// the request (`struct timespec *`) and `arg4` where to write the time left
+/// (or 0), and sleeps until the clock -- 2, or a process's or another of the
+/// caller's threads' by id -- has advanced by the request (or reads it, for
+/// `TIMER_ABSTIME`), as Linux's `clock_nanosleep` does: within a tick of it,
+/// and for ever if nothing advances it, a process sleeping on its own clock
+/// with no other thread running included. `-EOPNOTSUPP` for 3 and a CLOCKFD
+/// id, `-EINVAL` for the caller's own thread's clock (it could never
+/// advance) and anything that is not a CPU-time clock. Interrupted by a
+/// signal it answers `-EINTR`, the time left written for a relative sleep:
+/// there is no `restart_syscall` for native programs.
+///
+/// `clockid` is `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID`
+/// (3), or a process's or thread's clock as `clock_getcpuclockid` and
+/// `pthread_getcpuclockid` make them: `(~id << 3) | perthread << 2 | which`,
+/// `which` 0 for user plus system time sampled at the tick (`CPUCLOCK_PROF`),
+/// 1 for user time so sampled (`CPUCLOCK_VIRT`), 2 for the precise run time
+/// (`CPUCLOCK_SCHED`, what 2 and 3 read; resolution 1 ns, the sampled ones a
+/// tick, 10 ms), and id 0 meaning the caller. A thread's clock is readable by
+/// its own process alone, any process's by anyone, as on Linux; an id naming
+/// neither -- or a gone thread, a reaped process -- is `-EINVAL`, which is how
+/// `clock_getcpuclockid` tells a live pid from a dead one. Every other clock
+/// id is `-EINVAL` here (the others have native calls of their own). The
+/// clocks run on through `exec` and start at zero in a `fork`'s child; a
+/// process's counts its exited threads, not its children. An unknown `op` is
+/// `-EINVAL`. No capability.
+pub const SYS_CPU_CLOCK: u64 = 1156;
+/// [`SYS_CPU_CLOCK`] operation: read the clock.
+pub const CPU_CLOCK_GETTIME: u64 = 0;
+/// [`SYS_CPU_CLOCK`] operation: its resolution.
+pub const CPU_CLOCK_GETRES: u64 = 1;
+/// [`SYS_CPU_CLOCK`] operation: sleep until the clock reads a time.
+pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
+
+/// `SYS_FS_MKFIFO` (1157) -- make a named pipe's node: Linux's
+/// `mknod(path, S_IFIFO | mode, 0)`, which `mkfifo` is.
+///
+/// `arg0`/`arg1` the path, `arg2` the permission bits, already less the
+/// caller's umask (the native umask is the C library's). Returns 0.
+/// `AlreadyExists` for a name that exists, of any type; `NotSupported` on a
+/// filesystem that cannot hold one (FAT -- Linux's `EPERM`); otherwise what
+/// creating a file there answers. Needs the File capability with `CREATE`, as
+/// `SYS_FS_MKDIR_MODE` does.
+pub const SYS_FS_MKFIFO: u64 = 1157;
+
+/// `SYS_FIFO_OPEN` (1158) -- open a named pipe: Linux's `open` of a FIFO's
+/// node, which `SYS_FS_OPEN` answers `NoSuchDeviceOrAddress` (`ENXIO`), as it
+/// answers a socket's: there is nothing behind the node to read. A C library
+/// that meets that answer asks this call with the same path and flags.
+///
+/// `arg0`/`arg1` the path, `arg2` the native open flags -- `READ`, `WRITE` or
+/// both, and `NOFOLLOW`/`NO_SYMLINKS` for the walk; the others are ignored, a
+/// FIFO being made by [`SYS_FS_MKFIFO`] -- and `arg3` bit 0 nonblocking
+/// (`O_NONBLOCK`). Returns a pipe handle -- the read end, the write end, or
+/// for `READ | WRITE` both ends in one handle -- that `SYS_PIPE_READ`,
+/// `SYS_PIPE_WRITE`, `SYS_PIPE_POLL` and `SYS_PIPE_CLOSE` take as any pipe
+/// end's.
+///
+/// The open waits as POSIX says (`kernel/src/ipc/fifo.rs`): for reading,
+/// until a writer has opened; for writing, until a reader has; for both,
+/// never. Nonblocking, a reader opens at once and a writer with no reader is
+/// `NoSuchDeviceOrAddress`. A signal while it waits is `Interrupted`, with
+/// nothing left open. `NoSuchDeviceOrAddress` too for a path that names no
+/// FIFO; `InvalidArgument` for neither `READ` nor `WRITE`. Needs the File
+/// capability with `READ`, as `SYS_FS_OPEN` does.
+pub const SYS_FIFO_OPEN: u64 = 1158;
+
+/// `SYS_PROCESS_SET_IDS` (1159) -- move between user or group ids by
+/// Linux's rules: the native `setuid`, `seteuid`, `setreuid`, `setresuid`,
+/// `setfsuid` and their group twins (`kernel/src/proc/setid.rs`).
+///
+/// `arg0` the operation, `arg1`..`arg3` its ids, `0xFFFF_FFFF` leaving one as
+/// it is:
+///
+/// | op | Linux call | ids |
+/// |---|---|---|
+/// | [`SET_IDS_UID`] 0 | `setuid` | `arg1` |
+/// | [`SET_IDS_REUID`] 1 | `setreuid` | real, effective |
+/// | [`SET_IDS_RESUID`] 2 | `setresuid` | real, effective, saved |
+/// | [`SET_IDS_FSUID`] 3 | `setfsuid` | `arg1` |
+/// | 4..=7 | the same for group ids | |
+///
+/// Privileged -- holding `SET_CREDENTIALS` over processes -- a caller may
+/// set any id, and `SET_IDS_UID` sets all four. Unprivileged, it may move an
+/// id only to a value one of its ids holds: `NotPermitted` (`EPERM`)
+/// otherwise; `InvalidArgument` for `SET_IDS_UID` of `0xFFFF_FFFF` or an
+/// unknown op. `SET_IDS_FSUID` answers the old filesystem id and never
+/// fails, as `setfsuid` does; the rest answer 0. Root's authority follows the
+/// user ids: put aside while the effective id is not 0 but another is, back
+/// with it, gone when none is 0 -- so `seteuid(1000)` then `seteuid(0)` works
+/// and `setuid(1000)` is for good. No authority comes from an id of 0 here,
+/// unlike the Linux calls: a native program's privilege is its capability.
+pub const SYS_PROCESS_SET_IDS: u64 = 1159;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setuid`.
+pub const SET_IDS_UID: u64 = 0;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setreuid`.
+pub const SET_IDS_REUID: u64 = 1;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setresuid`.
+pub const SET_IDS_RESUID: u64 = 2;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setfsuid`.
+pub const SET_IDS_FSUID: u64 = 3;
+/// Added to a [`SYS_PROCESS_SET_IDS`] user operation: its group twin.
+pub const SET_IDS_GROUP: u64 = 4;
+
+/// `SYS_PROCESS_GET_IDS` (1160) -- the caller's ids: `arg0` a buffer of eight
+/// `u32`s, filled with the real, effective, saved and filesystem user ids,
+/// then the same group ids (`getresuid`, `getresgid`, and the filesystem
+/// ids Linux shows only in `/proc/<pid>/status`). Returns 0;
+/// `InvalidAddress` for a buffer that cannot be written.
+pub const SYS_PROCESS_GET_IDS: u64 = 1160;
+
+/// `SYS_NAMESPACE_UNSHARE` (1161) -- the caller's process into new
+/// namespaces, one of each kind `arg0` names by its Linux `CLONE_NEW*` bit,
+/// each a copy of the one it leaves: the native `unshare(2)`
+/// (`crate::nsfs`). Built so far: `CLONE_NEWUTS` (`0x0400_0000`), the host
+/// and domain names (`crate::utsns`). `arg0` 0 changes nothing and answers
+/// 0, as `unshare(0)`. The whole process moves, every thread
+/// (design-decisions 1554).
+///
+/// `PermissionDenied` without a `Namespace` capability with `WRITE` -- the
+/// right [`SYS_NS_CREATE`] and [`SYS_NS_ATTACH`] ask for; as for every
+/// native call, no authority comes from a user id of 0. `NotSupported` for
+/// any bit but a built kind's, `ResourceExhausted` past the limit on
+/// namespaces.
+pub const SYS_NAMESPACE_UNSHARE: u64 = 1161;
+
+/// `SYS_NAMESPACE_OPEN` (1162) -- a handle on the namespace a
+/// `/proc/<pid>/ns/<kind>` path names (`arg0` the path, `arg1` its length;
+/// absolute, `self` for the caller): what Linux's `open` of that link gives,
+/// for a native program, whose open of it would follow the link's text to
+/// nothing. The handle holds the namespace, alive with nobody in it, until
+/// [`SYS_NAMESPACE_CLOSE`] or exit; a fork's child holds it too. Each open
+/// is its own hold.
+///
+/// Returns the handle. `InvalidArgument` for a path that names no namespace
+/// link (the caller then opens it as it would any path); `NotFound` when the
+/// process is gone or a zombie; `PermissionDenied` when the caller may not
+/// inspect it (Linux's `PTRACE_MODE_READ` check).
+pub const SYS_NAMESPACE_OPEN: u64 = 1162;
+
+/// `SYS_NAMESPACE_ENTER` (1163) -- the caller's process into the namespace
+/// handle `arg0` holds (from [`SYS_NAMESPACE_OPEN`], held by the caller): the
+/// native `setns(2)` with a namespace's descriptor. `arg1` 0 takes it
+/// whatever its kind; otherwise it must be the kind's `CLONE_NEW*` bit.
+///
+/// `InvalidHandle` for a handle the caller does not hold; `InvalidArgument`
+/// for a kind that is not the handle's; `PermissionDenied` without a
+/// `Namespace` capability with `WRITE`.
+pub const SYS_NAMESPACE_ENTER: u64 = 1163;
+
+/// `SYS_NAMESPACE_ENTER_PROCESS` (1164) -- the caller's process into the
+/// namespaces of process `arg0` that `arg1` names by their `CLONE_NEW*`
+/// bits: the native `setns(2)` with a pidfd. `InvalidArgument` for no bit,
+/// `NotSupported` for a kind not built; `NoSuchProcess` for a process that
+/// is gone or a zombie; `PermissionDenied` if the caller may not inspect it
+/// or holds no `Namespace` capability with `WRITE`.
+pub const SYS_NAMESPACE_ENTER_PROCESS: u64 = 1164;
+
+/// `SYS_NAMESPACE_CLOSE` (1165) -- give back namespace handle `arg0` (one
+/// hold); the namespace goes with its last holder. `InvalidHandle` for a
+/// handle the caller does not hold.
+pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
+
+/// `SYS_NAMESPACE_INFO` (1166) -- what `fstat` and `NS_GET_NSTYPE` say of
+/// namespace handle `arg0`: three `u64`s at `arg1` -- the kind's `CLONE_NEW*`
+/// bit, the inode number its `/proc/<pid>/ns` link shows (the `N` of
+/// `uts:[N]`), and nsfs's device number (`st_dev`'s minor, under major 0).
+/// Returns 0; `InvalidHandle` for a handle the caller does not hold,
+/// `InvalidAddress` for a buffer that cannot be written.
+pub const SYS_NAMESPACE_INFO: u64 = 1166;
+
+// ---------------------------------------------------------------------------
+// Switching the machine off and restarting it (1167-1168)
+//
+// The kernel's part of a shutdown or a restart: every mounted filesystem
+// flushed (`Vfs::sync`), then the switch -- ACPI S5 for off, the ACPI reset
+// register, the keyboard controller or a triple fault for a restart. The
+// orderly part before it -- asking services and programs to stop, unmounting
+// what userspace mounted -- is the caller's (`powerctl`, the service
+// manager). Until these, nothing in userspace could switch the machine off
+// at all (known-issues `b-org.slateos.servicemanager-has-two-clients-and-no-
+// provider`: `powerctl`'s "direct" fallback found no way).
+//
+// Each is its own right on a `Process` capability -- `power.shutdown` and
+// `power.reboot` in `roadmap-detailed` §1.5 -- checked before anything is
+// flushed, so a caller without it changes nothing. `flags` must be 0
+// (`InvalidArgument`): no bit means anything yet.
+// ---------------------------------------------------------------------------
+
+/// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
+/// off. Does not return on success. Requires a `Process` capability carrying
+/// [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF): `PermissionDenied`
+/// without it. `NotSupported` -- and the machine still running, interrupts on
+/// again -- when no way of switching off worked (no ACPI S5 and no emulator
+/// port answered).
+pub const SYS_POWER_OFF: u64 = 1167;
+/// `SYS_POWER_REBOOT(flags)` -- flush every filesystem and restart the machine
+/// through the firmware. Does not return: the last of its methods, a triple
+/// fault, always resets. Requires [`Rights::REBOOT`](crate::cap::Rights::REBOOT):
+/// `PermissionDenied` without it.
+pub const SYS_POWER_REBOOT: u64 = 1168;
+
+/// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
+pub const UNIX_ADDR_LEN: usize = 116;
+/// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.
+pub const UNIX_RECV_INFO_LEN: usize = 28 + UNIX_ADDR_LEN;
+
+// ---------------------------------------------------------------------------
+// Unix-domain sockets carrying descriptors (1169-1170)
+//
+// The native half of `SCM_RIGHTS` (known-issues
+// `A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS`). A native program's descriptor
+// table lives in its C library, so the kernel knows a descriptor as the pair
+// the library keeps for it -- a type, the codes a spawn's `fd_map` uses
+// (`proc::spawn::fd_handle_type`), and a handle the process holds -- plus the
+// open file description's status flags, which travel with it. Each is one
+// [`UNIX_RIGHT_LEN`]-byte record: handle (u64), type (u32), status flags
+// (u32).
+//
+// A descriptor sent this way travels as a Linux program's does, so either
+// kind of program can receive what the other sent. The kinds that can travel
+// are files, pipes, the console, eventfds and Unix sockets; a native send of
+// any other type is `NotSupported`, and a Linux descriptor of a kind the
+// native library has no type for arrives dropped, reported as
+// [`UNIX_MSG_CTRUNC`].
+// ---------------------------------------------------------------------------
+
+/// `SYS_UNIX_SENDMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_SEND`], carrying
+/// descriptors. `msg_ptr` points at [`UNIX_SENDMSG_LEN`] bytes, six u64s:
+/// `buf`, `len`, `name_ptr`, `name_len` (as `SYS_UNIX_SEND` takes them),
+/// `rights_ptr`, `rights_count` -- that many [`UNIX_RIGHT_LEN`]-byte records,
+/// each a descriptor the caller holds. `flags` as `SYS_UNIX_SEND`'s. Returns
+/// bytes sent; the descriptors go with them, all or none.
+///
+/// The descriptors are taken last, after every other argument is checked,
+/// and each reference is held for the message until it is received or the
+/// socket closes. Errors beyond `SYS_UNIX_SEND`'s: `InvalidArgument` for more
+/// than 253 (Linux's `SCM_MAX_FD`), `NotSupported` for a type that cannot
+/// travel, `InvalidHandle` for one the caller does not hold, and
+/// `ResourceExhausted` when the caller's user, not root, already has more
+/// descriptors in flight than its `RLIMIT_NOFILE` -- Linux's `ETOOMANYREFS`,
+/// a code of its own (`-305`) once the C library declares it
+/// (`ipc::native_rights::take`).
+pub const SYS_UNIX_SENDMSG: u64 = 1169;
+/// `SYS_UNIX_RECVMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_RECV`], taking
+/// the descriptors the message carries. `msg_ptr` points at
+/// [`UNIX_RECVMSG_LEN`] bytes, seven u64s: `buf`, `cap`, `info_ptr` (as
+/// `SYS_UNIX_RECV` takes them), `rights_ptr`, `rights_cap` -- room for that
+/// many [`UNIX_RIGHT_LEN`]-byte records -- then two the kernel writes:
+/// `rights_got`, the records written at `rights_ptr`, and `msg_flags`
+/// ([`UNIX_MSG_CTRUNC`]). `flags` as `SYS_UNIX_RECV`'s; a peek
+/// ([`UNIX_PEEK`]) takes copies, and leaves the message's own for the
+/// receive.
+///
+/// Each descriptor received is a handle the caller now holds, released by
+/// its close or the caller's exit -- unless the caller held that object
+/// already, when the record names the handle it had and no second reference
+/// is taken. Those beyond `rights_cap`, or of a kind with no native type,
+/// are released, and `msg_flags` says so. Returns bytes copied.
+pub const SYS_UNIX_RECVMSG: u64 = 1170;
+/// Bytes of one descriptor record: handle (u64), type (u32), status flags
+/// (u32).
+pub const UNIX_RIGHT_LEN: usize = 16;
+/// Bytes [`SYS_UNIX_SENDMSG`] reads at `msg_ptr`.
+pub const UNIX_SENDMSG_LEN: usize = 6 * 8;
+/// Bytes of [`SYS_UNIX_RECVMSG`]'s record the kernel reads: the five words
+/// the caller fills.
+pub const UNIX_RECVMSG_IN_LEN: usize = 5 * 8;
+/// Bytes of [`SYS_UNIX_RECVMSG`]'s whole record: the five the caller fills
+/// and the two the kernel writes.
+pub const UNIX_RECVMSG_LEN: usize = 7 * 8;
+/// `msg_flags` bit: descriptors the message carried were released -- no room
+/// for them, or no native type (Linux's `MSG_CTRUNC`).
+pub const UNIX_MSG_CTRUNC: u64 = 1 << 0;
+
+/// `SYS_RESTART_SYSCALL()` -- resume a call the kernel interrupted with a
+/// deadline to keep, as Linux's `restart_syscall(2)` resumes one. Programs
+/// do not call it: when a sleep ([`SYS_SLEEP`]) is interrupted with no signal
+/// handler to run -- a freeze (`crate::proc::freezer`) -- the kernel saves
+/// the sleep's deadline and returns to the program with this number in RAX
+/// and its instruction pointer back on the `syscall` instruction, so the
+/// program's next instruction issues it, and the sleep ends when it would
+/// have. With nothing saved for the thread (a call nobody interrupted) it
+/// returns `Interrupted`, as Linux's answers `EINTR`.
+pub const SYS_RESTART_SYSCALL: u64 = 1171;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 
-/// Maximum supported syscall number.
+/// One more than the highest syscall number the dispatch table can hold.
 ///
 /// The dispatch table is a flat array of this size for O(1) lookup.
-/// Sparse — most entries are `None`.
-pub const MAX_SYSCALL_NR: usize = 1100;
+/// Sparse — most entries are `None`. Raised in steps of 100 when the numbers
+/// reach it (1100 -> 1200 with [`SYS_SCHED_SET_AFFINITY`]), so a new call
+/// does not have to move it; `scfilter` derives its bitmap from it.
+pub const MAX_SYSCALL_NR: usize = 1200;

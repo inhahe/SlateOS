@@ -1,0 +1,6 @@
+# The test streams are Ogg files -- binary, NUL bytes in their first page --
+# and are named as such rather than left to text=auto's inference (the root
+# .gitattributes says why): one translated byte would make a stream decode to
+# something Tremor never heard, and every digest in references.txt would fail
+# at once.
+*.ogg binary

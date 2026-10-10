@@ -281,6 +281,10 @@ fn every_visible_row_launches_the_program_named_on_it() {
                 );
                 continue;
             }
+            // Only a search lists a program's actions, and nothing is typed.
+            Some(crate::StartRow::Action { action, .. }) => {
+                panic!("row {row} is the action {:?} with no search", action.name)
+            }
             None => panic!("row {row} is empty in a menu longer than the screen"),
         };
         match shown {
@@ -2756,6 +2760,7 @@ fn the_recycle_bin_opens_the_file_managers_view_of_it() {
             ShellAction::Launch(crate::hotkeys::Launch {
                 program: std::path::PathBuf::from(launcher::FILE_MANAGER),
                 args: vec![std::ffi::OsString::from("--recycle-bin")],
+                dir: None,
             })
         );
         assert!(
@@ -3975,7 +3980,8 @@ fn one_section_alone_has_no_divider() {
             only_windows.taskbar_button_rect(0),
             only_windows.taskbar_button_rect(1),
         );
-        assert!((b.x - (a.x + a.w) - only_windows.scale(crate::TASKBAR_BUTTON_GAP)).abs() < 0.01);
+        // The built-in panel's gap between two tiles: the reference's 1.
+        assert!((b.x - (a.x + a.w) - only_windows.scale(1.0)).abs() < 0.01);
     });
 }
 

@@ -1496,7 +1496,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
     /// -- as glibc's `ungetc(c)` after its `inchar` chain gives back the last
     /// one.
     fn read_nil(&mut self) -> Result<(), Option<I::U>> {
-        for want in [b'n', b'i', b'l'] {
+        for want in *b"nil" {
             match self.inp.get() {
                 Some(x) if x.byte().to_ascii_lowercase() == want => {}
                 other => return Err(other),
@@ -1539,7 +1539,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
         if lower == b'n' {
             // "nan", or nothing.
             self.charbuf.push(c.byte());
-            for want in [b'a', b'n'] {
+            for want in *b"an" {
                 if width == 0 {
                     return Err(Stop::Conv);
                 }
@@ -1556,7 +1556,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
         } else if lower == b'i' {
             // "inf", maybe "infinity".
             self.charbuf.push(c.byte());
-            for want in [b'n', b'f'] {
+            for want in *b"nf" {
                 if width == 0 {
                     return Err(Stop::Conv);
                 }
@@ -1576,7 +1576,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
                             width = width.wrapping_sub(1);
                         }
                         self.charbuf.push(next.byte());
-                        for want in [b'n', b'i', b't', b'y'] {
+                        for want in *b"nity" {
                             if width == 0 {
                                 return Err(Stop::Conv);
                             }
@@ -3736,6 +3736,17 @@ mod tests {
         assert_eq!(n, 0, "infin is consumed and is no number");
         let (n, v, rest) = scan_hex("infx", b"%lf%s\0");
         assert_eq!((n, v, rest.as_str()), (2, f64::INFINITY, "x"));
+        // A `0x` and a point with no hex digit: the text `0x.` is collected
+        // and `strtod` reads its `0`, so glibc converts it to zero -- the
+        // two cases known-issues-resolved/TD-POSIX-SCANF-GLIBC-DIGITLESS-HEX
+        // recorded from glibc 2.39 when this library answered otherwise.
+        let (n, v, rest) = scan_hex("0x.z", b"%lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, 0.0, "z"));
+        let (n, v, rest) = scan_hex("0x.8p1", b"%3lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, 0.0, "8p1"));
+        // A bare `0x` is no number, as in glibc.
+        let (n, _, _) = scan_hex("0xz", b"%lf%s\0");
+        assert_eq!(n, 0);
     }
 
     #[test]

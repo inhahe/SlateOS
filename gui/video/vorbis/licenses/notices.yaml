@@ -1,0 +1,16 @@
+# The third-party code gui/video/vorbis carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# The decoder is Tremor's, translated: Xiph's integer Vorbis decoder (its
+# codebooks, floors, residues, mapping, MDCT, windows and their tables, and the
+# block and synthesis layers), each source file naming the Tremor files it
+# derives from; and libogg's bit reader, which Tremor reads packets with, under
+# the same Xiph.Org BSD licence. The test streams in tests/data are this
+# project's own (tools/make_fixtures.py and tools/make_synthetic.py), not
+# Xiph's.
+tremor:
+  version: libvorbisidec 1.2.1 (git 820fb32, 2025-04-03); libogg 1.3.6 (git 06a5e02)
+  licence: BSD-3-Clause
+  texts:
+    - tremor-COPYING

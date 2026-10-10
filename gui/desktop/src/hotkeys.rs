@@ -100,6 +100,13 @@ pub struct Launch {
     pub program: PathBuf,
     /// Its arguments, in order, not including the program name itself.
     pub args: Vec<OsString>,
+    /// The directory it starts in; `None` for wherever its starter is.
+    ///
+    /// A program a file's right-click menu starts runs in that file's folder
+    /// (`servicemenus`, as KDE runs one): a command such as
+    /// `tar czf archive.tar.gz %F` writes where the files are, not wherever
+    /// the desktop happened to be started.
+    pub dir: Option<PathBuf>,
 }
 
 impl Launch {
@@ -110,6 +117,7 @@ impl Launch {
         Self {
             program: program.into(),
             args: Vec::new(),
+            dir: None,
         }
     }
 
@@ -124,6 +132,7 @@ impl Launch {
         Self {
             program: program.into(),
             args: vec![path.as_os_str().to_os_string()],
+            dir: None,
         }
     }
 
@@ -726,22 +735,22 @@ impl HotkeyAction {
     /// list) wants neither the arguments nor to have to ignore them.
     #[must_use]
     pub fn launch(&self) -> Option<Launch> {
-        let plain = |p: &str| Launch {
-            program: PathBuf::from(p),
-            args: Vec::new(),
-        };
+        let plain = |p: &str| Launch::program(p);
         match self {
             Self::Screenshot => Some(Launch {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
                 args: vec![OsString::from(SCREENSHOT_FULLSCREEN_ARG)],
+                dir: None,
             }),
             Self::ScreenshotRegion => Some(Launch {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
                 args: vec![OsString::from(SCREENSHOT_REGION_ARG)],
+                dir: None,
             }),
             Self::ScreenshotWindow => Some(Launch {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
                 args: vec![OsString::from(SCREENSHOT_WINDOW_ARG)],
+                dir: None,
             }),
             Self::ScreenshotToFile => Some(Launch {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
@@ -749,6 +758,7 @@ impl HotkeyAction {
                     OsString::from(SCREENSHOT_FULLSCREEN_ARG),
                     OsString::from(SCREENSHOT_SAVE_ARG),
                 ],
+                dir: None,
             }),
             Self::ScreenshotWindowToFile => Some(Launch {
                 program: PathBuf::from(SCREENSHOT_COMMAND),
@@ -756,6 +766,7 @@ impl HotkeyAction {
                     OsString::from(SCREENSHOT_WINDOW_ARG),
                     OsString::from(SCREENSHOT_SAVE_ARG),
                 ],
+                dir: None,
             }),
             _ => self.command().map(plain),
         }

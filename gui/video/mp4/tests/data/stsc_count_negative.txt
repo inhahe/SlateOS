@@ -1,0 +1,3 @@
+# stsc_count_negative.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 afx0 1/48000 48000Hz/1 1024 -
+packet 0 0 0 1024 2 4656 K__ 314054f444cbd77adb854c1b70288041 0

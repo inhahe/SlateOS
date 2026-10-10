@@ -1027,8 +1027,17 @@ impl Compositor {
             match &req.body {
                 RequestBody::SetTrayIcon { id, glyph, tooltip } => {
                     let owner = link.client_pid;
-                    self.set_tray_icon(owner, *id, glyph, tooltip);
-                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    // `Ok` whether or not anything changed -- a program
+                    // re-sending its icon has done nothing wrong -- and the
+                    // refusal itself when the icon is not shown, so the
+                    // program can tell a full tray from a shell not drawing.
+                    let body = match self.set_tray_icon(owner, *id, glyph, tooltip) {
+                        Ok(_) => ResponseBody::Ok,
+                        Err(refused) => ResponseBody::Error {
+                            message: refused.to_string(),
+                        },
+                    };
+                    replies.push(Response::new(req.seq, body));
                     continue;
                 }
                 RequestBody::RemoveTrayIcon { id } => {
@@ -2794,6 +2803,154 @@ mod tests {
             "two connections, one process"
         );
         assert_eq!((entry(c).pid, entry(c).process), (23, None));
+    }
+
+    /// One program cannot fill the tray: past its share a new icon is refused,
+    /// with a reason, and the program next to it still gets its icon in.
+    ///
+    /// Before the share, the only bound was the tray's 4096, and a program
+    /// registering icon after icon reached it alone -- every program started
+    /// after it was then refused, and told `Ok`.
+    #[test]
+    fn a_program_past_its_share_of_the_tray_is_refused_and_told() {
+        use guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT;
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let set = |id: u32| RequestBody::SetTrayIcon {
+            id,
+            glyph: String::from("X"),
+            tooltip: format!("icon {id}"),
+        };
+        let mut greedy = ClientLink::new(99);
+        let replies = exchange(
+            &mut comp,
+            &mut greedy,
+            (0..=MAX_TRAY_ICONS_PER_CLIENT).map(set).collect(),
+        );
+        let (last, shown) = replies.split_last().expect("one reply per icon");
+        assert!(
+            shown.iter().all(|r| matches!(r.body, ResponseBody::Ok)),
+            "an icon within the share was refused"
+        );
+        match &last.body {
+            ResponseBody::Error { message } => {
+                assert!(
+                    message.contains("32"),
+                    "the refusal says the share: {message}"
+                );
+            }
+            other => panic!("the icon past the share was answered {other:?}"),
+        }
+        // Replacing is never refused: the battery at the share still ticks.
+        let replaced = exchange(&mut comp, &mut greedy, vec![set(0)]);
+        assert!(matches!(replaced[0].body, ResponseBody::Ok));
+
+        let mut next = ClientLink::new(100);
+        let theirs = exchange(&mut comp, &mut next, vec![set(1)]);
+        assert!(
+            matches!(theirs[0].body, ResponseBody::Ok),
+            "another program was refused because one took its share"
+        );
+        let last_list = pump_trays(&mut comp, &mut shell);
+        let icons = &last_list.last().expect("a frame").icons;
+        assert_eq!(
+            icons.iter().filter(|i| i.owner == 99).count(),
+            usize::try_from(MAX_TRAY_ICONS_PER_CLIENT).expect("small")
+        );
+        assert_eq!(icons.iter().filter(|i| i.owner == 100).count(), 1);
+    }
+
+    /// The tray's own bound is answered with the refusal too, for the program
+    /// that meets it within its share.
+    #[test]
+    fn a_full_tray_refuses_a_new_icon_and_says_so() {
+        use guiremote::tray::{MAX_TRAY_ICONS, MAX_TRAY_ICONS_PER_CLIENT};
+        let (mut comp, _shell) = wired();
+        // Programs of a full share each, until the tray is full.
+        let programs = MAX_TRAY_ICONS / MAX_TRAY_ICONS_PER_CLIENT;
+        for owner in 0..u64::from(programs) {
+            for id in 0..MAX_TRAY_ICONS_PER_CLIENT {
+                comp.set_tray_icon(owner, id, "X", "").expect("room");
+            }
+        }
+        assert_eq!(
+            comp.tray_list().icons.len(),
+            usize::try_from(MAX_TRAY_ICONS).expect("small")
+        );
+        let mut late = ClientLink::new(u64::from(programs));
+        let replies = exchange(
+            &mut comp,
+            &mut late,
+            vec![RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: String::from("L"),
+                tooltip: String::from("late"),
+            }],
+        );
+        match &replies[0].body {
+            ResponseBody::Error { message } => {
+                assert!(
+                    message.contains("4096"),
+                    "the refusal says the tray's bound: {message}"
+                );
+            }
+            other => panic!("a new icon in a full tray was answered {other:?}"),
+        }
+    }
+
+    /// A tooltip is kept to its kilobyte, cut where a character ends.
+    ///
+    /// The registry keeps an icon's text while its program runs, so a 4 MiB
+    /// tooltip per icon was memory any program could take from the
+    /// compositor. And the cut must fall between characters: half of one is
+    /// not UTF-8, and a frame carrying it would not decode for any shell.
+    #[test]
+    fn a_long_tooltip_is_cut_on_a_character_boundary() {
+        use guiremote::tray::MAX_TOOLTIP_BYTES;
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        // "é" is two bytes, and one byte in front puts every character
+        // boundary on an odd offset, so the bound itself (even) is mid-"é".
+        let tooltip = format!("a{}", "\u{e9}".repeat(MAX_TOOLTIP_BYTES));
+        let mut app = ClientLink::new(99);
+        let replies = exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: String::from("T"),
+                tooltip: tooltip.clone(),
+            }],
+        );
+        assert!(
+            matches!(replies[0].body, ResponseBody::Ok),
+            "cut, not refused"
+        );
+        let lists = pump_trays(&mut comp, &mut shell);
+        let kept = &lists.last().expect("a frame that decodes").icons[0].tooltip;
+        assert_eq!(
+            kept.len(),
+            MAX_TOOLTIP_BYTES - 1,
+            "the whole characters that fit"
+        );
+        assert!(
+            tooltip.starts_with(kept.as_str()),
+            "what is kept is the start"
+        );
+
+        // At the bound exactly, nothing is cut.
+        let exact = "t".repeat(MAX_TOOLTIP_BYTES);
+        comp.set_tray_icon(99, 1, "T", &exact)
+            .expect("a replacement");
+        assert_eq!(comp.tray_list().icons[0].tooltip, exact);
     }
 
     /// An unchanged tray is not resent.

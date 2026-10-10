@@ -1,0 +1,50 @@
+## D-POSIX-HOST-TESTS-SHARE-ONE-TIME-ZONE — `posix`'s host tests share one cached time zone, so a test that reads it without `TzGuard` races any test that sets one (lane D, 2026-10-05)
+
+**Status:** FIXED 2026-10-05
+
+**In short:** the C library's tests run many at once, each on its own
+thread of one process. Most per-process state in the library is kept per
+test thread on the host (`posix/src/perprocess.rs`), so tests cannot see
+each other's -- the environment among it since 2026-09-29. The time zone is
+not: the zone a test sets is the zone every test running beside it sees. A
+test that reads the zone (a local time, `mktime`, `strftime %s`) without
+first setting one through `TzGuard` gets whatever zone a neighbour set, and
+fails at random. The order gate (`check-test-order-independence.py`)
+shuffles `posix` on every push from every lane, so such a race refuses
+pushes at random -- lane B's on 2026-10-03, over
+`time::tests::test_strftime_epoch_seconds`
+(`requests/b-d-strftime-epoch-seconds-test-races-the-time-zone.md`).
+
+**Where:** `posix/src/tz.rs` keeps glibc's statics as glibc does -- one
+`State` behind `TZ_LOCK`, the name arena (`ARENA`, 8 KiB), the zone file
+(`ZONE_FILE`, 16 KiB) -- and publishes `tzname`, `timezone` and `daylight`
+to the C-visible statics in `posix/src/time.rs`. On the target that is
+right: one process, one zone. On the host all of it is shared by every test
+thread.
+
+**Today's remedy, and why it is not enough:** every zone-reading test takes
+`TzGuard` (set a zone, serialise on `lock_env_for_test`); 45 in `time.rs`
+did, and the 46th did not, and nothing noticed until a push was refused.
+The rule depends on each new test remembering it.
+
+**The proper fix:** make the zone per test thread on the host, as the
+environment is: `STATE`, `ARENA`, `ARENA_USED` and `ZONE_FILE` through
+`process_global!` (26 KiB of thread-local storage, zeroed per test thread),
+and the three C-visible variables behind host-only accessors, since on the
+host they are not the C ABI's -- nothing outside the crate links the host
+build. `TzGuard` then still sets a zone but no longer has to serialise, and
+a test that forgets it reads the zone it was born with, UTC, instead of a
+neighbour's. The target build does not change.
+
+**Fixed (2026-10-05):** the proper fix above, as written. `posix/src/tz.rs`
+keeps its state, name arena and zone-file buffer through `process_global!`,
+so on the host each test thread has its own and the target's are
+unchanged; `posix/src/time.rs`'s `tzname`, `timezone` and `daylight` are the
+C ABI's statics on the target only, and per test thread on the host
+(`host_tz_globals`, read by tests through `tz_globals_for_test`); the test
+build's table of zoneinfo files (`tz/tests.rs`, `FILES`) is per test thread
+too, since one test's files were every test's. `TzGuard` no longer takes
+the environment lock. `test_a_zone_set_on_another_thread_is_not_this_threads`
+pins it: New York's zone set on one thread, and the thread beside it still
+reading glibc's default for a process with no `TZ`, UTC. All 9193 `posix`
+host tests pass.

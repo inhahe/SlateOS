@@ -8,14 +8,37 @@
 # theme. Then choose it in Settings, or set `theme.colors: <name>` in
 # ~/.config/slateos/appearance.yaml.
 #
+# `themecheck <its folder>` then says what in it the desktop would refuse,
+# ignore or adjust -- a colour that is not one, text too faint to read, an icon
+# that draws nothing -- before you use it or share it.
+#
 # `colors` is dark mode and `colors-light` is light mode. A theme with only one
 # of the two is shown in that mode whichever the user has chosen. `terminal` and
 # `terminal-light` are a terminal's colours for the same two modes, `syntax` and
 # `syntax-light` the colours of code in a code editor, `widget-style` is the
 # shape of the controls -- chosen separately, as `theme.widget_style: <name>`,
 # so one theme's colours can be worn with another's buttons -- and
-# `animation`, at the end, is how the desktop's panels and notifications move,
-# chosen separately again as `theme.animation: <name>`.
+# `animation` is how the desktop's panels and notifications move, chosen
+# separately again as `theme.animation: <name>`, `window-decorations` is the
+# shape of every window's frame -- `theme.decorations: <name>` -- and
+# `taskbar-panel`, at the end, is the taskbar's finish and spacing --
+# `theme.taskbar_panel: <name>`.
+#
+# A theme may also bring desktop pictures: put them in a `wallpapers` folder
+# beside this file, and name one for each mode in a section of their own --
+#     wallpapers:
+#       dark: wallpapers/night.jpg
+#       light: wallpapers/day.jpg
+# -- chosen as `theme.wallpaper: <name>`. This one brings none.
+#
+# And it may name the fonts it was designed with -- named, not shipped, since
+# a font's licence seldom lets a theme carry it -- each a list tried in order,
+# the first one installed drawn:
+#     fonts:
+#       ui: [Inter, Noto Sans]
+#       mono: Fira Code
+# -- chosen as `theme.fonts: <name>`. This one names none: its fonts are the
+# ones you choose in Settings.
 #
 # Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
 # after a space begins a comment. The accent is not here: it is the user's own
@@ -23,14 +46,17 @@
 # subtext1, link) are held to a minimum contrast against the backgrounds, so a
 # theme chooses where its text starts but cannot make it unreadable.
 #
-# The desktop does not read the colours, the controls or the animation in this
-# file: they are compiled into it, so the built-in theme cannot fail to load.
+# The desktop does not read the colours, the controls, the animation or the
+# frames in this file: they are compiled into it, so the built-in theme cannot
+# fail to load.
 # Tests hold them equal: the_shipped_built_in_theme_is_the_built_in_palette in
 # gui/appearance/src/themes.rs,
 # the_shipped_built_in_theme_writes_out_the_built_in_controls in
-# gui/appearance/src/themes/widgets.rs, and
+# gui/appearance/src/themes/widgets.rs,
 # the_shipped_built_in_theme_writes_out_the_built_in_motion in
-# gui/appearance/src/themes/animation.rs.
+# gui/appearance/src/themes/animation.rs, and
+# the_shipped_built_in_theme_writes_out_the_built_in_frames in
+# gui/appearance/src/themes/decorations_tests.rs.
 # The hues are Catppuccin's (Mocha for dark, Latte for light), with the light
 # ones deepened until they read as text.
 
@@ -39,7 +65,7 @@ meta:
   author: SlateOS
   version: "1.0"
   tags: [default, dark, light]
-  supports: [colors, terminal, syntax, icons, widget-style, animation]
+  supports: [colors, terminal, syntax, icons, widget-style, animation, window-decorations, taskbar-panel]
 
 colors:
   # Backgrounds, darkest to lightest: the frame behind everything, the
@@ -244,3 +270,35 @@ animation:
   duration-ms: 200     # the standard transition: 50 to 1000 milliseconds
   easing: ease-out     # ease-out: arrives gently, leaves quickly; linear; or
                        # spring: arrives a little past its place and settles
+
+window-decorations:
+  # The shape of every window's frame. Its colours are the colours above:
+  # this is where the title and the buttons go and how big things are.
+  title-bar:
+    height: 30         # 20 to 56 pixels
+    align: left        # where the title goes: left, or center
+    bold: false        # whether the title is bold
+    overflow: ellipsis # a title too long for the bar: clip, ellipsis (cut at
+                       # the end), or keep-tail (cut at the start, keeping
+                       # the end) -- taskbar labels are cut the same way
+  buttons:
+    side: right        # which end of the title bar: left, or right
+    order: [minimize, maximize, close]   # left to right, each once
+    shape: rounded     # rounded (as the window's corners), circle, square,
+                       # or glyph: no face, the button's mark alone
+    size: 20           # 12 to 40 pixels
+    gap: 4             # between buttons, and from the bar's end: 0 to 16
+  border: 1            # the frame's border: 0 to 8 pixels
+  shadow: 8            # how far the shadow reaches: 0 to 48 pixels
+
+taskbar-panel:
+  # The taskbar's finish and spacing. Its colours are the colours above, and
+  # whether it is see-through is the user's own setting.
+  gloss: 1             # how much of the glass: the lines of light along the
+                       # bar's top, the glow and shade, the tiles' sheen --
+                       # 0 (a flat bar) to 1 (all of it)
+  spacing:
+    tiles: 1               # between two tiles: 0 to 24 pixels
+    after-start: 6         # from the start button to the first tile: 0 to 48
+    between-sections: 19   # from the pinned programs to the windows, the
+                           # divider in it: 3 to 64

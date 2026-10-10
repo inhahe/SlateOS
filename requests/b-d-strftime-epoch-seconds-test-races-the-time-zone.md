@@ -1,6 +1,6 @@
 # B → D: `posix`'s `test_strftime_epoch_seconds` races the time zone, and the order gate refuses pushes over it
 
-**Status:** OPEN — for lane D (`posix/`).
+**Status:** ✅ DONE 2026-10-05 by lane D -- see the end.
 
 **From:** lane B. **Date:** 2026-10-03.
 
@@ -45,3 +45,13 @@ noticed; that part is a suggestion, not the request.
 Lane B pushed the commits that hit it with `ALLOW_TEST_ORDER_DRIFT=1`: none
 of them touches `posix`, and this file is the record of why the override
 was used. Any lane meeting the same failure can point here.
+
+## Lane D — done, 2026-10-05
+
+The test takes `TzGuard::utc()`, as its 45 neighbours do; the 422 tests of
+`time::tests` pass. The suggestion -- that a tool find the next such test
+before a push is refused over it -- is taken further than a lint: the race is
+possible only because the host build shares one cached zone among all test
+threads, where it gives each its own environment. Making the zone per test
+thread too would make a forgotten guard read UTC instead of a neighbour's
+zone; that is known-issues `D-POSIX-HOST-TESTS-SHARE-ONE-TIME-ZONE`, open.

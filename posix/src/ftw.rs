@@ -50,8 +50,10 @@
 //!
 //! - Maximum path length is 4096 bytes.  glibc grows its buffer and `stat`s
 //!   relative to the parent's descriptor, so it has no such limit.
-//! - [`FTW_MOUNT`] and [`FTW_CHDIR`] are **rejected** with `EINVAL`
-//!   rather than accepted and ignored — see [`UNSUPPORTED_NFTW_FLAGS`].
+//! - [`FTW_CHDIR`] is **rejected** with `EINVAL` rather than accepted and
+//!   ignored — see [`UNSUPPORTED_NFTW_FLAGS`].  [`FTW_MOUNT`] was too, until
+//!   files reported their filesystem (2026-10-01), and still is on a kernel
+//!   that does not: a root whose `st_dev` is 0.
 
 use crate::errno;
 use crate::fcntl::{S_IFDIR, S_IFLNK, S_IFMT};
@@ -393,6 +395,8 @@ struct Walk {
     physical: bool,
     /// Read the callback's result as an action ([`FTW_ACTIONRETVAL`]).
     action_retval: bool,
+    /// Report nothing on another filesystem than the root's ([`FTW_MOUNT`]).
+    one_filesystem: bool,
 }
 
 /// One traversal in progress.
@@ -411,6 +415,8 @@ struct Walker<F, S> {
     fs: S,
     /// The directories entered so far; unused under [`FTW_PHYS`].
     seen: Seen,
+    /// The root's device, which [`FTW_MOUNT`] keeps the walk on.
+    dev: crate::types::DevT,
 }
 
 impl<F, S> Walker<F, S>
@@ -478,6 +484,14 @@ where
                 }
             }
         };
+
+        // FTW_MOUNT: an entry on another filesystem is not reported, and a
+        // directory there not entered -- the mount point itself included.
+        // One that could not be `stat`ed has no device to compare, and is
+        // reported as ever (`posix/tools/oracle/ftw_mount_probe.c`).
+        if self.opts.one_filesystem && flag != FTW_NS && sb.st_dev != self.dev {
+            return 0;
+        }
 
         let ret = if flag == FTW_D {
             match self.first_visit(&sb) {
@@ -583,6 +597,7 @@ where
         emit,
         fs,
         seen: Seen::new(),
+        dev: 0,
     };
     // SAFETY: `root` holds `root_len` bytes before its NUL.
     let bytes = unsafe { core::slice::from_raw_parts(root, root_len) };
@@ -619,13 +634,23 @@ where
                 None => -1,
             }
         }
-        Ok(sb) if sb.st_mode & S_IFMT == S_IFDIR => match w.first_visit(&sb) {
-            Ok(_) => w.dir(&sb, len, 0),
-            Err(e) => {
-                errno::set_errno(e);
-                -1
+        // A device of 0 is a kernel that does not say which filesystem a
+        // file is on. FTW_MOUNT cannot be kept there, and is refused rather
+        // than ignored (design-decisions.md §761).
+        Ok(sb) if sb.st_mode & S_IFMT == S_IFDIR && opts.one_filesystem && sb.st_dev == 0 => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+        Ok(sb) if sb.st_mode & S_IFMT == S_IFDIR => {
+            w.dev = sb.st_dev;
+            match w.first_visit(&sb) {
+                Ok(_) => w.dir(&sb, len, 0),
+                Err(e) => {
+                    errno::set_errno(e);
+                    -1
+                }
             }
-        },
+        }
         Ok(sb) => {
             let flag = if sb.st_mode & S_IFMT == S_IFLNK {
                 FTW_SL
@@ -716,6 +741,7 @@ pub extern "C" fn ftw(dirpath: *const u8, callback: Option<FtwFn>, nopenfd: i32)
             depth_first: false,
             physical: false,
             action_retval: false,
+            one_filesystem: false,
         },
         ftw_emit(callback),
         Kernel,
@@ -736,20 +762,28 @@ pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *mut FTW) -> i32;
 /// Accepting a flag and ignoring it is the worst of the three options: a
 /// caller that passes [`FTW_CHDIR`] uses `ftwbuf->base` as a *relative*
 /// filename, so ignoring it silently points every callback at the wrong
-/// file; a caller that passes [`FTW_MOUNT`] is asking not to cross into
-/// another filesystem, and ignoring that is how a `--one-file-system`
-/// delete walks into a network mount.  Refusing is loud, is trivially
-/// reversible when the flags are implemented, and cannot corrupt
-/// anything.  See design-decisions.md §761.
-const UNSUPPORTED_NFTW_FLAGS: i32 = FTW_MOUNT | FTW_CHDIR;
+/// file.  Refusing is loud, is trivially reversible when the flag is
+/// implemented, and cannot corrupt anything.  See design-decisions.md §761.
+///
+/// [`FTW_MOUNT`] was refused too, until 2026-10-01, when files began to
+/// report the filesystem they are on (`st_dev`); it is honoured now, and
+/// refused only where the root's device is unknown (§1168).
+const UNSUPPORTED_NFTW_FLAGS: i32 = FTW_CHDIR;
 
 /// Walk a file tree with extended options.
 ///
-/// Supports [`FTW_PHYS`], [`FTW_DEPTH`] and [`FTW_ACTIONRETVAL`].  A bit
-/// outside [`KNOWN_NFTW_FLAGS`] is `EINVAL`, as in glibc, before the path is
-/// looked at; so are [`FTW_MOUNT`] and [`FTW_CHDIR`] — see
+/// Supports [`FTW_PHYS`], [`FTW_MOUNT`], [`FTW_DEPTH`] and
+/// [`FTW_ACTIONRETVAL`].  A bit outside [`KNOWN_NFTW_FLAGS`] is `EINVAL`, as
+/// in glibc, before the path is looked at; so is [`FTW_CHDIR`] — see
 /// [`UNSUPPORTED_NFTW_FLAGS`].  `nopenfd` and a NULL `callback` are as for
 /// [`ftw`].
+///
+/// Under [`FTW_MOUNT`] an entry on another filesystem than the root's is not
+/// reported and a directory there not entered -- the mount point included,
+/// and, without [`FTW_PHYS`], a symbolic link whose target is there -- as
+/// glibc's walk does (`posix/tools/oracle/ftw_mount_probe.c`). An entry that
+/// cannot be `stat`ed is [`FTW_NS`] as ever. A root directory whose device is
+/// 0 -- a kernel that does not say -- is `EINVAL` before any callback.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nftw(
     dirpath: *const u8,
@@ -774,6 +808,7 @@ pub extern "C" fn nftw(
             depth_first: flags & FTW_DEPTH != 0,
             physical: flags & FTW_PHYS != 0,
             action_retval: flags & FTW_ACTIONRETVAL != 0,
+            one_filesystem: flags & FTW_MOUNT != 0,
         },
         nftw_emit(callback),
         Kernel,
@@ -1404,6 +1439,7 @@ mod tests {
         depth_first: false,
         physical: false,
         action_retval: false,
+        one_filesystem: false,
     };
 
     fn go_on(_: &str, _: i32) -> i32 {
@@ -1801,15 +1837,161 @@ mod tests {
         }
     }
 
+    /// FTW_MOUNT is no longer refused with the flags: a NULL path gets past
+    /// them to its own `EFAULT`.
     #[test]
-    fn test_nftw_rejects_ftw_mount() {
-        // Accepted-and-ignored is how a --one-file-system delete walks
-        // into a network mount.  See UNSUPPORTED_NFTW_FLAGS.
+    fn test_nftw_takes_ftw_mount() {
+        for flags in [FTW_MOUNT, FTW_MOUNT | FTW_PHYS | FTW_DEPTH] {
+            errno::set_errno(0);
+            assert_eq!(
+                nftw(core::ptr::null(), Some(never_called_nftw), 4, flags),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EFAULT, "flags {flags:#x}");
+        }
+    }
+
+    /// glibc's tree in `posix/tools/oracle/ftw_mount_probe.c`: top/{a,
+    /// sub/{b}, mnt/{c, d/{e}}, link-to-mnt -> mnt, link-to-mnt-c -> mnt/c,
+    /// nox/{f}}, with mnt and everything under it on device 2, and top/nox/f
+    /// a name that cannot be `stat`ed.
+    fn mounted_tree() -> FakeFs {
+        let mut fs = FakeFs::new();
+        let a = fs.file();
+        let b = fs.file();
+        let sub = fs.dir(&[("b", b)]);
+        let c = fs.file();
+        let e = fs.file();
+        let d = fs.dir(&[("e", e)]);
+        let mnt = fs.dir(&[("c", c), ("d", d)]);
+        for id in [c, e, d, mnt] {
+            fs.nodes[id].dev = 2;
+        }
+        let to_mnt = fs.link("top/mnt");
+        let to_c = fs.link("top/mnt/c");
+        let f = fs.add(Kind::StatErr(errno::EACCES));
+        let nox = fs.dir(&[("f", f)]);
+        let top = fs.dir(&[
+            ("a", a),
+            ("sub", sub),
+            ("mnt", mnt),
+            ("link-to-mnt", to_mnt),
+            ("link-to-mnt-c", to_c),
+            ("nox", nox),
+        ]);
+        fs.top.insert("top".into(), top);
+        fs
+    }
+
+    /// The walk's visits, sorted as the probe sorts them.
+    fn sorted_walk(fs: &mut FakeFs, root: &str, opts: Walk) -> (i32, Vec<Seen3>) {
+        let (ret, mut calls) = walk(fs, root, opts, go_on);
+        calls.sort();
+        (ret, calls)
+    }
+
+    /// FTW_MOUNT reports nothing on another device -- the mount point
+    /// included -- and an entry with no `stat` as ever, as glibc does
+    /// (`posix/tools/oracle/ftw_mount_probe.c`, each walk's answers).
+    #[test]
+    fn ftw_mount_keeps_the_walk_on_the_roots_filesystem() {
+        let phys = Walk {
+            physical: true,
+            ..PLAIN
+        };
+        let mount = Walk {
+            one_filesystem: true,
+            ..PLAIN
+        };
+        let phys_mount = Walk {
+            physical: true,
+            one_filesystem: true,
+            ..PLAIN
+        };
+        let phys_mount_depth = Walk {
+            physical: true,
+            one_filesystem: true,
+            depth_first: true,
+            ..PLAIN
+        };
+        let want = |v: &[(&str, i32, i32)]| {
+            let mut v: Vec<Seen3> = v.iter().map(|&(p, f, l)| entry(p, f, l)).collect();
+            v.sort();
+            (0, v)
+        };
+        let same_fs = [
+            ("top", FTW_D, 0),
+            ("top/a", FTW_F, 1),
+            ("top/sub", FTW_D, 1),
+            ("top/sub/b", FTW_F, 2),
+            ("top/nox", FTW_D, 1),
+            ("top/nox/f", FTW_NS, 2),
+        ];
+        let links = [
+            ("top/link-to-mnt", FTW_SL, 1),
+            ("top/link-to-mnt-c", FTW_SL, 1),
+        ];
+        let mounted = [
+            ("top/mnt", FTW_D, 1),
+            ("top/mnt/c", FTW_F, 2),
+            ("top/mnt/d", FTW_D, 2),
+            ("top/mnt/d/e", FTW_F, 3),
+        ];
+
+        let mut fs = mounted_tree();
         assert_eq!(
-            nftw(b"/tmp\0".as_ptr(), Some(never_called_nftw), 4, FTW_MOUNT),
-            -1
+            sorted_walk(&mut fs, "top", phys),
+            want(&[&same_fs[..], &links[..], &mounted[..]].concat()),
+            "FTW_PHYS: everything"
         );
+        assert_eq!(
+            sorted_walk(&mut fs, "top", phys_mount),
+            want(&[&same_fs[..], &links[..]].concat()),
+            "FTW_PHYS|FTW_MOUNT: the links are on top's filesystem"
+        );
+        assert_eq!(
+            sorted_walk(&mut fs, "top", mount),
+            want(&same_fs),
+            "FTW_MOUNT: the links' targets are not"
+        );
+        let depth: Vec<(&str, i32, i32)> = [&same_fs[..], &links[..]]
+            .concat()
+            .into_iter()
+            .map(|(p, f, l)| (p, if f == FTW_D { FTW_DP } else { f }, l))
+            .collect();
+        assert_eq!(
+            sorted_walk(&mut fs, "top", phys_mount_depth),
+            want(&depth),
+            "FTW_PHYS|FTW_MOUNT|FTW_DEPTH"
+        );
+        let from_mnt: Vec<(&str, i32, i32)> =
+            mounted.iter().map(|&(p, f, l)| (p, f, l - 1)).collect();
+        assert_eq!(
+            sorted_walk(&mut fs, "top/mnt", phys_mount),
+            want(&from_mnt),
+            "a root on the mounted filesystem walks it"
+        );
+    }
+
+    /// A root directory whose device is unknown (0: a kernel that does not
+    /// report one) cannot keep FTW_MOUNT, and refuses it before any callback;
+    /// without the flag the device does not matter.
+    #[test]
+    fn ftw_mount_is_refused_where_the_device_is_unknown() {
+        let mut fs = small_tree();
+        for node in &mut fs.nodes {
+            node.dev = 0;
+        }
+        let mount = Walk {
+            one_filesystem: true,
+            ..PLAIN
+        };
+        errno::set_errno(0);
+        let (ret, calls) = walk(&mut fs, "r", mount, go_on);
+        assert_eq!((ret, calls.len()), (-1, 0));
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        let (ret, calls) = walk(&mut fs, "r", PLAIN, go_on);
+        assert_eq!((ret, calls.len()), (0, 4));
     }
 
     #[test]

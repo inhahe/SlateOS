@@ -1,0 +1,3 @@
+# ttml_default.mp4: ttconv's reading of its samples, said as videocodec says it (generate_subtitle_fixtures.py).
+cue 1000000000 2000000000 7
+text 0000 - "no region at all"

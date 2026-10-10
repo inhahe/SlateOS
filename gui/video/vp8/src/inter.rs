@@ -15,7 +15,9 @@
 //! macroblock in a version-3 stream whose chroma vector, rounded to whole
 //! pixels, points more than 19 pixels out keeps whatever its chroma blocks
 //! held before. That is reproduced too, from the frame that held the buffer
-//! before.
+//! before ([`Prior`]) -- on one thread: a frame with such a macroblock does
+//! not decode on several, whose rows decode where nothing the buffer held
+//! is.
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp8/common/reconinter.c` and
 //! `vp8/common/filter.c` (copyright the WebM project authors), used under
@@ -37,7 +39,7 @@
     reason = "filtered values are clamped to 0..=255 before they become pixels; plane positions convert between isize and usize only once checked to be inside the plane"
 )]
 
-use crate::frame::{Frame, Plane};
+use crate::frame::{Frame, Plane, Target};
 use crate::modes::{Edges, ModeInfo, Mv, SPLITMV};
 use crate::tables::{BILINEAR_FILTERS, SUB_PEL_FILTERS};
 
@@ -288,7 +290,7 @@ fn predict<const W: usize>(
 fn predict_block(
     ctx: &InterContext,
     refp: &Frame,
-    dst: &mut Frame,
+    dst: &mut Target<'_>,
     p: usize,
     x: usize,
     y: usize,
@@ -306,9 +308,8 @@ fn predict_block(
         (Filter::Bilinear, _) => (0, 1),
     };
     let src_at = window(src_plane, sx, sy, w, h, before, after);
-    let dst_plane = &mut dst.planes[p];
-    let dst_at = dst_plane.at(x, y);
-    let stride = dst_plane.stride;
+    let dst_at = dst.at(p, x, y);
+    let stride = dst.strides[p];
     let run = match w {
         16 => predict::<16>,
         8 => predict::<8>,
@@ -322,7 +323,7 @@ fn predict_block(
         xfrac,
         yfrac,
         h,
-        &mut dst_plane.data,
+        &mut *dst.planes[p],
         dst_at,
         stride,
     );
@@ -407,22 +408,38 @@ fn split_chroma_mvs(mi: &ModeInfo, ctx: &InterContext) -> [Mv; 4] {
     out
 }
 
+/// Where the one macroblock libvpx predicts no chroma for finds what its
+/// buffer held before the frame, which it keeps.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Prior<'a> {
+    /// The target is the buffer itself, still holding it: nothing to do.
+    InPlace,
+    /// The target is a fresh buffer; this frame is what the old one held
+    /// (the caller kept it, as a picture).
+    Copy(&'a Frame),
+    /// The target is a thread's band, which holds nothing of the buffer's:
+    /// such a macroblock cannot be decoded there.
+    Unavailable,
+}
+
 /// Predict the macroblock at (`mb_x`, `mb_y`) pixels from `refp`: libvpx's
-/// `vp8_build_inter_predictors_mb`. `stale` is what `dst` held before this
-/// frame, if it is not `dst`'s own content: the one case libvpx predicts no
-/// chroma reads it.
+/// `vp8_build_inter_predictors_mb`. `prior` is where what the buffer held
+/// before the frame is: the one case libvpx predicts no chroma reads it.
+/// `false`, with the luma predicted and the chroma not, if that case meets
+/// [`Prior::Unavailable`].
+#[must_use]
 pub(crate) fn predict_mb(
     ctx: &InterContext,
     mi: &ModeInfo,
     refp: &Frame,
-    dst: &mut Frame,
-    stale: Option<&Frame>,
+    dst: &mut Target<'_>,
+    prior: Prior<'_>,
     mb_x: usize,
     mb_y: usize,
-) {
+) -> bool {
     if mi.mode == SPLITMV {
         predict_split(ctx, mi, refp, dst, mb_x, mb_y);
-        return;
+        return true;
     }
     // libvpx's `vp8_build_inter16x16_predictors_mb`.
     let mut mv = mi.mv;
@@ -440,20 +457,25 @@ pub(crate) fn predict_mb(
         || row2 > e.bottom + (18 << 3)
     {
         // libvpx returns here and leaves the chroma blocks as they were.
-        if let Some(stale) = stale {
-            for p in 1..3 {
-                let (src, out) = (&stale.planes[p], &mut dst.planes[p]);
-                for r in 0..8 {
-                    let at = out.at(cx, cy + r);
-                    out.data[at..at + 8].copy_from_slice(&src.data[at..at + 8]);
+        match prior {
+            Prior::InPlace => {}
+            Prior::Copy(old) => {
+                for p in 1..3 {
+                    let src = &old.planes[p];
+                    for r in 0..8 {
+                        let (from, to) = (src.at(cx, cy + r), dst.at(p, cx, cy + r));
+                        dst.planes[p][to..to + 8].copy_from_slice(&src.data[from..from + 8]);
+                    }
                 }
             }
+            Prior::Unavailable => return false,
         }
-        return;
+        return true;
     }
     for p in 1..3 {
         predict_block(ctx, refp, dst, p, cx, cy, uv, 8, 8);
     }
+    true
 }
 
 /// A split macroblock: libvpx's `build_4x4uvmvs` and
@@ -462,7 +484,7 @@ fn predict_split(
     ctx: &InterContext,
     mi: &ModeInfo,
     refp: &Frame,
-    dst: &mut Frame,
+    dst: &mut Target<'_>,
     mb_x: usize,
     mb_y: usize,
 ) {

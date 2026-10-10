@@ -42,6 +42,9 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// `mktemp -Z; echo $?` is 1.
 const MKTEMP: Program = Program::new("mktemp", 1);
 

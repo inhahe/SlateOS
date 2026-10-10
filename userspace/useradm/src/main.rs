@@ -61,6 +61,23 @@ fn load_db() -> UserDb {
     }
 }
 
+/// Hold the database (`userdb::Lock`), then load it, or exit -- for a command
+/// that changes it. Keep the hold bound until after [`save_db`]: without it,
+/// another account tool run at the same moment reads the same database, and
+/// whichever saves second erases the other's change.
+fn load_db_held() -> (userdb::Lock, UserDb) {
+    match UserDb::lock(userdb::DEFAULT_PATH) {
+        Ok(lock) => (lock, load_db()),
+        Err(e) => {
+            eprintln!(
+                "error: cannot lock {}: {e}; try again later",
+                userdb::DEFAULT_PATH
+            );
+            process::exit(1);
+        }
+    }
+}
+
 /// Save the database, or exit.
 fn save_db(db: &UserDb) {
     if let Err(e) = db.save(userdb::DEFAULT_PATH) {
@@ -152,7 +169,7 @@ fn set_new_password(record: &mut Record, username: &str) {
 // ============================================================================
 
 fn cmd_add(username: &str, args: &[String]) {
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
 
     if db.find(username).is_some() {
         eprintln!("error: user {} already exists", quoteaf_os(username));
@@ -292,7 +309,7 @@ fn cmd_del(username: &str) {
         process::exit(1);
     }
 
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
     let home = require_user(&db, username).home();
 
     if !db.remove(username) {
@@ -321,7 +338,7 @@ fn cmd_del(username: &str) {
 }
 
 fn cmd_passwd(username: &str) {
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
     let record = require_user_mut(&mut db, username);
     set_new_password(record, username);
     save_db(&db);
@@ -404,14 +421,14 @@ fn yes_no(value: bool) -> &'static str {
 }
 
 fn cmd_lock(username: &str) {
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
     require_user_mut(&mut db, username).set_locked(true);
     save_db(&db);
     println!("Locked account {}", quoteaf_os(username));
 }
 
 fn cmd_unlock(username: &str) {
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
     require_user_mut(&mut db, username).set_locked(false);
     save_db(&db);
     println!("Unlocked account {}", quoteaf_os(username));
@@ -428,7 +445,7 @@ fn cmd_groups(username: &str) {
 }
 
 fn cmd_mod(username: &str, args: &[String]) {
-    let mut db = load_db();
+    let (_lock, mut db) = load_db_held();
     let record = require_user_mut(&mut db, username);
 
     let mut i = 0;

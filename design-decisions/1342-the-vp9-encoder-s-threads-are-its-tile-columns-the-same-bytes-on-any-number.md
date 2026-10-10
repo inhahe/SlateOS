@@ -26,6 +26,16 @@ have one column and encode on one thread.
 - libvpx keeps the mode search's adaptive thresholds per tile
   (`tile_data->thresh_freq_fact`); so does the port now. With one shared
   table, tiled frames differed from `vpxenc`'s from the fourth frame on.
+- The columns' bitstreams are written on threads too (2026-10-05), as
+  libvpx's realtime mode does (`encode_tiles_mt`). They cannot be written as
+  the columns are coded, since the token probabilities they are written with
+  come from the whole frame's counts. One thread writes a column's tiles,
+  top to bottom, because VP9 carries the above contexts down a column from
+  one tile row to the next. Each thread has contexts of its own, since a
+  column touches only its own span of them. libvpx writes in parallel only
+  when there is one tile row; the port handles tile rows too, and puts the
+  tiles back in row order. Packing was 5-8% of a frame's instructions on one
+  thread (callgrind), the share that stayed serial.
 - `EncoderConfig::realtime` sets `tile_columns: 6`, `vpxenc`'s default, which
   the width clamps. The reference encodes that were made with
   `--tile-columns=0` say so in their tests. `Encoder::set_threads` caps the
@@ -53,7 +63,8 @@ parallelism and the reason `vpxenc` still offers one column.
 `Encoder::set_threads`); `enc/encodeframe.rs` (`FrameEncoder::for_tile_column`,
 `column_strip`, `merge_columns`, the reconstruction read through
 `recon_at`); `enc/nonrd.rs` (`RtState::absorb_columns`, the per-tile
-thresholds); `enc/aq_cyclicrefresh.rs` (`CyclicRefresh::absorb_columns`).
+thresholds); `enc/aq_cyclicrefresh.rs` (`CyclicRefresh::absorb_columns`);
+`enc/bitstream.rs` (`write_tiles`, the columns' bitstreams).
 Tests: `tests/encoder.rs`, `frames_match_vpxenc_in_tile_columns` and
 `frames_match_vpxenc_through_cuts_in_tile_columns`.
 

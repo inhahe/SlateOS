@@ -256,7 +256,7 @@ impl Sys for Process {
     fn var(&mut self, name: &[u8]) -> R<Option<Bytes>> {
         let mut n = Bytes::of(name)?;
         // SAFETY: a NUL-terminated name.
-        let v = unsafe { crate::environ::getenv(n.c_str()?) };
+        let v = unsafe { crate::environ::lookup(n.c_str()?) };
         if v.is_null() {
             return Ok(None);
         }
@@ -269,7 +269,7 @@ impl Sys for Process {
     fn set_var(&mut self, name: &[u8], value: &[u8]) -> R<()> {
         let (mut n, mut v) = (Bytes::of(name)?, Bytes::of(value)?);
         // SAFETY: NUL-terminated strings.
-        if unsafe { crate::environ::setenv(n.c_str()?, v.c_str()?, 1) } != 0 {
+        if unsafe { crate::environ::set(n.c_str()?, v.c_str()?, 1) } != 0 {
             return Err(Error::NoSpace);
         }
         Ok(())

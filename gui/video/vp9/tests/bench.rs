@@ -210,6 +210,12 @@ fn encode_fps(input: &[common::I420], config: EncoderConfig, threads: usize) -> 
 /// encoder's own decisions, at the reference's settings, on one thread and
 /// on every core -- against `LIBVPX_ENCODE` and `LIBVPX_ENCODE_TILES`. Only
 /// a picture of several tile columns encodes on more than one thread.
+///
+/// The figures for every core need an idle machine. A frame meets its
+/// threads three times -- the columns' coding, the loop filter, the columns'
+/// bitstreams -- and on a loaded machine each meeting waits for a thread the
+/// scheduler has not run yet: with other builds running, two threads have
+/// measured slower than one while the process got under half a core.
 #[test]
 #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
 fn bench_vp9_encode() {

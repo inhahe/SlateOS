@@ -17,9 +17,9 @@
 # libc.a. Neither says the interpreter can *run*, because an interpreter with
 # no stdlib cannot get past `init_fs_encoding` -- it dies looking for the
 # `encodings` package, which is not frozen into the binary. This script closes
-# that gap on the host, using the musl-linked control interpreter that `make`
-# builds from the identical objects, so that the only thing left untested on
-# SlateOS itself is SlateOS itself.
+# that gap on the host, using the musl-linked control interpreter that run.sh
+# links from the identical objects (python-control), so that the only thing
+# left untested on SlateOS itself is SlateOS itself.
 set -uo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
@@ -35,8 +35,10 @@ ISO="$WORK/ziproot"
 OUT="$SLATE_SPIKE/python$TAG.zip"
 
 [ -d "$BUILD" ] || { echo "ERROR: $BUILD missing — run run.sh first."; exit 1; }
-CTRL="$BUILD/python"
-[ -x "$CTRL" ] || { echo "ERROR: $CTRL missing — run.sh's make did not finish."; exit 1; }
+# Not $BUILD/python: since 2026-10-05 that is SlateOS's, linked against our
+# libc.a, and does not run here (run.sh says why).
+CTRL="$BUILD/python-control"
+[ -x "$CTRL" ] || { echo "ERROR: $CTRL missing — run.sh did not link the control interpreter."; exit 1; }
 
 BUILD_PY="${BUILD_PY:-python$MINOR}"
 command -v "$BUILD_PY" >/dev/null 2>&1 || { echo "ERROR: no $BUILD_PY on PATH"; exit 1; }
@@ -57,6 +59,24 @@ echo "=== C extension modules built into the interpreter ==="
 rm -rf "$SRC" "$ISO"
 mkdir -p "$SRC" "$ISO/usr/local/lib"
 cp -a "$BUILD/Lib/." "$SRC/"
+
+# The one module `make install` puts in the library that Lib/ does not hold:
+# `_sysconfigdata_<abiflags>_<platform>_<multiarch>.py`, which configure writes
+# into the build directory (pybuilddir.txt names it), and which `sysconfig`
+# imports for every get_config_var, get_config_vars, get_path and get_paths.
+# Without it each of those raises ModuleNotFoundError -- on SlateOS until
+# 2026-10-05, measured with `sysconfig.get_path("stdlib")` -- and so does
+# everything built on them. Its values are the cross build's: prefix
+# /usr/local and LIBDIR /usr/local/lib, which is where the image has this zip.
+PYBUILDDIR="$BUILD/$(cat "$BUILD/pybuilddir.txt" 2>/dev/null)"
+SYSCONFIGDATA=("$PYBUILDDIR"/_sysconfigdata_*.py)
+if [ "${#SYSCONFIGDATA[@]}" -ne 1 ] || [ ! -f "${SYSCONFIGDATA[0]}" ]; then
+    echo "ERROR: expected one _sysconfigdata_*.py in $PYBUILDDIR, found:" "${SYSCONFIGDATA[@]}"
+    echo "       run.sh's make writes it; did it finish?"
+    exit 1
+fi
+cp "${SYSCONFIGDATA[0]}" "$SRC/"
+echo "SYSCONFIGDATA=$(basename "${SYSCONFIGDATA[0]}")"
 
 # Dropped, with reasons:
 #   test/          the CPython test suite, ~30 MB, and run.sh already passes
@@ -187,6 +207,8 @@ print("uni   ", unicodedata.name("e"))
 print("xml   ", ET.fromstring("<a><b x=\"1\"/></a>")[0].get("x"))
 print("path  ", pathlib.PurePosixPath("/usr/local/lib") / "python312.zip")
 random.seed(1); print("rand  ", random.randint(0, 99))
+import sysconfig
+print("sysconf", sysconfig.get_config_var("LIBDIR"), sysconfig.get_path("stdlib"))
 print("SLATE_PYTHON_STDLIB_OK")
 ' 2>&1 | head -30
 echo "RC=${PIPESTATUS[0]}"

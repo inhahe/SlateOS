@@ -34,6 +34,30 @@ pub const RECYCLE_BIN_VIEW_ARG: &str = "--recycle-bin";
 /// Settings shortcut start, and this database's entry for it.
 pub const SETTINGS: &str = "/usr/bin/settings";
 
+/// How Settings is asked to open on one of its pages: `settings --page
+/// <name>`, with the name `SettingsPage::name` gives the page (lane E,
+/// 3fc93a617, `requests/c-e-settings-opens-on-the-page-it-is-asked-for.md`).
+pub const SETTINGS_PAGE_OPTION: &str = "--page";
+
+/// Settings' Notifications page, by the name it answers to: what a
+/// notification's menu opens.
+pub const NOTIFICATIONS_PAGE: &str = "notifications";
+
+/// Settings, asked to open on `page`.
+///
+/// The option and the name are two arguments, never one string: a program
+/// path with the option inside it names a file that cannot exist -- the
+/// defect `every_program_the_menus_start_is_one_this_workspace_builds`
+/// exists to catch.
+#[must_use]
+pub fn settings_page(page: &str) -> crate::hotkeys::Launch {
+    crate::hotkeys::Launch {
+        program: std::path::PathBuf::from(SETTINGS),
+        args: vec![SETTINGS_PAGE_OPTION.into(), page.into()],
+        dir: None,
+    }
+}
+
 /// The terminal: what the start menu's Terminal button starts, and this
 /// database's entry for it.
 pub const TERMINAL: &str = "/usr/bin/terminal";
@@ -94,6 +118,57 @@ pub struct AppEntry {
     /// its entry says: one of the ways a window is known to be this program's
     /// (`DesktopShell::program_for_app_id`).
     pub wm_class: Option<String>,
+    /// The kinds of file it opens (`MimeType`), as its entry lists them:
+    /// what puts it in a file's "Open with" (see [`Self::opens`]).
+    pub mime_types: Vec<String>,
+    /// The folder it starts in -- its entry's `Path` -- when that names one
+    /// from the root; `None` starts it wherever the desktop was started.
+    ///
+    /// Until 2026-10-05 `Path` was read into the entry and never reached a
+    /// launch: a program whose entry said `Path=/opt/game` -- as a program
+    /// that finds its data beside it does -- started in the desktop's folder,
+    /// and could not find its own files.
+    pub work_dir: Option<std::path::PathBuf>,
+}
+
+/// A kind of file, as a program's `MimeType` is matched against it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileKind {
+    /// Its MIME type: `inode/directory` for a folder.
+    pub mime: String,
+    /// Whether it is text of some kind -- a shell script or JSON as much as
+    /// `text/*` -- so a program for plain text opens it.
+    pub text: bool,
+}
+
+impl FileKind {
+    /// The kind of the file or folder at `path`: a folder is
+    /// `inode/directory`; a file's kind is the toolkit's reading of its
+    /// extension.
+    #[must_use]
+    pub fn of(path: &std::path::Path, is_dir: bool) -> Self {
+        if is_dir {
+            return Self {
+                mime: String::from("inode/directory"),
+                text: false,
+            };
+        }
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let info = guitk::filetypes::detect_from_extension(extension);
+        Self {
+            mime: info.mime_type.to_owned(),
+            text: info.is_text,
+        }
+    }
+
+    /// Whether this is a folder.
+    #[must_use]
+    pub fn is_dir(&self) -> bool {
+        self.mime == "inode/directory"
+    }
 }
 
 /// The folders of the start menu's applications tree.
@@ -127,7 +202,59 @@ impl AppEntry {
             terminal: app.terminal,
             desktop_id: Some(app.id),
             wm_class: app.startup_wm_class,
+            mime_types: app.mime_types,
+            // From the root only: a relative `Path` is relative to nothing a
+            // launch knows, and would mean whatever folder the desktop
+            // happened to be started in. `has_root`, not `is_absolute`, so
+            // `/opt/game` is a folder from the root on the development host
+            // too, where an absolute path needs a drive.
+            work_dir: app
+                .path
+                .map(std::path::PathBuf::from)
+                .filter(|dir| dir.has_root()),
         })
+    }
+
+    /// Whether it opens files of `kind`: its `MimeType` lists the kind; or
+    /// lists `text/plain` and the kind is text; or lists
+    /// `application/octet-stream`, which every file is -- the sub-classes the
+    /// shared MIME-info specification gives every type -- and the kind is a
+    /// file. Case is not asked about, as MIME types' is not.
+    #[must_use]
+    pub fn opens(&self, kind: &FileKind) -> bool {
+        self.mime_types.iter().any(|listed| {
+            listed.eq_ignore_ascii_case(&kind.mime)
+                || (kind.text && listed.eq_ignore_ascii_case("text/plain"))
+                || (!kind.is_dir() && listed.eq_ignore_ascii_case("application/octet-stream"))
+        })
+    }
+
+    /// How to start it on `files`: its desktop entry's command line with the
+    /// files put in -- one program for all of them, or one each where the
+    /// line takes one file at a time (`%f`) -- or, for an entry with no
+    /// command line, its program once per file. Inside a terminal when the
+    /// entry says it runs in one.
+    #[must_use]
+    pub fn launch_opening(&self, files: &[&std::path::Path]) -> Vec<crate::hotkeys::Launch> {
+        let Some(exec) = &self.exec else {
+            return files
+                .iter()
+                .map(|file| crate::hotkeys::Launch::opening(&self.executable_path, file))
+                .collect();
+        };
+        let targets: Vec<desktopentry::Target> = files
+            .iter()
+            .map(|file| desktopentry::Target::File(file.to_path_buf()))
+            .collect();
+        let invocation = desktopentry::Invocation {
+            icon: self.icon.as_deref(),
+            name: &self.name,
+            location: None,
+        };
+        exec.command_lines(&targets, &invocation)
+            .into_iter()
+            .map(|argv| self.launch_line(argv))
+            .collect()
     }
 
     /// How to start it with nothing to open: its desktop entry's command
@@ -136,6 +263,20 @@ impl AppEntry {
     #[must_use]
     pub fn launch(&self) -> crate::hotkeys::Launch {
         self.launch_with(self.exec.as_ref())
+    }
+
+    /// The actions its jump list offers, each with its place in
+    /// [`actions`](Self::actions): those with a command line -- one with none
+    /// is started by D-Bus, which this system does not have.
+    ///
+    /// The start menu's search offers the same ones, from here, so a
+    /// program's jump list and a search for one of its actions cannot
+    /// disagree about what it can do.
+    pub fn jump_list(&self) -> impl Iterator<Item = (usize, &desktopentry::Action)> {
+        self.actions
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| action.exec.is_some())
     }
 
     /// How to start one of its actions (its jump list), by the action's id:
@@ -162,6 +303,14 @@ impl AppEntry {
             }
             None => vec![OsString::from(&self.executable_path)],
         };
+        self.launch_line(argv)
+    }
+
+    /// Start the command line `argv`, program first -- inside a terminal
+    /// when the entry says it runs in one, and in its folder
+    /// ([`work_dir`](Self::work_dir)) when it names one.
+    fn launch_line(&self, argv: Vec<std::ffi::OsString>) -> crate::hotkeys::Launch {
+        use std::ffi::OsString;
         let mut argv = argv.into_iter();
         let Some(program) = argv.next() else {
             // A parsed line always has a program; this is the built-in
@@ -171,17 +320,20 @@ impl AppEntry {
         if self.terminal {
             // `-e`, as xterm and every terminal that copied it take a
             // command: the rest of the line is the program and its
-            // arguments, each its own argument.
+            // arguments, each its own argument. The terminal starts in the
+            // entry's folder, and the program inside it with it.
             let mut args = vec![OsString::from("-e"), program];
             args.extend(argv);
             return crate::hotkeys::Launch {
                 program: std::path::PathBuf::from(TERMINAL),
                 args,
+                dir: self.work_dir.clone(),
             };
         }
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from(program),
             args: argv.collect(),
+            dir: self.work_dir.clone(),
         }
     }
 }
@@ -240,6 +392,20 @@ pub(crate) fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
     }
 
     best
+}
+
+/// How well `query` finds `action`, one of a program's actions, or `None`
+/// if it does not: by its name, which counts as a program's name does in
+/// [`search_score`] -- so the two rank together, and "display" puts
+/// Settings' "Display settings" above Settings itself, which it finds only
+/// by a keyword.
+///
+/// The name alone: an action has no description or keywords of its own
+/// (the desktop entry specification gives it a name, a command line and a
+/// picture), and borrowing its program's would find every action of a
+/// program for a word that describes only one of them.
+pub(crate) fn action_search_score(query: &str, action: &desktopentry::Action) -> Option<u32> {
+    fuzzy_score(query, &action.name).map(|s| s.saturating_mul(2))
 }
 
 // ============================================================================
@@ -431,6 +597,74 @@ mod tests {
         }
     }
 
+    /// **Every Settings page the desktop asks for is one Settings answers
+    /// to**: a notification's menu's, and each `settings --page` line in
+    /// SlateOS's own programs' entries -- Settings' jump list of Display,
+    /// Network and Sound. And the desktop's own asks with two arguments.
+    ///
+    /// Settings refuses a page it does not know -- a message on its terminal
+    /// and no window -- so a misspelt name is a row that opens nothing, with
+    /// every other test green. Settings is another lane's program, a binary
+    /// this crate cannot link, so its source is read: the names are the
+    /// string arms of `SettingsPage::name`.
+    #[test]
+    fn every_settings_page_the_desktop_asks_for_is_one_settings_has() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = std::fs::read_to_string(root.join("apps/settings/src/main.rs"))
+            .expect("Settings' source")
+            .replace("\r\n", "\n");
+        let body = source
+            .split("fn name(self) -> &'static str {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("SettingsPage::name, which gives each page its name");
+        let names: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.split("=> \"").nth(1)?.split('"').next())
+            .collect();
+        // A floor, so a moved function fails as itself and not as a missing
+        // page.
+        assert!(
+            names.len() > 20,
+            "found {} page names: {names:?}",
+            names.len()
+        );
+
+        let notifications = settings_page(NOTIFICATIONS_PAGE);
+        assert_eq!(notifications.program, std::path::PathBuf::from(SETTINGS));
+        assert_eq!(
+            notifications.args,
+            [SETTINGS_PAGE_OPTION, NOTIFICATIONS_PAGE]
+        );
+
+        let mut asked = vec![notifications];
+        for entry in builtin_app_database() {
+            asked.push(entry.launch());
+            for action in &entry.actions {
+                asked.extend(entry.launch_action(&action.id));
+            }
+        }
+        let pages: Vec<String> = asked
+            .iter()
+            .filter(|launch| launch.program == std::path::Path::new(SETTINGS))
+            .filter_map(|launch| match launch.args.as_slice() {
+                [option, page] if option == SETTINGS_PAGE_OPTION => {
+                    Some(page.to_str().expect("a page's name is text").to_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        // The notifications page and Settings' three actions, at least: a
+        // floor, so an entry that stopped naming pages fails here.
+        assert!(pages.len() >= 4, "found {pages:?}");
+        for page in &pages {
+            assert!(
+                names.contains(&page.as_str()),
+                "Settings has no page called {page:?}"
+            );
+        }
+    }
+
     /// A search for what the three folded entries covered still finds a way
     /// in: Settings, which owns every one of those pages.
     #[test]
@@ -445,5 +679,198 @@ mod tests {
                 "{word:?} does not find Settings"
             );
         }
+    }
+
+    // -------- what a program opens, and how it is started on files --------
+
+    /// A program whose entry says `exec`, `types` and `terminal`.
+    fn program(exec: &str, types: &[&str], terminal: bool) -> AppEntry {
+        let exec = desktopentry::Exec::parse(exec).unwrap();
+        AppEntry {
+            name: String::from("Program"),
+            executable_path: exec.program(),
+            exec: Some(exec),
+            mime_types: types.iter().map(|t| (*t).to_owned()).collect(),
+            terminal,
+            ..AppEntry::default()
+        }
+    }
+
+    fn kind(mime: &str, text: bool) -> FileKind {
+        FileKind {
+            mime: mime.to_owned(),
+            text,
+        }
+    }
+
+    /// A program read from the desktop entry `text`.
+    fn entry(text: &str) -> AppEntry {
+        let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).unwrap();
+        let app = desktopentry::App::from_entry(&parsed, "fixture.desktop", None).unwrap();
+        AppEntry::from_desktop(app).unwrap()
+    }
+
+    /// **A program starts in the folder its entry's `Path` names** -- with
+    /// nothing to open, on files, from its jump list, and inside a terminal
+    /// -- and a `Path` that names no folder from the root is no folder.
+    #[test]
+    fn a_program_starts_in_the_folder_its_entry_names() {
+        let at = std::path::PathBuf::from("/opt/game");
+        let game = entry(
+            "[Desktop Entry]\nType=Application\nName=Game\nExec=game %f\nPath=/opt/game\n\
+             Actions=editor;\n[Desktop Action editor]\nName=Level editor\nExec=game --edit\n",
+        );
+        assert_eq!(game.work_dir.as_deref(), Some(at.as_path()));
+        assert_eq!(game.launch().dir.as_deref(), Some(at.as_path()));
+        let opening = game.launch_opening(&[std::path::Path::new("/home/me/level.map")]);
+        assert!(
+            opening
+                .iter()
+                .all(|launch| launch.dir.as_deref() == Some(at.as_path()))
+        );
+        assert_eq!(
+            game.launch_action("editor").unwrap().dir.as_deref(),
+            Some(at.as_path())
+        );
+
+        let in_terminal = entry(
+            "[Desktop Entry]\nType=Application\nName=Top\nExec=top\nTerminal=true\nPath=/var/log\n",
+        );
+        let launch = in_terminal.launch();
+        assert_eq!(launch.program, std::path::PathBuf::from(TERMINAL));
+        assert_eq!(launch.dir, Some(std::path::PathBuf::from("/var/log")));
+
+        let relative = entry("[Desktop Entry]\nType=Application\nName=X\nExec=x\nPath=data\n");
+        assert_eq!(relative.work_dir, None);
+        assert_eq!(relative.launch().dir, None);
+        let none = entry("[Desktop Entry]\nType=Application\nName=X\nExec=x\n");
+        assert_eq!(none.launch().dir, None);
+    }
+
+    /// **A jump list offers the actions with a command line, each with its
+    /// place among all of them** -- the place is what a chosen row is
+    /// found again by -- and not one started by D-Bus.
+    #[test]
+    fn a_jump_list_is_the_actions_with_a_command_line() {
+        let program = entry(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch\n\
+             Actions=new;dbus;blank;\n\
+             [Desktop Action new]\nName=New Drawing\nExec=sketch --new\n\
+             [Desktop Action dbus]\nName=Only by D-Bus\n\
+             [Desktop Action blank]\nName=Blank Canvas\nExec=sketch --blank\n",
+        );
+        let offered: Vec<(usize, &str)> = program
+            .jump_list()
+            .map(|(index, action)| (index, action.name.as_str()))
+            .collect();
+        assert_eq!(offered, [(0, "New Drawing"), (2, "Blank Canvas")]);
+        for (index, action) in program.jump_list() {
+            assert_eq!(program.actions[index].id, action.id);
+        }
+    }
+
+    /// **An action is found by its name, weighted as a program's name is**:
+    /// the same score a program of that name would get, so the two rank
+    /// together -- and never by a word it does not contain.
+    #[test]
+    fn an_action_is_found_by_its_name_as_a_program_is() {
+        let program = entry(
+            "[Desktop Entry]\nType=Application\nName=Settings\nExec=settings\n\
+             Keywords=display;\nActions=display;\n\
+             [Desktop Action display]\nName=Display settings\nExec=settings --page display\n",
+        );
+        let action = &program.actions[0];
+        let named_so = AppEntry {
+            name: "Display settings".to_owned(),
+            ..AppEntry::default()
+        };
+        assert_eq!(
+            action_search_score("disp", action),
+            search_score("disp", &named_so)
+        );
+        assert!(action_search_score("disp", action).is_some());
+        assert_eq!(action_search_score("volume", action), None);
+        // Above its program, which has the word only as a keyword.
+        assert!(action_search_score("display", action) > search_score("display", &program));
+    }
+
+    /// **A program opens the kinds its entry lists** -- in any case -- and
+    /// a program for plain text opens every kind of text, one for any file
+    /// every file but not a folder.
+    #[test]
+    fn a_program_opens_what_its_entry_lists() {
+        let viewer = program("viewer %f", &["image/png", "Image/JPEG"], false);
+        assert!(viewer.opens(&kind("image/png", false)));
+        assert!(viewer.opens(&kind("image/jpeg", false)));
+        assert!(!viewer.opens(&kind("image/gif", false)));
+        let editor = program("editor %F", &["text/plain"], false);
+        assert!(editor.opens(&kind("text/x-rust", true)));
+        assert!(editor.opens(&kind("application/json", true)));
+        assert!(!editor.opens(&kind("image/png", false)));
+        let hex = program("hexeditor %F", &["application/octet-stream"], false);
+        assert!(hex.opens(&kind("image/png", false)));
+        assert!(hex.opens(&kind("text/plain", true)));
+        assert!(!hex.opens(&kind("inode/directory", false)));
+        let files = program("explorer %f", &["inode/directory"], false);
+        assert!(files.opens(&kind("inode/directory", false)));
+        assert!(!files.opens(&kind("image/png", false)));
+        assert!(!program("calculator", &[], false).opens(&kind("text/plain", true)));
+    }
+
+    /// **The kind of a path is the toolkit's reading of its extension**; a
+    /// folder is a folder whatever it is called.
+    #[test]
+    fn the_kind_of_a_path_is_its_extensions() {
+        let png = FileKind::of(std::path::Path::new("/p/photo.PNG"), false);
+        assert_eq!(png.mime, "image/png");
+        assert!(!png.text && !png.is_dir());
+        let json = FileKind::of(std::path::Path::new("/p/data.json"), false);
+        assert!(json.text, "a JSON file is text");
+        let folder = FileKind::of(std::path::Path::new("/p/photos.png"), true);
+        assert_eq!(folder.mime, "inode/directory");
+        assert!(folder.is_dir());
+    }
+
+    /// **A program is started on files as its command line says**: one for
+    /// all where it takes them all, one each where it takes one; inside a
+    /// terminal when it runs in one; with no command line, its program once
+    /// per file.
+    #[test]
+    fn a_program_is_started_on_files_as_its_line_says() {
+        use std::ffi::OsString;
+        use std::path::Path;
+        let (a, b) = (Path::new("/p/a.txt"), Path::new("/p/b.txt"));
+        let all = program("editor --new %F", &[], false).launch_opening(&[a, b]);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].program, Path::new("editor"));
+        assert_eq!(
+            all[0].args,
+            [
+                OsString::from("--new"),
+                OsString::from("/p/a.txt"),
+                OsString::from("/p/b.txt")
+            ]
+        );
+        let each = program("viewer %f", &[], false).launch_opening(&[a, b]);
+        assert_eq!(each.len(), 2);
+        assert_eq!(each[1].args, [OsString::from("/p/b.txt")]);
+        let boxed = program("vim %f", &[], true).launch_opening(&[a]);
+        assert_eq!(boxed[0].program, Path::new(TERMINAL));
+        assert_eq!(
+            boxed[0].args,
+            [
+                OsString::from("-e"),
+                OsString::from("vim"),
+                OsString::from("/p/a.txt")
+            ]
+        );
+        let bare = AppEntry {
+            executable_path: String::from("/usr/bin/tool"),
+            ..AppEntry::default()
+        };
+        let launches = bare.launch_opening(&[a, b]);
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0].program, Path::new("/usr/bin/tool"));
+        assert_eq!(launches[0].args, [OsString::from("/p/a.txt")]);
     }
 }

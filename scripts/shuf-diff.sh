@@ -176,6 +176,30 @@ shuf --random-source=rnd -o out -o out lines; cat out
 shuf --random-source=rnd -o dir/ lines
 shuf --random-source=rnd -o dir lines
 
+# --- standard descriptors closed ---
+# `-o` is `freopen (FILE, "w", stdout)`: the file becomes descriptor 1. With
+# standard output closed the open lands *on* descriptor 1, and the port closed
+# it again (a `dup2` onto itself, then the original dropped): `write error: Bad
+# file descriptor` and an empty FILE, where GNU fills it. A failed `freopen`
+# closes the stream's descriptor and reports *that* close's `errno` -- `Bad file
+# descriptor` when it was closed already. The operand is `freopen`ed onto
+# descriptor 0 the same way.
+shuf --random-source=rnd -o out lines >&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out -i 1-3 >&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out lines <&- >&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out lines <&- >&- 2>&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out -i 1-3 >&- 2>&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out lines 2>&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd -o out lines <&-; echo "shuf=$?"; cat out
+shuf --random-source=rnd lines <&-
+shuf --random-source=rnd -e a b <&-
+shuf -o /nonexistent/x -i 1-1 >&-
+shuf -o /nonexistent/x -i 1-1 <&- >&-
+shuf -o dir -i 1-1 >&-
+shuf -o /nonexistent/x -i 1-1
+shuf nonexistent <&-
+shuf nonexistent >&-
+
 # --- the random source ---
 shuf --random-source=short thousand
 shuf --random-source=short -n 1 -i 1-10

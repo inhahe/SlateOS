@@ -137,7 +137,6 @@ const IO_CMD_READ: u8 = 0x02;
 /// Write.
 const IO_CMD_WRITE: u8 = 0x01;
 /// Flush.
-#[allow(dead_code)]
 const IO_CMD_FLUSH: u8 = 0x00;
 
 // ---------------------------------------------------------------------------
@@ -416,6 +415,10 @@ struct NvmeController {
     /// Model/serial from IDENTIFY.
     model: String,
     serial: String,
+    /// A volatile write cache is present (Identify Controller VWC, byte 525
+    /// bit 0): what the controller has completed may be only in its memory
+    /// until a Flush.
+    volatile_cache: bool,
 }
 
 impl NvmeController {
@@ -531,6 +534,7 @@ impl NvmeController {
             block_size: 512,
             model: String::new(),
             serial: String::new(),
+            volatile_cache: false,
         })
     }
 
@@ -559,7 +563,7 @@ impl NvmeController {
         // SAFETY: The controller wrote 4096 bytes to data_virt.
         let data = unsafe { core::slice::from_raw_parts(data_virt, 4096) };
 
-        // Bytes 24-63: Serial Number (20 bytes, ASCII, space-padded).
+        // Bytes 4-23: Serial Number (20 bytes, ASCII, space-padded).
         self.serial = core::str::from_utf8(data.get(4..24).unwrap_or(&[]))
             .unwrap_or("")
             .trim()
@@ -571,6 +575,9 @@ impl NvmeController {
             .trim()
             .into();
 
+        // Byte 525, VWC: bit 0 set when a volatile write cache is present.
+        self.volatile_cache = data.get(525).is_some_and(|b| b & 1 != 0);
+
         // Free the frame.
         // SAFETY: Done with the temporary buffer.
         unsafe {
@@ -578,6 +585,20 @@ impl NvmeController {
         }
 
         Ok(())
+    }
+
+    /// Write the controller's volatile cache out (the Flush command, namespace
+    /// 1): every write it has completed is durable once this returns `Ok`. A
+    /// controller without a volatile cache has nothing to do.
+    fn flush_impl(&mut self) -> KernelResult<()> {
+        if !self.volatile_cache {
+            return Ok(());
+        }
+        let io_queue = self.io_queue.as_mut().ok_or(KernelError::InternalError)?;
+        let mut sqe = NvmeSqe::zeroed();
+        sqe.cdw0 = u32::from(IO_CMD_FLUSH);
+        sqe.nsid = 1;
+        io_queue.submit_and_wait(sqe).map(|_| ())
     }
 
     /// Run IDENTIFY NAMESPACE to get capacity and block size.
@@ -840,6 +861,10 @@ impl BlockDevice for NvmeDevice {
         self.info.clone()
     }
 
+    fn flush(&mut self) -> KernelResult<()> {
+        self.ctrl.lock().flush_impl()
+    }
+
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
         let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
         let mut ctrl = self.ctrl.lock();
@@ -1052,6 +1077,8 @@ pub fn init(hhdm_offset: u64) {
             serial_println!("[nvme]   I/O queue creation failed: {:?}", e);
             continue;
         }
+        // Initialised, identified and queued: the controller is this driver's.
+        crate::pci::bind_driver(ctrl_pci.address, "nvme");
 
         // Register as block device.
         let dev_name = format!("nvme{}n1", total_devices);

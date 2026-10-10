@@ -1,0 +1,17 @@
+[package]
+name = "ultimeutils"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux's lib/timeutils.c: parse_sec and parse_timestamp, the time arguments of cal and dmesg, ported once"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The local time zone and glibc's mktime, through which a broken-down time is
+# normalised and resolved -- the one resolution of TZ in the tree. No I/O of
+# its own beyond reading the zone, so this stays a parser (section 768).
+localtime = { path = "../localtime" }
+# util-linux's lib/strutils.c scanning -- the integer scan and C-locale
+# `isspace` that parse_sec and the strptime subset are written with.
+ulstrutils = { path = "../ulstrutils" }

@@ -1,7 +1,7 @@
 //! sort — sort, merge or check lines of text.
 //!
 //! ```text
-//! sort [-bcCdfghimMnrsuVz] [-k KEYDEF]... [-t SEP] [-o FILE] [FILE...]
+//! sort [-bcCdfghimMnRrsuVz] [-k KEYDEF]... [-t SEP] [-o FILE] [FILE...]
 //! ```
 //!
 //! | | |
@@ -10,6 +10,7 @@
 //! | `-c` / `-C` | check that the input is sorted; report / stay quiet |
 //! | `-d` `-f` `-i` | compare only alphanumerics+blanks / fold case / drop unprintables |
 //! | `-g` `-h` `-M` `-n` `-V` | numeric through a double / SI suffixes / month names / exact decimal / version numbers |
+//! | `-R` | shuffle, keeping equal keys together; `--random-source=FILE` makes the order reproducible |
 //! | `-k SPEC` | sort on this part of the line; may be repeated |
 //! | `-m` | merge already-sorted inputs |
 //! | `-o FILE` | write here, which may be an input file |
@@ -18,6 +19,7 @@
 //! | `-t SEP` | field separator |
 //! | `-u` | output only the first of each run of equal keys |
 //! | `-z` | lines end with NUL, not newline |
+//! | `-S` `-T` `--batch-size` `--compress-program` | the buffer's size, where temporary files go, how many files one merge reads, what compresses them |
 //!
 //! Every option also has a long form, which may be abbreviated to any
 //! unambiguous prefix (`--rev`) and takes its value either way round
@@ -62,13 +64,28 @@
 //! so it inherits nothing else — including `-r`, which is why `sort -r -k2,2n`
 //! does not reverse. That surprises people, and it is GNU's behaviour.
 //!
-//! ## C locale only
+//! ## One locale
 //!
-//! Bytes compare as bytes and the month names are English. SlateOS has no
-//! collation tables yet; see `known-issues.md`. `scripts/sort-diff.sh` pins
-//! `LC_ALL=C` so the comparison against GNU is against the same ordering.
+//! Bytes compare as bytes and the month names are English: GNU's ordering
+//! under `C.UTF-8`, whose code-point collation is byte order. SlateOS is UTF-8
+//! throughout (design-decisions §351) and has no collation tables yet
+//! (`known-issues/TD-SORT-C-LOCALE-ONLY-COLLATION.md`). `scripts/sort-diff.sh`
+//! runs GNU under `LC_ALL=C.UTF-8`, so the comparison is against that ordering
+//! -- which differs from the `C` locale's in what `-R` hashes (`order::random`).
+//!
+//! ## More than fits in memory
+//!
+//! The input is read a buffer at a time, as upstream reads it; what does not
+//! fit in one buffer is sorted into temporary files and merged, and `-m`
+//! merges by the same code. Nothing is read whole into memory, so an input of
+//! any size can be sorted in a buffer of `-S`. When a temporary file is made
+//! is observable, so the buffer's size and filling are upstream's to the
+//! byte: see the `external` module.
 
+mod debug;
+mod external;
 mod keydef;
+mod limits;
 mod order;
 
 use coreutils::diag;
@@ -82,9 +99,13 @@ use std::process::ExitCode;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
-use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
+use coreutils::quote::{quote, quoteaf_os, quotef, quotef_os};
+use coreutils::randint::{RandError, RandRead};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 
 const USAGE: &str = "\
 usage: sort [OPTION]... [FILE]...
@@ -100,10 +121,13 @@ Ordering:
   -i, --ignore-nonprinting      compare only printable characters
   -M, --month-sort              compare as a month name (unknown < JAN < DEC)
   -n, --numeric-sort            compare as a decimal number, exactly
+  -R, --random-sort             shuffle, but keep equal keys together
+      --random-source=FILE      take -R's random bytes from FILE, which makes
+                                the order the same every time
   -V, --version-sort            compare as a file name holding version numbers
   -r, --reverse                 reverse the result
       --sort=WORD               one of general-numeric, human-numeric, month,
-                                numeric, version
+                                numeric, random, version
 
 Which part of the line:
   -k, --key=KEYDEF              sort on this key; KEYDEF is F[.C][OPTS][,F[.C][OPTS]]
@@ -119,20 +143,29 @@ Other:
   -u, --unique                  output only the first of each run of equal keys
   -z, --zero-terminated         lines end with NUL, not newline
       --files0-from=F           take the input names from F, NUL-separated
+      --debug                   underline the part of each line a key compares,
+                                and warn about options that do less than they
+                                seem to; not with -c, -C or -o
       --help                    print this and exit
       --version                 print the version and exit
 
-Accepted and ignored, because this sort holds the whole input in memory:
-  -S, --buffer-size=SIZE        -T, --temporary-directory=DIR
-      --parallel=N                  --compress-program=PROG
-      --batch-size=N                --random-source=FILE
+Resources, for input that does not fit in memory:
+  -S, --buffer-size=SIZE        sort in a buffer of SIZE: KiB, or a b, K, M, G,
+                                T, P, E, Z, Y, R or Q suffix, or N% of memory
+  -T, --temporary-directory=DIR put temporary files in DIR, not $TMPDIR or /tmp;
+                                given more than once, each in turn
+      --batch-size=N            merge at most N files at once
+      --compress-program=PROG   compress temporary files with PROG, and read
+                                them back with PROG -d
+      --parallel=N              size the buffer for N threads, as upstream
+                                does; this sort runs on one
 
 A long option may be abbreviated to any unambiguous prefix, and takes its value
 either as --key=2 or as --key 2.
 
 KEYDEF's F is a field number and C a character within it, both starting at 1;
 an omitted .C is the start of the field for a start position and the end of it
-for an end position. OPTS is any of bdfgiMnRrV, applying to that key alone --
+for an end position. OPTS is any of bdfghiMnRrV, applying to that key alone --
 a key that names any ordering of its own inherits none of the global ones.
 
 Exit status: 0 if all went well, 1 if -c or -C found the input out of order,
@@ -164,6 +197,32 @@ struct Config {
     /// Kept separate from `files` because it is read after the whole command
     /// line is parsed, and because combining it with an operand is an error.
     files0_from: Option<OsString>,
+    /// `--random-source=FILE`: where `-R`'s salt comes from, when it is not
+    /// the system's random numbers.
+    random_source: Option<OsString>,
+    /// The MD5 state `-R` hashes each key after ([`order::random`]): sixteen
+    /// bytes of salt already absorbed once a key is random
+    /// ([`salted_state`]), and a bare state, which no key hashes with,
+    /// otherwise.
+    salted: md5::Md5,
+    /// `--debug`: say how the keys are read, and underline them in the output.
+    debug: bool,
+    /// The options given outside any `-k`, after the command line is read:
+    /// upstream's `gkey`, which `--debug` reports the unused parts of.
+    global: KeySpec,
+    /// Whether the one key is the global options' own -- upstream's
+    /// `gkey_only`, under which `--debug` says less.
+    gkey_only: bool,
+    /// `-S`: the sort buffer's size in bytes, 0 when none was given.
+    sort_size: usize,
+    /// `-T`: where temporary files go, in the order given.
+    temp_dirs: Vec<OsString>,
+    /// `--batch-size`: how many files one merge reads.
+    nmerge: u32,
+    /// `--parallel`: how many threads may sort, 0 when none was given.
+    nthreads: usize,
+    /// `--compress-program`: what compresses the temporary files.
+    compress_program: Option<OsString>,
 }
 
 impl Default for Config {
@@ -180,6 +239,16 @@ impl Default for Config {
             output: None,
             files: Vec::new(),
             files0_from: None,
+            random_source: None,
+            salted: md5::Md5::new(),
+            debug: false,
+            global: KeySpec::whole_line(),
+            gkey_only: false,
+            sort_size: 0,
+            temp_dirs: Vec::new(),
+            nmerge: limits::NMERGE_DEFAULT,
+            nthreads: 0,
+            compress_program: None,
         }
     }
 }
@@ -193,66 +262,73 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
+    // Upstream catches its signals before it reads its options, and after
+    // the inherited dispositions are back, so that one its parent ignored
+    // stays ignored.
+    external::install_signal_handlers();
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cfg = match parse_args(&raw, getopt::posixly_correct(), posixver::posix2_version()) {
-        Ok(Some(c)) => c,
-        Ok(None) => return ExitCode::SUCCESS,
+        Ok(c) => c,
         Err(e) => die_with(&e.message(), e.status),
     };
+    let status = run(&cfg);
+    // Upstream's `exit_cleanup`: whatever temporary file is left goes.
+    external::remove_all();
+    status
+}
 
-    // Every input is read before anything is written, which is what lets
-    // `sort -o f f` work: by the time the output file is truncated its old
-    // contents are already in memory.
-    let mut contents: Vec<Vec<u8>> = Vec::with_capacity(cfg.files.len());
-    for path in &cfg.files {
-        match read_file(path) {
-            Ok(bytes) => contents.push(bytes),
-            // GNU words a failed open one way when checking and another when
-            // sorting, and a failed *read* a third way in both. The wording is
-            // the only thing that tells a user whether the name was wrong or
-            // the thing behind it was, so it is worth reproducing.
-            Err(failure) => die(&format!(
-                "{}: {}: {}",
-                match failure {
-                    ReadFailure::Open(_) if cfg.check.is_some() => "open failed",
-                    ReadFailure::Open(_) => "cannot read",
-                    ReadFailure::Read(_) => "read failed",
-                },
-                quotef_os(path),
-                strerror(failure.cause())
-            )),
-        }
-    }
-    let per_file: Vec<Vec<&[u8]>> = contents.iter().map(|c| split_lines(c, cfg.delim)).collect();
-
+/// The run itself, in upstream's order: `-c` reads its one input and
+/// answers; anything else checks that every named input can be read and
+/// opens `-o`'s file, then merges or sorts.
+fn run(cfg: &Config) -> ExitCode {
     if let Some(mode) = cfg.check {
-        return ExitCode::from(check(
-            &cfg,
-            per_file.first().map_or(&[], Vec::as_slice),
-            mode,
-        ));
+        let ordered = external::check(cfg, mode == Check::Diagnose);
+        return ExitCode::from(if ordered { 0 } else { 1 });
     }
-
-    let ordered = if cfg.merge {
-        merge(&cfg, &per_file)
+    check_inputs(cfg);
+    let mut output = external::Output::open(cfg);
+    let result = if cfg.merge {
+        let files = cfg
+            .files
+            .iter()
+            .cloned()
+            .map(external::MergeFile::input)
+            .collect();
+        let mut temps = external::Temps::new(cfg);
+        external::merge(cfg, &mut temps, files, &mut output)
     } else {
-        let mut lines: Vec<&[u8]> = per_file.iter().flatten().copied().collect();
-        // Stable, because `-s` and `-u` both stop the comparison short of the
-        // whole-line fallback and then rely on the input order to decide.
-        lines.sort_by(|a, b| compare(&cfg, a, b));
-        lines
+        external::sort(cfg, &mut output)
     };
-
-    if let Err(e) = write_out(&cfg, &ordered) {
-        // A closed pipe is how `sort | head` ends. It is not a failure worth a
-        // diagnostic, but it is not success either.
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            return ExitCode::from(2);
-        }
-        die(&format!("write failed: {}", strerror(&e)));
+    if let Err(status) = result {
+        return status;
     }
-
+    if let Err(status) = output.finish(cfg) {
+        return status;
+    }
+    // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) sort_die
+    // (_("close failed"), "-")`.
+    if cfg.files.iter().any(|f| f == "-")
+        && let Err(e) = stdfd::close_stdin()
+    {
+        die(&format!("close failed: -: {}", strerror(&e)));
+    }
     ExitCode::SUCCESS
+}
+
+/// Upstream's `check_inputs`: every named input must be readable --
+/// `euidaccess (R_OK)` -- before anything is opened. `sort - nosuch <&-` is
+/// `cannot read: nosuch`, not a complaint about standard input.
+fn check_inputs(cfg: &Config) {
+    for path in cfg.files.iter().filter(|p| *p != "-") {
+        if let Err(e) = stdfd::readable(&arg_bytes(path)) {
+            die(&format!(
+                "cannot read: {}: {}",
+                quotef_os(path),
+                strerror(&e)
+            ));
+        }
+    }
 }
 
 // ── comparison ──────────────────────────────────────────────────────────────
@@ -262,7 +338,7 @@ fn compare(cfg: &Config, a: &[u8], b: &[u8]) -> Ordering {
     if !cfg.keys.is_empty() {
         let mut diff = Ordering::Equal;
         for key in &cfg.keys {
-            diff = key.compare(a, b, cfg.tab);
+            diff = key.compare(a, b, cfg.tab, &cfg.salted);
             if diff != Ordering::Equal {
                 break;
             }
@@ -278,118 +354,30 @@ fn compare(cfg: &Config, a: &[u8], b: &[u8]) -> Ordering {
     if cfg.reverse { diff.reverse() } else { diff }
 }
 
-/// Merge inputs that are each already sorted.
-///
-/// This is a real k-way merge and not a re-sort, because the two differ on
-/// input that is not in fact sorted and GNU's answer there is the merge's.
-/// Ties go to the earliest file, which is what makes `-m` stable.
-fn merge<'a>(cfg: &Config, per_file: &[Vec<&'a [u8]>]) -> Vec<&'a [u8]> {
-    let total: usize = per_file.iter().map(Vec::len).sum();
-    let mut out: Vec<&[u8]> = Vec::with_capacity(total);
-    let mut at: Vec<usize> = vec![0; per_file.len()];
-    loop {
-        let mut best: Option<usize> = None;
-        for (index, lines) in per_file.iter().enumerate() {
-            let Some(line) = lines.get(at.get(index).copied().unwrap_or(0)) else {
-                continue;
-            };
-            let better = match best.and_then(|b| {
-                per_file
-                    .get(b)
-                    .and_then(|f| f.get(at.get(b).copied().unwrap_or(0)))
-            }) {
-                None => true,
-                Some(current) => compare(cfg, line, current) == Ordering::Less,
-            };
-            if better {
-                best = Some(index);
-            }
-        }
-        let Some(index) = best else { break };
-        if let Some(line) = per_file
-            .get(index)
-            .and_then(|f| f.get(at.get(index).copied().unwrap_or(0)))
-        {
-            out.push(line);
-        }
-        if let Some(slot) = at.get_mut(index) {
-            *slot = slot.saturating_add(1);
-        }
-    }
-    out
-}
-
-/// `-c` / `-C`: is the input already in order?
-///
-/// Returns the exit status. With `-u` an equal pair is also a failure, since
-/// the file would not be the output of `sort -u`.
-fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
-    // The name as given, which need not be text: upstream prints it bare.
-    let name = cfg
-        .files
-        .first()
-        .map_or(std::borrow::Cow::Borrowed(b"-".as_slice()), |f| os_bytes(f));
-    for index in 1..lines.len() {
-        let (Some(prev), Some(cur)) = (lines.get(index.saturating_sub(1)), lines.get(index)) else {
-            continue;
-        };
-        let diff = compare(cfg, prev, cur);
-        let disordered = if cfg.unique {
-            diff != Ordering::Less
-        } else {
-            diff == Ordering::Greater
-        };
-        if disordered {
-            if mode == Check::Diagnose {
-                // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
-                // diagnostic that never arrived has to reach `close_stderr`'s flag.
-                let mut err = Stream::stderr();
-                // The offending line goes out as bytes: it is not necessarily
-                // text, and a diagnostic is not a reason to mangle it.
-                let _ = err.write_all(b"sort: ");
-                let _ = err.write_all(&name);
-                let _ = write!(err, ":{}: disorder: ", index.saturating_add(1));
-                let _ = err.write_all(cur);
-                let _ = err.write_all(&[cfg.delim]);
-            }
-            return 1;
-        }
-    }
-    0
-}
-
 // ── input and output ────────────────────────────────────────────────────────
 
-/// Which stage of reading a file failed.
-///
-/// The distinction is not bookkeeping: "no such file" and "is a directory" are
-/// both `cannot read` if you collapse them, and the user then cannot tell a
-/// misspelled name from a name that is right but not a file.
+/// Which stage of reading a `--files0-from` list failed: upstream says
+/// `open failed: F: reason` for the one and `cannot read file names from 'F'`,
+/// with no reason, for the other. (The inputs themselves are read a buffer at
+/// a time by [`external::sort`], [`external::merge`] and [`external::check`],
+/// in upstream's order.)
 enum ReadFailure {
     Open(io::Error),
-    Read(io::Error),
-}
-
-impl ReadFailure {
-    fn cause(&self) -> &io::Error {
-        match self {
-            ReadFailure::Open(e) | ReadFailure::Read(e) => e,
-        }
-    }
+    Read,
 }
 
 fn read_file(path: &OsString) -> Result<Vec<u8>, ReadFailure> {
     let mut bytes = Vec::new();
     if path == "-" {
-        io::stdin()
-            .lock()
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        stdfd::RawStdin
             .read_to_end(&mut bytes)
-            .map_err(ReadFailure::Read)?;
+            .map_err(|_| ReadFailure::Read)?;
     } else {
         File::open(path)
             .map_err(ReadFailure::Open)?
             .read_to_end(&mut bytes)
-            .map_err(ReadFailure::Read)?;
+            .map_err(|_| ReadFailure::Read)?;
     }
     Ok(bytes)
 }
@@ -406,7 +394,7 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
         ReadFailure::Open(e) => {
             format!("open failed: {}: {}", quotef_os(list), strerror(&e))
         }
-        ReadFailure::Read(_) => {
+        ReadFailure::Read => {
             format!("cannot read file names from {}", quoteaf_os(list))
         }
     })?;
@@ -429,51 +417,6 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
         names.push(os_from_bytes(name));
     }
     Ok(names)
-}
-
-/// Split input into lines on `delim`.
-///
-/// A final line with no terminator is still a line — `printf 'b\na'` has two —
-/// and the terminator is supplied on output, so the result is terminated even
-/// when the input was not.
-fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
-    let mut lines: Vec<&[u8]> = Vec::new();
-    let mut start = 0usize;
-    for (index, &byte) in data.iter().enumerate() {
-        if byte == delim {
-            lines.push(data.get(start..index).unwrap_or_default());
-            start = index.saturating_add(1);
-        }
-    }
-    if start < data.len() {
-        lines.push(data.get(start..).unwrap_or_default());
-    }
-    lines
-}
-
-fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
-    let mut sink: Box<dyn Write> = match &cfg.output {
-        Some(path) => Box::new(io::BufWriter::new(File::create(path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("open failed: {}: {}", quotef_os(path), strerror(&e)),
-            )
-        })?)),
-        None => Box::new(io::BufWriter::new(io::stdout().lock())),
-    };
-    let mut previous: Option<&[u8]> = None;
-    for line in lines {
-        if cfg.unique
-            && let Some(prev) = previous
-            && compare(cfg, prev, line) == Ordering::Equal
-        {
-            continue;
-        }
-        sink.write_all(line)?;
-        sink.write_all(&[cfg.delim])?;
-        previous = Some(line);
-    }
-    sink.flush()
 }
 
 // ── command line ────────────────────────────────────────────────────────────
@@ -501,7 +444,8 @@ fn fatal(message: String) -> Fatal {
     SORT.usage(message)
 }
 
-/// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
+/// Parse argv. `--help` and `--version` do not return: upstream answers them
+/// from inside its option loop and exits, and so does [`say_now`].
 ///
 /// `posixly_correct` and `posix2_version` are the environment's
 /// ([`getopt::posixly_correct`], [`posixver::posix2_version`]), passed in so
@@ -513,7 +457,7 @@ fn parse_args(
     raw: &[OsString],
     posixly_correct: bool,
     posix2_version: i32,
-) -> Result<Option<Config>, Fatal> {
+) -> Result<Config, Fatal> {
     let mut cfg = Config::default();
     // The options that are not attached to a `-k` collect here, and are then
     // either handed to the keys that named no ordering of their own or, if
@@ -557,10 +501,7 @@ fn parse_args(
             continue;
         }
         if bytes.starts_with(b"--") {
-            match long_option(&bytes, raw, &mut i, &mut cfg, &mut global)? {
-                Answered::Yes => return Ok(None),
-                Answered::No => {}
-            }
+            long_option(&bytes, raw, &mut i, &mut cfg, &mut global)?;
             continue;
         }
         // `+POS [-POS]`: the obsolete key syntax. An argument that starts with
@@ -591,6 +532,24 @@ fn parse_args(
         let mut rest = bytes.get(1..).unwrap_or_default().to_vec();
         while let Some(&flag) = rest.first() {
             rest.remove(0);
+            if flag == b'y' {
+                // Solaris's `-y`, accepted and ignored. It takes the rest of
+                // its word, or else the next word -- but only a next word of
+                // nothing but digits: anything else is left to be read as an
+                // option or an operand, upstream's `optind -= (*p != '\0')`.
+                // So `sort -y file` sorts `file`.
+                if rest.is_empty() {
+                    let next = raw
+                        .get(i)
+                        .ok_or_else(|| SORT.short_missing_argument(flag))?;
+                    if arg_bytes(next).iter().all(u8::is_ascii_digit) {
+                        i = i.saturating_add(1);
+                    }
+                } else {
+                    rest.clear();
+                }
+                continue;
+            }
             // An option that takes a value takes the rest of this bundle, or
             // the next argument if the bundle is exhausted.
             let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, Fatal> {
@@ -604,7 +563,7 @@ fn parse_args(
                 Ok(arg_bytes(value))
             };
             match flag {
-                b'b' | b'd' | b'f' | b'g' | b'h' | b'i' | b'M' | b'n' | b'V' => {
+                b'b' | b'd' | b'f' | b'g' | b'h' | b'i' | b'M' | b'n' | b'R' | b'V' => {
                     keydef::set_ordering(&[flag], &mut global, Blanks::Both);
                 }
                 // `-r` lands on the global key like every other ordering
@@ -622,14 +581,17 @@ fn parse_args(
                     .push(parse_key(&take_value(&mut rest)?).map_err(fatal)?),
                 b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab).map_err(fatal)?),
                 b'o' => cfg.output = Some(os_from_bytes(&take_value(&mut rest)?)),
-                // Resource hints. This sort holds the whole input in memory, so
-                // there are no temporary files to place, no external program to
-                // compress them with, and nothing to parallelise; accepting and
-                // ignoring them keeps existing command lines working.
-                b'S' | b'T' | b'y' => {
-                    let _ = take_value(&mut rest)?;
+                b'S' => {
+                    cfg.sort_size = limits::specify_sort_size(
+                        cfg.sort_size,
+                        cfg.nmerge,
+                        "-S",
+                        &take_value(&mut rest)?,
+                        limits::physmem_total,
+                    )
+                    .map_err(fatal)?;
                 }
-                b'R' => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
+                b'T' => cfg.temp_dirs.push(os_from_bytes(&take_value(&mut rest)?)),
                 // `other` is a byte, not a `char`: `other as char` would map
                 // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
                 // `-é` would be reported as an option nobody typed.
@@ -663,11 +625,29 @@ fn parse_args(
     }
     if cfg.keys.is_empty() && global.makes_a_key() {
         cfg.keys.push(global.clone());
+        cfg.gkey_only = true;
     }
     cfg.reverse = global.reverse;
     // Only now, with every key final -- upstream's
     // check_ordering_compatibility, and the reason it is not done per key.
     keydef::check_compatibility(&cfg.keys).map_err(fatal)?;
+    cfg.global = global;
+    if cfg.debug {
+        debug_notes(&cfg)?;
+    }
+    // Upstream's `need_random`: the salt is read only when a key that will
+    // be compared is random -- `sort -R -k1,1n` reads none, its one key
+    // naming an ordering of its own -- and only now, after the check above
+    // and before the `-c` operand check below, which is where upstream reads
+    // it. So `--random-source=/nonexistent` costs nothing without `-R`.
+    if cfg.keys.iter().any(|key| key.kind == Kind::Random) {
+        cfg.salted = salted_state(cfg.random_source.as_ref())?;
+    }
+    // Upstream checks the size again against the final `--batch-size`, which
+    // may have come after `-S`.
+    if cfg.sort_size > 0 {
+        cfg.sort_size = cfg.sort_size.max(limits::min_sort_size(cfg.nmerge));
+    }
 
     if cfg.check.is_some() && cfg.files.len() > 1 {
         let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
@@ -676,13 +656,7 @@ fn parse_args(
     if cfg.files.is_empty() {
         cfg.files.push(OsString::from("-"));
     }
-    Ok(Some(cfg))
-}
-
-/// Whether a long option has already printed the answer.
-enum Answered {
-    Yes,
-    No,
+    Ok(cfg)
 }
 
 /// The name every diagnostic below is stamped with, and the status a bad
@@ -697,8 +671,8 @@ const SORT: Program = Program::new("sort", 2);
 
 /// Every long option `sort` knows, with what it takes.
 ///
-/// The table must list options we do *not* implement (`--debug`, `--random-sort`)
-/// as well, because it is also what decides whether an abbreviation is
+/// The table must list the option we do *not* implement (`--debug`) as well,
+/// because it is also what decides whether an abbreviation is
 /// ambiguous: without `--debug` in it, `--d` would resolve to
 /// `--dictionary-order` instead of being refused, and a user who typed `--d`
 /// meaning `--debug` would silently get a dictionary sort.
@@ -755,7 +729,7 @@ fn long_option(
     i: &mut usize,
     cfg: &mut Config,
     global: &mut KeySpec,
-) -> Result<Answered, Fatal> {
+) -> Result<(), Fatal> {
     let body = bytes.get(2..).unwrap_or_default();
     let (typed, inline) = match body.iter().position(|&c| c == b'=') {
         Some(at) => (
@@ -790,14 +764,8 @@ fn long_option(
     let need = || value.clone().unwrap_or_default();
 
     match name {
-        "help" => {
-            println!("{USAGE}");
-            return Ok(Answered::Yes);
-        }
-        "version" => {
-            println!("sort (SlateOS coreutils)");
-            return Ok(Answered::Yes);
-        }
+        "help" => say_now(format!("{USAGE}\n").as_bytes()),
+        "version" => say_now(b"sort (SlateOS coreutils)\n"),
         "ignore-leading-blanks" => {
             keydef::set_ordering(b"b", global, Blanks::Both);
         }
@@ -825,12 +793,55 @@ fn long_option(
         "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab).map_err(fatal)?),
         "output" => cfg.output = Some(os_from_bytes(&need())),
         "files0-from" => cfg.files0_from = Some(os_from_bytes(&need())),
-        "random-sort" => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
-        "debug" => return Err(fatal(DEBUG_UNIMPLEMENTED.to_string())),
-        // Accepted and ignored, as for their short forms.
+        "random-sort" => global.name(Kind::Random),
+        // Named twice, it must be the same file both times: upstream compares
+        // the names, as given.
+        "random-source" => {
+            let source = os_from_bytes(&need());
+            if cfg
+                .random_source
+                .as_ref()
+                .is_some_and(|known| *known != source)
+            {
+                return Err(fatal("multiple random sources specified".to_string()));
+            }
+            cfg.random_source = Some(source);
+        }
+        "debug" => cfg.debug = true,
+        "buffer-size" => {
+            cfg.sort_size = limits::specify_sort_size(
+                cfg.sort_size,
+                cfg.nmerge,
+                "--buffer-size",
+                &need(),
+                limits::physmem_total,
+            )
+            .map_err(fatal)?;
+        }
+        "temporary-directory" => cfg.temp_dirs.push(os_from_bytes(&need())),
+        "batch-size" => {
+            let max = limits::max_nmerge(limits::rlimit(limits::Resource::Files));
+            cfg.nmerge = limits::specify_nmerge(&need(), max).map_err(fatal)?;
+        }
+        "parallel" => {
+            cfg.nthreads = limits::specify_nthreads("--parallel", &need()).map_err(fatal)?;
+        }
+        // Named twice, it must be the same program: upstream compares the
+        // names as given.
+        "compress-program" => {
+            let program = os_from_bytes(&need());
+            if cfg
+                .compress_program
+                .as_ref()
+                .is_some_and(|known| *known != program)
+            {
+                return Err(fatal("multiple compress programs specified".to_string()));
+            }
+            cfg.compress_program = Some(program);
+        }
         _ => {}
     }
-    Ok(Answered::No)
+    Ok(())
 }
 
 /// `--check`'s words. `quiet` and `silent` are two spellings of one answer,
@@ -843,31 +854,88 @@ const CHECK_WORDS: &[(&str, Check)] = &[
     ("diagnose-first", Check::Diagnose),
 ];
 
-/// `--sort`'s words. `random` is spelled `None` because we recognise it — it is
-/// a real ordering and must not be reported as an invalid argument — but cannot
-/// perform it yet.
-const SORT_WORDS: &[(&str, Option<Kind>)] = &[
-    ("general-numeric", Some(Kind::General)),
-    ("human-numeric", Some(Kind::Human)),
-    ("month", Some(Kind::Month)),
-    ("numeric", Some(Kind::Numeric)),
-    ("random", None),
-    ("version", Some(Kind::Version)),
+/// `--sort`'s words.
+const SORT_WORDS: &[(&str, Kind)] = &[
+    ("general-numeric", Kind::General),
+    ("human-numeric", Kind::Human),
+    ("month", Kind::Month),
+    ("numeric", Kind::Numeric),
+    ("random", Kind::Random),
+    ("version", Kind::Version),
 ];
 
 /// `--sort=WORD`, the long spelling of the ordering options.
 fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
-    SORT.argmatch(word, "--sort", SORT_WORDS)?
-        .ok_or_else(|| fatal(RANDOM_UNIMPLEMENTED.to_string()))
+    SORT.argmatch(word, "--sort", SORT_WORDS)
 }
 
-/// The two options we accept into the parser and then refuse, each with the
-/// reason rather than a bare "unknown option" — a user who typed one asked for
-/// something real and deserves to be told it is missing, not that it does not
-/// exist.
-const RANDOM_UNIMPLEMENTED: &str =
-    "random sort is not implemented: it needs a keyed hash this system does not have yet";
-const DEBUG_UNIMPLEMENTED: &str = "--debug is not implemented";
+/// `--debug`'s checks and notes, where upstream makes them: after the keys
+/// are final and found compatible, before the random source is read.
+///
+/// It cannot be combined with `-c`, `-C` or `-o` -- there is no output to
+/// annotate in the first two, and the annotation is not data a file should
+/// hold -- and upstream names the first of them it finds in that order.
+/// Then it says which ordering is in force, and [`debug::notes`].
+fn debug_notes(cfg: &Config) -> Result<(), Fatal> {
+    let other = match (cfg.check, &cfg.output) {
+        (Some(Check::Diagnose), _) => Some('c'),
+        (Some(Check::Quiet), _) => Some('C'),
+        (None, Some(_)) => Some('o'),
+        (None, None) => None,
+    };
+    if let Some(letter) = other {
+        return Err(fatal(format!(
+            "options '-{letter} --debug' are incompatible"
+        )));
+    }
+    let settings = debug::Settings {
+        keys: &cfg.keys,
+        global: &cfg.global,
+        gkey_only: cfg.gkey_only,
+        tab: cfg.tab,
+        stable: cfg.stable,
+        unique: cfg.unique,
+    };
+    for note in debug::notes(&settings) {
+        diag!("sort: {note}");
+    }
+    Ok(())
+}
+
+/// Upstream's `random_md5_state_init`: sixteen bytes from the random source,
+/// absorbed into a fresh MD5 state that every random key is then hashed after.
+///
+/// The source is `--random-source`'s file, read as gnulib's `randread` reads
+/// it, or the system's random numbers. Its failures are upstream's: a file
+/// that cannot be opened is `open failed: FILE: <errno>`, one shorter than
+/// sixteen bytes is `'FILE': end of file`, one that cannot be read is
+/// `'FILE': read error: <errno>` -- each status 2, as everything `sort` dies
+/// of is.
+fn salted_state(source: Option<&OsString>) -> Result<md5::Md5, Fatal> {
+    let name = source.map(arg_bytes);
+    let mut random = RandRead::open(name.as_deref()).map_err(|e| {
+        fatal(format!(
+            "open failed: {}: {}",
+            quotef(name.as_deref().unwrap_or(b"getrandom")),
+            strerror(&e)
+        ))
+    })?;
+    let mut salt = [0u8; 16];
+    random.read(&mut salt).map_err(|e| {
+        fatal(match e {
+            RandError::EndOfFile(name) => format!("{}: end of file", quote(&name)),
+            RandError::Read(name, err) => {
+                format!("{}: read error: {}", quote(&name), strerror(&err))
+            }
+            RandError::System => {
+                "getrandom: the system random number generator is unavailable".to_string()
+            }
+        })
+    })?;
+    let mut state = md5::Md5::new();
+    state.update(&salt);
+    Ok(state)
+}
 
 /// `-t`'s argument: one byte, or the two characters `\0` for NUL.
 fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {
@@ -908,6 +976,26 @@ fn os_from_bytes(b: &[u8]) -> OsString {
     OsString::from(String::from_utf8_lossy(b).into_owned())
 }
 
+/// `--help` and `--version`, which upstream answers from inside its option
+/// loop -- `usage (EXIT_SUCCESS)`, `version_etc` and `exit` -- so the process
+/// ends here, with the funnel's verdict: status 2 when the text could not be
+/// written (`sort --help >/dev/full`), `close_stdout` giving `sort`'s
+/// `exit_failure`. `println!` panicked on a full disk.
+fn say_now(text: &[u8]) -> ! {
+    let mut out = Stream::stdout();
+    // The stream records a failure for the verdict below; it never returns one.
+    let _ = out.write_all(text);
+    let status = match out.finish() {
+        Ok(()) => 0,
+        Err(e) if stdfd::reader_gone(&e) => 0,
+        Err(e) => {
+            stdfd::write_error("sort", &e);
+            2
+        }
+    };
+    stdfd::exit_now(status, 2)
+}
+
 fn die(msg: &str) -> ! {
     die_with(msg, 2)
 }
@@ -920,6 +1008,8 @@ fn die(msg: &str) -> ! {
 /// too, exactly as it would on any path that does return.
 fn die_with(msg: &str, status: i32) -> ! {
     diag!("sort: {msg}");
+    // Upstream's `exit_cleanup` runs on this way out too.
+    external::remove_all();
     stdfd::exit_now(u8::try_from(status).unwrap_or(2), 2)
 }
 
@@ -933,10 +1023,30 @@ fn die_with(msg: &str, status: i32) -> ! {
 mod tests {
     use super::*;
 
+    /// Split input into lines on `delim`.
+    ///
+    /// A final line with no terminator is still a line — `printf 'b\na'` has two —
+    /// and the terminator is supplied on output, so the result is terminated even
+    /// when the input was not.
+    fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
+        let mut lines: Vec<&[u8]> = Vec::new();
+        let mut start = 0usize;
+        for (index, &byte) in data.iter().enumerate() {
+            if byte == delim {
+                lines.push(data.get(start..index).unwrap_or_default());
+                start = index.saturating_add(1);
+            }
+        }
+        if start < data.len() {
+            lines.push(data.get(start..).unwrap_or_default());
+        }
+        lines
+    }
+
     /// `parse_args` with `POSIXLY_CORRECT` unset and `_POSIX2_VERSION` at its
     /// default, so no test depends on the environment `cargo test` inherited.
     /// The tests of those two variables call `super::parse_args`.
-    fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
+    fn parse_args(raw: &[OsString]) -> Result<Config, Fatal> {
         super::parse_args(raw, false, posixver::DEFAULT)
     }
 
@@ -949,7 +1059,7 @@ mod tests {
     fn posixly_correct_makes_every_word_after_a_file_a_file() {
         let files = |words: &[&str], posix: bool, version: i32| -> Vec<OsString> {
             match super::parse_args(&os_args(words), posix, version) {
-                Ok(Some(cfg)) => cfg.files,
+                Ok(cfg) => cfg.files,
                 _ => panic!("{words:?} should parse"),
             }
         };
@@ -973,17 +1083,17 @@ mod tests {
             |words: &[&str], version: i32| super::parse_args(&os_args(words), true, version);
         let d = posixver::DEFAULT;
         // `-o FILE` and `-oFILE` after a file are the output, not files.
-        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], d) else {
+        let Ok(cfg) = parsed(&["f", "-o", "out"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f"]));
         assert_eq!(cfg.output, Some(OsString::from("out")));
-        let Ok(Some(cfg)) = parsed(&["f", "-oout"], d) else {
+        let Ok(cfg) = parsed(&["f", "-oout"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.output, Some(OsString::from("out")));
         // A final `-o` with nothing after it is a file.
-        let Ok(Some(cfg)) = parsed(&["f", "-o"], d) else {
+        let Ok(cfg) = parsed(&["f", "-o"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f", "-o"]));
@@ -998,7 +1108,7 @@ mod tests {
             e.sentence
         );
         // And not under the 2001 edition.
-        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], 200_112) else {
+        let Ok(cfg) = parsed(&["f", "-o", "out"], 200_112) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f", "-o", "out"]));
@@ -1011,7 +1121,7 @@ mod tests {
             posix,
             200_112,
         ) {
-            Ok(Some(cfg)) => (cfg.keys.len(), cfg.files),
+            Ok(cfg) => (cfg.keys.len(), cfg.files),
             _ => panic!("{words:?} should parse"),
         };
         assert_eq!(parsed(&["+1", "f"], false), (0, os_args(&["+1", "f"])));
@@ -1026,7 +1136,7 @@ mod tests {
 
     fn cfg_of(args: &[&str]) -> Config {
         let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
-        parse_args(&raw).unwrap().unwrap()
+        parse_args(&raw).unwrap()
     }
 
     fn run(args: &[&str], input: &str) -> String {
@@ -1298,34 +1408,5 @@ mod tests {
         let cfg = cfg_of(&["+file"]);
         assert!(cfg.keys.is_empty());
         assert_eq!(cfg.files, vec![OsString::from("+file")]);
-    }
-
-    #[test]
-    fn check_reports_the_first_line_out_of_order() {
-        let cfg = cfg_of(&["-c"]);
-        let data = b"b\na\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 1);
-        let cfg = cfg_of(&["-c"]);
-        let data = b"a\nb\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 0);
-        // With `-u`, an equal pair is also out of order.
-        let cfg = cfg_of(&["-cu"]);
-        let data = b"a\na\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 1);
-    }
-
-    #[test]
-    fn merge_is_a_merge_and_not_a_re_sort() {
-        // GNU's `-m` on input that is not in fact sorted answers with the
-        // merge, which is not what sorting the concatenation would give.
-        let cfg = cfg_of(&["-m"]);
-        let a = b"3\n1\n".to_vec();
-        let b = b"2\n".to_vec();
-        let per_file = vec![split_lines(&a, b'\n'), split_lines(&b, b'\n')];
-        let out = merge(&cfg, &per_file);
-        assert_eq!(out, vec![b"2".as_slice(), b"3".as_slice(), b"1".as_slice()]);
     }
 }

@@ -150,6 +150,16 @@ pub const PARAM_SCHED_INTERACTIVE_BOOST: u16 = 11;
 /// Default: 200.
 pub const PARAM_SCHED_STARVATION_THRESHOLD: u16 = 12;
 
+/// Real-time share (percent): how much of each second work in the
+/// real-time band (`SCHED_FIFO`/`SCHED_RR`) may take of a CPU on which
+/// ordinary work is waiting -- Linux's `sched_rt_runtime_us` over
+/// `sched_rt_period_us`. Past it the CPU runs its ordinary work first until
+/// the second ends; with no ordinary work waiting, real-time work runs on.
+/// 100 turns the throttle off.
+///
+/// Default: 95 (Linux's 950000 of 1000000).
+pub const PARAM_SCHED_RT_RUNTIME_PCT: u16 = 14;
+
 /// Scheduler backend algorithm.
 ///
 /// 0 = PriorityRoundRobin (default, O(1) bitmap pick_next)
@@ -499,6 +509,14 @@ pub fn init() {
         200,  // 200 ticks = 2 seconds at 100 Hz
         0,    // 0 = disable anti-starvation
         1000, // 10 seconds max
+    );
+
+    reg.register(
+        PARAM_SCHED_RT_RUNTIME_PCT,
+        "sched.rt_runtime_pct",
+        95,  // Linux's 950000 of 1000000 microseconds
+        1,   // at least a tick of each second
+        100, // 100 = no throttle
     );
 
     reg.register(

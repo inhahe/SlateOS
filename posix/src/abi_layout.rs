@@ -763,6 +763,67 @@ pub(crate) fn abi_asserts() -> String {
         contents
     );
 
+    // --- argp: a program's tables, and the state its parser is given --------
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpOption,
+        "struct argp_option",
+        "argp.h",
+        name,
+        key,
+        arg,
+        flags,
+        doc,
+        group
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::Argp,
+        "struct argp",
+        "argp.h",
+        options,
+        parser,
+        args_doc,
+        doc,
+        children,
+        help_filter,
+        argp_domain
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpChild,
+        "struct argp_child",
+        "argp.h",
+        argp,
+        flags,
+        header,
+        group
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpState,
+        "struct argp_state",
+        "argp.h",
+        root_argp,
+        argc,
+        argv,
+        next,
+        flags,
+        arg_num,
+        quoted,
+        input,
+        child_inputs,
+        hook,
+        name,
+        err_stream,
+        out_stream,
+        pstate
+    );
+
     // --- small odds and ends -------------------------------------------------
     abi!(
         out,
@@ -886,6 +947,42 @@ pub(crate) fn abi_asserts() -> String {
         sg_passwd,
         sg_adm,
         sg_mem
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::legacy::Prof,
+        "struct prof",
+        "sys/profil.h",
+        pr_base,
+        pr_size,
+        pr_off,
+        pr_scale
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_mount::MountAttr,
+        "struct mount_attr",
+        "sys/mount.h",
+        attr_set,
+        attr_clr,
+        propagation,
+        userns_fd
+    );
+    // Its thirteen one-bit fields are `bits` here, which C cannot take the
+    // offset of; the size, and `user` after them, place them.
+    abi!(
+        out,
+        hdrs,
+        crate::printf_h::PrintfInfo,
+        "struct printf_info",
+        "printf.h",
+        prec,
+        width,
+        spec,
+        user,
+        pad
     );
     abi!(
         out,

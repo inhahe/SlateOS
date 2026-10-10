@@ -439,12 +439,76 @@ else
   [ -n "${VERBOSE:-}" ] && printf 'skip en_US.UTF-8 case: locale not generated\n'
 fi
 
+# --- a closed or unwritable descriptor -----------------------------------------
+# diffutils calls `xstdopen` first, so a closed descriptor is reopened on the
+# null device the wrong way round: reading a closed standard input fails with
+# `EBADF` (`cmp: -: Bad file descriptor`, 2), and a closed standard output *is*
+# the null device, which `cmp` recognises and stops writing to (`cmp a b >&-`,
+# 1, silently). It checks its output itself at the end, and only when the
+# inputs differ: a write that already failed is `write failed`, with no reason,
+# and a failure at the `fclose` is `standard output: REASON` -- which of the
+# two depends on where glibc's buffer flushed, so a small and a large output
+# are both asked. All measured against diffutils 3.10 on 2026-10-03, where ours
+# read the closed input as empty and said `write error` for every failure.
+head -c 300000 /dev/zero > zero1
+head -c 300000 /dev/zero | tr '\0' '\1' > zero2
+run_fd() {
+  local mode=$1; shift
+  local o_out g_out o_err g_err o_rc g_rc
+  o_out=$(mktemp); g_out=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  # A spelling per mode: a redirection held in a variable would arrive as an
+  # argument.
+  case $mode in
+    stdin-closed)
+      timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" <&- >"$o_out" 2>"$o_err"; o_rc=$?
+      timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" <&- >"$g_out" 2>"$g_err"; g_rc=$? ;;
+    stdout-closed)
+      timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" </dev/null >&- 2>"$o_err"; o_rc=$?
+      timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" </dev/null >&- 2>"$g_err"; g_rc=$? ;;
+    stdout-full)
+      timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
+      timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$? ;;
+  esac
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_out" "$g_out" && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): out{%s} err{%s}\n  gnu  (rc=%s): out{%s} err{%s}' \
+      "$o_rc" "$(tr '\n' '|' <"$o_out")" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(tr '\n' '|' <"$g_out")" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_out" "$g_out" "$o_err" "$g_err"
+  report "cmp $* [$mode]"
+}
+run_fd stdin-closed - a
+run_fd stdin-closed a -
+run_fd stdin-closed -s - a
+run_fd stdin-closed -l - a
+run_fd stdout-closed a b
+run_fd stdout-closed -l a b
+run_fd stdout-closed a short
+run_fd stdout-closed -l x1 x2
+run_fd stdout-closed a a
+run_fd stdout-closed --help
+run_fd stdout-closed -v
+run_fd stdout-full a b
+run_fd stdout-full -l a b
+run_fd stdout-full -l x1 x2
+run_fd stdout-full x1 x2
+run_fd stdout-full -l zero1 zero2
+run_fd stdout-full zero1 zero2
+run_fd stdout-full a a
+run_fd stdout-full --help
+
 # --- differences on purpose --------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
 xfail_case 'our --version names SlateOS' -v a b
 xfail_case 'a name that could forge a line of output is quoted' 'sp ace' a
 xfail_case 'a name holding a newline is quoted' $'nl\nname' a
+# And in a diagnostic: diffutils prints `cmp: sp ace missing: No such file or
+# directory` raw, where `cmp` quotes every name it prints (design-decisions 373).
+xfail_case 'a name in a diagnostic is quoted too' 'sp ace missing' a
 xfail_case 'a rejected value is escaped inside its quotes' -i $'\xff' a b
 # The rows go to stdout and the note to stderr; we flush between them so the
 # note follows what it summarises. GNU leaves the order to its buffering: onto a

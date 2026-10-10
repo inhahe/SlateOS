@@ -158,6 +158,19 @@ impl SystemFont {
         })
     }
 
+    /// This font with its own face moved to `axes` where the face has them --
+    /// `[(*b"wght", 700.0)]` for a bold font -- each axis it is not given
+    /// left at its default. A static face has no axes and is unchanged, as is
+    /// the built-in bitmap face: asking either for weight 700 is not an
+    /// error, it is a face that is the weight its file is.
+    #[must_use]
+    pub fn with_axes(mut self, axes: &[([u8; 4], f32)]) -> Self {
+        if let Backend::Outline(primary) = &mut self.backend {
+            primary.set_axes(axes);
+        }
+        self
+    }
+
     /// This font, drawing whatever its own face has no glyph for from
     /// `faces`, in that order: face fallback. Each face is used at this
     /// font's size, moved to `axes` where it has them -- `[(*b"wght",
@@ -819,8 +832,9 @@ impl FontCache {
 
     /// Draw whatever an installed face has no glyph for from `faces`, in
     /// order, for every family and weight: face fallback (see
-    /// [`SystemFont::with_fallbacks`]). A bold font takes each fallback face
-    /// at weight 700 where it has a weight axis.
+    /// [`SystemFont::with_fallbacks`]). Each font takes each fallback face,
+    /// as it takes its own, at its weight -- 400 regular, 700 bold -- where
+    /// the face has a weight axis.
     ///
     /// Every font already built is dropped, as [`set_face`](Self::set_face)
     /// drops a family's: each holds the fallbacks it was built with.
@@ -891,8 +905,15 @@ impl FontCache {
         let fallbacks = &self.fallbacks;
         let rendering = self.rendering;
         self.fonts.entry((key, weight, family)).or_insert_with(|| {
+            // Every face -- the font's own and its fallbacks -- at the weight
+            // asked for where it has a weight axis, as CSS applies
+            // `font-weight` to a variable font: one variable file installed
+            // at both weights, as every family SlateOS ships is, is its
+            // regular instance in one and its bold in the other. (Built at
+            // the file's default instance, the bold was the regular.) A
+            // static face has no axis, and is the weight its file is.
             let axes: &[([u8; 4], f32)] = match weight {
-                Weight::Regular => &[],
+                Weight::Regular => &[(*b"wght", 400.0)],
                 Weight::Bold => &[(*b"wght", 700.0)],
             };
             // An installed face that will not scale to this size is a
@@ -900,7 +921,7 @@ impl FontCache {
             // back for this entry and leave the face installed.
             let mut font = face
                 .and_then(|f| SystemFont::from_shared(f, size).ok())
-                .map(|font| font.with_fallbacks(fallbacks, axes))
+                .map(|font| font.with_axes(axes).with_fallbacks(fallbacks, axes))
                 .unwrap_or_else(|| match weight {
                     Weight::Regular => SystemFont::builtin(size),
                     Weight::Bold => SystemFont::builtin_bold(size),
@@ -1025,7 +1046,86 @@ fn mask_from_bitmap(glyph: &GlyphBitmap) -> GlyphMask {
 )]
 mod tests {
     use super::*;
-    use crate::sfnt::tests::{build_test_font, build_test_font_at};
+    use crate::sfnt::tests::{build_test_font, build_test_font_at, build_variable_test_font};
+
+    /// The normalized coordinates the cache's font for `weight` draws its own
+    /// face at.
+    fn coords(cache: &mut FontCache, weight: Weight) -> Vec<i16> {
+        cache
+            .get(100.0, weight, Family::Ui)
+            .as_scaled()
+            .unwrap()
+            .variations()
+            .as_slice()
+            .to_vec()
+    }
+
+    /// One variable file installed at both weights -- every family SlateOS
+    /// ships is one -- is its bold instance at the bold weight: lane C's
+    /// report, bold drawn at the file's default instance, which is regular.
+    #[test]
+    fn one_variable_face_at_both_weights_is_bold_at_the_bold_one() {
+        let face = Arc::new(Face::parse(build_variable_test_font()).unwrap());
+        let mut cache = FontCache::new();
+        cache.set_face(Family::Ui, Weight::Regular, Arc::clone(&face));
+        cache.set_face(Family::Ui, Weight::Bold, face);
+        // The fixture's weight axis runs 100 to 700, its default 400.
+        assert_eq!(coords(&mut cache, Weight::Bold), [16384]);
+        assert_eq!(coords(&mut cache, Weight::Regular), [0]);
+        // And it shows: the fixture's square, glyph 1, is wider in bold.
+        let mut width = |weight| {
+            cache
+                .get(100.0, weight, Family::Ui)
+                .glyph_mask(GlyphKey::outline(1))
+                .unwrap()
+                .width
+        };
+        let (bold, regular) = (width(Weight::Bold), width(Weight::Regular));
+        assert!(bold > regular, "bold {bold}, regular {regular}");
+    }
+
+    /// The regular weight is 400, not whatever a face's default instance
+    /// is: a family whose file defaults to bold is regular at the regular
+    /// weight, as CSS asks a variable font for `font-weight: normal`.
+    #[test]
+    fn the_regular_weight_is_400_not_a_faces_default() {
+        let mut bytes = build_variable_test_font();
+        // The `fvar` axis record: `wght`, then its minimum, default and
+        // maximum in 16.16 fixed point -- 100, 400, 700. The default to 700.
+        let record = [
+            &b"wght"[..],
+            &(100i32 << 16).to_be_bytes(),
+            &(400i32 << 16).to_be_bytes(),
+        ]
+        .concat();
+        let at = bytes
+            .windows(record.len())
+            .position(|w| w == record)
+            .unwrap();
+        bytes[at + 8..at + 12].copy_from_slice(&(700i32 << 16).to_be_bytes());
+        let face = Arc::new(Face::parse(bytes).unwrap());
+        let mut cache = FontCache::new();
+        cache.set_face(Family::Ui, Weight::Regular, Arc::clone(&face));
+        cache.set_face(Family::Ui, Weight::Bold, face);
+        // 400 is half way from the default, 700, down to the minimum, 100.
+        assert_eq!(coords(&mut cache, Weight::Regular), [-8192]);
+        assert_eq!(coords(&mut cache, Weight::Bold), [0]);
+    }
+
+    /// A static face has no weight axis: asked for either weight, it is the
+    /// weight its file is.
+    #[test]
+    fn a_static_face_is_the_weight_its_file_is() {
+        let mut cache = FontCache::new();
+        cache
+            .install_face(Family::Ui, Weight::Bold, build_test_font())
+            .unwrap();
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
+        assert!(coords(&mut cache, Weight::Bold).is_empty());
+        assert!(coords(&mut cache, Weight::Regular).is_empty());
+    }
 
     /// The fixture face at 1000 px per em -- one font unit to the pixel
     /// whatever its units per em, as the advances below assume -- with the

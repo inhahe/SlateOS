@@ -14,6 +14,10 @@
 //! that does not exist is libvpx's success that shows nothing (`badcopy`)
 //! and this decoder's error.
 //!
+//! Each runs on one thread and on several (the streams with token
+//! partitions decode their rows on threads of their own), with the same
+//! answers.
+//!
 //! A second test damages the whole committed set at random, far more than
 //! libvpx's answers could be kept for, and asks only that nothing panics.
 
@@ -61,10 +65,13 @@ fn parse_mutation(s: &str) -> Mutation {
     }
 }
 
-/// What the decoder makes of each frame of `frames` damaged by `mutations`,
-/// in the harness's words.
-fn decode_damaged(frames: &[Vec<u8>], mutations: &[Mutation]) -> Vec<String> {
+/// What the decoder, on up to `threads` threads, makes of each frame of
+/// `frames` damaged by `mutations`, in the harness's words.
+fn decode_damaged(frames: &[Vec<u8>], mutations: &[Mutation], threads: usize) -> Vec<String> {
     let mut d = Decoder::new();
+    d.set_threads(threads);
+    // The vectors are small: without this, threads would not be used.
+    d.set_min_macroblocks_per_thread(0);
     let mut out = Vec::new();
     for (i, original) in frames.iter().enumerate().take(LIMIT) {
         let mut frame = original.clone();
@@ -116,8 +123,9 @@ fn normalise(line: &str) -> String {
     }
 }
 
-#[test]
-fn damaged_streams_decode_as_libvpx_decodes_them() {
+/// Decode every case of `damage.txt` on up to `threads` threads, and
+/// compare with libvpx's answers.
+fn check_damage(threads: usize) {
     let text = std::fs::read_to_string(common::committed_dir().join("damage.txt")).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
     let mut cases = 0;
@@ -133,7 +141,7 @@ fn damaged_streams_decode_as_libvpx_decodes_them() {
             .map(normalise)
             .collect();
         let v = common::read_vector(&common::committed_dir().join(vector)).unwrap();
-        let got = decode_damaged(&v.frames, &mutations);
+        let got = decode_damaged(&v.frames, &mutations, threads);
         if got != want {
             let at = got
                 .iter()
@@ -151,10 +159,25 @@ fn damaged_streams_decode_as_libvpx_decodes_them() {
     assert_eq!(cases, 446, "the cases tools/generate_damage.py writes");
     assert!(
         failures.is_empty(),
-        "{} of {cases} damaged streams decode unlike libvpx:\n{}",
+        "{} of {cases} damaged streams decode unlike libvpx on {threads} threads:\n{}",
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn damaged_streams_decode_as_libvpx_decodes_them() {
+    check_damage(1);
+}
+
+#[test]
+fn damaged_streams_decode_as_libvpx_decodes_them_on_three_threads() {
+    check_damage(3);
+}
+
+#[test]
+fn damaged_streams_decode_as_libvpx_decodes_them_on_eight_threads() {
+    check_damage(8);
 }
 
 /// A fixed sequence of pseudo-random numbers: Numerical Recipes' generator.
@@ -177,8 +200,10 @@ fn heavily_damaged_streams_never_panic() {
     for path in common::vectors_in(&common::committed_dir()) {
         let v = common::read_vector(&path).unwrap();
         let frames: Vec<Vec<u8>> = v.frames.iter().take(LIMIT).cloned().collect();
-        for _ in 0..40 {
+        for round in 0..40 {
             let mut d = Decoder::new();
+            d.set_threads([1, 3, 8][round % 3]);
+            d.set_min_macroblocks_per_thread(0);
             for frame in &frames {
                 let mut f = frame.clone();
                 // Up to eight flips, sometimes a cut, now and then a frame

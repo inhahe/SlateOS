@@ -123,6 +123,110 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config").join("slateos"))
 }
 
+/// The directory holding this user's SlateOS *data* -- what the desktop
+/// keeps that is not a setting: installed themes, the notifications it has
+/// shown.
+///
+/// `$XDG_DATA_HOME/slateos`, falling back to `$HOME/.local/share/slateos`,
+/// for the reason [`config_dir`] honours both of its variables. `None`
+/// when the environment names no home.
+#[must_use]
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(xdg) = env::var_os("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("slateos"));
+    }
+    let home = env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("slateos"),
+    )
+}
+
+/// The file the data named `name` lives in, in [`data_dir`]: `None` for a
+/// name that is not a settings name -- the same rule, for the same reason
+/// [`path_for`] gives -- or when there is no data directory.
+#[must_use]
+pub fn data_path_for(name: &str) -> Option<PathBuf> {
+    let name = SettingsName::new(name.as_bytes())?;
+    let mut path = data_dir()?;
+    path.push(name.to_string());
+    Some(path)
+}
+
+/// The bytes of the data named `name`, or `None` where there are none --
+/// never written, unreadable, or no data directory, which every reader
+/// treats as nothing kept.
+#[must_use]
+pub fn load_data(name: &str) -> Option<Vec<u8>> {
+    fs::read(data_path_for(name)?).ok()
+}
+
+/// Write the data named `name`, atomically, as [`store`] writes a setting.
+///
+/// # Errors
+///
+/// For a name that is not a settings name, when there is no data directory,
+/// or if creating it, the write or the rename fails.
+///
+/// # Panics
+///
+/// With the `testing` feature, when the file would be written outside the
+/// system's temporary directory, as [`store`] does.
+pub fn store_data(name: &str, bytes: &[u8]) -> io::Result<()> {
+    if SettingsName::new(name.as_bytes()).is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{name:?} is not a settings name: 1 to {} bytes of a-z, 0-9, _ and -",
+                SettingsName::MAX_LEN
+            ),
+        ));
+    }
+    let path = data_path_for(name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no data directory: neither XDG_DATA_HOME nor HOME is set",
+        )
+    })?;
+    #[cfg(feature = "testing")]
+    testing::refuse_a_real_configuration("store_data", name, &path);
+    write_atomic(&path, bytes)
+}
+
+/// Write `bytes` to `path` through a temporary beside it renamed over it,
+/// creating the folder first: a reader -- or a crash -- sees the whole old
+/// file or the whole new one, never the middle of a write.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    // Named for the target rather than randomly, so a crash between the write
+    // and the rename leaves one identifiable piece of litter that the next
+    // save overwrites — not an unbounded pile of temporaries.
+    let mut temp = path.to_path_buf();
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".new");
+    temp.set_file_name(file_name);
+
+    fs::write(&temp, bytes)?;
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // The temporary is not the user's file, so failing to clean it up
+            // is not worth masking the error that actually matters.
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
 /// The file a named settings group lives in, `<name>.yaml` in [`config_dir`].
 ///
 /// `None` for a name that is not a settings name ([`SettingsName`]: 1 to 32
@@ -191,28 +295,8 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
         )
     })?;
     #[cfg(feature = "testing")]
-    testing::refuse_a_real_configuration(name, &path);
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    // Named for the target rather than randomly, so a crash between the write
-    // and the rename leaves one identifiable piece of litter that the next
-    // save overwrites — not an unbounded pile of temporaries.
-    let mut temp = path.clone();
-    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
-    file_name.push(".new");
-    temp.set_file_name(file_name);
-
-    fs::write(&temp, doc.to_text())?;
-    match fs::rename(&temp, &path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            // The temporary is not the user's file, so failing to clean it up
-            // is not worth masking the error that actually matters.
-            let _ = fs::remove_file(&temp);
-            Err(err)
-        }
-    }
+    testing::refuse_a_real_configuration("store", name, &path);
+    write_atomic(&path, doc.to_text().as_bytes())
 }
 
 /// Notices when a settings group's file has changed underneath a running
@@ -598,8 +682,10 @@ pub mod testing {
         out
     }
 
-    /// Refuse -- by panicking -- a [`store`](super::store) of `name` at `path`
-    /// when `path` is not inside the system's temporary directory.
+    /// Refuse -- by panicking -- a [`store`](super::store) or
+    /// [`store_data`](super::store_data) of `name` at `path` when `path` is
+    /// not inside the system's temporary directory. `caller` names which, for
+    /// the message.
     ///
     /// Compiled only with this feature, which only a test build has, so a
     /// write anywhere else is a test writing the developer's own
@@ -626,13 +712,13 @@ pub mod testing {
     /// # Panics
     ///
     /// When `path` is outside `std::env::temp_dir()`.
-    pub(crate) fn refuse_a_real_configuration(name: &str, path: &Path) {
+    pub(crate) fn refuse_a_real_configuration(caller: &str, name: &str, path: &Path) {
         let temp = env::temp_dir();
         assert!(
             path.starts_with(&temp),
-            "settingsfile::store(\"{name}\") would write {} -- outside {}, so the developer's own \
-             configuration rather than a scratch one. This test forgot to borrow one: wrap it in \
-             settingsfile::testing::with_scratch_config.",
+            "settingsfile::{caller}(\"{name}\") would write {} -- outside {}, so the developer's \
+             own configuration rather than a scratch one. This test forgot to borrow one: wrap it \
+             in settingsfile::testing::with_scratch_config.",
             path.display(),
             temp.display()
         );
@@ -1151,5 +1237,150 @@ mod tests {
             store("appearance", &Document::parse("a: 1\n")).expect("store");
             assert_eq!(load("appearance").get_i64(&["a"]), Some(1));
         });
+    }
+
+    // -- Data --
+
+    /// Run `body` with the *data*-directory variables set as given, restoring
+    /// whatever the process had before. `XDG_CONFIG_HOME` is cleared for the
+    /// duration, so that nothing here can pass by reading the configuration
+    /// directory where the data directory was meant.
+    fn with_data_env<T>(data: Option<&str>, home: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = [
+            ("XDG_DATA_HOME", env::var_os("XDG_DATA_HOME")),
+            ("XDG_CONFIG_HOME", env::var_os("XDG_CONFIG_HOME")),
+            ("HOME", env::var_os("HOME")),
+        ];
+        // SAFETY: the lock above makes this the only thread touching the
+        // environment for the duration, which is what `set_var` requires.
+        unsafe {
+            match data {
+                Some(v) => env::set_var("XDG_DATA_HOME", v),
+                None => env::remove_var("XDG_DATA_HOME"),
+            }
+            env::remove_var("XDG_CONFIG_HOME");
+            match home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+        let out = body();
+        for (key, value) in old {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => env::set_var(key, v),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+        drop(guard);
+        out
+    }
+
+    /// **The data directory is `XDG_DATA_HOME`'s, else `HOME`'s
+    /// `.local/share`** -- each with `slateos` in it -- and an empty variable
+    /// is no location, as for the configuration directory.
+    #[test]
+    fn the_data_directory_is_where_xdg_says() {
+        assert_eq!(
+            with_data_env(Some("/d"), Some("/h"), data_dir),
+            Some(PathBuf::from("/d").join("slateos"))
+        );
+        let fallback = Some(
+            PathBuf::from("/h")
+                .join(".local")
+                .join("share")
+                .join("slateos"),
+        );
+        assert_eq!(with_data_env(None, Some("/h"), data_dir), fallback);
+        assert_eq!(with_data_env(Some(""), Some("/h"), data_dir), fallback);
+        assert_eq!(with_data_env(Some(""), None, data_dir), None);
+        assert_eq!(with_data_env(None, Some(""), data_dir), None);
+        assert_eq!(with_data_env(None, None, data_dir), None);
+    }
+
+    /// **Data comes back byte for byte** -- bytes that are no text included
+    /// -- from a file named as given, with no extension, in the data
+    /// directory; a second write replaces the first and leaves no temporary;
+    /// what was never written is `None`.
+    #[test]
+    fn data_comes_back_as_it_was_stored() {
+        let temp = ScratchDir::new("slateos-data-roundtrip");
+        let root = temp.dir().join("data");
+        let root_str = root.to_str().unwrap().to_owned();
+        with_data_env(Some(&root_str), None, || {
+            assert_eq!(load_data("history"), None, "never written");
+            let bytes = b"line one\n\xFF\x00 not text\r\n";
+            store_data("history", bytes).expect("store");
+            assert_eq!(load_data("history").as_deref(), Some(&bytes[..]));
+            let path = data_path_for("history").expect("path");
+            assert_eq!(path, root.join("slateos").join("history"));
+            assert_eq!(fs::read(&path).expect("read"), bytes);
+
+            store_data("history", b"second").expect("store again");
+            assert_eq!(load_data("history").as_deref(), Some(&b"second"[..]));
+            let names: Vec<_> = fs::read_dir(root.join("slateos"))
+                .expect("read dir")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect();
+            assert_eq!(names, ["history"], "a temporary was left behind");
+            // Not where the settings go: the configuration directory is unset.
+            assert_eq!(path_for("history"), None);
+        });
+    }
+
+    /// **Only a settings name names a data file**, refused before anything
+    /// is written; and with no home a write says so rather than guessing.
+    #[test]
+    fn a_data_name_is_a_settings_name() {
+        let temp = ScratchDir::new("slateos-data-names");
+        let root = temp.dir().to_str().unwrap().to_owned();
+        with_data_env(Some(&root), None, || {
+            for bad in ["a.b", "../escape", "sub/file", "Notes", "", "two words"] {
+                assert_eq!(data_path_for(bad), None, "{bad:?} named a file");
+                let err = store_data(bad, b"x").expect_err("a bad name is refused");
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+                assert_eq!(load_data(bad), None, "{bad:?} loaded something");
+            }
+        });
+        let wrote: Vec<_> = fs::read_dir(temp.dir())
+            .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(wrote.is_empty(), "a refused name left {wrote:?}");
+
+        let err = with_data_env(Some(""), Some(""), || store_data("history", b"x"))
+            .expect_err("storing with no home should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(with_data_env(None, None, || load_data("history")), None);
+    }
+
+    /// **A test build refuses to write data outside a scratch directory**,
+    /// as it refuses a setting, naming the call, the file and the fix.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_test_build_refuses_to_write_real_data() {
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml")
+            .join("under-a-file");
+        let real_str = real.to_str().expect("a UTF-8 path").to_string();
+        let refused = with_data_env(Some(&real_str), None, || {
+            std::panic::catch_unwind(|| store_data("guard", b"x"))
+        });
+        let payload = refused.expect_err("a write outside the temporary directory went ahead");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("store_data(\"guard\")") && message.contains("with_scratch_config"),
+            "{message}"
+        );
+        assert!(
+            !real.exists(),
+            "the refusal came after something was written"
+        );
     }
 }

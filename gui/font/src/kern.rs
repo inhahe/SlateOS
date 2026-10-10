@@ -68,7 +68,7 @@ use crate::device::Corrections;
 use crate::gpos::pair_values;
 use crate::otl::{MAX_SUBTABLES, binary_search, feature_lookups};
 use crate::sfnt::{Span, i16_at, u16_at};
-use crate::skip::{Definitions, Joiners, Skipper};
+use crate::skip::{Definitions, IGNORE_MARKS, Joiners, Skipper};
 
 /// `GPOS` lookup type for pair positioning.
 const LOOKUP_PAIR_POS: u16 = 2;
@@ -234,13 +234,36 @@ impl Kerning {
     /// which is switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked
     /// up in the plan's selected script rather than across the whole table.
     ///
-    /// The legacy table predates lookups and has no flags, so it skips nothing:
-    /// that is the historically correct reading, since the engines that used it
-    /// kerned strictly adjacent glyphs.
+    /// The legacy table predates lookups and carries no flags, but it is not
+    /// read as strictly adjacent: HarfBuzz's `hb_kern_machine_t` sets
+    /// `IgnoreMarks` on its matcher, so `A` and `V` kern with an accent between
+    /// them, as they do in every face whose kerning is a `GPOS` lookup. A face
+    /// kerns the same whichever of the two tables it ships. `between` is asked
+    /// of the face's `GDEF` classes, as a lookup's flag asks it; a face with
+    /// none cannot say which glyphs are marks, so anything between breaks the
+    /// pair here. The shaper, which can ask the characters instead, decides for
+    /// itself and reads the pair through
+    /// [`legacy_adjacent`](Self::legacy_adjacent).
     pub(crate) fn legacy_pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
         if !between.is_empty() {
-            return 0;
+            let skip = Skipper::new(
+                data,
+                self.defs,
+                IGNORE_MARKS,
+                0,
+                u64::MAX,
+                Joiners::POSITIONING,
+            );
+            if !between.iter().all(|&g| skip.skips(g)) {
+                return 0;
+            }
         }
+        self.legacy_adjacent(data, left, right)
+    }
+
+    /// The legacy table's entry for `left` followed by `right`, with nothing
+    /// between them but the marks the caller has already stepped over.
+    pub(crate) fn legacy_adjacent(&self, data: &[u8], left: u16, right: u16) -> i16 {
         for &off in &self.legacy {
             if let Some(v) = legacy_pair(data, off, left, right) {
                 return v;
@@ -602,7 +625,8 @@ mod tests {
         assert!(k.has_legacy());
         assert_eq!(k.pair(&data, 1, 2, &[], Corrections::NONE), -80);
         assert_eq!(k.legacy_pair(&data, 1, 2, &[]), -10);
-        // The legacy table has no lookup flags and so reads across nothing.
+        // With no `GDEF` nothing between is known to be a mark, so the pair is
+        // broken.
         assert_eq!(k.legacy_pair(&data, 1, 2, &[3]), 0);
     }
 
@@ -804,10 +828,39 @@ mod tests {
         assert_eq!(k.pair(&data, 1, 2, &[90], Corrections::NONE), 0);
     }
 
+    /// A legacy `kern` table and a `GDEF`, laid out as one file.
+    fn legacy_with_gdef(pairs: &[(u16, u16, i16)], gdef: &[u8]) -> (Vec<u8>, Kerning) {
+        let mut data = legacy_table(0x0001, pairs);
+        let at = data.len();
+        data.extend_from_slice(gdef);
+        let k = Kerning::parse(&data, None, Some(span(0, at)), Some(span(at, gdef.len())))
+            .expect("legacy parses");
+        (data, k)
+    }
+
     #[test]
-    fn the_legacy_table_kerns_only_adjacent_glyphs() {
-        // `kern` predates lookups and has no flags to honour, so there is no
-        // basis for reading across anything.
+    fn the_legacy_table_reads_across_a_mark_as_harfbuzz_does() {
+        // `kern` has no flags of its own, but HarfBuzz's `hb_kern_machine_t`
+        // reads it with `IgnoreMarks`: `A` and `V` kern with an accent between
+        // them, as they do in a face whose kerning is a `GPOS` lookup.
+        let (data, k) = legacy_with_gdef(&[(1, 2, -10)], &gdef_marks(&[90]));
+        assert_eq!(k.pair(&data, 1, 2, &[], Corrections::NONE), -10);
+        assert_eq!(k.pair(&data, 1, 2, &[90], Corrections::NONE), -10);
+        assert_eq!(k.legacy_pair(&data, 1, 2, &[90, 90]), -10);
+        // A letter between is still a letter in the way.
+        assert_eq!(k.pair(&data, 1, 2, &[7], Corrections::NONE), 0);
+        assert_eq!(k.legacy_pair(&data, 1, 2, &[90, 7]), 0);
+        // The shaper decides for itself which glyphs are marks, and asks for
+        // the pair alone.
+        assert_eq!(k.legacy_adjacent(&data, 1, 2), -10);
+        assert_eq!(k.legacy_adjacent(&data, 2, 1), 0);
+    }
+
+    #[test]
+    fn the_legacy_table_cannot_read_across_a_glyph_nothing_classes() {
+        // With no `GDEF`, the pair-at-a-time reader cannot tell a mark from a
+        // letter, so anything between breaks the pair -- the shaper, which can
+        // ask the characters instead, does not come through here.
         let data = legacy_table(0x0001, &[(1, 2, -10)]);
         let k =
             Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("legacy parses");

@@ -32,18 +32,39 @@
 //! asks to be turned or mirrored -- MP4's display matrix, Matroska's
 //! projection -- comes out turned, as ffmpeg's autorotate turns it
 //! ([`Orientation`]). Not yet: H.264 and
-//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files").
+//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files"). An Ogg
+//! film's pictures are Theora, refused by name; its sound plays ([`Sound`]).
 //!
 //! # Sound
 //!
 //! [`Sound`] is a file's sound, as [`Video`] is its pictures: opened on the
 //! same file (a second handle to it), it gives back each packet's samples
 //! decoded, with their time on the same clock, for the program to play and
-//! to show the pictures by. Opus, in Matroska and WebM -- WebM's sound,
-//! besides Vorbis -- through `gui/video/opus`, libopus's decoder ported and
-//! held to it sample for sample; the codec delay and each packet's discard
-//! padding dropped, and the blocks timed, as FFmpeg drops and times them
-//! (`tests/sound.rs`).
+//! to show the pictures by. Opus and Vorbis, in Matroska and WebM -- WebM's
+//! sound --, Opus in MP4, and Ogg files' (`.opus`, `.ogg`, `.oga`, and an
+//! `.ogv` film's sound; chained files played as one); FLAC, in `.flac` files
+//! and in Ogg, Matroska and MP4 -- through `gui/video/opus`, libopus's
+//! decoder, `gui/video/vorbis`, Tremor, and `gui/video/flac`, libFLAC, each
+//! ported and held to its reference sample for sample; the codec delay, an
+//! MP4 edit list's priming and each packet's discard padding dropped, and
+//! the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
+//! A file whose sound is AAC or MP3 is refused by the codec's name.
+//!
+//! # Subtitles
+//!
+//! [`Subtitles`] is a file's subtitles, as [`Sound`] is its sound: opened
+//! on the same file, it gives back each cue with its start and end on the
+//! same clock, and its text as SRT markup whatever the track's format --
+//! SubRip, ASS and SSA, WebVTT, in Matroska and WebM; 3GPP timed text in
+//! MP4. The markup is written as `ffmpeg -c:s srt` writes it, and is
+//! ffmpeg's text for the track wherever that says what the format's own
+//! renderer shows (libass's for ASS, the specification's for WebVTT); where
+//! it does not, the renderer is followed (`subtitle.rs`,
+//! `tests/subtitles.rs`). Blu-ray's PGS and DVD's VobSub, pictures of the
+//! text, come as images ([`Cue::images`], [`CueImage`]): FFmpeg's pixels, to
+//! the bit, but where the disc's player shows otherwise -- a PGS crop made, a
+//! DVD subpicture's later colours, fades and starts taking effect when they
+//! say. DVB's pictures are refused by their format's name.
 //!
 //! # Colour
 //!
@@ -80,6 +101,7 @@ mod decoder;
 mod orientation;
 mod picture;
 mod sound;
+mod subtitle;
 mod time;
 mod video;
 
@@ -88,6 +110,7 @@ pub use decoder::{Decoder, Packet};
 pub use orientation::Orientation;
 pub use picture::Picture;
 pub use sound::{Block, Sound, SoundInfo};
+pub use subtitle::{Cue, CueImage, SubtitleInfo, Subtitles};
 pub use video::{SeekMode, Video, VideoInfo};
 
 use core::fmt;
@@ -105,6 +128,8 @@ pub enum Codec {
     Hevc,
     /// MPEG-4 Part 2 (DivX, Xvid). Not decoded here.
     Mpeg4,
+    /// Theora, Ogg's video codec. Not decoded here.
+    Theora,
     /// Any other.
     Other,
 }
@@ -118,6 +143,7 @@ impl fmt::Display for Codec {
             Self::H264 => "H.264",
             Self::Hevc => "HEVC",
             Self::Mpeg4 => "MPEG-4 Part 2",
+            Self::Theora => "Theora",
             Self::Other => "a codec this does not know",
         })
     }
@@ -181,15 +207,23 @@ pub enum ContainerError {
     Matroska(matroska::Error),
     /// An MP4 file that could not be read.
     Mp4(mp4::Error),
+    /// An Ogg file that could not be read.
+    Ogg(ogg::Error),
+    /// A native FLAC file that could not be read.
+    Flac(flac::Error),
 }
 
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown => f.write_str("the file is not a Matroska, WebM or MP4 file"),
+            Self::Unknown => {
+                f.write_str("the file is not a Matroska, WebM, MP4, Ogg, FLAC or MPEG audio file")
+            }
             Self::Io(kind) => write!(f, "the file cannot be read: {kind}"),
             Self::Matroska(e) => write!(f, "{e}"),
             Self::Mp4(e) => write!(f, "{e}"),
+            Self::Ogg(e) => write!(f, "{e}"),
+            Self::Flac(e) => write!(f, "{e}"),
         }
     }
 }
@@ -208,15 +242,29 @@ impl From<mp4::Error> for ContainerError {
     }
 }
 
+impl From<ogg::Error> for ContainerError {
+    fn from(e: ogg::Error) -> Self {
+        Self::Ogg(e)
+    }
+}
+
+impl From<flac::Error> for ContainerError {
+    fn from(e: flac::Error) -> Self {
+        Self::Flac(e)
+    }
+}
+
 /// A sound codec: those decoded here, and the commonest of the rest, so that
 /// a file in one is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundCodec {
     Opus,
-    /// Not decoded here yet.
     Vorbis,
     /// Not decoded here yet.
     Aac,
+    Flac,
+    /// MPEG audio: MP3, and Layers II and I (MP2, MP1).
+    Mp3,
     /// Any other.
     Other,
 }
@@ -227,7 +275,69 @@ impl fmt::Display for SoundCodec {
             Self::Opus => "Opus",
             Self::Vorbis => "Vorbis",
             Self::Aac => "AAC",
+            Self::Flac => "FLAC",
+            Self::Mp3 => "MP3",
             Self::Other => "a codec this does not know",
+        })
+    }
+}
+
+/// A subtitle format: those read here, and the picture formats a film most
+/// often carries, so that a track in one not read is refused by its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubtitleFormat {
+    /// SubRip, SRT's own (`S_TEXT/UTF8`).
+    SubRip,
+    /// Advanced SubStation Alpha (`S_TEXT/ASS`).
+    Ass,
+    /// SubStation Alpha (`S_TEXT/SSA`).
+    Ssa,
+    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`; `wvtt` in
+    /// MP4).
+    WebVtt,
+    /// 3GPP timed text, MP4's (`tx3g`; QuickTime's `text`).
+    MovText,
+    /// TTML -- IMSC 1, broadcasting's -- in MP4 (`stpp`).
+    Ttml,
+    /// Blu-ray's pictures of text (`S_HDMV/PGS`), read as images.
+    Pgs,
+    /// DVD's pictures of text (`S_VOBSUB`), read as images.
+    VobSub,
+    /// DVB's pictures of text (`S_DVBSUB`): digital television's.
+    Dvb,
+    /// Any other.
+    Other,
+}
+
+impl SubtitleFormat {
+    /// Whether it is text: its cues give SRT markup.
+    pub const fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml
+        )
+    }
+
+    /// Whether [`Subtitles`] reads it: text, or pictures it gives as
+    /// images.
+    pub const fn is_read(self) -> bool {
+        self.is_text() || matches!(self, Self::Pgs | Self::VobSub | Self::Dvb)
+    }
+}
+
+impl fmt::Display for SubtitleFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SubRip => "SubRip",
+            Self::Ass => "ASS",
+            Self::Ssa => "SSA",
+            Self::WebVtt => "WebVTT",
+            Self::MovText => "3GPP timed text",
+            Self::Ttml => "TTML",
+            Self::Pgs => "PGS",
+            Self::VobSub => "VobSub",
+            Self::Dvb => "DVB",
+            Self::Other => "a format this does not know",
         })
     }
 }
@@ -238,8 +348,9 @@ impl fmt::Display for SoundCodec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The file could not be read: the source failed, the file is neither
-    /// Matroska (WebM) nor MP4, or its headers are damaged.
+    /// The file could not be read: the source failed, the file is not
+    /// Matroska (WebM), MP4, Ogg, FLAC or MPEG audio, or its headers are
+    /// damaged.
     Container(ContainerError),
     /// The file has no video track, or not the one asked for.
     NoVideo,
@@ -264,6 +375,20 @@ pub enum Error {
     /// An Opus track's setup (its `OpusHead`) is not one, or a packet did not
     /// decode.
     Opus(opus::Error),
+    /// A Vorbis track's headers (its codec private data) are not Vorbis's,
+    /// or a packet did not decode.
+    Vorbis(vorbis::Error),
+    /// A FLAC track's setup is not a FLAC stream's description, or a frame
+    /// did not decode (as libFLAC would report it).
+    Flac(flac::Status),
+    /// An MPEG audio track's first frame has no header, or a frame did not
+    /// decode (minimp3 says no more than that).
+    Mp3,
+    /// The file has no subtitle track, or not the one asked for.
+    NoSubtitles,
+    /// The subtitles are in a format this does not read: DVB's pictures of
+    /// text, or one it does not know.
+    SubtitleFormat(SubtitleFormat),
 }
 
 impl fmt::Display for Error {
@@ -289,6 +414,24 @@ impl fmt::Display for Error {
             }
             Self::SoundCodec(c) => write!(f, "the sound is {c}, which is not decoded here yet"),
             Self::Opus(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Vorbis(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Flac(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Mp3 => {
+                f.write_str("the sound could not be decoded: an MPEG audio frame is damaged")
+            }
+            Self::NoSubtitles => f.write_str("the file has no subtitles that can be shown"),
+            Self::SubtitleFormat(SubtitleFormat::Other) => {
+                f.write_str("the subtitles' format is not one read here")
+            }
+            Self::SubtitleFormat(s) if s.is_read() => {
+                write!(f, "the subtitles are {s}, and could not be read")
+            }
+            Self::SubtitleFormat(s) => {
+                write!(
+                    f,
+                    "the subtitles are {s}, pictures of text, which are not read here yet"
+                )
+            }
         }
     }
 }
@@ -310,5 +453,17 @@ impl From<matroska::Error> for Error {
 impl From<mp4::Error> for Error {
     fn from(e: mp4::Error) -> Self {
         Self::Container(ContainerError::Mp4(e))
+    }
+}
+
+impl From<ogg::Error> for Error {
+    fn from(e: ogg::Error) -> Self {
+        Self::Container(ContainerError::Ogg(e))
+    }
+}
+
+impl From<flac::Error> for Error {
+    fn from(e: flac::Error) -> Self {
+        Self::Container(ContainerError::Flac(e))
     }
 }

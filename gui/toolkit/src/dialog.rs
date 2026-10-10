@@ -78,6 +78,7 @@ use crate::scroll_window;
 use crate::scrollbar;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
+use crate::text::scaled;
 use crate::wheel;
 use core::ops::Range;
 use std::ffi::{OsStr, OsString};
@@ -524,9 +525,15 @@ impl FileDialog {
 
     /// Activate (double-click/Enter) the entry at `index`.
     ///
-    /// - If it is a directory, navigates into it.
+    /// - If it is a directory, navigates into it -- in every mode, the
+    ///   folder picker's included: choosing a folder is the Select button's
+    ///   ([`confirm`](Self::confirm)), which takes the one highlighted or the
+    ///   one being shown. A picker in which opening a folder chose it cannot
+    ///   be walked down a folder at a time: anything deeper than the folders
+    ///   listed where it stands is reachable only by typing its path. This
+    ///   one was such a picker until 2026-09-30, when a test driving it
+    ///   through the desktop's photo frame found so.
     /// - If it is a file (and mode is Open), returns `DialogAction::Selected`.
-    /// - In `SelectFolder` mode, double-clicking a dir selects it.
     pub fn activate_entry(&mut self, index: usize) -> DialogAction {
         let entry = match self.entries.get(index) {
             Some(e) => e.clone(),
@@ -535,9 +542,6 @@ impl FileDialog {
 
         if entry.is_dir {
             let full = self.child_path(&entry.name);
-            if self.mode == DialogMode::SelectFolder {
-                return DialogAction::Selected(full);
-            }
             let before = self.snapshot();
             self.navigate_to(full);
             self.before_navigating = Some(before);
@@ -585,6 +589,31 @@ impl FileDialog {
     /// `current_path` joined with a name from the listing.
     fn child_path(&self, name: &OsStr) -> PathBuf {
         PathBuf::from(join_path(self.current_path.as_os_str(), name))
+    }
+
+    /// The name in the field: the exact bytes it was given, if nothing has
+    /// been typed since, and otherwise what was typed -- the name
+    /// [`confirm`](Self::confirm) saves to, before any filter's extension is
+    /// added.
+    #[must_use]
+    pub fn filename(&self) -> OsString {
+        self.filename_exact
+            .clone()
+            .unwrap_or_else(|| OsString::from(&self.filename_input))
+    }
+
+    /// The file type filters as the dialog offers them: the caller's, and
+    /// "All files" after them unless one of them already is that. What
+    /// [`filter_index`](Self::filter_index) counts in.
+    #[must_use]
+    pub fn filters(&self) -> Vec<FileFilter> {
+        self.effective_filters()
+    }
+
+    /// The filter in force, an index into [`filters`](Self::filters).
+    #[must_use]
+    pub const fn filter_index(&self) -> usize {
+        self.active_filter_index
     }
 
     /// Change the active file type filter by index.
@@ -787,13 +816,13 @@ impl FileDialog {
         // furniture would otherwise hand a negative height to the clip stack,
         // and a negative-height clip is not a small one — it is one whose
         // bottom edge is above its top.
-        let content_top = TOOLBAR_HEIGHT;
-        let content_height = (height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(0.0);
+        let content_top = scaled(TOOLBAR_HEIGHT);
+        let content_height = (height - scaled(TOOLBAR_HEIGHT) - scaled(BOTTOM_BAR_HEIGHT)).max(0.0);
         self.draw_sidebar(palette, &mut frame, content_top, content_height);
 
         // File list
-        let list_x = SIDEBAR_WIDTH;
-        let list_width = (width - SIDEBAR_WIDTH).max(0.0);
+        let list_x = scaled(SIDEBAR_WIDTH);
+        let list_width = (width - scaled(SIDEBAR_WIDTH)).max(0.0);
         self.draw_file_list(
             palette,
             &mut frame,
@@ -805,7 +834,7 @@ impl FileDialog {
         );
 
         // Bottom bar (filename input for save, buttons)
-        let bottom_y = height - BOTTOM_BAR_HEIGHT;
+        let bottom_y = height - scaled(BOTTOM_BAR_HEIGHT);
         self.draw_bottom_bar(palette, &mut frame, bottom_y, width);
 
         // The address bar last: the completions it hangs below itself are
@@ -1338,8 +1367,8 @@ impl FileDialog {
     /// [`scroll_window::capacity`] rather than restated here.
     fn row_capacity(height: f32) -> usize {
         scroll_window::capacity(
-            ROW_HEIGHT,
-            height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT - ROW_HEIGHT,
+            scaled(ROW_HEIGHT),
+            height - scaled(TOOLBAR_HEIGHT) - scaled(BOTTOM_BAR_HEIGHT) - scaled(ROW_HEIGHT),
         )
     }
 
@@ -1451,12 +1480,12 @@ impl FileDialog {
     /// One answer for the toolbar, which records the bar's target, and for the
     /// bar's drawing at the end of the frame.
     fn address_rect(width: f32) -> Rect {
-        let x = PADDING + NAV_BUTTON_WIDTH * 2.0 + UP_BUTTON_WIDTH;
+        let x = scaled(PADDING) + scaled(NAV_BUTTON_WIDTH) * 2.0 + scaled(UP_BUTTON_WIDTH);
         Rect::new(
             x,
-            (TOOLBAR_HEIGHT - ADDRESS_HEIGHT) / 2.0,
-            (width - x - PADDING).max(0.0),
-            ADDRESS_HEIGHT,
+            (scaled(TOOLBAR_HEIGHT) - scaled(ADDRESS_HEIGHT)) / 2.0,
+            (width - x - scaled(PADDING)).max(0.0),
+            scaled(ADDRESS_HEIGHT),
         )
     }
 
@@ -1479,7 +1508,7 @@ impl FileDialog {
             x: 0.0,
             y: 0.0,
             width,
-            height: TOOLBAR_HEIGHT,
+            height: scaled(TOOLBAR_HEIGHT),
             color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
@@ -1489,8 +1518,8 @@ impl FileDialog {
             },
         });
 
-        let btn_y = (TOOLBAR_HEIGHT - 24.0) / 2.0;
-        let mut x = PADDING;
+        let btn_y = (scaled(TOOLBAR_HEIGHT) - scaled(24.0)) / 2.0;
+        let mut x = scaled(PADDING);
 
         // Navigation buttons. Each is a bare glyph, so its click target is the
         // slot the glyph sits in rather than the glyph's own ink — a single
@@ -1510,19 +1539,19 @@ impl FileDialog {
         };
         frame.push(RenderCommand::Text {
             x,
-            y: btn_y + 4.0,
+            y: btn_y + scaled(4.0),
             text: String::from("<"),
             color: back_color,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         frame.hit(
             DialogTarget::Back,
-            Rect::new(x, 0.0, NAV_BUTTON_WIDTH, TOOLBAR_HEIGHT),
+            Rect::new(x, 0.0, scaled(NAV_BUTTON_WIDTH), scaled(TOOLBAR_HEIGHT)),
         );
-        x += NAV_BUTTON_WIDTH;
+        x += scaled(NAV_BUTTON_WIDTH);
 
         // Forward button
         let fwd_color = if self.history_forward.is_empty() {
@@ -1532,34 +1561,34 @@ impl FileDialog {
         };
         frame.push(RenderCommand::Text {
             x,
-            y: btn_y + 4.0,
+            y: btn_y + scaled(4.0),
             text: String::from(">"),
             color: fwd_color,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         frame.hit(
             DialogTarget::Forward,
-            Rect::new(x, 0.0, NAV_BUTTON_WIDTH, TOOLBAR_HEIGHT),
+            Rect::new(x, 0.0, scaled(NAV_BUTTON_WIDTH), scaled(TOOLBAR_HEIGHT)),
         );
-        x += NAV_BUTTON_WIDTH;
+        x += scaled(NAV_BUTTON_WIDTH);
 
         // Up button
         frame.push(RenderCommand::Text {
             x,
-            y: btn_y + 4.0,
+            y: btn_y + scaled(4.0),
             text: String::from("^"),
             color: palette.text,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         frame.hit(
             DialogTarget::Up,
-            Rect::new(x, 0.0, UP_BUTTON_WIDTH, TOOLBAR_HEIGHT),
+            Rect::new(x, 0.0, scaled(UP_BUTTON_WIDTH), scaled(TOOLBAR_HEIGHT)),
         );
 
         // The address bar's target. It is drawn at the end of the frame
@@ -1579,7 +1608,7 @@ impl FileDialog {
         frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: top,
-            width: SIDEBAR_WIDTH,
+            width: scaled(SIDEBAR_WIDTH),
             height,
             color: palette.surface0,
             corner_radii: CornerRadii::ZERO,
@@ -1589,26 +1618,26 @@ impl FileDialog {
         // longer than a short dialog cannot draw over the bottom bar, and — the
         // part that matters here — so that a shortcut scrolled out of sight
         // cannot still be clicked. `Frame::hit` trims to the clip in force.
-        frame.clip(Rect::new(0.0, top, SIDEBAR_WIDTH, height));
-        let mut y = top + PADDING;
+        frame.clip(Rect::new(0.0, top, scaled(SIDEBAR_WIDTH), height));
+        let mut y = top + scaled(PADDING);
         for (index, qa) in self.quick_access.iter().enumerate() {
             frame.push(RenderCommand::Text {
-                x: PADDING + 4.0,
+                x: scaled(PADDING) + scaled(4.0),
                 y,
                 text: qa.label.clone(),
                 color: palette.subtext0,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 4.0),
+                max_width: Some(scaled(SIDEBAR_WIDTH) - scaled(PADDING) * 2.0 - scaled(4.0)),
                 overflow: TextOverflow::Ellipsis,
             });
             // The row, not the label: the gap between two labels belongs to the
             // one above it, so there is no dead strip between shortcuts.
             frame.hit(
                 DialogTarget::Shortcut(index),
-                Rect::new(0.0, y, SIDEBAR_WIDTH, ROW_HEIGHT),
+                Rect::new(0.0, y, scaled(SIDEBAR_WIDTH), scaled(ROW_HEIGHT)),
             );
-            y += ROW_HEIGHT;
+            y += scaled(ROW_HEIGHT);
         }
         frame.unclip();
     }
@@ -1641,58 +1670,68 @@ impl FileDialog {
             x,
             y: header_y,
             width,
-            height: ROW_HEIGHT,
+            height: scaled(ROW_HEIGHT),
             color: palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let name_col_x = x + PADDING + 20.0; // leave space for icon placeholder
-        let size_col_x = x + width - 200.0;
-        let date_col_x = x + width - 100.0;
+        let name_col_x = x + scaled(PADDING) + scaled(20.0); // leave space for icon placeholder
+        let size_col_x = x + width - scaled(200.0);
+        let date_col_x = x + width - scaled(100.0);
 
         // Each header is clickable across its whole column, not just under its
         // label: the label sits at the column's left edge, and a target the
         // width of the word "Size" leaves most of the column dead.
         frame.hit(
             DialogTarget::Header(SortColumn::Name),
-            Rect::new(x, header_y, size_col_x - x, ROW_HEIGHT),
+            Rect::new(x, header_y, size_col_x - x, scaled(ROW_HEIGHT)),
         );
         frame.hit(
             DialogTarget::Header(SortColumn::Size),
-            Rect::new(size_col_x, header_y, date_col_x - size_col_x, ROW_HEIGHT),
+            Rect::new(
+                size_col_x,
+                header_y,
+                date_col_x - size_col_x,
+                scaled(ROW_HEIGHT),
+            ),
         );
         frame.hit(
             DialogTarget::Header(SortColumn::Modified),
-            Rect::new(date_col_x, header_y, x + width - date_col_x, ROW_HEIGHT),
+            Rect::new(
+                date_col_x,
+                header_y,
+                x + width - date_col_x,
+                scaled(ROW_HEIGHT),
+            ),
         );
 
         // Header labels
         frame.push(RenderCommand::Text {
             x: name_col_x,
-            y: header_y + 6.0,
+            y: header_y + scaled(6.0),
             text: String::from("Name"),
             color: palette.text,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         frame.push(RenderCommand::Text {
             x: size_col_x,
-            y: header_y + 6.0,
+            y: header_y + scaled(6.0),
             text: String::from("Size"),
             color: palette.text,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         frame.push(RenderCommand::Text {
             x: date_col_x,
-            y: header_y + 6.0,
+            y: header_y + scaled(6.0),
             text: String::from("Modified"),
             color: palette.text,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1700,17 +1739,17 @@ impl FileDialog {
 
         // Sort indicator on active column
         let indicator_x = match self.sort_by {
-            SortColumn::Name => name_col_x + 36.0,
-            SortColumn::Size => size_col_x + 30.0,
-            SortColumn::Modified => date_col_x + 54.0,
+            SortColumn::Name => name_col_x + scaled(36.0),
+            SortColumn::Size => size_col_x + scaled(30.0),
+            SortColumn::Modified => date_col_x + scaled(54.0),
         };
         let indicator = if self.sort_ascending { "v" } else { "^" };
         frame.push(RenderCommand::Text {
             x: indicator_x,
-            y: header_y + 6.0,
+            y: header_y + scaled(6.0),
             text: String::from(indicator),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1723,7 +1762,7 @@ impl FileDialog {
         // means, since the selection did not scroll the list either.
         let rows = self.visible_rows(dialog_height);
         let first = rows.start;
-        let entries_top = top + ROW_HEIGHT;
+        let entries_top = top + scaled(ROW_HEIGHT);
         for (offset, entry) in self
             .entries
             .get(rows)
@@ -1732,11 +1771,19 @@ impl FileDialog {
             .enumerate()
         {
             let index = first.saturating_add(offset);
-            let row_y = entries_top + (offset as f32) * ROW_HEIGHT;
+            let row_y = entries_top + (offset as f32) * scaled(ROW_HEIGHT);
 
             // Selection highlight
             if self.selected_index == Some(index) {
-                palette.push_surface(frame, x, row_y, width, ROW_HEIGHT, 0.0, Surface::Selected);
+                palette.push_surface(
+                    frame,
+                    x,
+                    row_y,
+                    width,
+                    scaled(ROW_HEIGHT),
+                    0.0,
+                    Surface::Selected,
+                );
             }
 
             // Icon placeholder (folder vs file indicator)
@@ -1747,11 +1794,11 @@ impl FileDialog {
                 palette.subtext0
             };
             frame.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: row_y + 6.0,
+                x: x + scaled(PADDING),
+                y: row_y + scaled(6.0),
                 text: String::from(icon_char),
                 color: icon_color,
-                font_size: FONT_SIZE_SMALL,
+                font_size: scaled(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1763,10 +1810,10 @@ impl FileDialog {
             } else {
                 palette.text
             };
-            let max_name_width = size_col_x - name_col_x - PADDING;
+            let max_name_width = size_col_x - name_col_x - scaled(PADDING);
             frame.push(RenderCommand::Text {
                 x: name_col_x,
-                y: row_y + 6.0,
+                y: row_y + scaled(6.0),
                 // The other place, and the reason `DirEntry::name` can be an
                 // `OsString` everywhere else: a row has to *show* a name that
                 // has no UTF-8 reading, and an octal escape for each byte
@@ -1774,7 +1821,7 @@ impl FileDialog {
                 // What the row opens is rebuilt from the bytes, not from this.
                 text: pathcodec::display_os(&entry.name),
                 color: name_color,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_name_width),
                 overflow: TextOverflow::Ellipsis,
@@ -1784,10 +1831,10 @@ impl FileDialog {
             if !entry.is_dir {
                 frame.push(RenderCommand::Text {
                     x: size_col_x,
-                    y: row_y + 6.0,
+                    y: row_y + scaled(6.0),
                     text: format_size(entry.size),
                     color: palette.subtext0,
-                    font_size: FONT_SIZE_SMALL,
+                    font_size: scaled(FONT_SIZE_SMALL),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1797,10 +1844,10 @@ impl FileDialog {
             // Modified timestamp (simplified display)
             frame.push(RenderCommand::Text {
                 x: date_col_x,
-                y: row_y + 6.0,
+                y: row_y + scaled(6.0),
                 text: format_timestamp(entry.modified_timestamp, &self.timezone),
                 color: palette.subtext0,
-                font_size: FONT_SIZE_SMALL,
+                font_size: scaled(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1811,7 +1858,7 @@ impl FileDialog {
             // columns dead, and the row is what the highlight covers.
             frame.hit(
                 DialogTarget::Entry(index),
-                Rect::new(x, row_y, width, ROW_HEIGHT),
+                Rect::new(x, row_y, width, scaled(ROW_HEIGHT)),
             );
         }
 
@@ -1846,7 +1893,7 @@ impl FileDialog {
             x + width - SCROLLBAR_WIDTH,
             entries_top,
             SCROLLBAR_WIDTH,
-            (height - ROW_HEIGHT).max(0.0),
+            (height - scaled(ROW_HEIGHT)).max(0.0),
         );
         let thumb = scrollbar::thumb(
             track,
@@ -1884,7 +1931,7 @@ impl FileDialog {
             x: 0.0,
             y,
             width,
-            height: BOTTOM_BAR_HEIGHT,
+            height: scaled(BOTTOM_BAR_HEIGHT),
             color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: 0.0,
@@ -1894,12 +1941,12 @@ impl FileDialog {
             },
         });
 
-        let input_y = y + (BOTTOM_BAR_HEIGHT - 28.0) / 2.0;
+        let input_y = y + (scaled(BOTTOM_BAR_HEIGHT) - scaled(28.0)) / 2.0;
 
         // Filename input (save mode only)
         if self.mode == DialogMode::Save {
-            let input_width = width - BUTTON_WIDTH * 2.0 - PADDING * 5.0;
-            let field = Rect::new(PADDING, input_y, input_width, 28.0);
+            let input_width = width - scaled(BUTTON_WIDTH) * 2.0 - scaled(PADDING) * 5.0;
+            let field = Rect::new(scaled(PADDING), input_y, input_width, 28.0);
             // The box every field is drawn in (`crate::field`), with the
             // keyboard's mark while what is typed goes to it -- which is
             // whenever the address bar is not being typed in. It was a box of
@@ -1927,20 +1974,20 @@ impl FileDialog {
                 palette.text
             };
             frame.push(RenderCommand::Text {
-                x: PADDING + 6.0,
-                y: input_y + 7.0,
+                x: scaled(PADDING) + scaled(6.0),
+                y: input_y + scaled(7.0),
                 text: display_text,
                 color: text_color,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(input_width - 12.0),
+                max_width: Some(input_width - scaled(12.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
         // Buttons (right-aligned)
-        let cancel_x = width - BUTTON_WIDTH - PADDING;
-        let confirm_x = cancel_x - BUTTON_WIDTH - PADDING;
+        let cancel_x = width - scaled(BUTTON_WIDTH) - scaled(PADDING);
+        let confirm_x = cancel_x - scaled(BUTTON_WIDTH) - scaled(PADDING);
 
         // The toolkit's buttons (`crate::button`), the reference's Aero
         // buttons: Open, Save or Select the dialog's own action, tinted with
@@ -1955,7 +2002,12 @@ impl FileDialog {
         crate::button::draw(
             frame,
             palette,
-            (confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            (
+                confirm_x,
+                input_y,
+                scaled(BUTTON_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
             confirm_label,
             crate::button::Kind::Primary,
             crate::button::State {
@@ -1972,13 +2024,23 @@ impl FileDialog {
         // trusted from paint time.
         frame.hit(
             DialogTarget::Confirm,
-            Rect::new(confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            Rect::new(
+                confirm_x,
+                input_y,
+                scaled(BUTTON_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
         );
 
         crate::button::draw(
             frame,
             palette,
-            (cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            (
+                cancel_x,
+                input_y,
+                scaled(BUTTON_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
             "Cancel",
             crate::button::Kind::Plain,
             crate::button::State::default(),
@@ -1987,7 +2049,12 @@ impl FileDialog {
         );
         frame.hit(
             DialogTarget::Cancel,
-            Rect::new(cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            Rect::new(
+                cancel_x,
+                input_y,
+                scaled(BUTTON_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
         );
     }
 }
@@ -2566,6 +2633,27 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The file dialog follows the user's text size** (on this test's
+    /// thread): at twice the size its text is twice as large.
+    #[test]
+    fn the_file_dialog_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let sizes: Vec<f32> = FileDialog::open()
+            .render(&Palette::for_mode(false), 1600.0, 1200.0)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(!sizes.is_empty());
+        assert!(sizes.contains(&(FONT_SIZE * 2.0)), "{sizes:?}");
+        assert!(
+            !sizes.contains(&FONT_SIZE),
+            "a label left at the old size: {sizes:?}"
+        );
+    }
 
     fn press(key: Key) -> Event {
         Event::Key(KeyEvent {
@@ -3513,23 +3601,45 @@ mod tests {
         ));
     }
 
+    /// **A folder picker opens a folder as the other modes do, and chooses
+    /// with its Select button**: the folder highlighted, or with none
+    /// highlighted the one being shown -- so a folder below the one it
+    /// opened on can be reached and chosen, an empty one included.
     #[test]
     fn test_select_folder_mode() {
-        let mut dialog = FileDialog::select_folder().with_initial_path("/home");
-        dialog.set_entries(vec![DirEntry {
-            name: OsString::from("projects"),
+        let dir = |name: &str| DirEntry {
+            name: OsString::from(name),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
             extension: OsString::new(),
-        }]);
+        };
+        let mut dialog = FileDialog::select_folder().with_initial_path("/home");
+        dialog.set_entries(vec![dir("projects"), dir("trips")]);
 
-        // Activating a dir in select-folder mode selects it.
+        // Highlighted, the Select button takes it.
+        dialog.selected_index = Some(1);
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/trips")));
+
+        // Activated, it opens -- and chooses nothing yet.
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(PathBuf::from("/home/projects"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
         );
+        assert_eq!(dialog.current_path(), Path::new("/home/projects"));
+        // An empty folder, nothing highlighted: Select takes the folder shown.
+        dialog.set_entries(Vec::new());
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/projects")));
+        // A file is never the answer in this mode.
+        dialog.set_entries(vec![DirEntry {
+            is_dir: false,
+            extension: OsString::from("png"),
+            ..dir("photo.png")
+        }]);
+        dialog.selected_index = Some(0);
+        assert_eq!(dialog.activate_entry(0), DialogAction::None);
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/projects")));
     }
 
     #[test]

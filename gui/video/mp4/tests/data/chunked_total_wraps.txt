@@ -1,0 +1,5 @@
+# chunked_total_wraps.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 afx0 1/48000 48000Hz/1 4096 -
+packet 0 0 0 1024 2048 33336 K__ 3bf7073ef5d30847aad46437be06c62b 0
+packet 0 1024 1024 1024 2048 35384 K__ 3bf7073ef5d30847aad46437be06c62b 0
+packet 0 2048 2048 2048 2048 37432 K__ 3bf7073ef5d30847aad46437be06c62b 0

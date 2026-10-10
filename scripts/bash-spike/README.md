@@ -56,9 +56,8 @@ is a different shipped binary — and per §305 `bash-slateos.elf` *is* shipped.
 | `run.sh` | Native (glibc) build of bash 5.2. Baseline: proves the source tree is sound. |
 | `syms.sh` | Symbol diff — what `libc.a`/`libstubs.a` define vs what bash's objects reference. |
 | `quality.sh` | How many of bash's symbols are stub-only, and where `ENOSYS` lives in `posix/src`. |
-| `cross2.sh` | Cross-configure + cross-compile for `x86_64-linux-musl`. |
-| `cross3.sh` | Works around a bash 5.2 configure bug (below), then relinks. |
-| `runbash.sh` | Executes the musl binary on Linux to confirm the port actually works. |
+| `cross2.sh` | Cross-configure against SlateOS's `libc.a` (through `scripts/lib/worktree.sh`'s link wrapper) and compile; drops bash 5.2's inverted `strtoimax` replacement (below) between the two; links a copy against musl, `musl-shim.c` supplying the `arc4random` musl lacks, to run on Linux. |
+| `runbash.sh` | Executes that musl copy on Linux, to take a measurement of this build's bash outside SlateOS. |
 | `slatelink.sh` | **The decisive one** — relinks bash's objects against SlateOS's `libc.a`. |
 | `checksyms.sh` | Confirms the three once-missing functions are real symbols in `libc.a`. |
 
@@ -96,7 +95,7 @@ Artifacts land in `build/spike/` (gitignored): `bash-musl.elf`,
   both archives are Rust-built and each carries its own panic handler, so
   together they collide on `__rustc::rust_begin_unwind`.
 
-## Two traps worth remembering
+## Three traps worth remembering
 
 **1. `$CC` cannot contain spaces.** autotools word-splits it, and this repo
 lives under `D:\visual studio projects\`. The first attempt died with
@@ -109,9 +108,32 @@ also happens under `/tmp`, since `/mnt/d` is slow over 9p.
 `lib/sh/strtoimax.c` to `LIBOBJS` when the system **has** a usable
 `strtoimax`. Against a dynamic glibc that is harmless. Against a static musl it
 is fatal — musl defines `strtoimax` in the same object as `strtol`, that object
-gets pulled in for `strtol`, and lld reports a duplicate symbol. Pass
-`bash_cv_func_strtoimax=no` to a fresh configure, or drop it from
-`lib/sh/Makefile`'s `LIBOBJS` as `cross3.sh` does.
+gets pulled in for `strtol`, and lld reports a duplicate symbol. `cross2.sh` drops it
+from `lib/sh/Makefile`'s `LIBOBJS` between configure and the first make --
+not by answering `bash_cv_func_strtoimax=no`, which makes the macro skip its
+checks and leaves `HAVE_STRTOIMAX` and `HAVE_DECL_STRTOIMAX` out of
+`config.h`. (It was `cross3.sh`, run after a failed first make, until
+2026-10-05.)
+
+**3. bash brings its own copies of six C library functions.**
+`lib/sh/getenv.c` defines `getenv`, `putenv`, `setenv` and `unsetenv` over
+the shell's own variables, as on Linux; and a cross configure, which cannot
+run the tests that would have found ours sound, guesses that `getcwd` and
+`mktime` are broken and compiles `lib/sh/getcwd.c` and `lib/sh/mktime.c`
+too. Linked in bash's own order -- its libraries ahead of the C library --
+those are the ones bash uses. That needs our `libc.a` to let a program decline
+its copies, which it did not until 2026-10-01 (known-issues
+D-POSIX-GETENV-AND-GETCWD-COULD-NOT-BE-REPLACED), and it needs configure told
+the truth about `getcwd` and `mktime`, which `cross2.sh` now does: bash's
+`getcwd` walks `..` matching inode numbers, and names the wrong directory
+under procfs, which reports 0 for every one. Until that day zig's cc driver
+had moved `-lsh` behind our `libc.a`, so ours were taken and bash's never
+were, by accident. The other six guesses are answered too, since
+2026-10-05, each from a measured fact (`cross2.sh`'s comment; known-issues
+D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN, resolved). One
+was a live bug: with `shopt -s lastpipe`, `true | false; echo $?` said 129,
+bash reading the status it made for the pipeline's last command as a death
+by signal.
 
 ## If this is ever taken further
 

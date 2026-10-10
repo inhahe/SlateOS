@@ -969,18 +969,21 @@ impl Encoder {
                 tx_8x8_only: true,
             }
         };
-        let out = bitstream::pack_frame(Frame {
-            header: h,
-            lf: &mut cm.lf,
-            seg: &mut cm.seg,
-            fc: &mut fc,
-            counts: &encoded.counts,
-            search,
-            mi: &mut encoded.mi,
-            ext: &encoded.ext,
-            last_seg_map: &self.last_seg_map,
-            tile_tokens: &encoded.tile_tokens,
-        });
+        let out = bitstream::pack_frame(
+            Frame {
+                header: h,
+                lf: &mut cm.lf,
+                seg: &mut cm.seg,
+                fc: &mut fc,
+                counts: &encoded.counts,
+                search,
+                mi: &mut encoded.mi,
+                ext: &encoded.ext,
+                last_seg_map: &self.last_seg_map,
+                tile_tokens: &encoded.tile_tokens,
+            },
+            self.threads,
+        );
 
         // update_reference_segmentation_map.
         if cm.seg.update_map {

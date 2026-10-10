@@ -16,3 +16,7 @@ path = "src/lib.rs"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "rate"
+harness = false

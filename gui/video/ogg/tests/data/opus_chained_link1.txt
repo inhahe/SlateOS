@@ -1,0 +1,36 @@
+# opus_chained_link1.opus: what the Ogg demuxer makes of it (generate_fixtures.py).
+stream 0 opus 1/48000
+packet 0 -312 960 236 121 _ 6edc5dc4cb259737991a239e17f2742e 312 0 -
+packet 0 N/A 960 159 121 _ b69ed897ce340394ca8840e6cecb4b03 0 0 -
+packet 0 N/A 960 149 121 _ cbb82f9241691da631e96f204f28ddd9 0 0 -
+packet 0 N/A 960 139 121 _ daad7400987c3769ef3da1c5a822762e 0 0 -
+packet 0 N/A 960 139 121 _ 2e815f83d61bff9753bfdcbeb86ae9ef 0 0 -
+packet 0 N/A 960 146 121 _ 0cc6fab3cfdae9a25c29e80d436531e8 0 0 -
+packet 0 N/A 960 153 121 _ e032c4e366e7ff36ff83a771da44f064 0 0 -
+packet 0 N/A 960 151 121 _ 4ce3a03e0a5c3021635cf0150ecd3fac 0 0 -
+packet 0 N/A 960 143 121 _ 32cb14a7a1ee7a83ebc5ad8a84a25a90 0 0 -
+packet 0 N/A 960 139 121 _ 7459b69d6be032e324d18553750face9 0 0 -
+packet 0 N/A 960 146 121 _ 7fa30b6fc5a6d3467514acb3682b56ae 0 0 -
+packet 0 N/A 960 153 121 _ b8ae5fcee6238bcc301c2dd2320257aa 0 0 -
+packet 0 N/A 960 151 121 _ 2b7dc2af840458e2b8d3c770870a758c 0 0 -
+packet 0 N/A 960 144 121 _ 03fafa3456b49e8995ee01819f9a21ed 0 0 -
+packet 0 N/A 960 141 121 _ e1ee09d397a2b5fab1fba03633c55939 0 0 -
+packet 0 N/A 960 148 121 _ a25f816d5fb84e2d7437f69022afca9c 0 0 -
+packet 0 N/A 960 153 121 _ c094d7f810d044024c816f05dd7e2b18 0 0 -
+packet 0 N/A 960 151 121 _ 4ce3a03e0a5c3021635cf0150ecd3fac 0 0 -
+packet 0 N/A 960 143 121 _ 5d4f29dd97f6cbcf4c360d1cc15bc5c1 0 0 -
+packet 0 N/A 960 141 121 _ b1310e0344226a9f6edd83ef1bd5d893 0 0 -
+packet 0 N/A 960 148 121 _ f7e98f76727de9b72ef6da9ac31573b2 0 0 -
+packet 0 N/A 960 153 121 _ 1d4d3b9ff0607949494f6188760b6dbe 0 0 -
+packet 0 N/A 960 151 121 _ 4ce3a03e0a5c3021635cf0150ecd3fac 0 0 -
+packet 0 N/A 960 144 121 _ 03fafa3456b49e8995ee01819f9a21ed 0 0 -
+packet 0 N/A 960 141 121 _ e1ee09d397a2b5fab1fba03633c55939 0 0 -
+packet 0 N/A 960 148 121 _ f7e98f76727de9b72ef6da9ac31573b2 0 0 -
+packet 0 N/A 960 153 121 _ 0bb54bffa8d82dacb94bf2f010cc6728 0 0 -
+packet 0 N/A 960 151 121 _ 2b7dc2af840458e2b8d3c770870a758c 0 0 -
+packet 0 N/A 960 144 121 _ 03fafa3456b49e8995ee01819f9a21ed 0 0 -
+packet 0 N/A 960 141 121 _ b1310e0344226a9f6edd83ef1bd5d893 0 0 -
+packet 0 N/A 960 148 121 _ 0f8a0025a6e678f21035c712fafcf295 0 0 -
+packet 0 N/A 960 153 121 _ e81e7c1ed822fa194db68651f960caf7 0 0 -
+packet 0 N/A 960 151 121 _ fc0efb7c994cce19240bafd293f7e643 0 0 -
+packet 0 N/A 792 234 121 _ 6ec8667bb767bcaf8976773e1100d519 0 168 -

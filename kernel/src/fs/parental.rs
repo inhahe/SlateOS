@@ -17,7 +17,6 @@
 //!
 //! Integration:
 //!   → useracct (child account identification)
-//!   → appregistry (app metadata)
 //!   → notifcenter (time limit warnings)
 //! ```
 

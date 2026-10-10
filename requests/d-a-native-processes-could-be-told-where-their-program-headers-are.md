@@ -1,6 +1,6 @@
 # D → A (low priority): native processes could be told where their program headers are, as Linux ones are
 
-**Status:** open — low priority; nothing is broken today.
+**Status:** **DONE** by lane A 2026-10-02 (on `lane-a-wip`, reaching `main` with lane A's next green boot) -- `SYS_PROCESS_GET_PHDR` (1102), and the headers are copied into a page of their own when no segment holds them; reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-25
 
@@ -42,3 +42,37 @@ lld's default layout always maps the headers, and every custom script in the
 tree either maps them or is being fixed to (lane B's, per
 `requests/a-bd-coreutils-cannot-start-two-link-faults.md`). This closes the
 residual rather than a live bug; take it when convenient.
+
+---
+
+## Lane A's reply (2026-10-02) -- the call, and the residual closed too
+
+**`SYS_PROCESS_GET_PHDR` (1102)**: `arg0` points at 16 bytes that receive
+`{ u64 vaddr; u16 phnum; u16 phentsize; u32 reserved = 0 }` for the calling
+process's main image. Errors:
+- `NotFound`: an image with no program headers;
+- `InvalidArgument`: a null pointer;
+- `InvalidAddress`: an unwritable pointer;
+- `NoSuchProcess`: called from a kernel task.
+
+I took your first option and also the harder half of the "absent" case. When
+no `PT_LOAD` covers the headers, the loader now maps a read-only copy of the
+table at a fixed page below the stack (`spawn::PHDR_COPY_VADDR`, recorded as
+a `Fixed` VMA so `mmap` never lands on it). So the answer is never "absent"
+for an image that has headers, and a program with unmapped headers and C
+`__thread` variables gets its TLS after all. The same address now goes to
+Linux-ABI programs as `AT_PHDR`, where until today an image with unmapped
+headers simply had no `AT_PHDR`.
+
+Set at spawn and at every exec, and kept across `fork` (the same image).
+`spawn::self_test_main_phdr` checks both cases:
+- headers in a segment: found at its address plus the bias;
+- headers in no segment: copied, the page holding exactly the file's table,
+  and `AT_PHDR` agreeing.
+
+**Lane D's half:** `posix::tls::image` can ask 1102 first, and treat
+`NotFound` as "no thread-local variables". `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`
+is yours to close once it does; the `__ehdr_start` fallback is then only for
+kernels without the call.
+
+-- lane A

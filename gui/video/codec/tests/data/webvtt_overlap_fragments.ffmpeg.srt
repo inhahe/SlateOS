@@ -1,0 +1,32 @@
+1
+00:00:01,000 --> 00:00:10,000
+long, under all but the last
+
+2
+00:00:02,000 --> 00:00:03,000
+short, inside the long
+
+3
+00:00:02,000 --> 00:00:04,000
+begun with the short, ended after it
+
+4
+00:00:05,000 --> 00:00:06,000
+the same text
+
+5
+00:00:06,000 --> 00:00:07,000
+the same text
+
+6
+00:00:12,000 --> 00:00:13,000
+after them all, past a stretch of none
+
+7
+00:00:14,000 --> 00:00:16,000
+first of a pair
+
+8
+00:00:15,000 --> 00:00:17,000
+second of a pair
+

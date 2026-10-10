@@ -1,0 +1,20 @@
+[package]
+name = "windowrules"
+version = "0.1.0"
+edition = "2024"
+description = "Window rules: what happens to a program's windows as they open -- the rules, the engine, and the file a user keeps them in"
+
+# Read by the desktop shell, which applies the rules, and written by Settings:
+# no widget library, so a program that only edits rules does not link one.
+[dependencies]
+# The rules file is YAML, edited in place so a user's comments survive.
+yamldoc = { path = "../../yamldoc" }
+# Where the file lives, and how it is written without losing it.
+settingsfile = { path = "../settingsfile" }
+
+[dev-dependencies]
+# Scratch configuration directories for the file's round trips.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
+[lints]
+workspace = true

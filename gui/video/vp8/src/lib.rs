@@ -41,6 +41,9 @@
 //! - `inter`: motion-compensated prediction from reference frames.
 //! - `loopfilter`: smoothing across block edges.
 //! - `frame`: the planes frames are decoded into, borders and all.
+//! - `threading`: a frame's macroblock rows on several threads, when it has
+//!   several token partitions; `pipeline`: its loop filter on a thread of
+//!   its own, when it has one; `band`: the copy of a row each decodes into.
 //! - `decoder`: the frame loop -- the four buffers the frame being decoded
 //!   and the three references share, and which frames show.
 //!
@@ -53,10 +56,21 @@
 //! saturation where libvpx's C clamps, every position of an edge at once, a
 //! vertical edge's pixels transposed into lanes first. There is no
 //! hand-written SIMD and no `unsafe`. On 1080p film (`tests/bench.rs`) that
-//! is faster than libvpx's C and about a third of the speed of its SIMD, on
-//! one thread. Not here: libvpx's decoding of macroblock rows on several
-//! threads, which it does for streams of several token partitions
-//! (`known-issues/F-vp8-decodes-on-one-thread.md`).
+//! is 2.7 times as fast as libvpx's C and about 60% of the speed of its
+//! SIMD, on one thread (`known-issues/F-vp8-on-one-thread-is-about-60-percent-of-libvpx-simd.md`).
+//!
+//! A frame of several token partitions decodes its macroblock rows on
+//! threads of their own, as libvpx's does ([`Decoder::set_threads`]; a new
+//! decoder uses every core): each row a few macroblocks behind the one
+//! above, sharing nothing with the others but what crosses the edge between
+//! two rows, and making the single thread's pictures, bit for bit
+//! (`threading`). The same film in eight partitions decodes 2.9 times as
+//! fast on eight threads as on one (2.5 times at 720p, 1.6 at 360p; smaller
+//! pictures, which a thread costs more than it saves, stay on one). A frame
+//! of one partition -- what encoders make unless asked for more -- cannot
+//! share its rows so (libvpx decodes it on one thread), but its loop filter
+//! runs on a second thread, a row behind its macroblocks (`pipeline`): 1.3
+//! times as fast at 1080p, 1.2 at 360p, the pictures again the same.
 //!
 //! # What a hostile stream can do
 //!
@@ -84,6 +98,7 @@
 
 #![forbid(unsafe_code)]
 
+mod band;
 mod boolread;
 mod decodeframe;
 mod decoder;
@@ -94,9 +109,11 @@ mod inter;
 mod intra;
 mod loopfilter;
 mod modes;
+mod pipeline;
 // Generated from libvpx by `tools/gen_tables.py`, which formats what it
 // writes, so regenerating and diffing compares like with like.
 mod tables;
+mod threading;
 mod tokens;
 
 pub use decoder::{DEFAULT_MAX_PIXELS, Decoder, Picture, PlaneView};

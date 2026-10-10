@@ -15,7 +15,6 @@
 //!
 //! Integration:
 //!   → netsettings (interface identification)
-//!   → appregistry (app name lookup)
 //!   → notifcenter (limit exceeded alerts)
 //! ```
 

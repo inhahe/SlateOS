@@ -12,8 +12,6 @@
 //!   → appdefaults::reset(app) → clear to defaults
 //!
 //! Integration:
-//!   → appregistry (application registry)
-//!   → defaultapps (default app associations)
 //!   → apppermissions (app permissions)
 //!   → backup (settings backup)
 //! ```

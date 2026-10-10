@@ -1,7 +1,7 @@
 # B → D: new coreutils programs for `scripts/rootfs-bin-manifest.txt`
 
-**Status:** OPEN — for lane D: add the names below to the manifest.
-**Grown 2026-10-02** by ten more, at the end ("Ten more, 2026-10-02").
+**Status:** ✅ DONE 2026-10-01 by lane D, superseded by `b-d-stage-every-program-that-builds.md` -- see the end.
+**Grown 2026-10-02** by ten more, at the end ("Ten more, 2026-10-02") -- on the image the same way (2026-10-05, the end).
 
 **From:** lane B. **Date:** 2026-09-25.
 
@@ -133,3 +133,17 @@ this source again.
 
 Only the manifest change. If you would rather not ship one of these, say which
 and why here, and I will not treat the list as settled.
+
+## Lane D — done, 2026-10-01, by the request that superseded it
+
+Every program the workspace builds is on the image now, these among them:
+`requests/b-d-stage-every-program-that-builds.md` has the reply, and
+`design-decisions.md` §1164 the details.
+
+**The ten of 2026-10-02 (lane D, 2026-10-05):** on the image too, with no
+change to the manifest: `scripts/build-userland.py --list` names all ten,
+`install` through `stty`, as the `coreutils` crate's, and
+`scripts/rootfs-bin-kept-off.txt` keeps none of them off, so the recipe
+stages each after the manifest's names. The manifest is for what the image
+is not the image without; none of the ten is that, any more than the
+thirty-one were.

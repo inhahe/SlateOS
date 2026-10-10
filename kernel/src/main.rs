@@ -72,6 +72,7 @@ mod audio_alsa_ctl;
 mod audio_history;
 mod audio_mixer;
 mod audio_notify;
+mod audio_out;
 mod backtrace;
 mod bench;
 mod blkdev;
@@ -90,6 +91,7 @@ mod cpu;
 mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
+mod cpusync;
 mod cputime;
 mod crypto;
 mod devhotplug;
@@ -105,6 +107,7 @@ mod fb;
 mod font;
 mod fs;
 mod gdt;
+mod guestagent;
 mod hardlockup;
 mod hda;
 mod hpet;
@@ -124,6 +127,7 @@ mod json;
 mod kcounters;
 mod kdiag;
 mod kevent;
+mod kexec;
 mod keyboard;
 mod klog;
 mod kobject;
@@ -139,11 +143,13 @@ mod layout_pad;
 mod limine;
 mod lockdep;
 mod logpersist;
+mod membarrier;
 mod mm;
 mod mouse;
 mod msi;
 mod net;
 mod netns;
+mod nsfs;
 mod numa;
 mod nvme;
 mod oci;
@@ -161,6 +167,7 @@ mod rcu;
 mod reslimit;
 mod rip_sample;
 mod rng;
+mod rseq;
 mod rtc;
 mod rtl8139;
 mod scfilter;
@@ -191,6 +198,7 @@ mod udriver;
 mod uname;
 mod unicode;
 mod userns;
+mod utsns;
 mod virtio;
 mod vmguest;
 mod volume;
@@ -402,6 +410,12 @@ enum KasanEarlyStatus {
 // fault. Little coverage is lost: `kernel_main` is almost entirely calls into
 // other modules, which stay instrumented.
 #[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+#[allow(
+    clippy::redundant_closure,
+    reason = "each self-test is passed to selftest::dispatch as `|| x::self_test()`: a closure, \
+              so selftest.skip can leave it unrun, and a call, so the wiring gates \
+              (check-self-tests-wired, check-ran-if) still find it"
+)]
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
     {
@@ -652,11 +666,9 @@ extern "C" fn kernel_main() -> ! {
             }
 
             // Verify basic allocator functionality before proceeding.
-            selftest::dispatch(
-                "Frame allocator",
-                selftest::Severity::Integrity,
-                mm::frame::self_test(),
-            );
+            selftest::dispatch("Frame allocator", selftest::Severity::Integrity, || {
+                mm::frame::self_test()
+            });
 
             boot_timing::mark(boot_timing::Milestone::FrameAlloc);
 
@@ -685,11 +697,9 @@ extern "C" fn kernel_main() -> ! {
             console::notify_heap_available();
 
             // Verify heap allocations work.
-            selftest::dispatch(
-                "Heap allocator",
-                selftest::Severity::Integrity,
-                mm::heap::self_test(),
-            );
+            selftest::dispatch("Heap allocator", selftest::Severity::Integrity, || {
+                mm::heap::self_test()
+            });
             boot_timing::mark(boot_timing::Milestone::Heap);
 
             // Verify the self-test skip ledger allocates nothing.
@@ -701,11 +711,9 @@ extern "C" fn kernel_main() -> ! {
             // above records two skips with no heap in existence, so a ledger
             // that allocates kills the boot ~120 lines in, with a panic that
             // names `alloc.rs` and nothing else.  See fs::selftest::self_test.
-            selftest::dispatch(
-                "Skip-ledger",
-                selftest::Severity::Integrity,
-                fs::selftest::self_test(),
-            );
+            selftest::dispatch("Skip-ledger", selftest::Severity::Integrity, || {
+                fs::selftest::self_test()
+            });
             console::boot_step_update(console::BootStatus::Ok, "Memory manager");
 
             // Install the REAL physical memory map into the memlayout diagnostic table
@@ -734,11 +742,9 @@ extern "C" fn kernel_main() -> ! {
             // bucketed and are counted separately as unmeasurable rather than being
             // silently reported as "<1us".
             sclatency::calibrate();
-            selftest::dispatch_debug(
-                "Sclatency",
-                selftest::Severity::Diagnostic,
-                sclatency::self_test(),
-            );
+            selftest::dispatch_debug("Sclatency", selftest::Severity::Diagnostic, || {
+                sclatency::self_test()
+            });
 
             // Bring up the Ada/SPARK components and check the FFI boundary.
             //
@@ -754,11 +760,9 @@ extern "C" fn kernel_main() -> ! {
             // and its state is statically allocated .bss, which is why it can run this
             // early.
             ada::init();
-            selftest::dispatch(
-                "Ada/SPARK FFI",
-                selftest::Severity::Integrity,
-                ada::selftest(),
-            );
+            selftest::dispatch("Ada/SPARK FFI", selftest::Severity::Integrity, || {
+                ada::selftest()
+            });
             // Say so on success too. Every other self-test in this tree ends `: OK`, and
             // a silent one is indistinguishable from one that was never called — an
             // `ada::selftest()` accidentally dropped from this sequence would look
@@ -779,11 +783,9 @@ extern "C" fn kernel_main() -> ! {
             // said. A test placed after init would run after the panic it exists to
             // prevent -- which is what the RTC's own bounds check does, eight
             // thousand lines later at step 23, at Diagnostic severity.
-            selftest::dispatch(
-                "timekeeping",
-                selftest::Severity::Integrity,
-                timekeeping::self_test(),
-            );
+            selftest::dispatch("timekeeping", selftest::Severity::Integrity, || {
+                timekeeping::self_test()
+            });
             timekeeping::init();
 
             console::boot_step(console::BootStatus::Running, "Virtual memory");
@@ -794,11 +796,9 @@ extern "C" fn kernel_main() -> ! {
             mm::page_table::init(boot_info.hhdm_offset);
 
             // Verify page table operations work (translate HHDM, map/unmap).
-            selftest::dispatch(
-                "Page table",
-                selftest::Severity::Integrity,
-                mm::page_table::self_test(),
-            );
+            selftest::dispatch("Page table", selftest::Severity::Integrity, || {
+                mm::page_table::self_test()
+            });
 
             // Verify IA32_PAT reads back as programmed and that the PageFlags memory
             // types decode to what the rest of the kernel assumes.  Fatal: a wrong
@@ -806,7 +806,9 @@ extern "C" fn kernel_main() -> ! {
             // mapping, which is not a failure any later test would attribute
             // correctly.  Runs here because page_table::self_test has just proven the
             // mapping machinery this depends on.
-            selftest::dispatch("PAT", selftest::Severity::Integrity, mm::pat::self_test());
+            selftest::dispatch("PAT", selftest::Severity::Integrity, || {
+                mm::pat::self_test()
+            });
 
             // Initialize KASAN shadow memory (heap-corruption detector). Records the
             // HHDM offset so shadow addresses can be computed; shadow pages are lazily
@@ -820,11 +822,9 @@ extern "C" fn kernel_main() -> ! {
             mm::fault::init();
 
             // Verify demand paging works (register VMA, trigger fault, verify).
-            selftest::dispatch(
-                "Demand paging",
-                selftest::Severity::Integrity,
-                mm::fault::self_test(),
-            );
+            selftest::dispatch("Demand paging", selftest::Severity::Integrity, || {
+                mm::fault::self_test()
+            });
 
             // Step 8b: Verify userspace pointer validation logic.
             // Validates that kernel rejects null, kernel-space, wrapping, and
@@ -832,7 +832,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch(
                 "User memory validation",
                 selftest::Severity::Integrity,
-                mm::user::self_test(),
+                || mm::user::self_test(),
             );
 
             // Step 8c: Initialize kernel stack allocator with hardware guard pages.
@@ -841,7 +841,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch(
                 "Kernel stack guard page",
                 selftest::Severity::Integrity,
-                mm::kstack::self_test(),
+                || mm::kstack::self_test(),
             );
 
             boot_timing::mark(boot_timing::Milestone::PageTable);
@@ -855,22 +855,18 @@ extern "C" fn kernel_main() -> ! {
             sched::init();
 
             // Verify cooperative scheduling works (spawn tasks, yield, verify).
-            selftest::dispatch(
-                "Scheduler",
-                selftest::Severity::Integrity,
-                sched::self_test(),
-            );
+            selftest::dispatch("Scheduler", selftest::Severity::Integrity, || {
+                sched::self_test()
+            });
 
             // Process accounting (after self-test, which fills/empties the hook table).
             pacct::init();
 
             // Verify FPU/SSE state save/restore works correctly.
             // This tests the fxsave64/fxrstor64 path that the context switch uses.
-            selftest::dispatch_debug(
-                "Fpu",
-                selftest::Severity::Integrity,
-                sched::fpu::self_test(),
-            );
+            selftest::dispatch_debug("Fpu", selftest::Severity::Integrity, || {
+                sched::fpu::self_test()
+            });
 
             // Multi-task stress test: verify XMM state isolation across context switches.
             // Spawns 4 tasks writing unique patterns to XMM1, yields 50 times each,
@@ -881,11 +877,9 @@ extern "C" fn kernel_main() -> ! {
             // Registers tunable kernel parameters for memory management,
             // scheduling, and other subsystems.
             sysctl::init();
-            selftest::dispatch_debug(
-                "Sysctl",
-                selftest::Severity::Diagnostic,
-                sysctl::self_test(),
-            );
+            selftest::dispatch_debug("Sysctl", selftest::Severity::Diagnostic, || {
+                sysctl::self_test()
+            });
 
             // Step 9b′: Populate the kernel-parameter store from the Limine command
             // line. This MUST run during boot (previously it was only invoked lazily
@@ -903,12 +897,12 @@ extern "C" fn kernel_main() -> ! {
             // We'll try to upgrade to disk-backed swap after virtio-blk
             // and blkdev init (Step 20e).
             mm::swap::init(256);
-            selftest::dispatch_debug("Swap", selftest::Severity::Integrity, mm::swap::self_test());
-            selftest::dispatch_debug(
-                "Compress",
-                selftest::Severity::Integrity,
-                mm::compress::self_test(),
-            );
+            selftest::dispatch_debug("Swap", selftest::Severity::Integrity, || {
+                mm::swap::self_test()
+            });
+            selftest::dispatch_debug("Compress", selftest::Severity::Integrity, || {
+                mm::compress::self_test()
+            });
 
             boot_timing::mark(boot_timing::Milestone::Scheduler);
             console::boot_step_update(console::BootStatus::Ok, "Scheduler");
@@ -919,26 +913,22 @@ extern "C" fn kernel_main() -> ! {
             // global channel table is lazily populated).  Run self-tests to
             // verify send, recv, blocking, close detection, and backpressure.
             console::boot_step(console::BootStatus::Running, "IPC subsystem");
-            selftest::dispatch(
-                "IPC channel",
-                selftest::Severity::Integrity,
-                ipc::channel::self_test(),
-            );
+            selftest::dispatch("IPC channel", selftest::Severity::Integrity, || {
+                ipc::channel::self_test()
+            });
 
             // Step 11: Initialize syscall dispatch.
             // The versioned dispatch table maps syscall numbers to handlers.
             // No explicit init needed (table is a const static), but we run
             // self-tests to verify dispatch, yield, task_id, and IPC roundtrip
             // all work through the syscall interface.
-            selftest::dispatch(
-                "Syscall dispatch",
-                selftest::Severity::Integrity,
-                syscall::self_test(),
-            );
+            selftest::dispatch("Syscall dispatch", selftest::Severity::Integrity, || {
+                syscall::self_test()
+            });
             selftest::dispatch(
                 "Linux ABI translation",
                 selftest::Severity::Integrity,
-                syscall::linux::self_test(),
+                || syscall::linux::self_test(),
             );
             // The translation self-test is the deepest single frame that runs on the
             // boot stack (a monolithic function whose unoptimized frame is ~480 KiB
@@ -978,20 +968,16 @@ extern "C" fn kernel_main() -> ! {
             // Futexes enable fast userspace synchronization: the uncontended
             // path is pure atomic CAS (no syscall), the contended path uses
             // the kernel to block/wake tasks.
-            selftest::dispatch(
-                "Futex",
-                selftest::Severity::Integrity,
-                ipc::futex::self_test(),
-            );
+            selftest::dispatch("Futex", selftest::Severity::Integrity, || {
+                ipc::futex::self_test()
+            });
 
             // Step 13: Initialize pipe subsystem.
             // Pipes provide one-way kernel-buffered byte streams — the classic
             // Unix pipe model but strictly unidirectional.
-            selftest::dispatch(
-                "Pipe",
-                selftest::Severity::Integrity,
-                ipc::pipe::self_test(),
-            );
+            selftest::dispatch("Pipe", selftest::Severity::Integrity, || {
+                ipc::pipe::self_test()
+            });
 
             // Step 13b: Initialize stream socket subsystem.
             // Stream sockets are bidirectional kernel-buffered byte streams — the
@@ -1005,50 +991,40 @@ extern "C" fn kernel_main() -> ! {
             // enough to expose it.  With the kernel now switched to a dedicated
             // boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
             // fixed and the self-test runs normally at boot.
-            selftest::dispatch(
-                "Stream socket",
-                selftest::Severity::Integrity,
-                ipc::stream_socket::self_test(),
-            );
+            selftest::dispatch("Stream socket", selftest::Severity::Integrity, || {
+                ipc::stream_socket::self_test()
+            });
 
             // Step 14: Initialize shared memory subsystem.
             // Shared memory regions let tasks (and future processes) map the
             // same physical pages into their address spaces for zero-copy IPC.
-            selftest::dispatch(
-                "Shared memory",
-                selftest::Severity::Integrity,
-                ipc::shm::self_test(),
-            );
+            selftest::dispatch("Shared memory", selftest::Severity::Integrity, || {
+                ipc::shm::self_test()
+            });
 
             // Step 15: Initialize eventfd subsystem.
             // Eventfds are lightweight 64-bit counters for wake-up notifications.
             // Lighter than channels — ideal for "did something happen?" signaling.
-            selftest::dispatch(
-                "Eventfd",
-                selftest::Severity::Integrity,
-                ipc::eventfd::self_test(),
-            );
+            selftest::dispatch("Eventfd", selftest::Severity::Integrity, || {
+                ipc::eventfd::self_test()
+            });
 
             // Step 15a: Epoll subsystem.
             // Epoll instances hold an interest set (fd -> events + user data) and
             // serve epoll_wait via the shared poll-readiness engine.  This self-test
             // exercises create/dup/close refcounting and ctl add/mod/del semantics.
-            selftest::dispatch(
-                "Epoll",
-                selftest::Severity::Integrity,
-                ipc::epoll::self_test(),
-            );
+            selftest::dispatch("Epoll", selftest::Severity::Integrity, || {
+                ipc::epoll::self_test()
+            });
 
             // Step 15a (cont.): Signalfd subsystem.
             // A signalfd object holds an acceptance mask; reads drain masked pending
             // signals from the owning process.  This self-test exercises create with
             // SIGKILL/SIGSTOP mask sanitization, mask get/set, and dup/close
             // refcounting with a shared mask.
-            selftest::dispatch(
-                "Signalfd",
-                selftest::Severity::Integrity,
-                ipc::signalfd::self_test(),
-            );
+            selftest::dispatch("Signalfd", selftest::Severity::Integrity, || {
+                ipc::signalfd::self_test()
+            });
 
             // Step 15a (cont.): Timerfd subsystem.
             // A timerfd object holds an armed-timer state (clock id, next expiry,
@@ -1056,11 +1032,9 @@ extern "C" fn kernel_main() -> ! {
             // self-test exercises the pure expiry math (one-shot/periodic/overdue),
             // arm/disarm/query, dup/close refcounting with shared armed state, and
             // stale-handle safety.
-            selftest::dispatch(
-                "Timerfd",
-                selftest::Severity::Integrity,
-                ipc::timerfd::self_test(),
-            );
+            selftest::dispatch("Timerfd", selftest::Severity::Integrity, || {
+                ipc::timerfd::self_test()
+            });
 
             // Step 15a (cont.): Inotify subsystem.
             // An inotify instance multiplexes a set of path watches over the
@@ -1069,52 +1043,40 @@ extern "C" fn kernel_main() -> ! {
             // self-test exercises mask translation, record sizing, add_watch +
             // event emission/read, move-pair cookie pairing, buffer-too-small
             // EINVAL, rm_watch IN_IGNORED, and dup/close refcounting.
-            selftest::dispatch(
-                "Inotify",
-                selftest::Severity::Integrity,
-                ipc::inotify::self_test(),
-            );
+            selftest::dispatch("Inotify", selftest::Severity::Integrity, || {
+                ipc::inotify::self_test()
+            });
 
             // Step 15b: Memfd subsystem.
             // Anonymous in-memory regular file backing memfd_create(2).  Exercises
             // create/close/dup refcounting, read/write/seek, pread/pwrite,
             // truncate grow/shrink, F_SEAL_* enforcement, and poll readiness.
-            selftest::dispatch(
-                "Memfd",
-                selftest::Severity::Integrity,
-                ipc::memfd::self_test(),
-            );
+            selftest::dispatch("Memfd", selftest::Severity::Integrity, || {
+                ipc::memfd::self_test()
+            });
 
             // Step 16: Initialize completion port subsystem.
             // Completion ports provide unified wait on heterogeneous kernel
             // objects (channels, pipes, eventfds, future timers/process exit).
             // This is the IOCP-like multiplexer from the design spec.
-            selftest::dispatch(
-                "Completion port",
-                selftest::Severity::Integrity,
-                ipc::completion::self_test(),
-            );
+            selftest::dispatch("Completion port", selftest::Severity::Integrity, || {
+                ipc::completion::self_test()
+            });
 
             // Step 16b: Timer subsystem self-test.
-            selftest::dispatch(
-                "Timer",
-                selftest::Severity::Integrity,
-                ipc::timer::self_test(),
-            );
+            selftest::dispatch("Timer", selftest::Severity::Integrity, || {
+                ipc::timer::self_test()
+            });
 
             // Step 16b½: IPC semaphore self-test.
-            selftest::dispatch(
-                "IPC semaphore",
-                selftest::Severity::Integrity,
-                ipc::semaphore::self_test(),
-            );
+            selftest::dispatch("IPC semaphore", selftest::Severity::Integrity, || {
+                ipc::semaphore::self_test()
+            });
 
             // Step 16c: io_ring (io_uring-style batch I/O) self-test.
-            selftest::dispatch(
-                "io_ring",
-                selftest::Severity::Integrity,
-                ipc::io_ring::self_test(),
-            );
+            selftest::dispatch("io_ring", selftest::Severity::Integrity, || {
+                ipc::io_ring::self_test()
+            });
 
             boot_timing::mark(boot_timing::Milestone::Ipc);
             console::boot_step_update(console::BootStatus::Ok, "IPC subsystem");
@@ -1124,11 +1086,9 @@ extern "C" fn kernel_main() -> ! {
             // Every resource access goes through capability checks — no
             // ambient authority.
             console::boot_step(console::BootStatus::Running, "Capabilities & logging");
-            selftest::dispatch(
-                "Capability system",
-                selftest::Severity::Integrity,
-                cap::self_test(),
-            );
+            selftest::dispatch("Capability system", selftest::Severity::Integrity, || {
+                cap::self_test()
+            });
 
             // Step 17a¼: Initialize named capability groups.
             // Built-in groups (admin, network, filesystem, driver, process, ipc)
@@ -1136,44 +1096,34 @@ extern "C" fn kernel_main() -> ! {
             cap::groups::init();
 
             // Step 17a½: Capability audit log self-test.
-            selftest::dispatch_debug(
-                "Audit",
-                selftest::Severity::Integrity,
-                cap::audit::self_test(),
-            );
+            selftest::dispatch_debug("Audit", selftest::Severity::Integrity, || {
+                cap::audit::self_test()
+            });
 
             // Step 17a¾: Capability groups self-test.
             // §914: Integrity — capability system is a kernel structural invariant.
-            selftest::dispatch_debug(
-                "cap groups",
-                selftest::Severity::Integrity,
-                cap::groups::self_test(),
-            );
+            selftest::dispatch_debug("cap groups", selftest::Severity::Integrity, || {
+                cap::groups::self_test()
+            });
 
             // Step 17a⅞: File capability tags self-test.
             // §914: Integrity — capability system is a kernel structural invariant.
-            selftest::dispatch_debug(
-                "cap file_tags",
-                selftest::Severity::Integrity,
-                cap::file_tags::self_test(),
-            );
+            selftest::dispatch_debug("cap file_tags", selftest::Severity::Integrity, || {
+                cap::file_tags::self_test()
+            });
 
             // Step 17a⅞+: Capability request broker self-test.
             // §914: Integrity — capability system is a kernel structural invariant.
-            selftest::dispatch_debug(
-                "cap request",
-                selftest::Severity::Integrity,
-                cap::request::self_test(),
-            );
+            selftest::dispatch_debug("cap request", selftest::Severity::Integrity, || {
+                cap::request::self_test()
+            });
 
             // Step 17b: Initialize structured logging subsystem.
             // JSON-lines log entries go to serial and a kernel ring buffer.
             // Must be after APIC init (uses tick_count for timestamps).
-            selftest::dispatch(
-                "Structured logging",
-                selftest::Severity::Integrity,
-                klog::self_test(),
-            );
+            selftest::dispatch("Structured logging", selftest::Severity::Integrity, || {
+                klog::self_test()
+            });
 
             console::boot_step_update(console::BootStatus::Ok, "Capabilities & logging");
 
@@ -1197,11 +1147,9 @@ extern "C" fn kernel_main() -> ! {
             // capability table, thread list, parent relationship.
             // Spawn tests exercise the full ring 3 path: IRETQ → userspace →
             // SYSCALL(SYS_EXIT) → kernel, so SYSCALL MSRs must be ready.
-            selftest::dispatch(
-                "Process management",
-                selftest::Severity::Integrity,
-                proc::self_test(),
-            );
+            selftest::dispatch("Process management", selftest::Severity::Integrity, || {
+                proc::self_test()
+            });
 
             console::boot_step_update(console::BootStatus::Ok, "Process management");
 
@@ -1219,7 +1167,7 @@ extern "C" fn kernel_main() -> ! {
                 }
 
                 // RAN-IF: "[acpi] Running self-test..."
-                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, acpi::self_test());
+                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, || acpi::self_test());
             } else {
                 // No RSDP from Limine — try scanning memory directly.
                 serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
@@ -1230,7 +1178,7 @@ extern "C" fn kernel_main() -> ! {
                 }
 
                 // RAN-IF: "[acpi] Running self-test..."
-                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, acpi::self_test());
+                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, || acpi::self_test());
             }
 
             // Step 19c: Initialize HPET (High Precision Event Timer).
@@ -1245,7 +1193,7 @@ extern "C" fn kernel_main() -> ! {
                 hpet::init();
             }
             // §914: Diagnostic — optional hardware timer, system works with PIT/TSC.
-            selftest::dispatch_debug("HPET", selftest::Severity::Diagnostic, hpet::self_test());
+            selftest::dispatch_debug("HPET", selftest::Severity::Diagnostic, || hpet::self_test());
 
             // Capture the real boot timestamp now that HPET is running, so the
             // `sysuptime` command reports uptime since actual boot rather than since
@@ -1313,7 +1261,9 @@ extern "C" fn kernel_main() -> ! {
             }
 
             // Verify IOAPIC configuration.
-            selftest::dispatch("IOAPIC", selftest::Severity::Integrity, ioapic::self_test());
+            selftest::dispatch("IOAPIC", selftest::Severity::Integrity, || {
+                ioapic::self_test()
+            });
 
             boot_timing::mark(boot_timing::Milestone::ApicTimer);
             console::boot_step_update(console::BootStatus::Ok, "Interrupt controllers (APIC)");
@@ -1322,7 +1272,7 @@ extern "C" fn kernel_main() -> ! {
             // This finds virtio, USB, NVMe, and other PCI devices.
             console::boot_step(console::BootStatus::Running, "PCI & device drivers");
             // §914: Diagnostic — PCI bus scan is optional hardware.
-            selftest::dispatch("PCI", selftest::Severity::Diagnostic, pci::self_test());
+            selftest::dispatch("PCI", selftest::Severity::Diagnostic, || pci::self_test());
 
             // Step 20d: virtio-net probe is done first (it doesn't need the
             // blkdev registry).  virtio-blk devices are discovered in the
@@ -1358,6 +1308,13 @@ extern "C" fn kernel_main() -> ! {
             // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`
             if let Err(e) = virtio::sound::init(boot_info.hhdm_offset) {
                 serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
+            }
+
+            // Virtio console: named byte channels to the host -- the boot
+            // test's self-test port, and the guest agent's (design-decisions
+            // §1534). QEMU: `-device virtio-serial-pci -device virtserialport,...`
+            if let Err(e) = virtio::console::init(boot_info.hhdm_offset) {
+                serial_println!("[virtio-con] Init: {:?} (non-fatal)", e);
             }
 
             // AC97 audio controller: legacy audio for older hardware/VMs.
@@ -1594,7 +1551,7 @@ extern "C" fn kernel_main() -> ! {
                     // dispatched unconditionally below, so the gate saw it on every
                     // boot and reported this site as running when it never has.
                     // RAN-IF: "[fat] Running self-test..."
-                    fs::fat::self_test(),
+                    || fs::fat::self_test(),
                 );
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
                 if let Err(e) = fs::cache::flush_all() {
@@ -1618,16 +1575,12 @@ extern "C" fn kernel_main() -> ! {
             // fat::self_test() it does not sit behind `fat_ok`.  It did until
             // 2026-09-12, which meant the only tests for a function on the
             // stat path had never once run.
-            selftest::dispatch_debug(
-                "fat datetime",
-                selftest::Severity::Diagnostic,
-                fs::fat::self_test_datetime(),
-            );
-            selftest::dispatch_debug(
-                "ext4 pure",
-                selftest::Severity::Diagnostic,
-                fs::ext4::self_test_pure(),
-            );
+            selftest::dispatch_debug("fat datetime", selftest::Severity::Diagnostic, || {
+                fs::fat::self_test_datetime()
+            });
+            selftest::dispatch_debug("ext4 pure", selftest::Severity::Diagnostic, || {
+                fs::ext4::self_test_pure()
+            });
             // Full ext4 self-test: eight per-module unit suites (ondisk, superblock,
             // io, balloc, journal, fsck, driver, vfs_impl) followed by integration
             // tests against a mounted ext4.
@@ -1642,11 +1595,9 @@ extern "C" fn kernel_main() -> ! {
             // suites had never once run in CI, on an image they could have tested all
             // along.  Phase 1 writes a scratch file into the ext4 mount, which is
             // discarded — the boot test attaches rootfs.ext4 with `snapshot=on`.
-            selftest::dispatch_debug(
-                "ext4",
-                selftest::Severity::Diagnostic,
-                fs::ext4::self_test(),
-            );
+            selftest::dispatch_debug("ext4", selftest::Severity::Diagnostic, || {
+                fs::ext4::self_test()
+            });
             // Phase 1 above creates and removes a scratch file on the ext4 mount, so
             // it leaves dirty blocks in the buffer cache.  The flush that used to
             // follow it lives in the `fat_ok` block, which has already run by now and
@@ -1658,7 +1609,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Buffer cache flush after ext4",
                 selftest::Severity::Diagnostic,
-                fs::cache::flush_all(),
+                || fs::cache::flush_all(),
             );
             // io_ring's file-handle path: registering a file handle with a ring
             // and driving read/write SQEs through it.
@@ -1673,7 +1624,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "io_ring file handle",
                 selftest::Severity::Diagnostic,
-                ipc::io_ring::self_test_fh(),
+                || ipc::io_ring::self_test_fh(),
             );
             // Dispatch, spawn and Linux-translation cases that need a mounted,
             // writable root.
@@ -1691,20 +1642,16 @@ extern "C" fn kernel_main() -> ! {
             // the same suites that ran at Steps 11 and 19, which halt the boot
             // on failure.  Demoting them here would mean the six cases went
             // from never running to running and not mattering.
-            selftest::dispatch(
-                "Post-mount dispatch",
-                selftest::Severity::Integrity,
-                syscall::dispatch::self_test_fs(),
-            );
-            selftest::dispatch(
-                "Post-mount spawn",
-                selftest::Severity::Integrity,
-                proc::spawn::self_test_fs(),
-            );
+            selftest::dispatch("Post-mount dispatch", selftest::Severity::Integrity, || {
+                syscall::dispatch::self_test_fs()
+            });
+            selftest::dispatch("Post-mount spawn", selftest::Severity::Integrity, || {
+                proc::spawn::self_test_fs()
+            });
             selftest::dispatch(
                 "Post-mount Linux-translation",
                 selftest::Severity::Integrity,
-                syscall::linux::self_test_fs(),
+                || syscall::linux::self_test_fs(),
             );
             // Buffer cache: hit/miss accounting, write-back, flush, read-ahead.
             //
@@ -1718,11 +1665,9 @@ extern "C" fn kernel_main() -> ! {
             // its own RAM disk, which makes it both harmless and independent of
             // how the machine booted — nothing it checks was ever
             // device-specific.
-            selftest::dispatch_debug(
-                "Buffer cache",
-                selftest::Severity::Diagnostic,
-                fs::cache::self_test(),
-            );
+            selftest::dispatch_debug("Buffer cache", selftest::Severity::Diagnostic, || {
+                fs::cache::self_test()
+            });
             // VFS: path validation, normalisation, and symlink resolution both
             // within a mount and across one.
             //
@@ -1733,7 +1678,9 @@ extern "C" fn kernel_main() -> ! {
             // writable.  It already self-skips when nothing is mounted and
             // branches on `has_tmp` for the symlink cases, so like the others it
             // had been written to decide for itself all along.
-            selftest::dispatch_debug("VFS", selftest::Severity::Diagnostic, fs::vfs::self_test());
+            selftest::dispatch_debug("VFS", selftest::Severity::Diagnostic, || {
+                fs::vfs::self_test()
+            });
             // Recycle bin self-test (trash, list, restore, empty), plus the
             // index's escaping of filenames containing its own delimiters.
             //
@@ -1746,11 +1693,9 @@ extern "C" fn kernel_main() -> ! {
             // The honest fix is the one taken here: the suite now probes for
             // that itself and skips cleanly if it fails, so it needs no gate and
             // cannot be stranded by one again.
-            selftest::dispatch_debug(
-                "Recycle bin",
-                selftest::Severity::Diagnostic,
-                fs::trash::self_test(),
-            );
+            selftest::dispatch_debug("Recycle bin", selftest::Severity::Diagnostic, || {
+                fs::trash::self_test()
+            });
             // Change notification self-test: `path_matches` subtree boundaries,
             // watch create/emit/read/close, queue overflow, and the end-to-end
             // VFS and file-handle hooks that emit ACCESS / OPEN / CLOSE_*.
@@ -1766,7 +1711,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Change notification",
                 selftest::Severity::Diagnostic,
-                fs::notify::self_test(),
+                || fs::notify::self_test(),
             );
             // Change journal self-test (persistent change tracking).
             //
@@ -1781,11 +1726,9 @@ extern "C" fn kernel_main() -> ! {
             // over it was safe only while the gate kept this suite away from a
             // live filesystem.  Its probe paths now carry a marker and its
             // counts filter to them.
-            selftest::dispatch_debug(
-                "Change journal",
-                selftest::Severity::Diagnostic,
-                fs::journal::self_test(),
-            );
+            selftest::dispatch_debug("Change journal", selftest::Severity::Diagnostic, || {
+                fs::journal::self_test()
+            });
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot
             // path.
@@ -1796,48 +1739,38 @@ extern "C" fn kernel_main() -> ! {
             // A-KERNEL-UNIT-TESTS-NEVER-RUN).  `confine_under` is the "Zip Slip"
             // guard every archive extractor depends on, so "looks tested" and
             // "never executed" was a bad pair of properties for it to have.
-            selftest::dispatch_debug(
-                "pathutil",
-                selftest::Severity::Diagnostic,
-                fs::pathutil::self_test(),
-            );
+            selftest::dispatch_debug("pathutil", selftest::Severity::Diagnostic, || {
+                fs::pathutil::self_test()
+            });
             // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
             // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
             // (skips if "/" is not writable), so it runs on a diskless memfs boot too;
             // gating it on a FAT root would leave the whole handle layer — and O_EXCL —
             // untested on the common in-memory boot path (e.g. the CI boot test).
-            selftest::dispatch_debug(
-                "File handle",
-                selftest::Severity::Diagnostic,
-                fs::handle::self_test(),
-            );
+            selftest::dispatch_debug("File handle", selftest::Severity::Diagnostic, || {
+                fs::handle::self_test()
+            });
             // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
-            selftest::dispatch_debug(
-                "MemFs",
-                selftest::Severity::Diagnostic,
-                fs::memfs::self_test(),
-            );
+            selftest::dispatch_debug("MemFs", selftest::Severity::Diagnostic, || {
+                fs::memfs::self_test()
+            });
             // NTFS read self-test.  Unlike the ext4/ISO 9660 tests this needs no
             // attached device: it builds a synthetic NTFS volume in RAM and drives the
             // whole parser over it, so the hard parts (fixups, runlists, the $I30
             // B+ tree, $ATTRIBUTE_LIST) are covered on every boot rather than only on
             // the rare boot where someone happens to attach an NTFS disk.
-            selftest::dispatch_debug(
-                "NTFS",
-                selftest::Severity::Diagnostic,
-                fs::ntfs::self_test(),
-            );
+            selftest::dispatch_debug("NTFS", selftest::Severity::Diagnostic, || {
+                fs::ntfs::self_test()
+            });
             // Btrfs read self-test, in RAM for the same reason as the NTFS one. It
             // matters more here: the awkward part of Btrfs is the mount bootstrap
             // (superblock -> sys_chunk_array -> chunk tree -> root tree -> FS tree),
             // and the synthetic volume deliberately places logical and physical
             // addresses a fixed distance apart so that a broken chunk map cannot
             // accidentally produce correct reads.
-            selftest::dispatch_debug(
-                "Btrfs",
-                selftest::Severity::Diagnostic,
-                fs::btrfs::self_test(),
-            );
+            selftest::dispatch_debug("Btrfs", selftest::Severity::Diagnostic, || {
+                fs::btrfs::self_test()
+            });
             // F2FS read self-test, also in RAM. The hard parts here are the ones no
             // amount of parsing care can substitute for reading correctly: which of
             // the two checkpoint packs is current, which of the two NAT copies the
@@ -1845,11 +1778,9 @@ extern "C" fn kernel_main() -> ! {
             // journal overrides both. The synthetic volume attaches a decoy to each
             // of the three, so a driver that gets one wrong fails a check instead of
             // returning plausible bytes from the wrong block.
-            selftest::dispatch_debug(
-                "F2FS",
-                selftest::Severity::Diagnostic,
-                fs::f2fs::self_test(),
-            );
+            selftest::dispatch_debug("F2FS", selftest::Severity::Diagnostic, || {
+                fs::f2fs::self_test()
+            });
             // ZFS read self-test, in RAM. ZFS has no fixed offsets to check
             // against: a file's attributes live wherever the pool's own SA
             // registry says they do, a ZAP entry's bucket is defined by a
@@ -1857,19 +1788,27 @@ extern "C" fn kernel_main() -> ! {
             // slots rather than after its block pointers. Each of those is a
             // place where a wrong answer is a *plausible* answer, so they are
             // exercised on every boot rather than only when a pool is present.
-            selftest::dispatch_debug("ZFS", selftest::Severity::Diagnostic, fs::zfs::self_test());
+            selftest::dispatch_debug("ZFS", selftest::Severity::Diagnostic, || {
+                fs::zfs::self_test()
+            });
+            // Device numbers: Linux's numbering for block names and the
+            // 32-bit encoding `stat` and `/proc` carry.
+            selftest::dispatch_debug("DevNum", selftest::Severity::Diagnostic, || {
+                fs::devnum::self_test()
+            });
+            // kexec: ELF parsing and destination planning for `power.reload`
+            // (design-decisions §1536). Pure, so safe to run every boot.
+            selftest::dispatch_debug("kexec", selftest::Severity::Diagnostic, || {
+                kexec::self_test()
+            });
             // devfs self-test (validates device file operations).
-            selftest::dispatch_debug(
-                "DevFs",
-                selftest::Severity::Diagnostic,
-                fs::devfs::self_test(),
-            );
+            selftest::dispatch_debug("DevFs", selftest::Severity::Diagnostic, || {
+                fs::devfs::self_test()
+            });
             // sysfs self-test (validates kernel tunables, hostname, PCI).
-            selftest::dispatch_debug(
-                "SysFs",
-                selftest::Severity::Diagnostic,
-                fs::sysfs::self_test(),
-            );
+            selftest::dispatch_debug("SysFs", selftest::Severity::Diagnostic, || {
+                fs::sysfs::self_test()
+            });
             // Cross-backend FileMeta conformance. Runs *after* every per-backend
             // self-test above, and asks a different question from all of them:
             // each of those checks what one driver does, and a field whose
@@ -1883,54 +1822,68 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "FileMeta conformance",
                 selftest::Severity::Diagnostic,
-                fs::conformance::self_test(),
+                || fs::conformance::self_test(),
             );
             // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
             // backend dispatch on a scratch tmpfs mount — runs on any root).
-            selftest::dispatch_debug(
-                "VFS mount/unmount",
-                selftest::Severity::Diagnostic,
-                fs::vfs::mount_self_test(),
-            );
+            selftest::dispatch_debug("VFS mount/unmount", selftest::Severity::Diagnostic, || {
+                fs::vfs::mount_self_test()
+            });
             // Stable file-identity self-test (the page-cache key precursor — §23/§36).
+            selftest::dispatch_debug("VFS file-identity", selftest::Severity::Diagnostic, || {
+                fs::vfs::file_identity_self_test()
+            });
+            // Unix-domain socket nodes on memfs and devfs (needs both mounted).
+            selftest::dispatch_debug("VFS socket nodes", selftest::Severity::Diagnostic, || {
+                fs::vfs::socket_node_self_test()
+            });
+            // Who owns a new node: its creator, a set-group-ID directory's
+            // group, root for the kernel.
+            selftest::dispatch_debug("VFS new-node owner", selftest::Severity::Diagnostic, || {
+                fs::vfs::owner_self_test()
+            });
+            // Unix-domain sockets by name: datagrams and streams over abstract
+            // names and /tmp nodes (needs the socket nodes above).
+            selftest::dispatch_debug("Unix-domain sockets", selftest::Severity::Integrity, || {
+                ipc::unix_socket::self_test()
+            });
+            // Descriptors passed by native programs (the native half of
+            // SCM_RIGHTS): a pipe end from one process to another.
             selftest::dispatch_debug(
-                "VFS file-identity",
-                selftest::Severity::Diagnostic,
-                fs::vfs::file_identity_self_test(),
+                "native descriptor passing",
+                selftest::Severity::Integrity,
+                ipc::native_rights::self_test,
+            );
+            // A received descriptor whose number cannot be written back is
+            // taken back, not left open where its process cannot see it.
+            selftest::dispatch_debug(
+                "SCM_RIGHTS take-back",
+                selftest::Severity::Integrity,
+                syscall::linux::self_test_install_rights_take_back,
             );
             // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
-            selftest::dispatch_debug(
-                "page-cache",
-                selftest::Severity::Diagnostic,
-                mm::page_cache::self_test(),
-            );
+            selftest::dispatch_debug("page-cache", selftest::Severity::Diagnostic, || {
+                mm::page_cache::self_test()
+            });
             // Register the page-cache shrinker so idle cached pages are reclaimed under
             // memory pressure instead of pinning frames resident without bound (§36).
             mm::page_cache::init();
             // mkfs/format self-test (exercises the SYS_FS_FORMAT backend on a RAM disk).
-            selftest::dispatch_debug(
-                "FAT mkfs/format",
-                selftest::Severity::Diagnostic,
-                fs::fat::format_self_test(),
-            );
+            selftest::dispatch_debug("FAT mkfs/format", selftest::Severity::Diagnostic, || {
+                fs::fat::format_self_test()
+            });
             // fsck self-test (exercises the SYS_FS_CHECK backend on a RAM disk).
-            selftest::dispatch_debug(
-                "FAT fsck",
-                selftest::Severity::Diagnostic,
-                fs::fat::fsck_self_test(),
-            );
+            selftest::dispatch_debug("FAT fsck", selftest::Severity::Diagnostic, || {
+                fs::fat::fsck_self_test()
+            });
             // Block-layer discard (TRIM) primitive self-test on a scratch RAM disk.
-            selftest::dispatch_debug(
-                "blkdev discard",
-                selftest::Severity::Diagnostic,
-                blkdev::self_test_discard(),
-            );
+            selftest::dispatch_debug("blkdev discard", selftest::Severity::Diagnostic, || {
+                blkdev::self_test_discard()
+            });
             // FAT fstrim (free-space discard) self-test on a scratch RAM disk.
-            selftest::dispatch_debug(
-                "FAT fstrim",
-                selftest::Severity::Diagnostic,
-                fs::fat::trim_self_test(),
-            );
+            selftest::dispatch_debug("FAT fstrim", selftest::Severity::Diagnostic, || {
+                fs::fat::trim_self_test()
+            });
         }
         case();
     }
@@ -1959,11 +1912,9 @@ extern "C" fn kernel_main() -> ! {
             // Expect this to surface lock-order findings from paths that have never been
             // validated. Those are the point.
             lockdep::init();
-            selftest::dispatch_debug(
-                "Lockdep",
-                selftest::Severity::Integrity,
-                lockdep::self_test(),
-            );
+            selftest::dispatch_debug("Lockdep", selftest::Severity::Integrity, || {
+                lockdep::self_test()
+            });
         }
         case();
     }
@@ -2016,11 +1967,9 @@ extern "C" fn kernel_main() -> ! {
     // Verify the APIC timer is actually firing before the battery relies on it
     // for preemption and watchdog kicks.  (Runs here, immediately after enable,
     // rather than at its old post-battery location.)
-    selftest::dispatch(
-        "APIC timer",
-        selftest::Severity::Integrity,
-        apic::self_test(),
-    );
+    selftest::dispatch("APIC timer", selftest::Severity::Integrity, || {
+        apic::self_test()
+    });
 
     // The lock-context check's controls, here rather than in
     // `lockdep::self_test()` (Step ~19) for the same reason the timerfd
@@ -2031,9 +1980,45 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch(
         "Lockdep lock-context",
         selftest::Severity::Integrity,
-        lockdep::self_test_lock_context(),
+        || lockdep::self_test_lock_context(),
+    );
+
+    // The heap lock is held with interrupts off (design-decisions §1563): here,
+    // where there is an "on" for it to turn off and give back.
+    selftest::dispatch(
+        "Heap lock interrupt state",
+        selftest::Severity::Integrity,
+        || mm::heap::self_test_lock_irqs(),
+    );
+
+    // The boot runs in task 0, at the idle level: two tasks that never block
+    // would keep it off the CPU for good, but for the booster, which lifts it
+    // until `idle_loop` (`sched::BOOT_TASK_WORKING`). Here, because the
+    // booster is the timer's, just enabled.
+    selftest::dispatch(
+        "Boot task not starved",
+        selftest::Severity::Integrity,
+        || sched::self_test_boot_not_starved(),
+    );
+    // A context switch hands each task back the interrupt flag it entered
+    // with, though the switch itself runs with interrupts off. Here, the
+    // first point at which there is an "on" to keep.
+    selftest::dispatch(
+        "Switch keeps the interrupt flag",
+        selftest::Severity::Integrity,
+        || sched::self_test_switch_interrupt_flag(),
     );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
+
+    // The workqueue worker, as soon as tasks can be scheduled preemptively:
+    // the self-test battery below already relies on deferred work -- a
+    // timer's SIGCONT or SIGKILL for a stopped process is carried out by the
+    // work queue (`syscall::handlers::defer_act_on_stopped`), and the ring-3
+    // tests that send one run long before Step 22c, where the worker used to
+    // be spawned. Idempotent; its self-test stays at Step 22c.
+    if let Err(e) = workqueue::init() {
+        serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
+    }
 
     {
         #[inline(never)]
@@ -2047,7 +2032,16 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch(
                 "Timerfd blocking multi-waiter",
                 selftest::Severity::Integrity,
-                ipc::timerfd::self_test_blocking_multi_waiter(),
+                || ipc::timerfd::self_test_blocking_multi_waiter(),
+            );
+            // Unix sockets' SO_RCVTIMEO / SO_SNDTIMEO, for the same reason:
+            // a wait's limit is an hrtimer. Inside `unix_socket::self_test()`
+            // (before `cpu::sti()`) it parked the boot on a timer that could
+            // not fire (rq39, 2026-10-02).
+            selftest::dispatch(
+                "Unix-domain socket timeouts",
+                selftest::Severity::Integrity,
+                || ipc::unix_socket::self_test_timeouts(),
             );
         }
         case();
@@ -2062,10 +2056,17 @@ extern "C" fn kernel_main() -> ! {
             // wake) or bounds its park with an `hrtimer`, and hrtimer callbacks
             // are dispatched from the APIC timer ISR — which only exists once the
             // timer is initialized and IF=1, i.e. from right here.
+            selftest::dispatch("Multi-object wait", selftest::Severity::Integrity, || {
+                ipc::multiwait::self_test()
+            });
+            // A completion port's sources wake its parked waiter by themselves.
+            // Here and not in `ipc::completion::self_test()` (Step 16) for the
+            // same reason: before `sti()` a sleep spins without yielding, so
+            // the waiter would not park until its source was already ready.
             selftest::dispatch(
-                "Multi-object wait",
+                "Completion port sources wake",
                 selftest::Severity::Integrity,
-                ipc::multiwait::self_test(),
+                || ipc::completion::self_test_sources_wake(),
             );
         }
         case();
@@ -2079,44 +2080,48 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux dynamic-interpreter",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_dynamic_interp(),
+        || proc::spawn::self_test_linux_dynamic_interp(),
     );
 
     // Atomic RENAME_NOREPLACE test (needs the writable /tmp memfs to exercise
     // the same-mount branch, so it runs here rather than in
     // syscall::linux::self_test() which only sees a read-only root).
-    selftest::dispatch_debug(
-        "rename_noreplace",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_rename_noreplace(),
-    );
+    selftest::dispatch_debug("rename_noreplace", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_rename_noreplace()
+    });
+
+    // The regular files and socket nodes mknod makes (the writable /tmp,
+    // for the same reason; self_test() has mknod's refusals).
+    selftest::dispatch_debug("mknod nodes", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_mknod_nodes()
+    });
+
+    // The twelve xattr calls on files (needs the writable /tmp, so it runs
+    // here; `syscall::linux::self_test()` has their argument checks).
+    selftest::dispatch_debug("Linux xattr calls", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_xattr_calls()
+    });
 
     // statfs(2) against the real mounted root (the in-self_test() version can
     // only check error paths since it runs before any filesystem is mounted).
-    selftest::dispatch_debug(
-        "statfs(/)",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_statfs_root(),
-    );
+    selftest::dispatch_debug("statfs(/)", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_statfs_root()
+    });
 
     // sendfile(2) data-transfer test (needs a writable VFS to stage files;
     // the syscall entry can't run in kernel context since it dereferences the
     // per-process Linux fd table, so this drives the sendfile_core copy path
     // against kernel-opened handles directly).
-    selftest::dispatch_debug(
-        "sendfile",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_sendfile(),
-    );
+    selftest::dispatch_debug("sendfile", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_sendfile()
+    });
 
     // copy_file_range(2) data-transfer test — same kernel-context constraint as
     // sendfile, so it drives the copy_file_range_core / overlap path against
     // kernel-opened handles directly.
-    selftest::dispatch_debug(
-        "copy_file_range",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_copy_file_range(),
-    );
+    selftest::dispatch_debug("copy_file_range", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_copy_file_range()
+    });
 
     // fallocate(2) PUNCH_HOLE / ZERO_RANGE zeroing test — drives the
     // fallocate_zero_vfs / fallocate_zero_memfd path against /tmp files and a
@@ -2129,50 +2134,38 @@ extern "C" fn kernel_main() -> ! {
     // two POSIX shapes that quietly lock the wrong bytes if mishandled:
     // l_len == 0 meaning to-EOF, and a NEGATIVE l_len meaning the range below
     // the anchor.
-    selftest::dispatch_debug(
-        "fcntl flock range",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_flock_range(),
-    );
+    selftest::dispatch_debug("fcntl flock range", selftest::Severity::Diagnostic, || {
+        syscall::record_lock::self_test_flock_range()
+    });
 
-    selftest::dispatch_debug(
-        "blkdiscard range",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_blk_discard_range(),
-    );
+    selftest::dispatch_debug("blkdiscard range", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_blk_discard_range()
+    });
 
-    selftest::dispatch_debug(
-        "fallocate range",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_fallocate_range(),
-    );
+    selftest::dispatch_debug("fallocate range", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_fallocate_range()
+    });
 
     // splice(2) data-transfer test — drives splice_core against kernel-opened
     // file handles and kernel-created pipes (non-blocking) since the syscall
     // entry needs a per-process Linux fd table absent in kernel context.
-    selftest::dispatch_debug(
-        "splice",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_splice(),
-    );
+    selftest::dispatch_debug("splice", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_splice()
+    });
 
     // tee(2) data-transfer test — drives tee_core against kernel-created pipes
     // (non-blocking); needs no VFS but runs here alongside its splice sibling.
-    selftest::dispatch_debug(
-        "tee",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_tee(),
-    );
+    selftest::dispatch_debug("tee", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_tee()
+    });
 
     // vmsplice(2) data-transfer test — drives vmsplice_core and the
     // cross-address-space copy primitives against a throwaway process's page
     // table (the boot address space has no user mappings), so it must run after
     // process/paging init.
-    selftest::dispatch_debug(
-        "vmsplice",
-        selftest::Severity::Diagnostic,
-        syscall::linux::self_test_vmsplice(),
-    );
+    selftest::dispatch_debug("vmsplice", selftest::Severity::Diagnostic, || {
+        syscall::linux::self_test_vmsplice()
+    });
 
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
@@ -2180,7 +2173,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux file-backed mmap",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_file_mmap(),
+        || syscall::linux::self_test_file_mmap(),
     );
 
     // Arm the system-wide liveness watchdog for the boot-time ring-3 phase.
@@ -2206,7 +2199,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux file-backed mmap (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_file_mmap(),
+        || proc::spawn::self_test_linux_file_mmap(),
     );
 
     // Ring-3 coverage of openat2's dirfd marshalling and RESOLVE_BENEATH
@@ -2217,7 +2210,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "openat2 RESOLVE_BENEATH (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_openat2_beneath(),
+        || proc::spawn::self_test_openat2_beneath(),
     );
 
     // Ring-3 coverage that a process cannot use a file handle it does not own.
@@ -2227,7 +2220,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "file-handle ownership (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_file_handle_ownership(),
+        || proc::spawn::self_test_file_handle_ownership(),
     );
 
     {
@@ -2258,7 +2251,7 @@ extern "C" fn kernel_main() -> ! {
                     "userspace netstack daemon (ring 3)",
                     selftest::Severity::Diagnostic,
                     // RAN-IF: "[spawn] Running userspace netstack daemon (ring 3) integration test..."
-                    proc::spawn::self_test_userspace_netstack(),
+                    || proc::spawn::self_test_userspace_netstack(),
                 );
 
                 // Phase 4: forward a DNS resolve from the kernel to the userspace
@@ -2269,7 +2262,7 @@ extern "C" fn kernel_main() -> ! {
                     "netstack DNS-over-IPC (ring 3)",
                     selftest::Severity::Diagnostic,
                     // RAN-IF: "[spawn] Running netstack DNS-over-IPC (ring 3) integration test..."
-                    proc::spawn::self_test_netstack_dns_ipc(),
+                    || proc::spawn::self_test_netstack_dns_ipc(),
                 );
             }
         }
@@ -2284,7 +2277,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux brk(2) heap (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_brk(),
+        || proc::spawn::self_test_linux_brk(),
     );
 
     {
@@ -2300,7 +2293,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Linux SA_RESTART (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_sa_restart(),
+                || proc::spawn::self_test_linux_sa_restart(),
             );
         }
         case();
@@ -2318,7 +2311,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Linux signalfd-read interruptibility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_signalfd_interrupt(),
+                || proc::spawn::self_test_linux_signalfd_interrupt(),
             );
         }
         case();
@@ -2332,7 +2325,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux eventfd-read interruptibility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_eventfd_interrupt(),
+        || proc::spawn::self_test_linux_eventfd_interrupt(),
     );
 
     {
@@ -2347,7 +2340,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Linux timerfd-read interruptibility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_timerfd_interrupt(),
+                || proc::spawn::self_test_linux_timerfd_interrupt(),
             );
         }
         case();
@@ -2365,7 +2358,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Linux inotify-read interruptibility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_inotify_interrupt(),
+                || proc::spawn::self_test_linux_inotify_interrupt(),
             );
         }
         case();
@@ -2378,7 +2371,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux poll() interruptibility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_poll_interrupt(),
+        || proc::spawn::self_test_linux_poll_interrupt(),
     );
 
     // Ring-3 test that poll(NULL, 0, -1) (no fds, infinite timeout) BLOCKS
@@ -2388,7 +2381,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_poll_empty_infinite(),
+        || proc::spawn::self_test_linux_poll_empty_infinite(),
     );
 
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
@@ -2397,7 +2390,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux argv[0] deref (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_argv0_deref(),
+        || proc::spawn::self_test_linux_argv0_deref(),
     );
 
     // Ring-3 test that the SysV stack builder places the envp array at the
@@ -2408,7 +2401,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux envp[0] deref (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_envp0_deref(),
+        || proc::spawn::self_test_linux_envp0_deref(),
     );
 
     {
@@ -2423,7 +2416,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS TLS (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_tls(),
+                || proc::spawn::self_test_fastpy_slateos_tls(),
             );
         }
         case();
@@ -2441,7 +2434,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "child-thread ELF TLS (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctls_thread(),
+                || proc::spawn::self_test_ctls_thread(),
             );
         }
         case();
@@ -2456,7 +2449,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "libc float ABI (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_clibc_float(),
+        || proc::spawn::self_test_clibc_float(),
     );
 
     // The float-ABI fixture above only moves doubles as return values or as
@@ -2466,11 +2459,9 @@ extern "C" fn kernel_main() -> ! {
     // doubles as the only check that posix/src/math.rs is numerically correct
     // as compiled for the sysroot rather than for the host test runner.
     // Bounded yield loop; can never hang.
-    selftest::dispatch_debug(
-        "libm (ring 3)",
-        selftest::Severity::Diagnostic,
-        proc::spawn::self_test_clibm(),
-    );
+    selftest::dispatch_debug("libm (ring 3)", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_clibm()
+    });
 
     // Both fixtures above move every value through an %xmm register. A `long
     // double` never touches one — it is X87/X87UP, hence MEMORY: 16 bytes on
@@ -2480,7 +2471,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "long double (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_clongdouble(),
+        || proc::spawn::self_test_clongdouble(),
     );
 
     // The three fixtures above all reach the sysroot through the plain printf
@@ -2491,17 +2482,15 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fortify printf (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_cfortify(),
+        || proc::spawn::self_test_cfortify(),
     );
 
     // The scanf side of the same varargs ABI. It gets its own fixture because
     // its failure mode is not a wrong number printed but a wild address
     // written through: every scanf argument is a destination pointer.
-    selftest::dispatch_debug(
-        "scanf (ring 3)",
-        selftest::Severity::Diagnostic,
-        proc::spawn::self_test_cscanf(),
-    );
+    selftest::dispatch_debug("scanf (ring 3)", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_cscanf()
+    });
 
     // Process groups through our own libc. AbiMode is per-process, so these
     // wrappers are the only route a native-ABI program has to the kernel's
@@ -2520,7 +2509,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "our own userland runs at all (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_coreutils_runs(),
+        || proc::spawn::self_test_coreutils_runs(),
     );
 
     // The smallest reachable form of B-FORKEXEC-BOOT-HANG: two
@@ -2529,12 +2518,12 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "zombie with a waiter (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_zombiewait(),
+        || proc::spawn::self_test_zombiewait(),
     );
     selftest::dispatch_debug(
         "process groups (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_cpgroup(),
+        || proc::spawn::self_test_cpgroup(),
     );
 
     {
@@ -2552,7 +2541,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "job control (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_jobctl(),
+                || proc::spawn::self_test_jobctl(),
             );
         }
         case();
@@ -2573,7 +2562,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "controlling terminal (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_cctty(),
+                || proc::spawn::self_test_cctty(),
             );
         }
         case();
@@ -2601,7 +2590,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "alternate signal stack (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctest_altstack(),
+                || proc::spawn::self_test_ctest_altstack(),
             );
         }
         case();
@@ -2641,7 +2630,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "ELF constructor/destructor walks (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctest_initfini(),
+                || proc::spawn::self_test_ctest_initfini(),
             );
         }
         case();
@@ -2665,7 +2654,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "hostname round trip (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctest_hostname(),
+                || proc::spawn::self_test_ctest_hostname(),
             );
         };
         case();
@@ -2785,7 +2774,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "pty ^C signal delivery (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctest_pty(),
+                || proc::spawn::self_test_ctest_pty(),
             );
         }
         case();
@@ -2797,7 +2786,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "keyboard layout set from ring 3 (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_ctest_keylayout(),
+        || proc::spawn::self_test_ctest_keylayout(),
     );
 
     // AFTER the pty rung on purpose: this forkpty()s, so while ctest-pty is
@@ -2805,8 +2794,31 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "CPython interactive REPL over a pty (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_ctest_python_repl(),
+        || proc::spawn::self_test_ctest_python_repl(),
     );
+
+    // Every C fixture lane D lists in /mnt/tests/ctest-generic.list, from one
+    // rung (requests/d-a-one-rung-for-every-c-fixture.md). LAST of the C
+    // fixtures on purpose: the list is lane D's to grow, and a new fixture
+    // that misbehaves must not be able to disturb a named rung that runs
+    // after it. The parser's own cases first, so a red list rung is not a
+    // parser bug in disguise.
+    {
+        #[inline(never)]
+        fn case() {
+            selftest::dispatch_debug(
+                "C fixture list parser",
+                selftest::Severity::Diagnostic,
+                || proc::spawn::self_test_ctest_generic_list(),
+            );
+            selftest::dispatch_debug(
+                "listed C fixtures (ring 3, generic rung)",
+                selftest::Severity::Diagnostic,
+                || proc::spawn::self_test_ctest_generic(),
+            );
+        }
+        case();
+    }
 
     {
         #[inline(never)]
@@ -2820,7 +2832,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS pure-mode file I/O (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_fileio(),
+                || proc::spawn::self_test_fastpy_slateos_fileio(),
             );
         }
         case();
@@ -2834,7 +2846,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS pure-mode file-object surface (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_fileio2(),
+        || proc::spawn::self_test_fastpy_slateos_fileio2(),
     );
 
     // Ring-3 end-to-end test of the FIRST SHIPPING fastpy SlateOS utility:
@@ -2845,7 +2857,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `cat` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_cat(),
+        || proc::spawn::self_test_fastpy_slateos_cat(),
     );
 
     // Ring-3 test of the `fastpy-run` utility: the first fastpy program to
@@ -2855,7 +2867,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `run` (os.execv handoff)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_run(),
+        || proc::spawn::self_test_fastpy_slateos_run(),
     );
 
     // Ring-3 test of the `fastpy-forkexec` utility: the fork/exec/wait trinity
@@ -2865,7 +2877,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `forkexec` (os.fork+execv+waitpid)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_forkexec(),
+        || proc::spawn::self_test_fastpy_slateos_forkexec(),
     );
 
     // Ring-3 test of the `fastpy-capture` utility: fork + os.pipe + os.dup2 +
@@ -2876,7 +2888,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `capture` (fork+pipe+dup2+exec output capture)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_capture(),
+        || proc::spawn::self_test_fastpy_slateos_capture(),
     );
 
     {
@@ -2892,7 +2904,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `pipeline` (two-stage cmd1 | cmd2)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_pipeline(),
+                || proc::spawn::self_test_fastpy_slateos_pipeline(),
             );
         }
         case();
@@ -2906,19 +2918,19 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `redirect` (cmd > file, FILE fd across exec)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_redirect(),
+        || proc::spawn::self_test_fastpy_slateos_redirect(),
     );
 
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `inredirect` (cmd < file, readable FILE fd across exec as fd 0)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_inredirect(),
+        || proc::spawn::self_test_fastpy_slateos_inredirect(),
     );
 
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `minishell` (parse a command line + dispatch through fork/open/dup2/execv)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_minishell(),
+        || proc::spawn::self_test_fastpy_slateos_minishell(),
     );
 
     // Ring-3 test of the pure-mode `pathlib.Path` runtime (CPython-free): a
@@ -2929,7 +2941,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS pure-mode `pathlib.Path` runtime",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pathlib(),
+        || proc::spawn::self_test_fastpy_slateos_pathlib(),
     );
 
     // Ring-3 test of the `fastpy-grep` utility: a fixed-string grep(1) that
@@ -2938,7 +2950,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `grep` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_grep(),
+        || proc::spawn::self_test_fastpy_slateos_grep(),
     );
 
     // Ring-3 test of the `fastpy-wc` utility: reads argv[1], counts
@@ -2947,7 +2959,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `wc` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_wc(),
+        || proc::spawn::self_test_fastpy_slateos_wc(),
     );
 
     // Ring-3 test of the `fastpy-head` utility: `head <n> <file>` parses an
@@ -2956,7 +2968,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `head` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_head(),
+        || proc::spawn::self_test_fastpy_slateos_head(),
     );
 
     // Ring-3 test of the `fastpy-uniq` utility: `uniq <file>` drops adjacent
@@ -2964,7 +2976,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `uniq` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_uniq(),
+        || proc::spawn::self_test_fastpy_slateos_uniq(),
     );
 
     // Ring-3 test of the `fastpy-tail` utility: `tail <n> <file>` prints the
@@ -2973,7 +2985,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `tail` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_tail(),
+        || proc::spawn::self_test_fastpy_slateos_tail(),
     );
 
     // Ring-3 test of the `fastpy-sort` utility: `sort <file>` collects lines
@@ -2982,7 +2994,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `sort` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_sort(),
+        || proc::spawn::self_test_fastpy_slateos_sort(),
     );
 
     // Ring-3 test of the `fastpy-freq` utility: `freq <file>` counts each
@@ -2991,7 +3003,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `freq` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_freq(),
+        || proc::spawn::self_test_fastpy_slateos_freq(),
     );
 
     // Ring-3 test of the `fastpy-ls` utility: `ls <dir>` enumerates a directory
@@ -3000,7 +3012,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `ls` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_ls(),
+        || proc::spawn::self_test_fastpy_slateos_ls(),
     );
 
     // Ring-3 test of `fastpy-rm`: deletes a staged file via os.remove
@@ -3010,7 +3022,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `rm` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_rm(),
+        || proc::spawn::self_test_fastpy_slateos_rm(),
     );
 
     // Ring-3 test of `fastpy-mv`: renames a staged file via os.rename
@@ -3018,7 +3030,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `mv` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_mv(),
+        || proc::spawn::self_test_fastpy_slateos_mv(),
     );
 
     // Ring-3 test of `fastpy-mkdir`: creates a directory via os.mkdir
@@ -3026,7 +3038,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `mkdir` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_mkdir(),
+        || proc::spawn::self_test_fastpy_slateos_mkdir(),
     );
 
     // Ring-3 test of `fastpy-rmdir`: removes a directory via os.rmdir
@@ -3034,7 +3046,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `rmdir` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_rmdir(),
+        || proc::spawn::self_test_fastpy_slateos_rmdir(),
     );
 
     // Ring-3 test of the fastpy `size` utility: the first fastpy tool to read a
@@ -3044,7 +3056,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `size` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_size(),
+        || proc::spawn::self_test_fastpy_slateos_size(),
     );
 
     // Ring-3 test of the fastpy `ftype` utility: reads st_mode's file-type bits
@@ -3054,7 +3066,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `ftype` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_ftype(),
+        || proc::spawn::self_test_fastpy_slateos_ftype(),
     );
 
     // Ring-3 test of `fastpy-symlink`, an `ln -s` clone: the first fastpy tool to
@@ -3064,7 +3076,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `symlink` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_symlink(),
+        || proc::spawn::self_test_fastpy_slateos_symlink(),
     );
 
     // Ring-3 test of `fastpy-link`, an `ln` (hard-link) clone: the first fastpy
@@ -3074,7 +3086,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `link` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_link(),
+        || proc::spawn::self_test_fastpy_slateos_link(),
     );
 
     // Ring-3 test of `fastpy-chmod` — the first fastpy tool to MUTATE a file's
@@ -3084,7 +3096,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `chmod` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_chmod(),
+        || proc::spawn::self_test_fastpy_slateos_chmod(),
     );
 
     // Ring-3 test of `fastpy-truncate` — the first fastpy tool to RESIZE a
@@ -3093,7 +3105,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `truncate` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_truncate(),
+        || proc::spawn::self_test_fastpy_slateos_truncate(),
     );
 
     // Ring-3 test of `fastpy-settimes`: os.utime → SYS_FS_SET_TIMES stamps two
@@ -3103,7 +3115,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `settimes` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_settimes(),
+        || proc::spawn::self_test_fastpy_slateos_settimes(),
     );
 
     // Ring-3 test of `fastpy-getmtime`: os.path.getmtime → SYS_FS_STAT reads the
@@ -3112,7 +3124,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `getmtime` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_getmtime(),
+        || proc::spawn::self_test_fastpy_slateos_getmtime(),
     );
 
     // Ring-3 test of `fastpy-getatime`: os.path.getatime → SYS_FS_STAT reads the
@@ -3121,7 +3133,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `getatime` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_getatime(),
+        || proc::spawn::self_test_fastpy_slateos_getatime(),
     );
 
     // Ring-3 test of `fastpy-getctime`: os.path.getctime → SYS_FS_STAT reads the
@@ -3132,7 +3144,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `getctime` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_getctime(),
+        || proc::spawn::self_test_fastpy_slateos_getctime(),
     );
 
     // Ring-3 test of `fastpy-access`: os.access(path, mode) → posix access() →
@@ -3142,7 +3154,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `access` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_access(),
+        || proc::spawn::self_test_fastpy_slateos_access(),
     );
 
     // Ring-3 test of `fastpy-samefile`: os.path.samefile → SYS_FS_STAT compares
@@ -3152,7 +3164,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `samefile` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_samefile(),
+        || proc::spawn::self_test_fastpy_slateos_samefile(),
     );
 
     // Ring-3 test of `fastpy-islink`: os.path.islink → SYS_FS_LSTAT tests
@@ -3163,7 +3175,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `islink` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_islink(),
+        || proc::spawn::self_test_fastpy_slateos_islink(),
     );
 
     // Ring-3 test of `fastpy-stat`: os.stat → SYS_FS_STAT fills the whole
@@ -3173,7 +3185,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `stat` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_stat(),
+        || proc::spawn::self_test_fastpy_slateos_stat(),
     );
 
     // Ring-3 test of `fastpy-statvfs`: os.statvfs → SYS_FS_STATVFS reports the
@@ -3184,7 +3196,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `statvfs` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_statvfs(),
+        || proc::spawn::self_test_fastpy_slateos_statvfs(),
     );
 
     // Ring-3 test of `fastpy-getuid`: os.getuid/os.getgid → the new
@@ -3194,7 +3206,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `getuid` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_getuid(),
+        || proc::spawn::self_test_fastpy_slateos_getuid(),
     );
 
     // Ring-3 test of `fastpy-setuid`: os.setuid/os.setgid → SYS_PROCESS_SET_CREDENTIALS
@@ -3203,7 +3215,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `setuid` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_setuid(),
+        || proc::spawn::self_test_fastpy_slateos_setuid(),
     );
 
     // Ring-3 test of `fastpy-nice`: os.setpriority/os.nice → SYS_PROCESS_SET_NICE
@@ -3213,7 +3225,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `nice` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_nice(),
+        || proc::spawn::self_test_fastpy_slateos_nice(),
     );
 
     // Ring-3 test of `fastpy-umask`: os.umask changes the process file-creation
@@ -3223,7 +3235,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `umask` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_umask(),
+        || proc::spawn::self_test_fastpy_slateos_umask(),
     );
 
     // Ring-3 test of `fastpy-chown`: os.chown → SYS_FS_SET_OWNER stamps distinct
@@ -3232,7 +3244,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `chown` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_chown(),
+        || proc::spawn::self_test_fastpy_slateos_chown(),
     );
 
     // Ring-3 test of `fastpy-clock`: time.time_ns() → SYS_CLOCK_REALTIME — the
@@ -3242,7 +3254,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `clock` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_clock(),
+        || proc::spawn::self_test_fastpy_slateos_clock(),
     );
 
     // Ring-3 test of `fastpy-sleep`: time.sleep() → usleep() → SYS_SLEEP — the
@@ -3253,7 +3265,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `sleep` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_sleep(),
+        || proc::spawn::self_test_fastpy_slateos_sleep(),
     );
 
     // Ring-3 test of `fastpy-getpid`: os.getpid() → getpid() → SYS_PROCESS_ID —
@@ -3264,7 +3276,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `getpid` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_getpid(),
+        || proc::spawn::self_test_fastpy_slateos_getpid(),
     );
 
     {
@@ -3279,7 +3291,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `getppid` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_getppid(),
+                || proc::spawn::self_test_fastpy_slateos_getppid(),
             );
         }
         case();
@@ -3297,7 +3309,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `gettid` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_gettid(),
+                || proc::spawn::self_test_fastpy_slateos_gettid(),
             );
         }
         case();
@@ -3316,7 +3328,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `pipe` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_pipe(),
+                || proc::spawn::self_test_fastpy_slateos_pipe(),
             );
         }
         case();
@@ -3330,7 +3342,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `dup` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_dup(),
+        || proc::spawn::self_test_fastpy_slateos_dup(),
     );
 
     {
@@ -3345,7 +3357,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `dup2` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_dup2(),
+                || proc::spawn::self_test_fastpy_slateos_dup2(),
             );
         }
         case();
@@ -3359,7 +3371,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `lseek` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_lseek(),
+        || proc::spawn::self_test_fastpy_slateos_lseek(),
     );
 
     {
@@ -3374,7 +3386,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `ftruncate` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_ftruncate(),
+                || proc::spawn::self_test_fastpy_slateos_ftruncate(),
             );
         }
         case();
@@ -3392,7 +3404,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `pos` utility (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_pos(),
+                || proc::spawn::self_test_fastpy_slateos_pos(),
             );
         }
         case();
@@ -3405,7 +3417,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `sysinfo` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_sysinfo(),
+        || proc::spawn::self_test_fastpy_slateos_sysinfo(),
     );
 
     // Ring-3 test of the third shipping fastpy utility: `fastpy-store`, the
@@ -3416,7 +3428,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `store` utility (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_store(),
+        || proc::spawn::self_test_fastpy_slateos_store(),
     );
 
     // Ring-3 CLI-lifecycle test of the fastpy-built package manager front-end:
@@ -3427,7 +3439,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` manager (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg(),
+        || proc::spawn::self_test_fastpy_slateos_pkg(),
     );
 
     // Ring-3 generations/rollback test of the fastpy package manager: commit
@@ -3437,7 +3449,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` generations/rollback (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg_gen(),
+        || proc::spawn::self_test_fastpy_slateos_pkg_gen(),
     );
 
     // Ring-3 content-integrity test of the fastpy package manager: install a
@@ -3446,7 +3458,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` content-integrity verify (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg_verify(),
+        || proc::spawn::self_test_fastpy_slateos_pkg_verify(),
     );
 
     {
@@ -3461,7 +3473,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "fastpy-on-SlateOS `pkg` store gc (ring 3)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_fastpy_slateos_pkg_gc(),
+                || proc::spawn::self_test_fastpy_slateos_pkg_gc(),
             );
         }
         case();
@@ -3473,7 +3485,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` search (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg_search(),
+        || proc::spawn::self_test_fastpy_slateos_pkg_search(),
     );
 
     // Ring-3 test of the fastpy package manager's `upgrade` subcommand: reject
@@ -3482,7 +3494,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` upgrade (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg_upgrade(),
+        || proc::spawn::self_test_fastpy_slateos_pkg_upgrade(),
     );
 
     // Ring-3 test of the fastpy package manager's transactional `batch`
@@ -3492,7 +3504,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "fastpy-on-SlateOS `pkg` batch (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_fastpy_slateos_pkg_batch(),
+        || proc::spawn::self_test_fastpy_slateos_pkg_batch(),
     );
 
     // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
@@ -3503,7 +3515,306 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux fork()+wait4() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_fork_wait(),
+        || proc::spawn::self_test_linux_fork_wait(),
+    );
+
+    // Ring-3 end-to-end test of madvise's promises: MADV_DONTNEED at 4 KiB,
+    // MADV_REMOVE, and MADV_WIPEONFORK / MADV_DONTFORK through a real fork.
+    // Same bounded harness.
+    selftest::dispatch_debug(
+        "Linux madvise (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_madvise(),
+    );
+
+    // Ring-3 end-to-end test of /dev/stdin and /dev/fd/N: a re-open of the
+    // caller's own descriptor, and stat of it. Same bounded harness.
+    selftest::dispatch_debug(
+        "Linux /dev/stdin and /dev/fd/N (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_dev_stdin(),
+    );
+
+    // Ring-3 end-to-end test of POSIX timers: timer_create and family, their
+    // SI_TIMER signals through sigtimedwait, signalfd and a handler, a
+    // periodic timer's overrun, and a fork child without timers. Bounded by
+    // time (the program sleeps while its timers run).
+    selftest::dispatch_debug(
+        "Linux POSIX timers (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_posix_timers(),
+    );
+
+    // Ring-3 test of a signal delivered from the timer interrupt to a loop
+    // that makes no system calls, with every register, the FPU state and the
+    // red zone checked after the handler.
+    selftest::dispatch_debug(
+        "Linux signal from interrupt (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_signal_from_interrupt(),
+    );
+
+    // Ring-3 test of per-thread signal state: a second thread's own mask, a
+    // kill reaching the thread that does not block it, tgkill aimed at one.
+    selftest::dispatch_debug(
+        "Linux per-thread signals (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_thread_signals(),
+    );
+
+    // Ring-3 test of the alternate signal stack: sigaltstack's answers,
+    // SA_ONSTACK and SS_AUTODISARM, a stack overflow's SIGSEGV handled on it,
+    // AT_MINSIGSTKSZ, and SIGSEGV when a frame does not fit.
+    selftest::dispatch_debug(
+        "Linux alternate signal stack (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigaltstack(),
+    );
+
+    // Ring-3 test of SIGPIPE: a write into a pipe or stream nobody reads raises
+    // it before EPIPE is seen, as Linux does; MSG_NOSIGNAL and datagrams don't.
+    selftest::dispatch_debug(
+        "Linux SIGPIPE (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigpipe(),
+    );
+
+    // Locked memory: mlock, mlock2, munlock, mlockall, MAP_LOCKED and
+    // RLIMIT_MEMLOCK, as Linux answers them (mm::mlock).
+    selftest::dispatch_debug(
+        "Linux mlock (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mlock(),
+    );
+
+    // Reads and writes whose buffer cannot be used: EFAULT only where bytes
+    // would have moved, nothing consumed, every other answer first.
+    selftest::dispatch_debug(
+        "Linux NULL-buffer I/O (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_null_buffer(),
+    );
+
+    // Real-time scheduling: SCHED_FIFO, SCHED_RR and the rest set and read
+    // back as Linux answers, inherited across fork and clone, and obeyed --
+    // a spinning SCHED_FIFO thread keeps an ordinary one off its CPU.
+    selftest::dispatch_debug(
+        "Linux real-time scheduling (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_rt_sched(),
+    );
+
+    // Restartable sequences: cpu_id kept current, a critical section switched
+    // out or signalled inside restarted at its abort address (crate::rseq).
+    selftest::dispatch_debug(
+        "Linux rseq (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_rseq(),
+    );
+    // ptrace: the register image and its checks, the call's refusals
+    // (crate::proc::ptrace), then a debugger's start end to end in ring 3.
+    selftest::dispatch_debug("ptrace", selftest::Severity::Integrity, || {
+        proc::ptrace::self_test()
+    });
+    // The debug registers a debugger sets: Linux's checks, and what a debug
+    // exception from user mode was (crate::sched::debugreg).
+    selftest::dispatch_debug("debug registers", selftest::Severity::Integrity, || {
+        sched::debugreg::self_test()
+    });
+    selftest::dispatch_debug(
+        "Linux ptrace (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ptrace(),
+    );
+    // ptrace's threads, forks and system-call stops (Tier 2).
+    selftest::dispatch_debug(
+        "Linux ptrace tier 2 (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ptrace_tier2(),
+    );
+
+    // exit_group ends every thread of the process, exit the calling one
+    // (crate::proc::thread::exit_group_current), from both threads' side.
+    selftest::dispatch_debug(
+        "Linux exit_group (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_exit_group(),
+    );
+    // An exec ends every other thread of the process first (Linux's
+    // de_thread; crate::proc::spawn::exec_process).
+    selftest::dispatch_debug(
+        "Linux exec with threads (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_exec_threads(),
+    );
+    // A parent is sent SIGCHLD when its child stops or continues, unless it
+    // asked not to (SA_NOCLDSTOP); a SIGCONT to a running child is no continue
+    // (crate::syscall::handlers::notify_parent_of_job_control).
+    selftest::dispatch_debug(
+        "Linux SIGCHLD on stop and continue (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigchld_stop(),
+    );
+    // A stopped process takes only SIGKILL and SIGCONT until it is continued,
+    // a timer's included (crate::syscall::handlers::act_on_stopped).
+    selftest::dispatch_debug(
+        "Linux signals to a stopped process (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_stopped_signals(),
+    );
+    // An ignored signal is dropped as it is sent unless blocked, so it wakes
+    // nothing (crate::proc::signal::classify, linux::post_linux_sigchld).
+    selftest::dispatch_debug(
+        "Linux ignored signals dropped at the send (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ignored_at_send(),
+    );
+    // The CPU-time clocks measure processor time, precisely, per thread and
+    // per process (crate::syscall::linux::cpu_clock, pcb::process_counters).
+    selftest::dispatch_debug(
+        "Linux CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_cpu_clocks(),
+    );
+    // The same clocks through the native door (handlers::sys_cpu_clock).
+    selftest::dispatch_debug(
+        "native CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_cpu_clock(),
+    );
+    // Timers on those clocks, fired from the tick: POSIX timers, the CPU
+    // itimers, sleeps, RLIMIT_CPU (crate::proc::cputimer).
+    selftest::dispatch_debug(
+        "Linux CPU-time timers (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_cpu_timers(),
+    );
+    // Named pipes: the opens that need no second task in the kernel, the
+    // rest -- blocking opens across a fork among them -- from ring 3
+    // (crate::ipc::fifo).
+    selftest::dispatch("Named pipes (FIFOs)", selftest::Severity::Integrity, || {
+        ipc::fifo::self_test()
+    });
+    selftest::dispatch_debug(
+        "Linux named pipes (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_fifo(),
+    );
+    // Real, effective, saved and filesystem ids, moved by Linux's rules,
+    // root's authority following them (crate::proc::setid).
+    selftest::dispatch_debug(
+        "Linux user and group ids (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_setid(),
+    );
+    // UTS namespaces and the handles on them: unshare, setns by handle and by
+    // pidfd, clone(CLONE_NEWUTS), /proc/<pid>/ns (crate::utsns, crate::nsfs).
+    selftest::dispatch_debug(
+        "Linux UTS namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_uts_namespaces(),
+    );
+    // mount(2) and umount2(2) for root: new mounts, remounts, propagation,
+    // busy, lazy and expiring unmounts (fs::Vfs, fs::new_filesystem).
+    selftest::dispatch_debug(
+        "Linux mount and umount2 (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount(),
+    );
+    // Mount namespaces: unshare, clone and setns with CLONE_NEWNS, a table
+    // of one's own (fs::mntns).
+    selftest::dispatch_debug(
+        "Linux mount namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount_namespaces(),
+    );
+    // Bind and move mounts: MS_BIND (with MS_REC), bind remounts,
+    // unbindable mounts, MS_MOVE (fs::Vfs::bind_mount and the rest).
+    selftest::dispatch_debug(
+        "Linux bind and move mounts (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_bind_mounts(),
+    );
+    // Stacked mounts and pivot_root(2): a mount on a mount point, a mount
+    // covering what is beneath, pivot_root (fs::Vfs::mount_on_top,
+    // pivot_root_tree).
+    selftest::dispatch_debug(
+        "Linux stacked mounts and pivot_root (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_stacked_mounts(),
+    );
+    // A program asks the user for a capability and the handler -- the
+    // desktop's security dialog -- answers: told on its channel, an approval
+    // granting in the same step (crate::cap::request, design-decisions 1548).
+    selftest::dispatch_debug(
+        "native capability broker (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_cap_broker(),
+    );
+    // The freezer (crate::proc::freezer, design-decisions 1562): programs in
+    // nanosleep, a pipe read, FUTEX_WAIT, wait4, SYS_SLEEP and ring 3 frozen
+    // and thawed with no call seeing it, then one process frozen alone.
+    selftest::dispatch_debug("freezer (ring 3)", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_freezer()
+    });
+    // The namespace calls for native programs, SYS_NAMESPACE_* (crate::nsfs):
+    // with the Namespace right and without it.
+    selftest::dispatch_debug(
+        "native namespace calls (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_namespaces(),
+    );
+
+    // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
+    // a real Linux-ABI program makes a channel, round-trips a message, shares
+    // an end across fork, and sees end of file with the last holder. Same
+    // bounded, hang-safe harness as the fork test above.
+    selftest::dispatch_debug(
+        "Linux slate channel descriptors (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_slate_channels(),
+    );
+
+    // Ring-3 end-to-end test of AF_UNIX sockets by name: datagrams by
+    // abstract name and by a /tmp path, a stream through listen/connect/
+    // accept, SO_PEERCRED, end of file, EADDRINUSE and unlink.
+    selftest::dispatch_debug(
+        "Linux Unix-domain sockets (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_unix_sockets(),
+    );
+
+    // Ring-3 end-to-end test of SCM_RIGHTS: pipes' write ends passed on a
+    // datagram and on a stream, every reference shown by an end of file.
+    selftest::dispatch_debug(
+        "Linux SCM_RIGHTS (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_scm_rights(),
+    );
+
+    // A zombie keeps its /proc directory until it is reaped, and reads as one
+    // there from the process's own record once its thread's task is freed.
+    selftest::dispatch_debug(
+        "Zombie /proc directory",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_zombie_keeps_proc_dir(),
+    );
+
+    // Ring-3 end-to-end test of chattr's and lsattr's ioctls: the immutable
+    // flag set by root and enforced, refused to the file's owner.
+    selftest::dispatch_debug(
+        "Linux file flags (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_file_flags(),
+    );
+
+    // Where each process's program headers are: found in a loaded segment,
+    // or copied into a read-only page when none holds them -- recorded for
+    // SYS_PROCESS_GET_PHDR and given to Linux programs as AT_PHDR.
+    selftest::dispatch_debug(
+        "Program-header placement",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_main_phdr(),
     );
 
     // Ring-3 end-to-end test of the full fork → child execve → parent wait4
@@ -3513,7 +3824,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux fork()+execve()+wait4() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_fork_execve_wait(),
+        || proc::spawn::self_test_linux_fork_execve_wait(),
     );
 
     // Ring-3 end-to-end test of the canonical shell-pipeline primitive
@@ -3524,7 +3835,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux pipe2()+fork()+dup2()+execve()+read() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_pipe_fork_dup2_exec(),
+        || proc::spawn::self_test_linux_pipe_fork_dup2_exec(),
     );
 
     // Ring-3 round-trip test for the symlink()/readlink() syscalls, which were
@@ -3533,7 +3844,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux symlink()+readlink() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_symlink_readlink(),
+        || proc::spawn::self_test_linux_symlink_readlink(),
     );
 
     // Ring-3 round-trip test for the link()/linkat() hard-link syscalls, which
@@ -3541,7 +3852,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux link() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_link(),
+        || proc::spawn::self_test_linux_link(),
     );
 
     // Kernel-context test that link(2)/linkat honour the no-follow contract:
@@ -3550,7 +3861,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "link no-follow (ext4)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_ext4_link_no_follow(),
+        || proc::spawn::self_test_ext4_link_no_follow(),
     );
 
     // Ring-3 test that utimensat() applies file timestamps (the utimensat/
@@ -3560,7 +3871,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux utimensat() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_utimensat(),
+        || proc::spawn::self_test_linux_utimensat(),
     );
 
     // Ring-3 test that chmod()/chown() mutate file metadata (the chmod/chown
@@ -3569,7 +3880,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux chmod()/chown() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_chmod_chown(),
+        || proc::spawn::self_test_linux_chmod_chown(),
     );
 
     // Ring-3 test that truncate()/ftruncate() resize files (both now route to
@@ -3579,7 +3890,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux truncate()/ftruncate() (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_truncate(),
+        || proc::spawn::self_test_linux_truncate(),
     );
 
     // Ring-3 test that fchmodat2(AT_EMPTY_PATH) chmods the file an O_RDWR fd
@@ -3588,7 +3899,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux fchmodat2(AT_EMPTY_PATH) (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_fchmodat2(),
+        || proc::spawn::self_test_linux_fchmodat2(),
     );
 
     // Ring-3 regression test for fallocate(mode=0) growing a file via the
@@ -3596,7 +3907,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux fallocate(mode=0 grow) (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_fallocate(),
+        || proc::spawn::self_test_linux_fallocate(),
     );
 
     // Ring-3 regression test for /dev/input/event0: the EVIOC* interrogation
@@ -3605,7 +3916,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "evdev input device (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_evdev(),
+        || proc::spawn::self_test_linux_evdev(),
     );
 
     // Ring-3 regression test for the virtio-gpu GETPARAM render ioctl on
@@ -3614,7 +3925,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "virtio-gpu GETPARAM (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_virtgpu_getparam(),
+        || proc::spawn::self_test_linux_virtgpu_getparam(),
     );
 
     // Ring-3 regression test for the 2D render-resource round trip
@@ -3623,7 +3934,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "virtio-gpu render-resource (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_virtgpu_resource(),
+        || proc::spawn::self_test_linux_virtgpu_resource(),
     );
 
     {
@@ -3638,7 +3949,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Linux %fs/TLS-base context-switch",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_fs_tls_switch(),
+                || proc::spawn::self_test_linux_fs_tls_switch(),
             );
         }
         case();
@@ -3652,7 +3963,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux %gs-base context-switch",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_gs_tls_switch(),
+        || proc::spawn::self_test_linux_gs_tls_switch(),
     );
 
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
@@ -3662,7 +3973,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux execveat(2) (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_linux_execveat(),
+        || proc::spawn::self_test_linux_execveat(),
     );
 
     // Ring-3 test of the SYS_PROCESS_SPAWN_EX2 (559) argument ABI: a native
@@ -3674,7 +3985,74 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "SYS_PROCESS_SPAWN_EX2 argument-ABI (ring 3)",
         selftest::Severity::Diagnostic,
-        proc::spawn::self_test_spawn_ex2_abi(),
+        || proc::spawn::self_test_spawn_ex2_abi(),
+    );
+    // Native munmap's range checks, from ring 3 with no capability -- the way
+    // the kernel-half hole it closes was reachable. Diagnostic, like the probe
+    // above: a failure still fails the boot test, without halting the rungs
+    // after it.
+    selftest::dispatch_debug(
+        "SYS_MUNMAP argument-ABI (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_munmap_abi(),
+    );
+    // A futex on shared memory is one futex in every process that maps it
+    // (lane D's d-a-futexes-keyed-by-physical-page-for-process-shared-objects).
+    selftest::dispatch_debug(
+        "shm futex across processes (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_shm_futex(),
+    );
+    // SYS_SHM_MAP_AT: a region mapped at the address the caller chooses
+    // (lane D's d-a-shm-map-at-an-address, System V shmat's address).
+    selftest::dispatch_debug(
+        "SYS_SHM_MAP_AT (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_shm_map_at(),
+    );
+    // File reads and writes stream through a bounded bounce buffer
+    // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC, class 3).
+    selftest::dispatch_debug(
+        "streamed file I/O (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_filestream_abi(),
+    );
+    // Two tasks appending to one file lose no record (known-issues.md
+    // A-VFS-APPEND-RACES): the end is found and written under one lock hold.
+    selftest::dispatch_debug(
+        "VFS append atomicity (two concurrent appenders)",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_append_is_atomic(),
+    );
+    // The mount tree: covered and stacked mounts, the root's stack
+    // (design-decisions 1557), on tables made for the test.
+    // RAN-IF: "[vfs] Running mount tree self-test..."
+    selftest::dispatch_debug(
+        "VFS mount tree (covered and stacked mounts)",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_mount_tree(),
+    );
+    // The pivot the boot makes to put the system image at `/` before init
+    // (design-decisions §1513), tried on a tree under /tmp.
+    // RAN-IF: "[vfs] Running pivot_root self-test..."
+    selftest::dispatch_debug(
+        "VFS pivot_root (the system image becomes the root)",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_pivot_mounts(),
+    );
+    // Pipe and socketpair calls copy at most what one call can move
+    // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC).
+    selftest::dispatch_debug(
+        "pipe/socketpair per-call copy bound (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_callmax_abi(),
+    );
+    // The channel and UDP send syscalls judge a payload's size before copying
+    // it in (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC).
+    selftest::dispatch_debug(
+        "send-size gate (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_sizegate_abi(),
     );
 
     {
@@ -3716,7 +4094,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc dynamic-execution",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc(),
+                || proc::spawn::self_test_linux_real_glibc(),
             );
 
             // Path Z, part 2: run a REAL glibc binary that produces output
@@ -3728,7 +4106,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc stdio-output",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_stdio(),
+                || proc::spawn::self_test_linux_real_glibc_stdio(),
             );
 
             // Path Z, part 3: run a REAL glibc binary (/bin/full) that exercises argv,
@@ -3740,7 +4118,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc argv/env/stdin/heap",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_full(),
+                || proc::spawn::self_test_linux_real_glibc_full(),
             );
 
             // Path Z, part 4: run a REAL glibc binary (/bin/pthread) that creates 4
@@ -3753,7 +4131,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc pthread",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_pthread(),
+                || proc::spawn::self_test_linux_real_glibc_pthread(),
             );
 
             // Path Z, part 5: run a REAL glibc binary (/bin/signal) that installs an
@@ -3767,7 +4145,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc signal",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_signal(),
+                || proc::spawn::self_test_linux_real_glibc_signal(),
             );
 
             // Path Z: synchronous-fault signal delivery. Proves an AbiMode::Linux
@@ -3779,7 +4157,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc fault-signal",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_fault(),
+                || proc::spawn::self_test_linux_real_glibc_fault(),
             );
 
             // Path Z: SI_QUEUE payload delivery. Proves an AbiMode::Linux process that
@@ -3789,7 +4167,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc SI_QUEUE-payload",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_sigqueue(),
+                || proc::spawn::self_test_linux_real_glibc_sigqueue(),
             );
 
             // Path Z: a real glibc program fork()s, execl()s the silent /bin/hello
@@ -3799,7 +4177,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc fork/exec/wait",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_forkexec(),
+                || proc::spawn::self_test_linux_real_glibc_forkexec(),
             );
 
             // Path Z: a real glibc program builds a `cmd1 | cmd2` pipeline —
@@ -3810,7 +4188,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc pipe",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_pipe(),
+                || proc::spawn::self_test_linux_real_glibc_pipe(),
             );
 
             // Path Z: a real glibc program performs its OWN `cmd > file` output
@@ -3821,7 +4199,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc redir",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_redir(),
+                || proc::spawn::self_test_linux_real_glibc_redir(),
             );
 
             // Path Z: the mirror image — a real glibc program performs its OWN
@@ -3832,7 +4210,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real glibc redirin",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_redirin(),
+                || proc::spawn::self_test_linux_real_glibc_redirin(),
             );
 
             // Path Z: the culmination — a real prebuilt POSIX shell (dash) runs and
@@ -3842,7 +4220,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell redir",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_redir(),
+                || proc::spawn::self_test_linux_real_glibc_shell_redir(),
             );
 
             // GNU bash 5.2 compiled for this OS and linked against OUR libc.a (not
@@ -3853,8 +4231,15 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "GNU bash on SlateOS libc",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_bash_on_slateos_libc(),
+                || proc::spawn::self_test_bash_on_slateos_libc(),
             );
+
+            // The genuine Oils shell (OSH and YSH, upstream's C++ on our libc),
+            // lane B's choice of default shell: four lines measured on Linux.
+            // Skips, counted, until lane D stages /bin/oils-for-unix.
+            selftest::dispatch_debug("Genuine Oils shell", selftest::Severity::Diagnostic, || {
+                proc::spawn::self_test_oils()
+            });
 
             // CPython 3.12.3 on OUR libc.a — the widest consumer the library has
             // (478 external symbols resolved, against bash's far smaller share).
@@ -3869,7 +4254,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "CPython on SlateOS libc",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_cpython_on_slateos_libc(),
+                || proc::spawn::self_test_cpython_on_slateos_libc(),
             );
 
             // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
@@ -3882,7 +4267,18 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "pkgconf on SlateOS libc",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_pkgconf_on_slateos_libc(),
+                || proc::spawn::self_test_pkgconf_on_slateos_libc(),
+            );
+
+            // eSpeak NG 1.52, the speech synthesizer, linked against OUR libc.a:
+            // made to speak into a WAV file, and the file judged for format,
+            // length and sound, twice for determinism, and once without its data
+            // (it must refuse). No-op without /bin/espeak-ng and its English data
+            // on the image. See requests/e-a-espeak-ng-needs-a-ring-3-rung.md.
+            selftest::dispatch_debug(
+                "eSpeak NG on SlateOS libc",
+                selftest::Severity::Diagnostic,
+                || proc::spawn::self_test_espeak_on_slateos_libc(),
             );
 
             // Path Z: the full shell-orchestration proof — dash forks + exec's an
@@ -3892,7 +4288,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell fork+exec",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_exec(),
+                || proc::spawn::self_test_linux_real_glibc_shell_exec(),
             );
 
             // Path Z: a real dash shell builds a full PIPELINE — `cmd1 | cmd2 > file`.
@@ -3902,7 +4298,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell pipeline",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_pipe(),
+                || proc::spawn::self_test_linux_real_glibc_shell_pipe(),
             );
 
             // Path Z: a real dash shell runs a `for` LOOP that fork+exec's an external
@@ -3913,7 +4309,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell loop",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_loop(),
+                || proc::spawn::self_test_linux_real_glibc_shell_loop(),
             );
 
             // Path Z: a real dash shell reads a multi-command SCRIPT from stdin (no -c,
@@ -3923,7 +4319,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell script-from-stdin",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_script_stdin(),
+                || proc::spawn::self_test_linux_real_glibc_shell_script_stdin(),
             );
 
             // Path Z: a real dash shell performs pathname expansion (globbing) —
@@ -3933,7 +4329,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell glob",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_glob(),
+                || proc::spawn::self_test_linux_real_glibc_shell_glob(),
             );
 
             // Path Z: a real dash shell performs command substitution —
@@ -3943,7 +4339,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell cmdsub",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_cmdsub(),
+                || proc::spawn::self_test_linux_real_glibc_shell_cmdsub(),
             );
 
             // Path Z: a real dash shell evaluates a conditional compound command —
@@ -3953,7 +4349,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell conditional",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_cond(),
+                || proc::spawn::self_test_linux_real_glibc_shell_cond(),
             );
 
             // Path Z: a real dash shell evaluates an arithmetic expansion —
@@ -3963,7 +4359,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell arithmetic",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_arith(),
+                || proc::spawn::self_test_linux_real_glibc_shell_arith(),
             );
 
             // Path Z: a real dash shell processes a here-document — `read a <<EOF /
@@ -3973,7 +4369,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell heredoc",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_heredoc(),
+                || proc::spawn::self_test_linux_real_glibc_shell_heredoc(),
             );
 
             // Path Z: a real dash shell runs a background job and reaps it —
@@ -3982,7 +4378,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell background-job",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_bgjob(),
+                || proc::spawn::self_test_linux_real_glibc_shell_bgjob(),
             );
 
             // Path Z: a real dash shell runs a two-stage pipeline connecting an
@@ -3992,37 +4388,37 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real dash shell pipeline",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_pipeline(),
+                || proc::spawn::self_test_linux_real_glibc_shell_pipeline(),
             );
 
             selftest::dispatch_debug(
                 "Path-Z real dash shell cwd",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_cwd(),
+                || proc::spawn::self_test_linux_real_glibc_shell_cwd(),
             );
 
             selftest::dispatch_debug(
                 "Path-Z real dash shell relpath",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_relpath(),
+                || proc::spawn::self_test_linux_real_glibc_shell_relpath(),
             );
 
             selftest::dispatch_debug(
                 "Path-Z real dash shell statpath",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_statpath(),
+                || proc::spawn::self_test_linux_real_glibc_shell_statpath(),
             );
 
             selftest::dispatch_debug(
                 "Path-Z real dash shell dirstat",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_dirstat(),
+                || proc::spawn::self_test_linux_real_glibc_shell_dirstat(),
             );
 
             selftest::dispatch_debug(
                 "Path-Z real dash shell append",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_shell_append(),
+                || proc::spawn::self_test_linux_real_glibc_shell_append(),
             );
 
             // Path Z Part 34: run an unmodified prebuilt GNU make that parses a
@@ -4031,7 +4427,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real GNU make",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_slateos_make(),
+                || proc::spawn::self_test_linux_slateos_make(),
             );
 
             // Path Z Part 35: run an unmodified prebuilt C compiler (TinyCC) that
@@ -4041,7 +4437,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real C compiler (tcc)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc(),
+                || proc::spawn::self_test_linux_real_glibc_cc(),
             );
 
             // Path Z Part 36: the *hosted* compile rung — tcc links a C program against
@@ -4051,7 +4447,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z hosted C compiler (tcc)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_hosted(),
+                || proc::spawn::self_test_linux_real_glibc_cc_hosted(),
             );
 
             // Path Z Part 37: the hosted compile rung exercising more of the glibc ABI
@@ -4060,7 +4456,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z hosted C compiler (tcc, printf/malloc)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_hosted_stdio(),
+                || proc::spawn::self_test_linux_real_glibc_cc_hosted_stdio(),
             );
 
             // Path Z Part 38: separate compilation — `tcc -c` emits two relocatable ELF
@@ -4071,7 +4467,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z separate-compilation C compiler (tcc)",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_separate(),
+                || proc::spawn::self_test_linux_real_glibc_cc_separate(),
             );
 
             // Path Z Part 39: the §4.4 toolchain capstone — real GNU make drives tcc to
@@ -4082,7 +4478,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z make-drives-tcc build",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_slateos_make_cc(),
+                || proc::spawn::self_test_linux_slateos_make_cc(),
             );
 
             // Path Z Part 61: run our own cross-compiled CMake on target, driving
@@ -4091,11 +4487,9 @@ extern "C" fn kernel_main() -> ! {
             // run" caveat was still true. Runs in place from /mnt so cmake's
             // argv[0]-derived prefix finds /mnt/share/cmake-4.4 without copying a
             // 6 MB module tree into the VFS -- see the rung's doc comment.
-            selftest::dispatch_debug(
-                "Path-Z real CMake",
-                selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_slateos_cmake(),
-            );
+            selftest::dispatch_debug("Path-Z real CMake", selftest::Severity::Diagnostic, || {
+                proc::spawn::self_test_linux_slateos_cmake()
+            });
 
             // Path Z Part 40: a multi-TU C project that #includes its own project header
             // via `#include "..."` (the project-relative quote form, distinct from the
@@ -4107,7 +4501,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z project-header C build",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_project_header(),
+                || proc::spawn::self_test_linux_real_glibc_cc_project_header(),
             );
 
             // Path Z Part 41: the first rung to exercise the C runtime's constructor/
@@ -4119,7 +4513,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z ctor/dtor C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_ctor_dtor(),
+                || proc::spawn::self_test_linux_real_glibc_cc_ctor_dtor(),
             );
 
             // Path Z Part 42: ELF thread-local storage (__thread) in a tcc-built dynamic
@@ -4130,7 +4524,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z TLS (__thread) C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_tls(),
+                || proc::spawn::self_test_linux_real_glibc_cc_tls(),
             );
 
             // Path Z Part 43: POSIX signal delivery in a tcc-built dynamic glibc binary.
@@ -4142,7 +4536,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z signal C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_signal(),
+                || proc::spawn::self_test_linux_real_glibc_cc_signal(),
             );
 
             // Path Z Part 44: non-local control flow (setjmp/longjmp) in a tcc-built
@@ -4154,7 +4548,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z setjmp/longjmp C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_setjmp(),
+                || proc::spawn::self_test_linux_real_glibc_cc_setjmp(),
             );
 
             // Path Z Part 45: user-defined variadic function (SysV varargs ABI codegen)
@@ -4165,7 +4559,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z variadic-function C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_vararg(),
+                || proc::spawn::self_test_linux_real_glibc_cc_vararg(),
             );
 
             // Path Z Part 46: floating-point / SSE codegen + the x86_64 SysV FP ABI in a
@@ -4177,7 +4571,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z floating-point C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_float(),
+                || proc::spawn::self_test_linux_real_glibc_cc_float(),
             );
 
             // Path Z Part 47: struct-by-value argument passing + return (the x86_64 SysV
@@ -4190,7 +4584,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z struct-by-value C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_struct(),
+                || proc::spawn::self_test_linux_real_glibc_cc_struct(),
             );
 
             // Path Z Part 48: long double / x87 80-bit extended-precision FP in a tcc-
@@ -4203,7 +4597,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z long-double (x87) C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_longdouble(),
+                || proc::spawn::self_test_linux_real_glibc_cc_longdouble(),
             );
 
             // Path Z Part 49: bitfield layout + extract/insert codegen in a tcc-built
@@ -4215,7 +4609,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z bitfield C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_bitfield(),
+                || proc::spawn::self_test_linux_real_glibc_cc_bitfield(),
             );
 
             // Path Z Part 50: indirect call through a function-pointer dispatch table in
@@ -4227,7 +4621,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z function-pointer C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_funcptr(),
+                || proc::spawn::self_test_linux_real_glibc_cc_funcptr(),
             );
 
             // Path Z Part 51: computed goto (GNU labels-as-values, &&label + goto *p) in
@@ -4239,7 +4633,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z computed-goto C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_computed_goto(),
+                || proc::spawn::self_test_linux_real_glibc_cc_computed_goto(),
             );
 
             // Path Z Part 52: union type-punning (overlapping-member storage aliasing) in
@@ -4251,7 +4645,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z union type-punning C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_union(),
+                || proc::spawn::self_test_linux_real_glibc_cc_union(),
             );
 
             // Path Z Part 53: function-local static variable (persistent, once-init
@@ -4263,7 +4657,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z function-local-static C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_func_static(),
+                || proc::spawn::self_test_linux_real_glibc_cc_func_static(),
             );
 
             // Path Z Part 54: variable-length array (C99 VLA -> runtime-sized stack
@@ -4275,7 +4669,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z VLA (dynamic-stack) C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_vla(),
+                || proc::spawn::self_test_linux_real_glibc_cc_vla(),
             );
 
             // Path Z Part 55: GCC-style inline assembly with operand constraints in a
@@ -4287,7 +4681,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z inline-asm C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_inline_asm(),
+                || proc::spawn::self_test_linux_real_glibc_cc_inline_asm(),
             );
 
             // Path Z Part 56: aggregate brace-initializer (runtime value → tcc-
@@ -4298,7 +4692,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z brace-init/memset C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_brace_memset(),
+                || proc::spawn::self_test_linux_real_glibc_cc_brace_memset(),
             );
 
             // Path Z Part 57: C11 `_Atomic` + `__atomic_fetch_add` builtin compiled +
@@ -4308,7 +4702,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z C11 atomic C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_atomic(),
+                || proc::spawn::self_test_linux_real_glibc_cc_atomic(),
             );
 
             // Path Z Part 58: GNU statement expressions (`({ ... })`) + `__typeof__`
@@ -4318,7 +4712,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z statement-expression C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_stmt_expr(),
+                || proc::spawn::self_test_linux_real_glibc_cc_stmt_expr(),
             );
 
             // Path Z Part 59: C11 `_Generic` type-generic selection compiled + glibc-
@@ -4328,7 +4722,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z C11 _Generic C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_generic(),
+                || proc::spawn::self_test_linux_real_glibc_cc_generic(),
             );
 
             // Path Z Part 60: a dense `switch` (lowered to an indexed jump table)
@@ -4338,7 +4732,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z dense-switch C runtime",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_cc_switch(),
+                || proc::spawn::self_test_linux_real_glibc_cc_switch(),
             );
 
             // Path-Z coverage verdict.  Every rung above self-skips when `rootfs.ext4`
@@ -4406,7 +4800,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux madvise(MADV_DONTNEED)",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_madvise_dontneed(),
+        || syscall::linux::self_test_madvise_dontneed(),
     );
 
     // Q6 / design-decisions §24: cross-address-space process_vm_readv/writev
@@ -4416,7 +4810,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux process_vm cross-AS",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_process_vm_cross_as(),
+        || syscall::linux::self_test_process_vm_cross_as(),
     );
 
     // The same capability gate on the other syscall that needed it. `kcmp` had
@@ -4428,7 +4822,7 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "Linux kcmp authority",
         selftest::Severity::Diagnostic,
-        syscall::linux::self_test_kcmp_authority(),
+        || syscall::linux::self_test_kcmp_authority(),
     );
 
     // The layer underneath that one: `copy_{to,from}_user_as` walk another
@@ -4439,7 +4833,18 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug(
         "cross-address-space fault-resolution",
         selftest::Severity::Diagnostic,
-        mm::user::self_test_cross_as_resolution(),
+        || mm::user::self_test_cross_as_resolution(),
+    );
+
+    // User-range teardown: the clamp that keeps every munmap-like syscall out
+    // of the kernel half, tried against a real mapped kernel page, and the
+    // last-sub-page rule for freeing. Needs a process, so it runs here with the
+    // test above. Diagnostic, like the ring-3 probe: a failure fails the boot
+    // test without halting the rungs after it.
+    selftest::dispatch_debug(
+        "user-range teardown (kernel half unreachable)",
+        selftest::Severity::Diagnostic,
+        || mm::user::self_test_unmap_user_range(),
     );
 
     boot_timing::mark(boot_timing::Milestone::Filesystem);
@@ -4449,226 +4854,185 @@ extern "C" fn kernel_main() -> ! {
     // must run unconditionally.  (It was previously gated behind a successful
     // FAT mount on vda, which meant the boot-test — whose vda is a raw swap
     // disk with no FAT — never exercised procfs at all.)
-    selftest::dispatch_debug(
-        "ProcFs",
-        selftest::Severity::Diagnostic,
-        fs::procfs::self_test(),
-    );
+    selftest::dispatch_debug("ProcFs", selftest::Severity::Diagnostic, || {
+        fs::procfs::self_test()
+    });
 
     {
         #[inline(never)]
         fn case() {
             // Compression self-tests — pure in-memory, no mounted FS required.
-            selftest::dispatch_debug(
-                "Compression",
-                selftest::Severity::Diagnostic,
-                fs::compress::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Bzip2",
-                selftest::Severity::Diagnostic,
-                fs::bzip2::self_test(),
-            );
-            selftest::dispatch_debug("XZ", selftest::Severity::Diagnostic, fs::xz::self_test());
-            selftest::dispatch_debug(
-                "Zstd",
-                selftest::Severity::Diagnostic,
-                fs::zstd::self_test(),
-            );
-            selftest::dispatch_debug(
-                "7z",
-                selftest::Severity::Diagnostic,
-                fs::sevenz::self_test(),
-            );
-            selftest::dispatch_debug(
-                "CPIO",
-                selftest::Severity::Diagnostic,
-                fs::cpio::self_test(),
-            );
-            selftest::dispatch_debug("ar", selftest::Severity::Diagnostic, fs::ar::self_test());
-            selftest::dispatch_debug("ZIP", selftest::Severity::Diagnostic, fs::zip::self_test());
-            selftest::dispatch_debug("tar", selftest::Severity::Diagnostic, fs::tar::self_test());
-            selftest::dispatch_debug("LZ4", selftest::Severity::Diagnostic, fs::lz4::self_test());
-            selftest::dispatch_debug("RAR", selftest::Severity::Diagnostic, fs::rar::self_test());
-            selftest::dispatch_debug(
-                "File index",
-                selftest::Severity::Diagnostic,
-                fs::index::self_test(),
-            );
-            selftest::dispatch_debug("CAS", selftest::Severity::Diagnostic, fs::cas::self_test());
+            selftest::dispatch_debug("Compression", selftest::Severity::Diagnostic, || {
+                fs::compress::self_test()
+            });
+            selftest::dispatch_debug("Bzip2", selftest::Severity::Diagnostic, || {
+                fs::bzip2::self_test()
+            });
+            selftest::dispatch_debug("XZ", selftest::Severity::Diagnostic, || fs::xz::self_test());
+            selftest::dispatch_debug("Zstd", selftest::Severity::Diagnostic, || {
+                fs::zstd::self_test()
+            });
+            selftest::dispatch_debug("7z", selftest::Severity::Diagnostic, || {
+                fs::sevenz::self_test()
+            });
+            selftest::dispatch_debug("CPIO", selftest::Severity::Diagnostic, || {
+                fs::cpio::self_test()
+            });
+            selftest::dispatch_debug("ar", selftest::Severity::Diagnostic, || fs::ar::self_test());
+            selftest::dispatch_debug("ZIP", selftest::Severity::Diagnostic, || {
+                fs::zip::self_test()
+            });
+            selftest::dispatch_debug("tar", selftest::Severity::Diagnostic, || {
+                fs::tar::self_test()
+            });
+            selftest::dispatch_debug("LZ4", selftest::Severity::Diagnostic, || {
+                fs::lz4::self_test()
+            });
+            selftest::dispatch_debug("RAR", selftest::Severity::Diagnostic, || {
+                fs::rar::self_test()
+            });
+            selftest::dispatch_debug("File index", selftest::Severity::Diagnostic, || {
+                fs::index::self_test()
+            });
+            selftest::dispatch_debug("CAS", selftest::Severity::Diagnostic, || {
+                fs::cas::self_test()
+            });
             selftest::dispatch_debug(
                 "Integrity monitoring",
                 selftest::Severity::Diagnostic,
-                fs::integrity::self_test(),
+                || fs::integrity::self_test(),
             );
-            selftest::dispatch_debug(
-                "File history",
-                selftest::Severity::Diagnostic,
-                fs::history::self_test(),
-            );
-            selftest::dispatch_debug(
-                "MIME detection",
-                selftest::Severity::Diagnostic,
-                fs::mime::self_test(),
-            );
+            selftest::dispatch_debug("File history", selftest::Severity::Diagnostic, || {
+                fs::history::self_test()
+            });
             // taskstats backs /proc/taskstats; its self-test builds fixtures via the
             // real accounting API and resets the table afterward (leaving no
             // fabricated rows), so it is safe to run during boot and gives the
             // module automated coverage it otherwise lacks (it was previously only
             // reachable via the `taskstats test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Taskstats",
-                selftest::Severity::Diagnostic,
-                fs::taskstats::self_test(),
-            );
+            selftest::dispatch_debug("Taskstats", selftest::Severity::Diagnostic, || {
+                fs::taskstats::self_test()
+            });
             // iolatency backs /proc/iolatency; like taskstats its self-test now builds
             // fixtures via the real register_device/record API and resets the table
             // afterward (leaving no fabricated devices), so it is safe at boot and
             // gives the module automated coverage it previously lacked (it was only
             // reachable via the `iolatency test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Iolatency",
-                selftest::Severity::Diagnostic,
-                fs::iolatency::self_test(),
-            );
+            selftest::dispatch_debug("Iolatency", selftest::Severity::Diagnostic, || {
+                fs::iolatency::self_test()
+            });
             // netsock backs /proc/netsock; like taskstats/iolatency its self-test now
             // builds fixtures via the real open/close/record API and resets the table
             // afterward (leaving no fabricated sockets), so it is safe at boot and
             // gives the module automated coverage it previously lacked (it was only
             // reachable via the `netsock test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Netsock",
-                selftest::Severity::Diagnostic,
-                fs::netsock::self_test(),
-            );
+            selftest::dispatch_debug("Netsock", selftest::Severity::Diagnostic, || {
+                fs::netsock::self_test()
+            });
             // slabstat backs /proc/slabstat; like taskstats/iolatency/netsock its
             // self-test now builds fixtures via the real create_cache/alloc/free API
             // and resets the table afterward (leaving no fabricated caches), so it is
             // safe at boot and gives the module automated coverage it previously
             // lacked (it was only reachable via the `slabstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Slabstat",
-                selftest::Severity::Diagnostic,
-                fs::slabstat::self_test(),
-            );
+            selftest::dispatch_debug("Slabstat", selftest::Severity::Diagnostic, || {
+                fs::slabstat::self_test()
+            });
             // futexstat backs /proc/futexstat; like its siblings the self-test now
             // builds fixtures via the real record_wait/record_wake API and resets the
             // table afterward (leaving no fabricated futex/process rows), so it is
             // safe at boot and gives the module automated coverage it previously
             // lacked (it was only reachable via the `futexstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Futexstat",
-                selftest::Severity::Diagnostic,
-                fs::futexstat::self_test(),
-            );
+            selftest::dispatch_debug("Futexstat", selftest::Severity::Diagnostic, || {
+                fs::futexstat::self_test()
+            });
             // pipestat backs /proc/pipestat; like its siblings the self-test now
             // builds fixtures via the real create/destroy/record_write/record_read API
             // and resets the table afterward (leaving no fabricated pipes), so it is
             // safe at boot and gives the module automated coverage it previously
             // lacked (it was only reachable via the `pipestat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Pipestat",
-                selftest::Severity::Diagnostic,
-                fs::pipestat::self_test(),
-            );
+            selftest::dispatch_debug("Pipestat", selftest::Severity::Diagnostic, || {
+                fs::pipestat::self_test()
+            });
             // epollstat backs /proc/epollstat; like its siblings the self-test now
             // builds fixtures via the real create_instance/add_fd/record_wait API and
             // resets the table afterward (leaving no fabricated instances), so it is
             // safe at boot and gives the module automated coverage it previously
             // lacked (it was only reachable via the `epollstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Epollstat",
-                selftest::Severity::Diagnostic,
-                fs::epollstat::self_test(),
-            );
+            selftest::dispatch_debug("Epollstat", selftest::Severity::Diagnostic, || {
+                fs::epollstat::self_test()
+            });
             // aiostat backs /proc/aiostat (io_uring-style submission-queue monitoring);
             // like its siblings the self-test now builds fixtures via the real
             // create_ring/submit/complete/overflow API and resets the table afterward
             // (leaving no fabricated rings), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `aiostat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Aiostat",
-                selftest::Severity::Diagnostic,
-                fs::aiostat::self_test(),
-            );
+            selftest::dispatch_debug("Aiostat", selftest::Severity::Diagnostic, || {
+                fs::aiostat::self_test()
+            });
             // netlat backs /proc/netlat (per-interface network RTT/processing latency);
             // like its siblings the self-test now builds fixtures via the real
             // register_iface/record_rtt/record_processing API and resets the table
             // afterward (leaving no fabricated interfaces), so it is safe at boot and
             // gives the module automated coverage it previously lacked (it was only
             // reachable via the `netlat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Netlat",
-                selftest::Severity::Diagnostic,
-                fs::netlat::self_test(),
-            );
+            selftest::dispatch_debug("Netlat", selftest::Severity::Diagnostic, || {
+                fs::netlat::self_test()
+            });
             // migstat backs /proc/migstat (per-CPU/per-task scheduler migration stats);
             // like its siblings the self-test now builds fixtures via the real
             // register_cpu/register_task/record API and resets the table afterward
             // (leaving no fabricated rows), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `migstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Migstat",
-                selftest::Severity::Diagnostic,
-                fs::migstat::self_test(),
-            );
+            selftest::dispatch_debug("Migstat", selftest::Severity::Diagnostic, || {
+                fs::migstat::self_test()
+            });
             // rcustat backs /proc/rcustat (RCU grace-period/callback/per-CPU stats);
             // like its siblings the self-test now builds fixtures via the real
             // register_cpu/begin_gp/end_gp/queue_callback API and resets the table
             // afterward (leaving no fabricated rows), so it is safe at boot and gives
             // the module automated coverage it previously lacked (it was only reachable
             // via the `rcustat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Rcustat",
-                selftest::Severity::Diagnostic,
-                fs::rcustat::self_test(),
-            );
+            selftest::dispatch_debug("Rcustat", selftest::Severity::Diagnostic, || {
+                fs::rcustat::self_test()
+            });
             // tlbstat backs /proc/tlbstat (per-CPU TLB hit/miss/shootdown/flush stats);
             // like its siblings the self-test now builds fixtures via the real
             // register_cpu/record_hit/record_miss/record_shootdown/record_flush API and
             // resets the table afterward (leaving no fabricated rows), so it is safe at
             // boot and gives the module automated coverage it previously lacked (it was
             // only reachable via the `tlbstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Tlbstat",
-                selftest::Severity::Diagnostic,
-                fs::tlbstat::self_test(),
-            );
+            selftest::dispatch_debug("Tlbstat", selftest::Severity::Diagnostic, || {
+                fs::tlbstat::self_test()
+            });
             // wqstat backs /proc/wqstat (kernel workqueue work-item stats); like its
             // siblings the self-test now builds fixtures via the real register/enqueue/
             // activate/complete/cancel API and resets the table afterward (leaving no
             // fabricated workqueues), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `wqstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Wqstat",
-                selftest::Severity::Diagnostic,
-                fs::wqstat::self_test(),
-            );
+            selftest::dispatch_debug("Wqstat", selftest::Severity::Diagnostic, || {
+                fs::wqstat::self_test()
+            });
             // numastat backs /proc/numastat (per-NUMA-node memory placement stats);
             // like its siblings the self-test now builds fixtures via the real
             // register_node/set_distance/record_* API and resets the table afterward
             // (leaving no fabricated nodes), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `numastat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Numastat",
-                selftest::Severity::Diagnostic,
-                fs::numastat::self_test(),
-            );
+            selftest::dispatch_debug("Numastat", selftest::Severity::Diagnostic, || {
+                fs::numastat::self_test()
+            });
             // cpustat backs /proc/cpustat (per-CPU user/system/idle/irq time breakdown);
             // like its siblings the self-test now builds fixtures via the real
             // register_cpu/record_time/record_context_switch/record_interrupt API and
             // resets the table afterward (leaving no fabricated rows), so it is safe at
             // boot and gives the module automated coverage it previously lacked (it was
             // only reachable via the `cpustat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Cpustat",
-                selftest::Severity::Diagnostic,
-                fs::cpustat::self_test(),
-            );
+            selftest::dispatch_debug("Cpustat", selftest::Severity::Diagnostic, || {
+                fs::cpustat::self_test()
+            });
             // irqstat backs /proc/irqstat.  UNLIKE its siblings it owns no table
             // and builds no fixtures: it is a pure projection of
             // idt::vector_counts(), so there is nothing to seed and nothing to
@@ -4677,34 +5041,21 @@ extern "C" fn kernel_main() -> ! {
             // to be non-zero and to be at least the BSP tick count, which is what
             // detects the projection having become disconnected from its counter.
             // A fixture-based test cannot see that failure at all.
-            selftest::dispatch_debug(
-                "Irqstat",
-                selftest::Severity::Diagnostic,
-                fs::irqstat::self_test(),
-            );
-            // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
-            // latency, queue depth, merges); like its siblings the self-test now builds
-            // fixtures via the real register/record_read/record_write/record_discard/
-            // record_flush/record_merge API and resets the table afterward (leaving no
-            // fabricated rows), so it is safe at boot and gives the module automated
-            // coverage it previously lacked (it was only reachable via the
-            // `diskstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Diskstat",
-                selftest::Severity::Diagnostic,
-                fs::diskstat::self_test(),
-            );
+            selftest::dispatch_debug("Irqstat", selftest::Severity::Diagnostic, || {
+                fs::irqstat::self_test()
+            });
+            // (fs::diskstat, which backed /proc/diskstat with a table nothing fed,
+            // went on 2026-10-08: /proc/diskstat is a view of fs::diskio's
+            // projection of the block layer's own counts, tested as "Diskio".)
             // acpistat backs /proc/acpistat (ACPI event counts, GPE firings, S-state
             // suspend/resume); like its siblings the self-test now builds fixtures via
             // the real register_gpe/record_event/record_gpe/set_s_state API and resets
             // the table afterward (leaving no fabricated rows), so it is safe at boot
             // and gives the module automated coverage it previously lacked (it was only
             // reachable via the `acpistat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Acpistat",
-                selftest::Severity::Diagnostic,
-                fs::acpistat::self_test(),
-            );
+            selftest::dispatch_debug("Acpistat", selftest::Severity::Diagnostic, || {
+                fs::acpistat::self_test()
+            });
             // bpfstat backs /proc/bpfstat (loaded eBPF programs, maps, run counts,
             // verifier errors); like its siblings the self-test now builds fixtures via
             // the real load_program/unload_program/record_run/create_map/
@@ -4712,11 +5063,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated rows), so it is safe at boot and gives the module automated
             // coverage it previously lacked (it was only reachable via the
             // `bpfstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Bpfstat",
-                selftest::Severity::Diagnostic,
-                fs::bpfstat::self_test(),
-            );
+            selftest::dispatch_debug("Bpfstat", selftest::Severity::Diagnostic, || {
+                fs::bpfstat::self_test()
+            });
             // budstat backs /proc/buddyinfo (per-zone buddy-allocator free counts and
             // split/coalesce activity); like its siblings the self-test now builds
             // fixtures via the real register_zone/update_free/record_split/
@@ -4724,11 +5073,9 @@ extern "C" fn kernel_main() -> ! {
             // rows), so it is safe at boot and gives the module automated coverage it
             // previously lacked (it was only reachable via the `budstat test` kshell
             // subcommand).
-            selftest::dispatch_debug(
-                "Budstat",
-                selftest::Severity::Diagnostic,
-                fs::budstat::self_test(),
-            );
+            selftest::dispatch_debug("Budstat", selftest::Severity::Diagnostic, || {
+                fs::budstat::self_test()
+            });
             // cgiostat backs /proc/cgiostat (per-cgroup disk I/O bytes, IOPS, throttle
             // events, I/O wait); like its siblings the self-test now builds fixtures via
             // the real create_cgroup/remove_cgroup/record_read/record_write/
@@ -4736,11 +5083,9 @@ extern "C" fn kernel_main() -> ! {
             // (leaving no fabricated rows), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `cgiostat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Cgiostat",
-                selftest::Severity::Diagnostic,
-                fs::cgiostat::self_test(),
-            );
+            selftest::dispatch_debug("Cgiostat", selftest::Severity::Diagnostic, || {
+                fs::cgiostat::self_test()
+            });
             // compstat backs /proc/compstat (per-zone memory compaction attempts, page
             // migrations, scan activity, stalls); like its siblings the self-test now
             // builds fixtures via the real register_zone/start_compaction/
@@ -4748,33 +5093,27 @@ extern "C" fn kernel_main() -> ! {
             // (leaving no fabricated rows), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `compstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Compstat",
-                selftest::Severity::Diagnostic,
-                fs::compstat::self_test(),
-            );
+            selftest::dispatch_debug("Compstat", selftest::Severity::Diagnostic, || {
+                fs::compstat::self_test()
+            });
             // dmastat backs /proc/dmastat (per-device DMA mappings, transfers, IOMMU
             // faults); like its siblings the self-test now builds fixtures via the real
             // register_device/record_map/record_unmap/record_transfer/record_fault API
             // and resets the table afterward (leaving no fabricated rows), so it is safe
             // at boot and gives the module automated coverage it previously lacked (it
             // was only reachable via the `dmastat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Dmastat",
-                selftest::Severity::Diagnostic,
-                fs::dmastat::self_test(),
-            );
+            selftest::dispatch_debug("Dmastat", selftest::Severity::Diagnostic, || {
+                fs::dmastat::self_test()
+            });
             // inodestat backs /proc/inodestat (per-filesystem inode counts + dcache
             // hit/miss); like its siblings the self-test now builds fixtures via the
             // real register_fs/alloc_inode/free_inode/evict/dcache_lookup API and resets
             // the table afterward (leaving no fabricated rows), so it is safe at boot and
             // gives the module automated coverage it previously lacked (it was only
             // reachable via the `inodestat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Inodestat",
-                selftest::Severity::Diagnostic,
-                fs::inodestat::self_test(),
-            );
+            selftest::dispatch_debug("Inodestat", selftest::Severity::Diagnostic, || {
+                fs::inodestat::self_test()
+            });
             // ksmstat backs /proc/ksmstat (Kernel Same-page Merging: per-process
             // sharing, merges/unmerges, scan progress, bytes saved); like its siblings
             // the self-test now builds fixtures via the real register_process/
@@ -4782,11 +5121,9 @@ extern "C" fn kernel_main() -> ! {
             // table afterward (leaving no fabricated rows), so it is safe at boot and
             // gives the module automated coverage it previously lacked (it was only
             // reachable via the `ksmstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Ksmstat",
-                selftest::Severity::Diagnostic,
-                fs::ksmstat::self_test(),
-            );
+            selftest::dispatch_debug("Ksmstat", selftest::Severity::Diagnostic, || {
+                fs::ksmstat::self_test()
+            });
             // mmapstat backs /proc/mmapstat (per-process mmap/munmap/mprotect counts,
             // per-type breakdown, total bytes mapped); like its siblings the self-test
             // now builds fixtures via the real register_process/record_map/record_unmap/
@@ -4794,11 +5131,9 @@ extern "C" fn kernel_main() -> ! {
             // rows), so it is safe at boot and gives the module automated coverage it
             // previously lacked (it was only reachable via the `mmapstat test` kshell
             // subcommand).
-            selftest::dispatch_debug(
-                "Mmapstat",
-                selftest::Severity::Diagnostic,
-                fs::mmapstat::self_test(),
-            );
+            selftest::dispatch_debug("Mmapstat", selftest::Severity::Diagnostic, || {
+                fs::mmapstat::self_test()
+            });
             // pagestat backs /proc/pagestat (per-zone page allocator stats, per-order
             // histogram, huge-page pools); like its siblings the self-test now builds
             // fixtures via the real register_zone/record_alloc/record_free/
@@ -4806,11 +5141,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated rows), so it is safe at boot and gives the module automated
             // coverage it previously lacked (it was only reachable via the `pagestat
             // test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Pagestat",
-                selftest::Severity::Diagnostic,
-                fs::pagestat::self_test(),
-            );
+            selftest::dispatch_debug("Pagestat", selftest::Severity::Diagnostic, || {
+                fs::pagestat::self_test()
+            });
             // pidstat backs /proc/pidstat (per-PID-namespace allocation counts, reuse
             // rate, high-watermark); like its siblings the self-test now builds fixtures
             // via the real alloc_pid/free_pid/create_ns API and resets the table
@@ -4818,11 +5151,9 @@ extern "C" fn kernel_main() -> ! {
             // counters, no fabricated activity), so it is safe at boot and gives the
             // module automated coverage it previously lacked (it was only reachable via
             // the `pidstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Pidstat",
-                selftest::Severity::Diagnostic,
-                fs::pidstat::self_test(),
-            );
+            selftest::dispatch_debug("Pidstat", selftest::Severity::Diagnostic, || {
+                fs::pidstat::self_test()
+            });
             // pmcstat backs /proc/pmcstat (per-CPU hardware performance counters,
             // derived IPC + cache-miss rate, event multiplexing); like its siblings the
             // self-test now builds fixtures via the real register_cpu/record_sample/
@@ -4830,11 +5161,9 @@ extern "C" fn kernel_main() -> ! {
             // (leaving no fabricated rows), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `pmcstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Pmcstat",
-                selftest::Severity::Diagnostic,
-                fs::pmcstat::self_test(),
-            );
+            selftest::dispatch_debug("Pmcstat", selftest::Severity::Diagnostic, || {
+                fs::pmcstat::self_test()
+            });
             // powerstat backs /proc/powerstat (per-domain power state, energy in uJ,
             // transitions, wake-event log); like its siblings the self-test now builds
             // fixtures via the real register_domain/record_transition/update_energy/
@@ -4842,22 +5171,18 @@ extern "C" fn kernel_main() -> ! {
             // rows), so it is safe at boot and gives the module automated coverage it
             // previously lacked (it was only reachable via the `powerstat test` kshell
             // subcommand).
-            selftest::dispatch_debug(
-                "Powerstat",
-                selftest::Severity::Diagnostic,
-                fs::powerstat::self_test(),
-            );
+            selftest::dispatch_debug("Powerstat", selftest::Severity::Diagnostic, || {
+                fs::powerstat::self_test()
+            });
             // procstat backs /proc/procstat (per-process CPU/memory/IO/fault/ctx-switch
             // accounting, top-CPU/top-mem views); like its siblings the self-test now
             // builds fixtures via the real register/update_cpu/update_memory/unregister
             // API and resets the table afterward (leaving no fabricated rows), so it is
             // safe at boot and gives the module automated coverage it previously lacked
             // (it was only reachable via the `procstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Procstat",
-                selftest::Severity::Diagnostic,
-                fs::procstat::self_test(),
-            );
+            selftest::dispatch_debug("Procstat", selftest::Severity::Diagnostic, || {
+                fs::procstat::self_test()
+            });
             // ratestat backs /proc/ratestat (per-limiter token-bucket rate-limiting
             // stats: allow/deny counts, current bucket level, burst-exhaustion events);
             // the self-test now builds fixtures via the real register/record_allow/
@@ -4865,11 +5190,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated rows), so it is safe at boot and gives the module automated
             // coverage it previously lacked (it was only reachable via the `ratestat
             // test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Ratestat",
-                selftest::Severity::Diagnostic,
-                fs::ratestat::self_test(),
-            );
+            selftest::dispatch_debug("Ratestat", selftest::Severity::Diagnostic, || {
+                fs::ratestat::self_test()
+            });
             // rqstat backs /proc/rqstat (per-CPU runqueue depth/wait/load-balance stats);
             // record functions return NotFound for unknown CPUs and there was no register
             // API, so added register_cpu(cpu_id) (zeroed counters) — the proper fix is to
@@ -4878,11 +5201,9 @@ extern "C" fn kernel_main() -> ! {
             // resets the table afterward (leaving no fabricated rows), so it is safe at
             // boot and gives the module automated coverage it previously lacked (it was
             // only reachable via the `rqstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Rqstat",
-                selftest::Severity::Diagnostic,
-                fs::rqstat::self_test(),
-            );
+            selftest::dispatch_debug("Rqstat", selftest::Severity::Diagnostic, || {
+                fs::rqstat::self_test()
+            });
             // schedlat backs /proc/schedlat (per-CPU scheduling-latency stats: wakeup-to-
             // run / runqueue-wait / preemption latencies + per-CPU latency histograms);
             // record functions return NotFound for unknown CPUs and there was no register
@@ -4892,11 +5213,9 @@ extern "C" fn kernel_main() -> ! {
             // resets the table afterward (leaving no fabricated rows), so it is safe at
             // boot and gives the module automated coverage it previously lacked (it was
             // only reachable via the `schedlat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Schedlat",
-                selftest::Severity::Diagnostic,
-                fs::schedlat::self_test(),
-            );
+            selftest::dispatch_debug("Schedlat", selftest::Severity::Diagnostic, || {
+                fs::schedlat::self_test()
+            });
             // ttystat backs /proc/ttystat (per-TTY read/write bytes+ops, line-discipline
             // signals, buffer overruns, buffer usage); already had a full register/
             // record_read/record_write/record_signal/record_overrun/set_buf_used API, so
@@ -4905,11 +5224,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated rows), so it is safe at boot and gives the module automated
             // coverage it previously lacked (it was only reachable via the `ttystat test`
             // kshell subcommand).
-            selftest::dispatch_debug(
-                "Ttystat",
-                selftest::Severity::Diagnostic,
-                fs::ttystat::self_test(),
-            );
+            selftest::dispatch_debug("Ttystat", selftest::Severity::Diagnostic, || {
+                fs::ttystat::self_test()
+            });
             // zramstat backs /proc/zramstat (per-ZRAM-device compressed-swap stats:
             // original/compressed sizes, mem used, read/write/discard ops, compression
             // ratio); already had a full create_device/remove_device/record_write/
@@ -4919,11 +5236,9 @@ extern "C" fn kernel_main() -> ! {
             // afterward (leaving no fabricated rows), so it is safe at boot and gives the
             // module automated coverage it previously lacked (it was only reachable via
             // the `zramstat test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Zramstat",
-                selftest::Severity::Diagnostic,
-                fs::zramstat::self_test(),
-            );
+            selftest::dispatch_debug("Zramstat", selftest::Severity::Diagnostic, || {
+                fs::zramstat::self_test()
+            });
             // thpstat backs /proc/thpstat (transparent-huge-page promotion/demotion/
             // split/compaction/khugepaged stats per size class). The two size-class rows
             // (PMD 2MiB, PUD 1GiB) are real fixed structure kept with zeroed counters; the
@@ -4933,11 +5248,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated activity), so it is safe at boot and gives the module automated
             // coverage it previously lacked (it was only reachable via the `thpstat test`
             // kshell subcommand).
-            selftest::dispatch_debug(
-                "Thpstat",
-                selftest::Severity::Diagnostic,
-                fs::thpstat::self_test(),
-            );
+            selftest::dispatch_debug("Thpstat", selftest::Severity::Diagnostic, || {
+                fs::thpstat::self_test()
+            });
             // swapact backs /proc/swapact (per-swap-area swap-in/out counts, pages, and
             // latencies); already had a full register/record_in/record_out API, so just
             // emptied init_defaults. The self-test now builds fixtures via that real API
@@ -4946,11 +5259,9 @@ extern "C" fn kernel_main() -> ! {
             // (leaving no fabricated rows), so it is safe at boot and gives the module
             // automated coverage it previously lacked (it was only reachable via the
             // `swapact test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Swapact",
-                selftest::Severity::Diagnostic,
-                fs::swapact::self_test(),
-            );
+            selftest::dispatch_debug("Swapact", selftest::Severity::Diagnostic, || {
+                fs::swapact::self_test()
+            });
             // writeback backs /proc/writeback (per-device dirty/writeback/written page
             // counts + flusher-thread state). Record functions returned NotFound for
             // unknown devices and there was no register API, so added register_device(dev)
@@ -4961,11 +5272,9 @@ extern "C" fn kernel_main() -> ! {
             // assertions and resets the table afterward (leaving no fabricated rows), so
             // it is safe at boot and gives the module automated coverage it previously
             // lacked (it was only reachable via the `writeback test` kshell subcommand).
-            selftest::dispatch_debug(
-                "Writeback",
-                selftest::Severity::Diagnostic,
-                fs::writeback::self_test(),
-            );
+            selftest::dispatch_debug("Writeback", selftest::Severity::Diagnostic, || {
+                fs::writeback::self_test()
+            });
             // blkqueue backs /proc/blkqueue (per-device block I/O queue depth, request
             // merges, plug/unplug events).  Its init_defaults() previously seeded two
             // fictional devices (sda/nvme0n1) with ~60M fabricated submitted I/Os; that
@@ -4973,11 +5282,9 @@ extern "C" fn kernel_main() -> ! {
             // submit/complete/merge/plug/unplug record functions).  The residue-free
             // self_test builds its fixtures via the real API with exact assertions and
             // resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Blkqueue",
-                selftest::Severity::Diagnostic,
-                fs::blkqueue::self_test(),
-            );
+            selftest::dispatch_debug("Blkqueue", selftest::Severity::Diagnostic, || {
+                fs::blkqueue::self_test()
+            });
             // netqueue backs /proc/netqueue (per-NIC-queue TX/RX packets, drops, NAPI
             // poll/budget-exhaustion).  Its init_defaults() previously seeded four
             // fictional eth0 queues with 190M/150M fabricated RX/TX packets; that demo
@@ -4985,11 +5292,9 @@ extern "C" fn kernel_main() -> ! {
             // record_packets/record_drop/record_napi_poll functions).  The residue-free
             // self_test builds its fixtures via the real API with exact assertions and
             // resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Netqueue",
-                selftest::Severity::Diagnostic,
-                fs::netqueue::self_test(),
-            );
+            selftest::dispatch_debug("Netqueue", selftest::Severity::Diagnostic, || {
+                fs::netqueue::self_test()
+            });
             // pagecache backs /proc/pagecache (per-device file-cache hits/misses/
             // evictions/readahead and derived hit-rate/readahead-rate).  Its
             // init_defaults() previously seeded two fictional devices (sda/nvme0n1) with
@@ -5004,11 +5309,9 @@ extern "C" fn kernel_main() -> ! {
             // projected cache is live and can advance mid-test), and clears its fixtures
             // afterward, so it is safe at boot.  Note this call is also what leaves the
             // table initialised: nothing else calls pagecache::init_defaults().
-            selftest::dispatch_debug(
-                "Pagecache",
-                selftest::Severity::Diagnostic,
-                fs::pagecache::self_test(),
-            );
+            selftest::dispatch_debug("Pagecache", selftest::Severity::Diagnostic, || {
+                fs::pagecache::self_test()
+            });
             // taskio backs /proc/taskio (per-process read/write bytes, syscall counts,
             // cancelled writes, io-wait time, major faults).  Its init_defaults()
             // previously seeded three fictional tasks (pid 1/100/200) with 2.6GB/1.25GB
@@ -5017,11 +5320,9 @@ extern "C" fn kernel_main() -> ! {
             // record_io_wait/record_page_fault_io functions).  The residue-free
             // self_test builds its fixtures via the real API with exact assertions and
             // resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Taskio",
-                selftest::Severity::Diagnostic,
-                fs::taskio::self_test(),
-            );
+            selftest::dispatch_debug("Taskio", selftest::Severity::Diagnostic, || {
+                fs::taskio::self_test()
+            });
             // netspeed backs /proc/netspeed (per-interface bandwidth snapshots + speed
             // test history).  Its init_defaults() previously seeded a placeholder "eth0"
             // snapshot (fabricating an interface's existence) and its run_test()
@@ -5030,11 +5331,9 @@ extern "C" fn kernel_main() -> ! {
             // appear only via update_bandwidth from real net-stack counters) and run_test
             // now honestly returns NotSupported until a real measurement backend exists.
             // The residue-free self_test verifies both and resets the table afterward.
-            selftest::dispatch_debug(
-                "Netspeed",
-                selftest::Severity::Diagnostic,
-                fs::netspeed::self_test(),
-            );
+            selftest::dispatch_debug("Netspeed", selftest::Severity::Diagnostic, || {
+                fs::netspeed::self_test()
+            });
             // diskhealth backs /proc/diskhealth (per-drive S.M.A.R.T. health, temp,
             // error rates, failure prediction).  Its init_defaults() previously seeded
             // two fictional disks with INVENTED model/serial numbers ("WDC WD10EZEX",
@@ -5043,11 +5342,9 @@ extern "C" fn kernel_main() -> ! {
             // layer).  The residue-free self_test builds its fixtures via the real API,
             // exercises the compute_health grading (Excellent/Poor/Critical) with exact
             // assertions, and resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Diskhealth",
-                selftest::Severity::Diagnostic,
-                fs::diskhealth::self_test(),
-            );
+            selftest::dispatch_debug("Diskhealth", selftest::Severity::Diagnostic, || {
+                fs::diskhealth::self_test()
+            });
             // netdev backs /proc/netdev (per-NIC packet/byte/error/drop counters + link
             // state, like Linux /proc/net/dev).  Its init_defaults() previously seeded
             // three fictional interfaces (lo/eth0/wlan0) with 51GB/11GB fabricated rx/tx
@@ -5056,11 +5353,9 @@ extern "C" fn kernel_main() -> ! {
             // record_error/record_drop functions).  The residue-free self_test builds its
             // fixtures via the real API with exact assertions and resets the table
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Netdev",
-                selftest::Severity::Diagnostic,
-                fs::netdev::self_test(),
-            );
+            selftest::dispatch_debug("Netdev", selftest::Severity::Diagnostic, || {
+                fs::netdev::self_test()
+            });
             // netfilter backs /proc/netfilter (firewall rules + connection tracking +
             // packet accept/drop/reject totals).  Its init_defaults() previously seeded
             // four fictional rules ("allow established" 5M matches/10GB, "allow ssh",
@@ -5072,11 +5367,9 @@ extern "C" fn kernel_main() -> ! {
             // and totals advance only on real record_match calls.  The residue-free
             // self_test builds its fixtures via the real API with exact assertions and
             // resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Netfilter",
-                selftest::Severity::Diagnostic,
-                fs::netfilter::self_test(),
-            );
+            selftest::dispatch_debug("Netfilter", selftest::Severity::Diagnostic, || {
+                fs::netfilter::self_test()
+            });
             // mempress backs the PSI-style /proc/pressure/memory view (memory stall
             // times, reclaim activity, OOM proximity).  Its init_defaults() previously
             // seeded fictional pressure — level Low, 5.5s total stall, 10M reclaim
@@ -5086,11 +5379,9 @@ extern "C" fn kernel_main() -> ! {
             // update_level/set_oom_proximity calls from the reclaim/OOM paths).  The
             // residue-free self_test builds its fixtures via the real API with exact
             // assertions and resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Mempress",
-                selftest::Severity::Diagnostic,
-                fs::mempress::self_test(),
-            );
+            selftest::dispatch_debug("Mempress", selftest::Severity::Diagnostic, || {
+                fs::mempress::self_test()
+            });
             // devfreq backs /proc/devfreq (per-device frequency governors, current
             // frequency, transition counts, time-in-state).  Its init_defaults()
             // previously seeded two fictional devices — "gpu0" 200MHz-2GHz OnDemand with
@@ -5101,11 +5392,9 @@ extern "C" fn kernel_main() -> ! {
             // calls).  The residue-free self_test builds its fixtures via the real API
             // with exact assertions and resets the table afterward, so it is safe at
             // boot.
-            selftest::dispatch_debug(
-                "Devfreq",
-                selftest::Severity::Diagnostic,
-                fs::devfreq::self_test(),
-            );
+            selftest::dispatch_debug("Devfreq", selftest::Severity::Diagnostic, || {
+                fs::devfreq::self_test()
+            });
             // memcg backs /proc/memcg (per-cgroup memory usage, limits, swap, failcnt,
             // OOM kills, charge/uncharge counts).  Its init_defaults() previously seeded
             // three fictional cgroups — "/" 2GiB usage / 500k charges, "/system" 512MiB
@@ -5115,11 +5404,9 @@ extern "C" fn kernel_main() -> ! {
             // subsystem and usage is accounted only through real charge/uncharge calls).
             // The residue-free self_test builds its fixtures via the real API with exact
             // assertions and resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Memcg",
-                selftest::Severity::Diagnostic,
-                fs::memcg::self_test(),
-            );
+            selftest::dispatch_debug("Memcg", selftest::Severity::Diagnostic, || {
+                fs::memcg::self_test()
+            });
             // cgmem backs /proc/cgmem (per-cgroup page-level memory stats: usage/RSS/
             // cache/swap pages, charges, uncharges, OOM kills, high-watermark events).
             // Its init_defaults() previously seeded three fictional cgroups — "root"
@@ -5130,11 +5417,9 @@ extern "C" fn kernel_main() -> ! {
             // record_uncharge calls).  The residue-free self_test builds its fixtures via
             // the real API with exact assertions and resets the table afterward, so it is
             // safe at boot.
-            selftest::dispatch_debug(
-                "Cgmem",
-                selftest::Severity::Diagnostic,
-                fs::cgmem::self_test(),
-            );
+            selftest::dispatch_debug("Cgmem", selftest::Severity::Diagnostic, || {
+                fs::cgmem::self_test()
+            });
             // vmzone backs /proc/vmzone (per-zone page totals, watermarks, free/active/
             // inactive pages, alloc/free/reclaim activity).  Its init_defaults()
             // previously seeded four fictional zones — DMA 4096 pages / 10k allocs,
@@ -5146,11 +5431,9 @@ extern "C" fn kernel_main() -> ! {
             // record_alloc/record_free/record_reclaim calls).  The residue-free self_test
             // builds its fixtures via the real API with exact assertions and resets the
             // table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Vmzone",
-                selftest::Severity::Diagnostic,
-                fs::vmzone::self_test(),
-            );
+            selftest::dispatch_debug("Vmzone", selftest::Severity::Diagnostic, || {
+                fs::vmzone::self_test()
+            });
             // vmballoon backs /proc/vmballoon (VM memory-balloon status: current/target/
             // max pages, inflate/deflate counts and page totals, OOM events, free-page
             // hints).  Its init_defaults() previously seeded a fictional balloon — 100k
@@ -5161,11 +5444,9 @@ extern "C" fn kernel_main() -> ! {
             // deflate/record_oom/record_free_hint calls).  The residue-free self_test
             // builds its fixtures via the real API with exact assertions and resets the
             // status afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Vmballoon",
-                selftest::Severity::Diagnostic,
-                fs::vmballoon::self_test(),
-            );
+            selftest::dispatch_debug("Vmballoon", selftest::Severity::Diagnostic, || {
+                fs::vmballoon::self_test()
+            });
             // softirq backs /proc/softirq (deferred-interrupt stats: per-CPU softirq/
             // tasklet/ksoftirqd counts and per-type raised/executed/time).  Its
             // init_defaults() previously seeded four fictional CPUs with invented
@@ -5178,11 +5459,9 @@ extern "C" fn kernel_main() -> ! {
             // only on real raise/run/tasklet_run/ksoftirqd_wakeup calls.  The residue-
             // free self_test builds its fixtures via the real API with exact assertions
             // and resets the tables afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Softirq",
-                selftest::Severity::Diagnostic,
-                fs::softirq::self_test(),
-            );
+            selftest::dispatch_debug("Softirq", selftest::Severity::Diagnostic, || {
+                fs::softirq::self_test()
+            });
             // timerq backs /proc/timerq (kernel timer queue: per-timer id/name/type/
             // state/deadline/interval/fire-count/overruns plus created/fired/cancelled/
             // overrun totals).  Its init_defaults() previously seeded three fictional
@@ -5194,11 +5473,9 @@ extern "C" fn kernel_main() -> ! {
             // builds its fixtures via the real API with exact assertions (using a far-
             // future periodic deadline so fire_expired is deterministic) and resets the
             // queue afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Timerq",
-                selftest::Severity::Diagnostic,
-                fs::timerq::self_test(),
-            );
+            selftest::dispatch_debug("Timerq", selftest::Severity::Diagnostic, || {
+                fs::timerq::self_test()
+            });
             // schedclass backs /proc/schedclass (scheduler-class diagnostics: per-task
             // pid/class/priority/runtime/switches/migrations and per-class task counts,
             // context switches, runtime, slices, and migrations).  Its init_defaults()
@@ -5213,11 +5490,9 @@ extern "C" fn kernel_main() -> ! {
             // record_slice/record_migration calls.  The residue-free self_test builds
             // its fixtures via the real API with exact assertions and resets the tables
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Schedclass",
-                selftest::Severity::Diagnostic,
-                fs::schedclass::self_test(),
-            );
+            selftest::dispatch_debug("Schedclass", selftest::Severity::Diagnostic, || {
+                fs::schedclass::self_test()
+            });
             // schedwait backs /proc/schedwait (scheduler-wait diagnostics: per-reason
             // wait counts/total-ns/max-ns across runqueue/iowait/lock/sleep/ipc/pgfault
             // plus a six-bucket latency histogram and global wait totals).  Its
@@ -5229,11 +5504,9 @@ extern "C" fn kernel_main() -> ! {
             // record_wait calls.  The residue-free self_test builds its fixtures via the
             // real API with exact assertions (including exact histogram-bucket placement)
             // and resets the tables afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Schedwait",
-                selftest::Severity::Diagnostic,
-                fs::schedwait::self_test(),
-            );
+            selftest::dispatch_debug("Schedwait", selftest::Severity::Diagnostic, || {
+                fs::schedwait::self_test()
+            });
             // kthread backs /proc/kthread (kernel-thread lifecycle: per-thread id/name/
             // cpu/state/cpu-time/wakeups plus created/exited totals).  Its
             // init_defaults() previously seeded five fictional kernel threads —
@@ -5245,11 +5518,9 @@ extern "C" fn kernel_main() -> ! {
             // advancing only on real set_state/record_cpu_time calls.  The residue-free
             // self_test builds its fixtures via the real API with exact assertions and
             // resets the list afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Kthread",
-                selftest::Severity::Diagnostic,
-                fs::kthread::self_test(),
-            );
+            selftest::dispatch_debug("Kthread", selftest::Severity::Diagnostic, || {
+                fs::kthread::self_test()
+            });
             // kstack backs /proc/kstack (kernel-stack diagnostics: per-CPU stack size,
             // current/high-water usage, overflow + guard-page-hit counts, and usage
             // samples, plus global overflow/guard/sample totals).  Its init_defaults()
@@ -5262,11 +5533,9 @@ extern "C" fn kernel_main() -> ! {
             // record_overflow/record_guard_hit calls.  The residue-free self_test builds
             // its fixtures via the real API with exact assertions and resets the table
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Kstack",
-                selftest::Severity::Diagnostic,
-                fs::kstack::self_test(),
-            );
+            selftest::dispatch_debug("Kstack", selftest::Severity::Diagnostic, || {
+                fs::kstack::self_test()
+            });
             // kprobes backs /proc/kprobes (dynamic-instrumentation diagnostics: per-probe
             // id/type/name/address/hits/misses/enabled/overhead plus global hit/miss/
             // overhead totals).  Its init_defaults() previously seeded three fictional
@@ -5279,11 +5548,9 @@ extern "C" fn kernel_main() -> ! {
             // its fixtures via the real API with exact assertions (incl. disabled-probe
             // miss counting and by_type filtering) and resets the list afterward, so it
             // is safe at boot.
-            selftest::dispatch_debug(
-                "Kprobes",
-                selftest::Severity::Diagnostic,
-                fs::kprobes::self_test(),
-            );
+            selftest::dispatch_debug("Kprobes", selftest::Severity::Diagnostic, || {
+                fs::kprobes::self_test()
+            });
             // ftrace backs /proc/ftrace (function-trace diagnostics: per-probe func name/
             // kind/hits/misses/total-ns/max-ns/enabled plus global hit/miss/overhead
             // totals and a global tracing on/off flag).  Its init_defaults() previously
@@ -5297,11 +5564,9 @@ extern "C" fn kernel_main() -> ! {
             // self_test builds its fixtures via the real API with exact assertions (incl.
             // disabled-probe miss counting, max-ns tracking, and the global toggle) and
             // resets the list afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Ftrace",
-                selftest::Severity::Diagnostic,
-                fs::ftrace::self_test(),
-            );
+            selftest::dispatch_debug("Ftrace", selftest::Severity::Diagnostic, || {
+                fs::ftrace::self_test()
+            });
             // sockbuf backs /proc/sockbuf (socket-buffer pool diagnostics: per-pool
             // active-buffers/bytes/allocs/frees/drops/peak across tcp/udp/raw/icmp/mcast/
             // general plus global alloc/free/drop/byte totals).  Its init_defaults()
@@ -5314,11 +5579,9 @@ extern "C" fn kernel_main() -> ! {
             // with exact assertions (incl. peak high-water tracking across frees and
             // cumulative byte accounting) and resets the table afterward, so it is safe
             // at boot.
-            selftest::dispatch_debug(
-                "Sockbuf",
-                selftest::Severity::Diagnostic,
-                fs::sockbuf::self_test(),
-            );
+            selftest::dispatch_debug("Sockbuf", selftest::Severity::Diagnostic, || {
+                fs::sockbuf::self_test()
+            });
             // msivec backs /proc/msivec (MSI/MSI-X interrupt-vector diagnostics:
             // per-device allocated/active vector counts, delivered-interrupt counts and
             // target CPU, plus global vector/interrupt/alloc/free totals).  Its
@@ -5332,11 +5595,9 @@ extern "C" fn kernel_main() -> ! {
             // fixtures via the real API with exact assertions (incl. cumulative
             // interrupt accounting that is not decremented on free) and resets the table
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Msivec",
-                selftest::Severity::Diagnostic,
-                fs::msivec::self_test(),
-            );
+            selftest::dispatch_debug("Msivec", selftest::Severity::Diagnostic, || {
+                fs::msivec::self_test()
+            });
             // clocksrc backs /proc/clocksrc (clock-source diagnostics: per-source
             // frequency, quality rating, current flag, read count, skew corrections,
             // total/max skew and read latency, plus global read/skew totals).  Its
@@ -5351,11 +5612,9 @@ extern "C" fn kernel_main() -> ! {
             // fixtures via the real API with exact assertions (incl. total/max skew
             // accumulation and latest-latency tracking) and resets the table afterward,
             // so it is safe at boot.
-            selftest::dispatch_debug(
-                "Clocksrc",
-                selftest::Severity::Diagnostic,
-                fs::clocksrc::self_test(),
-            );
+            selftest::dispatch_debug("Clocksrc", selftest::Severity::Diagnostic, || {
+                fs::clocksrc::self_test()
+            });
             // cpuidle backs /proc/cpuidle (CPU idle / C-state diagnostics: per-CPU
             // current C-state, per-C-state entry counts and residency times, total
             // idle/active time, plus global transition/idle totals).  Its
@@ -5370,11 +5629,9 @@ extern "C" fn kernel_main() -> ! {
             // with exact assertions (entry-counter increments by C-state depth,
             // transition counting) and resets the table afterward, so it is safe at
             // boot.
-            selftest::dispatch_debug(
-                "Cpuidle",
-                selftest::Severity::Diagnostic,
-                fs::cpuidle::self_test(),
-            );
+            selftest::dispatch_debug("Cpuidle", selftest::Severity::Diagnostic, || {
+                fs::cpuidle::self_test()
+            });
             // cpucache backs /proc/cpucache (CPU cache-hierarchy diagnostics: per-level
             // geometry — size / line size / ways / sets / shared-CPU count — and
             // hit/miss/eviction counters across L1d/L1i/L2/L3, plus global hit/miss
@@ -5390,11 +5647,9 @@ extern "C" fn kernel_main() -> ! {
             // with exact assertions (geometry persistence, per-level + overall hit-rate
             // math, level→index mapping) and resets the table afterward, so it is safe
             // at boot.
-            selftest::dispatch_debug(
-                "Cpucache",
-                selftest::Severity::Diagnostic,
-                fs::cpucache::self_test(),
-            );
+            selftest::dispatch_debug("Cpucache", selftest::Severity::Diagnostic, || {
+                fs::cpucache::self_test()
+            });
             // userfault backs /proc/userfault (userfaultfd diagnostics: per-process
             // registered ranges, missing/write-protect/minor fault counts, resolves,
             // total/max resolve latency, copy/zero page counts, plus global fault/
@@ -5409,11 +5664,9 @@ extern "C" fn kernel_main() -> ! {
             // counters, copy vs zero resolve accounting, max-latency tracking, cumulative
             // global totals not decremented on unregister) and resets the table
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Userfault",
-                selftest::Severity::Diagnostic,
-                fs::userfault::self_test(),
-            );
+            selftest::dispatch_debug("Userfault", selftest::Severity::Diagnostic, || {
+                fs::userfault::self_test()
+            });
             // iomem backs /proc/iomem (MMIO region diagnostics: per-region name, base,
             // size, cacheable/prefetchable attributes and read/write access counts,
             // plus global read/write totals).  Its init_defaults() previously seeded
@@ -5427,11 +5680,9 @@ extern "C" fn kernel_main() -> ! {
             // per-region + global read/write counting, duplicate-base AlreadyExists,
             // cumulative totals not decremented on unregister) and resets the table
             // afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Iomem",
-                selftest::Severity::Diagnostic,
-                fs::iomem::self_test(),
-            );
+            selftest::dispatch_debug("Iomem", selftest::Severity::Diagnostic, || {
+                fs::iomem::self_test()
+            });
             // pgtable backs /proc/pgtable (page-table diagnostics: per-level (PML4/PDPT/
             // PD/PT) allocated/freed/active page-table page counts, page-walk count and
             // average depth, TLB-flush counts by scope (single/range/full/global), plus
@@ -5447,11 +5698,9 @@ extern "C" fn kernel_main() -> ! {
             // active-page total tracking, average walk depth 366 from 11 levels / 3
             // walks, per-scope flush counts) and resets the table afterward, so it is
             // safe at boot.
-            selftest::dispatch_debug(
-                "Pgtable",
-                selftest::Severity::Diagnostic,
-                fs::pgtable::self_test(),
-            );
+            selftest::dispatch_debug("Pgtable", selftest::Severity::Diagnostic, || {
+                fs::pgtable::self_test()
+            });
             // Memory diagnostics self-test (memdiag) — exercises the RAM-test log and
             // ECC-error tracking surfaced by the `memdiag` kshell command (test runs
             // with pass/fail results, correctable/uncorrectable ECC error counts, and
@@ -5464,11 +5713,9 @@ extern "C" fn kernel_main() -> ! {
             // API with exact assertions (test pass/fail accounting, ECC correctable/
             // uncorrectable counts, and a 2 GB size set explicitly via
             // set_total_memory) and resets the table afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Memdiag",
-                selftest::Severity::Diagnostic,
-                fs::memdiag::self_test(),
-            );
+            selftest::dispatch_debug("Memdiag", selftest::Severity::Diagnostic, || {
+                fs::memdiag::self_test()
+            });
             // IPC-namespace statistics self-test (ipcns) — exercises the System V IPC
             // namespace table surfaced by /proc/ipcns and the `ipcns` kshell command
             // (per-namespace shared-memory segment / semaphore-set / message-queue
@@ -5483,11 +5730,9 @@ extern "C" fn kernel_main() -> ! {
             // namespace + global SHM/SEM/MSG accounting, cumulative totals not
             // decremented on destroy) and resets the table afterward, so it is safe at
             // boot and /proc/ipcns reads as a truthful empty table.
-            selftest::dispatch_debug(
-                "Ipcns",
-                selftest::Severity::Diagnostic,
-                fs::ipcns::self_test(),
-            );
+            selftest::dispatch_debug("Ipcns", selftest::Severity::Diagnostic, || {
+                fs::ipcns::self_test()
+            });
             // I/O-port statistics self-test (ioport) — exercises the x86 port-I/O
             // region table surfaced by /proc/ioport and the `ioport` kshell command
             // (per-region in/out counts + byte totals, plus untracked-access counters).
@@ -5503,11 +5748,9 @@ extern "C" fn kernel_main() -> ! {
             // tracked vs untracked accounting, range-boundary matching at 0x103/0x104,
             // cumulative totals) and resets the table afterward, so it is safe at boot
             // and /proc/ioport reads as a truthful empty table.
-            selftest::dispatch_debug(
-                "Ioport",
-                selftest::Severity::Diagnostic,
-                fs::ioport::self_test(),
-            );
+            selftest::dispatch_debug("Ioport", selftest::Severity::Diagnostic, || {
+                fs::ioport::self_test()
+            });
             // Hardware-RNG statistics self-test (hwrng) — exercises the entropy pool
             // status and per-source breakdown surfaced by /proc/hwrng and the `hwrng`
             // kshell command (RDRAND/RDSEED/interrupt/disk/input/jitter byte counts and
@@ -5523,11 +5766,9 @@ extern "C" fn kernel_main() -> ! {
             // pool, requests drain it, per-source failure tracking, reseed refills to
             // capacity, six-source breakdown) and resets afterward, so it is safe at
             // boot and /proc/hwrng reads as a truthful empty pool.
-            selftest::dispatch_debug(
-                "Hwrng",
-                selftest::Severity::Diagnostic,
-                fs::hwrng::self_test(),
-            );
+            selftest::dispatch_debug("Hwrng", selftest::Severity::Diagnostic, || {
+                fs::hwrng::self_test()
+            });
             // Certificate-manager self-test.  certmgr previously seeded five well-known
             // root CAs (ISRG Root X1, DigiCert Global Root G2, GlobalSign, Baltimore
             // CyberTrust, Amazon Root CA 1) into init_defaults, each marked Root/System/
@@ -5544,7 +5785,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Certificate manager",
                 selftest::Severity::Diagnostic,
-                fs::certmgr::self_test(),
+                || fs::certmgr::self_test(),
             );
             // Auth-broker self-test.  authbroker previously seeded three fictional
             // credentials into init_defaults — "root" (Password), "admin" (PublicKey)
@@ -5558,11 +5799,9 @@ extern "C" fn kernel_main() -> ! {
             // grant_capability.  The residue-free self_test builds its fixtures via the
             // real API with exact assertions (store/authenticate/lockout/unlock/grant/
             // revoke) and clears the state afterward, so it is safe at boot.
-            selftest::dispatch_debug(
-                "Authbroker",
-                selftest::Severity::Diagnostic,
-                fs::authbroker::self_test(),
-            );
+            selftest::dispatch_debug("Authbroker", selftest::Severity::Diagnostic, || {
+                fs::authbroker::self_test()
+            });
             // Security-module (LSM) statistics self-test.  secmod previously seeded two
             // fictional modules into init_defaults — "capability" (88.8M checks /
             // 168,700 denials / 50K audits) and "apparmor" (71.93M checks / 338,500
@@ -5576,11 +5815,9 @@ extern "C" fn kernel_main() -> ! {
             // record_deny/record_audit on the security-hook path.  The residue-free
             // self_test builds its fixtures via the real API with exact assertions
             // (register/check/deny/audit/enable) and clears the state afterward.
-            selftest::dispatch_debug(
-                "Secmod",
-                selftest::Severity::Diagnostic,
-                fs::secmod::self_test(),
-            );
+            selftest::dispatch_debug("Secmod", selftest::Severity::Diagnostic, || {
+                fs::secmod::self_test()
+            });
             // Binary-format loader statistics self-test.  binfmt previously seeded three
             // fictional formats into init_defaults — Elf64 (500K loads / 1K errors),
             // Script (100K / 5K) and Elf32 (10K / 200) — plus an error breakdown
@@ -5594,11 +5831,9 @@ extern "C" fn kernel_main() -> ! {
             // residue-free self_test builds its fixtures via the real API with exact
             // assertions (register/load/average/max/error/breakdown) and clears the
             // state afterward.
-            selftest::dispatch_debug(
-                "Binfmt",
-                selftest::Severity::Diagnostic,
-                fs::binfmt::self_test(),
-            );
+            selftest::dispatch_debug("Binfmt", selftest::Severity::Diagnostic, || {
+                fs::binfmt::self_test()
+            });
             // AFTER the self-test, which resets the table to empty by design.
             // Registering before it left 0 formats at BOOT_OK, which the new
             // [binfmt] report caught and a /proc byte count could not: the
@@ -5621,11 +5856,9 @@ extern "C" fn kernel_main() -> ! {
             // (when one is detected on disk) and tools via add_tool.  The residue-free
             // self_test builds its fixtures via the real API with exact assertions
             // (register/verify/add/repair/boot/remove) and clears the state afterward.
-            selftest::dispatch_debug(
-                "Recoverypart",
-                selftest::Severity::Diagnostic,
-                fs::recoverypart::self_test(),
-            );
+            selftest::dispatch_debug("Recoverypart", selftest::Severity::Diagnostic, || {
+                fs::recoverypart::self_test()
+            });
             // Log-rotation self-test.  Unlike the statistics modules above, logrotate's
             // init_defaults seeds CONFIGURATION (three default rotation rules for
             // syslog/kern.log/auth.log — the analogue of a shipped /etc/logrotate.d
@@ -5636,11 +5869,9 @@ extern "C" fn kernel_main() -> ! {
             // simulated rotations never leak into the live /proc/logrotate counters.  It
             // is wired here so its exact assertions (rule ids, rotation/byte totals) are
             // actually exercised at boot.
-            selftest::dispatch_debug(
-                "Logrotate",
-                selftest::Severity::Diagnostic,
-                fs::logrotate::self_test(),
-            );
+            selftest::dispatch_debug("Logrotate", selftest::Severity::Diagnostic, || {
+                fs::logrotate::self_test()
+            });
             // Disk-cleanup self-test.  diskclean's init_defaults was already empty, but
             // the fabrication lived in scan(): it used to inject nine hardcoded phantom
             // reclaimable items (~1.46 GB of fake /tmp, /var/cache, trash and crash-dump
@@ -5651,11 +5882,9 @@ extern "C" fn kernel_main() -> ! {
             // file via add_item only when a real scanner is implemented.  The residue-free
             // self_test exercises the honest empty scan plus the real add_item/summarize/
             // estimate/clean primitives with exact assertions and clears STATE afterward.
-            selftest::dispatch_debug(
-                "Diskclean",
-                selftest::Severity::Diagnostic,
-                fs::diskclean::self_test(),
-            );
+            selftest::dispatch_debug("Diskclean", selftest::Severity::Diagnostic, || {
+                fs::diskclean::self_test()
+            });
             // Game-mode self-test.  Like logrotate, gamemode is a legitimate SETTINGS
             // module: its init_defaults seeds only configuration (the default
             // optimization set, auto_detect flag and F12 capture hotkey) with NO
@@ -5667,11 +5896,9 @@ extern "C" fn kernel_main() -> ! {
             // cannot leak those fixtures into the live /proc/gamemode table.  Wired here
             // so its exact assertions (game id, session/activation totals) are exercised
             // at boot now that it is safe.
-            selftest::dispatch_debug(
-                "Gamemode",
-                selftest::Severity::Diagnostic,
-                fs::gamemode::self_test(),
-            );
+            selftest::dispatch_debug("Gamemode", selftest::Severity::Diagnostic, || {
+                fs::gamemode::self_test()
+            });
             // Usage-time self-test.  usagetime is a per-app foreground-time TRACKER, not
             // a fabricator: its init_defaults seeds only the tracking_enabled flag with
             // NO fabricated app-usage records (apps empty, all counters 0), so
@@ -5682,11 +5909,9 @@ extern "C" fn kernel_main() -> ! {
             // (which prints per-app foreground hours, making the leak look like real
             // usage).  It is now residue-free (clears STATE and restores clean defaults
             // at the end) and wired here so its exact assertions are exercised at boot.
-            selftest::dispatch_debug(
-                "Usagetime",
-                selftest::Severity::Diagnostic,
-                fs::usagetime::self_test(),
-            );
+            selftest::dispatch_debug("Usagetime", selftest::Severity::Diagnostic, || {
+                fs::usagetime::self_test()
+            });
             // Screen-time self-test.  screentime is a user-activity / app-focus TRACKER,
             // not a fabricator: its init_defaults seeds only the enabled flag, the
             // initial Active state and default (unlimited) usage limits, with NO
@@ -5698,11 +5923,9 @@ extern "C" fn kernel_main() -> ! {
             // leak those fabricated activity records into the live /proc/screentime
             // table.  It is now residue-free (clears STATE and restores clean defaults
             // at the end) and wired here so its exact assertions are exercised at boot.
-            selftest::dispatch_debug(
-                "Screentime",
-                selftest::Severity::Diagnostic,
-                fs::screentime::self_test(),
-            );
+            selftest::dispatch_debug("Screentime", selftest::Severity::Diagnostic, || {
+                fs::screentime::self_test()
+            });
             // Startup-optimization self-test.  startupopt is a boot PROFILER, not a
             // fabricator: its init_defaults seeds NO boot profile (stages/suggestions
             // empty, all counters 0, fastest_boot_ms a u64::MAX sentinel reported as 0),
@@ -5714,11 +5937,9 @@ extern "C" fn kernel_main() -> ! {
             // restores clean defaults at the end) and wired here so its exact assertions
             // (stage counts, 0 suggestions for sub-second stages, boot/analysis totals)
             // are exercised at boot.
-            selftest::dispatch_debug(
-                "Startupopt",
-                selftest::Severity::Diagnostic,
-                fs::startupopt::self_test(),
-            );
+            selftest::dispatch_debug("Startupopt", selftest::Severity::Diagnostic, || {
+                fs::startupopt::self_test()
+            });
             // Eye-protection self-test.  Like logrotate/gamemode, eyeprotect is a
             // legitimate SETTINGS module: its init_defaults seeds two break-reminder
             // PROFILES (the 20-20-20 rule and an Hourly preset) — the analogue of shipped
@@ -5731,11 +5952,9 @@ extern "C" fn kernel_main() -> ! {
             // AND corrupt the shipped default profile.  It is now residue-free (clears
             // STATE and restores the clean default profiles at the end) and wired here so
             // its exact assertions are exercised at boot.
-            selftest::dispatch_debug(
-                "Eyeprotect",
-                selftest::Severity::Diagnostic,
-                fs::eyeprotect::self_test(),
-            );
+            selftest::dispatch_debug("Eyeprotect", selftest::Severity::Diagnostic, || {
+                fs::eyeprotect::self_test()
+            });
             // File-notification statistics self-test.  fnotify's init_defaults used to
             // fabricate observed activity — inotify 500 watches / 10,000,000 events / 5
             // overflows, fanotify 50 watches / 5,000,000 events, dnotify 10 watches /
@@ -5748,11 +5967,9 @@ extern "C" fn kernel_main() -> ! {
             // watches / 0 events.  The residue-free self_test exercises add_watch /
             // record_event / drain_events with exact assertions and restores the zeroed
             // baseline afterward.
-            selftest::dispatch_debug(
-                "Fnotify",
-                selftest::Severity::Diagnostic,
-                fs::fnotify::self_test(),
-            );
+            selftest::dispatch_debug("Fnotify", selftest::Severity::Diagnostic, || {
+                fs::fnotify::self_test()
+            });
             // memlayout previously seeded a FABRICATED physical memory layout in
             // init_defaults() — a hand-invented ~1 GiB "Main memory" block plus fixed
             // kernel/heap/APIC ranges — so /proc/memlayout, total_ram() and the
@@ -5763,19 +5980,80 @@ extern "C" fn kernel_main() -> ! {
             // exercises populate_from_memmap / add_region / the totals with exact
             // assertions against a synthetic map, then restores the real map so no test
             // fixtures leak into the live /proc/memlayout table.
-            selftest::dispatch_debug(
-                "Memlayout",
-                selftest::Severity::Diagnostic,
-                fs::memlayout::self_test(),
-            );
+            selftest::dispatch_debug("Memlayout", selftest::Severity::Diagnostic, || {
+                fs::memlayout::self_test()
+            });
             // Byte-range record locks. The cases that matter are the two a
             // naive implementation passes: disjoint writers must NOT conflict
             // (the whole reason this is not the flock table), and unlocking the
             // middle of a range must leave both ends held.
+            selftest::dispatch_debug("Record locks", selftest::Severity::Diagnostic, || {
+                fs::reclock::self_test()
+            });
+            // The syscall half both ABIs share: the access-mode rule,
+            // F_GETLK's answer in full, SEEK_CUR/SEEK_END against a real
+            // handle, an OFD's own query, and the close/fcntl race.
             selftest::dispatch_debug(
-                "Record locks",
+                "Record-lock syscalls",
                 selftest::Severity::Diagnostic,
-                fs::reclock::self_test(),
+                || syscall::record_lock::self_test(),
+            );
+            // flock without LOCK_NB: a waiter parks and the unlock wakes it,
+            // and two sharers upgrading do not wait on each other.
+            selftest::dispatch_debug("flock waiting", selftest::Severity::Diagnostic, || {
+                fs::vfs::self_test_flock_wait()
+            });
+            // /proc/locks: both kinds of lock, in Linux's format.
+            selftest::dispatch_debug("/proc/locks", selftest::Severity::Diagnostic, || {
+                fs::procfs::self_test_locks()
+            });
+            // /etc/mtab: a link to /proc/self/mounts, read as the table.
+            selftest::dispatch_debug("/etc/mtab", selftest::Severity::Diagnostic, || {
+                fs::procfs::self_test_etc_mtab()
+            });
+            // Extended attributes: Linux's namespace and permission rules,
+            // alone and as every VFS call applies them.
+            selftest::dispatch_debug("xattr rules", selftest::Severity::Diagnostic, || {
+                fs::xattr_policy::self_test()
+            });
+            selftest::dispatch_debug(
+                "xattr rules through the VFS",
+                selftest::Severity::Diagnostic,
+                || fs::vfs::self_test_xattr_rules(),
+            );
+            // `chattr +i` and `+a`: Linux's rules for the immutable and
+            // append-only attributes, alone and as every VFS operation, the
+            // handle layer and memfs apply them.
+            selftest::dispatch_debug(
+                "immutable and append-only rules",
+                selftest::Severity::Diagnostic,
+                || fs::attr_policy::self_test(),
+            );
+            selftest::dispatch_debug(
+                "immutable and append-only through the VFS",
+                selftest::Severity::Diagnostic,
+                || fs::vfs::self_test_attr_rules(),
+            );
+            // Seals (`fs::sealing`) as the VFS enforces them on every route
+            // that changes a file's contents, size or mode.
+            selftest::dispatch_debug(
+                "seals through the VFS",
+                selftest::Severity::Diagnostic,
+                || fs::vfs::self_test_seal_rules(),
+            );
+            // The ACL door: `setfacl`'s `system.posix_acl_access`, reaching
+            // the ACL table the permission check reads.
+            selftest::dispatch_debug(
+                "ACL door through the VFS",
+                selftest::Severity::Diagnostic,
+                || fs::vfs::self_test_acl_door(),
+            );
+            // A new node's mode and ACL: a process's umask on every route
+            // that makes one, and a directory's default ACL in its place.
+            selftest::dispatch_debug(
+                "new nodes' modes, the umask and default ACLs",
+                selftest::Severity::Diagnostic,
+                || fs::vfs::self_test_create_modes(),
             );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
@@ -5787,11 +6065,9 @@ extern "C" fn kernel_main() -> ! {
             // self_test builds its own fixtures via the real API with exact assertions
             // and resets to empty afterward so no test connections leak into
             // /proc/netmon.
-            selftest::dispatch_debug(
-                "Netmon",
-                selftest::Severity::Diagnostic,
-                fs::netmon::self_test(),
-            );
+            selftest::dispatch_debug("Netmon", selftest::Severity::Diagnostic, || {
+                fs::netmon::self_test()
+            });
             // swapmon backs /proc/swapmon and the `swapmon` kshell command.  Its
             // init_defaults() previously seeded a FABRICATED default swap device (a
             // fictional 4 GiB /dev/sda2 partition shown ~500 MiB used) plus invented
@@ -5802,11 +6078,9 @@ extern "C" fn kernel_main() -> ! {
             // a pure read-through over mm::swap + mm::fault with no state of its own, so
             // this self_test asserts the reporting views are exactly consistent with the
             // real subsystem (no fabricated fixtures, nothing to leak).
-            selftest::dispatch_debug(
-                "Swapmon",
-                selftest::Severity::Diagnostic,
-                fs::swapmon::self_test(),
-            );
+            selftest::dispatch_debug("Swapmon", selftest::Severity::Diagnostic, || {
+                fs::swapmon::self_test()
+            });
             // netusage backs /proc/netusage and the `netusage` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED interfaces (eth0
             // Ethernet, wlan0 Wi-Fi, lo loopback) with zeroed counters, which the
@@ -5818,11 +6092,9 @@ extern "C" fn kernel_main() -> ! {
             // self_test builds its own fixtures via the real API with exact assertions
             // (including the cap-warning counter, which the old test asserted loosely)
             // and resets to empty afterward so nothing leaks into /proc/netusage.
-            selftest::dispatch_debug(
-                "Netusage",
-                selftest::Severity::Diagnostic,
-                fs::netusage::self_test(),
-            );
+            selftest::dispatch_debug("Netusage", selftest::Severity::Diagnostic, || {
+                fs::netusage::self_test()
+            });
             // taskmon is the kernel-side process registry behind /proc/taskmon and the
             // `taskmon` kshell command.  Its init_defaults() previously seeded three
             // FABRICATED bootstrap tasks (kernel/init/kshell with invented CPU%, memory,
@@ -5835,11 +6107,9 @@ extern "C" fn kernel_main() -> ! {
             // before) builds its own fixtures via the real API with exact assertions and
             // resets STATE afterward — the old test left `testapp`/`daemon` behind, which
             // would have leaked into /proc/taskmon now that it runs at boot.
-            selftest::dispatch_debug(
-                "Taskmon",
-                selftest::Severity::Diagnostic,
-                fs::taskmon::self_test(),
-            );
+            selftest::dispatch_debug("Taskmon", selftest::Severity::Diagnostic, || {
+                fs::taskmon::self_test()
+            });
             // vmmap is the kernel-side VMA monitor behind /proc/vmmap and the `vmmap`
             // kshell command.  Its init_defaults() previously seeded a FABRICATED pid-1
             // address space — three invented VMAs ([text] r-x, [heap] rw, [stack] rw)
@@ -5853,11 +6123,9 @@ extern "C" fn kernel_main() -> ! {
             // relied on the fabricated pid 1 with no end-reset) builds its own fixtures
             // via the real API with exact assertions and resets STATE afterward so
             // nothing leaks into /proc/vmmap.
-            selftest::dispatch_debug(
-                "Vmmap",
-                selftest::Severity::Diagnostic,
-                fs::vmmap::self_test(),
-            );
+            selftest::dispatch_debug("Vmmap", selftest::Severity::Diagnostic, || {
+                fs::vmmap::self_test()
+            });
             // pftrack is the kernel-side page-fault tracker behind /proc/pftrack and the
             // `pftrack` kshell command.  Its init_defaults() previously seeded three
             // FABRICATED processes (init pid 1, sshd pid 100, browser pid 200) with
@@ -5872,11 +6140,9 @@ extern "C" fn kernel_main() -> ! {
             // before, and whose old version relied on the fabricated processes with no
             // end-reset) builds its own fixtures via the real API with exact assertions
             // and resets STATE afterward so nothing leaks into /proc/pftrack.
-            selftest::dispatch_debug(
-                "Pftrack",
-                selftest::Severity::Diagnostic,
-                fs::pftrack::self_test(),
-            );
+            selftest::dispatch_debug("Pftrack", selftest::Severity::Diagnostic, || {
+                fs::pftrack::self_test()
+            });
             // vmfrag is the kernel-side VM-fragmentation monitor behind /proc/vmfrag and
             // the `vmfrag` kshell command.  Its init_defaults() previously seeded two
             // FABRICATED zones — `DMA32` and `Normal` (Linux zone names) — with invented
@@ -5892,11 +6158,9 @@ extern "C" fn kernel_main() -> ! {
             // before, and whose old version relied on the fabricated zones with no
             // end-reset) builds its own fixtures via the real API with exact assertions
             // and resets STATE afterward so nothing leaks into /proc/vmfrag.
-            selftest::dispatch_debug(
-                "Vmfrag",
-                selftest::Severity::Diagnostic,
-                fs::vmfrag::self_test(),
-            );
+            selftest::dispatch_debug("Vmfrag", selftest::Severity::Diagnostic, || {
+                fs::vmfrag::self_test()
+            });
             // ipclog is the kernel-side IPC message log behind /proc/ipclog and the
             // `ipclog` kshell command.  Its init_defaults() previously seeded three
             // FABRICATED channels — `system_bus`, `vfs_channel`, `gui_events` — with
@@ -5910,11 +6174,9 @@ extern "C" fn kernel_main() -> ! {
             // fabricated channels with no end-reset) builds its own fixtures via the real
             // API with exact assertions and resets STATE afterward so nothing leaks into
             // /proc/ipclog.
-            selftest::dispatch_debug(
-                "Ipclog",
-                selftest::Severity::Diagnostic,
-                fs::ipclog::self_test(),
-            );
+            selftest::dispatch_debug("Ipclog", selftest::Severity::Diagnostic, || {
+                fs::ipclog::self_test()
+            });
             // telemetry is the kernel-side metric registry behind /proc/telemetry and the
             // `telemetry` kshell command.  Its init_defaults() previously seeded four
             // FABRICATED metrics with invented OBSERVED values — cpu.usage_pct 15%,
@@ -5929,11 +6191,9 @@ extern "C" fn kernel_main() -> ! {
             // on the fabricated metrics with no end-reset) builds its own fixtures via the
             // real API with exact assertions and resets STATE afterward so nothing leaks
             // into /proc/telemetry.
-            selftest::dispatch_debug(
-                "Telemetry",
-                selftest::Severity::Diagnostic,
-                fs::telemetry::self_test(),
-            );
+            selftest::dispatch_debug("Telemetry", selftest::Severity::Diagnostic, || {
+                fs::telemetry::self_test()
+            });
             // fdtable is the kernel-side FD-table tracker behind /proc/fdtable and the
             // `fdtable` kshell command.  Its init_defaults() previously seeded two
             // FABRICATED process FD tables — pid 1 (/dev/console ×3 + /etc/init.conf) and
@@ -5948,11 +6208,9 @@ extern "C" fn kernel_main() -> ! {
             // and whose old version relied on the fabricated tables with no end-reset)
             // builds its own fixtures via the real API with exact assertions and resets
             // STATE afterward so nothing leaks into /proc/fdtable.
-            selftest::dispatch_debug(
-                "Fdtable",
-                selftest::Severity::Diagnostic,
-                fs::fdtable::self_test(),
-            );
+            selftest::dispatch_debug("Fdtable", selftest::Severity::Diagnostic, || {
+                fs::fdtable::self_test()
+            });
             // sysprofiler is the detailed hardware/software inventory behind
             // /proc/sysprofiler and the `sysprofiler` kshell command.  Its
             // init_defaults() previously seeded entirely FABRICATED hardware specs — a
@@ -5972,11 +6230,9 @@ extern "C" fn kernel_main() -> ! {
             // relied on the fabricated defaults with no end-reset) exercises the real
             // builders, then rebuilds the real snapshot so /proc/sysprofiler reflects
             // actual CPU + Memory and not its scratch entries.
-            selftest::dispatch_debug(
-                "Sysprofiler",
-                selftest::Severity::Diagnostic,
-                fs::sysprofiler::self_test(),
-            );
+            selftest::dispatch_debug("Sysprofiler", selftest::Severity::Diagnostic, || {
+                fs::sysprofiler::self_test()
+            });
             // fs::eventlog is a (redundant, unwired) structured event log behind
             // /proc/eventlog and the `eventlog` kshell command.  Its init_defaults()
             // previously seeded two FABRICATED entries — an Info/System/"kernel" "System
@@ -5991,18 +6247,9 @@ extern "C" fn kernel_main() -> ! {
             // (never wired before, and whose old version relied on the fabricated entries
             // with no end-reset) builds its own fixtures via the real API with exact
             // assertions and resets STATE afterward so nothing leaks into /proc/eventlog.
-            selftest::dispatch_debug(
-                "Eventlog",
-                selftest::Severity::Diagnostic,
-                fs::eventlog::self_test(),
-            );
-            // Register default file type associations, then self-test.
-            fs::associations::register_defaults();
-            selftest::dispatch_debug(
-                "File associations",
-                selftest::Severity::Diagnostic,
-                fs::associations::self_test(),
-            );
+            selftest::dispatch_debug("Eventlog", selftest::Severity::Diagnostic, || {
+                fs::eventlog::self_test()
+            });
         }
         case();
     }
@@ -6011,93 +6258,70 @@ extern "C" fn kernel_main() -> ! {
         #[inline(never)]
         fn case() {
             // Filesystem quota self-test.
-            selftest::dispatch_debug(
-                "Filesystem quota",
-                selftest::Severity::Diagnostic,
-                fs::quota::self_test(),
-            );
+            selftest::dispatch_debug("Filesystem quota", selftest::Severity::Diagnostic, || {
+                fs::quota::self_test()
+            });
             // ACL self-test.
-            selftest::dispatch_debug("ACL", selftest::Severity::Diagnostic, fs::acl::self_test());
+            selftest::dispatch_debug("ACL", selftest::Severity::Diagnostic, || {
+                fs::acl::self_test()
+            });
             // Filesystem interceptor self-test.
-            selftest::dispatch_debug(
-                "FS interceptor",
-                selftest::Severity::Diagnostic,
-                fs::intercept::self_test(),
-            );
+            selftest::dispatch_debug("FS interceptor", selftest::Severity::Diagnostic, || {
+                fs::intercept::self_test()
+            });
             // Symlink/hardlink security self-test.
-            selftest::dispatch_debug(
-                "Symlink security",
-                selftest::Severity::Diagnostic,
-                fs::symlink_security::self_test(),
-            );
+            selftest::dispatch_debug("Symlink security", selftest::Severity::Diagnostic, || {
+                fs::symlink_security::self_test()
+            });
             // Resource limits self-test.
-            selftest::dispatch_debug(
-                "Resource limits",
-                selftest::Severity::Diagnostic,
-                fs::rlimit::self_test(),
-            );
+            selftest::dispatch_debug("Resource limits", selftest::Severity::Diagnostic, || {
+                fs::rlimit::self_test()
+            });
             // Overlay filesystem self-test.
-            selftest::dispatch_debug(
-                "Overlay filesystem",
-                selftest::Severity::Diagnostic,
-                fs::overlay::self_test(),
-            );
+            selftest::dispatch_debug("Overlay filesystem", selftest::Severity::Diagnostic, || {
+                fs::overlay::self_test()
+            });
             // Named pipe self-test.
-            selftest::dispatch_debug(
-                "Named pipe",
-                selftest::Severity::Diagnostic,
-                fs::pipe::self_test(),
-            );
+            selftest::dispatch_debug("Named pipe", selftest::Severity::Diagnostic, || {
+                fs::pipe::self_test()
+            });
             // Tmpwatch self-test.
-            selftest::dispatch_debug(
-                "Tmpwatch",
-                selftest::Severity::Diagnostic,
-                fs::tmpwatch::self_test(),
-            );
+            selftest::dispatch_debug("Tmpwatch", selftest::Severity::Diagnostic, || {
+                fs::tmpwatch::self_test()
+            });
             // Filesystem audit self-test.
-            selftest::dispatch_debug(
-                "Filesystem audit",
-                selftest::Severity::Diagnostic,
-                fs::audit::self_test(),
-            );
+            selftest::dispatch_debug("Filesystem audit", selftest::Severity::Diagnostic, || {
+                fs::audit::self_test()
+            });
             // Filesystem benchmark self-test.
-            selftest::dispatch_debug(
-                "FS bench",
-                selftest::Severity::Diagnostic,
-                fs::bench::self_test(),
-            );
+            selftest::dispatch_debug("FS bench", selftest::Severity::Diagnostic, || {
+                fs::bench::self_test()
+            });
             // Power-management self-test.
-            selftest::dispatch_debug(
-                "Power",
-                selftest::Severity::Diagnostic,
-                fs::power::self_test(),
-            );
-            // Mount namespace self-test.
-            selftest::dispatch_debug(
-                "Mount namespace",
-                selftest::Severity::Diagnostic,
-                fs::mount_ns::self_test(),
-            );
+            selftest::dispatch_debug("Power", selftest::Severity::Diagnostic, || {
+                fs::power::self_test()
+            });
+            // Mount namespaces: a copy of the table, a private mount, freed
+            // with the last hold (fs::mntns).
+            selftest::dispatch_debug("Mount namespace", selftest::Severity::Diagnostic, || {
+                fs::mntns::self_test()
+            });
             // The byte-oriented path lexer, which the VFS is being converted onto.
             // If `Path::components` or `Path::starts_with` is wrong then every
             // containment check built on them is wrong the same way, and that would
             // surface as a sandbox-escape rather than as a test failure — so it is
             // worth checking on every boot rather than trusting it.
-            selftest::dispatch_debug(
-                "Path",
-                selftest::Severity::Diagnostic,
-                fs::path::self_test(),
-            );
+            selftest::dispatch_debug("Path", selftest::Severity::Diagnostic, || {
+                fs::path::self_test()
+            });
             // The byte-string splitters that the kshell parser is being converted
             // onto. Each one is claimed to behave exactly like its `str` counterpart,
             // and a ~1500-site mechanical conversion is only safe while that holds —
             // a helper that differed in one edge case would plant a bug at whichever
             // site hit it, with nothing in the diff to show for it.
-            selftest::dispatch_debug(
-                "bytestr",
-                selftest::Severity::Diagnostic,
-                bytestr::self_test(),
-            );
+            selftest::dispatch_debug("bytestr", selftest::Severity::Diagnostic, || {
+                bytestr::self_test()
+            });
             // The one quoting scanner, which the kshell parser's eleven
             // hand-rolled copies are being replaced by. Those eleven disagree
             // with each other, and two of the disagreements are user-visible
@@ -6106,22 +6330,18 @@ extern "C" fn kernel_main() -> ! {
             // self-test on purpose. If the scanner is wrong, eleven call sites
             // are wrong at once, and a failure here says so directly instead of
             // surfacing as an unrelated-looking kshell rung.
-            selftest::dispatch_debug(
-                "shellquote",
-                selftest::Severity::Diagnostic,
-                shellquote::self_test(),
-            );
+            selftest::dispatch_debug("shellquote", selftest::Severity::Diagnostic, || {
+                shellquote::self_test()
+            });
             // The shell's `echo -e` escape decoder. Worth a boot-battery slot
             // despite being one small function: it walked bytes while writing
             // into a `String`, so it re-encoded every byte of a multi-byte
             // character and printed "cafÃ©" for "café". Every ASCII test of it
             // passed throughout, which is exactly why the test added with the
             // fix is deliberately *not* ASCII.
-            selftest::dispatch_debug(
-                "kshell",
-                selftest::Severity::Diagnostic,
-                kshell::self_test(),
-            );
+            selftest::dispatch_debug("kshell", selftest::Severity::Diagnostic, || {
+                kshell::self_test()
+            });
             // The one byte-size formatter, replacing twenty-one private copies.
             // Two of those copies printed a two-digit tenths ("1.10 KiB", which
             // reads as larger than the "1.9 KiB" below it) because they divided
@@ -6131,42 +6351,32 @@ extern "C" fn kernel_main() -> ! {
             // digit it gets wrong is the one that only appears at the top of a
             // unit, which is exactly where a hand-written spot check does not
             // look. See `bytesize`'s module docs.
-            selftest::dispatch_debug(
-                "Bytesize",
-                selftest::Severity::Diagnostic,
-                bytesize::self_test(),
-            );
+            selftest::dispatch_debug("Bytesize", selftest::Severity::Diagnostic, || {
+                bytesize::self_test()
+            });
             // The octal escaper that lets those byte paths be written into the
             // line-oriented text formats (/proc/mounts, the trash index). A bug here
             // corrupts a file rather than failing loudly, so it is checked on boot.
-            selftest::dispatch_debug(
-                "Escape",
-                selftest::Severity::Diagnostic,
-                fs::escape::self_test(),
-            );
+            selftest::dispatch_debug("Escape", selftest::Severity::Diagnostic, || {
+                fs::escape::self_test()
+            });
             // Deferred filesystem operations — the queue entry serializer/parser and
             // the filename encoding.  A bug here could cause a replayed operation to
             // target the wrong file (inode mismatch not detected, path unescaped
             // wrongly) or silently drop a queued operation (malformed entry not
             // recognised).  Tested early because the replay hook runs on every mount.
-            selftest::dispatch_debug(
-                "Deferred Ops",
-                selftest::Severity::Diagnostic,
-                fs::deferred_ops::self_test(),
-            );
+            selftest::dispatch_debug("Deferred Ops", selftest::Severity::Diagnostic, || {
+                fs::deferred_ops::self_test()
+            });
             // Locale and timezone. Both self-tests existed but were never called from
             // anywhere — a test that never runs is not a test, and these two are the
             // only coverage the kernel's POSIX `TZ` rule evaluation has.
-            selftest::dispatch_debug(
-                "Locale",
-                selftest::Severity::Diagnostic,
-                fs::locale::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Timezone",
-                selftest::Severity::Diagnostic,
-                fs::timezone::self_test(),
-            );
+            selftest::dispatch_debug("Locale", selftest::Severity::Diagnostic, || {
+                fs::locale::self_test()
+            });
+            selftest::dispatch_debug("Timezone", selftest::Severity::Diagnostic, || {
+                fs::timezone::self_test()
+            });
             // Populate the tables. Nothing else does: without this the zone
             // database stays empty until someone types `locale init` at the
             // kernel shell, and every offset query answers 0 — i.e. the kernel
@@ -6186,136 +6396,75 @@ extern "C" fn kernel_main() -> ! {
     {
         #[inline(never)]
         fn case() {
-            // The 21 modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
-            // sweep (see known-issues.md). Every one of them already had a
+            // The modules converted to `PreemptSpinMutex` by the Q24 leaf-lock
+            // sweep (see known-issues.md; 21 then, four of them -- columnview,
+            // fileinfo, findex and preview -- since removed with the kernel's
+            // file-type list, design-decisions 1528). Every one of them already had a
             // `self_test()` and not one of them was called from anywhere, so the
             // conversion would otherwise have shipped with zero boot coverage --
             // the same "a test that never runs is not a test" trap as locale and
             // timezone above. These also exercise the three critical sections that
             // were restructured to stop calling the VFS under a raw spinlock
             // (`bookmarks::validate`, `thumbcache::get`, `fileops::create`).
-            selftest::dispatch_debug(
-                "atime",
-                selftest::Severity::Diagnostic,
-                fs::atime::self_test(),
-            );
-            selftest::dispatch_debug(
-                "bookmarks",
-                selftest::Severity::Diagnostic,
-                fs::bookmarks::self_test(),
-            );
-            selftest::dispatch_debug(
-                "clipboard",
-                selftest::Severity::Diagnostic,
-                fs::clipboard::self_test(),
-            );
-            selftest::dispatch_debug(
-                "column view",
-                selftest::Severity::Diagnostic,
-                fs::columnview::self_test(),
-            );
-            selftest::dispatch_debug(
-                "direct I/O",
-                selftest::Severity::Diagnostic,
-                fs::directio::self_test(),
-            );
-            selftest::dispatch_debug(
-                "drag-and-drop",
-                selftest::Severity::Diagnostic,
-                fs::dragdrop::self_test(),
-            );
-            // fcomment and immutable were reachable only from a `kshell`
-            // subcommand, so neither `self_test()` had ever run in the boot
-            // test -- including `immutable`'s, which covers the table that
-            // decides whether a write, truncate, delete or link is refused.
-            // Same "a test that never runs is not a test" trap as the batch
-            // above. See known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the
-            // ~220 further `fs` modules still in that state.
-            selftest::dispatch_debug(
-                "file comments",
-                selftest::Severity::Diagnostic,
-                fs::fcomment::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fileinfo",
-                selftest::Severity::Diagnostic,
-                fs::fileinfo::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file operations",
-                selftest::Severity::Diagnostic,
-                fs::fileops::self_test(),
-            );
-            selftest::dispatch_debug(
-                "findex",
-                selftest::Severity::Diagnostic,
-                fs::findex::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs freeze",
-                selftest::Severity::Diagnostic,
-                fs::freeze::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fstrim",
-                selftest::Severity::Diagnostic,
-                fs::fstrim::self_test(),
-            );
-            selftest::dispatch_debug(
-                "immutable flags",
-                selftest::Severity::Diagnostic,
-                fs::immutable::self_test(),
-            );
-            selftest::dispatch_debug(
-                "pathbar",
-                selftest::Severity::Diagnostic,
-                fs::pathbar::self_test(),
-            );
-            selftest::dispatch_debug(
-                "prefetch",
-                selftest::Severity::Diagnostic,
-                fs::prefetch::self_test(),
-            );
-            selftest::dispatch_debug(
-                "preview",
-                selftest::Severity::Diagnostic,
-                fs::preview::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs profile",
-                selftest::Severity::Diagnostic,
-                fs::profile::self_test(),
-            );
-            selftest::dispatch_debug(
-                "recent files",
-                selftest::Severity::Diagnostic,
-                fs::recent::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file sealing",
-                selftest::Severity::Diagnostic,
-                fs::sealing::self_test(),
-            );
-            selftest::dispatch_debug(
-                "sparse files",
-                selftest::Severity::Diagnostic,
-                fs::sparse::self_test(),
-            );
-            selftest::dispatch_debug(
-                "templates",
-                selftest::Severity::Diagnostic,
-                fs::templates::self_test(),
-            );
-            selftest::dispatch_debug(
-                "thumbnail cache",
-                selftest::Severity::Diagnostic,
-                fs::thumbcache::self_test(),
-            );
-            selftest::dispatch_debug(
-                "viewstate",
-                selftest::Severity::Diagnostic,
-                fs::viewstate::self_test(),
-            );
+            selftest::dispatch_debug("atime", selftest::Severity::Diagnostic, || {
+                fs::atime::self_test()
+            });
+            selftest::dispatch_debug("bookmarks", selftest::Severity::Diagnostic, || {
+                fs::bookmarks::self_test()
+            });
+            selftest::dispatch_debug("clipboard", selftest::Severity::Diagnostic, || {
+                fs::clipboard::self_test()
+            });
+            selftest::dispatch_debug("direct I/O", selftest::Severity::Diagnostic, || {
+                fs::directio::self_test()
+            });
+            selftest::dispatch_debug("drag-and-drop", selftest::Severity::Diagnostic, || {
+                fs::dragdrop::self_test()
+            });
+            // fcomment was reachable only from a `kshell` subcommand, so its
+            // `self_test()` had never run in the boot test. Same "a test that
+            // never runs is not a test" trap as the batch above. See
+            // known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the ~220 further
+            // `fs` modules still in that state.
+            selftest::dispatch_debug("file comments", selftest::Severity::Diagnostic, || {
+                fs::fcomment::self_test()
+            });
+            selftest::dispatch_debug("file operations", selftest::Severity::Diagnostic, || {
+                fs::fileops::self_test()
+            });
+            selftest::dispatch_debug("fs freeze", selftest::Severity::Diagnostic, || {
+                fs::freeze::self_test()
+            });
+            selftest::dispatch_debug("fstrim", selftest::Severity::Diagnostic, || {
+                fs::fstrim::self_test()
+            });
+            selftest::dispatch_debug("pathbar", selftest::Severity::Diagnostic, || {
+                fs::pathbar::self_test()
+            });
+            selftest::dispatch_debug("prefetch", selftest::Severity::Diagnostic, || {
+                fs::prefetch::self_test()
+            });
+            selftest::dispatch_debug("fs profile", selftest::Severity::Diagnostic, || {
+                fs::profile::self_test()
+            });
+            selftest::dispatch_debug("recent files", selftest::Severity::Diagnostic, || {
+                fs::recent::self_test()
+            });
+            selftest::dispatch_debug("file sealing", selftest::Severity::Diagnostic, || {
+                fs::sealing::self_test()
+            });
+            selftest::dispatch_debug("sparse files", selftest::Severity::Diagnostic, || {
+                fs::sparse::self_test()
+            });
+            selftest::dispatch_debug("templates", selftest::Severity::Diagnostic, || {
+                fs::templates::self_test()
+            });
+            selftest::dispatch_debug("thumbnail cache", selftest::Severity::Diagnostic, || {
+                fs::thumbcache::self_test()
+            });
+            selftest::dispatch_debug("viewstate", selftest::Severity::Diagnostic, || {
+                fs::viewstate::self_test()
+            });
         }
         case();
     }
@@ -6338,428 +6487,286 @@ extern "C" fn kernel_main() -> ! {
         // bisects to one obvious place.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "archive",
-                selftest::Severity::Diagnostic,
-                fs::archive::self_test(),
-            );
-            selftest::dispatch_debug(
-                "backup",
-                selftest::Severity::Diagnostic,
-                fs::backup::self_test(),
-            );
-            selftest::dispatch_debug(
-                "batch-rename",
-                selftest::Severity::Diagnostic,
-                fs::batch::self_test(),
-            );
-            selftest::dispatch_debug(
-                "change-tracking",
-                selftest::Severity::Diagnostic,
-                fs::changetrack::self_test(),
-            );
-            selftest::dispatch_debug(
-                "context-menu",
-                selftest::Severity::Diagnostic,
-                fs::contextmenu::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cpufreq",
-                selftest::Severity::Diagnostic,
-                fs::cpufreq::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cputopo",
-                selftest::Severity::Diagnostic,
-                fs::cputopo::self_test(),
-            );
-            selftest::dispatch_debug(
-                "dedup",
-                selftest::Severity::Diagnostic,
-                fs::dedup::self_test(),
-            );
-            selftest::dispatch_debug(
-                "dirsync",
-                selftest::Severity::Diagnostic,
-                fs::dirsync::self_test(),
-            );
+            selftest::dispatch_debug("archive", selftest::Severity::Diagnostic, || {
+                fs::archive::self_test()
+            });
+            selftest::dispatch_debug("backup", selftest::Severity::Diagnostic, || {
+                fs::backup::self_test()
+            });
+            selftest::dispatch_debug("batch-rename", selftest::Severity::Diagnostic, || {
+                fs::batch::self_test()
+            });
+            selftest::dispatch_debug("change-tracking", selftest::Severity::Diagnostic, || {
+                fs::changetrack::self_test()
+            });
+            selftest::dispatch_debug("context-menu", selftest::Severity::Diagnostic, || {
+                fs::contextmenu::self_test()
+            });
+            selftest::dispatch_debug("Cpufreq", selftest::Severity::Diagnostic, || {
+                fs::cpufreq::self_test()
+            });
+            selftest::dispatch_debug("Cputopo", selftest::Severity::Diagnostic, || {
+                fs::cputopo::self_test()
+            });
+            selftest::dispatch_debug("dedup", selftest::Severity::Diagnostic, || {
+                fs::dedup::self_test()
+            });
+            selftest::dispatch_debug("dirsync", selftest::Severity::Diagnostic, || {
+                fs::dirsync::self_test()
+            });
             // diskencrypt was reachable only from a `kshell` subcommand, so
             // its suite had never run in the boot test
             // (TD-A-FS-SELFTESTS-NEVER-RUN).  It is in-memory volume
             // bookkeeping -- the unlock/encrypt paths are simulated, it
             // touches no disk -- and clears the state on the way out.
-            selftest::dispatch_debug(
-                "Diskencrypt",
-                selftest::Severity::Diagnostic,
-                fs::diskencrypt::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Diskio",
-                selftest::Severity::Diagnostic,
-                fs::diskio::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file-encryption",
-                selftest::Severity::Diagnostic,
-                fs::encrypt::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file-compression",
-                selftest::Severity::Diagnostic,
-                fs::fcompress::self_test(),
-            );
+            selftest::dispatch_debug("Diskencrypt", selftest::Severity::Diagnostic, || {
+                fs::diskencrypt::self_test()
+            });
+            // diskio projects the block layer's per-device counts (blkdev's
+            // Accounted wrapper) for /proc/diskio, /proc/diskstat and the
+            // shell: its test registers a scratch RAM disk, does I/O through
+            // the registry and checks the view, then unregisters it.
+            selftest::dispatch_debug("Diskio", selftest::Severity::Diagnostic, || {
+                fs::diskio::self_test()
+            });
+            selftest::dispatch_debug("file-encryption", selftest::Severity::Diagnostic, || {
+                fs::encrypt::self_test()
+            });
+            selftest::dispatch_debug("file-compression", selftest::Severity::Diagnostic, || {
+                fs::fcompress::self_test()
+            });
             // fileshare was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It contacts no network -- it is in-memory share bookkeeping --
             // and now resets to the uninitialised state on the way out, so it
             // leaves no residue for a boot run to inherit.
-            selftest::dispatch_debug(
-                "Fileshare",
-                selftest::Severity::Diagnostic,
-                fs::fileshare::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file-select",
-                selftest::Severity::Diagnostic,
-                fs::fileselect::self_test(),
-            );
+            selftest::dispatch_debug("Fileshare", selftest::Severity::Diagnostic, || {
+                fs::fileshare::self_test()
+            });
+            selftest::dispatch_debug("file-select", selftest::Severity::Diagnostic, || {
+                fs::fileselect::self_test()
+            });
             // filevault was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It is in-memory vault bookkeeping with a simulated password
             // hash -- no real crypto, no disk -- and clears the state on the
             // way out, so it leaves no vault behind for a boot run.
-            selftest::dispatch_debug(
-                "Filevault",
-                selftest::Severity::Diagnostic,
-                fs::filevault::self_test(),
-            );
-            selftest::dispatch_debug(
-                "filetype",
-                selftest::Severity::Diagnostic,
-                fs::filetype::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fswalk",
-                selftest::Severity::Diagnostic,
-                fs::fswalk::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs health",
-                selftest::Severity::Diagnostic,
-                fs::health::self_test(),
-            );
-            selftest::dispatch_debug(
-                "I/O priority",
-                selftest::Severity::Diagnostic,
-                fs::ioprio::self_test(),
-            );
-            selftest::dispatch_debug(
-                "iso9660",
-                selftest::Severity::Diagnostic,
-                fs::iso9660::self_test(),
-            );
-            selftest::dispatch_debug(
-                "linkcheck",
-                selftest::Severity::Diagnostic,
-                fs::linkcheck::self_test(),
-            );
+            selftest::dispatch_debug("Filevault", selftest::Severity::Diagnostic, || {
+                fs::filevault::self_test()
+            });
+            selftest::dispatch_debug("fswalk", selftest::Severity::Diagnostic, || {
+                fs::fswalk::self_test()
+            });
+            selftest::dispatch_debug("fs health", selftest::Severity::Diagnostic, || {
+                fs::health::self_test()
+            });
+            selftest::dispatch_debug("I/O priority", selftest::Severity::Diagnostic, || {
+                fs::ioprio::self_test()
+            });
+            selftest::dispatch_debug("iso9660", selftest::Severity::Diagnostic, || {
+                fs::iso9660::self_test()
+            });
+            selftest::dispatch_debug("linkcheck", selftest::Severity::Diagnostic, || {
+                fs::linkcheck::self_test()
+            });
             // netshare was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It is pure in-memory registry bookkeeping -- it contacts no
             // server -- so it is safe to run unconditionally at boot.
-            selftest::dispatch_debug(
-                "Netshare",
-                selftest::Severity::Diagnostic,
-                fs::netshare::self_test(),
-            );
-            selftest::dispatch_debug(
-                "open-with",
-                selftest::Severity::Diagnostic,
-                fs::openwith::self_test(),
-            );
+            selftest::dispatch_debug("Netshare", selftest::Severity::Diagnostic, || {
+                fs::netshare::self_test()
+            });
             // partmgr was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Unlike the others in this sweep it was already idempotent --
             // it clears the table at both ends -- and it touches no real
             // disk: `register_disk` only records what a caller tells it.
-            selftest::dispatch_debug(
-                "partmgr",
-                selftest::Severity::Diagnostic,
-                fs::partmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs policy",
-                selftest::Severity::Diagnostic,
-                fs::policy::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Powerwake",
-                selftest::Severity::Diagnostic,
-                fs::powerwake::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file-properties",
-                selftest::Severity::Diagnostic,
-                fs::properties::self_test(),
-            );
+            selftest::dispatch_debug("partmgr", selftest::Severity::Diagnostic, || {
+                fs::partmgr::self_test()
+            });
+            selftest::dispatch_debug("fs policy", selftest::Severity::Diagnostic, || {
+                fs::policy::self_test()
+            });
+            selftest::dispatch_debug("Powerwake", selftest::Severity::Diagnostic, || {
+                fs::powerwake::self_test()
+            });
+            selftest::dispatch_debug("file-properties", selftest::Severity::Diagnostic, || {
+                fs::properties::self_test()
+            });
             // queryable was reachable only from a `kshell` subcommand, so
             // its suite had never run in the boot test -- including the
             // coverage of the attribute index, which is the structure that
             // decides which files a query returns. Promoted here as one of
             // the batches described in known-issues
             // TD-A-FS-SELFTESTS-NEVER-RUN; ~255 fs suites remain manual-only.
-            selftest::dispatch_debug(
-                "queryable-attrs",
-                selftest::Severity::Diagnostic,
-                fs::queryable::self_test(),
-            );
+            selftest::dispatch_debug("queryable-attrs", selftest::Severity::Diagnostic, || {
+                fs::queryable::self_test()
+            });
             // After the four suites whose tables it drives: ACLs, flags, seals
             // and indexed attributes must end with their file and move with
             // its name, through the real VFS on /tmp (fs::perfile).
-            selftest::dispatch_debug(
-                "per-file state",
-                selftest::Severity::Diagnostic,
-                fs::perfile::self_test(),
-            );
-            selftest::dispatch_debug(
-                "readdir-plus",
-                selftest::Severity::Diagnostic,
-                fs::readdir_plus::self_test(),
-            );
-            selftest::dispatch_debug(
-                "reclaim",
-                selftest::Severity::Diagnostic,
-                fs::reclaim::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs search",
-                selftest::Severity::Diagnostic,
-                fs::search::self_test(),
-            );
-            selftest::dispatch_debug(
-                "sidebar",
-                selftest::Severity::Diagnostic,
-                fs::sidebar::self_test(),
-            );
-            selftest::dispatch_debug(
-                "snapshot",
-                selftest::Severity::Diagnostic,
-                fs::snapshot::self_test(),
-            );
-            selftest::dispatch_debug(
-                "splice",
-                selftest::Severity::Diagnostic,
-                fs::splice::self_test(),
-            );
-            selftest::dispatch_debug(
-                "statusbar",
-                selftest::Severity::Diagnostic,
-                fs::statusbar::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysctlfs",
-                selftest::Severity::Diagnostic,
-                fs::sysctlfs::self_test(),
-            );
+            selftest::dispatch_debug("per-file state", selftest::Severity::Diagnostic, || {
+                fs::perfile::self_test()
+            });
+            selftest::dispatch_debug("readdir-plus", selftest::Severity::Diagnostic, || {
+                fs::readdir_plus::self_test()
+            });
+            selftest::dispatch_debug("reclaim", selftest::Severity::Diagnostic, || {
+                fs::reclaim::self_test()
+            });
+            selftest::dispatch_debug("fs search", selftest::Severity::Diagnostic, || {
+                fs::search::self_test()
+            });
+            selftest::dispatch_debug("sidebar", selftest::Severity::Diagnostic, || {
+                fs::sidebar::self_test()
+            });
+            selftest::dispatch_debug("snapshot", selftest::Severity::Diagnostic, || {
+                fs::snapshot::self_test()
+            });
+            selftest::dispatch_debug("splice", selftest::Severity::Diagnostic, || {
+                fs::splice::self_test()
+            });
+            selftest::dispatch_debug("statusbar", selftest::Severity::Diagnostic, || {
+                fs::statusbar::self_test()
+            });
+            selftest::dispatch_debug("Sysctlfs", selftest::Severity::Diagnostic, || {
+                fs::sysctlfs::self_test()
+            });
             // sysinfo was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It was already idempotent -- `clear_all()` at both ends -- and
             // its CPU/kernel-parameter assertions read live values rather
             // than fabricated ones, so it is genuine boot coverage.
-            selftest::dispatch_debug(
-                "sysinfo",
-                selftest::Severity::Diagnostic,
-                fs::sysinfo::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysuptime",
-                selftest::Severity::Diagnostic,
-                fs::sysuptime::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file-tags",
-                selftest::Severity::Diagnostic,
-                fs::tags::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Thermal",
-                selftest::Severity::Diagnostic,
-                fs::thermal::self_test(),
-            );
-            selftest::dispatch_debug(
-                "fs transaction",
-                selftest::Severity::Diagnostic,
-                fs::transaction::self_test(),
-            );
-            selftest::dispatch_debug(
-                "undelete",
-                selftest::Severity::Diagnostic,
-                fs::undelete::self_test(),
-            );
-            selftest::dispatch_debug(
-                "disk-usage",
-                selftest::Severity::Diagnostic,
-                fs::usage::self_test(),
-            );
+            selftest::dispatch_debug("sysinfo", selftest::Severity::Diagnostic, || {
+                fs::sysinfo::self_test()
+            });
+            selftest::dispatch_debug("Sysuptime", selftest::Severity::Diagnostic, || {
+                fs::sysuptime::self_test()
+            });
+            selftest::dispatch_debug("file-tags", selftest::Severity::Diagnostic, || {
+                fs::tags::self_test()
+            });
+            selftest::dispatch_debug("Thermal", selftest::Severity::Diagnostic, || {
+                fs::thermal::self_test()
+            });
+            selftest::dispatch_debug("fs transaction", selftest::Severity::Diagnostic, || {
+                fs::transaction::self_test()
+            });
+            selftest::dispatch_debug("undelete", selftest::Severity::Diagnostic, || {
+                fs::undelete::self_test()
+            });
+            selftest::dispatch_debug("disk-usage", selftest::Severity::Diagnostic, || {
+                fs::usage::self_test()
+            });
             // bootcfg was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at both ends, and nothing consults this
             // module during boot -- it records the *next* boot's menu, not the
             // one already in progress.
-            selftest::dispatch_debug(
-                "bootcfg",
-                selftest::Severity::Diagnostic,
-                fs::bootcfg::self_test(),
-            );
+            selftest::dispatch_debug("bootcfg", selftest::Severity::Diagnostic, || {
+                fs::bootcfg::self_test()
+            });
             // progmgr was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at both ends, and it registers only its
             // own `test.*` app ids, so it neither depends on nor leaves behind
             // the four built-in program entries `init_defaults()` seeds.
-            selftest::dispatch_debug(
-                "progmgr",
-                selftest::Severity::Diagnostic,
-                fs::progmgr::self_test(),
-            );
+            selftest::dispatch_debug("progmgr", selftest::Severity::Diagnostic, || {
+                fs::progmgr::self_test()
+            });
             // vpn was reachable only from a `kshell` subcommand, so its suite
             // had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at entry, mid and exit, and it asserts
             // that `init_defaults()` seeds *no* profiles, so it neither relies
             // on nor leaves fabricated VPN configuration behind.
-            selftest::dispatch_debug("vpn", selftest::Severity::Diagnostic, fs::vpn::self_test());
+            selftest::dispatch_debug("vpn", selftest::Severity::Diagnostic, || {
+                fs::vpn::self_test()
+            });
             // wallpaper was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It is safe to run here: it calls `clear_all()` and `reset_stats()`
             // at both ends, so it neither depends on nor leaves behind state,
             // and a boot has no wallpaper configured for it to destroy.
-            selftest::dispatch_debug(
-                "wallpaper",
-                selftest::Severity::Diagnostic,
-                fs::wallpaper::self_test(),
-            );
+            selftest::dispatch_debug("wallpaper", selftest::Severity::Diagnostic, || {
+                fs::wallpaper::self_test()
+            });
             // loginscreen was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at both ends, and the greeter is not
             // running yet -- this only edits the config it will later read.
-            selftest::dispatch_debug(
-                "loginscreen",
-                selftest::Severity::Diagnostic,
-                fs::loginscreen::self_test(),
-            );
+            selftest::dispatch_debug("loginscreen", selftest::Severity::Diagnostic, || {
+                fs::loginscreen::self_test()
+            });
             // screenshot was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` and `reset_stats()` at both ends, and it
             // only records capture *metadata* -- nothing touches the framebuffer.
-            selftest::dispatch_debug(
-                "screenshot",
-                selftest::Severity::Diagnostic,
-                fs::screenshot::self_test(),
-            );
+            selftest::dispatch_debug("screenshot", selftest::Severity::Diagnostic, || {
+                fs::screenshot::self_test()
+            });
             // cloudsync was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: it is baseline-relative and restores the account,
             // conflict and exclude lists exactly, so it cannot disturb a user's
             // cloud configuration -- and at boot there is none yet anyway.
-            selftest::dispatch_debug(
-                "Cloudsync",
-                selftest::Severity::Diagnostic,
-                fs::cloudsync::self_test(),
-            );
+            selftest::dispatch_debug("Cloudsync", selftest::Severity::Diagnostic, || {
+                fs::cloudsync::self_test()
+            });
             // fileversion was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: it is baseline-relative, refuses to run at all if a
             // pre-existing watch covers its fixture, and purges every version it
             // captures -- so it cannot destroy a real file's version history.
-            selftest::dispatch_debug(
-                "Fileversion",
-                selftest::Severity::Diagnostic,
-                fs::fileversion::self_test(),
-            );
+            selftest::dispatch_debug("Fileversion", selftest::Severity::Diagnostic, || {
+                fs::fileversion::self_test()
+            });
             // screenrec was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: it resets `STATE` to `None` at both ends, which is
             // exactly the state a fresh boot has -- `init_defaults()` is
             // otherwise reachable only from `screenrec init`. It records
             // session *metadata* only; nothing touches the framebuffer.
-            selftest::dispatch_debug(
-                "Screenrec",
-                selftest::Severity::Diagnostic,
-                fs::screenrec::self_test(),
-            );
-            // appregistry and startmenu were reachable only from `kshell`
-            // subcommands (TD-A-FS-SELFTESTS-NEVER-RUN). Both decline to run
-            // against a populated store rather than clearing it, and both end
-            // at the empty state a fresh boot has -- nothing outside their
-            // shell commands populates either.
-            selftest::dispatch_debug(
-                "appregistry",
-                selftest::Severity::Diagnostic,
-                fs::appregistry::self_test(),
-            );
-            selftest::dispatch_debug(
-                "startmenu",
-                selftest::Severity::Diagnostic,
-                fs::startmenu::self_test(),
-            );
-            // pinnedapps was reachable only from a `kshell` subcommand
-            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it resets `STATE` to
-            // `None` at both ends, which is what a fresh boot has -- nothing
-            // calls `init_defaults()` outside the `pinnedapps` commands.
-            selftest::dispatch_debug(
-                "Pinnedapps",
-                selftest::Severity::Diagnostic,
-                fs::pinnedapps::self_test(),
-            );
+            selftest::dispatch_debug("Screenrec", selftest::Severity::Diagnostic, || {
+                fs::screenrec::self_test()
+            });
             // kernelbuild was reachable only from a `kshell` subcommand
             // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it declines to run
             // against a populated registry rather than clearing it, and at
             // boot the registry is empty -- `init_defaults()` is reachable
             // only from `kbuild init`.
-            selftest::dispatch_debug(
-                "kernelbuild",
-                selftest::Severity::Diagnostic,
-                fs::kernelbuild::self_test(),
-            );
+            selftest::dispatch_debug("kernelbuild", selftest::Severity::Diagnostic, || {
+                fs::kernelbuild::self_test()
+            });
             // userprofile was reachable only from a `kshell` subcommand
             // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it creates one profile
             // and deletes it again, and every other change it makes it undoes,
             // so it leaves the two default profiles exactly as it found them.
-            selftest::dispatch_debug(
-                "Userprofile",
-                selftest::Severity::Diagnostic,
-                fs::userprofile::self_test(),
-            );
+            selftest::dispatch_debug("Userprofile", selftest::Severity::Diagnostic, || {
+                fs::userprofile::self_test()
+            });
             // useracct was reachable only from a `kshell` subcommand
             // (TD-A-FS-SELFTESTS-NEVER-RUN) -- and until this commit it opened
             // and closed with `clear_all()`, so `useracct test` deleted every
             // account, group and session on the machine. It is now
             // baseline-relative, declines to run while anybody is logged in,
             // and restores `current_uid` and the login counter on exit.
-            selftest::dispatch_debug(
-                "useracct",
-                selftest::Severity::Diagnostic,
-                fs::useracct::self_test(),
-            );
-            selftest::dispatch_debug(
-                "socket-activation",
-                selftest::Severity::Diagnostic,
-                crate::sockact::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sync",
-                selftest::Severity::Diagnostic,
-                crate::sync::self_test(),
-            );
+            selftest::dispatch_debug("useracct", selftest::Severity::Diagnostic, || {
+                fs::useracct::self_test()
+            });
+            selftest::dispatch_debug("socket-activation", selftest::Severity::Diagnostic, || {
+                crate::sockact::self_test()
+            });
+            selftest::dispatch_debug("Sync", selftest::Severity::Diagnostic, || {
+                crate::sync::self_test()
+            });
             // The leaf-claim control, beside the Mutex self-test rather
             // than inside it: both need the scheduler alive (every
             // acquisition here disables preemption), and this one wants
             // its own PASS/FAIL line so a reader can tell which of the
             // two failed.
-            selftest::dispatch_debug(
-                "Leaf-claim",
-                selftest::Severity::Diagnostic,
-                crate::sync::self_test_leaf_claim(),
-            );
+            selftest::dispatch_debug("Leaf-claim", selftest::Severity::Diagnostic, || {
+                crate::sync::self_test_leaf_claim()
+            });
         }
         case();
     }
@@ -6793,187 +6800,129 @@ extern "C" fn kernel_main() -> ! {
         // bisects to one obvious place.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "accessibility",
-                selftest::Severity::Diagnostic,
-                fs::a11y::self_test(),
-            );
+            selftest::dispatch_debug("accessibility", selftest::Severity::Diagnostic, || {
+                fs::a11y::self_test()
+            });
             selftest::dispatch_debug(
                 "per-app notification settings",
                 selftest::Severity::Diagnostic,
-                fs::appnotify::self_test(),
+                || fs::appnotify::self_test(),
             );
-            selftest::dispatch_debug(
-                "autostart",
-                selftest::Severity::Diagnostic,
-                fs::autostart::self_test(),
-            );
+            selftest::dispatch_debug("autostart", selftest::Severity::Diagnostic, || {
+                fs::autostart::self_test()
+            });
             selftest::dispatch_debug(
                 "capability settings",
                 selftest::Severity::Diagnostic,
-                fs::capsettings::self_test(),
+                || fs::capsettings::self_test(),
             );
-            selftest::dispatch_debug(
-                "color picker",
-                selftest::Severity::Diagnostic,
-                fs::colorpicker::self_test(),
-            );
-            selftest::dispatch_debug(
-                "credential store",
-                selftest::Severity::Diagnostic,
-                fs::credentials::self_test(),
-            );
-            selftest::dispatch_debug(
-                "cursor settings",
-                selftest::Severity::Diagnostic,
-                fs::cursorsettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "detail columns",
-                selftest::Severity::Diagnostic,
-                fs::detailcols::self_test(),
-            );
-            selftest::dispatch_debug(
-                "display settings",
-                selftest::Severity::Diagnostic,
-                fs::display::self_test(),
-            );
-            selftest::dispatch_debug(
-                "dynamic DNS",
-                selftest::Severity::Diagnostic,
-                fs::dyndns::self_test(),
-            );
-            selftest::dispatch_debug(
-                "file picker",
-                selftest::Severity::Diagnostic,
-                fs::filepicker::self_test(),
-            );
-            selftest::dispatch_debug(
-                "font manager",
-                selftest::Severity::Diagnostic,
-                fs::fontmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "filesystem tuning",
-                selftest::Severity::Diagnostic,
-                fs::fstune::self_test(),
-            );
-            selftest::dispatch_debug(
-                "hotkeys",
-                selftest::Severity::Diagnostic,
-                fs::hotkeys::self_test(),
-            );
-            selftest::dispatch_debug("IME", selftest::Severity::Diagnostic, fs::ime::self_test());
-            selftest::dispatch_debug(
-                "installer",
-                selftest::Severity::Diagnostic,
-                fs::installer::self_test(),
-            );
-            selftest::dispatch_debug(
-                "keyboard settings",
-                selftest::Severity::Diagnostic,
-                fs::kbsettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "keyboard layout",
-                selftest::Severity::Diagnostic,
-                fs::keylayout::self_test(),
-            );
+            selftest::dispatch_debug("color picker", selftest::Severity::Diagnostic, || {
+                fs::colorpicker::self_test()
+            });
+            selftest::dispatch_debug("credential store", selftest::Severity::Diagnostic, || {
+                fs::credentials::self_test()
+            });
+            selftest::dispatch_debug("cursor settings", selftest::Severity::Diagnostic, || {
+                fs::cursorsettings::self_test()
+            });
+            selftest::dispatch_debug("detail columns", selftest::Severity::Diagnostic, || {
+                fs::detailcols::self_test()
+            });
+            selftest::dispatch_debug("display settings", selftest::Severity::Diagnostic, || {
+                fs::display::self_test()
+            });
+            selftest::dispatch_debug("dynamic DNS", selftest::Severity::Diagnostic, || {
+                fs::dyndns::self_test()
+            });
+            selftest::dispatch_debug("file picker", selftest::Severity::Diagnostic, || {
+                fs::filepicker::self_test()
+            });
+            selftest::dispatch_debug("font manager", selftest::Severity::Diagnostic, || {
+                fs::fontmgr::self_test()
+            });
+            selftest::dispatch_debug("filesystem tuning", selftest::Severity::Diagnostic, || {
+                fs::fstune::self_test()
+            });
+            selftest::dispatch_debug("hotkeys", selftest::Severity::Diagnostic, || {
+                fs::hotkeys::self_test()
+            });
+            selftest::dispatch_debug("IME", selftest::Severity::Diagnostic, || {
+                fs::ime::self_test()
+            });
+            selftest::dispatch_debug("installer", selftest::Severity::Diagnostic, || {
+                fs::installer::self_test()
+            });
+            selftest::dispatch_debug("keyboard settings", selftest::Severity::Diagnostic, || {
+                fs::kbsettings::self_test()
+            });
+            selftest::dispatch_debug("keyboard layout", selftest::Severity::Diagnostic, || {
+                fs::keylayout::self_test()
+            });
             selftest::dispatch_debug(
                 "memory-management tuning",
                 selftest::Severity::Diagnostic,
-                fs::mmtune::self_test(),
+                || fs::mmtune::self_test(),
             );
-            selftest::dispatch_debug(
-                "network indicator",
-                selftest::Severity::Diagnostic,
-                fs::netindicator::self_test(),
-            );
-            selftest::dispatch_debug(
-                "network settings",
-                selftest::Severity::Diagnostic,
-                fs::netsettings::self_test(),
-            );
+            selftest::dispatch_debug("network indicator", selftest::Severity::Diagnostic, || {
+                fs::netindicator::self_test()
+            });
+            selftest::dispatch_debug("network settings", selftest::Severity::Diagnostic, || {
+                fs::netsettings::self_test()
+            });
             selftest::dispatch_debug(
                 "notification center",
                 selftest::Severity::Diagnostic,
-                fs::notifcenter::self_test(),
+                || fs::notifcenter::self_test(),
             );
-            selftest::dispatch_debug(
-                "OS reset",
-                selftest::Severity::Diagnostic,
-                fs::osreset::self_test(),
-            );
+            selftest::dispatch_debug("OS reset", selftest::Severity::Diagnostic, || {
+                fs::osreset::self_test()
+            });
             selftest::dispatch_debug(
                 "performance monitor",
                 selftest::Severity::Diagnostic,
-                fs::perfmon::self_test(),
+                || fs::perfmon::self_test(),
             );
-            selftest::dispatch_debug(
-                "run dialog",
-                selftest::Severity::Diagnostic,
-                fs::rundialog::self_test(),
-            );
-            selftest::dispatch_debug(
-                "scheduler tuning",
-                selftest::Severity::Diagnostic,
-                fs::schedtune::self_test(),
-            );
+            selftest::dispatch_debug("run dialog", selftest::Severity::Diagnostic, || {
+                fs::rundialog::self_test()
+            });
+            selftest::dispatch_debug("scheduler tuning", selftest::Severity::Diagnostic, || {
+                fs::schedtune::self_test()
+            });
             selftest::dispatch_debug(
                 "script-engine registry",
                 selftest::Severity::Diagnostic,
-                fs::scriptlang::self_test(),
+                || fs::scriptlang::self_test(),
             );
-            selftest::dispatch_debug(
-                "service manager",
-                selftest::Severity::Diagnostic,
-                fs::servicemgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "sound mixer",
-                selftest::Severity::Diagnostic,
-                fs::soundmixer::self_test(),
-            );
-            selftest::dispatch_debug(
-                "swap configuration",
-                selftest::Severity::Diagnostic,
-                fs::swapcfg::self_test(),
-            );
-            selftest::dispatch_debug(
-                "system tray",
-                selftest::Severity::Diagnostic,
-                fs::systray::self_test(),
-            );
-            selftest::dispatch_debug(
-                "taskbar",
-                selftest::Severity::Diagnostic,
-                fs::taskbar::self_test(),
-            );
-            selftest::dispatch_debug(
-                "desktop theme",
-                selftest::Severity::Diagnostic,
-                fs::theme::self_test(),
-            );
-            selftest::dispatch_debug(
-                "virtual desktops",
-                selftest::Severity::Diagnostic,
-                fs::vdesktop::self_test(),
-            );
-            selftest::dispatch_debug(
-                "wake sensor",
-                selftest::Severity::Diagnostic,
-                fs::wakesensor::self_test(),
-            );
-            selftest::dispatch_debug(
-                "desktop widgets",
-                selftest::Severity::Diagnostic,
-                fs::widgets::self_test(),
-            );
-            selftest::dispatch_debug(
-                "window snapping",
-                selftest::Severity::Diagnostic,
-                fs::winsnap::self_test(),
-            );
+            selftest::dispatch_debug("service manager", selftest::Severity::Diagnostic, || {
+                fs::servicemgr::self_test()
+            });
+            selftest::dispatch_debug("sound mixer", selftest::Severity::Diagnostic, || {
+                fs::soundmixer::self_test()
+            });
+            selftest::dispatch_debug("swap configuration", selftest::Severity::Diagnostic, || {
+                fs::swapcfg::self_test()
+            });
+            selftest::dispatch_debug("system tray", selftest::Severity::Diagnostic, || {
+                fs::systray::self_test()
+            });
+            selftest::dispatch_debug("taskbar", selftest::Severity::Diagnostic, || {
+                fs::taskbar::self_test()
+            });
+            selftest::dispatch_debug("desktop theme", selftest::Severity::Diagnostic, || {
+                fs::theme::self_test()
+            });
+            selftest::dispatch_debug("virtual desktops", selftest::Severity::Diagnostic, || {
+                fs::vdesktop::self_test()
+            });
+            selftest::dispatch_debug("wake sensor", selftest::Severity::Diagnostic, || {
+                fs::wakesensor::self_test()
+            });
+            selftest::dispatch_debug("desktop widgets", selftest::Severity::Diagnostic, || {
+                fs::widgets::self_test()
+            });
+            selftest::dispatch_debug("window snapping", selftest::Severity::Diagnostic, || {
+                fs::winsnap::self_test()
+            });
         }
         case();
     }
@@ -7004,86 +6953,54 @@ extern "C" fn kernel_main() -> ! {
         // calls.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Autofix",
-                selftest::Severity::Diagnostic,
-                fs::autofix::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cliphistory",
-                selftest::Severity::Diagnostic,
-                fs::cliphistory::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Crashreport",
-                selftest::Severity::Diagnostic,
-                fs::crashreport::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Datausage",
-                selftest::Severity::Diagnostic,
-                fs::datausage::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dmevent",
-                selftest::Severity::Diagnostic,
-                fs::dmevent::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dnssettings",
-                selftest::Severity::Diagnostic,
-                fs::dnssettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dumpanalyzer",
-                selftest::Severity::Diagnostic,
-                fs::dumpanalyzer::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Hwmonitor",
-                selftest::Severity::Diagnostic,
-                fs::hwmonitor::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Location",
-                selftest::Severity::Diagnostic,
-                fs::location::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Multiclip",
-                selftest::Severity::Diagnostic,
-                fs::multiclip::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Nameservice",
-                selftest::Severity::Diagnostic,
-                fs::nameservice::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Printmgr",
-                selftest::Severity::Diagnostic,
-                fs::printmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Recentsearch",
-                selftest::Severity::Diagnostic,
-                fs::recentsearch::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Startuprepair",
-                selftest::Severity::Diagnostic,
-                fs::startuprepair::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysresource",
-                selftest::Severity::Diagnostic,
-                fs::sysresource::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Tracemon",
-                selftest::Severity::Diagnostic,
-                fs::tracemon::self_test(),
-            );
+            selftest::dispatch_debug("Autofix", selftest::Severity::Diagnostic, || {
+                fs::autofix::self_test()
+            });
+            selftest::dispatch_debug("Cliphistory", selftest::Severity::Diagnostic, || {
+                fs::cliphistory::self_test()
+            });
+            selftest::dispatch_debug("Crashreport", selftest::Severity::Diagnostic, || {
+                fs::crashreport::self_test()
+            });
+            selftest::dispatch_debug("Datausage", selftest::Severity::Diagnostic, || {
+                fs::datausage::self_test()
+            });
+            selftest::dispatch_debug("Dmevent", selftest::Severity::Diagnostic, || {
+                fs::dmevent::self_test()
+            });
+            selftest::dispatch_debug("Dnssettings", selftest::Severity::Diagnostic, || {
+                fs::dnssettings::self_test()
+            });
+            selftest::dispatch_debug("Dumpanalyzer", selftest::Severity::Diagnostic, || {
+                fs::dumpanalyzer::self_test()
+            });
+            selftest::dispatch_debug("Hwmonitor", selftest::Severity::Diagnostic, || {
+                fs::hwmonitor::self_test()
+            });
+            selftest::dispatch_debug("Location", selftest::Severity::Diagnostic, || {
+                fs::location::self_test()
+            });
+            selftest::dispatch_debug("Multiclip", selftest::Severity::Diagnostic, || {
+                fs::multiclip::self_test()
+            });
+            selftest::dispatch_debug("Nameservice", selftest::Severity::Diagnostic, || {
+                fs::nameservice::self_test()
+            });
+            selftest::dispatch_debug("Printmgr", selftest::Severity::Diagnostic, || {
+                fs::printmgr::self_test()
+            });
+            selftest::dispatch_debug("Recentsearch", selftest::Severity::Diagnostic, || {
+                fs::recentsearch::self_test()
+            });
+            selftest::dispatch_debug("Startuprepair", selftest::Severity::Diagnostic, || {
+                fs::startuprepair::self_test()
+            });
+            selftest::dispatch_debug("Sysresource", selftest::Severity::Diagnostic, || {
+                fs::sysresource::self_test()
+            });
+            selftest::dispatch_debug("Tracemon", selftest::Severity::Diagnostic, || {
+                fs::tracemon::self_test()
+            });
         }
         case();
     }
@@ -7108,126 +7025,69 @@ extern "C" fn kernel_main() -> ! {
         // calls.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Appcompat",
-                selftest::Severity::Diagnostic,
-                fs::appcompat::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Appdefaults",
-                selftest::Severity::Diagnostic,
-                fs::appdefaults::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Applaunch",
-                selftest::Severity::Diagnostic,
-                fs::applaunch::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Apppermissions",
-                selftest::Severity::Diagnostic,
-                fs::apppermissions::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Appsandbox",
-                selftest::Severity::Diagnostic,
-                fs::appsandbox::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Appstore",
-                selftest::Severity::Diagnostic,
-                fs::appstore::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Audiodevice",
-                selftest::Severity::Diagnostic,
-                fs::audiodevice::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Audioeq",
-                selftest::Severity::Diagnostic,
-                fs::audioeq::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Audiomux",
-                selftest::Severity::Diagnostic,
-                fs::audiomux::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Backupsched",
-                selftest::Severity::Diagnostic,
-                fs::backupsched::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Battery",
-                selftest::Severity::Diagnostic,
-                fs::battery::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Blktrace",
-                selftest::Severity::Diagnostic,
-                fs::blktrace::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Bluetooth",
-                selftest::Severity::Diagnostic,
-                fs::bluetooth::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Brightness",
-                selftest::Severity::Diagnostic,
-                fs::brightness::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cgroupfs",
-                selftest::Severity::Diagnostic,
-                fs::cgroupfs::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Clipaction",
-                selftest::Severity::Diagnostic,
-                fs::clipaction::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Clipsync",
-                selftest::Severity::Diagnostic,
-                fs::clipsync::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Colorblind",
-                selftest::Severity::Diagnostic,
-                fs::colorblind::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Colorscheme",
-                selftest::Severity::Diagnostic,
-                fs::colorscheme::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Colortemp",
-                selftest::Severity::Diagnostic,
-                fs::colortemp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Coredump",
-                selftest::Severity::Diagnostic,
-                fs::coredump::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cpuset",
-                selftest::Severity::Diagnostic,
-                fs::cpuset::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Cputhr",
-                selftest::Severity::Diagnostic,
-                fs::cputhr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Defaultapps",
-                selftest::Severity::Diagnostic,
-                fs::defaultapps::self_test(),
-            );
+            selftest::dispatch_debug("Appcompat", selftest::Severity::Diagnostic, || {
+                fs::appcompat::self_test()
+            });
+            selftest::dispatch_debug("Appdefaults", selftest::Severity::Diagnostic, || {
+                fs::appdefaults::self_test()
+            });
+            selftest::dispatch_debug("Apppermissions", selftest::Severity::Diagnostic, || {
+                fs::apppermissions::self_test()
+            });
+            selftest::dispatch_debug("Appsandbox", selftest::Severity::Diagnostic, || {
+                fs::appsandbox::self_test()
+            });
+            selftest::dispatch_debug("Audiodevice", selftest::Severity::Diagnostic, || {
+                fs::audiodevice::self_test()
+            });
+            selftest::dispatch_debug("Audioeq", selftest::Severity::Diagnostic, || {
+                fs::audioeq::self_test()
+            });
+            selftest::dispatch_debug("Audiomux", selftest::Severity::Diagnostic, || {
+                fs::audiomux::self_test()
+            });
+            selftest::dispatch_debug("Backupsched", selftest::Severity::Diagnostic, || {
+                fs::backupsched::self_test()
+            });
+            selftest::dispatch_debug("Battery", selftest::Severity::Diagnostic, || {
+                fs::battery::self_test()
+            });
+            selftest::dispatch_debug("Blktrace", selftest::Severity::Diagnostic, || {
+                fs::blktrace::self_test()
+            });
+            selftest::dispatch_debug("Bluetooth", selftest::Severity::Diagnostic, || {
+                fs::bluetooth::self_test()
+            });
+            selftest::dispatch_debug("Brightness", selftest::Severity::Diagnostic, || {
+                fs::brightness::self_test()
+            });
+            selftest::dispatch_debug("Cgroupfs", selftest::Severity::Diagnostic, || {
+                fs::cgroupfs::self_test()
+            });
+            selftest::dispatch_debug("Clipaction", selftest::Severity::Diagnostic, || {
+                fs::clipaction::self_test()
+            });
+            selftest::dispatch_debug("Clipsync", selftest::Severity::Diagnostic, || {
+                fs::clipsync::self_test()
+            });
+            selftest::dispatch_debug("Colorblind", selftest::Severity::Diagnostic, || {
+                fs::colorblind::self_test()
+            });
+            selftest::dispatch_debug("Colorscheme", selftest::Severity::Diagnostic, || {
+                fs::colorscheme::self_test()
+            });
+            selftest::dispatch_debug("Colortemp", selftest::Severity::Diagnostic, || {
+                fs::colortemp::self_test()
+            });
+            selftest::dispatch_debug("Coredump", selftest::Severity::Diagnostic, || {
+                fs::coredump::self_test()
+            });
+            selftest::dispatch_debug("Cpuset", selftest::Severity::Diagnostic, || {
+                fs::cpuset::self_test()
+            });
+            selftest::dispatch_debug("Cputhr", selftest::Severity::Diagnostic, || {
+                fs::cputhr::self_test()
+            });
         }
         case();
     }
@@ -7236,126 +7096,78 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged fs self-tests, batch 2 of 6. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Devicemgr",
-                selftest::Severity::Diagnostic,
-                fs::devicemgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Devpair",
-                selftest::Severity::Diagnostic,
-                fs::devpair::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dictation",
-                selftest::Severity::Diagnostic,
-                fs::dictation::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Diskquota",
-                selftest::Severity::Diagnostic,
-                fs::diskquota::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Disksmart",
-                selftest::Severity::Diagnostic,
-                fs::disksmart::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Displayarrange",
-                selftest::Severity::Diagnostic,
-                fs::displayarrange::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Displaycal",
-                selftest::Severity::Diagnostic,
-                fs::displaycal::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Displaycolor",
-                selftest::Severity::Diagnostic,
-                fs::displaycolor::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dpiscaling",
-                selftest::Severity::Diagnostic,
-                fs::dpiscaling::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Driverupdate",
-                selftest::Severity::Diagnostic,
-                fs::driverupdate::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Dynlock",
-                selftest::Severity::Diagnostic,
-                fs::dynlock::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Energysaver",
-                selftest::Severity::Diagnostic,
-                fs::energysaver::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Entropy",
-                selftest::Severity::Diagnostic,
-                fs::entropy::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Envvars",
-                selftest::Severity::Diagnostic,
-                fs::envvars::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Faceunlock",
-                selftest::Severity::Diagnostic,
-                fs::faceunlock::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Filelock",
-                selftest::Severity::Diagnostic,
-                fs::filelock::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Filerules",
-                selftest::Severity::Diagnostic,
-                fs::filerules::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Filetransfer",
-                selftest::Severity::Diagnostic,
-                fs::filetransfer::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Focusassist",
-                selftest::Severity::Diagnostic,
-                fs::focusassist::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Focussession",
-                selftest::Severity::Diagnostic,
-                fs::focussession::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Fontpreview",
-                selftest::Severity::Diagnostic,
-                fs::fontpreview::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Fontsettings",
-                selftest::Severity::Diagnostic,
-                fs::fontsettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Fscache",
-                selftest::Severity::Diagnostic,
-                fs::fscache::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Fwsettings",
-                selftest::Severity::Diagnostic,
-                fs::fwsettings::self_test(),
-            );
+            selftest::dispatch_debug("Devicemgr", selftest::Severity::Diagnostic, || {
+                fs::devicemgr::self_test()
+            });
+            selftest::dispatch_debug("Devpair", selftest::Severity::Diagnostic, || {
+                fs::devpair::self_test()
+            });
+            selftest::dispatch_debug("Dictation", selftest::Severity::Diagnostic, || {
+                fs::dictation::self_test()
+            });
+            selftest::dispatch_debug("Diskquota", selftest::Severity::Diagnostic, || {
+                fs::diskquota::self_test()
+            });
+            selftest::dispatch_debug("Disksmart", selftest::Severity::Diagnostic, || {
+                fs::disksmart::self_test()
+            });
+            selftest::dispatch_debug("Displayarrange", selftest::Severity::Diagnostic, || {
+                fs::displayarrange::self_test()
+            });
+            selftest::dispatch_debug("Displaycal", selftest::Severity::Diagnostic, || {
+                fs::displaycal::self_test()
+            });
+            selftest::dispatch_debug("Displaycolor", selftest::Severity::Diagnostic, || {
+                fs::displaycolor::self_test()
+            });
+            selftest::dispatch_debug("Dpiscaling", selftest::Severity::Diagnostic, || {
+                fs::dpiscaling::self_test()
+            });
+            selftest::dispatch_debug("Driverupdate", selftest::Severity::Diagnostic, || {
+                fs::driverupdate::self_test()
+            });
+            selftest::dispatch_debug("Dynlock", selftest::Severity::Diagnostic, || {
+                fs::dynlock::self_test()
+            });
+            selftest::dispatch_debug("Energysaver", selftest::Severity::Diagnostic, || {
+                fs::energysaver::self_test()
+            });
+            selftest::dispatch_debug("Entropy", selftest::Severity::Diagnostic, || {
+                fs::entropy::self_test()
+            });
+            selftest::dispatch_debug("Envvars", selftest::Severity::Diagnostic, || {
+                fs::envvars::self_test()
+            });
+            selftest::dispatch_debug("Faceunlock", selftest::Severity::Diagnostic, || {
+                fs::faceunlock::self_test()
+            });
+            selftest::dispatch_debug("Filelock", selftest::Severity::Diagnostic, || {
+                fs::filelock::self_test()
+            });
+            selftest::dispatch_debug("Filerules", selftest::Severity::Diagnostic, || {
+                fs::filerules::self_test()
+            });
+            selftest::dispatch_debug("Filetransfer", selftest::Severity::Diagnostic, || {
+                fs::filetransfer::self_test()
+            });
+            selftest::dispatch_debug("Focusassist", selftest::Severity::Diagnostic, || {
+                fs::focusassist::self_test()
+            });
+            selftest::dispatch_debug("Focussession", selftest::Severity::Diagnostic, || {
+                fs::focussession::self_test()
+            });
+            selftest::dispatch_debug("Fontpreview", selftest::Severity::Diagnostic, || {
+                fs::fontpreview::self_test()
+            });
+            selftest::dispatch_debug("Fontsettings", selftest::Severity::Diagnostic, || {
+                fs::fontsettings::self_test()
+            });
+            selftest::dispatch_debug("Fscache", selftest::Severity::Diagnostic, || {
+                fs::fscache::self_test()
+            });
+            selftest::dispatch_debug("Fwsettings", selftest::Severity::Diagnostic, || {
+                fs::fwsettings::self_test()
+            });
         }
         case();
     }
@@ -7364,126 +7176,78 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged fs self-tests, batch 3 of 6. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Fwupdate",
-                selftest::Severity::Diagnostic,
-                fs::fwupdate::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Gamepadinput",
-                selftest::Severity::Diagnostic,
-                fs::gamepadinput::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Gestures",
-                selftest::Severity::Diagnostic,
-                fs::gestures::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Groupmgr",
-                selftest::Severity::Diagnostic,
-                fs::groupmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Haptfeedback",
-                selftest::Severity::Diagnostic,
-                fs::haptfeedback::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Hdrdisplay",
-                selftest::Severity::Diagnostic,
-                fs::hdrdisplay::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Hotcorners",
-                selftest::Severity::Diagnostic,
-                fs::hotcorners::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Inputa11Y",
-                selftest::Severity::Diagnostic,
-                fs::inputa11y::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Inputmethod",
-                selftest::Severity::Diagnostic,
-                fs::inputmethod::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Iosched",
-                selftest::Severity::Diagnostic,
-                fs::iosched::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Iotdevice",
-                selftest::Severity::Diagnostic,
-                fs::iotdevice::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kbmacro",
-                selftest::Severity::Diagnostic,
-                fs::kbmacro::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kbshortcuts",
-                selftest::Severity::Diagnostic,
-                fs::kbshortcuts::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kconsole",
-                selftest::Severity::Diagnostic,
-                fs::kconsole::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kernlog",
-                selftest::Severity::Diagnostic,
-                fs::kernlog::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kernparam",
-                selftest::Severity::Diagnostic,
-                fs::kernparam::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Kmod",
-                selftest::Severity::Diagnostic,
-                fs::kmod::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Langpack",
-                selftest::Severity::Diagnostic,
-                fs::langpack::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Loadavg",
-                selftest::Severity::Diagnostic,
-                fs::loadavg::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Lockwallpaper",
-                selftest::Severity::Diagnostic,
-                fs::lockwallpaper::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Magnifier",
-                selftest::Severity::Diagnostic,
-                fs::magnifier::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Mediakeys",
-                selftest::Severity::Diagnostic,
-                fs::mediakeys::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Mobilelink",
-                selftest::Severity::Diagnostic,
-                fs::mobilelink::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Monitors",
-                selftest::Severity::Diagnostic,
-                fs::monitors::self_test(),
-            );
+            selftest::dispatch_debug("Fwupdate", selftest::Severity::Diagnostic, || {
+                fs::fwupdate::self_test()
+            });
+            selftest::dispatch_debug("Gamepadinput", selftest::Severity::Diagnostic, || {
+                fs::gamepadinput::self_test()
+            });
+            selftest::dispatch_debug("Gestures", selftest::Severity::Diagnostic, || {
+                fs::gestures::self_test()
+            });
+            selftest::dispatch_debug("Groupmgr", selftest::Severity::Diagnostic, || {
+                fs::groupmgr::self_test()
+            });
+            selftest::dispatch_debug("Haptfeedback", selftest::Severity::Diagnostic, || {
+                fs::haptfeedback::self_test()
+            });
+            selftest::dispatch_debug("Hdrdisplay", selftest::Severity::Diagnostic, || {
+                fs::hdrdisplay::self_test()
+            });
+            selftest::dispatch_debug("Hotcorners", selftest::Severity::Diagnostic, || {
+                fs::hotcorners::self_test()
+            });
+            selftest::dispatch_debug("Inputa11Y", selftest::Severity::Diagnostic, || {
+                fs::inputa11y::self_test()
+            });
+            selftest::dispatch_debug("Inputmethod", selftest::Severity::Diagnostic, || {
+                fs::inputmethod::self_test()
+            });
+            selftest::dispatch_debug("Iosched", selftest::Severity::Diagnostic, || {
+                fs::iosched::self_test()
+            });
+            selftest::dispatch_debug("Iotdevice", selftest::Severity::Diagnostic, || {
+                fs::iotdevice::self_test()
+            });
+            selftest::dispatch_debug("Kbmacro", selftest::Severity::Diagnostic, || {
+                fs::kbmacro::self_test()
+            });
+            selftest::dispatch_debug("Kbshortcuts", selftest::Severity::Diagnostic, || {
+                fs::kbshortcuts::self_test()
+            });
+            selftest::dispatch_debug("Kconsole", selftest::Severity::Diagnostic, || {
+                fs::kconsole::self_test()
+            });
+            selftest::dispatch_debug("Kernlog", selftest::Severity::Diagnostic, || {
+                fs::kernlog::self_test()
+            });
+            selftest::dispatch_debug("Kernparam", selftest::Severity::Diagnostic, || {
+                fs::kernparam::self_test()
+            });
+            selftest::dispatch_debug("Kmod", selftest::Severity::Diagnostic, || {
+                fs::kmod::self_test()
+            });
+            selftest::dispatch_debug("Langpack", selftest::Severity::Diagnostic, || {
+                fs::langpack::self_test()
+            });
+            selftest::dispatch_debug("Loadavg", selftest::Severity::Diagnostic, || {
+                fs::loadavg::self_test()
+            });
+            selftest::dispatch_debug("Lockwallpaper", selftest::Severity::Diagnostic, || {
+                fs::lockwallpaper::self_test()
+            });
+            selftest::dispatch_debug("Magnifier", selftest::Severity::Diagnostic, || {
+                fs::magnifier::self_test()
+            });
+            selftest::dispatch_debug("Mediakeys", selftest::Severity::Diagnostic, || {
+                fs::mediakeys::self_test()
+            });
+            selftest::dispatch_debug("Mobilelink", selftest::Severity::Diagnostic, || {
+                fs::mobilelink::self_test()
+            });
+            selftest::dispatch_debug("Monitors", selftest::Severity::Diagnostic, || {
+                fs::monitors::self_test()
+            });
         }
         case();
     }
@@ -7492,126 +7256,78 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged fs self-tests, batch 4 of 6. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Mousegestures",
-                selftest::Severity::Diagnostic,
-                fs::mousegestures::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Mousesettings",
-                selftest::Severity::Diagnostic,
-                fs::mousesettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Netdiag",
-                selftest::Severity::Diagnostic,
-                fs::netdiag::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Netprofile",
-                selftest::Severity::Diagnostic,
-                fs::netprofile::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Netproxy",
-                selftest::Severity::Diagnostic,
-                fs::netproxy::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Netthrottle",
-                selftest::Severity::Diagnostic,
-                fs::netthrottle::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Networkbridge",
-                selftest::Severity::Diagnostic,
-                fs::networkbridge::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Nightlight",
-                selftest::Severity::Diagnostic,
-                fs::nightlight::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Notifbadge",
-                selftest::Severity::Diagnostic,
-                fs::notifbadge::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Notiffilter",
-                selftest::Severity::Diagnostic,
-                fs::notiffilter::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Notifgroup",
-                selftest::Severity::Diagnostic,
-                fs::notifgroup::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Notifprefs",
-                selftest::Severity::Diagnostic,
-                fs::notifprefs::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Oobe",
-                selftest::Severity::Diagnostic,
-                fs::oobe::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Oomkiller",
-                selftest::Severity::Diagnostic,
-                fs::oomkiller::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Parental",
-                selftest::Severity::Diagnostic,
-                fs::parental::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Parentaltime",
-                selftest::Severity::Diagnostic,
-                fs::parentaltime::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Peninput",
-                selftest::Severity::Diagnostic,
-                fs::peninput::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Pidfd",
-                selftest::Severity::Diagnostic,
-                fs::pidfd::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Pkgmgr",
-                selftest::Severity::Diagnostic,
-                fs::pkgmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Playmedia",
-                selftest::Severity::Diagnostic,
-                fs::playmedia::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Policyengine",
-                selftest::Severity::Diagnostic,
-                fs::policyengine::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Powerprofile",
-                selftest::Severity::Diagnostic,
-                fs::powerprofile::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Printqueue",
-                selftest::Severity::Diagnostic,
-                fs::printqueue::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Prochistory",
-                selftest::Severity::Diagnostic,
-                fs::prochistory::self_test(),
-            );
+            selftest::dispatch_debug("Mousegestures", selftest::Severity::Diagnostic, || {
+                fs::mousegestures::self_test()
+            });
+            selftest::dispatch_debug("Mousesettings", selftest::Severity::Diagnostic, || {
+                fs::mousesettings::self_test()
+            });
+            selftest::dispatch_debug("Netdiag", selftest::Severity::Diagnostic, || {
+                fs::netdiag::self_test()
+            });
+            selftest::dispatch_debug("Netprofile", selftest::Severity::Diagnostic, || {
+                fs::netprofile::self_test()
+            });
+            selftest::dispatch_debug("Netproxy", selftest::Severity::Diagnostic, || {
+                fs::netproxy::self_test()
+            });
+            selftest::dispatch_debug("Netthrottle", selftest::Severity::Diagnostic, || {
+                fs::netthrottle::self_test()
+            });
+            selftest::dispatch_debug("Networkbridge", selftest::Severity::Diagnostic, || {
+                fs::networkbridge::self_test()
+            });
+            selftest::dispatch_debug("Nightlight", selftest::Severity::Diagnostic, || {
+                fs::nightlight::self_test()
+            });
+            selftest::dispatch_debug("Notifbadge", selftest::Severity::Diagnostic, || {
+                fs::notifbadge::self_test()
+            });
+            selftest::dispatch_debug("Notiffilter", selftest::Severity::Diagnostic, || {
+                fs::notiffilter::self_test()
+            });
+            selftest::dispatch_debug("Notifgroup", selftest::Severity::Diagnostic, || {
+                fs::notifgroup::self_test()
+            });
+            selftest::dispatch_debug("Notifprefs", selftest::Severity::Diagnostic, || {
+                fs::notifprefs::self_test()
+            });
+            selftest::dispatch_debug("Oobe", selftest::Severity::Diagnostic, || {
+                fs::oobe::self_test()
+            });
+            selftest::dispatch_debug("Oomkiller", selftest::Severity::Diagnostic, || {
+                fs::oomkiller::self_test()
+            });
+            selftest::dispatch_debug("Parental", selftest::Severity::Diagnostic, || {
+                fs::parental::self_test()
+            });
+            selftest::dispatch_debug("Parentaltime", selftest::Severity::Diagnostic, || {
+                fs::parentaltime::self_test()
+            });
+            selftest::dispatch_debug("Peninput", selftest::Severity::Diagnostic, || {
+                fs::peninput::self_test()
+            });
+            selftest::dispatch_debug("Pidfd", selftest::Severity::Diagnostic, || {
+                fs::pidfd::self_test()
+            });
+            selftest::dispatch_debug("Pkgmgr", selftest::Severity::Diagnostic, || {
+                fs::pkgmgr::self_test()
+            });
+            selftest::dispatch_debug("Playmedia", selftest::Severity::Diagnostic, || {
+                fs::playmedia::self_test()
+            });
+            selftest::dispatch_debug("Policyengine", selftest::Severity::Diagnostic, || {
+                fs::policyengine::self_test()
+            });
+            selftest::dispatch_debug("Powerprofile", selftest::Severity::Diagnostic, || {
+                fs::powerprofile::self_test()
+            });
+            selftest::dispatch_debug("Printqueue", selftest::Severity::Diagnostic, || {
+                fs::printqueue::self_test()
+            });
+            selftest::dispatch_debug("Prochistory", selftest::Severity::Diagnostic, || {
+                fs::prochistory::self_test()
+            });
         }
         case();
     }
@@ -7620,126 +7336,78 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged fs self-tests, batch 5 of 6. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Prociso",
-                selftest::Severity::Diagnostic,
-                fs::prociso::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Quicknote",
-                selftest::Severity::Diagnostic,
-                fs::quicknote::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Quicksettings",
-                selftest::Severity::Diagnostic,
-                fs::quicksettings::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Raidmgr",
-                selftest::Severity::Diagnostic,
-                fs::raidmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Remoteassist",
-                selftest::Severity::Diagnostic,
-                fs::remoteassist::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Remotedesktop",
-                selftest::Severity::Diagnostic,
-                fs::remotedesktop::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Restorepoint",
-                selftest::Severity::Diagnostic,
-                fs::restorepoint::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Screenlock",
-                selftest::Severity::Diagnostic,
-                fs::screenlock::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Screenreader",
-                selftest::Severity::Diagnostic,
-                fs::screenreader::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Screensaver",
-                selftest::Severity::Diagnostic,
-                fs::screensaver::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Secpolicy",
-                selftest::Severity::Diagnostic,
-                fs::secpolicy::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Secureboot",
-                selftest::Severity::Diagnostic,
-                fs::secureboot::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Secureerase",
-                selftest::Severity::Diagnostic,
-                fs::secureerase::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sessionmgr",
-                selftest::Severity::Diagnostic,
-                fs::sessionmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sharesheet",
-                selftest::Severity::Diagnostic,
-                fs::sharesheet::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Shmem",
-                selftest::Severity::Diagnostic,
-                fs::shmem::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Signalq",
-                selftest::Severity::Diagnostic,
-                fs::signalq::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Snaplayout",
-                selftest::Severity::Diagnostic,
-                fs::snaplayout::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Soundevents",
-                selftest::Severity::Diagnostic,
-                fs::soundevents::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Spatialaudio",
-                selftest::Severity::Diagnostic,
-                fs::spatialaudio::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Speechio",
-                selftest::Severity::Diagnostic,
-                fs::speechio::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Spellcheck",
-                selftest::Severity::Diagnostic,
-                fs::spellcheck::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Splitview",
-                selftest::Severity::Diagnostic,
-                fs::splitview::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Storageclean",
-                selftest::Severity::Diagnostic,
-                fs::storageclean::self_test(),
-            );
+            selftest::dispatch_debug("Prociso", selftest::Severity::Diagnostic, || {
+                fs::prociso::self_test()
+            });
+            selftest::dispatch_debug("Quicknote", selftest::Severity::Diagnostic, || {
+                fs::quicknote::self_test()
+            });
+            selftest::dispatch_debug("Quicksettings", selftest::Severity::Diagnostic, || {
+                fs::quicksettings::self_test()
+            });
+            selftest::dispatch_debug("Raidmgr", selftest::Severity::Diagnostic, || {
+                fs::raidmgr::self_test()
+            });
+            selftest::dispatch_debug("Remoteassist", selftest::Severity::Diagnostic, || {
+                fs::remoteassist::self_test()
+            });
+            selftest::dispatch_debug("Remotedesktop", selftest::Severity::Diagnostic, || {
+                fs::remotedesktop::self_test()
+            });
+            selftest::dispatch_debug("Restorepoint", selftest::Severity::Diagnostic, || {
+                fs::restorepoint::self_test()
+            });
+            selftest::dispatch_debug("Screenlock", selftest::Severity::Diagnostic, || {
+                fs::screenlock::self_test()
+            });
+            selftest::dispatch_debug("Screenreader", selftest::Severity::Diagnostic, || {
+                fs::screenreader::self_test()
+            });
+            selftest::dispatch_debug("Screensaver", selftest::Severity::Diagnostic, || {
+                fs::screensaver::self_test()
+            });
+            selftest::dispatch_debug("Secpolicy", selftest::Severity::Diagnostic, || {
+                fs::secpolicy::self_test()
+            });
+            selftest::dispatch_debug("Secureboot", selftest::Severity::Diagnostic, || {
+                fs::secureboot::self_test()
+            });
+            selftest::dispatch_debug("Secureerase", selftest::Severity::Diagnostic, || {
+                fs::secureerase::self_test()
+            });
+            selftest::dispatch_debug("Sessionmgr", selftest::Severity::Diagnostic, || {
+                fs::sessionmgr::self_test()
+            });
+            selftest::dispatch_debug("Sharesheet", selftest::Severity::Diagnostic, || {
+                fs::sharesheet::self_test()
+            });
+            selftest::dispatch_debug("Shmem", selftest::Severity::Diagnostic, || {
+                fs::shmem::self_test()
+            });
+            selftest::dispatch_debug("Signalq", selftest::Severity::Diagnostic, || {
+                fs::signalq::self_test()
+            });
+            selftest::dispatch_debug("Snaplayout", selftest::Severity::Diagnostic, || {
+                fs::snaplayout::self_test()
+            });
+            selftest::dispatch_debug("Soundevents", selftest::Severity::Diagnostic, || {
+                fs::soundevents::self_test()
+            });
+            selftest::dispatch_debug("Spatialaudio", selftest::Severity::Diagnostic, || {
+                fs::spatialaudio::self_test()
+            });
+            selftest::dispatch_debug("Speechio", selftest::Severity::Diagnostic, || {
+                fs::speechio::self_test()
+            });
+            selftest::dispatch_debug("Spellcheck", selftest::Severity::Diagnostic, || {
+                fs::spellcheck::self_test()
+            });
+            selftest::dispatch_debug("Splitview", selftest::Severity::Diagnostic, || {
+                fs::splitview::self_test()
+            });
+            selftest::dispatch_debug("Storageclean", selftest::Severity::Diagnostic, || {
+                fs::storageclean::self_test()
+            });
         }
         case();
     }
@@ -7748,126 +7416,78 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged fs self-tests, batch 6 of 6. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Storagesense",
-                selftest::Severity::Diagnostic,
-                fs::storagesense::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Surroundsound",
-                selftest::Severity::Diagnostic,
-                fs::surroundsound::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysanimations",
-                selftest::Severity::Diagnostic,
-                fs::sysanimations::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysdiag",
-                selftest::Severity::Diagnostic,
-                fs::sysdiag::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Syslog",
-                selftest::Severity::Diagnostic,
-                fs::syslog::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysmaint",
-                selftest::Severity::Diagnostic,
-                fs::sysmaint::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysrestore",
-                selftest::Severity::Diagnostic,
-                fs::sysrestore::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Sysrq",
-                selftest::Severity::Diagnostic,
-                fs::sysrq::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Systemimage",
-                selftest::Severity::Diagnostic,
-                fs::systemimage::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Systemsounds",
-                selftest::Severity::Diagnostic,
-                fs::systemsounds::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Tasksched",
-                selftest::Severity::Diagnostic,
-                fs::tasksched::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Timesync",
-                selftest::Severity::Diagnostic,
-                fs::timesync::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Touchpad",
-                selftest::Severity::Diagnostic,
-                fs::touchpad::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Touchscreen",
-                selftest::Severity::Diagnostic,
-                fs::touchscreen::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Updatemgr",
-                selftest::Severity::Diagnostic,
-                fs::updatemgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Usbmgr",
-                selftest::Severity::Diagnostic,
-                fs::usbmgr::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Usbpolicy",
-                selftest::Severity::Diagnostic,
-                fs::usbpolicy::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Voicecontrol",
-                selftest::Severity::Diagnostic,
-                fs::voicecontrol::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Volumeosd",
-                selftest::Severity::Diagnostic,
-                fs::volumeosd::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Vpnprofile",
-                selftest::Severity::Diagnostic,
-                fs::vpnprofile::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Webcam",
-                selftest::Severity::Diagnostic,
-                fs::webcam::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Wifiscan",
-                selftest::Severity::Diagnostic,
-                fs::wifiscan::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Windowrules",
-                selftest::Severity::Diagnostic,
-                fs::windowrules::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Wintiling",
-                selftest::Severity::Diagnostic,
-                fs::wintiling::self_test(),
-            );
+            selftest::dispatch_debug("Storagesense", selftest::Severity::Diagnostic, || {
+                fs::storagesense::self_test()
+            });
+            selftest::dispatch_debug("Surroundsound", selftest::Severity::Diagnostic, || {
+                fs::surroundsound::self_test()
+            });
+            selftest::dispatch_debug("Sysanimations", selftest::Severity::Diagnostic, || {
+                fs::sysanimations::self_test()
+            });
+            selftest::dispatch_debug("Sysdiag", selftest::Severity::Diagnostic, || {
+                fs::sysdiag::self_test()
+            });
+            selftest::dispatch_debug("Syslog", selftest::Severity::Diagnostic, || {
+                fs::syslog::self_test()
+            });
+            selftest::dispatch_debug("Sysmaint", selftest::Severity::Diagnostic, || {
+                fs::sysmaint::self_test()
+            });
+            selftest::dispatch_debug("Sysrestore", selftest::Severity::Diagnostic, || {
+                fs::sysrestore::self_test()
+            });
+            selftest::dispatch_debug("Sysrq", selftest::Severity::Diagnostic, || {
+                fs::sysrq::self_test()
+            });
+            selftest::dispatch_debug("Systemimage", selftest::Severity::Diagnostic, || {
+                fs::systemimage::self_test()
+            });
+            selftest::dispatch_debug("Systemsounds", selftest::Severity::Diagnostic, || {
+                fs::systemsounds::self_test()
+            });
+            selftest::dispatch_debug("Tasksched", selftest::Severity::Diagnostic, || {
+                fs::tasksched::self_test()
+            });
+            selftest::dispatch_debug("Timesync", selftest::Severity::Diagnostic, || {
+                fs::timesync::self_test()
+            });
+            selftest::dispatch_debug("Touchpad", selftest::Severity::Diagnostic, || {
+                fs::touchpad::self_test()
+            });
+            selftest::dispatch_debug("Touchscreen", selftest::Severity::Diagnostic, || {
+                fs::touchscreen::self_test()
+            });
+            selftest::dispatch_debug("Updatemgr", selftest::Severity::Diagnostic, || {
+                fs::updatemgr::self_test()
+            });
+            selftest::dispatch_debug("Usbmgr", selftest::Severity::Diagnostic, || {
+                fs::usbmgr::self_test()
+            });
+            selftest::dispatch_debug("Usbpolicy", selftest::Severity::Diagnostic, || {
+                fs::usbpolicy::self_test()
+            });
+            selftest::dispatch_debug("Voicecontrol", selftest::Severity::Diagnostic, || {
+                fs::voicecontrol::self_test()
+            });
+            selftest::dispatch_debug("Volumeosd", selftest::Severity::Diagnostic, || {
+                fs::volumeosd::self_test()
+            });
+            selftest::dispatch_debug("Vpnprofile", selftest::Severity::Diagnostic, || {
+                fs::vpnprofile::self_test()
+            });
+            selftest::dispatch_debug("Webcam", selftest::Severity::Diagnostic, || {
+                fs::webcam::self_test()
+            });
+            selftest::dispatch_debug("Wifiscan", selftest::Severity::Diagnostic, || {
+                fs::wifiscan::self_test()
+            });
+            selftest::dispatch_debug("Windowrules", selftest::Severity::Diagnostic, || {
+                fs::windowrules::self_test()
+            });
+            selftest::dispatch_debug("Wintiling", selftest::Severity::Diagnostic, || {
+                fs::wintiling::self_test()
+            });
         }
         case();
     }
@@ -7902,31 +7522,21 @@ extern "C" fn kernel_main() -> ! {
         // These return `()`, hence the bare calls.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "Devhotplug",
-                selftest::Severity::Diagnostic,
-                devhotplug::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Devpower",
-                selftest::Severity::Diagnostic,
-                devpower::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Udriver",
-                selftest::Severity::Diagnostic,
-                udriver::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Vmguest",
-                selftest::Severity::Diagnostic,
-                vmguest::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Upnp",
-                selftest::Severity::Diagnostic,
-                net::upnp::self_test(),
-            );
+            selftest::dispatch_debug("Devhotplug", selftest::Severity::Diagnostic, || {
+                devhotplug::self_test()
+            });
+            selftest::dispatch_debug("Devpower", selftest::Severity::Diagnostic, || {
+                devpower::self_test()
+            });
+            selftest::dispatch_debug("Udriver", selftest::Severity::Diagnostic, || {
+                udriver::self_test()
+            });
+            selftest::dispatch_debug("Vmguest", selftest::Severity::Diagnostic, || {
+                vmguest::self_test()
+            });
+            selftest::dispatch_debug("Upnp", selftest::Severity::Diagnostic, || {
+                net::upnp::self_test()
+            });
         }
         case();
     }
@@ -7938,27 +7548,21 @@ extern "C" fn kernel_main() -> ! {
         // already printed which assertion failed by the time it returns.
         #[inline(never)]
         fn case() {
-            selftest::dispatch(
-                "initproc",
-                selftest::Severity::Diagnostic,
+            selftest::dispatch("initproc", selftest::Severity::Diagnostic, || {
                 initproc::self_test()
                     .then_some(())
-                    .ok_or("assertions failed"),
-            );
-            selftest::dispatch(
-                "reslimit",
-                selftest::Severity::Diagnostic,
+                    .ok_or("assertions failed")
+            });
+            selftest::dispatch("reslimit", selftest::Severity::Diagnostic, || {
                 reslimit::self_test()
                     .then_some(())
-                    .ok_or("assertions failed"),
-            );
-            selftest::dispatch(
-                "syshealth",
-                selftest::Severity::Diagnostic,
+                    .ok_or("assertions failed")
+            });
+            selftest::dispatch("syshealth", selftest::Severity::Diagnostic, || {
                 syshealth::self_test()
                     .then_some(())
-                    .ok_or("assertions failed"),
-            );
+                    .ok_or("assertions failed")
+            });
         }
         case();
     }
@@ -7967,76 +7571,48 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged eager self-tests, batch 3 of 4. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "drvmon",
-                selftest::Severity::Diagnostic,
-                drvmon::self_test(),
-            );
-            selftest::dispatch_debug(
-                "logpersist",
-                selftest::Severity::Diagnostic,
-                logpersist::self_test(),
-            );
-            selftest::dispatch_debug(
-                "svcstart",
-                selftest::Severity::Diagnostic,
-                svcstart::self_test(),
-            );
-            selftest::dispatch_debug(
-                "toolbar",
-                selftest::Severity::Diagnostic,
-                fs::toolbar::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::bridge",
-                selftest::Severity::Diagnostic,
-                net::bridge::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::dhcpv6",
-                selftest::Severity::Diagnostic,
-                net::dhcpv6::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::ftp",
-                selftest::Severity::Diagnostic,
-                net::ftp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::http",
-                selftest::Severity::Diagnostic,
-                net::http::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::igmp",
-                selftest::Severity::Diagnostic,
-                net::igmp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::iperf",
-                selftest::Severity::Diagnostic,
-                net::iperf::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::lldp",
-                selftest::Severity::Diagnostic,
-                net::lldp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::mdns",
-                selftest::Severity::Diagnostic,
-                net::mdns::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::mld",
-                selftest::Severity::Diagnostic,
-                net::mld::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::ndisc",
-                selftest::Severity::Diagnostic,
-                net::ndisc::self_test(),
-            );
+            selftest::dispatch_debug("drvmon", selftest::Severity::Diagnostic, || {
+                drvmon::self_test()
+            });
+            selftest::dispatch_debug("logpersist", selftest::Severity::Diagnostic, || {
+                logpersist::self_test()
+            });
+            selftest::dispatch_debug("svcstart", selftest::Severity::Diagnostic, || {
+                svcstart::self_test()
+            });
+            selftest::dispatch_debug("toolbar", selftest::Severity::Diagnostic, || {
+                fs::toolbar::self_test()
+            });
+            selftest::dispatch_debug("net::bridge", selftest::Severity::Diagnostic, || {
+                net::bridge::self_test()
+            });
+            selftest::dispatch_debug("net::dhcpv6", selftest::Severity::Diagnostic, || {
+                net::dhcpv6::self_test()
+            });
+            selftest::dispatch_debug("net::ftp", selftest::Severity::Diagnostic, || {
+                net::ftp::self_test()
+            });
+            selftest::dispatch_debug("net::http", selftest::Severity::Diagnostic, || {
+                net::http::self_test()
+            });
+            selftest::dispatch_debug("net::igmp", selftest::Severity::Diagnostic, || {
+                net::igmp::self_test()
+            });
+            selftest::dispatch_debug("net::iperf", selftest::Severity::Diagnostic, || {
+                net::iperf::self_test()
+            });
+            selftest::dispatch_debug("net::lldp", selftest::Severity::Diagnostic, || {
+                net::lldp::self_test()
+            });
+            selftest::dispatch_debug("net::mdns", selftest::Severity::Diagnostic, || {
+                net::mdns::self_test()
+            });
+            selftest::dispatch_debug("net::mld", selftest::Severity::Diagnostic, || {
+                net::mld::self_test()
+            });
+            selftest::dispatch_debug("net::ndisc", selftest::Severity::Diagnostic, || {
+                net::ndisc::self_test()
+            });
         }
         case();
     }
@@ -8045,71 +7621,45 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged eager self-tests, batch 4 of 4. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug(
-                "net::netcat",
-                selftest::Severity::Diagnostic,
-                net::netcat::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::netstat",
-                selftest::Severity::Diagnostic,
-                net::netstat::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::ntp",
-                selftest::Severity::Diagnostic,
-                net::ntp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::pcap",
-                selftest::Severity::Diagnostic,
-                net::pcap::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::qos",
-                selftest::Severity::Diagnostic,
-                net::qos::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::smtp",
-                selftest::Severity::Diagnostic,
-                net::smtp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::snmp",
-                selftest::Severity::Diagnostic,
-                net::snmp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::socks",
-                selftest::Severity::Diagnostic,
-                net::socks::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::telnet",
-                selftest::Severity::Diagnostic,
-                net::telnet::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::tftp",
-                selftest::Severity::Diagnostic,
-                net::tftp::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::traceroute",
-                selftest::Severity::Diagnostic,
-                net::traceroute::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::vlan",
-                selftest::Severity::Diagnostic,
-                net::vlan::self_test(),
-            );
-            selftest::dispatch_debug(
-                "net::wol",
-                selftest::Severity::Diagnostic,
-                net::wol::self_test(),
-            );
+            selftest::dispatch_debug("net::netcat", selftest::Severity::Diagnostic, || {
+                net::netcat::self_test()
+            });
+            selftest::dispatch_debug("net::netstat", selftest::Severity::Diagnostic, || {
+                net::netstat::self_test()
+            });
+            selftest::dispatch_debug("net::ntp", selftest::Severity::Diagnostic, || {
+                net::ntp::self_test()
+            });
+            selftest::dispatch_debug("net::pcap", selftest::Severity::Diagnostic, || {
+                net::pcap::self_test()
+            });
+            selftest::dispatch_debug("net::qos", selftest::Severity::Diagnostic, || {
+                net::qos::self_test()
+            });
+            selftest::dispatch_debug("net::smtp", selftest::Severity::Diagnostic, || {
+                net::smtp::self_test()
+            });
+            selftest::dispatch_debug("net::snmp", selftest::Severity::Diagnostic, || {
+                net::snmp::self_test()
+            });
+            selftest::dispatch_debug("net::socks", selftest::Severity::Diagnostic, || {
+                net::socks::self_test()
+            });
+            selftest::dispatch_debug("net::telnet", selftest::Severity::Diagnostic, || {
+                net::telnet::self_test()
+            });
+            selftest::dispatch_debug("net::tftp", selftest::Severity::Diagnostic, || {
+                net::tftp::self_test()
+            });
+            selftest::dispatch_debug("net::traceroute", selftest::Severity::Diagnostic, || {
+                net::traceroute::self_test()
+            });
+            selftest::dispatch_debug("net::vlan", selftest::Severity::Diagnostic, || {
+                net::vlan::self_test()
+            });
+            selftest::dispatch_debug("net::wol", selftest::Severity::Diagnostic, || {
+                net::wol::self_test()
+            });
         }
         case();
     }
@@ -8118,31 +7668,21 @@ extern "C" fn kernel_main() -> ! {
         #[inline(never)]
         fn case() {
             // Run cryptographic self-tests.
-            selftest::dispatch_debug(
-                "SHA-256",
-                selftest::Severity::Diagnostic,
-                crypto::self_test(),
-            );
-            selftest::dispatch_debug(
-                "CRC32C",
-                selftest::Severity::Diagnostic,
-                crypto::self_test_crc32c(),
-            );
-            selftest::dispatch_debug(
-                "CRC-32",
-                selftest::Severity::Diagnostic,
-                crypto::self_test_crc32(),
-            );
-            selftest::dispatch_debug(
-                "TLS crypto",
-                selftest::Severity::Diagnostic,
-                crypto::self_test_tls_crypto(),
-            );
-            selftest::dispatch_debug(
-                "Ed25519/SHA-512",
-                selftest::Severity::Diagnostic,
-                crypto::self_test_ed25519(),
-            );
+            selftest::dispatch_debug("SHA-256", selftest::Severity::Diagnostic, || {
+                crypto::self_test()
+            });
+            selftest::dispatch_debug("CRC32C", selftest::Severity::Diagnostic, || {
+                crypto::self_test_crc32c()
+            });
+            selftest::dispatch_debug("CRC-32", selftest::Severity::Diagnostic, || {
+                crypto::self_test_crc32()
+            });
+            selftest::dispatch_debug("TLS crypto", selftest::Severity::Diagnostic, || {
+                crypto::self_test_tls_crypto()
+            });
+            selftest::dispatch_debug("Ed25519/SHA-512", selftest::Severity::Diagnostic, || {
+                crypto::self_test_ed25519()
+            });
         }
         case();
     }
@@ -8160,10 +7700,15 @@ extern "C" fn kernel_main() -> ! {
             // Test sleep_ns (requires interrupts for hrtimer-based wake).
             // Runs after interrupts are enabled because the hrtimer callback fires from
             // the APIC timer ISR.
-            selftest::dispatch(
-                "sleep_ns",
-                selftest::Severity::Integrity,
-                sched::test_sleep_ns_postboot(),
+            selftest::dispatch("sleep_ns", selftest::Severity::Integrity, || {
+                sched::test_sleep_ns_postboot()
+            });
+            // A thread join with a time limit, for the same reason: the
+            // limit is an hrtimer (`proc::thread::self_test_join_timeout`).
+            selftest::dispatch_debug(
+                "thread join_timeout",
+                selftest::Severity::Diagnostic,
+                || proc::thread::self_test_join_timeout(),
             );
         }
         case();
@@ -8171,11 +7716,9 @@ extern "C" fn kernel_main() -> ! {
 
     // Softirq self-test — verify raise/process/reentry-guard work.
     // Requires interrupts enabled (softirq processing does STI/CLI internally).
-    selftest::dispatch(
-        "Softirq",
-        selftest::Severity::Integrity,
-        softirq::self_test(),
-    );
+    selftest::dispatch("Softirq", selftest::Severity::Integrity, || {
+        softirq::self_test()
+    });
 
     // Step 22: Initialize PS/2 keyboard.
     // Unmasks IRQ 1, enables scan code translation.  Keypresses now
@@ -8188,11 +7731,9 @@ extern "C" fn kernel_main() -> ! {
         keyboard::init();
     }
 
-    selftest::dispatch(
-        "Keyboard",
-        selftest::Severity::Integrity,
-        keyboard::self_test(),
-    );
+    selftest::dispatch("Keyboard", selftest::Severity::Integrity, || {
+        keyboard::self_test()
+    });
 
     // Initialize PS/2 mouse on port 2 (IRQ 12).
     // Must be after keyboard init (which sets up the i8042 controller).
@@ -8204,7 +7745,9 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // §914: Diagnostic — optional hardware, system works without a mouse.
-    selftest::dispatch("Mouse", selftest::Severity::Diagnostic, mouse::self_test());
+    selftest::dispatch("Mouse", selftest::Severity::Diagnostic, || {
+        mouse::self_test()
+    });
 
     // Step 21b: Bootstrap Application Processors (SMP).
     // Discovers APs via ACPI MADT, copies the real-mode trampoline to
@@ -8215,16 +7758,20 @@ extern "C" fn kernel_main() -> ! {
     // Must be after: ACPI (CPU discovery), APIC (IPI sending),
     //                scheduler (per-CPU queues), page tables (identity mapping).
     smp::init();
-    selftest::dispatch_debug("Smp", selftest::Severity::Integrity, smp::self_test());
+    selftest::dispatch_debug("Smp", selftest::Severity::Integrity, || smp::self_test());
+
+    // Cross-CPU barriers (membarrier's expedited commands): every other CPU
+    // is interrupted and answers. Needs the APs that smp::init just started.
+    selftest::dispatch_debug("Cross-CPU barrier", selftest::Severity::Integrity, || {
+        cpusync::self_test()
+    });
 
     // Step 22b½: Validate SMP scheduler invariants.
     // Now that all APs are online with their idle tasks, verify
     // per-CPU current tasks are distinct and reap is SMP-safe.
-    selftest::dispatch(
-        "Scheduler SMP",
-        selftest::Severity::Integrity,
-        sched::smp_self_test(),
-    );
+    selftest::dispatch("Scheduler SMP", selftest::Severity::Integrity, || {
+        sched::smp_self_test()
+    });
 
     boot_timing::mark(boot_timing::Milestone::Smp);
 
@@ -8235,16 +7782,23 @@ extern "C" fn kernel_main() -> ! {
 
     // CPU hotplug framework initialization — marks all online CPUs.
     cpu_hotplug::init();
-    selftest::dispatch_debug(
-        "Cpu Hotplug",
-        selftest::Severity::Diagnostic,
-        cpu_hotplug::self_test(),
+    selftest::dispatch_debug("Cpu Hotplug", selftest::Severity::Diagnostic, || {
+        cpu_hotplug::self_test()
+    });
+
+    // CPU affinity moves a task off a CPU it may no longer use -- a running
+    // one included -- and refuses a mask with no online CPU. After hotplug
+    // init, so the online mask it checks against is the real one.
+    selftest::dispatch(
+        "Scheduler CPU affinity",
+        selftest::Severity::Integrity,
+        || sched::affinity_self_test(),
     );
 
     // NUMA topology detection — parse SRAT or default to UMA.
     // Requires ACPI tables and SMP to be initialized.
     numa::init();
-    selftest::dispatch_debug("Numa", selftest::Severity::Integrity, numa::self_test());
+    selftest::dispatch_debug("Numa", selftest::Severity::Integrity, || numa::self_test());
 
     // Hand the topology `numa::init` just worked out to the module that
     // reports it.  Until this call existed, `/proc/numastat` said `nodes: 0`
@@ -8263,32 +7817,30 @@ extern "C" fn kernel_main() -> ! {
     fs::numastat::self_test_adoption(adopted_cpus);
 
     // Kernel symbol table self-test.
-    selftest::dispatch_debug("Ksyms", selftest::Severity::Diagnostic, ksyms::self_test());
+    selftest::dispatch_debug("Ksyms", selftest::Severity::Diagnostic, || {
+        ksyms::self_test()
+    });
 
     // Kernel event bus self-test.
-    selftest::dispatch_debug(
-        "Kevent",
-        selftest::Severity::Diagnostic,
-        kevent::self_test(),
-    );
+    selftest::dispatch_debug("Kevent", selftest::Severity::Diagnostic, || {
+        kevent::self_test()
+    });
 
     // RCU (Read-Copy-Update) self-test.
     // Must be after scheduler (needs yield_now for synchronize).
-    selftest::dispatch_debug("Rcu", selftest::Severity::Diagnostic, rcu::self_test());
+    selftest::dispatch_debug("Rcu", selftest::Severity::Diagnostic, || rcu::self_test());
 
     // MSI (Message Signaled Interrupts) self-test.
     // Vector allocation pool and address/data formatting.
     // Must be after PCI init (uses config space accessors).
-    selftest::dispatch_debug("Msi", selftest::Severity::Diagnostic, msi::self_test());
+    selftest::dispatch_debug("Msi", selftest::Severity::Diagnostic, || msi::self_test());
 
     // IRQ balancer initialization — distributes interrupts across CPUs.
     // Requires IOAPIC, SMP, and cpu_hotplug to be initialized.
     irqbalance::init();
-    selftest::dispatch_debug(
-        "Irqbalance",
-        selftest::Severity::Diagnostic,
-        irqbalance::self_test(),
-    );
+    selftest::dispatch_debug("Irqbalance", selftest::Severity::Diagnostic, || {
+        irqbalance::self_test()
+    });
 
     // Step 22b⅞: CPU frequency scaling initialization.
     // Detect HWP or EIST support and set default governor (performance).
@@ -8300,56 +7852,68 @@ extern "C" fn kernel_main() -> ! {
 
     // Step 22b⅞++: Power management self-test.
     // Verifies ACPI shutdown/reboot capability reporting (FADT parsed in acpi::init).
-    selftest::dispatch_debug("Power", selftest::Severity::Diagnostic, power::self_test());
+    selftest::dispatch_debug("Power", selftest::Severity::Diagnostic, || {
+        power::self_test()
+    });
 
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.
-    selftest::dispatch_debug("Tlb", selftest::Severity::Integrity, tlb::self_test());
+    selftest::dispatch_debug("Tlb", selftest::Severity::Integrity, || tlb::self_test());
 
     // Step 22d: DMA buffer management self-test.
     // Verifies contiguous physical allocation and free for device DMA.
-    selftest::dispatch_debug("Dma", selftest::Severity::Integrity, mm::dma::self_test());
+    selftest::dispatch_debug("Dma", selftest::Severity::Integrity, || {
+        mm::dma::self_test()
+    });
+
+    // The address-space page-table locks the copy-on-write break, swap-in
+    // and demand paging install under (mm::as_lock).
+    selftest::dispatch_debug("Address-space locks", selftest::Severity::Integrity, || {
+        mm::as_lock::self_test()
+    });
 
     // Step 22e: Copy-on-Write self-test.
     // Verifies refcount API and COW PTE flag manipulation.
-    selftest::dispatch_debug("Cow", selftest::Severity::Integrity, mm::cow::self_test());
+    selftest::dispatch_debug("Cow", selftest::Severity::Integrity, || {
+        mm::cow::self_test()
+    });
+
+    // Locked memory (mm::mlock): the lock bit on entries and swap entries,
+    // the reclaimer's frame test, stack growth under a locked page.
+    selftest::dispatch_debug("Mlock", selftest::Severity::Integrity, || {
+        mm::mlock::self_test()
+    });
 
     // Step 22e½: Huge page (2 MiB) self-test.
     // Verifies alloc/map/read/write/unmap/free of 2 MiB huge pages.
-    selftest::dispatch_debug(
-        "Hugepage",
-        selftest::Severity::Integrity,
-        mm::hugepage::self_test(),
-    );
+    selftest::dispatch_debug("Hugepage", selftest::Severity::Integrity, || {
+        mm::hugepage::self_test()
+    });
 
     // Step 22e¾: vmalloc self-test.
     // Verifies virtual-contiguous allocations backed by discontiguous frames.
-    selftest::dispatch_debug(
-        "Vmalloc",
-        selftest::Severity::Integrity,
-        mm::vmalloc::self_test(),
-    );
+    selftest::dispatch_debug("Vmalloc", selftest::Severity::Integrity, || {
+        mm::vmalloc::self_test()
+    });
 
     // Step 22e¾+: kernel heap allocations above the buddy maximum (16 MiB),
     // which the heap maps from vmalloc. Here rather than with the early heap
     // self-test because it needs page_table::init and a working vmalloc.
-    selftest::dispatch_debug(
-        "HeapVirtual",
-        selftest::Severity::Integrity,
-        mm::heap::virtual_alloc_self_test(),
-    );
+    selftest::dispatch_debug("HeapVirtual", selftest::Severity::Integrity, || {
+        mm::heap::virtual_alloc_self_test()
+    });
 
     // Step 22e⅞: Reverse mapping (rmap) self-test.
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
-    selftest::dispatch_debug("Rmap", selftest::Severity::Integrity, mm::rmap::self_test());
+    selftest::dispatch_debug("Rmap", selftest::Severity::Integrity, || {
+        mm::rmap::self_test()
+    });
 
     // Step 22e⅞+: Kernel virtual address space validation.
     // Ensures no VA regions overlap (catches configuration bugs at boot).
-    selftest::dispatch_debug(
-        "Kvspace",
-        selftest::Severity::Integrity,
-        mm::kvspace::self_test(),
-    );
+    selftest::dispatch_debug("Kvspace", selftest::Severity::Integrity, || {
+        mm::kvspace::self_test()
+    });
 
     // Step 22e⅞+: Uninstrumented raw byte-accessor self-test.
     // Must run before poison/kasan/quarantine: those three all do their actual
@@ -8357,42 +7921,34 @@ extern "C" fn kernel_main() -> ! {
     // (so the compiler-instrumented build does not report their deliberate
     // accesses to poisoned memory), and a wrong operand size or direction there
     // would make every downstream "OK" meaningless.
-    selftest::dispatch_debug(
-        "Rawmem",
-        selftest::Severity::Integrity,
-        mm::rawmem::self_test(),
-    );
+    selftest::dispatch_debug("Rawmem", selftest::Severity::Integrity, || {
+        mm::rawmem::self_test()
+    });
 
     // Step 22e⅞+: Direction-flag-on-entry self-test.
     // Runs right after `rawmem` because it validates the same invariant from
     // the other side: `rawmem::fill_u8` and every compiler-emitted
     // `memset`/`memcpy` are `rep`-string operations that run *backwards* if DF
     // is set, and an IDT gate — unlike SYSCALL — does not clear DF for us.
-    selftest::dispatch_debug(
-        "DF on entry",
-        selftest::Severity::Integrity,
-        idt::df_on_entry_self_test(),
-    );
+    selftest::dispatch_debug("DF on entry", selftest::Severity::Integrity, || {
+        idt::df_on_entry_self_test()
+    });
 
     // Step 22e⅞+: Alternatives (CPUID-gated code patching) self-test.
     // Must precede the AC test below, which depends on the `clac` this patches
     // into the ISR stubs — if patching silently did nothing, we want to hear it
     // from here, where the message says so, rather than as a confusing AC result.
-    selftest::dispatch_debug(
-        "Alternatives",
-        selftest::Severity::Diagnostic,
-        alternatives::self_test(),
-    );
+    selftest::dispatch_debug("Alternatives", selftest::Severity::Diagnostic, || {
+        alternatives::self_test()
+    });
 
     // Step 22e⅞+: Alignment-check-flag-on-entry self-test.
     // The same class of bug as the DF test above — RFLAGS the kernel inherits
     // from ring 3 at an IDT gate — but for AC, which is the SMAP override.
     // Keeps `smep_smap`'s SMAP-enable gate honest about what the stubs do.
-    selftest::dispatch_debug(
-        "AC on entry",
-        selftest::Severity::Integrity,
-        idt::ac_on_entry_self_test(),
-    );
+    selftest::dispatch_debug("AC on entry", selftest::Severity::Integrity, || {
+        idt::ac_on_entry_self_test()
+    });
 
     // Step 22e⅞+: #UD trap-decode self-test.
     // Sits with the other IDT self-tests because it guards what the #UD
@@ -8401,39 +7957,31 @@ extern "C" fn kernel_main() -> ! {
     // report it as an undecoded byte dump.  Pinned to byte sequences captured
     // from real clang output, so a toolchain bump that changes the encoding
     // fails here rather than silently mis-naming every fault thereafter.
-    selftest::dispatch_debug(
-        "UD trap decode",
-        selftest::Severity::Integrity,
-        idt::ud_trap_decode_self_test(),
-    );
+    selftest::dispatch_debug("UD trap decode", selftest::Severity::Integrity, || {
+        idt::ud_trap_decode_self_test()
+    });
 
     // Step 22e⅞+: Serial print re-entrancy self-test.
     // Guards the escape hatch that keeps a fault taken *during* a print from
     // deadlocking on the console lock — the difference between a diagnosable
     // crash and an evidence-free wedge.
-    selftest::dispatch_debug(
-        "Serial re-entrancy",
-        selftest::Severity::Diagnostic,
-        serial::reentrancy_self_test(),
-    );
+    selftest::dispatch_debug("Serial re-entrancy", selftest::Severity::Diagnostic, || {
+        serial::reentrancy_self_test()
+    });
 
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
-    selftest::dispatch_debug(
-        "Poison",
-        selftest::Severity::Integrity,
-        mm::poison::self_test(),
-    );
+    selftest::dispatch_debug("Poison", selftest::Severity::Integrity, || {
+        mm::poison::self_test()
+    });
 
     // Step 22e⅞+: KASAN shadow-memory self-test.
     // Exercises the lazy-mapped shadow with real heap allocations: verifies a
     // live object reads clean, its redzone / partial granule are flagged
     // out-of-bounds, and a freed slot is flagged use-after-free.
-    selftest::dispatch_debug(
-        "Kasan",
-        selftest::Severity::Integrity,
-        mm::kasan::self_test(),
-    );
+    selftest::dispatch_debug("Kasan", selftest::Severity::Integrity, || {
+        mm::kasan::self_test()
+    });
 
     // Step 22e⅞+: KASAN compiler-runtime self-test.
     // Drives the `__asan_*` entry points that the instrumented build's inline
@@ -8441,141 +7989,107 @@ extern "C" fn kernel_main() -> ! {
     // ordinary build too: that path only ever executes when something is
     // already broken, so a fault or an infinite recursion inside it would
     // otherwise surface at the worst possible moment.
-    selftest::dispatch_debug(
-        "Kasan Rt",
-        selftest::Severity::Integrity,
-        mm::kasan_rt::self_test(),
-    );
+    selftest::dispatch_debug("Kasan Rt", selftest::Severity::Integrity, || {
+        mm::kasan_rt::self_test()
+    });
 
     // Step 22e⅞+: Slab free-quarantine self-test.
     // Exercises the FIFO parking ring / poison-verify / eviction logic used to
     // catch stale-pointer/UAF writes (leading B-KNULLJUMP hypothesis).
-    selftest::dispatch_debug(
-        "Quarantine",
-        selftest::Severity::Integrity,
-        mm::quarantine::self_test(),
-    );
+    selftest::dispatch_debug("Quarantine", selftest::Severity::Integrity, || {
+        mm::quarantine::self_test()
+    });
 
     // Step 22e⅞+: Memory watermark self-test.
     // Verifies per-subsystem peak usage tracking.
-    selftest::dispatch_debug(
-        "Watermark",
-        selftest::Severity::Integrity,
-        mm::watermark::self_test(),
-    );
+    selftest::dispatch_debug("Watermark", selftest::Severity::Integrity, || {
+        mm::watermark::self_test()
+    });
 
     // Step 22e⅞+++: TLB flush gather self-test.
     // Verifies batched TLB shootdown and deferred frame free.
-    selftest::dispatch_debug(
-        "Tlb Gather",
-        selftest::Severity::Integrity,
-        mm::tlb_gather::self_test(),
-    );
+    selftest::dispatch_debug("Tlb Gather", selftest::Severity::Integrity, || {
+        mm::tlb_gather::self_test()
+    });
 
     // Step 22e⅞++++a: Migration type system initialization and self-test.
     // Classifies frames as unmovable/movable/reclaimable for compaction.
     mm::migrate_type::init();
-    selftest::dispatch_debug(
-        "Migrate Type",
-        selftest::Severity::Integrity,
-        mm::migrate_type::self_test(),
-    );
+    selftest::dispatch_debug("Migrate Type", selftest::Severity::Integrity, || {
+        mm::migrate_type::self_test()
+    });
 
     // Step 22e⅞++++b: Page aging self-test.
     // Tracks page access patterns for intelligent reclaim decisions.
-    selftest::dispatch_debug(
-        "Page Age",
-        selftest::Severity::Integrity,
-        mm::page_age::self_test(),
-    );
+    selftest::dispatch_debug("Page Age", selftest::Severity::Integrity, || {
+        mm::page_age::self_test()
+    });
 
     // Step 22e⅞++++c: Page table walker self-test.
     // Generic page table iteration for RSS counting, fork, etc.
-    selftest::dispatch_debug(
-        "Pt Walk",
-        selftest::Severity::Integrity,
-        mm::pt_walk::self_test(),
-    );
+    selftest::dispatch_debug("Pt Walk", selftest::Severity::Integrity, || {
+        mm::pt_walk::self_test()
+    });
 
     // Step 22e⅞++++d: Memory scrubber self-test.
     // Proactive ECC error detection via background memory reads.
-    selftest::dispatch_debug(
-        "Scrub",
-        selftest::Severity::Integrity,
-        mm::scrub::self_test(),
-    );
+    selftest::dispatch_debug("Scrub", selftest::Severity::Integrity, || {
+        mm::scrub::self_test()
+    });
 
     // Step 22e⅞++++e: Memory fault injection self-test.
     // Verifies controlled allocation failure simulation for testing error paths.
-    selftest::dispatch_debug(
-        "Fault Inject",
-        selftest::Severity::Integrity,
-        mm::fault_inject::self_test(),
-    );
+    selftest::dispatch_debug("Fault Inject", selftest::Severity::Integrity, || {
+        mm::fault_inject::self_test()
+    });
 
     // Step 22e⅞++++g: Frame ownership tracker self-test.
     // Per-frame subsystem tagging for "who allocated this memory?" diagnostics.
-    selftest::dispatch_debug(
-        "Frame Owner",
-        selftest::Severity::Integrity,
-        mm::frame_owner::self_test(),
-    );
+    selftest::dispatch_debug("Frame Owner", selftest::Severity::Integrity, || {
+        mm::frame_owner::self_test()
+    });
 
     // Step 22e⅞++++h: Allocation trace ring buffer self-test.
     // Records recent alloc/free events for post-mortem debugging.
-    selftest::dispatch_debug(
-        "Alloc Trace",
-        selftest::Severity::Integrity,
-        mm::alloc_trace::self_test(),
-    );
+    selftest::dispatch_debug("Alloc Trace", selftest::Severity::Integrity, || {
+        mm::alloc_trace::self_test()
+    });
 
     // Step 22e⅞++++i: Allocation latency histogram self-test.
     // Measures and profiles alloc/free timing for performance analysis.
-    selftest::dispatch_debug(
-        "Alloc Lat",
-        selftest::Severity::Integrity,
-        mm::alloc_lat::self_test(),
-    );
+    selftest::dispatch_debug("Alloc Lat", selftest::Severity::Integrity, || {
+        mm::alloc_lat::self_test()
+    });
 
     // Step 22e⅞++++j: Heap allocation profiler self-test.
     // Tracks allocation size distribution for slab tuning.
-    selftest::dispatch_debug(
-        "Heap Profile",
-        selftest::Severity::Integrity,
-        mm::heap_profile::self_test(),
-    );
+    selftest::dispatch_debug("Heap Profile", selftest::Severity::Integrity, || {
+        mm::heap_profile::self_test()
+    });
 
     // Step 22e⅞++++k: Syscall profiler self-test.
     // Per-syscall invocation count and latency tracking.
-    selftest::dispatch_debug(
-        "Profile",
-        selftest::Severity::Integrity,
-        syscall::profile::self_test(),
-    );
+    selftest::dispatch_debug("Profile", selftest::Severity::Integrity, || {
+        syscall::profile::self_test()
+    });
 
     // Step 22e⅞++++l: Allocation checkpoint self-test.
     // Memory state checkpoints for leak detection (save/diff).
-    selftest::dispatch_debug(
-        "Alloc Checkpoint",
-        selftest::Severity::Integrity,
-        mm::alloc_checkpoint::self_test(),
-    );
+    selftest::dispatch_debug("Alloc Checkpoint", selftest::Severity::Integrity, || {
+        mm::alloc_checkpoint::self_test()
+    });
 
     // Step 22e⅞++++m: Syscall tracer self-test.
     // Per-event syscall capture for strace-like debugging.
-    selftest::dispatch_debug(
-        "Trace",
-        selftest::Severity::Integrity,
-        syscall::trace::self_test(),
-    );
+    selftest::dispatch_debug("Trace", selftest::Severity::Integrity, || {
+        syscall::trace::self_test()
+    });
 
     // Step 22e⅞++++n: IPC statistics self-test.
     // Per-mechanism usage and performance counters.
-    selftest::dispatch_debug(
-        "Stats",
-        selftest::Severity::Integrity,
-        ipc::stats::self_test(),
-    );
+    selftest::dispatch_debug("Stats", selftest::Severity::Integrity, || {
+        ipc::stats::self_test()
+    });
 
     // Step 22e⅞++++n1: Internet-checksum self-test.
     // Every transport protocol's checksum now funnels through one loop
@@ -8584,98 +8098,105 @@ extern "C" fn kernel_main() -> ! {
     // Verified at boot rather than only under `cargo test`, because the
     // kernel's #[cfg(test)] modules never execute on the target.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "net checksum",
-        selftest::Severity::Diagnostic,
-        net::checksum::self_test(),
-    );
+    selftest::dispatch_debug("net checksum", selftest::Severity::Diagnostic, || {
+        net::checksum::self_test()
+    });
 
     // Step 22e⅞++++n2: TCP server (bind/listen/accept) self-test.
     // Validates listener lifecycle without needing network hardware.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug("TCP", selftest::Severity::Diagnostic, net::tcp::self_test());
+    selftest::dispatch_debug("TCP", selftest::Severity::Diagnostic, || {
+        net::tcp::self_test()
+    });
 
     // Step 22e⅞++++n3: Firewall self-test.
     // Stateful packet filtering with rules and connection tracking.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "firewall",
-        selftest::Severity::Diagnostic,
-        net::firewall::self_test(),
-    );
+    selftest::dispatch_debug("firewall", selftest::Severity::Diagnostic, || {
+        net::firewall::self_test()
+    });
 
     // Step 22e⅞++++n4: Network stack per-module self-tests.
     // Exercises protocol parsing/building for ethernet, IPv4, ICMP, ARP,
     // UDP, DNS, DHCP, fragmentation, and interface modules.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug("net", selftest::Severity::Diagnostic, net::self_test());
+    selftest::dispatch_debug("net", selftest::Severity::Diagnostic, || net::self_test());
 
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.
-    selftest::dispatch_debug(
-        "Kobject",
-        selftest::Severity::Diagnostic,
-        kobject::self_test(),
-    );
+    selftest::dispatch_debug("Kobject", selftest::Severity::Diagnostic, || {
+        kobject::self_test()
+    });
 
     // Step 22e⅞++++p: Fragmentation history self-test.
     // Tracks memory fragmentation over time for trend analysis.
-    selftest::dispatch_debug(
-        "Frag History",
-        selftest::Severity::Integrity,
-        mm::frag_history::self_test(),
-    );
+    selftest::dispatch_debug("Frag History", selftest::Severity::Integrity, || {
+        mm::frag_history::self_test()
+    });
 
     // Step 22e⅞++++p2: Memory type accounting self-test.
     // Verifies charge/uncharge/peak tracking for memory usage breakdown.
-    selftest::dispatch_debug(
-        "Memtype",
-        selftest::Severity::Integrity,
-        mm::memtype::self_test(),
-    );
+    selftest::dispatch_debug("Memtype", selftest::Severity::Integrity, || {
+        mm::memtype::self_test()
+    });
 
     // Step 22e⅞++++p3: Memory compaction self-test.
     // Verifies fragmentation analysis, rmap iteration, and migration API.
-    selftest::dispatch_debug(
-        "Compact",
-        selftest::Severity::Integrity,
-        mm::compact::self_test(),
-    );
+    selftest::dispatch_debug("Compact", selftest::Severity::Integrity, || {
+        mm::compact::self_test()
+    });
 
     // Step 22e⅞++++p4: VMA management self-test.
     // Verifies add/remove/find/overlap/alignment checks for address spaces.
-    selftest::dispatch_debug("Vma", selftest::Severity::Integrity, mm::vma::self_test());
+    selftest::dispatch_debug("Vma", selftest::Severity::Integrity, || {
+        mm::vma::self_test()
+    });
 
     // Step 22e⅞++++p5: Resource control groups (cgroup) self-test.
     // Verifies hierarchy, CPU/memory controllers, charge/uncharge, limits.
-    selftest::dispatch_debug("Cgroup", selftest::Severity::Integrity, cgroup::self_test());
+    selftest::dispatch_debug("Cgroup", selftest::Severity::Integrity, || {
+        cgroup::self_test()
+    });
 
     // Step 22e⅞++++p6: PID namespace subsystem init + self-test.
     pidns::init();
-    selftest::dispatch_debug("Pidns", selftest::Severity::Integrity, pidns::self_test());
+    selftest::dispatch_debug("Pidns", selftest::Severity::Integrity, || {
+        pidns::self_test()
+    });
 
     // Step 22e⅞++++p7: User namespace subsystem init + self-test.
     // UID/GID remapping for rootless containers.  Supports hierarchical
     // mappings with up to 16 ranges per namespace, process tracking,
     // and full host UID resolution through nested namespaces.
     userns::init();
-    selftest::dispatch_debug("Userns", selftest::Severity::Integrity, userns::self_test());
+    selftest::dispatch_debug("Userns", selftest::Severity::Integrity, || {
+        userns::self_test()
+    });
+
+    // UTS namespaces: the host and domain names each process sees; and the
+    // handles on namespaces that /proc/<pid>/ns gives and setns takes.
+    selftest::dispatch_debug("UTS namespaces", selftest::Severity::Integrity, || {
+        utsns::self_test()
+    });
+    selftest::dispatch_debug("Namespace handles", selftest::Severity::Integrity, || {
+        nsfs::self_test()
+    });
 
     // Step 22e⅞++++p8: Network namespace subsystem init + self-test.
     // Per-container network isolation with independent interface config,
     // routing tables (longest-prefix match + metric tie-breaking), and
     // process tracking.
     netns::init();
-    selftest::dispatch_debug("Netns", selftest::Severity::Integrity, netns::self_test());
+    selftest::dispatch_debug("Netns", selftest::Severity::Integrity, || {
+        netns::self_test()
+    });
 
     // Verify the root-namespace routing table feeds resolve_next_hop (the
     // SYS_NET_ROUTE_ADD path). Runs here because it needs netns::init().
     // §914: Diagnostic — network routing, optional hardware.
-    selftest::dispatch_debug(
-        "IPv4 route",
-        selftest::Severity::Diagnostic,
-        net::ipv4::root_route_next_hop_self_test(),
-    );
+    selftest::dispatch_debug("IPv4 route", selftest::Severity::Diagnostic, || {
+        net::ipv4::root_route_next_hop_self_test()
+    });
 
     // Step 22e⅞++++p8b: Virtual Ethernet (veth) pairs init + self-test.
     // Connected virtual links between namespaces — frame sent on one
@@ -8684,11 +8205,9 @@ extern "C" fn kernel_main() -> ! {
     // Runs after netns::init() because veth tests create child namespaces.
     net::veth::init();
     // §914: Diagnostic — virtual networking, optional.
-    selftest::dispatch_debug(
-        "veth",
-        selftest::Severity::Diagnostic,
-        net::veth::self_test(),
-    );
+    selftest::dispatch_debug("veth", selftest::Severity::Diagnostic, || {
+        net::veth::self_test()
+    });
 
     // Step 22e⅞++++p8b′: Simulated 802.11 radios (hwsim) init + self-test.
     // A shared virtual medium that several stations attach to: a frame
@@ -8701,11 +8220,9 @@ extern "C" fn kernel_main() -> ! {
     // Heap only, no hardware, so it runs anywhere the kernel boots.
     net::hwsim::init();
     // §914: Diagnostic — simulated wireless, optional hardware.
-    selftest::dispatch_debug(
-        "hwsim",
-        selftest::Severity::Diagnostic,
-        net::hwsim::self_test(),
-    );
+    selftest::dispatch_debug("hwsim", selftest::Severity::Diagnostic, || {
+        net::hwsim::self_test()
+    });
     // The other end of that medium: a simulated WPA2-PSK access point, so that
     // lane C's `net80211::assoc::Association` -- the station half of a join --
     // can be *run* rather than only unit-tested.  Without an AP it sits in
@@ -8717,29 +8234,29 @@ extern "C" fn kernel_main() -> ! {
     // not encrypt.  See net::hwsim_ap's module docs and design-decisions.md
     // section 677.
     // §914: Diagnostic — simulated wireless AP, optional hardware.
-    selftest::dispatch_debug(
-        "hwsim AP",
-        selftest::Severity::Diagnostic,
-        net::hwsim_ap::self_test(),
-    );
+    selftest::dispatch_debug("hwsim AP", selftest::Severity::Diagnostic, || {
+        net::hwsim_ap::self_test()
+    });
 
     // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.
     // Isolated MAC resolution per namespace — requires netns::init().
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "ARP ns",
-        selftest::Severity::Diagnostic,
-        net::arp::ns_self_test(),
-    );
+    selftest::dispatch_debug("ARP ns", selftest::Severity::Diagnostic, || {
+        net::arp::ns_self_test()
+    });
 
     // Step 22e⅞++++p8d: NAT/masquerade self-test.
     // Source NAT for container traffic traversing namespace boundaries.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug("NAT", selftest::Severity::Diagnostic, net::nat::self_test());
+    selftest::dispatch_debug("NAT", selftest::Severity::Diagnostic, || {
+        net::nat::self_test()
+    });
 
     // SSH server self-test (binary packet protocol, encryption, key derivation).
     // §914: Diagnostic — network service, optional.
-    selftest::dispatch_debug("SSH", selftest::Severity::Diagnostic, net::ssh::self_test());
+    selftest::dispatch_debug("SSH", selftest::Severity::Diagnostic, || {
+        net::ssh::self_test()
+    });
 
     // Raw-NIC claim self-test: unclaimed reads clean, a non-owner's release is
     // a no-op, and a claim held by a dead process self-heals.
@@ -8750,11 +8267,9 @@ extern "C" fn kernel_main() -> ! {
     // Runs here, before userspace exists, so no real claim can be outstanding —
     // the test checks that anyway and skips rather than disturbing a live one.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "raw NIC",
-        selftest::Severity::Diagnostic,
-        net::raw::self_test(),
-    );
+    selftest::dispatch_debug("raw NIC", selftest::Severity::Diagnostic, || {
+        net::raw::self_test()
+    });
 
     {
         #[inline(never)]
@@ -8763,29 +8278,23 @@ extern "C" fn kernel_main() -> ! {
             // Unified container abstraction tying PID/user/network namespaces + cgroup
             // into a single lifecycle with create/start/stop/delete state machine.
             container::init();
-            selftest::dispatch_debug(
-                "Container",
-                selftest::Severity::Diagnostic,
-                container::self_test(),
-            );
+            selftest::dispatch_debug("Container", selftest::Severity::Diagnostic, || {
+                container::self_test()
+            });
             // Named-volume registry self-test (Docker `docker volume`). Runs after the
             // container self-test; exercises the registry against real backing dirs.
-            selftest::dispatch_debug(
-                "Volume",
-                selftest::Severity::Diagnostic,
-                volume::self_test(),
-            );
+            selftest::dispatch_debug("Volume", selftest::Severity::Diagnostic, || {
+                volume::self_test()
+            });
             // Container-network registry + IPAM self-test (Docker `docker network`).
-            selftest::dispatch_debug(
-                "Cnetwork",
-                selftest::Severity::Diagnostic,
-                cnetwork::self_test(),
-            );
+            selftest::dispatch_debug("Cnetwork", selftest::Severity::Diagnostic, || {
+                cnetwork::self_test()
+            });
             // Pure parser self-test for the `oci run --memory`/`--cpus` CLI helpers.
             selftest::dispatch_debug(
                 "CLI resource parser",
                 selftest::Severity::Diagnostic,
-                kshell::cli_resource_parser_self_test(),
+                || kshell::cli_resource_parser_self_test(),
             );
         }
         case();
@@ -8794,22 +8303,20 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞++++p10a: JSON parser self-test.
     // Minimal recursive-descent JSON parser for OCI image manifests.
     // §914: Diagnostic — parser utility, not structural kernel integrity.
-    selftest::dispatch_debug("JSON", selftest::Severity::Diagnostic, json::self_test());
+    selftest::dispatch_debug("JSON", selftest::Severity::Diagnostic, || json::self_test());
 
     // Step 22e⅞++++p10b: OCI image format parser self-test.
     // Parses OCI image index, manifest, config, and verifies digests.
     // §914: Diagnostic — container image format, not structural kernel integrity.
-    selftest::dispatch_debug("OCI", selftest::Severity::Diagnostic, oci::self_test());
+    selftest::dispatch_debug("OCI", selftest::Severity::Diagnostic, || oci::self_test());
 
     // Step 22e⅞++++p10: Syscall filter (seccomp-equivalent) init + self-test.
     // Per-process bitmap-based syscall allow/deny lists for container
     // sandboxing.  O(1) check per syscall, fork-inheritable, tighten-only.
     scfilter::init();
-    selftest::dispatch_debug(
-        "Scfilter",
-        selftest::Severity::Diagnostic,
-        scfilter::self_test(),
-    );
+    selftest::dispatch_debug("Scfilter", selftest::Severity::Diagnostic, || {
+        scfilter::self_test()
+    });
 
     // Now that filtering is live, re-check that dispatch still reaches its
     // handlers.  The syscall dispatch self-test ran ~4200 lines above this
@@ -8823,254 +8330,247 @@ extern "C" fn kernel_main() -> ! {
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
-    selftest::dispatch_debug(
-        "Selftest",
-        selftest::Severity::Diagnostic,
-        selftest::self_test(),
-    );
+    selftest::dispatch_debug("Selftest", selftest::Severity::Diagnostic, || {
+        selftest::self_test()
+    });
 
     // Step 22e⅞++++r: Watchpoint self-test.
     // Software memory watchpoints for debugging value changes.
-    selftest::dispatch_debug(
-        "Watchpoint",
-        selftest::Severity::Diagnostic,
-        watchpoint::self_test(),
-    );
+    selftest::dispatch_debug("Watchpoint", selftest::Severity::Diagnostic, || {
+        watchpoint::self_test()
+    });
 
     // Step 22e⅞++++s: Kernel snapshot self-test.
     // Comprehensive system state capture for before/after comparison.
-    selftest::dispatch_debug(
-        "Ksnapshot",
-        selftest::Severity::Diagnostic,
-        ksnapshot::self_test(),
-    );
+    selftest::dispatch_debug("Ksnapshot", selftest::Severity::Diagnostic, || {
+        ksnapshot::self_test()
+    });
 
     // Step 22e⅞++++t: RIP sampler self-test.
     // Statistical profiler — samples instruction pointer on timer ticks.
-    selftest::dispatch_debug(
-        "Rip Sample",
-        selftest::Severity::Diagnostic,
-        rip_sample::self_test(),
-    );
+    selftest::dispatch_debug("Rip Sample", selftest::Severity::Diagnostic, || {
+        rip_sample::self_test()
+    });
 
     // Step 22e⅞++++u: Invariant checker self-test.
     // Verifies system-wide consistency properties (memory, scheduler, objects).
-    selftest::dispatch_debug(
-        "Invariant",
-        selftest::Severity::Diagnostic,
-        invariant::self_test(),
-    );
+    selftest::dispatch_debug("Invariant", selftest::Severity::Diagnostic, || {
+        invariant::self_test()
+    });
 
     // Step 22e⅞++++v: Scheduler migration tracker self-test.
     // Records and analyzes task migration events between CPUs.
-    selftest::dispatch_debug(
-        "Sched Migrate",
-        selftest::Severity::Diagnostic,
-        sched_migrate::self_test(),
-    );
+    selftest::dispatch_debug("Sched Migrate", selftest::Severity::Diagnostic, || {
+        sched_migrate::self_test()
+    });
 
     // Step 22e⅞++++w: Wait channel tracker self-test.
     // Tracks what blocked tasks are waiting on (WCHAN for ps/top).
-    selftest::dispatch_debug("Wchan", selftest::Severity::Diagnostic, wchan::self_test());
+    selftest::dispatch_debug("Wchan", selftest::Severity::Diagnostic, || {
+        wchan::self_test()
+    });
 
     // Step 22e⅞++++x: Diagnostic report generator self-test.
     // Comprehensive system state collection for bug reports.
-    selftest::dispatch_debug("Kdiag", selftest::Severity::Diagnostic, kdiag::self_test());
+    selftest::dispatch_debug("Kdiag", selftest::Severity::Diagnostic, || {
+        kdiag::self_test()
+    });
 
     // Step 22e⅞++++y: Hypervisor detection self-test.
     // Verifies CPUID-based VM detection and signature matching.
     // §914: Diagnostic — informational VM detection, not structural integrity.
-    selftest::dispatch_debug(
-        "hypervisor",
-        selftest::Severity::Diagnostic,
-        hypervisor::self_test(),
-    );
+    selftest::dispatch_debug("hypervisor", selftest::Severity::Diagnostic, || {
+        hypervisor::self_test()
+    });
 
     // Step 22e⅞++++z: Scheduler fairness measurement self-test.
     // Computes Jain's Fairness Index for CPU time distribution.
-    selftest::dispatch_debug(
-        "Sched Fairness",
-        selftest::Severity::Diagnostic,
-        sched_fairness::self_test(),
-    );
+    selftest::dispatch_debug("Sched Fairness", selftest::Severity::Diagnostic, || {
+        sched_fairness::self_test()
+    });
 
     // Step 22e⅞+++++a: Intel CET self-test.
     // Verifies CET detection, error code parsing, and CR4 state.
-    selftest::dispatch_debug("Cet", selftest::Severity::Diagnostic, cet::self_test());
+    selftest::dispatch_debug("Cet", selftest::Severity::Diagnostic, || cet::self_test());
 
     // Step 22e⅞+++++b: SMEP/SMAP self-test.
     // Verifies hardware execution/access prevention is enabled.
-    selftest::dispatch_debug(
-        "Smep Smap",
-        selftest::Severity::Diagnostic,
-        smep_smap::self_test(),
-    );
+    selftest::dispatch_debug("Smep Smap", selftest::Severity::Diagnostic, || {
+        smep_smap::self_test()
+    });
 
     // Step 22e⅞+++++c: Spectre/Meltdown mitigation self-test.
     // Verifies IBRS/STIBP/SSBD MSRs are set and IBPB barrier works.
-    selftest::dispatch_debug(
-        "Spectre",
-        selftest::Severity::Diagnostic,
-        spectre::self_test(),
-    );
+    selftest::dispatch_debug("Spectre", selftest::Severity::Diagnostic, || {
+        spectre::self_test()
+    });
 
     // Step 22e⅞+++++d: IOMMU detection self-test.
     // Verifies API consistency (available ↔ vendor ↔ unit_count).
     // §914: Integrity — IOMMU is a security boundary for DMA isolation.
-    selftest::dispatch_debug("IOMMU", selftest::Severity::Integrity, iommu::self_test());
+    selftest::dispatch_debug("IOMMU", selftest::Severity::Integrity, || {
+        iommu::self_test()
+    });
 
     // Step 22e⅞+++++d½: IOMMU DMA remapping self-test.
     // Tests page table manipulation (domain create/map/unmap/destroy).
     // §914: Integrity — DMA remapping is a security boundary.
-    selftest::dispatch_debug(
-        "IOMMU remap",
-        selftest::Severity::Integrity,
-        iommu_remap::self_test(),
-    );
+    selftest::dispatch_debug("IOMMU remap", selftest::Severity::Integrity, || {
+        iommu_remap::self_test()
+    });
 
     // AHCI/SATA driver self-test.
-    selftest::dispatch_debug("Ahci", selftest::Severity::Diagnostic, ahci::self_test());
+    selftest::dispatch_debug("Ahci", selftest::Severity::Diagnostic, || ahci::self_test());
 
     // NVMe driver self-test.
-    selftest::dispatch_debug("Nvme", selftest::Severity::Diagnostic, nvme::self_test());
+    selftest::dispatch_debug("Nvme", selftest::Severity::Diagnostic, || nvme::self_test());
 
     // xHCI USB host controller self-test.
-    selftest::dispatch_debug("Xhci", selftest::Severity::Diagnostic, xhci::self_test());
+    selftest::dispatch_debug("Xhci", selftest::Severity::Diagnostic, || xhci::self_test());
 
     // Intel e1000 NIC self-test.
-    selftest::dispatch_debug("E1000", selftest::Severity::Diagnostic, e1000::self_test());
+    selftest::dispatch_debug("E1000", selftest::Severity::Diagnostic, || {
+        e1000::self_test()
+    });
 
     // Realtek RTL8139 NIC self-test.
-    selftest::dispatch_debug(
-        "Rtl8139",
-        selftest::Severity::Diagnostic,
-        rtl8139::self_test(),
-    );
+    selftest::dispatch_debug("Rtl8139", selftest::Severity::Diagnostic, || {
+        rtl8139::self_test()
+    });
 
     // Virtio-net self-test.  Sited with the other two NICs rather than among
     // the virtio devices below, because all three now transmit a frame and
     // their datapath results are worth reading as one block.
     // §914: Diagnostic — optional network hardware.
-    selftest::dispatch_debug(
-        "virtio-net",
-        selftest::Severity::Diagnostic,
-        virtio::net::self_test(),
-    );
+    selftest::dispatch_debug("virtio-net", selftest::Severity::Diagnostic, || {
+        virtio::net::self_test()
+    });
+
+    // The cards' multicast filter (known-issues A-E1000-AND-RTL8139-DROP-
+    // EVERY-MULTICAST-FRAME): e1000 and rtl8139 hashes against QEMU's, and
+    // the programmed table read back from whichever card is present. Runs
+    // before the netstack daemon claims the NIC, and puts the kernel's own
+    // set back when done.
+    // §914: Diagnostic — optional network hardware.
+    selftest::dispatch_debug("mcast filter", selftest::Severity::Diagnostic, || {
+        net::mcast_filter::self_test()
+    });
 
     // Intel HD Audio self-test.
     // §914: Diagnostic — optional audio hardware.
-    selftest::dispatch_debug("HDA", selftest::Severity::Diagnostic, hda::self_test());
+    selftest::dispatch_debug("HDA", selftest::Severity::Diagnostic, || hda::self_test());
 
     // PC speaker self-test.
     // §914: Diagnostic — optional audio hardware.
-    selftest::dispatch_debug(
-        "PC speaker",
-        selftest::Severity::Diagnostic,
-        pcspk::self_test(),
-    );
+    selftest::dispatch_debug("PC speaker", selftest::Severity::Diagnostic, || {
+        pcspk::self_test()
+    });
 
     // Virtio-sound self-test.
-    selftest::dispatch_debug(
-        "Sound",
-        selftest::Severity::Diagnostic,
-        virtio::sound::self_test(),
-    );
+    selftest::dispatch_debug("Sound", selftest::Severity::Diagnostic, || {
+        virtio::sound::self_test()
+    });
+
+    // The virtio console: its protocol, and the boot test's port end to end
+    // (scripts/boot-test.sh checks the reply on the host). Then the guest
+    // agent's reading of requests, which needs no host (§1534).
+    selftest::dispatch_debug("virtio console", selftest::Severity::Diagnostic, || {
+        virtio::console::self_test()
+    });
+    selftest::dispatch_debug("guest agent", selftest::Severity::Diagnostic, || {
+        guestagent::self_test()
+    });
 
     // AC97 audio self-test.
-    selftest::dispatch_debug("Ac97", selftest::Severity::Diagnostic, ac97::self_test());
+    selftest::dispatch_debug("Ac97", selftest::Severity::Diagnostic, || ac97::self_test());
 
     // Virtio-GPU self-test.
-    selftest::dispatch_debug(
-        "Gpu",
-        selftest::Severity::Diagnostic,
-        virtio::gpu::self_test(),
-    );
+    selftest::dispatch_debug("Gpu", selftest::Severity::Diagnostic, || {
+        virtio::gpu::self_test()
+    });
 
     // Virtio-GPU render-node resource manager self-test (the driver half of
     // the virtgpu render ioctls).
     selftest::dispatch(
         "virtio-gpu render-resource",
         selftest::Severity::Integrity,
-        virtio::gpu::resource_self_test(),
+        || virtio::gpu::resource_self_test(),
     );
 
     // Audio mixer self-test.
-    selftest::dispatch_debug(
-        "Audio Mixer",
-        selftest::Severity::Diagnostic,
-        audio_mixer::self_test(),
-    );
+    selftest::dispatch_debug("Audio Mixer", selftest::Severity::Diagnostic, || {
+        audio_mixer::self_test()
+    });
 
     // ALSA PCM ABI self-test (Linux audio-compat foundation).
-    selftest::dispatch(
-        "ALSA PCM ABI",
-        selftest::Severity::Integrity,
-        audio_alsa::self_test(),
-    );
+    selftest::dispatch("ALSA PCM ABI", selftest::Severity::Integrity, || {
+        audio_alsa::self_test()
+    });
 
     // ALSA PCM instance-object lifecycle self-test (per-open substream
     // refcounting behind a /dev/snd/pcmC0D0p fd).
-    selftest::dispatch(
-        "ALSA PCM instance",
-        selftest::Severity::Integrity,
-        ipc::alsa_pcm::self_test(),
-    );
+    selftest::dispatch("ALSA PCM instance", selftest::Severity::Integrity, || {
+        ipc::alsa_pcm::self_test()
+    });
 
     // ALSA control-device ABI self-test (card enumeration foundation behind
     // /dev/snd/controlC0).
-    selftest::dispatch(
-        "ALSA control ABI",
-        selftest::Severity::Integrity,
-        audio_alsa_ctl::self_test(),
-    );
+    selftest::dispatch("ALSA control ABI", selftest::Severity::Integrity, || {
+        audio_alsa_ctl::self_test()
+    });
 
     // System notification sounds self-test.
-    selftest::dispatch_debug(
-        "Audio Notify",
-        selftest::Severity::Diagnostic,
-        audio_notify::self_test(),
-    );
+    selftest::dispatch_debug("Audio Notify", selftest::Severity::Diagnostic, || {
+        audio_notify::self_test()
+    });
 
     // Sound history self-test.
-    selftest::dispatch_debug(
-        "Audio History",
-        selftest::Severity::Diagnostic,
-        audio_history::self_test(),
-    );
+    selftest::dispatch_debug("Audio History", selftest::Severity::Diagnostic, || {
+        audio_history::self_test()
+    });
+
+    // The audio output pump: the first usable sound card becomes the sink and a
+    // kernel task keeps it fed from the mixer. Started only now, after the
+    // drivers' own self-tests above, which reconfigure the cards and play
+    // through them directly. Then the end-to-end check: a ring of sound
+    // empties through the card.
+    audio_out::init();
+    selftest::dispatch("audio output", selftest::Severity::Diagnostic, || {
+        audio_out::self_test()
+    });
+    // The same card from a native program, through the device door
+    // (SYS_DEVICE_*): what the C library's open/ioctl/write will do.
+    selftest::dispatch("native device door", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_native_device_door()
+    });
 
     // Framebuffer graphics self-test.
     // §914: Diagnostic — optional display hardware.
-    selftest::dispatch(
-        "Framebuffer",
-        selftest::Severity::Diagnostic,
-        fb::self_test(),
-    );
+    selftest::dispatch("Framebuffer", selftest::Severity::Diagnostic, || {
+        fb::self_test()
+    });
 
     // DRM/KMS subsystem self-test.
     // §914: Diagnostic — optional display hardware.
-    selftest::dispatch_debug("DRM", selftest::Severity::Diagnostic, drm::self_test());
+    selftest::dispatch_debug("DRM", selftest::Severity::Diagnostic, || drm::self_test());
 
     // DRM Linux-uAPI ABI self-test (Linux graphics-compat foundation).
-    selftest::dispatch(
-        "DRM uAPI ABI",
-        selftest::Severity::Integrity,
-        drm::uapi::self_test(),
-    );
+    selftest::dispatch("DRM uAPI ABI", selftest::Severity::Integrity, || {
+        drm::uapi::self_test()
+    });
 
     // virtio-gpu DRM driver-specific uAPI ABI self-test (3D/virgl foundation
     // for the Vulkan/OpenGL Mesa port).
     selftest::dispatch(
         "virtio-gpu DRM uAPI ABI",
         selftest::Severity::Integrity,
-        drm::virtgpu_uapi::self_test(),
+        || drm::virtgpu_uapi::self_test(),
     );
 
     // DRM card client-instance lifecycle self-test (the /dev/dri fd family).
-    selftest::dispatch(
-        "DRM card client",
-        selftest::Severity::Integrity,
-        drm::card_fd::self_test(),
-    );
+    selftest::dispatch("DRM card client", selftest::Severity::Integrity, || {
+        drm::card_fd::self_test()
+    });
 
     // evdev input-device self-test (the /dev/input/event* fd family).
     //
@@ -9078,93 +8578,87 @@ extern "C" fn kernel_main() -> ! {
     // format a userspace client parses by memcpy, so a record that is the
     // wrong size or the wrong shape is not a degraded input device — it is a
     // client reading garbage and acting on it.
-    selftest::dispatch("evdev", selftest::Severity::Integrity, evdev::self_test());
-    selftest::dispatch(
-        "evdev fd",
-        selftest::Severity::Integrity,
-        evdev_fd::self_test(),
-    );
+    selftest::dispatch("evdev", selftest::Severity::Integrity, || {
+        evdev::self_test()
+    });
+    selftest::dispatch("evdev fd", selftest::Severity::Integrity, || {
+        evdev_fd::self_test()
+    });
 
     // Console VT100/ANSI escape sequence self-test.
     // §914: Diagnostic — cosmetic rendering, not structural integrity.
-    selftest::dispatch_debug(
-        "Console",
-        selftest::Severity::Diagnostic,
-        console::self_test(),
-    );
+    selftest::dispatch_debug("Console", selftest::Severity::Diagnostic, || {
+        console::self_test()
+    });
 
     // TTY/termios layer self-test (depends on the console being up so that
     // TIOCGWINSZ can report live dimensions).
     // §914: Diagnostic — terminal flags and line discipline, not structural integrity.
-    selftest::dispatch_debug("TTY", selftest::Severity::Diagnostic, tty::self_test());
+    selftest::dispatch_debug("TTY", selftest::Severity::Diagnostic, || tty::self_test());
 
     // Pseudo-terminal self-test.  Runs after `tty::self_test` because it
     // creates real terminal devices through the same table and drives the
     // line discipline end-to-end over them; a failure here means the
     // discipline works for the console but not for a device with no keyboard
     // driver behind it, which is precisely what a pty is.
-    selftest::dispatch_debug("Pty", selftest::Severity::Diagnostic, tty::pty::self_test());
+    selftest::dispatch_debug("Pty", selftest::Severity::Diagnostic, || {
+        tty::pty::self_test()
+    });
 
     // Terminal session multiplexer init + self-test.
     // §914: Diagnostic — terminal session management, not structural integrity.
     termsession::init();
-    selftest::dispatch_debug(
-        "termsession",
-        selftest::Severity::Diagnostic,
-        termsession::self_test(),
-    );
+    selftest::dispatch_debug("termsession", selftest::Severity::Diagnostic, || {
+        termsession::self_test()
+    });
 
     // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
     // §914: Diagnostic — cosmetic rendering, not structural integrity.
-    selftest::dispatch_debug(
-        "Unicode",
-        selftest::Severity::Diagnostic,
-        unicode::self_test(),
-    );
+    selftest::dispatch_debug("Unicode", selftest::Severity::Diagnostic, || {
+        unicode::self_test()
+    });
 
     // The uname strings: glibc's start-up version gate, and single-token fields.
     // §914: Diagnostic — informational strings, not structural kernel integrity.
-    selftest::dispatch_debug("uname", selftest::Severity::Diagnostic, uname::self_test());
+    selftest::dispatch_debug("uname", selftest::Severity::Diagnostic, || {
+        uname::self_test()
+    });
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
-    selftest::dispatch_debug(
-        "Integ Test",
-        selftest::Severity::Integrity,
-        mm::integ_test::self_test(),
-    );
+    selftest::dispatch_debug("Integ Test", selftest::Severity::Integrity, || {
+        mm::integ_test::self_test()
+    });
 
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();
     mm::pcid::enable_on_this_cpu();
-    selftest::dispatch_debug("Pcid", selftest::Severity::Integrity, mm::pcid::self_test());
+    selftest::dispatch_debug("Pcid", selftest::Severity::Integrity, || {
+        mm::pcid::self_test()
+    });
 
     // Step 22f: Initialize the soft lockup detector (watchdog).
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.
     watchdog::init();
     // §914: Diagnostic — monitoring infrastructure, not structural integrity.
-    selftest::dispatch_debug(
-        "watchdog",
-        selftest::Severity::Diagnostic,
-        watchdog::self_test(),
-    );
+    selftest::dispatch_debug("watchdog", selftest::Severity::Diagnostic, || {
+        watchdog::self_test()
+    });
 
     // Step 22f1.5: Initialize MWAIT-based idle (power-efficient CPU sleep).
     idle::init();
     // §914: Diagnostic — power optimization, not structural integrity.
-    selftest::dispatch_debug("idle", selftest::Severity::Diagnostic, idle::self_test());
+    selftest::dispatch_debug("idle", selftest::Severity::Diagnostic, || idle::self_test());
 
     // Step 22f2: Stack backtrace self-test.
     // Verifies frame pointer chain walking works (requires -C force-frame-pointers=yes).
     // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
     // §914: Diagnostic — debugging aid, not structural integrity.
-    selftest::dispatch_debug(
-        "backtrace",
-        selftest::Severity::Diagnostic,
-        backtrace::self_test(),
-    );
+    selftest::dispatch_debug("backtrace", selftest::Severity::Diagnostic, || {
+        backtrace::self_test()
+    });
 
     // Step 22f3: lockdep is initialized far earlier -- see the block just
     // before Step 21. It used to live here, after SMP init, on the stated
@@ -9214,11 +8708,9 @@ extern "C" fn kernel_main() -> ! {
     // and audits kernel page tables for write+execute violations.
     // Runs AFTER hardening so the audit reflects the fixed state.
     // §914: Integrity — memory protection (W^X) is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "mm::protect",
-        selftest::Severity::Integrity,
-        mm::protect::self_test(),
-    );
+    selftest::dispatch_debug("mm::protect", selftest::Severity::Integrity, || {
+        mm::protect::self_test()
+    });
 
     console::boot_step_update(console::BootStatus::Ok, "Security hardening");
 
@@ -9240,123 +8732,109 @@ extern "C" fn kernel_main() -> ! {
     // there is no pre-poison allocation window that would produce spurious
     // red-zone overflow reports (B-HEAP1).  Here we just exercise the
     // UAF/double-free/red-zone detectors to confirm they fire correctly.
-    selftest::dispatch_debug(
-        "Heap poison",
-        selftest::Severity::Integrity,
-        mm::heap::poison_self_test(),
-    );
+    selftest::dispatch_debug("Heap poison", selftest::Severity::Integrity, || {
+        mm::heap::poison_self_test()
+    });
 
     // Step 22g: I/O scheduler self-test.
     // BFQ-style budget fair queueing with per-process queues,
     // priority classes, elevator ordering, and request merging.
-    selftest::dispatch_debug(
-        "Io Sched",
-        selftest::Severity::Integrity,
-        sched::io_sched::self_test(),
-    );
+    selftest::dispatch_debug("Io Sched", selftest::Severity::Integrity, || {
+        sched::io_sched::self_test()
+    });
 
     // Step 22h: Wait queue self-test.
-    selftest::dispatch_debug(
-        "Waitqueue",
-        selftest::Severity::Integrity,
-        sched::waitqueue::self_test(),
-    );
+    selftest::dispatch_debug("Waitqueue", selftest::Severity::Integrity, || {
+        sched::waitqueue::self_test()
+    });
 
     // Step 22i: Sleeping mutex self-test.
-    selftest::dispatch_debug(
-        "Kmutex",
-        selftest::Severity::Integrity,
-        sched::kmutex::self_test(),
-    );
+    selftest::dispatch_debug("Kmutex", selftest::Severity::Integrity, || {
+        sched::kmutex::self_test()
+    });
 
     // Step 22j: Counting semaphore self-test.
-    selftest::dispatch_debug(
-        "Semaphore",
-        selftest::Severity::Integrity,
-        sched::semaphore::self_test(),
-    );
+    selftest::dispatch_debug("Semaphore", selftest::Severity::Integrity, || {
+        sched::semaphore::self_test()
+    });
 
     // Step 22k: Condition variable self-test.
-    selftest::dispatch_debug(
-        "Condvar",
-        selftest::Severity::Integrity,
-        sched::condvar::self_test(),
-    );
+    selftest::dispatch_debug("Condvar", selftest::Severity::Integrity, || {
+        sched::condvar::self_test()
+    });
 
     // Step 22k2: Reader-writer lock self-test.
-    selftest::dispatch_debug(
-        "Krwlock",
-        selftest::Severity::Integrity,
-        sched::krwlock::self_test(),
-    );
+    selftest::dispatch_debug("Krwlock", selftest::Severity::Integrity, || {
+        sched::krwlock::self_test()
+    });
 
     // Step 22k3: Barrier self-test.
-    selftest::dispatch_debug(
-        "Barrier",
-        selftest::Severity::Integrity,
-        sched::barrier::self_test(),
-    );
+    selftest::dispatch_debug("Barrier", selftest::Severity::Integrity, || {
+        sched::barrier::self_test()
+    });
 
     // Step 22k4: One-shot event self-test.
-    selftest::dispatch_debug(
-        "Once Event",
-        selftest::Severity::Integrity,
-        sched::once_event::self_test(),
-    );
+    selftest::dispatch_debug("Once Event", selftest::Severity::Integrity, || {
+        sched::once_event::self_test()
+    });
 
     // Step 22k5: Kernel channel self-test.
-    selftest::dispatch_debug(
-        "Kchannel",
-        selftest::Severity::Integrity,
-        sched::kchannel::self_test(),
-    );
+    selftest::dispatch_debug("Kchannel", selftest::Severity::Integrity, || {
+        sched::kchannel::self_test()
+    });
 
     // Step 22k6: Kernel trace buffer self-test.
-    selftest::dispatch_debug(
-        "Ktrace",
-        selftest::Severity::Diagnostic,
-        ktrace::self_test(),
-    );
+    selftest::dispatch_debug("Ktrace", selftest::Severity::Diagnostic, || {
+        ktrace::self_test()
+    });
 
     // Step 22k7: EEVDF scheduler self-test.
     // §914: Integrity — scheduler correctness is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "EEVDF",
-        selftest::Severity::Integrity,
-        sched::eevdf::self_test(),
-    );
+    selftest::dispatch_debug("EEVDF", selftest::Severity::Integrity, || {
+        sched::eevdf::self_test()
+    });
 
     // Step 22k8: Deadline scheduler self-test.
     // §914: Integrity — scheduler correctness is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "deadline",
-        selftest::Severity::Integrity,
-        sched::deadline::self_test(),
-    );
+    selftest::dispatch_debug("deadline", selftest::Severity::Integrity, || {
+        sched::deadline::self_test()
+    });
 
     // Step 22k9: Scheduler backend enum self-test.
-    selftest::dispatch_debug(
-        "Backend",
-        selftest::Severity::Integrity,
-        sched::backend::self_test(),
-    );
+    selftest::dispatch_debug("Backend", selftest::Severity::Integrity, || {
+        sched::backend::self_test()
+    });
 
     // Step 22l: Task supervisor self-test.
-    selftest::dispatch_debug(
-        "Supervisor",
-        selftest::Severity::Integrity,
-        sched::supervisor::self_test(),
-    );
+    selftest::dispatch_debug("Supervisor", selftest::Severity::Integrity, || {
+        sched::supervisor::self_test()
+    });
 
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-
-    // driven completion.  The PCI IRQ is configured as level-triggered
-    // and unmasked.  Both devices may share the same IRQ line (IRQ 11
-    // on QEMU q35); the handler reads each device's ISR status register
-    // to acknowledge, which is correct for shared level-triggered IRQs.
+    // driven completion.  Each PCI IRQ a device uses is configured as
+    // level-triggered and unmasked.  Lines are shared (on this QEMU
+    // configuration the swap disk and virtio-net share IRQ 10, the rootfs
+    // disk and the RTL8139 IRQ 11); the handler reads the ISR status
+    // register of every function routed to the line, which is what a
+    // shared level-triggered IRQ requires.
     virtio::blk::enable_interrupts();
     virtio::net::enable_interrupts();
+
+    // Straight after, while nothing else is using the disks: every virtio-blk
+    // disk's interrupt must be acknowledged at its own port. An
+    // unacknowledged level-triggered pin storms its shared line, and the
+    // storms this replaced starved the daemon behind a network self-test into
+    // timing out (known-issues A-VIRTIO-BLK-ACKED-THE-WRONG-DISK). Diagnostic,
+    // not Integrity: the storm detector masks such a line, so the machine
+    // survives it, and the checks after this one still have something to say.
+    // The failure still reds the run.
+    selftest::dispatch_debug(
+        "virtio-blk interrupt routes",
+        selftest::Severity::Diagnostic,
+        || virtio::blk::self_test_irq_routes(),
+    );
 
     {
         #[inline(never)]
@@ -9364,20 +8842,22 @@ extern "C" fn kernel_main() -> ! {
             // Step 23: Verify the CMOS Real-Time Clock.
             // No initialization needed — the RTC is always running on battery.
             // We just verify we can read a plausible date/time.
-            selftest::dispatch("RTC", selftest::Severity::Diagnostic, rtc::self_test());
+            selftest::dispatch("RTC", selftest::Severity::Diagnostic, || rtc::self_test());
             // Non-fatal — the system can function without a correct clock.
 
             // Step 23b: Run benchmark infrastructure self-test (fast, validates runner).
             // The actual micro-benchmarks (bench::run_all) are deferred to a
             // background kernel task so init can start immediately.  This shaves
             // ~15-20s off the time-to-usable under QEMU TCG.
-            selftest::dispatch_debug("Bench", selftest::Severity::Diagnostic, bench::self_test());
+            selftest::dispatch_debug("Bench", selftest::Severity::Diagnostic, || {
+                bench::self_test()
+            });
 
             // Self-test hardware performance counters (PMU).
             // Must be after CPU feature detection (uses pmu_version/counters from
             // cpu::features()).  If PMU is unavailable (QEMU without -cpu host),
             // the test gracefully skips.
-            selftest::dispatch_debug("Pmc", selftest::Severity::Diagnostic, pmc::self_test());
+            selftest::dispatch_debug("Pmc", selftest::Severity::Diagnostic, || pmc::self_test());
 
             // Print a boot-time memory summary via the unified MemoryInfo API.
             {
@@ -9401,47 +8881,32 @@ extern "C" fn kernel_main() -> ! {
                     // reclamation in alloc_order().
                 }
             }
-            selftest::dispatch_debug(
-                "Kswapd",
-                selftest::Severity::Integrity,
-                mm::kswapd::self_test(),
-            );
-            selftest::dispatch_debug("Oom", selftest::Severity::Integrity, mm::oom::self_test());
-            selftest::dispatch_debug(
-                "Accounting",
-                selftest::Severity::Integrity,
-                mm::accounting::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Rlimits",
-                selftest::Severity::Integrity,
-                mm::rlimits::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Pressure",
-                selftest::Severity::Integrity,
-                mm::pressure::self_test(),
-            );
-            selftest::dispatch_debug(
-                "Mempool",
-                selftest::Severity::Integrity,
-                mm::mempool::self_test(),
-            );
+            selftest::dispatch_debug("Kswapd", selftest::Severity::Integrity, || {
+                mm::kswapd::self_test()
+            });
+            selftest::dispatch_debug("Oom", selftest::Severity::Integrity, || {
+                mm::oom::self_test()
+            });
+            selftest::dispatch_debug("Accounting", selftest::Severity::Integrity, || {
+                mm::accounting::self_test()
+            });
+            selftest::dispatch_debug("Rlimits", selftest::Severity::Integrity, || {
+                mm::rlimits::self_test()
+            });
+            selftest::dispatch_debug("Pressure", selftest::Severity::Integrity, || {
+                mm::pressure::self_test()
+            });
+            selftest::dispatch_debug("Mempool", selftest::Severity::Integrity, || {
+                mm::mempool::self_test()
+            });
 
-            // Step 22c: Spawn workqueue worker task.
-            // Provides deferred work execution in full process context (can sleep,
-            // allocate, take locks).  Must be after scheduler (Step 10).
-            match workqueue::init() {
-                Ok(()) => {}
-                Err(e) => {
-                    serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
-                }
-            }
-            selftest::dispatch_debug(
-                "Workqueue",
-                selftest::Severity::Diagnostic,
-                workqueue::self_test(),
-            );
+            // Step 22c: the workqueue worker's self-test. The worker itself --
+            // deferred work in full process context (can sleep, allocate, take
+            // locks) -- is spawned as soon as preemptive scheduling starts, for
+            // the self-test battery's sake (see there).
+            selftest::dispatch_debug("Workqueue", selftest::Severity::Diagnostic, || {
+                workqueue::self_test()
+            });
         }
         case();
     }
@@ -9449,72 +8914,56 @@ extern "C" fn kernel_main() -> ! {
     // Step 22d: Kernel timers self-test.
     // ktimer fires callbacks via the workqueue after a tick-based delay.
     // Requires both the workqueue worker and TIMER softirq to be active.
-    selftest::dispatch_debug(
-        "Ktimer",
-        selftest::Severity::Diagnostic,
-        ktimer::self_test(),
-    );
+    selftest::dispatch_debug("Ktimer", selftest::Severity::Diagnostic, || {
+        ktimer::self_test()
+    });
 
     // Step 22d½: High-resolution timer self-test.
     // Verifies scheduling, cancellation, ordering, and repeating timers.
-    selftest::dispatch_debug(
-        "Hrtimer",
-        selftest::Severity::Diagnostic,
-        hrtimer::self_test(),
-    );
+    selftest::dispatch_debug("Hrtimer", selftest::Severity::Diagnostic, || {
+        hrtimer::self_test()
+    });
 
     // Channel recv_timeout self-test (requires hrtimer for sleep_ms).
     // §914: Integrity — IPC correctness is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "channel timeout",
-        selftest::Severity::Integrity,
-        ipc::channel::self_test_timeout(),
-    );
+    selftest::dispatch_debug("channel timeout", selftest::Severity::Integrity, || {
+        ipc::channel::self_test_timeout()
+    });
 
     // Futex wait_timeout self-test (requires hrtimer).
     // §914: Integrity — futex correctness is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "futex timeout",
-        selftest::Severity::Integrity,
-        ipc::futex::self_test_timeout(),
-    );
+    selftest::dispatch_debug("futex timeout", selftest::Severity::Integrity, || {
+        ipc::futex::self_test_timeout()
+    });
 
     // Eventfd read_timeout self-test (requires hrtimer).
     // §914: Integrity — IPC correctness is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "eventfd timeout",
-        selftest::Severity::Integrity,
-        ipc::eventfd::self_test_timeout(),
-    );
+    selftest::dispatch_debug("eventfd timeout", selftest::Severity::Integrity, || {
+        ipc::eventfd::self_test_timeout()
+    });
 
     // Service registry self-test (requires scheduler + channels).
     // §914: Integrity — service registry is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "service registry",
-        selftest::Severity::Integrity,
-        ipc::service::self_test(),
-    );
+    selftest::dispatch_debug("service registry", selftest::Severity::Integrity, || {
+        ipc::service::self_test()
+    });
 
     // Service limits self-test.
     // §914: Integrity — service limits enforce kernel resource policy.
-    selftest::dispatch_debug(
-        "service limits",
-        selftest::Severity::Integrity,
-        ipc::service_limits::self_test(),
-    );
+    selftest::dispatch_debug("service limits", selftest::Severity::Integrity, || {
+        ipc::service_limits::self_test()
+    });
 
     // Namespace self-test (pure in-memory, no dependencies beyond alloc).
     // §914: Integrity — namespace isolation is a kernel structural invariant.
-    selftest::dispatch_debug(
-        "namespace",
-        selftest::Severity::Integrity,
-        ipc::namespace::self_test(),
-    );
+    selftest::dispatch_debug("namespace", selftest::Severity::Integrity, || {
+        ipc::namespace::self_test()
+    });
 
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
     // entropy during the boot process (ISR timing mixed in).
-    selftest::dispatch_debug("Rng", selftest::Severity::Diagnostic, rng::self_test());
+    selftest::dispatch_debug("Rng", selftest::Severity::Diagnostic, || rng::self_test());
 
     {
         #[inline(never)]
@@ -9523,11 +8972,9 @@ extern "C" fn kernel_main() -> ! {
             // caches, which aren't available during the early frame allocator
             // self-test (test 7 skips there with "HHDM not ready").
             // §914: Integrity — memory zeroing prevents information leaks.
-            selftest::dispatch_debug(
-                "zero-on-free",
-                selftest::Severity::Integrity,
-                mm::frame::test_zero_on_free(),
-            );
+            selftest::dispatch_debug("zero-on-free", selftest::Severity::Integrity, || {
+                mm::frame::test_zero_on_free()
+            });
 
             // Zeroed frame allocation — same reason, and until 2026-08-31 this
             // call did not exist, so the case had never run on any boot: its
@@ -9540,11 +8987,9 @@ extern "C" fn kernel_main() -> ! {
             // reading the previous owner's bytes and which nothing else in a
             // booting kernel checks.
             // §914: Integrity — memory zeroing prevents information leaks.
-            selftest::dispatch_debug(
-                "zeroed-alloc",
-                selftest::Severity::Integrity,
-                mm::frame::test_zeroed_alloc(),
-            );
+            selftest::dispatch_debug("zeroed-alloc", selftest::Severity::Integrity, || {
+                mm::frame::test_zeroed_alloc()
+            });
 
             boot_timing::mark(boot_timing::Milestone::SelfTests);
 
@@ -9689,6 +9134,20 @@ extern "C" fn kernel_main() -> ! {
             // accumulate where nothing reads them.
             sync::report_leaf_claims();
 
+            // And the switch-under-lock check's verdict, which, unlike those
+            // two, fails the run. A spinlock carried across a yield or a block
+            // leaves its CPU's preempt count raised under whichever task runs
+            // next, and for good if the holder resumes on another CPU. Each
+            // site is described where it happens; this is the total, after a
+            // control that shows the check can count. Diagnostic, not
+            // Integrity: BOOT_OK and the lines after it still have something
+            // to say, and the failure reds the run either way.
+            selftest::dispatch_debug(
+                "switch under a spinlock",
+                selftest::Severity::Diagnostic,
+                || sched::report_switches_under_lock(),
+            );
+
             // And binfmt's, for the reason its own accessor cannot give:
             // `stats()` returns (0, 0, 0, 0) when STATE is None, which is
             // byte-identical to an initialised table on a system that has
@@ -9719,6 +9178,26 @@ extern "C" fn kernel_main() -> ! {
                         ""
                     }
                 );
+            }
+
+            // Boot-test kexec mode: if asked, reload the running kernel into
+            // itself here, after every self-test, to validate the kexec
+            // trampoline — the one path no self-test can exercise, because it
+            // ends the running kernel (design-decisions §1536; todo.txt kexec 5c).
+            // The second kernel has no command line (the handoff builds no
+            // kernel-file response), so it does not re-trigger: it boots on to
+            // BOOT_OK, which the harness sees AFTER this marker to confirm the
+            // jump worked. A pre-jump failure falls through to BOOT_OK with the
+            // error on serial rather than hanging. Absent the flag — every
+            // ordinary boot — this does nothing.
+            if boot::kernel_cmdline()
+                .is_some_and(|c| c.split_ascii_whitespace().any(|w| w == "kexec.selftest=1"))
+            {
+                serial_println!("=== KEXEC-SELFTEST: reloading the kernel into itself now ===");
+                // At the end of boot, committing to the restart; on success this
+                // never returns.
+                let e = kexec::reload_self();
+                serial_println!("=== KEXEC-SELFTEST: reload did not happen: {:?} ===", e);
             }
 
             // Boot success marker — the boot test script greps for this.
@@ -9767,22 +9246,32 @@ extern "C" fn kernel_main() -> ! {
             // Spawn a low-priority kernel task to run micro-benchmarks in the
             // background.  This lets init start immediately while benchmarks
             // run interleaved with normal scheduling.
+            //
+            // Not with `bench.skip=1`: a boot wanted for what it runs, as
+            // scripts/guest.py's guest is (with `selftest.skip=1`), has no use
+            // for minutes of measurement competing with the programs it was
+            // started to try. `boot-test.sh --bench`, which waits for BENCH_OK,
+            // refuses the flag.
             let pml4 = mm::page_table::active_pml4_phys();
-            match sched::spawn(
-                b"bench",
-                sched::task::DEFAULT_PRIORITY.saturating_add(2), // slightly below default
-                deferred_bench_task,
-                0,
-                pml4,
-            ) {
-                Ok(tid) => {
-                    serial_println!("[boot] Deferred benchmark task spawned (tid={})", tid);
-                }
-                Err(e) => {
-                    serial_println!("[boot] WARNING: failed to spawn bench task: {:?}", e);
-                    // Fall back to inline benchmarks so we still get numbers.
-                    bench::run_all();
-                    serial_println!("BENCH_OK");
+            if fs::kernparam::is_set("bench.skip") {
+                serial_println!("[boot] bench.skip: no boot benchmarks");
+            } else {
+                match sched::spawn(
+                    b"bench",
+                    sched::task::DEFAULT_PRIORITY.saturating_add(2), // slightly below default
+                    deferred_bench_task,
+                    0,
+                    pml4,
+                ) {
+                    Ok(tid) => {
+                        serial_println!("[boot] Deferred benchmark task spawned (tid={})", tid);
+                    }
+                    Err(e) => {
+                        serial_println!("[boot] WARNING: failed to spawn bench task: {:?}", e);
+                        // Fall back to inline benchmarks so we still get numbers.
+                        bench::run_all();
+                        serial_println!("BENCH_OK");
+                    }
                 }
             }
         }
@@ -9803,20 +9292,26 @@ extern "C" fn kernel_main() -> ! {
     static TICKER_ELF: &[u8] =
         include_bytes!("../../services/ticker/target/x86_64-unknown-none/release/ticker");
 
-    // Write embedded binaries to the VFS so init can spawn them.
+    // The system image is the root from here on: init and everything it
+    // starts find the image's /bin/sh, /etc and /home under their own names
+    // (design-decisions §1513). The self-tests above ran with the in-memory
+    // root and the image at /mnt, and keep doing so.
+    let image_is_root = switch_root_to_image();
+
+    // The host's way into this running system, when QEMU attached the
+    // agent's port (scripts/guest.py; design-decisions §1534). Now, not
+    // earlier: what it runs looks for programs on the image, at /bin.
+    guestagent::start();
+
+    // Write embedded binaries to the VFS so init can spawn them -- onto an
+    // image root only where the image has none, so an image that provides
+    // its own programs and service list (the recipe's to write) is used as
+    // it stands.
     if let Err(e) = fs::Vfs::mkdir("/bin") {
         serial_println!("[init] Note: /bin mkdir: {:?} (may already exist)", e);
     }
-    if let Err(e) = fs::Vfs::write_file("/bin/hello", HELLO_ELF) {
-        serial_println!("[init] WARNING: failed to write /bin/hello: {:?}", e);
-    } else {
-        serial_println!("[init] Installed /bin/hello ({} bytes)", HELLO_ELF.len());
-    }
-    if let Err(e) = fs::Vfs::write_file("/bin/ticker", TICKER_ELF) {
-        serial_println!("[init] WARNING: failed to write /bin/ticker: {:?}", e);
-    } else {
-        serial_println!("[init] Installed /bin/ticker ({} bytes)", TICKER_ELF.len());
-    }
+    install_boot_file("/bin/hello", HELLO_ELF, image_is_root);
+    install_boot_file("/bin/ticker", TICKER_ELF, image_is_root);
 
     // Create /etc directory and write a default service list.
     // Init reads this at startup to auto-register services.  The name is
@@ -9826,13 +9321,16 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::Vfs::mkdir("/etc") {
         serial_println!("[init] Note: /etc mkdir: {:?} (may already exist)", e);
     }
-    if let Err(e) = fs::Vfs::write_file(
+    install_boot_file(
         "/etc/startup.conf",
         b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/ticker\n",
-    ) {
-        serial_println!("[init] Note: /etc/startup.conf write: {:?}", e);
-    } else {
-        serial_println!("[init] Created /etc/startup.conf");
+        image_is_root,
+    );
+    // `/etc/mtab`: the mount table at glibc's `MOUNTED` path, a link to
+    // `/proc/self/mounts` as on Linux (`fs::procfs::make_etc_mtab`). The
+    // self-test made it already; this is the boot's own, and a no-op then.
+    if let Err(e) = fs::procfs::make_etc_mtab() {
+        serial_println!("[init] WARNING: /etc/mtab could not be made: {:?}", e);
     }
 
     serial_println!(
@@ -9898,6 +9396,37 @@ extern "C" fn kernel_main() -> ! {
             cap::Rights::WRITE
                 .union(cap::Rights::MEMORY_LOCK)
                 .union(cap::Rights::TRANSFER),
+        ),
+        // Two init holds only to hand on, to the services whose
+        // `/etc/startup.conf` line names them with `caps:` -- the compositor's
+        // `caps:InputDevice/0/r,Service/0/w`: read the keyboard and mouse,
+        // offer the display service. The kernel delegates only what the parent
+        // holds (`pcb::inherit_caps_subset`), so the grant has to sit here.
+        //
+        // design-decisions 706 kept `InputDevice` off init while init's whole
+        // table went to everything it started -- every program would have read
+        // every keystroke. That is no longer how init starts anything: every
+        // process goes through `SYS_PROCESS_SPAWN_EX2`'s named subset, which
+        // leaves these two types out unless the line names them, and init does
+        // not fork (design-decisions 1174, `services/init`'s `child_caps` and
+        // `DELEGATED_TYPES`). So only such a service holds them; init's own
+        // console cannot read devices. Revisit with 1174 if init ever forks or
+        // spawns any other way.
+        //
+        // `TRANSFER`, as on the three objects above: nothing reads it today
+        // (the subset path checks only that init holds the rights it hands
+        // on), and it is here so that a delegation that one day does read it
+        // does not silently fail for PID 1 (lane D's request,
+        // `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`).
+        (
+            cap::ResourceType::InputDevice,
+            0,
+            cap::Rights::READ.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::Service,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
         ),
     ];
     let spawn_opts = proc::spawn::SpawnOptions {
@@ -10195,13 +9724,81 @@ fn print_security_posture() {
     }
 }
 
+/// Make the system image the root, just before init: the ext4 filesystem the
+/// boot mounted at `/mnt` becomes `/`, and the in-memory root the self-tests
+/// ran on moves to `/.bootfs` and is unmounted there unless a file on it is
+/// still held. Returns whether the image is the root.
+///
+/// Why: every program reads the standard paths -- `/bin/sh` for `popen`,
+/// `system` and `#!` scripts, `/etc` for accounts and settings,
+/// `/usr/share/zoneinfo`, `/home` -- and with the image at `/mnt` none of them
+/// named anything, nor could a service installed on the image be started at
+/// boot (`requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`,
+/// `requests/d-ab-the-booted-system-has-no-bin-sh.md`; design-decisions
+/// §1513). Here, after the self-tests, so the battery's fixtures keep their
+/// `/mnt` paths; the mounts made over the old root (`/tmp`, `/proc`, `/dev`,
+/// `/sys`) stay where they are, over the new one.
+///
+/// A boot with no image (`--no-rootfs`, a diskless machine) keeps the
+/// in-memory root, and so does one whose pivot is refused, which is logged.
+fn switch_root_to_image() -> bool {
+    let image_at_mnt = fs::Vfs::mounts()
+        .iter()
+        .any(|(path, kind)| path.as_path() == fs::path::Path::new("/mnt") && kind == "ext4");
+    if !image_at_mnt {
+        serial_println!("[boot] No system image at /mnt: the in-memory root stays the root");
+        return false;
+    }
+    if let Err(e) = fs::Vfs::pivot_root("/mnt", "/.bootfs") {
+        serial_println!(
+            "[boot] WARNING: the system image could not be made the root ({:?}); the in-memory \
+             root stays the root and the image stays at /mnt",
+            e
+        );
+        return false;
+    }
+    serial_println!("[boot] Root is the system image (was at /mnt)");
+    match fs::Vfs::unmount("/.bootfs") {
+        Ok(()) => serial_println!("[boot] The boot's in-memory root is unmounted"),
+        // A file on it is still held: it stays reachable, at /.bootfs, until
+        // whoever holds it lets go, as an unmount refuses then anyway.
+        Err(e) => serial_println!(
+            "[boot] The boot's in-memory root stays at /.bootfs: {:?}",
+            e
+        ),
+    }
+    true
+}
+
+/// Write one of the kernel's boot files (an embedded program, the default
+/// service list) for init -- onto the system image only where the image has
+/// none, since what an image provides is the image's to decide; onto the
+/// in-memory root of a boot with no image, always, as before the image was
+/// the root.
+fn install_boot_file(path: &str, contents: &[u8], image_is_root: bool) {
+    if image_is_root && fs::Vfs::exists(path) {
+        serial_println!("[init] Using the image's {}", path);
+        return;
+    }
+    match fs::Vfs::write_file(path, contents) {
+        Ok(()) if image_is_root => serial_println!(
+            "[init] The image has no {}: installed the kernel's ({} bytes)",
+            path,
+            contents.len()
+        ),
+        Ok(()) => serial_println!("[init] Installed {} ({} bytes)", path, contents.len()),
+        Err(e) => serial_println!("[init] WARNING: failed to write {}: {:?}", path, e),
+    }
+}
+
 /// After spawning the init process, the boot thread enters this loop.
 /// Each iteration performs lightweight housekeeping before yielding
 /// and halting:
 ///
 /// 1. **Reap dead tasks** — free kernel stacks for tasks that have
 ///    exited.  Without this, each dead task leaks 32 KiB of stack
-///    memory permanently.
+///    memory permanently.  With it, free any process address space
+///    whose teardown waited for a killed thread to leave its CPU.
 /// 2. **Refill the pre-zeroed frame pool** — zero a small batch of
 ///    frames in the background so page faults can grab them instantly.
 ///    This moves the 16 KiB memset cost from the page fault hot path
@@ -10220,6 +9817,9 @@ fn print_security_posture() {
 /// Maintenance (reap + refill) runs at reduced frequency to keep
 /// lock pressure low.
 fn idle_loop() -> ! {
+    // The boot is over: from here task 0 is the idle task alone, and the
+    // anti-starvation booster leaves it be (`sched::boot_work_done`).
+    sched::boot_work_done();
     let mut tick_counter = 0u32;
     loop {
         // Notify RCU that this CPU is entering idle.  An idle CPU is
@@ -10252,6 +9852,10 @@ fn idle_loop() -> ! {
         // even when nothing is dead, so throttling reduces contention.
         if tick_counter.is_multiple_of(100) {
             sched::reap_dead_tasks();
+            // And the address spaces of processes whose teardown waited for a
+            // killed thread to leave its CPU (`pcb::free_deferred_address_spaces`):
+            // here, so the wait is bounded even when nothing else exits.
+            proc::pcb::free_deferred_address_spaces();
         }
 
         // Refill the pre-zeroed frame pool.  Each call zeros up to

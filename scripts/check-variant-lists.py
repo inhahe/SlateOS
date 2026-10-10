@@ -76,7 +76,12 @@ like `[Level; 8]` names whatever `Level` is in scope in that file, so the
 candidate enums are tried nearest-first: the same file, then the same crate,
 and only then another crate -- and a cross-crate hit additionally requires the
 file to `use` the name, because a bare identifier from another crate cannot be
-in scope without one. Matching on the bare name alone is unsound and was
+in scope without one. Before any of those, a struct, union or type alias the
+file defines itself settles it: that is what the bare name means there, and
+an enum of the same name elsewhere in the crate is a different type --
+`posix/src/gensalt.rs`'s `struct Method` against `posix/src/crypt.rs`'s
+`enum Method` refused a boot test while this check came after the crate's
+enums. Matching on the bare name alone is unsound and was
 observed to be: `gui/keylayout` has a `struct Level` with an eight-element
 `ALL_LEVELS`, and `kernel/src/klog.rs` has an unrelated five-variant `enum
 Level`, so the first tree-wide run reported the pair as drifted. Every failure
@@ -401,6 +406,17 @@ def resolve_enum(
     if path in per_file:
         return per_file[path], ""
 
+    # A struct, union or type alias that this file itself defines is what the
+    # bare name means here, however many enums of that name the rest of the
+    # crate holds: a module's own items need no `use`, and an enum in a sibling
+    # module is in scope only through one. So it is asked before the crate's
+    # enums, not after. Asked after, it lost to them: `posix/src/gensalt.rs`
+    # has a private `struct Method` (one row per hashing method) and
+    # `posix/src/crypt.rs` a public twelve-variant `enum Method`, and a boot
+    # test was refused over gensalt's fifteen-row `METHODS`, a list of structs.
+    if path in nonenum.get(elem, ()):
+        return None, f"`{elem}` is a struct/type alias in this file, not an enum"
+
     same_crate = {p: n for p, n in per_file.items() if crates[p] == crate}
     if same_crate:
         vals = set(same_crate.values())
@@ -600,6 +616,22 @@ RESOLVE_TESTS: list[tuple] = [
         {"Level": {"gui/keylayout/src/lib.rs"}},
         "use super::*;",
         None,
+    ),
+    (
+        "a struct this file defines outranks an enum elsewhere in its crate",
+        "Method", "posix/src/gensalt.rs", "posix",
+        {"Method": {"posix/src/crypt.rs": 12}},
+        {"Method": {"posix/src/gensalt.rs"}},
+        "",
+        None,
+    ),
+    (
+        "while a struct in a sibling file leaves the crate's enum in charge",
+        "Method", "posix/src/other.rs", "posix",
+        {"Method": {"posix/src/crypt.rs": 12}},
+        {"Method": {"posix/src/gensalt.rs"}},
+        "",
+        12,
     ),
     (
         "another crate's enum needs a use naming it",

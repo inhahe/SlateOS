@@ -11,8 +11,8 @@ set -x
 SPIKE="$SLATE_SPIKE"
 # Lane-keyed: cross2.sh writes this tree and slatelink.sh reads it, so two lanes
 # sharing one bash-cross directory would relink one lane's objects into the
-# other's shipped bash-slateos.elf. Keep this name in step with cross3.sh and
-# slatelink.sh, which must agree on it.
+# other's shipped bash-slateos.elf. Keep this name in step with slatelink.sh,
+# which must agree on it.
 #
 # Under $SLATE_WORK, not /tmp: WSL wipes /tmp on every restart, which silently
 # broke the automatic relink in create-ext4-rootfs.sh (see worktree.sh).
@@ -51,24 +51,120 @@ mkdir -p "$BUILD"
 tar xzf "$SLATE_BASH_TARBALL" -C "$BUILD" --strip-components=1 || exit 1
 cd "$BUILD" || exit 1
 
-export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
+# Configured against SlateOS's libc, not zig's musl: CC is scripts/lib/
+# worktree.sh's link wrapper, so configure's link tests are answered by our
+# libc.a -- arc4random, which ours has and musl has not, is found, and with it
+# $SRANDOM's source -- and its compiles see posix/include, which declares what
+# ours has beyond musl (argz.h). Until 2026-10-05 CC was zig's cc, so every
+# link test asked musl (known-issues/D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL.md).
+# The build's own link of bash goes through the wrapper too, so `make` leaves
+# a SlateOS bash; slatelink.sh is what relinks and stages it.
+SPIKE_LIBS="$SLATE_TMP/bash-sysroot"
+mkdir -p "$SPIKE_LIBS" || exit 1
+cp "$SLATE_SYSROOT/libc.a" "$SLATE_SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$BUILD/.slate-link" "$SPIKE_LIBS" || exit 1
+export CC="$SLATE_LINK_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 # --disable-readline drops termcap (9 of the 23 unresolved symbols); a spike only
 # needs `bash -c` and script execution to prove the port is real.
+#
+# bash_cv_getcwd_malloc=yes is the answer configure would find if it could run
+# its test, which a cross build cannot: getcwd(NULL, 0) allocates, in our libc
+# as in musl. Without it configure guesses "no" and compiles lib/sh/getcwd.c,
+# a getcwd that walks `..` matching inode numbers -- which procfs, sysfs and
+# devfs report as 0 for every entry, so in them it names the wrong directory --
+# in place of ours, which reads the kernel's record of the directory. Ours
+# lost to it once the link kept bash's own order, lib/sh/libsh.a ahead of the
+# C library, on 2026-10-01; before that, zig's driver had moved -lsh behind
+# our libc.a and ours won by accident. ac_cv_func_working_mktime=yes for the
+# same reason: its test runs a program too, and the guess "no" compiles
+# lib/sh/mktime.c, which nothing in bash calls today, and which the first
+# call would reach instead of ours.
+#
+# The rest, 2026-10-05: each is what its configure test answers -- or would,
+# run on SlateOS -- measured from our libc and kernel rather than guessed
+# (known-issues-resolved/D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN.md):
+#
+#   bash_cv_wexitstatus_offset=8  our wait status is Linux's, exit code in bits
+#       8-15 (posix/src/process.rs: exit 1 is 256). The guess, 0, made the
+#       status `lastpipe` synthesises for a pipeline's last command (jobs.c,
+#       append_process) read as a death by signal: `shopt -s lastpipe;
+#       true | false; echo $?` said 129, and `true | (exit 3)` 131 -- measured
+#       with this build's own bash under WSL, whose wait status is Linux's
+#       too, where Ubuntu's bash says 1 and 3.
+#   bash_cv_printf_a_format=yes   our printf's %A, %a and the long-double %LA
+#       bash's builtin uses are glibc 2.39's byte for byte (posix/src/printf.rs,
+#       its conversion oracle); the guess turned the builtin's %a off.
+#   bash_cv_unusable_rtsigs=no    the test asks only that SIGRTMIN be under
+#       2*NSIG, and ours is 32; the guess dropped RTMIN..RTMAX from kill and trap.
+#   bash_cv_sys_named_pipes=present  the test answers from mkfifo existing,
+#       which ours does. It answers ENOSYS for now (the filesystem holds no
+#       FIFO), so process substitution fails saying so -- and starts working,
+#       with no rebuild, the day FIFOs do.
+#   bash_cv_dev_fd=absent, bash_cv_dev_stdin=absent  configure reads these
+#       from the *build* machine's /dev, and SlateOS has no /dev/fd, its
+#       /dev/stdin, /dev/stdout and /dev/stderr are the console rather than the
+#       process's descriptors (kernel/src/fs/devfs.rs), and /proc/self/fd/N
+#       names nothing for a native process. Absent, bash opens those names
+#       itself in its redirections (redir.c), as their descriptors: `echo x >
+#       /dev/stderr` reaches fd 2 and not the console.
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu \
     --without-bash-malloc --disable-nls --disable-readline --without-curses \
+    bash_cv_getcwd_malloc=yes ac_cv_func_working_mktime=yes \
+    bash_cv_wexitstatus_offset=8 bash_cv_printf_a_format=yes \
+    bash_cv_unusable_rtsigs=no bash_cv_sys_named_pipes=present \
+    bash_cv_dev_fd=absent bash_cv_dev_stdin=absent \
     >cross-configure.log 2>&1
 echo "CROSS_CONFIGURE_EXIT=$?"
 tail -15 cross-configure.log
+
+# bash 5.2's configure has an inverted test: when the C library HAS a usable
+# strtoimax it *adds* lib/sh/strtoimax.c to LIBOBJS (BASH_FUNC_STRTOIMAX's
+# `if test $bash_cv_func_strtoimax = yes; then AC_LIBOBJ(strtoimax)`). So
+# libsh.a carries a strtoimax of its own, which is linked ahead of the C
+# library's -- a duplicate definition against musl, which keeps strtoimax in
+# strtol's object, and bash's copy in place of ours against our libc.a. It is
+# dropped from libsh.a here, between configure and the first make. Not by
+# answering bash_cv_func_strtoimax=no: the macro then skips its own checks,
+# and config.h loses HAVE_STRTOIMAX and HAVE_DECL_STRTOIMAX, which are true.
+# (This was cross3.sh, run after a first make had failed; folded in
+# 2026-10-05.)
+sed -i 's|\${LIBOBJDIR}strtoimax\$U\.o||' lib/sh/Makefile
+grep -n '^LIBOBJS' lib/sh/Makefile
 
 make -j8 >cross-make.log 2>&1
 echo "CROSS_MAKE_EXIT=$?"
 tail -25 cross-make.log
 
-if [ -x "$BUILD/bash" ]; then
+if [ -x "$BUILD/bash" ] && readelf -n "$BUILD/bash" | grep SlateOS >/dev/null; then
   file "$BUILD/bash"
   ls -l "$BUILD/bash"
   echo "CROSS_BASH_BUILT"
-  cp "$BUILD/bash" "$SPIKE/bash-musl.elf"
 else
   echo "NO_CROSS_BINARY"
+  exit 1
+fi
+
+# A copy that runs on Linux: the same objects linked against zig's musl, for
+# taking a measurement of this build's bash under WSL (runbash.sh) -- how
+# `lastpipe`'s statuses were found wrong. musl has not got arc4random, which
+# the objects now call, so musl-shim.c stands in for it there, and only
+# there: the SlateOS link above and slatelink.sh never see it.
+# The lists are make's own expansions of its link line's variables, so this
+# links exactly what the build linked into bash.
+make_var() {
+    printf 'slate-print-%%:\n\t@echo $($*)\n' \
+        | make -s --no-print-directory -f Makefile -f - "slate-print-$1"
+}
+# shellcheck disable=SC2046  # word splitting is what builds the lists
+"$SLATE_CC" -static -o bash-musl $(make_var OBJECTS) \
+    "$SLATE_ROOT/scripts/bash-spike/musl-shim.c" \
+    $(make_var BUILTINS_LDFLAGS) $(make_var LIBRARY_LDFLAGS) $(make_var LIBS) \
+    >musl-link.log 2>&1
+echo "MUSL_LINK_EXIT=$?"
+if [ -x bash-musl ] && ./bash-musl -c 'echo "$SRANDOM" | grep -q "^[0-9][0-9]*$"'; then
+  cp bash-musl "$SPIKE/bash-musl.elf"
+  echo "MUSL_BASH_BUILT"
+else
+  echo "NO_MUSL_BINARY -- see $BUILD/musl-link.log"
+  exit 1
 fi

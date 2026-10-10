@@ -82,20 +82,27 @@ grep -E 'PKG_DEFAULT_PATH|SYSTEM_LIBDIR|SYSTEM_INCLUDEDIR' config.h || echo "  (
 echo "PKGCONF_INSTALL_DIRS_FROM_MAKEFILE:"
 grep -E '^(prefix|exec_prefix|libdir|datadir|datarootdir) *=' Makefile || echo "  (not in Makefile)"
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled
-# musl. libc.a is listed twice because it is Rust-built and its intra-archive
-# references are not topologically ordered; a second pass is cheaper than
-# --start-group. libstubs.a is deliberately NOT linked: it and libc.a each
-# carry a panic handler and collide on __rustc::rust_begin_unwind, and libc.a
-# turns out to cover pkgconf entirely on its own.
+# The decisive step: a link against SlateOS's libc and nothing else, through
+# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
+# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
+# and zig's compiler runtime behind it, which is zig's own order (the
+# wrapper's comment says why the order matters). Not zig's cc driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately NOT linked: it and libc.a each carry a panic
+# handler and collide on __rustc::rust_begin_unwind, and libc.a covers
+# pkgconf entirely on its own.
 mkdir -p "$SPIKE_LIBS"
-cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/"
+cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 
 OBJS="cli/pkgconf-main.o cli/pkgconf-getopt_long.o cli/pkgconf-renderer-msvc.o"
-"$SLATE_CC" -static -nostdlib -o pkgconf-slateos $OBJS .libs/libpkgconf.a \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
-echo "SLATE_LINK_EXIT=$?"
+# `|| LINK_RC=$?` because this script is `set -e`: a failed link would end it
+# here, before the counts below say what failed.
+LINK_RC=0
+"$SLATE_LINK_CC" -o pkgconf-slateos $OBJS .libs/libpkgconf.a 2>slate-link.log || LINK_RC=$?
+echo "SLATE_LINK_EXIT=$LINK_RC"
 
 MISSING="/tmp/pkgconf_missing-$SLATE_LANE.txt"
 grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING" || true
@@ -128,4 +135,5 @@ if [ -x pkgconf-slateos ]; then
   echo "SLATE_PKGCONF_BUILT"
 else
   echo "NO_SLATE_BINARY"
+  exit 1
 fi

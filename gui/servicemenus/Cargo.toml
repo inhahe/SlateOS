@@ -1,0 +1,25 @@
+[package]
+name = "servicemenus"
+version = "0.1.0"
+edition = "2024"
+description = "Context-menu extensions (design-decisions 1448): programs' items in the menu a right-click on a file opens, read from KDE's service-menu files, each on or off by the user's choice."
+
+[dependencies]
+# The format a service menu is written in -- a desktop entry -- and the reader
+# of its `Exec` lines, which already expands `%f` and `%F` as the
+# specification says. One reader, so a menu's command is not read a second way.
+desktopentry = { path = "../desktopentry" }
+# Which menus the user turned on or off: `context-menus.yaml`, written through
+# the one settings writer, comments kept.
+settingsfile = { path = "../settingsfile" }
+yamldoc = { path = "../../yamldoc" }
+# A menu's file name, written into the settings file whatever bytes it holds.
+pathcodec = { path = "../pathcodec" }
+
+[dev-dependencies]
+# Scratch data directories to install service menus into.
+scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
+[lints]
+workspace = true

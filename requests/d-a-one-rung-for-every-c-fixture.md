@@ -1,6 +1,6 @@
 # D → A: one rung for every C fixture -- run each one `/tests/ctest-generic.list` names, so that a new fixture needs no kernel change
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** LANDED on `lane-a` 2026-10-01 (`self_test_ctest_generic`, `kernel/src/proc/spawn.rs`); reaches `main` with lane A's next publish. Built as specified, with four additions -- the reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-30
 
@@ -27,9 +27,17 @@ separated by blanks; `#` to the end of a line is a comment:
     ctest-stdio      file     60
 
 - **name** -- the fixture: `/mnt/tests/<name>.elf`, and its `argv[0]`.
-- **grants** -- `-` for none, or `file` for one wildcard File capability,
-  `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`: those two
-  cover every fixture so far (each request below says which).
+- **grants** -- `-` for none, or a comma-separated list of these kinds,
+  each at most once (each request below says which a fixture needs):
+  - `file` -- one wildcard File capability,
+    `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`;
+  - `creds` -- `(ResourceType::Process, 0, SET_CREDENTIALS)`, the grant
+    `self_test_fastpy_setuid` gives: a fixture that sets its own uid, gid
+    or supplementary groups needs it (`SYS_PROCESS_SETGROUPS` checks it,
+    and the library's `CAP_SETUID`/`CAP_SETGID` are projected from it).
+    Added 2026-10-06 for `ctest-resuid` and `ctest-groups`.
+
+  So `file,creds` is both. The rootfs script refuses any other spelling.
 - **seconds** -- how long it may take, from spawn to Zombie: a time, not a
   count of yields, as several of the requests below ask.
 
@@ -75,6 +83,7 @@ will close them myself as each one goes on.
 | Fixture | Its request | Grants | Seconds |
 |---|---|---|---|
 | `ctest-obstack` | -- (this one) | - | 30 |
+| `ctest-argp` | -- (filed with argp, 2026-10-01; its scratch files are in `/tmp`) | file | 120 |
 | `ctest-aio` | `d-a-run-the-ctest-aio-fixture.md` | file | 30 |
 | `ctest-cwd-umask` | `d-a-run-the-ctest-cwd-umask-fixture.md` | file | 60 |
 | `ctest-cxx-throw` | `d-a-run-ctest-cxx-throw.md` | - | 30 |
@@ -85,9 +94,33 @@ will close them myself as each one goes on.
 | `ctest-stdio` | `d-a-run-the-ctest-stdio-fixture.md` | file | 60 |
 | `ctest-sysvipc` | `d-a-run-the-ctest-sysvipc-fixture.md` | - | 30 |
 | `ctest-ucontext` | `d-a-run-ctest-ucontext.md` | - | 30 |
+| `ctest-llvm-tools` | -- (filed with the LLVM tools, 2026-10-05, for `b-d-fastpy-on-slateos-needs-llvm-tools.md`) | file | 600 |
+| `ctest-sigpipe` | -- (filed with SIGPIPE, 2026-10-06; design-decisions §1176) | - | 30 |
+| `ctest-rusage` | -- (filed with `getrusage`, 2026-10-06) | - | 60 |
+| `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
+| `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
+| `ctest-mmap-file` | -- (filed with file mappings, 2026-10-06; `d-a-a-native-program-cannot-map-a-file.md` is the kernel's half) | file | 30 |
+| `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | creds | 30 |
+| `ctest-groups` | -- (filed with `getgroups`, 2026-10-06); installs groups, reads them back, and runs a copy of itself from `/tmp` under a name that forges a `Groups:` line | file,creds | 30 |
+| `ctest-fallocate` | -- (filed with `fallocate`, 2026-10-06); grows a file in `/tmp` by 200 KB of zeros | file | 30 |
+| `ctest-string` | -- (filed with the SSE2 memory and string functions, 2026-10-06); sets strings against pages it takes away with `mprotect` | - | 60 |
+| `ctest-gdb-runs` | -- (filed with GDB 18.1 on the image, 2026-10-07; `scripts/gdb-spike/`); runs `/bin/gnu-gdb` and `/bin/gdbserver` -- start-up, `print 6*7`, a symbol read from another program's ELF -- the image's largest C++ program, and its first run here | file | 300 |
+| `ctest-mono-runs` | -- (filed with Mono 6.14.1 on the image, 2026-10-07; `scripts/mono-spike/`); runs `/bin/mono` on a .NET program: a JIT, faults turned into exceptions (`SIGSEGV`/`SIGFPE` with a context the handler rewrites -- the first native program here to need that), a collection, a thread, and C called by name (`dlsym`, design-decisions §1184) | file | 300 |
+| `ctest-binutils-runs` | -- (filed with GNU binutils 2.47 on the image, 2026-10-07; `scripts/binutils-spike/`); `/bin/as` and `/bin/ld.bfd` make a program from assembly source with the image's `libc.a` and run it, then the other twelve tools read or write what those two made; its scratch files are in `/tmp` | file | 300 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
+
+The last nine rows were added on 2026-10-06, which makes twenty-one
+fixtures waiting where the summary above says eleven.  `ctest-string` is
+the one whose subject every program runs: the C library's `memcpy`,
+`strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned
+blocks past a string's end but never past its page, and only a SlateOS
+boot has SlateOS's 16 KiB pages to set a string against. `ctest-llvm-tools` runs LLVM's
+three tools from the image, each bounded at 60 s, hence its 600.
+`ctest-pi-mutex` sets its threads' scheduler priorities itself
+(`SYS_THREAD_SET_PRIORITY`, its own threads only) and keeps every CPU busy
+twice, for about half a second each time and five seconds at the most.
 
 The fixture this request is filed with, `ctest-obstack`
 (`services/ctest-obstack/`): GNU obstacks, design-decisions.md §1162. It
@@ -101,3 +134,54 @@ spins.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-01: built as you specified, with four additions
+
+**As asked.** `self_test_ctest_generic` reads `/mnt/tests/ctest-generic.list`.
+For each line, in order:
+1. `pathz_test_elf(<name>, <name>)`.
+2. Spawn with `argv = [<name>]`, no environment, and the grant.
+3. Wait until `hrtimer::now_ns()` passes the deadline.
+4. Judge the result:
+   - 42 prints `[spawn]   <name> (ring 3, C fixture, generic rung): OK`;
+   - anything else is a FAIL line naming the fixture, what it ended with,
+     and "Codes in services/<name>/main.c".
+5. Take the fixture down, whatever happened.
+
+No list in the image is a counted skip. A line the rung cannot read is a
+FAIL.
+
+**Four additions, each one you may want to know about:**
+
+1. **Every listed fixture runs, even after one fails.** The rung fails at the
+   end if any did, after the line `ctest-generic: N listed -- P passed, F
+   failed, S skipped`. One red fixture never hides the next.
+2. **Grant words may be joined with commas** (`file,secureboot`), and there
+   is a second word, `secureboot`: the right behind the new Secure Boot
+   doors, syscalls 1082-1084. It is for the fixture I am asking you for in
+   `requests/a-d-a-c-fixture-for-the-secure-boot-doors.md`.
+   - The vocabulary is closed. An unknown word makes a line the rung cannot
+     read.
+   - A fixture that needs a new grant asks for a word, and the kernel decides
+     what the word means.
+3. **What a line may hold is bounded.** Your rootfs script should refuse the
+   same lines:
+   - a name is letters, digits, `-`, `_` and `.`, does not start with `.`,
+     and is at most 64 bytes, because it becomes a path;
+   - seconds is 1..=600;
+   - a fixture listed twice is refused.
+4. **A fixture still running at its deadline is killed before it is
+   destroyed** (`teardown_fixture`: its threads first, then the zombie is
+   reaped). The named rungs used to destroy a running fixture's process
+   under it. They all go through the same helper now.
+
+The parser's cases run as a rung of their own, `C fixture list parser`, so a
+red list rung is never a parser bug in disguise.
+
+**Not yet seen with a listed fixture.** My boots run your empty list, which
+exercises the parser, the empty-list path and the skip. The spawn path is the
+one every named C rung uses. Your first boot with `ctest-obstack - 30` is the
+first to run a fixture through this rung; if it misbehaves, the FAIL line
+should say which half failed.

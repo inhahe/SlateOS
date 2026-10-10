@@ -565,6 +565,41 @@ pub const MON_FULL: [&[u8]; 12] = [
     b"December",
 ];
 
+/// glibc's `asctime_r`, without the newline: `Thu Oct  8 13:00:00 2026`, as
+/// `ctime_r` and `asctime_r` write it -- `"%.3s %.3s%3d %.2d:%.2d:%.2d
+/// %d\n"`.
+///
+/// `None` where glibc refuses (`EOVERFLOW`): the text and its newline must
+/// fit the 26 bytes `asctime_r` promises its caller, so a year of five
+/// characters or more -- 10000, or -1000 -- has no text at all.
+#[must_use]
+pub fn asctime(tm: &Tm) -> Option<Vec<u8>> {
+    let wday = usize::try_from(tm.wday)
+        .ok()
+        .and_then(|w| WDAY_ABBR.get(w))
+        .copied()
+        .unwrap_or(b"???");
+    let mon = usize::try_from(tm.month)
+        .ok()
+        .and_then(|m| m.checked_sub(1))
+        .and_then(|m| MON_ABBR.get(m))
+        .copied()
+        .unwrap_or(b"???");
+    let mut s = Vec::with_capacity(26);
+    s.extend_from_slice(wday);
+    s.push(b' ');
+    s.extend_from_slice(mon);
+    s.extend_from_slice(
+        format!(
+            "{:3} {:02}:{:02}:{:02} {}",
+            tm.day, tm.hour, tm.minute, tm.second, tm.year
+        )
+        .as_bytes(),
+    );
+    // With its newline and NUL, within `asctime_r`'s 26 bytes.
+    (s.len() < 25).then_some(s)
+}
+
 /// An `OsStr`'s bytes, on both the host and the target.
 #[cfg(unix)]
 fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
@@ -588,6 +623,27 @@ mod tests {
 
     fn utc_tm(t: i64) -> Tm {
         Zone::utc().local(t, 0)
+    }
+
+    #[test]
+    fn asctime_is_glibcs_and_refuses_what_its_buffer_cannot_hold() {
+        let text = |t| asctime(&utc_tm(t)).map(|s| String::from_utf8(s).unwrap());
+        assert_eq!(
+            text(1_700_000_000).as_deref(),
+            Some("Tue Nov 14 22:13:20 2023")
+        );
+        assert_eq!(text(0).as_deref(), Some("Thu Jan  1 00:00:00 1970"));
+        assert_eq!(
+            text(-2_147_483_648).as_deref(),
+            Some("Fri Dec 13 20:45:52 1901")
+        );
+        // 10000-01-01: five digits, a byte too many.
+        assert_eq!(text(253_402_300_800), None);
+        // 9999-12-31 23:59:59 still fits.
+        assert_eq!(
+            text(253_402_300_799).as_deref(),
+            Some("Fri Dec 31 23:59:59 9999")
+        );
     }
 
     /// gnulib's `nstrftime`: every expectation in this module was measured

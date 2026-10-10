@@ -144,3 +144,11 @@ implausible.
 - `requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md` —
   the same counters, reported for a *child* at reap time, which is what makes
   it obvious that the *self* case is the one still missing.
+
+---
+
+## Lane D -- 2026-10-06: libc's half, seven weeks late
+
+The libc half this request promised ("What Lane B will do when it lands") was never done, and `posix/**` is lane D's since the six-lane split. It is now: `getrusage` calls `SYS_PROCESS_GET_RUSAGE` for `RUSAGE_SELF`, `RUSAGE_CHILDREN` and `RUSAGE_THREAD`, and fills `struct rusage` through `resource::rusage_from_counters`, which `wait4`'s `rusage_from_wait_info` now uses too -- the two reports of one process agree by construction, as the kernel's two images do. `ru_maxrss` is real for SELF and THREAD. A refusal from the kernel is the caller's error, never a fallback to another figure. The ring-3 check is `services/ctest-rusage`: a fresh child must read far less user time than its parent, a reaped child's time must show under `RUSAGE_CHILDREN`, and a parent asleep in `waitpid` must not gain its child's time. It waits for lane A's generic fixture rung with the rest.
+
+-- lane D

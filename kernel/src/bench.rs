@@ -4280,6 +4280,18 @@ pub fn run_all() {
     bench_dashboard_api_health();
     bench_dashboard_api_metrics();
 
+    // --- A-Q15's load harness: ring design A against B, same loads ---
+    //
+    // Before the ISR benchmark below, which can take the machine down under
+    // QEMU. The harness prints its own `[ring-bench]` lines; a failure stops it
+    // and is said so, and the suite carries on.
+    if let Err(e) = crate::net::ring_bench::run() {
+        serial_println!(
+            "[ring-bench] the harness stopped early: {:?} -- the lines above it stand",
+            e
+        );
+    }
+
     // --- ISR latency (timer interrupt hard-IRQ phase) ---
     //
     // Measures the time interrupts are disabled during the timer ISR:
@@ -6667,11 +6679,15 @@ fn bench_vfs_write_breakdown() {
     // the cost. Every one of these is per-write and independent of the byte count,
     // which is why a 256-byte and a 16 KiB write cost nearly the same.
     // The same quantity the A/B measures, obtained directly instead of by difference.
-    // `try_auto_record` is the call `write_file_resolved` makes, and it is `pub`, so
+    // `record_after_save` is the call `write_file_resolved` makes, and it is `pub`, so
     // there is no reason to infer it. Two routes to one number: if they disagree, the
-    // A/B has a confounder and that disagreement is the finding.
+    // A/B has a confounder and that disagreement is the finding.  (Until 2026-09-27 the
+    // call was `try_auto_record`, which read back and checksummed the old content on the
+    // save path; design-decisions §971 moved that work to a worker, so this series is
+    // expected to drop for an enrolled path.  The series keeps its name so its history
+    // shows the drop.)
     let history_only = run("vfs_write_breakdown_history", 200, || {
-        crate::fs::history::try_auto_record(&resolved);
+        crate::fs::history::record_after_save(&resolved);
     });
     let quota_only = run("vfs_write_breakdown_quota", 200, || {
         // No black_box: these return unit, and clippy denies passing one to a
@@ -9239,6 +9255,13 @@ fn bench_crypto_ed25519_verify() {
 ///
 /// The design spec says Linux cached lookup is ~200-500ns per component.
 /// With 2 components, expect 2× the single-component cost.
+///
+/// Since 2026-10-03 every iteration walks both components: the VFS path cache
+/// keeps no resolution through procfs, whose answers depend on the caller and
+/// on time (`FileSystem::dcache_safe`). Until then iterations after the first
+/// were cache hits. The walk asks procfs only each component's type
+/// (`FileSystem::entry_type`), so `meminfo` is still made once per `stat`, as
+/// before. A step up in this series from that date is the walk.
 fn bench_vfs_stat_deep() {
     use crate::fs::vfs::Vfs;
 
@@ -9272,9 +9295,12 @@ fn bench_vfs_stat_deep() {
 
 /// Benchmark VFS stat on a 3-component path.
 ///
-/// Uses "/proc/net/tcp" to measure the cost of 3-level path resolution.
+/// Uses "/proc/sched/stats" to measure the cost of 3-level path resolution.
 /// If that path doesn't exist, falls back to creating a temporary
 /// 3-level directory structure.
+///
+/// A procfs path is walked on every iteration since 2026-10-03, as
+/// [`bench_vfs_stat_deep`] explains; the fallback paths are cached as before.
 fn bench_vfs_stat_3comp() {
     use crate::fs::vfs::Vfs;
 

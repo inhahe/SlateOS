@@ -1,0 +1,38 @@
+# cues_broken.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 K__
+packet 0 40 ___
+packet 0 1000 K__
+packet 0 1040 ___
+packet 0 2000 K__
+packet 0 2040 ___
+seek 500
+packet 0 0 K__
+packet 0 40 ___
+packet 0 1000 K__
+packet 0 1040 ___
+packet 0 2000 K__
+packet 0 2040 ___
+seek 999
+packet 0 0 K__
+packet 0 40 ___
+packet 0 1000 K__
+packet 0 1040 ___
+packet 0 2000 K__
+packet 0 2040 ___
+seek 1000
+packet 0 1000 K__
+packet 0 1040 ___
+packet 0 2000 K__
+packet 0 2040 ___
+seek 1500
+packet 0 1000 K__
+packet 0 1040 ___
+packet 0 2000 K__
+packet 0 2040 ___
+seek 2000
+packet 0 2000 K__
+packet 0 2040 ___
+seek 9000
+packet 0 2000 K__
+packet 0 2040 ___

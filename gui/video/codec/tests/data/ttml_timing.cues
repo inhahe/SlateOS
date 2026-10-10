@@ -1,0 +1,9 @@
+# ttml_timing.mp4: ttconv's reading of its samples, said as videocodec says it (generate_subtitle_fixtures.py).
+cue 1000000000 2000000000 2
+text 0000 - "offset by the div"
+cue 14000000000 17000000000 2
+text 0000 - "long"
+cue 15000000000 16000000000 2
+text 0000 - "inside"
+cue 18000000000 18600000000 2
+text 0000 - "by hours and minutes"

@@ -90,7 +90,6 @@
 pub mod audit;
 pub mod file_tags;
 pub mod groups;
-#[allow(dead_code)] // API functions for future syscall interface and timer expiry.
 pub mod request;
 pub mod rights;
 pub mod table;
@@ -388,6 +387,52 @@ pub enum ResourceType {
     /// erase every disk in the machine before it could draw its sidebar is one
     /// that must be launched over-privileged.
     BlockDevice = 31,
+
+    /// A kernel IPC semaphore (`SYS_SEM_*`), as a handle a process holds.
+    ///
+    /// Recorded in the creating process's `ipc_handles`, as every other IPC
+    /// object is, for two reasons it lacked until 2026-10-01: so that only
+    /// its holder can signal, wait on or close it (a semaphore handle is a
+    /// counter, so any process could name every one), and so that it is
+    /// closed when its process dies. Not inherited across fork, like a
+    /// channel: there is no refcounted duplicate.
+    Semaphore = 32,
+
+    /// A Unix-domain socket (`ipc::unix_socket`), as a handle a process holds
+    /// through a Linux descriptor.
+    ///
+    /// Recorded in the holder's `ipc_handles` so that it is closed when the
+    /// process dies and duplicated -- one more holder -- when it forks, as
+    /// every descriptor-backed IPC object is. Not a capability anything is
+    /// gated on: as on Linux, any process may make a Unix-domain socket, and
+    /// what a name allows is the filesystem's to say (write permission on the
+    /// directory to bind, on the node to connect).
+    UnixSocket = 33,
+
+    /// A handle for one of the kernel's own TCP connections, TCP listeners
+    /// or UDP sockets (`net::native_socket`), as the native `SYS_TCP_*` and
+    /// `SYS_UDP_*` calls give them out.
+    ///
+    /// Recorded in each holder's `ipc_handles`, so that only a holder can
+    /// use one, a fork or a spawn that passes it on adds a holder, and a
+    /// close, an exit or an exec drops one -- the last closing the socket.
+    /// Not a capability anything is gated on: making a socket at all is
+    /// `Socket`'s (11) to allow.
+    NativeSocket = 34,
+
+    /// The right to answer the user's capability requests: to be the one
+    /// process -- the desktop's security dialog -- that the request broker
+    /// ([`crate::cap::request`]) tells of each request and that decides it,
+    /// an approval granting what was asked (`SYS_CAP_BROKER_REGISTER` needs
+    /// `Rights::WRITE` on it; design-decisions 1548).
+    ///
+    /// Class only (`resource_id` 0): there is one broker. Its holder can give
+    /// any process anything a request may name, by approving -- the user's own
+    /// authority, held by the program that asks the user -- so it belongs to
+    /// the desktop's session and nothing else, and it can never itself be
+    /// asked for (`request::requestable`). Pure authority: no per-open object
+    /// behind it, and it implies no Linux capability.
+    CapBroker = 35,
 }
 
 impl ResourceType {
@@ -397,7 +442,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::BlockDevice as u16;
+    pub const LAST: u16 = Self::CapBroker as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -479,7 +524,11 @@ impl ResourceType {
             | Self::PrivilegedPort
             | Self::ResourceLimit
             | Self::InputDevice
-            | Self::BlockDevice => self as u16,
+            | Self::BlockDevice
+            | Self::Semaphore
+            | Self::UnixSocket
+            | Self::NativeSocket
+            | Self::CapBroker => self as u16,
         }
     }
 
@@ -547,9 +596,90 @@ impl ResourceType {
             29 => Self::ResourceLimit,
             30 => Self::InputDevice,
             31 => Self::BlockDevice,
+            32 => Self::Semaphore,
+            33 => Self::UnixSocket,
+            34 => Self::NativeSocket,
+            35 => Self::CapBroker,
             _ => return None,
         };
         Some(ty)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What being root gives, and what is taken back when a process stops being it
+// ---------------------------------------------------------------------------
+
+/// The rights on a `Process` capability that are root's: changing identity
+/// and the system-wide settings. Linux's `CAP_SETUID`/`CAP_SETGID` and the
+/// `CAP_SYS_ADMIN`/`CAP_SYS_TTY_CONFIG` corners these stand for.
+const ROOT_PROCESS_RIGHTS: Rights = Rights::SET_CREDENTIALS
+    .union(Rights::SET_HOSTNAME)
+    .union(Rights::SET_KEYLAYOUT)
+    .union(Rights::SET_BRIGHTNESS)
+    .union(Rights::ENROLL_SECUREBOOT)
+    // Replacing the kernel (kexec) is root's, as Linux's CAP_SYS_BOOT is, and is
+    // dropped with the rest when uid leaves 0 -- a non-root process must not be
+    // able to load a new kernel.
+    .union(Rights::RELOAD_KERNEL)
+    // So are switching the machine off and restarting it, the rest of
+    // CAP_SYS_BOOT.
+    .union(Rights::POWER_OFF)
+    .union(Rights::REBOOT);
+
+/// The rights a capability keeps when its process's uid leaves 0.
+///
+/// On every Unix that switch is one-way: a program started as root that sets
+/// its uid to 1000 has none of root's powers afterwards, and cannot take them
+/// back. Here it kept its whole capability table, `SET_CREDENTIALS` included,
+/// so its next `setuid(0)` succeeded and every drop of privilege -- sign-in,
+/// `su`, a daemon becoming its service user -- was decoration
+/// (`requests/d-a-a-process-that-gives-up-root-keeps-roots-authority.md`).
+///
+/// What goes is what maps onto Linux's root-only capabilities:
+/// - **the system-authority types, whole:** the clock (`CAP_SYS_TIME`),
+///   privileged ports (`CAP_NET_BIND_SERVICE`), resource limits beyond one's
+///   own (`CAP_SYS_RESOURCE`, and `MEMORY_LOCK` = `CAP_IPC_LOCK`), raw block
+///   devices and port I/O (`CAP_SYS_RAWIO`), the raw NIC (`CAP_NET_RAW`),
+///   device IRQs;
+/// - **on `Process` capabilities:** [`ROOT_PROCESS_RIGHTS`], and `DEBUG` on a
+///   class-wide one (resource id 0, any process -- `CAP_SYS_PTRACE`). A
+///   `DEBUG` granted over one process is an explicit grant and stays;
+/// - **`IO_REALTIME` (`CAP_SYS_NICE`)**, the rest kept:
+///   - on `IoScheduler`, since ordinary I/O may need the capability;
+///   - on `Thread`, where it is the right to raise priority
+///     (design-decisions §326, enforced by `proc::priority`). It was left
+///     in place until 2026-10-01, so a process that dropped root could
+///     still put itself above every service.
+///
+/// What stays is everything else, file access included: here it is a
+/// capability rather than root's bypass of permission bits, so taking it would
+/// leave the program unable to read its own files, which no Unix does to a
+/// process that drops root.
+#[must_use]
+pub fn rights_without_root(
+    resource_type: ResourceType,
+    resource_id: u64,
+    rights: Rights,
+) -> Rights {
+    match resource_type {
+        ResourceType::SystemClock
+        | ResourceType::PrivilegedPort
+        | ResourceType::ResourceLimit
+        | ResourceType::BlockDevice
+        | ResourceType::NetRaw
+        | ResourceType::PortIo
+        | ResourceType::DeviceIrq => Rights::NONE,
+        ResourceType::Process => {
+            let kept = rights.remove(ROOT_PROCESS_RIGHTS);
+            if resource_id == 0 {
+                kept.remove(Rights::DEBUG)
+            } else {
+                kept
+            }
+        }
+        ResourceType::IoScheduler | ResourceType::Thread => rights.remove(Rights::IO_REALTIME),
+        _ => rights,
     }
 }
 
@@ -690,6 +820,7 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         resource_type: ResourceType::Channel,
         resource_id: 0xDEAD_BEEF_0000_0001,
         rights: Rights::READ_WRITE,
+        suspended: Rights::NONE,
         valid: true,
     };
     let info = CapEntryInfo::from_entry(&entry);
@@ -752,13 +883,28 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    It earns the exception because the value is not ours — it is the
     //    wire's, and the other copy of it lives in a tree this build cannot
     //    compile, so there is nothing to derive it from.
-    if ResourceType::LAST != 31 {
+    //
+    //    32 since 2026-10-01: `Semaphore` (febc4c8d3), a held object like a
+    //    descriptor rather than a privilege, so it implies no Linux capability
+    //    -- told to lane D in requests/a-d-resource-type-32-is-semaphore.md.
+    //    33 since 2026-10-02: `UnixSocket`, likewise a held object, and Linux
+    //    gates no Unix-domain socket on a capability -- told to lane D in
+    //    requests/a-d-resource-type-33-is-unixsocket.md.
+    //    34 since 2026-10-02: `NativeSocket`, the handle a process holds for
+    //    one of the kernel's own TCP or UDP sockets -- a held object, which
+    //    implies no Linux capability; told to lane D in
+    //    requests/a-d-resource-type-34-is-nativesocket.md.
+    //    35 since 2026-10-08: `CapBroker`, the right to answer the user's
+    //    capability requests (design-decisions 1548) -- pure authority that
+    //    no Linux capability follows from; told to lane D in
+    //    requests/a-bd-resource-type-35-is-capbroker.md.
+    if ResourceType::LAST != 35 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 31 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 35 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
-             and ask lane B whether the new type implies a Linux capability. If it does, \
+             and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-one types — it needs nothing, and \
+             answer, that file names seven of our thirty-five types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

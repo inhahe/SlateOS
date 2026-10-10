@@ -52,6 +52,14 @@
 //!     such message, because `-n` is not an option with an argument — it is a
 //!     flag that changes how the *next positional word* is read, so `renice -n`
 //!     is `not enough arguments`.
+//! 16. **Standard output was judged by gnulib's rule, not util-linux's**
+//!     (2026-10-07, found by `scripts/renice-diff.sh`). `renice 5 $$ >&-`
+//!     said `write error: Bad file descriptor` and exited 1; util-linux's
+//!     `close_stdout` forgives `EBADF` at the final flush, so upstream exits 0
+//!     in silence. And its success lines went out before a later failure's
+//!     message, because gnulib's `error()` flushes standard output first and
+//!     util-linux's `warn` does not. Standard output is
+//!     `ulclosestream::Stdout` now, util-linux's `closestream.h`.
 //!
 //! # Measured against util-linux 2.39.3
 //!
@@ -575,17 +583,21 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let mut out = Stream::stdout();
+    // util-linux's standard output: glibc's buffer, and `close_stdout`'s
+    // verdict at the end -- which forgives a closed descriptor at the final
+    // flush, where gnulib's reports it. Measured: `renice 5 $$ >&-` exits 0,
+    // silent (`scripts/renice-diff.sh`).
+    let mut stdout = ulclosestream::Stdout::new(1);
     let mut err = Stream::stderr();
 
     let status = match request {
         // `usage()` writes to stdout and exits 0; `print_version` likewise.
         Request::Help => {
-            let _ = out.write_all(help_text().as_bytes());
+            stdout.write(help_text().as_bytes());
             0
         }
         Request::Version => {
-            let _ = out.write_all(version_text().as_bytes());
+            stdout.write(version_text().as_bytes());
             0
         }
         Request::Run {
@@ -597,14 +609,43 @@ fn run_main() -> ExitCode {
             let lookup = |name: &[u8]| db.user_by_name(name).map(|u| u.uid);
             let mut sched = imp::Kernel;
             run(
-                relative, priority, &targets, &mut sched, &lookup, &mut out, &mut err,
+                relative,
+                priority,
+                &targets,
+                &mut sched,
+                &lookup,
+                &mut UlStdout(&mut stdout),
+                &mut err,
             )
         }
     };
 
     // `close_stdout_atexit()`: a success line that could not be written is not
-    // a success.
-    stdfd::close_stdout("renice", out, ExitCode::from(status))
+    // a success -- unless the descriptor was closed, which util-linux forgives.
+    ExitCode::from(stdout.close(status, b"renice"))
+}
+
+/// util-linux's standard output as the `impl Write` [`run`] reports through.
+///
+/// Its writes are stdio's: held in glibc's buffer and written when it fills or
+/// at the end, and a failure is the stream's to remember and `close`'s to
+/// judge. Upstream's diagnostics are `warn`s, which -- unlike gnulib's
+/// `error()` -- do not flush standard output first, so with both streams in one
+/// file a failure comes out ahead of the success lines still held. This keeps
+/// that: the diagnostics go to standard error directly, past this buffer.
+struct UlStdout<'a>(&'a mut ulclosestream::Stdout);
+
+impl Write for UlStdout<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    /// Nothing: upstream never calls `fflush (stdout)`, so what is held stays
+    /// held until `close`.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------ unix ----
@@ -618,56 +659,19 @@ fn run_main() -> ExitCode {
 mod imp {
     use std::io;
 
-    unsafe extern "C" {
-        fn getpriority(which: i32, who: u32) -> i32;
-        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
-        fn __errno_location() -> *mut i32;
-    }
-
-    fn errno_slot() -> *mut i32 {
-        // SAFETY: `__errno_location` is defined to return a valid pointer to
-        // this thread's `errno` and never fails.
-        unsafe { __errno_location() }
-    }
-
-    fn clear_errno() {
-        // SAFETY: the pointer is this thread's `errno`, a live `int` for the
-        // whole life of the thread.
-        unsafe { *errno_slot() = 0 };
-    }
-
-    fn errno() -> i32 {
-        // SAFETY: as above.
-        unsafe { *errno_slot() }
-    }
-
-    /// Calls straight through, with upstream's `errno` dance.
+    /// Calls straight through `libcall::priority`, which makes the calls
+    /// through the linked C library and does upstream's `errno` dance: -1 is
+    /// a priority as well as `getpriority`'s failure, so `errno` is cleared
+    /// before the call and read after.
     pub struct Kernel;
 
     impl super::Sched for Kernel {
         fn get(&self, which: i32, who: u32) -> io::Result<i32> {
-            // −1 is a legitimate priority, so upstream's `getprio` clears
-            // `errno` first and reads it after; that is the only way to tell
-            // the value from the failure.
-            clear_errno();
-            // SAFETY: `getpriority` takes no pointers and only reads
-            // scheduling state.
-            let value = unsafe { getpriority(which, who) };
-            let e = errno();
-            if value == -1 && e != 0 {
-                return Err(io::Error::from_raw_os_error(e));
-            }
-            Ok(value)
+            libcall::priority::getpriority(which, who).map_err(io::Error::from_raw_os_error)
         }
 
         fn set(&mut self, which: i32, who: u32, prio: i32) -> io::Result<()> {
-            clear_errno();
-            // SAFETY: `setpriority` takes no pointers and only alters
-            // scheduling priority.
-            if unsafe { setpriority(which, who, prio) } < 0 {
-                return Err(io::Error::from_raw_os_error(errno()));
-            }
-            Ok(())
+            libcall::priority::setpriority(which, who, prio).map_err(io::Error::from_raw_os_error)
         }
     }
 }

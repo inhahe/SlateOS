@@ -1,0 +1,24 @@
+# opus_unlike_link0.opus: what the Ogg demuxer makes of it (generate_fixtures.py).
+stream 0 opus 1/48000
+packet 0 -312 960 476 121 _ b5c8f2485afdd954843f7d367c6e27d1 312 0 -
+packet 0 N/A 960 321 121 _ 1f4c643f69d80ac1595d7072ea5f8965 0 0 -
+packet 0 N/A 960 299 121 _ 9a3675c2cf2e9a13fd3981a6a007e07a 0 0 -
+packet 0 N/A 960 283 121 _ d29fe1196da59d323ef180f968b082bd 0 0 -
+packet 0 N/A 960 291 121 _ e09444c83c550967cac62517650146a4 0 0 -
+packet 0 N/A 960 323 121 _ 5f40d3ac73b179a6d8336178ef38e4bf 0 0 -
+packet 0 N/A 960 330 121 _ 78f6cd33995d0e7859df5e15bd9d8510 0 0 -
+packet 0 N/A 960 314 121 _ aee0ebc7003e6829cd2fd5fe3d2d2e33 0 0 -
+packet 0 N/A 960 296 121 _ c3c6aaeb9bec07f8424e9a2aa7f383aa 0 0 -
+packet 0 N/A 960 292 121 _ 6a3886fae3cd5722ab67e488daa4fd6b 0 0 -
+packet 0 N/A 960 323 121 _ 17d49e73e644fbc1b71b2645025bc945 0 0 -
+packet 0 N/A 960 331 121 _ bfac653a9d30371dd561afbee54274d9 0 0 -
+packet 0 N/A 960 315 121 _ db44ef403962b51e9e93623c612e05f5 0 0 -
+packet 0 N/A 960 298 121 _ 43155959b5f3b005984b6eff9f5dfb1d 0 0 -
+packet 0 N/A 960 296 121 _ d8cf16e7506cc10fc654ed70c7bebc21 0 0 -
+packet 0 N/A 960 323 121 _ e55db266710a2190bbd6d69ea2fea90f 0 0 -
+packet 0 N/A 960 331 121 _ 8b32c5ce357fb4fd8084422198f5d448 0 0 -
+packet 0 N/A 960 315 121 _ 520c2f0b04c64d8ad725b5f441875c41 0 0 -
+packet 0 N/A 960 298 121 _ 40b57db6cd1a6d3e3cdcb1bfb83a22f1 0 0 -
+packet 0 N/A 960 296 121 _ 12e9d930518c57790e736a34e29be772 0 0 -
+packet 0 N/A 960 324 121 _ 5211be82be62d3fe8a69e86d0d76b441 0 0 -
+packet 0 N/A 792 473 121 _ a41309a460046ce7f7cfd09cb1fa6e71 0 168 -

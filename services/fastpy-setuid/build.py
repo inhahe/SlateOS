@@ -23,7 +23,12 @@ updates the process identity.
 
 The self-check in a single binary:
   * read `u0 = os.getuid()`, `g0 = os.getgid()` (the spawn identity),
-  * `os.setuid(NEW_UID)`, `os.setgid(NEW_GID)` to change identity,
+  * `os.setgid(NEW_GID)`, then `os.setuid(NEW_UID)`, to change identity --
+    in that order, as real privilege-dropping code does: since
+    design-decisions §1502 leaving uid 0 drops root's authority for good, as
+    Linux clears the capabilities on `setuid`, so a `setgid` after it is
+    rightly `EPERM` and the gid stays 0 (it was the other way round until
+    2026-10-05, and lane A's kernel caught it),
   * read `u1 = os.getuid()`, `g1 = os.getgid()` (the *new* identity),
   * write `"<u0>,<g0>,<u1>,<g1>"` (decimal) to `/tmp/fastpy-setuid.out`,
   * exit 0 (the kernel does the authoritative check on the written values).
@@ -75,8 +80,8 @@ SRC = (
     "import os\n"
     "u0 = os.getuid()\n"
     "g0 = os.getgid()\n"
-    "os.setuid(3131)\n"
     "os.setgid(4242)\n"
+    "os.setuid(3131)\n"
     "u1 = os.getuid()\n"
     "g1 = os.getgid()\n"
     "s = str(u0) + ',' + str(g0) + ',' + str(u1) + ',' + str(g1)\n"

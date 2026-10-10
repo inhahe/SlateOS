@@ -1,0 +1,9 @@
+# cues_broken.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 0 40 4 439 K__ 21f402f25b1a0fd722b83169e10509f8 -
+packet 0 40 40 6 456 ___ ad230529d8ef792800c885ad7cbc255c -
+packet 0 1000 40 4 504 K__ c2add694bf942dc77b376592d9c862cd -
+packet 0 1040 40 6 521 ___ 162c5af971fc89454d5cafddba62e743 -
+packet 0 2000 40 4 569 K__ 78f825aaa0103319aaa1a30bf4fe3ada -
+packet 0 2040 40 6 586 ___ a1f0ead06e66ecfe8c124d502cf379f4 -

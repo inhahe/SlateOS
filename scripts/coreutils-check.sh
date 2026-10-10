@@ -199,6 +199,15 @@ fi
 
 # --- what to compile, decided per package -------------------------------------
 #
+# Clippy runs `--no-deps`: it lints the packages named and only compiles what
+# they depend on. Without it every path dependency in the workspace is linted
+# too, so a lint newer than its owner's gates -- WSL's nightly clippy, here --
+# in another lane's crate refused a push of these packages and named *them* as
+# the failures: on 2026-10-07 eleven `chunks_exact_to_as_chunks` findings in
+# lane D's `posix/pwhash` stopped a lane B push of nine userspace crates, none
+# of which had a finding of its own. A dependency that does not *compile* still
+# fails the run, since it is still built; its lints are its own lane's.
+#
 # `--lib --bins` rather than `--all-targets`: the zone's integration tests and
 # examples are the slowest part of the build and none of them is what this file
 # is about. A `#[cfg(unix)]` arm lives in the library or in a `src/bin/*.rs`.
@@ -443,14 +452,18 @@ run_host() {
   # One invocation per (step, group). The trailing separator is what flushes
   # the last group, so the loop body handles a group in exactly one place.
   local step a
-  local -a cur
+  local -a cur only_these
   for step in $steps; do
+    # Clippy lints the named packages and only compiles their dependencies:
+    # see "what to compile, decided per package".
+    only_these=()
+    if [ "$step" = clippy ]; then only_these=(--no-deps); fi
     cur=()
     for a in "${groups[@]}" "$GSEP"; do
       if [ "$a" != "$GSEP" ]; then cur+=("$a"); continue; fi
       if [ ${#cur[@]} -gt 0 ]; then
         note "host $step ($host_target) ${cur[*]}"
-        if ! (cd "$root" && cargo +nightly "$step" "${cur[@]}" \
+        if ! (cd "$root" && cargo +nightly "$step" "${only_these[@]}" "${cur[@]}" \
                 --target "$host_target"); then
           status=1
         fi
@@ -531,6 +544,10 @@ rc=0
 # here rather than running `wsl` once per group keeps the one-invocation
 # property this heredoc was written for.
 for step in $steps; do
+  # Clippy lints the named packages and only compiles their dependencies: see
+  # "what to compile, decided per package" on the near side.
+  only_these=()
+  if [ "$step" = clippy ]; then only_these=(--no-deps); fi
   cur=()
   for a in "$@" "$gsep"; do
     if [ "$a" != "$gsep" ]; then cur+=("$a"); continue; fi
@@ -541,7 +558,7 @@ for step in $steps; do
       # capitals: this workspace's unstable settings are silently ignored by
       # stable, and a silently-ignored setting is how you get a green run of
       # the wrong thing.
-      "$cargo" +nightly "$step" "${cur[@]}" --target "$target" \
+      "$cargo" +nightly "$step" "${only_these[@]}" "${cur[@]}" --target "$target" \
         --target-dir "$tdir" || rc=1
     fi
     cur=()

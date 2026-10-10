@@ -120,6 +120,14 @@ slate_env() {
     # skipped warning -- which is why this is exported rather than left to the
     # real script to define.
     export IMG_SIZE="384M"
+    # The second loop's inputs: what the workspace builds, from a stand-in for
+    # `build-userland.py --list` that prints SLATE_TEST_PROGRAMS -- none,
+    # unless a case says -- and a kept-off list that keeps nothing off.
+    SYSROOT_PY="$(command -v python3 || command -v python)"
+    export SLATE_TEST_PROGRAMS=""
+    printf 'import os\nimport sys\nsys.stdout.write(os.environ["SLATE_TEST_PROGRAMS"])\n' \
+        > "$ROOT_DIR/scripts/build-userland.py"
+    printf '# nothing kept off\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
 }
 
 # 5. A name in the manifest with a built ELF behind it reaches /bin, and the
@@ -138,10 +146,13 @@ esac
 rm -rf "$T"
 
 # 6. THE COUPLING PROBE, and the reason the manifest exists at all. A binary
-# that is BUILT but not listed must not ship. Before the manifest this block
-# scanned the build directory, so a measurement build of every userspace crate
-# put 204 MiB into /bin and mke2fs could not allocate a block. Building a crate
-# to debug it must not change what the operating system contains.
+# that is BUILT but neither listed nor a program of the workspace's must not
+# ship. Before the manifest this block scanned the build directory, so a
+# measurement build of every userspace crate put 204 MiB into /bin and mke2fs
+# could not allocate a block. Building a crate to debug it must not change what
+# the operating system contains. Since 2026-10-01 every program the workspace
+# builds ships (case 33), but the list is still the workspace's, never the
+# directory's: here it holds nothing, so neither stray binary is one.
 slate_env
 mk_manifest ls
 mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
@@ -213,7 +224,10 @@ esac
 # A FRESH STAGE FIRST. The block above already put /bin/ls on the previous
 # stage, and a second run over it reports the collision instead of the
 # staleness -- so without this reset the case passes or fails for the wrong
-# reason. It failed that way when first written.
+# reason. It failed that way when first written. (The first stage's tree goes
+# first: `slate_env` makes a new one, and until 2026-10-01 every run of this
+# file left the old one in /tmp.)
+rm -rf "$T"
 slate_env
 mk_manifest ls
 mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
@@ -251,7 +265,7 @@ msg="$(eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
 [ "$rc" -eq 1 ] && ok || bad "an empty build dir must fail the image build (exit $rc)"
 case "$msg" in
-    *"ERROR"*"cargo +nightly build --release"*) ok ;;
+    *"ERROR"*"python scripts/build-userland.py"*) ok ;;
     *) bad "the ERROR must name the commands that fix it, got: $msg" ;;
 esac
 rm -rf "$T"
@@ -494,7 +508,7 @@ msg="$(eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
 [ ! -e "$STAGE/bin/kill" ] && ok || bad "coreutils' copy of a doubly-built name must not ship"
 case "$rc:$msg" in
-    1:*"crate's build: kill"*"-p ar -p kill -p logger -p logrotate -p powerctl"*) ok ;;
+    1:*"crate's build: kill"*"python scripts/build-userland.py"*) ok ;;
     *) bad "the wrong copy must be fatal, named, with the commands, got rc=$rc: $msg" ;;
 esac
 # ...and the standalone copy, linked last, ships.
@@ -520,7 +534,7 @@ rm -rf "$T"
 # /usr/share/slateos/themes byte for byte, and as data: 0644 files in 0755
 # directories, whatever mode the tree was read with -- WSL reads the NTFS one
 # as 0777 throughout.
-THEMES_BLOCK="$(awk '/^THEMES_SRC=/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+THEMES_BLOCK="$(awk '/^THEMES_SRC=/{f=1} /^# --- notices/{f=0} f' "$SRC")"
 if [ -n "$THEMES_BLOCK" ]; then ok; else bad "could not extract the THEMES_SRC block from $SRC"; fi
 T="$(mktemp -d)"
 export ROOT_DIR="$T/repo" STAGE="$T/stage"
@@ -555,6 +569,287 @@ rc=$?
 case "$rc:$msg" in
     1:*"checkout is broken"*) ok ;;
     *) bad "a missing theme tree must be fatal, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 28. THE NOTICES. scripts/gather-notices.py writes the third-party notices
+# into /usr/share/licenses; here a stand-in for it records what it was given
+# -- its arguments, and the CARGO_HOME it ran with -- and writes a bundle of
+# two components with modes a umask of 077 would give.
+NOTICES_BLOCK="$(awk '/^# --- notices:/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+if [ -n "$NOTICES_BLOCK" ]; then ok; else bad "could not extract the notices block from $SRC"; fi
+case "$THEMES_BLOCK" in
+    *gather-notices*) bad "the themes block should end where the notices begin" ;;
+    *) ok ;;
+esac
+TEST_PY="$(command -v python3 || command -v python)"
+# Is the path the stand-in recorded the one meant? Under Git Bash the Python
+# is a Windows one, and MSYS hands it `/tmp/x` as `C:/Users/.../Temp/x`, in
+# its arguments and its environment alike.
+same_path() {
+    [ "$1" = "$2" ] && return 0
+    command -v cygpath >/dev/null 2>&1 && [ "$1" = "$(cygpath -m "$2")" ]
+}
+notices_env() {
+    T="$(mktemp -d)"
+    export ROOT_DIR="$T/repo" STAGE="$T/stage" NOTICES_TEST_RECORD="$T/record"
+    SYSROOT_PY="$TEST_PY"
+    mkdir -p "$ROOT_DIR/scripts" "$STAGE"
+    cat > "$ROOT_DIR/scripts/gather-notices.py" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["NOTICES_TEST_RECORD"]).write_text(
+    " ".join(sys.argv[1:]) + "\n" + os.environ.get("CARGO_HOME", "<unset>") + "\n")
+if os.environ.get("NOTICES_TEST_FAIL"):
+    sys.exit(int(os.environ["NOTICES_TEST_FAIL"]))
+out = Path(sys.argv[2])
+for component, text in (("comp-a", "LICENSE"), ("comp-b", "COPYING")):
+    (out / component).mkdir(parents=True)
+    (out / component / text).write_text("text\n")
+    os.chmod(out / component / text, 0o600)
+    os.chmod(out / component, 0o700)
+(out / "index.yaml").write_text("comp-a: {}\ncomp-b: {}\n")
+(out / "NOTICES.txt").write_text("both\n")
+PY
+}
+notices_env
+export SLATEOS_CARGO_HOME="$T/cache"
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset SLATEOS_CARGO_HOME
+D="$STAGE/usr/share/licenses"
+{ [ "$rc" -eq 0 ] && [ -f "$D/index.yaml" ] && [ -f "$D/NOTICES.txt" ] \
+    && [ -f "$D/comp-a/LICENSE" ] && [ -f "$D/comp-b/COPYING" ]; } && ok \
+    || bad "the bundle should be staged under /usr/share/licenses, got rc=$rc: $msg"
+{ [ "$(head -1 "$T/record" | cut -d' ' -f1)" = "--out" ] \
+    && same_path "$(head -1 "$T/record" | cut -d' ' -f2-)" "$D"; } && ok \
+    || bad "the gatherer should be asked for --out \$STAGE/usr/share/licenses, got: $(head -1 "$T/record")"
+same_path "$(sed -n 2p "$T/record")" "$T/cache" && ok \
+    || bad "SLATEOS_CARGO_HOME should be the gatherer's CARGO_HOME, got: $(sed -n 2p "$T/record")"
+{ [ "$(stat -c %a "$D/comp-a")" = 755 ] && [ "$(stat -c %a "$D/comp-a/LICENSE")" = 644 ] \
+    && [ "$(stat -c %a "$D/index.yaml")" = 644 ]; } && ok \
+    || bad "notices are data: 0644 files in 0755 directories"
+case "$msg" in
+    *"staged the notices of 2 component(s) under /usr/share/licenses (4 files)"*) ok ;;
+    *) bad "the count should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 29. Without SLATEOS_CARGO_HOME, the registry is Windows cargo's when the
+# recipe runs under WSL -- cmd.exe and wslpath both there -- and otherwise
+# cargo's own, whatever CARGO_HOME the recipe was given.
+notices_env
+export CARGO_HOME="$T/env-cache"
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset CARGO_HOME
+seen="$(sed -n 2p "$T/record")"
+if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+    case "$rc:$seen" in
+        0:/mnt/?/*) ok ;;
+        *) bad "under WSL the registry should be Windows cargo's, got rc=$rc, CARGO_HOME=$seen: $msg" ;;
+    esac
+else
+    { [ "$rc" -eq 0 ] && same_path "$seen" "$T/env-cache"; } && ok \
+        || bad "off WSL the registry should be cargo's own, got rc=$rc, CARGO_HOME=$seen: $msg"
+fi
+rm -rf "$T"
+
+# 30. A gatherer that fails fails the image, with its exit status named:
+# an image missing a notice is what this exists to prevent.
+notices_env
+export NOTICES_TEST_FAIL=3
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+unset NOTICES_TEST_FAIL
+case "$rc:$msg" in
+    1:*"gather-notices.py failed (exit 3"*) ok ;;
+    *) bad "a failed gather must be fatal, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 31. ...as does having no Python to gather with.
+notices_env
+# shellcheck disable=SC2034  # read by the block `eval` runs
+SYSROOT_PY=""
+msg="$(eval "$NOTICES_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"no python3/python"*) ok ;;
+    *) bad "no python must be fatal, got rc=$rc: $msg" ;;
+esac
+[ ! -e "$T/record" ] && ok || bad "with no python, nothing should have been run"
+rm -rf "$T"
+
+# 32. THE SYSROOT CHECK WITHOUT PYTHON. libc.a is behind its inputs when one
+# of them is newer -- posix's own sources, and its path dependencies, read out
+# of posix/Cargo.toml: a sibling crate (`../tzrules`) and one inside posix/
+# (`vendor/libm`). Run with no python on PATH, in a tree whose path has a space
+# in it, as every real one does ("visual studio projects"). Until 2026-10-01
+# the dependencies were a word list that the space split apart, and the one
+# inside posix/ was skipped, so neither case below was ever caught.
+SYSROOT_BLOCK="$(awk '/^LIBC_A=/{f=1} f{print} f && /^fi$/{exit}' "$SRC")"
+case "$SYSROOT_BLOCK" in
+    *"_dep_roots"*"no python3/python"*) ok ;;
+    *) bad "could not extract the sysroot check from $SRC" ;;
+esac
+# A PATH with sed and find on it and no python: wrappers that run the real
+# tools by their full paths, which works on Linux and under MSYS alike. Each
+# case runs in the subshell `$(...)` makes, so it removes its own tree.
+sysroot_case() {  # sysroot_case <file made newer than libc.a, or "">
+    T="$(mktemp -d)"
+    trap 'rm -rf "$T"' EXIT
+    local bin="$T/bin" tool
+    mkdir -p "$bin"
+    for tool in sed find; do
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v "$tool")" > "$bin/$tool"
+        chmod +x "$bin/$tool"
+    done
+    export ROOT_DIR="$T/visual studio projects/os"
+    mkdir -p "$ROOT_DIR/toolchain/sysroot/lib" "$ROOT_DIR/posix/src" \
+             "$ROOT_DIR/tzrules/src" "$ROOT_DIR/posix/vendor/libm/src"
+    printf '[dependencies]\ntzrules = { path = "../tzrules" }\nlibm = { path = "vendor/libm", features = ["x"] }\n' \
+        > "$ROOT_DIR/posix/Cargo.toml"
+    : > "$ROOT_DIR/posix/src/lib.rs"
+    : > "$ROOT_DIR/tzrules/src/lib.rs"
+    : > "$ROOT_DIR/posix/vendor/libm/src/lib.rs"
+    : > "$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    find "$ROOT_DIR" -type f -exec touch -d @1600000000 {} +
+    touch -d @1650000000 "$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    [ -n "$1" ] && touch -d @1700000000 "$ROOT_DIR/$1"
+    # The block's own `command -v` decides there is no python, from this PATH.
+    PATH="$bin" eval "$SYSROOT_BLOCK" > "$T/out" 2>&1
+    echo "STALE=[$SYSROOT_STALE] PY=[$SYSROOT_PY]"
+}
+for newer in "tzrules/src/lib.rs" "posix/vendor/libm/src/lib.rs" "posix/src/lib.rs"; do
+    got="$(sysroot_case "$newer")"
+    [ "$got" = "STALE=[$newer] PY=[]" ] && ok \
+        || bad "without python, $newer newer than libc.a should make it stale, got: $got"
+done
+got="$(sysroot_case "")"
+[ "$got" = "STALE=[] PY=[]" ] && ok || bad "without python, a current libc.a is not stale, got: $got"
+
+# 33. EVERY PROGRAM THE WORKSPACE BUILDS SHIPS (design-decisions §1053, §1164):
+# the manifest's names, and after them every program `build-userland.py --list`
+# reports, but for what rootfs-bin-kept-off.txt keeps off. A binary that is no
+# program of the workspace's -- a leftover of a deleted crate -- does not.
+R="target/x86_64-slateos/release"
+slate_env
+mk_manifest ls
+for n in ls tool other cat leftover; do mk_elf "$ROOT_DIR/$R/$n"; done
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntool\ttool\nother\tcoreutils\ncat\tcoreutils\n'
+printf 'cat  # fastpy owns it\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 0 ] && [ -e "$STAGE/bin/ls" ] && [ -e "$STAGE/bin/tool" ] \
+  && [ -e "$STAGE/bin/other" ] && [ ! -e "$STAGE/bin/cat" ] \
+  && [ ! -e "$STAGE/bin/leftover" ]; } && ok \
+    || bad "every program but the kept-off one should ship, and no stray binary, got rc=$rc: $msg"
+case "$msg" in
+    *"staged 1 SlateOS-native"*"staged 2 more programs"*"1 kept off"*) ok ;;
+    *) bad "both counts and the kept-off one should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 34. A program with no binary is an ERROR that says what to run, as a name in
+# the manifest is -- and ALLOW_PARTIAL_USERLAND=1 asks for the image without it.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\nunbuilt\tunbuilt\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"ERROR: 1 program(s)"*"unbuilt"*"python scripts/build-userland.py"*) ok ;;
+    *) bad "an unbuilt program must be fatal, named, with the command, got rc=$rc: $msg" ;;
+esac
+rm -rf "$STAGE/bin/ls"
+msg="$(ALLOW_PARTIAL_USERLAND=1 eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    0:*"NOTE: 1 program(s)"*"as asked"*"unbuilt"*) ok ;;
+    *) bad "ALLOW_PARTIAL_USERLAND=1 must make it a NOTE, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 35. A name kept off without a reason is refused: the reason is what the list
+# records.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+printf 'cat  # fastpy owns it\nwhy\nalso #   \n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"no reason: why also"*) ok ;;
+    *) bad "a kept-off name with no reason must be refused, both, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 36. A name a block above has already staged, and the list does not keep off,
+# keeps the earlier copy and says to add it -- the guard behind the list. A
+# kept-off name the workspace does not build is named as a stale entry.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mk_elf "$ROOT_DIR/$R/sh"
+printf 'dash' > "$STAGE/bin/sh"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\nsh\tcoreutils\n'
+printf 'gone  # a crate since deleted\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(cat "$STAGE/bin/sh")" = dash ]; } && ok \
+    || bad "an earlier block's copy must stay, got rc=$rc: $msg"
+case "$msg" in
+    *"already staged these names"*" sh"*"Add each to scripts/rootfs-bin-kept-off.txt"*) ok ;;
+    *) bad "the collision should be named, with the fix, got: $msg" ;;
+esac
+case "$msg" in
+    *"does"*"not build: gone"*) ok ;;
+    *) bad "a stale kept-off entry should be named, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 37. A program older than libc.a is refused, as the manifest's are, and
+# ALLOW_STALE_FIXTURES=1 packs it anyway.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mk_elf "$ROOT_DIR/$R/tool"
+touch -d "2020-01-01" "$ROOT_DIR/$R/tool"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntool\ttool\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"1 of them are OLDER than the sysroot libc.a"*"refusing"*) ok ;;
+    *) bad "a stale program must stop the image, got rc=$rc: $msg" ;;
+esac
+rm -rf "$STAGE/bin/ls" "$STAGE/bin/tool"
+msg="$(ALLOW_STALE_FIXTURES=1 eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    0:*"packing them anyway"*) ok ;;
+    *) bad "ALLOW_STALE_FIXTURES=1 must pack it, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 38. A name two packages build, and the manifest does not, ships as its
+# namesake crate's build or not at all -- the same check as case 24's.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mkdir -p "$ROOT_DIR/$R/deps"
+printf '\177ELF other package' > "$ROOT_DIR/$R/twice"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntwice\tcoreutils\ntwice\ttwice\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 1 ] && [ ! -e "$STAGE/bin/twice" ]; } && ok \
+    || bad "a shared name's unproven copy must not ship, got rc=$rc: $msg"
+case "$msg" in
+    *"not the one named after it: twice"*"python scripts/build-userland.py"*) ok ;;
+    *) bad "the wrong copy should be named, with the command, got: $msg" ;;
 esac
 rm -rf "$T"
 

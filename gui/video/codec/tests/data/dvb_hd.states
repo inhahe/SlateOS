@@ -1,0 +1,5 @@
+# dvb_hd.mkv: the picture at each change, as an MD5 of the RGBA canvas (generate_subtitle_fixtures.py)
+canvas 1920 1080
+state 1000 ad550e08b2ae2efa3f72157c39850373
+state 2000 2c320a6b9080433d68b29b8504f2dc43
+state 3000 1656abeafafe88b4b216e300a2b710c5

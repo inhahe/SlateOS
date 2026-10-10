@@ -372,8 +372,10 @@ mod sys {
         ) -> i32;
         pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
         pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
-        pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-        pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        // `void *`, as the C library and Rust's own runtime declare them: a
+        // test build links the runtime, which checks that these agree.
+        pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+        pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
         pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         pub fn waitid(idtype: i32, id: i32, infop: *mut core::ffi::c_void, options: i32) -> i32;
@@ -394,6 +396,8 @@ mod sys {
     pub const TIOCSWINSZ: u64 = 0x5414;
     /// `TIOCGWINSZ`: read a terminal's window size.
     pub const TIOCGWINSZ: u64 = 0x5413;
+    /// `TIOCMGET`: read a line's modem-control bits.
+    pub const TIOCMGET: u64 = 0x5415;
     /// `waitpid`: do not block.
     pub const WNOHANG: i32 = 1;
     /// `waitid`: the id names one process.
@@ -492,7 +496,7 @@ fn spawn_one(path: &CStr, argv: &[&CStr], envp: &[&CStr], size: WinSize) -> Resu
             // seeing an exit status of 127, which is wrong but not dangerous;
             // there is nothing more a child in this state can do.
             let bytes = crate::last_errno().to_ne_bytes();
-            sys::write(report_wr, bytes.as_ptr(), bytes.len());
+            sys::write(report_wr, bytes.as_ptr().cast(), bytes.len());
             sys::_exit(127);
         }
     }
@@ -559,7 +563,7 @@ fn read_all_retrying(fd: i32, buf: &mut [u8]) -> usize {
         }
         // SAFETY: `rest` is a live, writable slice and the length handed over
         // is its own.
-        let n = unsafe { sys::read(fd, rest.as_mut_ptr(), rest.len()) };
+        let n = unsafe { sys::read(fd, rest.as_mut_ptr().cast(), rest.len()) };
         match usize::try_from(n) {
             Ok(0) => break,
             Ok(n) => got = got.saturating_add(n),
@@ -667,6 +671,42 @@ fn window_size_one(_fd: i32) -> Result<WinSize, i32> {
     Err(crate::ENOSYS)
 }
 
+/// The modem-control bits of the line on `fd`: `ioctl (fd, TIOCMGET,
+/// &bits)`.
+///
+/// `reset` and `tset` ask only to learn whether the line is a modem's --
+/// they then leave `CLOCAL` as it is -- so what matters most is whether
+/// there is an answer at all: a pseudo-terminal has no modem lines, and
+/// says so with an error.
+///
+/// # Errors
+///
+/// `EINVAL` or `ENOTTY` for a terminal without modem lines or something
+/// that is no terminal, `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no
+/// C library of ours.
+pub fn modem_bits(fd: i32) -> Result<i32, i32> {
+    if fd < 0 {
+        return Err(EBADF);
+    }
+    #[cfg(unix)]
+    {
+        let mut bits: i32 = 0;
+        // SAFETY: `TIOCMGET` writes one `int` through the pointer, which is
+        // `bits`, live and writable for the whole call.
+        let rc = unsafe { sys::ioctl(fd, sys::TIOCMGET, &raw mut bits) };
+        if rc == 0 {
+            Ok(bits)
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
 #[cfg(not(unix))]
 fn try_wait_one(_pid: i32) -> Result<ChildState, i32> {
     Err(crate::ENOSYS)
@@ -762,6 +802,10 @@ mod tests {
         assert_eq!(sys::FD_CLOEXEC, i64::from(posix::fdtable::FD_CLOEXEC));
         assert_eq!(sys::TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
         assert_eq!(sys::TIOCGWINSZ, posix::ioctl::TIOCGWINSZ);
+        assert_eq!(
+            sys::TIOCMGET,
+            u64::from(posix::linux_tty_user_types::TIOCMGET)
+        );
         assert_eq!(sys::WNOHANG, posix::process::WNOHANG);
         assert_eq!(sys::P_PID, posix::process::P_PID);
         assert_eq!(sys::WEXITED, posix::process::WEXITED);
@@ -853,6 +897,12 @@ mod tests {
         assert_eq!(window_size(-1), Err(EBADF));
     }
 
+    /// And for the modem lines.
+    #[test]
+    fn modem_bits_refuses_a_negative_descriptor() {
+        assert_eq!(modem_bits(-1), Err(EBADF));
+    }
+
     /// On a host every call declines once the checks have passed, rather than
     /// pretending a terminal exists.
     #[cfg(not(unix))]
@@ -915,7 +965,7 @@ mod tests {
             let mut buf = [0u8; 512];
             loop {
                 // SAFETY: `buf` is writable for its whole length.
-                let n = unsafe { sys::read(master, buf.as_mut_ptr(), buf.len()) };
+                let n = unsafe { sys::read(master, buf.as_mut_ptr().cast(), buf.len()) };
                 if n > 0 {
                     out.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
                     continue;
@@ -994,7 +1044,7 @@ mod tests {
                 spawn(SH, &[c"sh", c"-c", c"read x; stty size"], &[], size(24, 80)).expect("spawn");
             set_window_size(s.master, size(40, 132)).expect("resize");
             // SAFETY: a one-byte write from a live buffer to our own master.
-            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             let out = read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);
@@ -1013,7 +1063,7 @@ mod tests {
             assert_eq!(window_size(s.master), Ok(size(40, 132)));
             // SAFETY: a one-byte write from a live buffer to our own master,
             // which lets the child's `read` finish.
-            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);
@@ -1179,7 +1229,7 @@ mod tests {
             // Wait for the child to be running `sleep` before interrupting it.
             std::thread::sleep(Duration::from_millis(300));
             // SAFETY: a one-byte write from a live buffer to our own master.
-            let wrote = unsafe { sys::write(s.master, [0x03u8].as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, [0x03u8].as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);

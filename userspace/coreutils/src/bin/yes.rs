@@ -32,16 +32,16 @@
 //! # A broken pipe is the normal ending, not a failure
 //!
 //! `yes | head -1` is what this program is for. GNU dies there of `SIGPIPE`,
-//! printing nothing; SlateOS has no Unix signals for process control
-//! (`design.txt`) and Rust masks the signal in any case, so the same situation
-//! arrives as `EPIPE` and has to be recognised and kept quiet — exactly as
-//! `cut`, `head`, `tail` and `uniq` in this tree already do. Any *other* write
-//! failure is upstream's `error (EXIT_FAILURE, errno, _("standard output"))`,
-//! which is why `yes > /dev/full` says
-//! `yes: standard output: No space left on device` and exits 1.
+//! printing nothing, and a shell reports 141; so does this, because
+//! `stdfd::restore` puts back the disposition it inherited (design-decisions
+//! §1060). Inherited ignored (`trap '' PIPE`), the write fails with `EPIPE`
+//! instead, and that is a write failure like any other: upstream's
+//! `error (EXIT_FAILURE, errno, _("standard output"))`, which is also why
+//! `yes > /dev/full` says `yes: standard output: No space left on device` and
+//! exits 1.
 //!
-//! The one visible difference from GNU: a shell reports 141 for a
-//! `SIGPIPE`-killed `yes` and 0 for ours. There is no signal to report.
+//! Where the signal could not be put back, an `EPIPE` stands in for it, and
+//! is kept quiet with status 0 (`stdfd::reader_gone`, design-decisions §377).
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -49,7 +49,7 @@ use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::process::ExitCode;
 
 // Before `main`, so that `yes >&-` still has a closed descriptor to fail
@@ -228,8 +228,10 @@ fn repeat(buf: &[u8]) -> ExitCode {
     loop {
         if let Err(e) = stdfd::write_all(1, buf) {
             // The normal ending: the reader went away. GNU is killed by
-            // SIGPIPE here and prints nothing, so neither do we.
-            if e.kind() == ErrorKind::BrokenPipe {
+            // SIGPIPE here and prints nothing -- and so is this, since
+            // `stdfd::restore` put the signal back; this is reached only where
+            // it could not (see `stdfd::reader_gone`).
+            if stdfd::reader_gone(&e) {
                 return ExitCode::SUCCESS;
             }
             diag!("yes: standard output: {}", strerror(&e));

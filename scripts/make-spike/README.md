@@ -14,6 +14,14 @@ GNU make **4.4.1**, unmodified, `./configure --host=x86_64-linux-musl
 --disable-shared --without-guile`, compiled with `zig cc` against zig's musl
 headers, then linked `-nostdlib` against `toolchain/sysroot/lib/libc.a`.
 
+> **2026-10-01:** `zig cc -nostdlib` turned out to put zig's own musl `libc.a`
+> behind ours on every link, so a function ours lacked would have come from
+> musl rather than counting as missing (known-issues
+> `D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC`). The link is now zig's `ld.lld`
+> with exactly its inputs (`slate_make_link_wrappers` in
+> `scripts/lib/worktree.sh`), and relinked that way make has nothing
+> undefined: the results below stand.
+
 configure and the build both succeeded on the first attempt, producing 30
 objects in `src/` plus `lib/libgnu.a`. The link did not.
 

@@ -38,6 +38,18 @@
 //! files written to exercise it, in a code no decoder reads so that what
 //! ffprobe prints is the demuxer's word alone.
 //!
+//! A text track is subtitles where FFmpeg's `mov_codec_id` makes it so --
+//! its handler (`subp`, `clcp`), or a data track's sample entry (`tx3g`,
+//! `text`: 3GPP timed text, [`Codec::MovText`]; `stpp`: TTML,
+//! [`Codec::Ttml`]) -- and the rest of its sample entry is its setup
+//! ([`Track::config`]), as `mov_parse_stsd_subtitle` keeps it: timed text's
+//! default style, justification and font table; TTML's namespace and
+//! schemas. WebVTT's `wvtt` is not in FFmpeg's table, and its track stays
+//! data.
+//!
+//! [`Demuxer::select_tracks`] reads one track alone, the others' samples
+//! passed over unread as FFmpeg passes over a discarded stream's.
+//!
 //! [`probe`] tells an MP4 file from others by its first boxes, as FFmpeg's
 //! probe does.
 //!
@@ -59,7 +71,22 @@
 //! # A hostile file
 //!
 //! Errors, never a panic. Every table is bounded by the file's length
-//! before anything is allocated for it, and every box by its parent.
+//! before anything is allocated for it, and every box by its parent. What a
+//! table claims is bounded too: a file's tracks index at most one sample a
+//! byte of it between them, as every sample of a real file is at least a
+//! byte of it (design-decisions §1364). A track whose tables claim more --
+//! every sample one size and billions of them, a fragment's run of samples
+//! that take none of its bytes, an edit list giving the same samples again
+//! -- is held to that, and what is read of it is FFmpeg's still: the
+//! samples the file holds, then its end. FFmpeg's own ceilings -- the
+//! entries its allocator lets it index -- are kept exactly.
+//!
+//! What a file costs to read is bounded the same way. FFmpeg's lookups in
+//! an index walk it an entry at a time -- in its search, and once an edit in
+//! its edit lists -- and a file made for it makes each walk the index's
+//! length: quadratic, to seek in or to open. Here each walk is one step,
+//! from a table built the first time a walk is long, with FFmpeg's answers
+//! (design-decisions §1366).
 
 mod demux;
 mod index;

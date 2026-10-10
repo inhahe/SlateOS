@@ -59,6 +59,7 @@ dependencies = [
  "pathcodec",
  "scratchdir",
  "settingsfile",
+ "sound",
  "yamldoc",
 ]
 
@@ -191,6 +192,7 @@ dependencies = [
 name = "autoopts"
 version = "0.1.0"
 dependencies = [
+ "cstrtol",
  "errmsg",
  "localtime",
  "quoting",
@@ -531,8 +533,13 @@ dependencies = [
 name = "chpasswd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -657,13 +664,18 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstrtol",
  "embed-manifest",
  "ere",
  "errmsg",
  "fnmatch",
  "getoptlong",
  "gnubase64",
+ "journalfwd",
+ "journalio",
+ "journalrec",
  "libcall",
+ "libcsyslog",
  "localtime",
  "md5",
  "modechange",
@@ -679,7 +691,11 @@ dependencies = [
  "sm3",
  "stdfdguard",
  "sysroot-dep",
+ "terminfo",
+ "ulclosestream",
+ "ulcolors",
  "ulstrutils",
+ "ultimeutils",
  "userspec",
  "utmpfile",
 ]
@@ -719,9 +735,27 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
+ "msgframe",
  "pwkdf",
  "randrange",
+ "secret",
  "sha2",
+ "svcconn",
+]
+
+[[package]]
+name = "credentialsd"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "credentials",
+ "guiremote",
+ "guitk",
+ "journalrec",
+ "oswindow",
+ "pathcodec",
+ "secret",
 ]
 
 [[package]]
@@ -781,6 +815,10 @@ version = "0.2.2"
 dependencies = [
  "hybrid-array",
 ]
+
+[[package]]
+name = "cstrtol"
+version = "0.1.0"
 
 [[package]]
 name = "ctags"
@@ -877,9 +915,12 @@ dependencies = [
  "procinfo",
  "programs",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "settingswatch",
+ "sound",
  "tzrules",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -1050,6 +1091,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyndns"
+version = "0.1.0"
+dependencies = [
+ "dyndnsproviders",
+ "dyndnsrouter",
+ "httpclient",
+ "journalrec",
+ "yamldoc",
+]
+
+[[package]]
+name = "dyndnsproviders"
+version = "0.1.0"
+
+[[package]]
+name = "dyndnsrouter"
+version = "0.1.0"
+
+[[package]]
 name = "earlyoom"
 version = "0.1.0"
 dependencies = [
@@ -1217,6 +1277,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filechooser"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "guitk",
+ "msgframe",
+ "svcconn",
+]
+
+[[package]]
 name = "filediff"
 version = "0.1.0"
 dependencies = [
@@ -1300,6 +1370,13 @@ version = "0.1.0"
 dependencies = [
  "procinfo",
  "sha2",
+]
+
+[[package]]
+name = "flac"
+version = "0.1.0"
+dependencies = [
+ "md5",
 ]
 
 [[package]]
@@ -1503,10 +1580,12 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "imagecodec",
  "osfont",
  "pathcodec",
  "randrange",
  "regex",
+ "secret",
  "settingsname",
  "textfind",
  "textfmt",
@@ -1569,13 +1648,6 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hex-literal"
 version = "1.1.0"
-
-[[package]]
-name = "hexdump"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "hexeditor"
@@ -1656,6 +1728,9 @@ dependencies = [
 name = "iconv"
 version = "0.1.0"
 dependencies = [
+ "coreutils",
+ "errmsg",
+ "getoptlong",
  "quoting",
 ]
 
@@ -1791,9 +1866,20 @@ version = "0.1.0"
 name = "journalctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "journalio",
+ "journalrec",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "journalfwd"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "localtime",
+ "utmpfile",
 ]
 
 [[package]]
@@ -1849,6 +1935,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "bitflags",
+ "bzip2",
  "crc32",
  "deflate",
  "ere",
@@ -1857,9 +1944,13 @@ dependencies = [
  "netipc",
  "netproto",
  "netring",
+ "planecompose",
+ "seal",
+ "sevenz",
  "sha2",
  "spin",
  "tzrules",
+ "xz",
  "ziparchive",
 ]
 
@@ -1893,13 +1984,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "last"
-version = "0.1.0"
-dependencies = [
- "utmpfile",
 ]
 
 [[package]]
@@ -1968,11 +2052,12 @@ dependencies = [
 name = "libmagic"
 version = "0.1.0"
 dependencies = [
- "charwidth",
  "cprintf",
+ "cstrtol",
  "ere",
  "errmsg",
  "localtime",
+ "quoting",
 ]
 
 [[package]]
@@ -2116,6 +2201,7 @@ dependencies = [
  "authlib",
  "guitk",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -2150,13 +2236,6 @@ dependencies = [
  "pathtext",
  "safeio",
  "textline",
-]
-
-[[package]]
-name = "look"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2498,11 +2577,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp3"
+version = "0.1.0"
+
+[[package]]
 name = "mp4"
 version = "0.1.0"
 dependencies = [
  "md5",
 ]
+
+[[package]]
+name = "msgframe"
+version = "0.1.0"
 
 [[package]]
 name = "musicplayer"
@@ -2675,6 +2762,7 @@ dependencies = [
 name = "notifications"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -2725,6 +2813,14 @@ dependencies = [
 [[package]]
 name = "offloop"
 version = "0.1.0"
+
+[[package]]
+name = "ogg"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "vorbis",
+]
 
 [[package]]
 name = "oils"
@@ -2972,6 +3068,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "planecompose"
+version = "0.1.0"
+
+[[package]]
 name = "pngwrite"
 version = "0.1.0"
 dependencies = [
@@ -3034,7 +3134,10 @@ dependencies = [
 name = "posix"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
+ "journalrec",
  "libm",
+ "pwhash",
  "tzrules",
 ]
 
@@ -3103,14 +3206,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pstree"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "pv"
 version = "0.1.0"
 dependencies = [
@@ -3119,6 +3214,10 @@ dependencies = [
 
 [[package]]
 name = "pwdb"
+version = "0.1.0"
+
+[[package]]
+name = "pwhash"
 version = "0.1.0"
 
 [[package]]
@@ -3467,6 +3566,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "secret"
+version = "0.1.0"
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3499,6 +3602,17 @@ name = "servicebus"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "servicemenus"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "pathcodec",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3715,6 +3829,16 @@ dependencies = [
  "oswindow",
  "randrange",
  "statehistory",
+]
+
+[[package]]
+name = "sound"
+version = "0.1.0"
+dependencies = [
+ "ogg",
+ "opus",
+ "scratchdir",
+ "vorbis",
 ]
 
 [[package]]
@@ -3949,6 +4073,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "svcconn"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "msgframe",
+]
+
+[[package]]
 name = "swapon"
 version = "0.1.0"
 dependencies = [
@@ -4010,13 +4142,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysctl"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "sysinfo"
 version = "0.1.0"
 dependencies = [
@@ -4042,6 +4167,8 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "journalfwd",
  "journalio",
  "journalrec",
  "quoting",
@@ -4079,8 +4206,6 @@ dependencies = [
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
- "journalio",
- "journalrec",
  "procinfo",
  "quoting",
  "scratchdir",
@@ -4146,6 +4271,14 @@ dependencies = [
  "oswindow",
  "termchild",
  "textline",
+]
+
+[[package]]
+name = "terminfo"
+version = "0.1.0"
+dependencies = [
+ "cstrtol",
+ "libcall",
 ]
 
 [[package]]
@@ -4254,14 +4387,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tput"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "traceroute"
 version = "0.1.0"
 dependencies = [
@@ -4348,6 +4473,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulcolors"
+version = "0.1.0"
+dependencies = [
+ "terminfo",
+]
+
+[[package]]
 name = "ulmount"
 version = "0.1.0"
 dependencies = [
@@ -4362,6 +4494,7 @@ dependencies = [
 name = "ulstrutils"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
  "quoting",
 ]
 
@@ -4371,6 +4504,14 @@ version = "0.1.0"
 dependencies = [
  "quoting",
  "scratchdir",
+ "ulstrutils",
+]
+
+[[package]]
+name = "ultimeutils"
+version = "0.1.0"
+dependencies = [
+ "localtime",
  "ulstrutils",
 ]
 
@@ -4514,11 +4655,15 @@ dependencies = [
 name = "videocodec"
 version = "0.1.0"
 dependencies = [
+ "flac",
  "matroska",
  "md5",
+ "mp3",
  "mp4",
+ "ogg",
  "opus",
  "rav1d",
+ "vorbis",
  "vp8",
  "vp9",
  "yuv",
@@ -4544,12 +4689,8 @@ name = "vkloader"
 version = "0.1.0"
 
 [[package]]
-name = "vmstat"
+name = "vorbis"
 version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
 
 [[package]]
 name = "vp8"
@@ -4577,15 +4718,6 @@ dependencies = [
  "safeio",
  "scratchdir",
  "textline",
-]
-
-[[package]]
-name = "wall"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "quoting",
- "userdb",
 ]
 
 [[package]]
@@ -4638,6 +4770,14 @@ name = "whois"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "windowrules"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

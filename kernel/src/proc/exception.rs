@@ -10,7 +10,7 @@
 //! `SYS_SET_EXCEPTION_HANDLER(addr)`.  When an exception occurs:
 //!
 //! 1. Kernel saves the full CPU context (registers, flags, faulting address).
-//! 2. Kernel pushes an [`ExceptionRecord`] onto the user stack.
+//! 2. Kernel pushes an [`ExceptionContext`] onto the user stack.
 //! 3. Kernel redirects execution to the handler.
 //! 4. The handler examines the exception and either:
 //!    - Fixes the issue (e.g., guard page commit) and calls
@@ -73,6 +73,12 @@ pub enum ExceptionCode {
     AlignmentCheck = 10,
     /// SIMD floating-point exception (#XM, vector 19).
     SimdFloatingPoint = 11,
+    /// Breakpoint -- an `int3` (#BP, vector 3) in a program no debugger
+    /// traces. A trap: the context's `rip` is already past the one-byte
+    /// instruction, as the CPU leaves it, so a handler that resumes runs on
+    /// after it. Since 2026-10-08, when ring 3 could first reach the vector;
+    /// until then a user `int3` was a `GeneralProtectionFault`.
+    Breakpoint = 12,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +220,7 @@ fn test_exception_code_abi() -> crate::error::KernelResult<()> {
         (ExceptionCode::FloatingPointError, 9),
         (ExceptionCode::AlignmentCheck, 10),
         (ExceptionCode::SimdFloatingPoint, 11),
+        (ExceptionCode::Breakpoint, 12),
     ];
 
     for &(code, val) in expected {

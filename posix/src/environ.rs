@@ -54,6 +54,28 @@
 //! `environ_slot`), so a test cannot see — or free — another's. Tests that
 //! also depend on *other* process-wide state derived from it, such as a
 //! cached time zone, still serialise on `lock_env_for_test`.
+//!
+//! ## A program may bring its own
+//!
+//! bash does: its `lib/sh/getenv.c` defines `getenv`, `putenv`, `setenv` and
+//! `unsetenv` over the shell's own variables, and its link names
+//! `lib/sh/libsh.a` ahead of the C library, so on Linux the shell's are the
+//! ones its calls reach. gnulib's setenv, unsetenv, putenv and secure_getenv
+//! modules define theirs wherever they judge the C library's wanting. A link
+//! can decline a definition of ours only if nothing else brings its archive
+//! member in -- a member is extracted whole -- and until 2026-10-01 all six
+//! shared one member with `environ` and [`adopt_initial_envp`], which the
+//! start-up code needs in every program: a program that brought its own
+//! `getenv` could not link (known-issues.md ->
+//! D-POSIX-GETENV-AND-GETCWD-COULD-NOT-BE-REPLACED).
+//!
+//! So each is a `mod gnu_*` block of its own, its own member, as string.rs's
+//! module header explains, and a thin one: the work is [`lookup`], [`set`]
+//! and [`remove`], which stay here with `environ` and the bookkeeping. They
+//! are also what this library calls -- `execvp`'s `PATH`, `glob`'s `HOME`,
+//! `TMPDIR` -- never the exported names, as glibc's own calls read
+//! `__environ` by internal names: a program's `getenv` changes what the
+//! program's calls reach, and nothing this library does.
 
 use crate::string;
 
@@ -309,18 +331,20 @@ unsafe fn put(s: *mut u8, name_len: usize, owned: bool) -> i32 {
     0
 }
 
-/// Get the value of an environment variable.
+/// `getenv`'s work: `name`'s value -- the bytes after its `=` -- or NULL if
+/// it is not set, or is not a valid name at all: empty, or containing `=`.
+/// glibc would look `A=B` up as a prefix and answer with the tail of some
+/// `A=B=…`; there is no variable by that name, so there is nothing to answer.
 ///
-/// Returns a pointer to the value (after the `=`), or NULL if `name` is not
-/// set — or is not a valid name at all: empty, or containing `=`. glibc would
-/// look `A=B` up as a prefix and answer with the tail of some `A=B=…`; there
-/// is no variable by that name, so there is nothing to answer.
+/// This, not `getenv`, is what this library calls to read the environment,
+/// as glibc's own calls read `__environ` by internal names: a program may
+/// define `getenv` itself (see the module header), and that changes what
+/// the program's calls reach and nothing else.
 ///
 /// # Safety
 ///
-/// `name` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
+/// `name` must be NULL or a valid null-terminated string.
+pub(crate) unsafe fn lookup(name: *const u8) -> *const u8 {
     if name.is_null() {
         return core::ptr::null();
     }
@@ -348,22 +372,26 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
     }
 }
 
-/// Set an environment variable.
-///
-/// If `overwrite` is non-zero and the variable exists, it is replaced.
-/// Returns 0 on success, -1 on error.
-///
-/// # Errors
-///
-/// * `EINVAL` — `name` is NULL, empty or contains `=`, or `value` is NULL.
-/// * `ENOMEM` — the new entry or the list could not be allocated. There is no
-///   length or count limit beyond memory.
+/// `secure_getenv`'s work, for this library's lookups of a variable a
+/// privileged program must not trust: [`lookup`], since SlateOS has no
+/// privilege elevation for a program to be running under. This is where
+/// the check would go.
 ///
 /// # Safety
 ///
-/// `name` and `value` must be valid null-terminated strings.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
+/// As [`lookup`].
+pub(crate) unsafe fn secure_lookup(name: *const u8) -> *const u8 {
+    // SAFETY: the caller's contract is `lookup`'s.
+    unsafe { lookup(name) }
+}
+
+/// `setenv`'s work, for this library's own assignments (see [`lookup`]):
+/// 0, or -1 with `errno` `EINVAL` or `ENOMEM`, as `setenv` documents.
+///
+/// # Safety
+///
+/// `name` and `value` must be NULL or valid null-terminated strings.
+pub(crate) unsafe fn set(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
     if name.is_null() || value.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
@@ -374,7 +402,7 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
         return -1;
     };
     // SAFETY: as above.
-    if overwrite == 0 && !unsafe { getenv(name) }.is_null() {
+    if overwrite == 0 && !unsafe { lookup(name) }.is_null() {
         return 0;
     }
     // SAFETY: `value` is a valid C string (the caller's contract).
@@ -402,20 +430,13 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
     }
 }
 
-/// Remove an environment variable — every entry for it, as POSIX requires,
-/// since a program that edits `environ` directly can make duplicates.
-///
-/// Returns 0 on success, including when the variable was not set.
-///
-/// # Errors
-///
-/// `EINVAL` — `name` is NULL, empty or contains `=`.
+/// `unsetenv`'s work, for this library's own removals (see [`lookup`]): 0,
+/// or -1 with `errno` `EINVAL`, as `unsetenv` documents.
 ///
 /// # Safety
 ///
-/// `name` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
+/// `name` must be NULL or a valid null-terminated string.
+pub(crate) unsafe fn remove(name: *const u8) -> i32 {
     if name.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
@@ -456,94 +477,182 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     0
 }
 
+/// Own archive member -- bash defines `getenv` itself. See the module header.
+mod gnu_getenv {
+    use super::*;
+
+    /// Get the value of an environment variable.
+    ///
+    /// Returns a pointer to the value (after the `=`), or NULL if `name` is not
+    /// set — or is not a valid name at all: empty, or containing `=`. glibc would
+    /// look `A=B` up as a prefix and answer with the tail of some `A=B=…`; there
+    /// is no variable by that name, so there is nothing to answer.
+    ///
+    /// # Safety
+    ///
+    /// `name` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
+        // SAFETY: the caller's contract is `lookup`'s.
+        unsafe { lookup(name) }
+    }
+}
+pub use gnu_getenv::getenv;
+
+/// Own archive member -- bash and gnulib's setenv module define `setenv`
+/// themselves. See the module header.
+mod gnu_setenv {
+    use super::*;
+
+    /// Set an environment variable.
+    ///
+    /// If `overwrite` is non-zero and the variable exists, it is replaced.
+    /// Returns 0 on success, -1 on error.
+    ///
+    /// # Errors
+    ///
+    /// * `EINVAL` — `name` is NULL, empty or contains `=`, or `value` is NULL.
+    /// * `ENOMEM` — the new entry or the list could not be allocated. There is no
+    ///   length or count limit beyond memory.
+    ///
+    /// # Safety
+    ///
+    /// `name` and `value` must be valid null-terminated strings.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
+        // SAFETY: the caller's contract is `set`'s.
+        unsafe { set(name, value, overwrite) }
+    }
+}
+pub use gnu_setenv::setenv;
+
+/// Own archive member -- bash and gnulib's unsetenv module define
+/// `unsetenv` themselves. See the module header.
+mod gnu_unsetenv {
+    use super::*;
+
+    /// Remove an environment variable — every entry for it, as POSIX requires,
+    /// since a program that edits `environ` directly can make duplicates.
+    ///
+    /// Returns 0 on success, including when the variable was not set.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` — `name` is NULL, empty or contains `=`.
+    ///
+    /// # Safety
+    ///
+    /// `name` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
+        // SAFETY: the caller's contract is `remove`'s.
+        unsafe { remove(name) }
+    }
+}
+pub use gnu_unsetenv::unsetenv;
+
 // ---------------------------------------------------------------------------
 // putenv
 // ---------------------------------------------------------------------------
 
-/// Insert or modify an environment variable.
-///
-/// `string` must be of the form `"NAME=VALUE"`, and — unlike `setenv` — it is
-/// **not copied**: POSIX says it "shall become part of the environment, so
-/// altering the string shall change the environment". The caller must keep it
-/// alive while it is there. A string without `=` unsets that name (a glibc
-/// extension musl shares).
-///
-/// Returns 0 on success, -1 on error.
-///
-/// # Errors
-///
-/// * `EINVAL` — `string` is NULL, or its name is empty (`"=value"`).
-/// * `ENOMEM` — the list could not grow.
-///
-/// # Safety
-///
-/// `string` must be a valid null-terminated C string that outlives its entry.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
-    if string.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
+/// Own archive member -- bash and gnulib's putenv module define `putenv`
+/// themselves. See the module header.
+mod gnu_putenv {
+    use super::*;
+
+    /// Insert or modify an environment variable.
+    ///
+    /// `string` must be of the form `"NAME=VALUE"`, and — unlike `setenv` — it is
+    /// **not copied**: POSIX says it "shall become part of the environment, so
+    /// altering the string shall change the environment". The caller must keep it
+    /// alive while it is there. A string without `=` unsets that name (a glibc
+    /// extension musl shares).
+    ///
+    /// Returns 0 on success, -1 on error.
+    ///
+    /// # Errors
+    ///
+    /// * `EINVAL` — `string` is NULL, or its name is empty (`"=value"`).
+    /// * `ENOMEM` — the list could not grow.
+    ///
+    /// # Safety
+    ///
+    /// `string` must be a valid null-terminated C string that outlives its entry.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
+        if string.is_null() {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        // SAFETY: `string` is a valid C string (the caller's contract).
+        let total = unsafe { string::strlen(string) };
+        // SAFETY: readable for `total` bytes, just measured.
+        let bytes = unsafe { core::slice::from_raw_parts(string, total) };
+        let Some(name_len) = bytes.iter().position(|&b| b == b'=') else {
+            // SAFETY: as above; a string without `=` is a name.
+            return unsafe { remove(string) };
+        };
+        if name_len == 0 {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        // SAFETY: `string`'s `=` is at `name_len`; the caller keeps it alive.
+        unsafe { put(string, name_len, false) }
     }
-    // SAFETY: `string` is a valid C string (the caller's contract).
-    let total = unsafe { string::strlen(string) };
-    // SAFETY: readable for `total` bytes, just measured.
-    let bytes = unsafe { core::slice::from_raw_parts(string, total) };
-    let Some(name_len) = bytes.iter().position(|&b| b == b'=') else {
-        // SAFETY: as above; a string without `=` is a name.
-        return unsafe { unsetenv(string) };
-    };
-    if name_len == 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    // SAFETY: `string`'s `=` is at `name_len`; the caller keeps it alive.
-    unsafe { put(string, name_len, false) }
 }
+pub use gnu_putenv::putenv;
 
 // ---------------------------------------------------------------------------
 // clearenv
 // ---------------------------------------------------------------------------
 
-/// Clear the entire environment.
-///
-/// `environ` is left pointing at an empty list rather than NULL — glibc and
-/// musl leave NULL, and a program that iterates `environ` afterwards without
-/// checking then crashes; an empty list is equally conforming and harms
-/// nobody. Frees every string `setenv` allocated and the list array if it is
-/// ours. Returns 0.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn clearenv() -> i32 {
-    // Point `environ` away from everything first, so nothing reachable from
-    // it is freed while it still points there.
-    set_env_list(empty_env());
-    // SAFETY: the bookkeeping is touched only in this module, its array holds
-    // `len` initialised slots, and POSIX makes a concurrent caller the
-    // caller's problem.
-    unsafe {
-        let owned = &mut *owned_strings();
-        for i in 0..owned.len {
-            let s = owned.ptr.add(i).read();
-            if !s.is_null() {
-                crate::malloc::free(s);
-            }
-        }
-        if !owned.ptr.is_null() {
-            crate::malloc::free(owned.ptr.cast::<u8>());
-        }
-        *owned = OwnedStrings {
-            ptr: core::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
+/// Own archive member, as every function of this family is. See the module
+/// header.
+mod gnu_clearenv {
+    use super::*;
 
-        let ours = owned_array().read();
-        if !ours.is_null() {
-            crate::malloc::free(ours.cast::<u8>());
+    /// Clear the entire environment.
+    ///
+    /// `environ` is left pointing at an empty list rather than NULL — glibc and
+    /// musl leave NULL, and a program that iterates `environ` afterwards without
+    /// checking then crashes; an empty list is equally conforming and harms
+    /// nobody. Frees every string `setenv` allocated and the list array if it is
+    /// ours. Returns 0.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn clearenv() -> i32 {
+        // Point `environ` away from everything first, so nothing reachable from
+        // it is freed while it still points there.
+        set_env_list(empty_env());
+        // SAFETY: the bookkeeping is touched only in this module, its array holds
+        // `len` initialised slots, and POSIX makes a concurrent caller the
+        // caller's problem.
+        unsafe {
+            let owned = &mut *owned_strings();
+            for i in 0..owned.len {
+                let s = owned.ptr.add(i).read();
+                if !s.is_null() {
+                    crate::malloc::free(s);
+                }
+            }
+            if !owned.ptr.is_null() {
+                crate::malloc::free(owned.ptr.cast::<u8>());
+            }
+            *owned = OwnedStrings {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+
+            let ours = owned_array().read();
+            if !ours.is_null() {
+                crate::malloc::free(ours.cast::<u8>());
+            }
+            owned_array().write(core::ptr::null_mut());
         }
-        owned_array().write(core::ptr::null_mut());
+        0
     }
-    0
 }
+pub use gnu_clearenv::clearenv;
 
 /// The shared empty list.
 fn empty_env() -> *mut *const u8 {
@@ -554,20 +663,27 @@ fn empty_env() -> *mut *const u8 {
 // secure_getenv
 // ---------------------------------------------------------------------------
 
-/// Get an environment variable (security-aware).
-///
-/// In a real libc, `secure_getenv` returns null if the process is
-/// running with elevated privileges (setuid/setgid).  Since our OS
-/// doesn't have privilege escalation, this is identical to `getenv`.
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *const u8 {
-    // No privilege escalation in our OS — just delegate.
-    unsafe { getenv(name) }
+/// Own archive member -- gnulib's secure_getenv module defines it where the
+/// C library has none. See the module header.
+mod gnu_secure_getenv {
+    use super::*;
+
+    /// Get an environment variable (security-aware).
+    ///
+    /// In a real libc, `secure_getenv` returns null if the process is
+    /// running with elevated privileges (setuid/setgid).  Since our OS
+    /// doesn't have privilege escalation, this is identical to `getenv`.
+    ///
+    /// # Safety
+    ///
+    /// `name` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *const u8 {
+        // SAFETY: the caller's contract is `secure_lookup`'s.
+        unsafe { secure_lookup(name) }
+    }
 }
+pub use gnu_secure_getenv::secure_getenv;
 
 /// Look up an environment variable from Rust, by name bytes.
 ///

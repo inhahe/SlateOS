@@ -1307,10 +1307,12 @@ fn pty_master_get_pgrp(handle: u64) -> Result<i32, i32> {
 /// `SYS_PTY_SET_PGRP` behind an `errno`-shaped result.  See
 /// [`pty_master_get_pgrp`] for why the host build refuses.
 fn pty_master_set_pgrp(handle: u64, pgrp: i32) -> Result<(), i32> {
-    if pgrp <= 0 {
-        // A process group id is positive; 0 and negatives are `tcsetpgrp`'s
-        // documented `EINVAL`, and letting one through would sign-extend into a
-        // `u64` argument as an enormous group id.
+    if pgrp < 0 {
+        // A negative group is `tcsetpgrp`'s documented `EINVAL`, and letting
+        // one through would sign-extend into a `u64` argument as an enormous
+        // group id. 0 goes to the kernel, which answers it as Linux's
+        // `tiocspgrp` does -- the terminal's checks, then `ESRCH`, since no
+        // group is 0 (lane A's f4f5778ba).
         return Err(errno::EINVAL);
     }
     #[cfg(target_os = "none")]
@@ -1552,7 +1554,7 @@ fn format_pts_name(id: u32, out: &mut [u8; PTS_NAME_MAX]) -> usize {
 /// rather than computing `handle >> 1`: the handle encoding is the kernel's
 /// business, and syscall 551 exists precisely so that libc need not depend
 /// on it.
-fn slave_id_of(handle: u64) -> Option<u32> {
+pub(crate) fn slave_id_of(handle: u64) -> Option<u32> {
     let ret = crate::syscall::syscall1(crate::syscall::SYS_PTY_SLAVE_ID, handle);
     if errno::translate(ret) < 0 {
         return None;
@@ -3127,15 +3129,18 @@ mod tests {
     }
 
     /// Same for the setter, and additionally the one rule the master path
-    /// enforces before it reaches the kernel: a process group id is positive.
+    /// enforces before it reaches the kernel: a process group id is not
+    /// negative.
     ///
-    /// 0 and negatives matter more here than on the slave path because the
-    /// value is widened into a `u64` syscall argument — a negative would
-    /// sign-extend into an enormous group id rather than being rejected.
+    /// A negative matters more here than on the slave path because the value
+    /// is widened into a `u64` syscall argument, and would sign-extend into
+    /// an enormous group id rather than being rejected. 0 is the kernel's to
+    /// answer (`ESRCH` past the terminal's checks, as Linux's `tiocspgrp`),
+    /// so it gets past the gate -- to the host build's no-kernel `ENOTTY`.
     #[test]
-    fn tiocspgrp_on_a_master_rejects_a_non_positive_group() {
+    fn tiocspgrp_on_a_master_rejects_a_negative_group() {
         let fd = fdtable::alloc_fd(HandleKind::PtyMaster, 9 << 1).unwrap();
-        for bad in [0_i32, -1, i32::MIN] {
+        for bad in [-1_i32, i32::MIN] {
             let ret = ioctl(fd, TIOCSPGRP, (&raw const bad).cast::<u8>().cast_mut());
             assert_eq!(ret, -1, "pgid {bad} was accepted");
             assert_eq!(
@@ -3144,6 +3149,14 @@ mod tests {
                 "pgid {bad} must be EINVAL, not passed to the kernel"
             );
         }
+        let zero = 0_i32;
+        let ret = ioctl(fd, TIOCSPGRP, (&raw const zero).cast::<u8>().cast_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOTTY,
+            "pgid 0 must reach the kernel's arm, not be refused as malformed"
+        );
         let _ = fdtable::close_fd(fd);
     }
 

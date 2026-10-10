@@ -35,10 +35,12 @@
 //!
 //! **The sixth is `apps/spreadsheet`, and it is deliberately left alone.** Its
 //! scrollbar is generic over the axis — one function draws both the vertical
-//! and the horizontal bar from a `length` — where everything here is vertical,
-//! reading `track.h` and `track.y` by name. Converting it means either
-//! generalising this module to an axis-agnostic span or splitting that function
-//! in two, and both are design decisions rather than mechanical substitutions.
+//! and the horizontal bar from a `length` — where this module's arithmetic is
+//! a column's, reading `track.h` and `track.y` by name. A bar across a view's
+//! foot is that column's bar laid on its side ([`thumb_across`],
+//! [`draw_across`]: x and y swapped going in and coming out), so a theme's form
+//! for bars holds along both axes; converting the spreadsheet to them is its
+//! owner's call, not a mechanical substitution.
 //!
 //! (A note on the count, because this module's own history has it wrong. The
 //! doc first said six and named `gui/desktop/src/window_peek.rs` as one of
@@ -229,6 +231,61 @@ pub fn draw(sink: &mut impl CommandSink, p: &Palette, track: Rect, thumb: Rect, 
         },
         corner_radii: CornerRadii::all(ends),
     });
+}
+
+/// `r` mirrored across its diagonal: its x for its y, its width for its
+/// height. A bar across a view's foot is a column's bar mirrored so.
+const fn mirrored(r: Rect) -> Rect {
+    Rect {
+        x: r.y,
+        y: r.x,
+        w: r.h,
+        h: r.w,
+    }
+}
+
+/// [`thumb_of`] for a bar across a view's foot: `track` a strip as wide as
+/// the view and [`WIDTH`] tall, the thumb travelling along it as a column's
+/// travels down it -- the same arithmetic, mirrored.
+#[must_use]
+pub fn thumb_across(track: Rect, shown: f32, position: f32, min_thumb: f32) -> Rect {
+    mirrored(thumb_of(mirrored(track), shown, position, min_thumb))
+}
+
+/// [`draw`] for a bar across a view's foot, `track` its strip and `thumb`
+/// from [`thumb_across`]: drawn as a column's bar is and mirrored, so the
+/// style's form -- thin, or a line until the pointer comes -- is the same
+/// along either axis, at the strip's outer (bottom) edge.
+pub fn draw_across(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    track: Rect,
+    thumb: Rect,
+    state: BarState,
+) {
+    let mut down: Vec<RenderCommand> = Vec::new();
+    draw(&mut down, p, mirrored(track), mirrored(thumb), state);
+    for command in down {
+        // `draw` emits filled rectangles and nothing else.
+        if let RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            color,
+            corner_radii,
+        } = command
+        {
+            sink.emit(RenderCommand::FillRect {
+                x: y,
+                y: x,
+                width: height,
+                height: width,
+                color,
+                corner_radii,
+            });
+        }
+    }
 }
 
 /// The first visible row a thumb drag lands on.
@@ -518,5 +575,80 @@ mod tests {
     fn a_drag_with_nothing_to_scroll_reports_nothing() {
         assert_eq!(first_from_drag(TRACK, TRACK.h, 0.0, 50.0, 10, 10), None);
         assert_eq!(first_from_drag(TRACK, 20.0, 0.0, 50.0, 5, 10), None);
+    }
+
+    /// A strip across a view's foot: 200 wide, a column's width tall.
+    const STRIP: Rect = Rect {
+        x: 0.0,
+        y: 100.0,
+        w: 200.0,
+        h: WIDTH,
+    };
+
+    /// **A bar across a view is a column's bar laid on its side**: its thumb
+    /// travels along the strip as far, as long and with the same floor as a
+    /// column's travels down it.
+    #[test]
+    fn a_bar_across_travels_as_a_column_does() {
+        let along = thumb_across(STRIP, 0.25, 0.5, MIN_THUMB);
+        assert_eq!((along.y, along.h), (STRIP.y, STRIP.h));
+        assert!((along.w - 50.0).abs() < 1e-4, "{along:?}");
+        // Half way through the 150 of travel.
+        assert!((along.x - 75.0).abs() < 1e-4, "{along:?}");
+        let floor = thumb_across(STRIP, 0.01, 1.0, MIN_THUMB);
+        assert!((floor.w - MIN_THUMB).abs() < 1e-4 && (floor.right() - STRIP.right()).abs() < 1e-4);
+    }
+
+    /// **A bar across is drawn as a column's, mirrored**: the same rectangles
+    /// with x and y and width and height swapped -- at the strip's bottom
+    /// edge, in the same colours, under every style.
+    #[test]
+    fn a_bar_across_is_drawn_as_a_column_is() {
+        let mirror = |c: &RenderCommand| match *c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            } => RenderCommand::FillRect {
+                x: y,
+                y: x,
+                width: height,
+                height: width,
+                color,
+                corner_radii,
+            },
+            ref other => other.clone(),
+        };
+        let thumb = thumb_across(STRIP, 0.25, 0.5, MIN_THUMB);
+        for visibility in [ScrollbarVisibility::Always, ScrollbarVisibility::Overlay] {
+            for state in [
+                BarState::default(),
+                BarState {
+                    hovered: true,
+                    dragging: false,
+                },
+            ] {
+                let mut p = Palette::for_mode(true);
+                p.widget_style.scrollbar = ScrollbarStyle {
+                    visibility,
+                    width: ScrollbarWidth::Thin,
+                };
+                let mut across: Vec<RenderCommand> = Vec::new();
+                draw_across(&mut across, &p, STRIP, thumb, state);
+                let mut down: Vec<RenderCommand> = Vec::new();
+                draw(&mut down, &p, mirrored(STRIP), mirrored(thumb), state);
+                assert_eq!(across, down.iter().map(mirror).collect::<Vec<_>>());
+                assert!(!across.is_empty());
+                // At the strip's bottom edge.
+                for c in &across {
+                    if let RenderCommand::FillRect { y, height, .. } = c {
+                        assert!((y + height - STRIP.bottom()).abs() < 1e-4, "{c:?}");
+                    }
+                }
+            }
+        }
     }
 }

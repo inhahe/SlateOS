@@ -75,6 +75,31 @@ pub const MAX_TRAY_ICONS: u32 = 4096;
 /// into the taskbar.
 pub const MAX_GLYPH_BYTES: usize = 32;
 
+/// The longest tooltip an icon keeps, in bytes.
+///
+/// A tooltip is a line or two -- "Battery: 87% (2 h 10 min left)" -- and a
+/// kilobyte holds several sentences in any script. The compositor keeps the
+/// first kilobyte of a longer one, cut on a character boundary as a glyph is.
+///
+/// A bound because the registry keeps every icon's text for as long as its
+/// program runs. Without one a tooltip may be as long as any string on this
+/// wire, 4 MiB, and one program's icons could hold the compositor's memory
+/// by the gigabyte.
+pub const MAX_TOOLTIP_BYTES: usize = 1024;
+
+/// The most icons one client may have in the tray at once.
+///
+/// A share rather than only the tray's [`MAX_TRAY_ICONS`]: with that alone,
+/// one program registering icon after icon fills the tray, and every program
+/// started after it is refused. A program shows one icon, or a few -- a
+/// status, a second for a download in progress -- and 32 leaves a program
+/// that hosts several indicators room to spare.
+///
+/// Counted per connection, which is what the compositor knows a client by.
+/// Replacing an icon a client already has is never refused; only a new id
+/// past the share is.
+pub const MAX_TRAY_ICONS_PER_CLIENT: u32 = 32;
+
 /// One icon in the tray.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayIcon {

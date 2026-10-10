@@ -1,0 +1,9 @@
+# ttml_regions.mp4: ttconv's reading of its samples, said as videocodec says it (generate_subtitle_fixtures.py).
+cue 1000000000 2000000000 7
+text 0000 - "in a"
+cue 1000000000 2000000000 3
+text 0000 - "in b"
+cue 1000000000 2000000000 4
+text 0000 - "in c, the middle of it"
+cue 3000000000 4000000000 3
+text 0000 - "a span's own region"

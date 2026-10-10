@@ -3,3 +3,13 @@ name = "init"
 version = "0.1.0"
 edition = "2024"
 description = "First userspace process — boots the system to a shell prompt"
+
+# The program has no tests of its own: what can be tested on a host is the
+# library's (src/lib.rs), and the program -- no_std, no_main, with its own
+# panic handler -- cannot be built under the test harness, which brings std's
+# ("duplicate lang item `panic_impl`"). So `cargo test` runs the library's
+# tests and leaves the program to `cargo build`, which the image uses.
+[[bin]]
+name = "init"
+path = "src/main.rs"
+test = false

@@ -18,7 +18,6 @@
 //! Integration:
 //!   → notifcenter (notification display pipeline)
 //!   → focusassist (DND mode overrides)
-//!   → appregistry (app metadata)
 //!   → soundmixer (notification sounds)
 //! ```
 

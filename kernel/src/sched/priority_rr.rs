@@ -315,12 +315,29 @@ impl PriorityRoundRobin {
     /// **O(1)**: bitmap scan + dequeue from head.
     #[must_use]
     pub fn pick_next(&mut self) -> Option<TaskId> {
+        self.pick_next_masked(false)
+    }
+
+    /// [`pick_next`](Self::pick_next), passing over the real-time band
+    /// (levels below [`super::task::RT_LEVELS`]) when `avoid_band` and there
+    /// is anything below it to run: the real-time throttle's pick, which
+    /// gives ordinary work its share of a CPU that real-time work would
+    /// otherwise keep. With nothing ordinary queued the band is picked from
+    /// after all -- the throttle never idles a CPU that has work.
+    #[must_use]
+    pub fn pick_next_masked(&mut self, avoid_band: bool) -> Option<TaskId> {
         if self.bitmap == 0 {
             return None;
         }
+        let band = (1u32 << super::task::RT_LEVELS).wrapping_sub(1);
+        let pickable = if avoid_band && self.bitmap & !band != 0 {
+            self.bitmap & !band
+        } else {
+            self.bitmap
+        };
 
         // Highest priority = lowest set bit.
-        let level = self.bitmap.trailing_zeros() as usize;
+        let level = pickable.trailing_zeros() as usize;
 
         // Pop the front task from this priority's queue.
         let queue = self.queues.get_mut(level)?;
@@ -420,10 +437,32 @@ impl PriorityRoundRobin {
     /// Decrements the remaining time slice.  Returns `true` if the
     /// time slice has expired and a reschedule is needed.
     pub fn tick(&mut self) -> bool {
+        // `u32::MAX` is no slice at all: a `SCHED_FIFO` task's
+        // (`sched::note_dispatch`), which runs until it blocks, yields or is
+        // preempted.
+        if self.current_remaining == u32::MAX {
+            return false;
+        }
         if self.current_remaining > 0 {
             self.current_remaining = self.current_remaining.saturating_sub(1);
         }
         self.current_remaining == 0
+    }
+
+    /// The highest-priority level with a task queued, if any.
+    #[must_use]
+    pub fn top_level(&self) -> Option<u8> {
+        #[allow(clippy::cast_possible_truncation)]
+        (self.bitmap != 0).then(|| self.bitmap.trailing_zeros() as u8)
+    }
+
+    /// Whether anything ordinary is queued: a level at or below the
+    /// real-time band's floor, the idle level aside.
+    #[must_use]
+    pub fn has_ordinary_work(&self) -> bool {
+        let band = (1u32 << super::task::RT_LEVELS).wrapping_sub(1);
+        let idle_bit = 1u32 << super::task::IDLE_PRIORITY;
+        self.bitmap & !band & !idle_bit != 0
     }
 
     /// Check if any task is ready to run.
@@ -763,7 +802,28 @@ impl PerCpuScheduler {
     /// returns `None` and other CPUs might have work.
     #[must_use]
     pub fn pick_next_local(&self, cpu: usize) -> Option<super::task::TaskId> {
-        self.queues.get(cpu)?.lock().pick_next()
+        // A CPU whose real-time work has used its share of this period runs
+        // its ordinary work first (`sched::rt_throttled`).
+        let avoid_band = super::rt_throttled(cpu);
+        self.queues.get(cpu)?.lock().pick_next_masked(avoid_band)
+    }
+
+    /// The highest-priority level queued on `cpu`, without waiting for its
+    /// lock (`None` when it is held, or nothing is queued): for the timer
+    /// tick and the reschedule interrupt, which must not spin.
+    #[must_use]
+    pub fn try_top_level(&self, cpu: usize) -> Option<u8> {
+        self.queues.get(cpu)?.try_lock()?.top_level()
+    }
+
+    /// Whether `cpu` has ordinary work queued, without waiting for its lock
+    /// (`false` when it is held).
+    #[must_use]
+    pub fn try_has_ordinary_work(&self, cpu: usize) -> bool {
+        self.queues
+            .get(cpu)
+            .and_then(|q| q.try_lock())
+            .is_some_and(|q| q.has_ordinary_work())
     }
 
     /// Enqueue a task on the specified CPU's run queue.
@@ -1177,9 +1237,18 @@ impl PerCpuScheduler {
     /// rather than [`queue_length`](Self::queue_length).
     #[must_use]
     pub fn real_queue_length(&self, cpu: usize) -> usize {
-        self.queues.get(cpu).map_or(0, |m| {
-            Self::try_locked_irqs_off(m, |backend| backend.real_tasks()).unwrap_or(0)
-        })
+        self.try_real_queue_length(cpu).unwrap_or(0)
+    }
+
+    /// [`real_queue_length`](Self::real_queue_length), but `None` -- rather
+    /// than 0 -- when the CPU index is out of range or the queue's lock is
+    /// held: for a caller to whom "nothing queued" is a promise, not an
+    /// estimate (`sched::cpu_idle_for_wake`). `try_lock`, so ISR-safe.
+    #[must_use]
+    pub fn try_real_queue_length(&self, cpu: usize) -> Option<usize> {
+        self.queues
+            .get(cpu)
+            .and_then(|m| Self::try_locked_irqs_off(m, |backend| backend.real_tasks()))
     }
 
     /// Check if any *other* CPU has real work that could be stolen.

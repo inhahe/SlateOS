@@ -1010,7 +1010,7 @@ fn environment_settings(
 pub(crate) fn init_from_environment() {
     let get = |name: &core::ffi::CStr| -> Option<&'static [u8]> {
         // SAFETY: a C string; the answer is NULL or one of the environment's.
-        let v = unsafe { crate::environ::secure_getenv(name.as_ptr().cast()) };
+        let v = unsafe { crate::environ::secure_lookup(name.as_ptr().cast()) };
         // SAFETY: non-null, a C string that the environment keeps.
         (!v.is_null()).then(|| unsafe { core::ffi::CStr::from_ptr(v.cast()) }.to_bytes())
     };

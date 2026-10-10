@@ -1,0 +1,16 @@
+[package]
+name = "vorbis"
+version = "0.1.0"
+edition = "2024"
+description = "A Vorbis audio decoder: Tremor, Xiph's integer decoder, ported to Rust and held to it sample for sample."
+# A derivative of Tremor (and of libogg's bit reader): their BSD licence is in
+# `licenses/`, and every file translated from them says which of their files it
+# came from.
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -503,7 +503,7 @@ fn env(name: &[u8]) -> Option<&'static [u8]> {
     // SAFETY: `name` is NUL-terminated; the value is a NUL-terminated
     // string that lives as long as the environment.
     unsafe {
-        let v = crate::environ::secure_getenv(name.as_ptr());
+        let v = crate::environ::secure_lookup(name.as_ptr());
         if v.is_null() {
             return None;
         }
@@ -3343,7 +3343,7 @@ fn is_space(c: u8) -> bool {
 /// program run with privileges it was not started with.
 fn aliases_file() -> *const u8 {
     // SAFETY: a NUL-terminated name.
-    unsafe { crate::environ::secure_getenv(b"HOSTALIASES\0".as_ptr()) }
+    unsafe { crate::environ::secure_lookup(b"HOSTALIASES\0".as_ptr()) }
 }
 
 /// The alias for `name` in the `HOSTALIASES` file, unless `options` has

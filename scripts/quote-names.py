@@ -73,6 +73,7 @@ unit of review is a file; a crate-level count would hide a new violation in
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -119,6 +120,57 @@ NOT_A_NAME = {"msg", "e", "err", "error", "message", "reason"}
 # already in the tree.
 TEST_DIRS = ("tests", "benches")
 
+# ...and a module declared under `#[cfg(test)]` is test code from its first
+# line to its last, with nothing in its own file to say so. `#[cfg(test)] mod
+# tests;` sits in the parent, where `live_code` blanks it; the module's file --
+# `argp/tests.rs` beside `argp.rs` -- is read on its own, and was read as
+# production. Measured 2026-10-01: lane D's push of posix's argp was refused
+# for its test module spelling a key as the oracle's text does,
+# `format!("'{}'", c)`; the other such files in the tree were clean by luck.
+#
+# Found from the declarations, resolved as cargo resolves them, not by name: a
+# `test.rs` is not always test code (`coreutils/src/bin/test.rs` is the `test`
+# utility), and test code is not always called `tests`. A declaration this
+# misreads -- a crate root it does not know is one -- leaves its module read as
+# production, which is where the gate stood before.
+_TEST_MOD_DECL = re.compile(
+    r"^[ \t]*#\[cfg\(test\)\]\s*"
+    r"(?:(?:#\[[^\n]*\]|//[^\n]*)\s*)*"
+    r"(?:pub(?:\([^)\n]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+_PATH_ATTR = re.compile(r'#\[path\s*=\s*"(?P<path>[^"\n]+)"\s*\]')
+
+
+def _module_dir(rel: str) -> str:
+    """Where `mod x;` in the file `rel` looks for `x`: beside a crate root or a
+    `mod.rs`, and in the directory named for the file otherwise."""
+    parent, _, base = rel.rpartition("/")
+    if base in ("lib.rs", "main.rs", "mod.rs", "build.rs") or parent.endswith("/src/bin"):
+        return parent
+    return f"{parent}/{base[: -len('.rs')]}"
+
+
+def test_modules(sources: list[tuple[str, str | None]]) -> tuple[set[str], tuple[str, ...]]:
+    """The files of the modules `sources` declare under `#[cfg(test)]`, and
+    the directories holding those modules' own submodules, which are test code
+    too."""
+    files: set[str] = set()
+    dirs: list[str] = []
+    for rel, text in sources:
+        if text is None or "#[cfg(test)]" not in text:
+            continue
+        for decl in _TEST_MOD_DECL.finditer(text):
+            path = _PATH_ATTR.search(decl.group(0))
+            if path:
+                # Relative to the declaring file's own directory.
+                files.add(posixpath.normpath(f"{rel.rpartition('/')[0]}/{path['path']}"))
+                continue
+            base = f"{_module_dir(rel)}/{decl['name']}"
+            files.update((f"{base}.rs", f"{base}/mod.rs"))
+            dirs.append(f"{base}/")
+    return files, tuple(dirs)
+
 # Files whose hits are not defects, with the reason. This table records *why*
 # a file is exempt; the baseline records only *that* a site exists, which is
 # the wrong place for a judgement. Keep it short -- every entry is a hole.
@@ -160,6 +212,12 @@ IGNORE = {
     # one echo of raw input, upstream's `TZ="..." in date string`, is
     # double-quoted bytes and was never this pattern's to find.
     "userspace/coreutils/src/parse_datetime/mod.rs": "gnulib's --debug text; the quotes wrap formatted dates",
+    # ncurses' `comp_scan.c` texts, byte for byte, which `tic-diff.sh`
+    # compares against the reference `tic`'s: "Illegal character - '%s'" and
+    # its three siblings. What each quotes is ONE BYTE of the source as
+    # `unctrl` shows it -- `^J`, `~X`, or the byte itself where printable --
+    # so it can hold no newline, and no name reaches any of the four.
+    "userspace/terminfo/src/compile/scan.rs": "comp_scan.c's text; the quotes wrap unctrl() of one byte",
 }
 
 # The macros that build a message somebody will read.
@@ -974,30 +1032,37 @@ def survey_tree(tree: gittree.Tree) -> Survey:
     """
     found: dict[str, list[tuple[int, str, str]]] = {}
     scanned = 0
+    # Read first, judged second: whether a file is a test module is said by
+    # its parent, which the walk may reach after it (`test_modules`).
+    sources: list[tuple[str, str | None]] = []
     for top in ROOTS:
         for rel in tree.files_under(top):
             if not rel.endswith(".rs") or rel in IGNORE:
                 continue
             if any(part in TEST_DIRS for part in rel.split("/")):
                 continue
-            scanned += 1
-            text = _decode(tree.read_bytes(rel))
-            if text is None:
-                continue
-            # Test code is not a diagnostic. This gate was the only one of the
-            # eleven rustlex exists for that read `#[cfg(test)]` as production
-            # -- harmless while it saw only `eprintln!`, and not harmless the
-            # moment it saw `format!`: `userspace/oils` builds shell source in
-            # its fixtures (`format!("eval '{src}'")`), which is a shell test
-            # doing its job and would have entered the ledger as a defect
-            # nobody could ever fix.
-            #
-            # `live_code` BLANKS the test items to spaces rather than cutting
-            # at the first one, so the line numbers this reports still point at
-            # the line a reader will open.
-            hits = violations(live_code(text)[0])
-            if hits:
-                found[rel] = hits
+            sources.append((rel, _decode(tree.read_bytes(rel))))
+    test_files, test_dirs = test_modules(sources)
+    for rel, text in sources:
+        if rel in test_files or rel.startswith(test_dirs):
+            continue
+        scanned += 1
+        if text is None:
+            continue
+        # Test code is not a diagnostic. This gate was the only one of the
+        # eleven rustlex exists for that read `#[cfg(test)]` as production
+        # -- harmless while it saw only `eprintln!`, and not harmless the
+        # moment it saw `format!`: `userspace/oils` builds shell source in
+        # its fixtures (`format!("eval '{src}'")`), which is a shell test
+        # doing its job and would have entered the ledger as a defect
+        # nobody could ever fix.
+        #
+        # `live_code` BLANKS the test items to spaces rather than cutting
+        # at the first one, so the line numbers this reports still point at
+        # the line a reader will open.
+        hits = violations(live_code(text)[0])
+        if hits:
+            found[rel] = hits
     return Survey(found, scanned)
 
 
@@ -1992,6 +2057,44 @@ def selftest() -> int:
         checked += 1
         if skipped(rel) != want:
             failures.append(f"test-dir rule: {rel} skipped={not want}, wanted {want}")
+
+    # 16. A module declared under `#[cfg(test)]` is test code, and only one
+    #     that is: the attribute is in the parent, so the module's own file
+    #     carries no mark (`test_modules`). posix's `argp/tests.rs` was
+    #     refused for `format!("'{}'", c)` by the gate as it stood. Driven
+    #     through `survey`, the walk the push runs, on a tree of each kind.
+    hit = 'fn f() {\n    eprintln!("cut: \'{p}\': no such file");\n}\n'
+    tree = {
+        # A crate root's test module, one under `#[path]`, and an ordinary one.
+        "src/lib.rs": "#[cfg(test)]\nmod tests;\n#[cfg(test)]\n#[path = \"oracle_cases.rs\"]\n"
+                      "mod cases;\nmod real;\nmod other;\n",
+        "src/tests.rs": hit + "mod helper;\n",
+        "src/tests/helper.rs": hit,
+        "src/oracle_cases.rs": hit,
+        # A module's own test module, `pub(crate)` and with a doc comment.
+        "src/real.rs": "/// Its tests.\n#[cfg(test)]\npub(crate) mod tests;\n" + hit,
+        "src/real/tests.rs": hit,
+        # Not test code: a binary that happens to be called `test`, and a
+        # `tests.rs` that only prose declares.
+        "src/bin/test.rs": hit,
+        "src/other.rs": "/// Unlike `#[cfg(test)] mod tests;`, this one is not gated.\nmod tests;\n",
+        "src/other/tests.rs": hit,
+    }
+    with tempfile.TemporaryDirectory() as td:
+        for rel, text in tree.items():
+            path = Path(td) / "userspace" / "probe" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8", newline="")
+        seen = survey(Path(td))
+    want = {"userspace/probe/src/real.rs", "userspace/probe/src/bin/test.rs",
+            "userspace/probe/src/other/tests.rs"}
+    checked += 1
+    if set(seen.found) != want:
+        failures.append(f"test modules: found {sorted(seen.found)}, wanted {sorted(want)}")
+    # Judged: lib.rs, real.rs, bin/test.rs, other.rs and other/tests.rs.
+    checked += 1
+    if seen.scanned != 5:
+        failures.append(f"test modules: scanned {seen.scanned} file(s), wanted the 5 not under test")
 
     for f in failures:
         print(f"selftest FAIL {f}")

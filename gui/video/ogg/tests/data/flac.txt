@@ -1,0 +1,8 @@
+# flac.oga: what the Ogg demuxer makes of it (generate_fixtures.py).
+stream 0 flac 1/44100
+packet 0 N/A 0 4122 146 _ d93341d9404b3a3ec239944057125114 0 0 -
+packet 0 N/A 0 3529 146 _ 8c314d6ea0711ab0264746536ff9c596 0 0 -
+packet 0 N/A 0 3736 146 _ d504916dec9980c81b0edb0d593272aa 0 0 -
+packet 0 N/A 0 3866 146 _ 8ed018b1544f153442d67106381290e9 0 0 -
+packet 0 N/A 0 4197 146 _ f9545b140d37ecc750b7c81cd81755fc 0 0 -
+packet 0 N/A 0 809 146 _ 0f59e4b5d6c51c1fc670c7d0b886b451 0 0 -

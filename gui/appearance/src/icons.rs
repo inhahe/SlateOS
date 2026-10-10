@@ -774,7 +774,7 @@ fn read_icon(path: &Path) -> Option<String> {
 /// whole icon faded by `color`'s alpha, so a translucent colour draws a
 /// translucent icon (the ghost of a dragged icon, say) whatever colours the
 /// icon's own shapes are in.
-fn render_svg(svg: &str, size: u32, color: Color) -> Option<Icon> {
+pub(crate) fn render_svg(svg: &str, size: u32, color: Color) -> Option<Icon> {
     let hex = format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
     let tinted = svg
         .replace("currentColor", &hex)

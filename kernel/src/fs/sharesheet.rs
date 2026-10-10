@@ -14,7 +14,6 @@
 //!     → dispatches to chosen target
 //!
 //! Integration:
-//!   → appregistry (registered apps)
 //!   → contextmenu (share menu item)
 //!   → clipboard (copy-to-clipboard target)
 //!   → fileshare (network share target)

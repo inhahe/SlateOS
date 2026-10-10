@@ -1,0 +1,6043 @@
+glibc 2.39 C.UTF-8
+class 0 8 8
+class 9 9 20c
+class a d 208
+class e 1f 8
+class 20 20 284
+class 21 2f 1a0
+class 30 39 8b1
+class 3a 40 1a0
+class 41 46 ca3
+class 47 5a 4a3
+class 5b 60 1a0
+class 61 66 8e3
+class 67 7a e3
+class 7b 7e 1a0
+class 7f 9f 8
+class a0 a9 1a0
+class aa aa e3
+class ab b4 1a0
+class b5 b5 e3
+class b6 b9 1a0
+class ba ba e3
+class bb bf 1a0
+class c0 d6 4a3
+class d7 d7 1a0
+class d8 de 4a3
+class df f6 e3
+class f7 f7 1a0
+class f8 ff e3
+class 100 100 4a3
+class 101 101 e3
+class 102 102 4a3
+class 103 103 e3
+class 104 104 4a3
+class 105 105 e3
+class 106 106 4a3
+class 107 107 e3
+class 108 108 4a3
+class 109 109 e3
+class 10a 10a 4a3
+class 10b 10b e3
+class 10c 10c 4a3
+class 10d 10d e3
+class 10e 10e 4a3
+class 10f 10f e3
+class 110 110 4a3
+class 111 111 e3
+class 112 112 4a3
+class 113 113 e3
+class 114 114 4a3
+class 115 115 e3
+class 116 116 4a3
+class 117 117 e3
+class 118 118 4a3
+class 119 119 e3
+class 11a 11a 4a3
+class 11b 11b e3
+class 11c 11c 4a3
+class 11d 11d e3
+class 11e 11e 4a3
+class 11f 11f e3
+class 120 120 4a3
+class 121 121 e3
+class 122 122 4a3
+class 123 123 e3
+class 124 124 4a3
+class 125 125 e3
+class 126 126 4a3
+class 127 127 e3
+class 128 128 4a3
+class 129 129 e3
+class 12a 12a 4a3
+class 12b 12b e3
+class 12c 12c 4a3
+class 12d 12d e3
+class 12e 12e 4a3
+class 12f 12f e3
+class 130 130 4a3
+class 131 131 e3
+class 132 132 4a3
+class 133 133 e3
+class 134 134 4a3
+class 135 135 e3
+class 136 136 4a3
+class 137 138 e3
+class 139 139 4a3
+class 13a 13a e3
+class 13b 13b 4a3
+class 13c 13c e3
+class 13d 13d 4a3
+class 13e 13e e3
+class 13f 13f 4a3
+class 140 140 e3
+class 141 141 4a3
+class 142 142 e3
+class 143 143 4a3
+class 144 144 e3
+class 145 145 4a3
+class 146 146 e3
+class 147 147 4a3
+class 148 149 e3
+class 14a 14a 4a3
+class 14b 14b e3
+class 14c 14c 4a3
+class 14d 14d e3
+class 14e 14e 4a3
+class 14f 14f e3
+class 150 150 4a3
+class 151 151 e3
+class 152 152 4a3
+class 153 153 e3
+class 154 154 4a3
+class 155 155 e3
+class 156 156 4a3
+class 157 157 e3
+class 158 158 4a3
+class 159 159 e3
+class 15a 15a 4a3
+class 15b 15b e3
+class 15c 15c 4a3
+class 15d 15d e3
+class 15e 15e 4a3
+class 15f 15f e3
+class 160 160 4a3
+class 161 161 e3
+class 162 162 4a3
+class 163 163 e3
+class 164 164 4a3
+class 165 165 e3
+class 166 166 4a3
+class 167 167 e3
+class 168 168 4a3
+class 169 169 e3
+class 16a 16a 4a3
+class 16b 16b e3
+class 16c 16c 4a3
+class 16d 16d e3
+class 16e 16e 4a3
+class 16f 16f e3
+class 170 170 4a3
+class 171 171 e3
+class 172 172 4a3
+class 173 173 e3
+class 174 174 4a3
+class 175 175 e3
+class 176 176 4a3
+class 177 177 e3
+class 178 179 4a3
+class 17a 17a e3
+class 17b 17b 4a3
+class 17c 17c e3
+class 17d 17d 4a3
+class 17e 180 e3
+class 181 182 4a3
+class 183 183 e3
+class 184 184 4a3
+class 185 185 e3
+class 186 187 4a3
+class 188 188 e3
+class 189 18b 4a3
+class 18c 18d e3
+class 18e 191 4a3
+class 192 192 e3
+class 193 194 4a3
+class 195 195 e3
+class 196 198 4a3
+class 199 19b e3
+class 19c 19d 4a3
+class 19e 19e e3
+class 19f 1a0 4a3
+class 1a1 1a1 e3
+class 1a2 1a2 4a3
+class 1a3 1a3 e3
+class 1a4 1a4 4a3
+class 1a5 1a5 e3
+class 1a6 1a7 4a3
+class 1a8 1a8 e3
+class 1a9 1a9 4a3
+class 1aa 1ab e3
+class 1ac 1ac 4a3
+class 1ad 1ad e3
+class 1ae 1af 4a3
+class 1b0 1b0 e3
+class 1b1 1b3 4a3
+class 1b4 1b4 e3
+class 1b5 1b5 4a3
+class 1b6 1b6 e3
+class 1b7 1b8 4a3
+class 1b9 1ba e3
+class 1bb 1bb a3
+class 1bc 1bc 4a3
+class 1bd 1bf e3
+class 1c0 1c3 a3
+class 1c4 1c4 4a3
+class 1c5 1c5 4e3
+class 1c6 1c6 e3
+class 1c7 1c7 4a3
+class 1c8 1c8 4e3
+class 1c9 1c9 e3
+class 1ca 1ca 4a3
+class 1cb 1cb 4e3
+class 1cc 1cc e3
+class 1cd 1cd 4a3
+class 1ce 1ce e3
+class 1cf 1cf 4a3
+class 1d0 1d0 e3
+class 1d1 1d1 4a3
+class 1d2 1d2 e3
+class 1d3 1d3 4a3
+class 1d4 1d4 e3
+class 1d5 1d5 4a3
+class 1d6 1d6 e3
+class 1d7 1d7 4a3
+class 1d8 1d8 e3
+class 1d9 1d9 4a3
+class 1da 1da e3
+class 1db 1db 4a3
+class 1dc 1dd e3
+class 1de 1de 4a3
+class 1df 1df e3
+class 1e0 1e0 4a3
+class 1e1 1e1 e3
+class 1e2 1e2 4a3
+class 1e3 1e3 e3
+class 1e4 1e4 4a3
+class 1e5 1e5 e3
+class 1e6 1e6 4a3
+class 1e7 1e7 e3
+class 1e8 1e8 4a3
+class 1e9 1e9 e3
+class 1ea 1ea 4a3
+class 1eb 1eb e3
+class 1ec 1ec 4a3
+class 1ed 1ed e3
+class 1ee 1ee 4a3
+class 1ef 1f0 e3
+class 1f1 1f1 4a3
+class 1f2 1f2 4e3
+class 1f3 1f3 e3
+class 1f4 1f4 4a3
+class 1f5 1f5 e3
+class 1f6 1f8 4a3
+class 1f9 1f9 e3
+class 1fa 1fa 4a3
+class 1fb 1fb e3
+class 1fc 1fc 4a3
+class 1fd 1fd e3
+class 1fe 1fe 4a3
+class 1ff 1ff e3
+class 200 200 4a3
+class 201 201 e3
+class 202 202 4a3
+class 203 203 e3
+class 204 204 4a3
+class 205 205 e3
+class 206 206 4a3
+class 207 207 e3
+class 208 208 4a3
+class 209 209 e3
+class 20a 20a 4a3
+class 20b 20b e3
+class 20c 20c 4a3
+class 20d 20d e3
+class 20e 20e 4a3
+class 20f 20f e3
+class 210 210 4a3
+class 211 211 e3
+class 212 212 4a3
+class 213 213 e3
+class 214 214 4a3
+class 215 215 e3
+class 216 216 4a3
+class 217 217 e3
+class 218 218 4a3
+class 219 219 e3
+class 21a 21a 4a3
+class 21b 21b e3
+class 21c 21c 4a3
+class 21d 21d e3
+class 21e 21e 4a3
+class 21f 21f e3
+class 220 220 4a3
+class 221 221 e3
+class 222 222 4a3
+class 223 223 e3
+class 224 224 4a3
+class 225 225 e3
+class 226 226 4a3
+class 227 227 e3
+class 228 228 4a3
+class 229 229 e3
+class 22a 22a 4a3
+class 22b 22b e3
+class 22c 22c 4a3
+class 22d 22d e3
+class 22e 22e 4a3
+class 22f 22f e3
+class 230 230 4a3
+class 231 231 e3
+class 232 232 4a3
+class 233 239 e3
+class 23a 23b 4a3
+class 23c 23c e3
+class 23d 23e 4a3
+class 23f 240 e3
+class 241 241 4a3
+class 242 242 e3
+class 243 246 4a3
+class 247 247 e3
+class 248 248 4a3
+class 249 249 e3
+class 24a 24a 4a3
+class 24b 24b e3
+class 24c 24c 4a3
+class 24d 24d e3
+class 24e 24e 4a3
+class 24f 293 e3
+class 294 294 a3
+class 295 2b8 e3
+class 2b9 2bf a3
+class 2c0 2c1 e3
+class 2c2 2c5 1a0
+class 2c6 2d1 a3
+class 2d2 2df 1a0
+class 2e0 2e4 e3
+class 2e5 2eb 1a0
+class 2ec 2ec a3
+class 2ed 2ed 1a0
+class 2ee 2ee a3
+class 2ef 344 1a0
+class 345 345 e3
+class 346 36f 1a0
+class 370 370 4a3
+class 371 371 e3
+class 372 372 4a3
+class 373 373 e3
+class 374 374 a3
+class 375 375 1a0
+class 376 376 4a3
+class 377 377 e3
+class 378 379 0
+class 37a 37d e3
+class 37e 37e 1a0
+class 37f 37f 4a3
+class 380 383 0
+class 384 385 1a0
+class 386 386 4a3
+class 387 387 1a0
+class 388 38a 4a3
+class 38b 38b 0
+class 38c 38c 4a3
+class 38d 38d 0
+class 38e 38f 4a3
+class 390 390 e3
+class 391 3a1 4a3
+class 3a2 3a2 0
+class 3a3 3ab 4a3
+class 3ac 3ce e3
+class 3cf 3cf 4a3
+class 3d0 3d1 e3
+class 3d2 3d4 4a3
+class 3d5 3d7 e3
+class 3d8 3d8 4a3
+class 3d9 3d9 e3
+class 3da 3da 4a3
+class 3db 3db e3
+class 3dc 3dc 4a3
+class 3dd 3dd e3
+class 3de 3de 4a3
+class 3df 3df e3
+class 3e0 3e0 4a3
+class 3e1 3e1 e3
+class 3e2 3e2 4a3
+class 3e3 3e3 e3
+class 3e4 3e4 4a3
+class 3e5 3e5 e3
+class 3e6 3e6 4a3
+class 3e7 3e7 e3
+class 3e8 3e8 4a3
+class 3e9 3e9 e3
+class 3ea 3ea 4a3
+class 3eb 3eb e3
+class 3ec 3ec 4a3
+class 3ed 3ed e3
+class 3ee 3ee 4a3
+class 3ef 3f3 e3
+class 3f4 3f4 4a3
+class 3f5 3f5 e3
+class 3f6 3f6 1a0
+class 3f7 3f7 4a3
+class 3f8 3f8 e3
+class 3f9 3fa 4a3
+class 3fb 3fc e3
+class 3fd 42f 4a3
+class 430 45f e3
+class 460 460 4a3
+class 461 461 e3
+class 462 462 4a3
+class 463 463 e3
+class 464 464 4a3
+class 465 465 e3
+class 466 466 4a3
+class 467 467 e3
+class 468 468 4a3
+class 469 469 e3
+class 46a 46a 4a3
+class 46b 46b e3
+class 46c 46c 4a3
+class 46d 46d e3
+class 46e 46e 4a3
+class 46f 46f e3
+class 470 470 4a3
+class 471 471 e3
+class 472 472 4a3
+class 473 473 e3
+class 474 474 4a3
+class 475 475 e3
+class 476 476 4a3
+class 477 477 e3
+class 478 478 4a3
+class 479 479 e3
+class 47a 47a 4a3
+class 47b 47b e3
+class 47c 47c 4a3
+class 47d 47d e3
+class 47e 47e 4a3
+class 47f 47f e3
+class 480 480 4a3
+class 481 481 e3
+class 482 489 1a0
+class 48a 48a 4a3
+class 48b 48b e3
+class 48c 48c 4a3
+class 48d 48d e3
+class 48e 48e 4a3
+class 48f 48f e3
+class 490 490 4a3
+class 491 491 e3
+class 492 492 4a3
+class 493 493 e3
+class 494 494 4a3
+class 495 495 e3
+class 496 496 4a3
+class 497 497 e3
+class 498 498 4a3
+class 499 499 e3
+class 49a 49a 4a3
+class 49b 49b e3
+class 49c 49c 4a3
+class 49d 49d e3
+class 49e 49e 4a3
+class 49f 49f e3
+class 4a0 4a0 4a3
+class 4a1 4a1 e3
+class 4a2 4a2 4a3
+class 4a3 4a3 e3
+class 4a4 4a4 4a3
+class 4a5 4a5 e3
+class 4a6 4a6 4a3
+class 4a7 4a7 e3
+class 4a8 4a8 4a3
+class 4a9 4a9 e3
+class 4aa 4aa 4a3
+class 4ab 4ab e3
+class 4ac 4ac 4a3
+class 4ad 4ad e3
+class 4ae 4ae 4a3
+class 4af 4af e3
+class 4b0 4b0 4a3
+class 4b1 4b1 e3
+class 4b2 4b2 4a3
+class 4b3 4b3 e3
+class 4b4 4b4 4a3
+class 4b5 4b5 e3
+class 4b6 4b6 4a3
+class 4b7 4b7 e3
+class 4b8 4b8 4a3
+class 4b9 4b9 e3
+class 4ba 4ba 4a3
+class 4bb 4bb e3
+class 4bc 4bc 4a3
+class 4bd 4bd e3
+class 4be 4be 4a3
+class 4bf 4bf e3
+class 4c0 4c1 4a3
+class 4c2 4c2 e3
+class 4c3 4c3 4a3
+class 4c4 4c4 e3
+class 4c5 4c5 4a3
+class 4c6 4c6 e3
+class 4c7 4c7 4a3
+class 4c8 4c8 e3
+class 4c9 4c9 4a3
+class 4ca 4ca e3
+class 4cb 4cb 4a3
+class 4cc 4cc e3
+class 4cd 4cd 4a3
+class 4ce 4cf e3
+class 4d0 4d0 4a3
+class 4d1 4d1 e3
+class 4d2 4d2 4a3
+class 4d3 4d3 e3
+class 4d4 4d4 4a3
+class 4d5 4d5 e3
+class 4d6 4d6 4a3
+class 4d7 4d7 e3
+class 4d8 4d8 4a3
+class 4d9 4d9 e3
+class 4da 4da 4a3
+class 4db 4db e3
+class 4dc 4dc 4a3
+class 4dd 4dd e3
+class 4de 4de 4a3
+class 4df 4df e3
+class 4e0 4e0 4a3
+class 4e1 4e1 e3
+class 4e2 4e2 4a3
+class 4e3 4e3 e3
+class 4e4 4e4 4a3
+class 4e5 4e5 e3
+class 4e6 4e6 4a3
+class 4e7 4e7 e3
+class 4e8 4e8 4a3
+class 4e9 4e9 e3
+class 4ea 4ea 4a3
+class 4eb 4eb e3
+class 4ec 4ec 4a3
+class 4ed 4ed e3
+class 4ee 4ee 4a3
+class 4ef 4ef e3
+class 4f0 4f0 4a3
+class 4f1 4f1 e3
+class 4f2 4f2 4a3
+class 4f3 4f3 e3
+class 4f4 4f4 4a3
+class 4f5 4f5 e3
+class 4f6 4f6 4a3
+class 4f7 4f7 e3
+class 4f8 4f8 4a3
+class 4f9 4f9 e3
+class 4fa 4fa 4a3
+class 4fb 4fb e3
+class 4fc 4fc 4a3
+class 4fd 4fd e3
+class 4fe 4fe 4a3
+class 4ff 4ff e3
+class 500 500 4a3
+class 501 501 e3
+class 502 502 4a3
+class 503 503 e3
+class 504 504 4a3
+class 505 505 e3
+class 506 506 4a3
+class 507 507 e3
+class 508 508 4a3
+class 509 509 e3
+class 50a 50a 4a3
+class 50b 50b e3
+class 50c 50c 4a3
+class 50d 50d e3
+class 50e 50e 4a3
+class 50f 50f e3
+class 510 510 4a3
+class 511 511 e3
+class 512 512 4a3
+class 513 513 e3
+class 514 514 4a3
+class 515 515 e3
+class 516 516 4a3
+class 517 517 e3
+class 518 518 4a3
+class 519 519 e3
+class 51a 51a 4a3
+class 51b 51b e3
+class 51c 51c 4a3
+class 51d 51d e3
+class 51e 51e 4a3
+class 51f 51f e3
+class 520 520 4a3
+class 521 521 e3
+class 522 522 4a3
+class 523 523 e3
+class 524 524 4a3
+class 525 525 e3
+class 526 526 4a3
+class 527 527 e3
+class 528 528 4a3
+class 529 529 e3
+class 52a 52a 4a3
+class 52b 52b e3
+class 52c 52c 4a3
+class 52d 52d e3
+class 52e 52e 4a3
+class 52f 52f e3
+class 530 530 0
+class 531 556 4a3
+class 557 558 0
+class 559 559 a3
+class 55a 55f 1a0
+class 560 588 e3
+class 589 58a 1a0
+class 58b 58c 0
+class 58d 58f 1a0
+class 590 590 0
+class 591 5af 1a0
+class 5b0 5bd a3
+class 5be 5be 1a0
+class 5bf 5bf a3
+class 5c0 5c0 1a0
+class 5c1 5c2 a3
+class 5c3 5c3 1a0
+class 5c4 5c5 a3
+class 5c6 5c6 1a0
+class 5c7 5c7 a3
+class 5c8 5cf 0
+class 5d0 5ea a3
+class 5eb 5ee 0
+class 5ef 5f2 a3
+class 5f3 5f4 1a0
+class 5f5 5ff 0
+class 600 60f 1a0
+class 610 61a a3
+class 61b 61f 1a0
+class 620 657 a3
+class 658 658 1a0
+class 659 669 a3
+class 66a 66d 1a0
+class 66e 6d3 a3
+class 6d4 6d4 1a0
+class 6d5 6dc a3
+class 6dd 6e0 1a0
+class 6e1 6e8 a3
+class 6e9 6ec 1a0
+class 6ed 6fc a3
+class 6fd 6fe 1a0
+class 6ff 6ff a3
+class 700 70d 1a0
+class 70e 70e 0
+class 70f 70f 1a0
+class 710 73f a3
+class 740 74a 1a0
+class 74b 74c 0
+class 74d 7b1 a3
+class 7b2 7bf 0
+class 7c0 7ea a3
+class 7eb 7f3 1a0
+class 7f4 7f5 a3
+class 7f6 7f9 1a0
+class 7fa 7fa a3
+class 7fb 7fc 0
+class 7fd 7ff 1a0
+class 800 817 a3
+class 818 819 1a0
+class 81a 82c a3
+class 82d 82d 1a0
+class 82e 82f 0
+class 830 83e 1a0
+class 83f 83f 0
+class 840 858 a3
+class 859 85b 1a0
+class 85c 85d 0
+class 85e 85e 1a0
+class 85f 85f 0
+class 860 86a a3
+class 86b 86f 0
+class 870 887 a3
+class 888 888 1a0
+class 889 88e a3
+class 88f 88f 0
+class 890 891 1a0
+class 892 897 0
+class 898 89f 1a0
+class 8a0 8c9 a3
+class 8ca 8d3 1a0
+class 8d4 8df a3
+class 8e0 8e2 1a0
+class 8e3 8e9 a3
+class 8ea 8ef 1a0
+class 8f0 93b a3
+class 93c 93c 1a0
+class 93d 94c a3
+class 94d 94d 1a0
+class 94e 950 a3
+class 951 954 1a0
+class 955 963 a3
+class 964 965 1a0
+class 966 96f a3
+class 970 970 1a0
+class 971 983 a3
+class 984 984 0
+class 985 98c a3
+class 98d 98e 0
+class 98f 990 a3
+class 991 992 0
+class 993 9a8 a3
+class 9a9 9a9 0
+class 9aa 9b0 a3
+class 9b1 9b1 0
+class 9b2 9b2 a3
+class 9b3 9b5 0
+class 9b6 9b9 a3
+class 9ba 9bb 0
+class 9bc 9bc 1a0
+class 9bd 9c4 a3
+class 9c5 9c6 0
+class 9c7 9c8 a3
+class 9c9 9ca 0
+class 9cb 9cc a3
+class 9cd 9cd 1a0
+class 9ce 9ce a3
+class 9cf 9d6 0
+class 9d7 9d7 a3
+class 9d8 9db 0
+class 9dc 9dd a3
+class 9de 9de 0
+class 9df 9e3 a3
+class 9e4 9e5 0
+class 9e6 9f1 a3
+class 9f2 9fb 1a0
+class 9fc 9fc a3
+class 9fd 9fe 1a0
+class 9ff a00 0
+class a01 a03 a3
+class a04 a04 0
+class a05 a0a a3
+class a0b a0e 0
+class a0f a10 a3
+class a11 a12 0
+class a13 a28 a3
+class a29 a29 0
+class a2a a30 a3
+class a31 a31 0
+class a32 a33 a3
+class a34 a34 0
+class a35 a36 a3
+class a37 a37 0
+class a38 a39 a3
+class a3a a3b 0
+class a3c a3c 1a0
+class a3d a3d 0
+class a3e a42 a3
+class a43 a46 0
+class a47 a48 a3
+class a49 a4a 0
+class a4b a4c a3
+class a4d a4d 1a0
+class a4e a50 0
+class a51 a51 a3
+class a52 a58 0
+class a59 a5c a3
+class a5d a5d 0
+class a5e a5e a3
+class a5f a65 0
+class a66 a75 a3
+class a76 a76 1a0
+class a77 a80 0
+class a81 a83 a3
+class a84 a84 0
+class a85 a8d a3
+class a8e a8e 0
+class a8f a91 a3
+class a92 a92 0
+class a93 aa8 a3
+class aa9 aa9 0
+class aaa ab0 a3
+class ab1 ab1 0
+class ab2 ab3 a3
+class ab4 ab4 0
+class ab5 ab9 a3
+class aba abb 0
+class abc abc 1a0
+class abd ac5 a3
+class ac6 ac6 0
+class ac7 ac9 a3
+class aca aca 0
+class acb acc a3
+class acd acd 1a0
+class ace acf 0
+class ad0 ad0 a3
+class ad1 adf 0
+class ae0 ae3 a3
+class ae4 ae5 0
+class ae6 aef a3
+class af0 af1 1a0
+class af2 af8 0
+class af9 afc a3
+class afd aff 1a0
+class b00 b00 0
+class b01 b03 a3
+class b04 b04 0
+class b05 b0c a3
+class b0d b0e 0
+class b0f b10 a3
+class b11 b12 0
+class b13 b28 a3
+class b29 b29 0
+class b2a b30 a3
+class b31 b31 0
+class b32 b33 a3
+class b34 b34 0
+class b35 b39 a3
+class b3a b3b 0
+class b3c b3c 1a0
+class b3d b44 a3
+class b45 b46 0
+class b47 b48 a3
+class b49 b4a 0
+class b4b b4c a3
+class b4d b4d 1a0
+class b4e b54 0
+class b55 b55 1a0
+class b56 b57 a3
+class b58 b5b 0
+class b5c b5d a3
+class b5e b5e 0
+class b5f b63 a3
+class b64 b65 0
+class b66 b6f a3
+class b70 b70 1a0
+class b71 b71 a3
+class b72 b77 1a0
+class b78 b81 0
+class b82 b83 a3
+class b84 b84 0
+class b85 b8a a3
+class b8b b8d 0
+class b8e b90 a3
+class b91 b91 0
+class b92 b95 a3
+class b96 b98 0
+class b99 b9a a3
+class b9b b9b 0
+class b9c b9c a3
+class b9d b9d 0
+class b9e b9f a3
+class ba0 ba2 0
+class ba3 ba4 a3
+class ba5 ba7 0
+class ba8 baa a3
+class bab bad 0
+class bae bb9 a3
+class bba bbd 0
+class bbe bc2 a3
+class bc3 bc5 0
+class bc6 bc8 a3
+class bc9 bc9 0
+class bca bcc a3
+class bcd bcd 1a0
+class bce bcf 0
+class bd0 bd0 a3
+class bd1 bd6 0
+class bd7 bd7 a3
+class bd8 be5 0
+class be6 bef a3
+class bf0 bfa 1a0
+class bfb bff 0
+class c00 c0c a3
+class c0d c0d 0
+class c0e c10 a3
+class c11 c11 0
+class c12 c28 a3
+class c29 c29 0
+class c2a c39 a3
+class c3a c3b 0
+class c3c c3c 1a0
+class c3d c44 a3
+class c45 c45 0
+class c46 c48 a3
+class c49 c49 0
+class c4a c4c a3
+class c4d c4d 1a0
+class c4e c54 0
+class c55 c56 a3
+class c57 c57 0
+class c58 c5a a3
+class c5b c5c 0
+class c5d c5d a3
+class c5e c5f 0
+class c60 c63 a3
+class c64 c65 0
+class c66 c6f a3
+class c70 c76 0
+class c77 c7f 1a0
+class c80 c83 a3
+class c84 c84 1a0
+class c85 c8c a3
+class c8d c8d 0
+class c8e c90 a3
+class c91 c91 0
+class c92 ca8 a3
+class ca9 ca9 0
+class caa cb3 a3
+class cb4 cb4 0
+class cb5 cb9 a3
+class cba cbb 0
+class cbc cbc 1a0
+class cbd cc4 a3
+class cc5 cc5 0
+class cc6 cc8 a3
+class cc9 cc9 0
+class cca ccc a3
+class ccd ccd 1a0
+class cce cd4 0
+class cd5 cd6 a3
+class cd7 cdc 0
+class cdd cde a3
+class cdf cdf 0
+class ce0 ce3 a3
+class ce4 ce5 0
+class ce6 cef a3
+class cf0 cf0 0
+class cf1 cf3 a3
+class cf4 cff 0
+class d00 d0c a3
+class d0d d0d 0
+class d0e d10 a3
+class d11 d11 0
+class d12 d3a a3
+class d3b d3c 1a0
+class d3d d44 a3
+class d45 d45 0
+class d46 d48 a3
+class d49 d49 0
+class d4a d4c a3
+class d4d d4d 1a0
+class d4e d4e a3
+class d4f d4f 1a0
+class d50 d53 0
+class d54 d57 a3
+class d58 d5e 1a0
+class d5f d63 a3
+class d64 d65 0
+class d66 d6f a3
+class d70 d79 1a0
+class d7a d7f a3
+class d80 d80 0
+class d81 d83 a3
+class d84 d84 0
+class d85 d96 a3
+class d97 d99 0
+class d9a db1 a3
+class db2 db2 0
+class db3 dbb a3
+class dbc dbc 0
+class dbd dbd a3
+class dbe dbf 0
+class dc0 dc6 a3
+class dc7 dc9 0
+class dca dca 1a0
+class dcb dce 0
+class dcf dd4 a3
+class dd5 dd5 0
+class dd6 dd6 a3
+class dd7 dd7 0
+class dd8 ddf a3
+class de0 de5 0
+class de6 def a3
+class df0 df1 0
+class df2 df3 a3
+class df4 df4 1a0
+class df5 e00 0
+class e01 e3a a3
+class e3b e3e 0
+class e3f e3f 1a0
+class e40 e46 a3
+class e47 e4c 1a0
+class e4d e4d a3
+class e4e e4f 1a0
+class e50 e59 a3
+class e5a e5b 1a0
+class e5c e80 0
+class e81 e82 a3
+class e83 e83 0
+class e84 e84 a3
+class e85 e85 0
+class e86 e8a a3
+class e8b e8b 0
+class e8c ea3 a3
+class ea4 ea4 0
+class ea5 ea5 a3
+class ea6 ea6 0
+class ea7 eb9 a3
+class eba eba 1a0
+class ebb ebd a3
+class ebe ebf 0
+class ec0 ec4 a3
+class ec5 ec5 0
+class ec6 ec6 a3
+class ec7 ec7 0
+class ec8 ecc 1a0
+class ecd ecd a3
+class ece ece 1a0
+class ecf ecf 0
+class ed0 ed9 a3
+class eda edb 0
+class edc edf a3
+class ee0 eff 0
+class f00 f00 a3
+class f01 f1f 1a0
+class f20 f29 a3
+class f2a f3f 1a0
+class f40 f47 a3
+class f48 f48 0
+class f49 f6c a3
+class f6d f70 0
+class f71 f83 a3
+class f84 f87 1a0
+class f88 f97 a3
+class f98 f98 0
+class f99 fbc a3
+class fbd fbd 0
+class fbe fcc 1a0
+class fcd fcd 0
+class fce fda 1a0
+class fdb fff 0
+class 1000 1036 a3
+class 1037 1037 1a0
+class 1038 1038 a3
+class 1039 103a 1a0
+class 103b 1049 a3
+class 104a 104f 1a0
+class 1050 109d a3
+class 109e 109f 1a0
+class 10a0 10c5 4a3
+class 10c6 10c6 0
+class 10c7 10c7 4a3
+class 10c8 10cc 0
+class 10cd 10cd 4a3
+class 10ce 10cf 0
+class 10d0 10fa e3
+class 10fb 10fb 1a0
+class 10fc 10ff e3
+class 1100 1248 a3
+class 1249 1249 0
+class 124a 124d a3
+class 124e 124f 0
+class 1250 1256 a3
+class 1257 1257 0
+class 1258 1258 a3
+class 1259 1259 0
+class 125a 125d a3
+class 125e 125f 0
+class 1260 1288 a3
+class 1289 1289 0
+class 128a 128d a3
+class 128e 128f 0
+class 1290 12b0 a3
+class 12b1 12b1 0
+class 12b2 12b5 a3
+class 12b6 12b7 0
+class 12b8 12be a3
+class 12bf 12bf 0
+class 12c0 12c0 a3
+class 12c1 12c1 0
+class 12c2 12c5 a3
+class 12c6 12c7 0
+class 12c8 12d6 a3
+class 12d7 12d7 0
+class 12d8 1310 a3
+class 1311 1311 0
+class 1312 1315 a3
+class 1316 1317 0
+class 1318 135a a3
+class 135b 135c 0
+class 135d 137c 1a0
+class 137d 137f 0
+class 1380 138f a3
+class 1390 1399 1a0
+class 139a 139f 0
+class 13a0 13f5 4a3
+class 13f6 13f7 0
+class 13f8 13fd e3
+class 13fe 13ff 0
+class 1400 1400 1a0
+class 1401 166c a3
+class 166d 166e 1a0
+class 166f 167f a3
+class 1680 1680 284
+class 1681 169a a3
+class 169b 169c 1a0
+class 169d 169f 0
+class 16a0 16ea a3
+class 16eb 16ed 1a0
+class 16ee 16f8 a3
+class 16f9 16ff 0
+class 1700 1713 a3
+class 1714 1715 1a0
+class 1716 171e 0
+class 171f 1733 a3
+class 1734 1736 1a0
+class 1737 173f 0
+class 1740 1753 a3
+class 1754 175f 0
+class 1760 176c a3
+class 176d 176d 0
+class 176e 1770 a3
+class 1771 1771 0
+class 1772 1773 a3
+class 1774 177f 0
+class 1780 17b3 a3
+class 17b4 17b5 1a0
+class 17b6 17c8 a3
+class 17c9 17d6 1a0
+class 17d7 17d7 a3
+class 17d8 17db 1a0
+class 17dc 17dc a3
+class 17dd 17dd 1a0
+class 17de 17df 0
+class 17e0 17e9 a3
+class 17ea 17ef 0
+class 17f0 17f9 1a0
+class 17fa 17ff 0
+class 1800 180f 1a0
+class 1810 1819 a3
+class 181a 181f 0
+class 1820 1878 a3
+class 1879 187f 0
+class 1880 18aa a3
+class 18ab 18af 0
+class 18b0 18f5 a3
+class 18f6 18ff 0
+class 1900 191e a3
+class 191f 191f 0
+class 1920 192b a3
+class 192c 192f 0
+class 1930 1938 a3
+class 1939 193b 1a0
+class 193c 193f 0
+class 1940 1940 1a0
+class 1941 1943 0
+class 1944 1945 1a0
+class 1946 196d a3
+class 196e 196f 0
+class 1970 1974 a3
+class 1975 197f 0
+class 1980 19ab a3
+class 19ac 19af 0
+class 19b0 19c9 a3
+class 19ca 19cf 0
+class 19d0 19d9 a3
+class 19da 19da 1a0
+class 19db 19dd 0
+class 19de 19ff 1a0
+class 1a00 1a1b a3
+class 1a1c 1a1d 0
+class 1a1e 1a1f 1a0
+class 1a20 1a5e a3
+class 1a5f 1a5f 0
+class 1a60 1a60 1a0
+class 1a61 1a74 a3
+class 1a75 1a7c 1a0
+class 1a7d 1a7e 0
+class 1a7f 1a7f 1a0
+class 1a80 1a89 a3
+class 1a8a 1a8f 0
+class 1a90 1a99 a3
+class 1a9a 1a9f 0
+class 1aa0 1aa6 1a0
+class 1aa7 1aa7 a3
+class 1aa8 1aad 1a0
+class 1aae 1aaf 0
+class 1ab0 1abe 1a0
+class 1abf 1ac0 a3
+class 1ac1 1acb 1a0
+class 1acc 1ace a3
+class 1acf 1aff 0
+class 1b00 1b33 a3
+class 1b34 1b34 1a0
+class 1b35 1b43 a3
+class 1b44 1b44 1a0
+class 1b45 1b4c a3
+class 1b4d 1b4f 0
+class 1b50 1b59 a3
+class 1b5a 1b7e 1a0
+class 1b7f 1b7f 0
+class 1b80 1ba9 a3
+class 1baa 1bab 1a0
+class 1bac 1be5 a3
+class 1be6 1be6 1a0
+class 1be7 1bf1 a3
+class 1bf2 1bf3 1a0
+class 1bf4 1bfb 0
+class 1bfc 1bff 1a0
+class 1c00 1c36 a3
+class 1c37 1c37 1a0
+class 1c38 1c3a 0
+class 1c3b 1c3f 1a0
+class 1c40 1c49 a3
+class 1c4a 1c4c 0
+class 1c4d 1c7d a3
+class 1c7e 1c7f 1a0
+class 1c80 1c88 e3
+class 1c89 1c8f 0
+class 1c90 1cba 4a3
+class 1cbb 1cbc 0
+class 1cbd 1cbf 4a3
+class 1cc0 1cc7 1a0
+class 1cc8 1ccf 0
+class 1cd0 1ce8 1a0
+class 1ce9 1cec a3
+class 1ced 1ced 1a0
+class 1cee 1cf3 a3
+class 1cf4 1cf4 1a0
+class 1cf5 1cf6 a3
+class 1cf7 1cf9 1a0
+class 1cfa 1cfa a3
+class 1cfb 1cff 0
+class 1d00 1dbf e3
+class 1dc0 1de6 1a0
+class 1de7 1df4 a3
+class 1df5 1dff 1a0
+class 1e00 1e00 4a3
+class 1e01 1e01 e3
+class 1e02 1e02 4a3
+class 1e03 1e03 e3
+class 1e04 1e04 4a3
+class 1e05 1e05 e3
+class 1e06 1e06 4a3
+class 1e07 1e07 e3
+class 1e08 1e08 4a3
+class 1e09 1e09 e3
+class 1e0a 1e0a 4a3
+class 1e0b 1e0b e3
+class 1e0c 1e0c 4a3
+class 1e0d 1e0d e3
+class 1e0e 1e0e 4a3
+class 1e0f 1e0f e3
+class 1e10 1e10 4a3
+class 1e11 1e11 e3
+class 1e12 1e12 4a3
+class 1e13 1e13 e3
+class 1e14 1e14 4a3
+class 1e15 1e15 e3
+class 1e16 1e16 4a3
+class 1e17 1e17 e3
+class 1e18 1e18 4a3
+class 1e19 1e19 e3
+class 1e1a 1e1a 4a3
+class 1e1b 1e1b e3
+class 1e1c 1e1c 4a3
+class 1e1d 1e1d e3
+class 1e1e 1e1e 4a3
+class 1e1f 1e1f e3
+class 1e20 1e20 4a3
+class 1e21 1e21 e3
+class 1e22 1e22 4a3
+class 1e23 1e23 e3
+class 1e24 1e24 4a3
+class 1e25 1e25 e3
+class 1e26 1e26 4a3
+class 1e27 1e27 e3
+class 1e28 1e28 4a3
+class 1e29 1e29 e3
+class 1e2a 1e2a 4a3
+class 1e2b 1e2b e3
+class 1e2c 1e2c 4a3
+class 1e2d 1e2d e3
+class 1e2e 1e2e 4a3
+class 1e2f 1e2f e3
+class 1e30 1e30 4a3
+class 1e31 1e31 e3
+class 1e32 1e32 4a3
+class 1e33 1e33 e3
+class 1e34 1e34 4a3
+class 1e35 1e35 e3
+class 1e36 1e36 4a3
+class 1e37 1e37 e3
+class 1e38 1e38 4a3
+class 1e39 1e39 e3
+class 1e3a 1e3a 4a3
+class 1e3b 1e3b e3
+class 1e3c 1e3c 4a3
+class 1e3d 1e3d e3
+class 1e3e 1e3e 4a3
+class 1e3f 1e3f e3
+class 1e40 1e40 4a3
+class 1e41 1e41 e3
+class 1e42 1e42 4a3
+class 1e43 1e43 e3
+class 1e44 1e44 4a3
+class 1e45 1e45 e3
+class 1e46 1e46 4a3
+class 1e47 1e47 e3
+class 1e48 1e48 4a3
+class 1e49 1e49 e3
+class 1e4a 1e4a 4a3
+class 1e4b 1e4b e3
+class 1e4c 1e4c 4a3
+class 1e4d 1e4d e3
+class 1e4e 1e4e 4a3
+class 1e4f 1e4f e3
+class 1e50 1e50 4a3
+class 1e51 1e51 e3
+class 1e52 1e52 4a3
+class 1e53 1e53 e3
+class 1e54 1e54 4a3
+class 1e55 1e55 e3
+class 1e56 1e56 4a3
+class 1e57 1e57 e3
+class 1e58 1e58 4a3
+class 1e59 1e59 e3
+class 1e5a 1e5a 4a3
+class 1e5b 1e5b e3
+class 1e5c 1e5c 4a3
+class 1e5d 1e5d e3
+class 1e5e 1e5e 4a3
+class 1e5f 1e5f e3
+class 1e60 1e60 4a3
+class 1e61 1e61 e3
+class 1e62 1e62 4a3
+class 1e63 1e63 e3
+class 1e64 1e64 4a3
+class 1e65 1e65 e3
+class 1e66 1e66 4a3
+class 1e67 1e67 e3
+class 1e68 1e68 4a3
+class 1e69 1e69 e3
+class 1e6a 1e6a 4a3
+class 1e6b 1e6b e3
+class 1e6c 1e6c 4a3
+class 1e6d 1e6d e3
+class 1e6e 1e6e 4a3
+class 1e6f 1e6f e3
+class 1e70 1e70 4a3
+class 1e71 1e71 e3
+class 1e72 1e72 4a3
+class 1e73 1e73 e3
+class 1e74 1e74 4a3
+class 1e75 1e75 e3
+class 1e76 1e76 4a3
+class 1e77 1e77 e3
+class 1e78 1e78 4a3
+class 1e79 1e79 e3
+class 1e7a 1e7a 4a3
+class 1e7b 1e7b e3
+class 1e7c 1e7c 4a3
+class 1e7d 1e7d e3
+class 1e7e 1e7e 4a3
+class 1e7f 1e7f e3
+class 1e80 1e80 4a3
+class 1e81 1e81 e3
+class 1e82 1e82 4a3
+class 1e83 1e83 e3
+class 1e84 1e84 4a3
+class 1e85 1e85 e3
+class 1e86 1e86 4a3
+class 1e87 1e87 e3
+class 1e88 1e88 4a3
+class 1e89 1e89 e3
+class 1e8a 1e8a 4a3
+class 1e8b 1e8b e3
+class 1e8c 1e8c 4a3
+class 1e8d 1e8d e3
+class 1e8e 1e8e 4a3
+class 1e8f 1e8f e3
+class 1e90 1e90 4a3
+class 1e91 1e91 e3
+class 1e92 1e92 4a3
+class 1e93 1e93 e3
+class 1e94 1e94 4a3
+class 1e95 1e9d e3
+class 1e9e 1e9e 4a3
+class 1e9f 1e9f e3
+class 1ea0 1ea0 4a3
+class 1ea1 1ea1 e3
+class 1ea2 1ea2 4a3
+class 1ea3 1ea3 e3
+class 1ea4 1ea4 4a3
+class 1ea5 1ea5 e3
+class 1ea6 1ea6 4a3
+class 1ea7 1ea7 e3
+class 1ea8 1ea8 4a3
+class 1ea9 1ea9 e3
+class 1eaa 1eaa 4a3
+class 1eab 1eab e3
+class 1eac 1eac 4a3
+class 1ead 1ead e3
+class 1eae 1eae 4a3
+class 1eaf 1eaf e3
+class 1eb0 1eb0 4a3
+class 1eb1 1eb1 e3
+class 1eb2 1eb2 4a3
+class 1eb3 1eb3 e3
+class 1eb4 1eb4 4a3
+class 1eb5 1eb5 e3
+class 1eb6 1eb6 4a3
+class 1eb7 1eb7 e3
+class 1eb8 1eb8 4a3
+class 1eb9 1eb9 e3
+class 1eba 1eba 4a3
+class 1ebb 1ebb e3
+class 1ebc 1ebc 4a3
+class 1ebd 1ebd e3
+class 1ebe 1ebe 4a3
+class 1ebf 1ebf e3
+class 1ec0 1ec0 4a3
+class 1ec1 1ec1 e3
+class 1ec2 1ec2 4a3
+class 1ec3 1ec3 e3
+class 1ec4 1ec4 4a3
+class 1ec5 1ec5 e3
+class 1ec6 1ec6 4a3
+class 1ec7 1ec7 e3
+class 1ec8 1ec8 4a3
+class 1ec9 1ec9 e3
+class 1eca 1eca 4a3
+class 1ecb 1ecb e3
+class 1ecc 1ecc 4a3
+class 1ecd 1ecd e3
+class 1ece 1ece 4a3
+class 1ecf 1ecf e3
+class 1ed0 1ed0 4a3
+class 1ed1 1ed1 e3
+class 1ed2 1ed2 4a3
+class 1ed3 1ed3 e3
+class 1ed4 1ed4 4a3
+class 1ed5 1ed5 e3
+class 1ed6 1ed6 4a3
+class 1ed7 1ed7 e3
+class 1ed8 1ed8 4a3
+class 1ed9 1ed9 e3
+class 1eda 1eda 4a3
+class 1edb 1edb e3
+class 1edc 1edc 4a3
+class 1edd 1edd e3
+class 1ede 1ede 4a3
+class 1edf 1edf e3
+class 1ee0 1ee0 4a3
+class 1ee1 1ee1 e3
+class 1ee2 1ee2 4a3
+class 1ee3 1ee3 e3
+class 1ee4 1ee4 4a3
+class 1ee5 1ee5 e3
+class 1ee6 1ee6 4a3
+class 1ee7 1ee7 e3
+class 1ee8 1ee8 4a3
+class 1ee9 1ee9 e3
+class 1eea 1eea 4a3
+class 1eeb 1eeb e3
+class 1eec 1eec 4a3
+class 1eed 1eed e3
+class 1eee 1eee 4a3
+class 1eef 1eef e3
+class 1ef0 1ef0 4a3
+class 1ef1 1ef1 e3
+class 1ef2 1ef2 4a3
+class 1ef3 1ef3 e3
+class 1ef4 1ef4 4a3
+class 1ef5 1ef5 e3
+class 1ef6 1ef6 4a3
+class 1ef7 1ef7 e3
+class 1ef8 1ef8 4a3
+class 1ef9 1ef9 e3
+class 1efa 1efa 4a3
+class 1efb 1efb e3
+class 1efc 1efc 4a3
+class 1efd 1efd e3
+class 1efe 1efe 4a3
+class 1eff 1f07 e3
+class 1f08 1f0f 4a3
+class 1f10 1f15 e3
+class 1f16 1f17 0
+class 1f18 1f1d 4a3
+class 1f1e 1f1f 0
+class 1f20 1f27 e3
+class 1f28 1f2f 4a3
+class 1f30 1f37 e3
+class 1f38 1f3f 4a3
+class 1f40 1f45 e3
+class 1f46 1f47 0
+class 1f48 1f4d 4a3
+class 1f4e 1f4f 0
+class 1f50 1f57 e3
+class 1f58 1f58 0
+class 1f59 1f59 4a3
+class 1f5a 1f5a 0
+class 1f5b 1f5b 4a3
+class 1f5c 1f5c 0
+class 1f5d 1f5d 4a3
+class 1f5e 1f5e 0
+class 1f5f 1f5f 4a3
+class 1f60 1f67 e3
+class 1f68 1f6f 4a3
+class 1f70 1f7d e3
+class 1f7e 1f7f 0
+class 1f80 1f87 e3
+class 1f88 1f8f 4a3
+class 1f90 1f97 e3
+class 1f98 1f9f 4a3
+class 1fa0 1fa7 e3
+class 1fa8 1faf 4a3
+class 1fb0 1fb4 e3
+class 1fb5 1fb5 0
+class 1fb6 1fb7 e3
+class 1fb8 1fbc 4a3
+class 1fbd 1fbd 1a0
+class 1fbe 1fbe e3
+class 1fbf 1fc1 1a0
+class 1fc2 1fc4 e3
+class 1fc5 1fc5 0
+class 1fc6 1fc7 e3
+class 1fc8 1fcc 4a3
+class 1fcd 1fcf 1a0
+class 1fd0 1fd3 e3
+class 1fd4 1fd5 0
+class 1fd6 1fd7 e3
+class 1fd8 1fdb 4a3
+class 1fdc 1fdc 0
+class 1fdd 1fdf 1a0
+class 1fe0 1fe7 e3
+class 1fe8 1fec 4a3
+class 1fed 1fef 1a0
+class 1ff0 1ff1 0
+class 1ff2 1ff4 e3
+class 1ff5 1ff5 0
+class 1ff6 1ff7 e3
+class 1ff8 1ffc 4a3
+class 1ffd 1ffe 1a0
+class 1fff 1fff 0
+class 2000 2006 284
+class 2007 2007 1a0
+class 2008 200a 284
+class 200b 2027 1a0
+class 2028 2029 208
+class 202a 205e 1a0
+class 205f 205f 284
+class 2060 2064 1a0
+class 2065 2065 0
+class 2066 2070 1a0
+class 2071 2071 e3
+class 2072 2073 0
+class 2074 207e 1a0
+class 207f 207f e3
+class 2080 208e 1a0
+class 208f 208f 0
+class 2090 209c e3
+class 209d 209f 0
+class 20a0 20c0 1a0
+class 20c1 20cf 0
+class 20d0 20f0 1a0
+class 20f1 20ff 0
+class 2100 2101 1a0
+class 2102 2102 4a3
+class 2103 2106 1a0
+class 2107 2107 4a3
+class 2108 2109 1a0
+class 210a 210a e3
+class 210b 210d 4a3
+class 210e 210f e3
+class 2110 2112 4a3
+class 2113 2113 e3
+class 2114 2114 1a0
+class 2115 2115 4a3
+class 2116 2118 1a0
+class 2119 211d 4a3
+class 211e 2123 1a0
+class 2124 2124 4a3
+class 2125 2125 1a0
+class 2126 2126 4a3
+class 2127 2127 1a0
+class 2128 2128 4a3
+class 2129 2129 1a0
+class 212a 212d 4a3
+class 212e 212e 1a0
+class 212f 212f e3
+class 2130 2133 4a3
+class 2134 2134 e3
+class 2135 2138 a3
+class 2139 2139 e3
+class 213a 213b 1a0
+class 213c 213d e3
+class 213e 213f 4a3
+class 2140 2144 1a0
+class 2145 2145 4a3
+class 2146 2149 e3
+class 214a 214d 1a0
+class 214e 214e e3
+class 214f 215f 1a0
+class 2160 216f 4a3
+class 2170 217f e3
+class 2180 2182 a3
+class 2183 2183 4a3
+class 2184 2184 e3
+class 2185 2188 a3
+class 2189 218b 1a0
+class 218c 218f 0
+class 2190 2426 1a0
+class 2427 243f 0
+class 2440 244a 1a0
+class 244b 245f 0
+class 2460 24b5 1a0
+class 24b6 24cf 4a3
+class 24d0 24e9 e3
+class 24ea 2b73 1a0
+class 2b74 2b75 0
+class 2b76 2b95 1a0
+class 2b96 2b96 0
+class 2b97 2bff 1a0
+class 2c00 2c2f 4a3
+class 2c30 2c5f e3
+class 2c60 2c60 4a3
+class 2c61 2c61 e3
+class 2c62 2c64 4a3
+class 2c65 2c66 e3
+class 2c67 2c67 4a3
+class 2c68 2c68 e3
+class 2c69 2c69 4a3
+class 2c6a 2c6a e3
+class 2c6b 2c6b 4a3
+class 2c6c 2c6c e3
+class 2c6d 2c70 4a3
+class 2c71 2c71 e3
+class 2c72 2c72 4a3
+class 2c73 2c74 e3
+class 2c75 2c75 4a3
+class 2c76 2c7d e3
+class 2c7e 2c80 4a3
+class 2c81 2c81 e3
+class 2c82 2c82 4a3
+class 2c83 2c83 e3
+class 2c84 2c84 4a3
+class 2c85 2c85 e3
+class 2c86 2c86 4a3
+class 2c87 2c87 e3
+class 2c88 2c88 4a3
+class 2c89 2c89 e3
+class 2c8a 2c8a 4a3
+class 2c8b 2c8b e3
+class 2c8c 2c8c 4a3
+class 2c8d 2c8d e3
+class 2c8e 2c8e 4a3
+class 2c8f 2c8f e3
+class 2c90 2c90 4a3
+class 2c91 2c91 e3
+class 2c92 2c92 4a3
+class 2c93 2c93 e3
+class 2c94 2c94 4a3
+class 2c95 2c95 e3
+class 2c96 2c96 4a3
+class 2c97 2c97 e3
+class 2c98 2c98 4a3
+class 2c99 2c99 e3
+class 2c9a 2c9a 4a3
+class 2c9b 2c9b e3
+class 2c9c 2c9c 4a3
+class 2c9d 2c9d e3
+class 2c9e 2c9e 4a3
+class 2c9f 2c9f e3
+class 2ca0 2ca0 4a3
+class 2ca1 2ca1 e3
+class 2ca2 2ca2 4a3
+class 2ca3 2ca3 e3
+class 2ca4 2ca4 4a3
+class 2ca5 2ca5 e3
+class 2ca6 2ca6 4a3
+class 2ca7 2ca7 e3
+class 2ca8 2ca8 4a3
+class 2ca9 2ca9 e3
+class 2caa 2caa 4a3
+class 2cab 2cab e3
+class 2cac 2cac 4a3
+class 2cad 2cad e3
+class 2cae 2cae 4a3
+class 2caf 2caf e3
+class 2cb0 2cb0 4a3
+class 2cb1 2cb1 e3
+class 2cb2 2cb2 4a3
+class 2cb3 2cb3 e3
+class 2cb4 2cb4 4a3
+class 2cb5 2cb5 e3
+class 2cb6 2cb6 4a3
+class 2cb7 2cb7 e3
+class 2cb8 2cb8 4a3
+class 2cb9 2cb9 e3
+class 2cba 2cba 4a3
+class 2cbb 2cbb e3
+class 2cbc 2cbc 4a3
+class 2cbd 2cbd e3
+class 2cbe 2cbe 4a3
+class 2cbf 2cbf e3
+class 2cc0 2cc0 4a3
+class 2cc1 2cc1 e3
+class 2cc2 2cc2 4a3
+class 2cc3 2cc3 e3
+class 2cc4 2cc4 4a3
+class 2cc5 2cc5 e3
+class 2cc6 2cc6 4a3
+class 2cc7 2cc7 e3
+class 2cc8 2cc8 4a3
+class 2cc9 2cc9 e3
+class 2cca 2cca 4a3
+class 2ccb 2ccb e3
+class 2ccc 2ccc 4a3
+class 2ccd 2ccd e3
+class 2cce 2cce 4a3
+class 2ccf 2ccf e3
+class 2cd0 2cd0 4a3
+class 2cd1 2cd1 e3
+class 2cd2 2cd2 4a3
+class 2cd3 2cd3 e3
+class 2cd4 2cd4 4a3
+class 2cd5 2cd5 e3
+class 2cd6 2cd6 4a3
+class 2cd7 2cd7 e3
+class 2cd8 2cd8 4a3
+class 2cd9 2cd9 e3
+class 2cda 2cda 4a3
+class 2cdb 2cdb e3
+class 2cdc 2cdc 4a3
+class 2cdd 2cdd e3
+class 2cde 2cde 4a3
+class 2cdf 2cdf e3
+class 2ce0 2ce0 4a3
+class 2ce1 2ce1 e3
+class 2ce2 2ce2 4a3
+class 2ce3 2ce4 e3
+class 2ce5 2cea 1a0
+class 2ceb 2ceb 4a3
+class 2cec 2cec e3
+class 2ced 2ced 4a3
+class 2cee 2cee e3
+class 2cef 2cf1 1a0
+class 2cf2 2cf2 4a3
+class 2cf3 2cf3 e3
+class 2cf4 2cf8 0
+class 2cf9 2cff 1a0
+class 2d00 2d25 e3
+class 2d26 2d26 0
+class 2d27 2d27 e3
+class 2d28 2d2c 0
+class 2d2d 2d2d e3
+class 2d2e 2d2f 0
+class 2d30 2d67 a3
+class 2d68 2d6e 0
+class 2d6f 2d6f a3
+class 2d70 2d70 1a0
+class 2d71 2d7e 0
+class 2d7f 2d7f 1a0
+class 2d80 2d96 a3
+class 2d97 2d9f 0
+class 2da0 2da6 a3
+class 2da7 2da7 0
+class 2da8 2dae a3
+class 2daf 2daf 0
+class 2db0 2db6 a3
+class 2db7 2db7 0
+class 2db8 2dbe a3
+class 2dbf 2dbf 0
+class 2dc0 2dc6 a3
+class 2dc7 2dc7 0
+class 2dc8 2dce a3
+class 2dcf 2dcf 0
+class 2dd0 2dd6 a3
+class 2dd7 2dd7 0
+class 2dd8 2dde a3
+class 2ddf 2ddf 0
+class 2de0 2dff a3
+class 2e00 2e2e 1a0
+class 2e2f 2e2f a3
+class 2e30 2e5d 1a0
+class 2e5e 2e7f 0
+class 2e80 2e99 1a0
+class 2e9a 2e9a 0
+class 2e9b 2ef3 1a0
+class 2ef4 2eff 0
+class 2f00 2fd5 1a0
+class 2fd6 2fef 0
+class 2ff0 2fff 1a0
+class 3000 3000 284
+class 3001 3004 1a0
+class 3005 3007 a3
+class 3008 3020 1a0
+class 3021 3029 a3
+class 302a 3030 1a0
+class 3031 3035 a3
+class 3036 3037 1a0
+class 3038 303c a3
+class 303d 303f 1a0
+class 3040 3040 0
+class 3041 3096 a3
+class 3097 3098 0
+class 3099 309c 1a0
+class 309d 309f a3
+class 30a0 30a0 1a0
+class 30a1 30fa a3
+class 30fb 30fb 1a0
+class 30fc 30ff a3
+class 3100 3104 0
+class 3105 312f a3
+class 3130 3130 0
+class 3131 318e a3
+class 318f 318f 0
+class 3190 319f 1a0
+class 31a0 31bf a3
+class 31c0 31e3 1a0
+class 31e4 31ee 0
+class 31ef 31ef 1a0
+class 31f0 31ff a3
+class 3200 321e 1a0
+class 321f 321f 0
+class 3220 33ff 1a0
+class 3400 4dbf a3
+class 4dc0 4dff 1a0
+class 4e00 a48c a3
+class a48d a48f 0
+class a490 a4c6 1a0
+class a4c7 a4cf 0
+class a4d0 a4fd a3
+class a4fe a4ff 1a0
+class a500 a60c a3
+class a60d a60f 1a0
+class a610 a62b a3
+class a62c a63f 0
+class a640 a640 4a3
+class a641 a641 e3
+class a642 a642 4a3
+class a643 a643 e3
+class a644 a644 4a3
+class a645 a645 e3
+class a646 a646 4a3
+class a647 a647 e3
+class a648 a648 4a3
+class a649 a649 e3
+class a64a a64a 4a3
+class a64b a64b e3
+class a64c a64c 4a3
+class a64d a64d e3
+class a64e a64e 4a3
+class a64f a64f e3
+class a650 a650 4a3
+class a651 a651 e3
+class a652 a652 4a3
+class a653 a653 e3
+class a654 a654 4a3
+class a655 a655 e3
+class a656 a656 4a3
+class a657 a657 e3
+class a658 a658 4a3
+class a659 a659 e3
+class a65a a65a 4a3
+class a65b a65b e3
+class a65c a65c 4a3
+class a65d a65d e3
+class a65e a65e 4a3
+class a65f a65f e3
+class a660 a660 4a3
+class a661 a661 e3
+class a662 a662 4a3
+class a663 a663 e3
+class a664 a664 4a3
+class a665 a665 e3
+class a666 a666 4a3
+class a667 a667 e3
+class a668 a668 4a3
+class a669 a669 e3
+class a66a a66a 4a3
+class a66b a66b e3
+class a66c a66c 4a3
+class a66d a66d e3
+class a66e a66e a3
+class a66f a673 1a0
+class a674 a67b a3
+class a67c a67e 1a0
+class a67f a67f a3
+class a680 a680 4a3
+class a681 a681 e3
+class a682 a682 4a3
+class a683 a683 e3
+class a684 a684 4a3
+class a685 a685 e3
+class a686 a686 4a3
+class a687 a687 e3
+class a688 a688 4a3
+class a689 a689 e3
+class a68a a68a 4a3
+class a68b a68b e3
+class a68c a68c 4a3
+class a68d a68d e3
+class a68e a68e 4a3
+class a68f a68f e3
+class a690 a690 4a3
+class a691 a691 e3
+class a692 a692 4a3
+class a693 a693 e3
+class a694 a694 4a3
+class a695 a695 e3
+class a696 a696 4a3
+class a697 a697 e3
+class a698 a698 4a3
+class a699 a699 e3
+class a69a a69a 4a3
+class a69b a69d e3
+class a69e a6ef a3
+class a6f0 a6f7 1a0
+class a6f8 a6ff 0
+class a700 a716 1a0
+class a717 a71f a3
+class a720 a721 1a0
+class a722 a722 4a3
+class a723 a723 e3
+class a724 a724 4a3
+class a725 a725 e3
+class a726 a726 4a3
+class a727 a727 e3
+class a728 a728 4a3
+class a729 a729 e3
+class a72a a72a 4a3
+class a72b a72b e3
+class a72c a72c 4a3
+class a72d a72d e3
+class a72e a72e 4a3
+class a72f a731 e3
+class a732 a732 4a3
+class a733 a733 e3
+class a734 a734 4a3
+class a735 a735 e3
+class a736 a736 4a3
+class a737 a737 e3
+class a738 a738 4a3
+class a739 a739 e3
+class a73a a73a 4a3
+class a73b a73b e3
+class a73c a73c 4a3
+class a73d a73d e3
+class a73e a73e 4a3
+class a73f a73f e3
+class a740 a740 4a3
+class a741 a741 e3
+class a742 a742 4a3
+class a743 a743 e3
+class a744 a744 4a3
+class a745 a745 e3
+class a746 a746 4a3
+class a747 a747 e3
+class a748 a748 4a3
+class a749 a749 e3
+class a74a a74a 4a3
+class a74b a74b e3
+class a74c a74c 4a3
+class a74d a74d e3
+class a74e a74e 4a3
+class a74f a74f e3
+class a750 a750 4a3
+class a751 a751 e3
+class a752 a752 4a3
+class a753 a753 e3
+class a754 a754 4a3
+class a755 a755 e3
+class a756 a756 4a3
+class a757 a757 e3
+class a758 a758 4a3
+class a759 a759 e3
+class a75a a75a 4a3
+class a75b a75b e3
+class a75c a75c 4a3
+class a75d a75d e3
+class a75e a75e 4a3
+class a75f a75f e3
+class a760 a760 4a3
+class a761 a761 e3
+class a762 a762 4a3
+class a763 a763 e3
+class a764 a764 4a3
+class a765 a765 e3
+class a766 a766 4a3
+class a767 a767 e3
+class a768 a768 4a3
+class a769 a769 e3
+class a76a a76a 4a3
+class a76b a76b e3
+class a76c a76c 4a3
+class a76d a76d e3
+class a76e a76e 4a3
+class a76f a778 e3
+class a779 a779 4a3
+class a77a a77a e3
+class a77b a77b 4a3
+class a77c a77c e3
+class a77d a77e 4a3
+class a77f a77f e3
+class a780 a780 4a3
+class a781 a781 e3
+class a782 a782 4a3
+class a783 a783 e3
+class a784 a784 4a3
+class a785 a785 e3
+class a786 a786 4a3
+class a787 a787 e3
+class a788 a788 a3
+class a789 a78a 1a0
+class a78b a78b 4a3
+class a78c a78c e3
+class a78d a78d 4a3
+class a78e a78e e3
+class a78f a78f a3
+class a790 a790 4a3
+class a791 a791 e3
+class a792 a792 4a3
+class a793 a795 e3
+class a796 a796 4a3
+class a797 a797 e3
+class a798 a798 4a3
+class a799 a799 e3
+class a79a a79a 4a3
+class a79b a79b e3
+class a79c a79c 4a3
+class a79d a79d e3
+class a79e a79e 4a3
+class a79f a79f e3
+class a7a0 a7a0 4a3
+class a7a1 a7a1 e3
+class a7a2 a7a2 4a3
+class a7a3 a7a3 e3
+class a7a4 a7a4 4a3
+class a7a5 a7a5 e3
+class a7a6 a7a6 4a3
+class a7a7 a7a7 e3
+class a7a8 a7a8 4a3
+class a7a9 a7a9 e3
+class a7aa a7ae 4a3
+class a7af a7af e3
+class a7b0 a7b4 4a3
+class a7b5 a7b5 e3
+class a7b6 a7b6 4a3
+class a7b7 a7b7 e3
+class a7b8 a7b8 4a3
+class a7b9 a7b9 e3
+class a7ba a7ba 4a3
+class a7bb a7bb e3
+class a7bc a7bc 4a3
+class a7bd a7bd e3
+class a7be a7be 4a3
+class a7bf a7bf e3
+class a7c0 a7c0 4a3
+class a7c1 a7c1 e3
+class a7c2 a7c2 4a3
+class a7c3 a7c3 e3
+class a7c4 a7c7 4a3
+class a7c8 a7c8 e3
+class a7c9 a7c9 4a3
+class a7ca a7ca e3
+class a7cb a7cf 0
+class a7d0 a7d0 4a3
+class a7d1 a7d1 e3
+class a7d2 a7d2 0
+class a7d3 a7d3 e3
+class a7d4 a7d4 0
+class a7d5 a7d5 e3
+class a7d6 a7d6 4a3
+class a7d7 a7d7 e3
+class a7d8 a7d8 4a3
+class a7d9 a7d9 e3
+class a7da a7f1 0
+class a7f2 a7f4 e3
+class a7f5 a7f5 4a3
+class a7f6 a7f6 e3
+class a7f7 a7f7 a3
+class a7f8 a7fa e3
+class a7fb a805 a3
+class a806 a806 1a0
+class a807 a827 a3
+class a828 a82c 1a0
+class a82d a82f 0
+class a830 a839 1a0
+class a83a a83f 0
+class a840 a873 a3
+class a874 a877 1a0
+class a878 a87f 0
+class a880 a8c3 a3
+class a8c4 a8c4 1a0
+class a8c5 a8c5 a3
+class a8c6 a8cd 0
+class a8ce a8cf 1a0
+class a8d0 a8d9 a3
+class a8da a8df 0
+class a8e0 a8f1 1a0
+class a8f2 a8f7 a3
+class a8f8 a8fa 1a0
+class a8fb a8fb a3
+class a8fc a8fc 1a0
+class a8fd a92a a3
+class a92b a92f 1a0
+class a930 a952 a3
+class a953 a953 1a0
+class a954 a95e 0
+class a95f a95f 1a0
+class a960 a97c a3
+class a97d a97f 0
+class a980 a9b2 a3
+class a9b3 a9b3 1a0
+class a9b4 a9bf a3
+class a9c0 a9cd 1a0
+class a9ce a9ce 0
+class a9cf a9d9 a3
+class a9da a9dd 0
+class a9de a9df 1a0
+class a9e0 a9fe a3
+class a9ff a9ff 0
+class aa00 aa36 a3
+class aa37 aa3f 0
+class aa40 aa4d a3
+class aa4e aa4f 0
+class aa50 aa59 a3
+class aa5a aa5b 0
+class aa5c aa5f 1a0
+class aa60 aa76 a3
+class aa77 aa79 1a0
+class aa7a aabe a3
+class aabf aabf 1a0
+class aac0 aac0 a3
+class aac1 aac1 1a0
+class aac2 aac2 a3
+class aac3 aada 0
+class aadb aadd a3
+class aade aadf 1a0
+class aae0 aaef a3
+class aaf0 aaf1 1a0
+class aaf2 aaf5 a3
+class aaf6 aaf6 1a0
+class aaf7 ab00 0
+class ab01 ab06 a3
+class ab07 ab08 0
+class ab09 ab0e a3
+class ab0f ab10 0
+class ab11 ab16 a3
+class ab17 ab1f 0
+class ab20 ab26 a3
+class ab27 ab27 0
+class ab28 ab2e a3
+class ab2f ab2f 0
+class ab30 ab5a e3
+class ab5b ab5b 1a0
+class ab5c ab69 e3
+class ab6a ab6b 1a0
+class ab6c ab6f 0
+class ab70 abbf e3
+class abc0 abea a3
+class abeb abed 1a0
+class abee abef 0
+class abf0 abf9 a3
+class abfa abff 0
+class ac00 d7a3 a3
+class d7a4 d7af 0
+class d7b0 d7c6 a3
+class d7c7 d7ca 0
+class d7cb d7fb a3
+class d7fc dfff 0
+class e000 f8ff 1a0
+class f900 fa6d a3
+class fa6e fa6f 0
+class fa70 fad9 a3
+class fada faff 0
+class fb00 fb06 e3
+class fb07 fb12 0
+class fb13 fb17 e3
+class fb18 fb1c 0
+class fb1d fb28 a3
+class fb29 fb29 1a0
+class fb2a fb36 a3
+class fb37 fb37 0
+class fb38 fb3c a3
+class fb3d fb3d 0
+class fb3e fb3e a3
+class fb3f fb3f 0
+class fb40 fb41 a3
+class fb42 fb42 0
+class fb43 fb44 a3
+class fb45 fb45 0
+class fb46 fbb1 a3
+class fbb2 fbc2 1a0
+class fbc3 fbd2 0
+class fbd3 fd3d a3
+class fd3e fd4f 1a0
+class fd50 fd8f a3
+class fd90 fd91 0
+class fd92 fdc7 a3
+class fdc8 fdce 0
+class fdcf fdcf 1a0
+class fdd0 fdef 0
+class fdf0 fdfb a3
+class fdfc fe19 1a0
+class fe1a fe1f 0
+class fe20 fe52 1a0
+class fe53 fe53 0
+class fe54 fe66 1a0
+class fe67 fe67 0
+class fe68 fe6b 1a0
+class fe6c fe6f 0
+class fe70 fe74 a3
+class fe75 fe75 0
+class fe76 fefc a3
+class fefd fefe 0
+class feff feff 1a0
+class ff00 ff00 0
+class ff01 ff0f 1a0
+class ff10 ff19 a3
+class ff1a ff20 1a0
+class ff21 ff3a 4a3
+class ff3b ff40 1a0
+class ff41 ff5a e3
+class ff5b ff65 1a0
+class ff66 ffbe a3
+class ffbf ffc1 0
+class ffc2 ffc7 a3
+class ffc8 ffc9 0
+class ffca ffcf a3
+class ffd0 ffd1 0
+class ffd2 ffd7 a3
+class ffd8 ffd9 0
+class ffda ffdc a3
+class ffdd ffdf 0
+class ffe0 ffe6 1a0
+class ffe7 ffe7 0
+class ffe8 ffee 1a0
+class ffef fff8 0
+class fff9 fffd 1a0
+class fffe ffff 0
+class 10000 1000b a3
+class 1000c 1000c 0
+class 1000d 10026 a3
+class 10027 10027 0
+class 10028 1003a a3
+class 1003b 1003b 0
+class 1003c 1003d a3
+class 1003e 1003e 0
+class 1003f 1004d a3
+class 1004e 1004f 0
+class 10050 1005d a3
+class 1005e 1007f 0
+class 10080 100fa a3
+class 100fb 100ff 0
+class 10100 10102 1a0
+class 10103 10106 0
+class 10107 10133 1a0
+class 10134 10136 0
+class 10137 1013f 1a0
+class 10140 10174 a3
+class 10175 1018e 1a0
+class 1018f 1018f 0
+class 10190 1019c 1a0
+class 1019d 1019f 0
+class 101a0 101a0 1a0
+class 101a1 101cf 0
+class 101d0 101fd 1a0
+class 101fe 1027f 0
+class 10280 1029c a3
+class 1029d 1029f 0
+class 102a0 102d0 a3
+class 102d1 102df 0
+class 102e0 102fb 1a0
+class 102fc 102ff 0
+class 10300 1031f a3
+class 10320 10323 1a0
+class 10324 1032c 0
+class 1032d 1034a a3
+class 1034b 1034f 0
+class 10350 1037a a3
+class 1037b 1037f 0
+class 10380 1039d a3
+class 1039e 1039e 0
+class 1039f 1039f 1a0
+class 103a0 103c3 a3
+class 103c4 103c7 0
+class 103c8 103cf a3
+class 103d0 103d0 1a0
+class 103d1 103d5 a3
+class 103d6 103ff 0
+class 10400 10427 4a3
+class 10428 1044f e3
+class 10450 1049d a3
+class 1049e 1049f 0
+class 104a0 104a9 a3
+class 104aa 104af 0
+class 104b0 104d3 4a3
+class 104d4 104d7 0
+class 104d8 104fb e3
+class 104fc 104ff 0
+class 10500 10527 a3
+class 10528 1052f 0
+class 10530 10563 a3
+class 10564 1056e 0
+class 1056f 1056f 1a0
+class 10570 1057a 4a3
+class 1057b 1057b 0
+class 1057c 1058a 4a3
+class 1058b 1058b 0
+class 1058c 10592 4a3
+class 10593 10593 0
+class 10594 10595 4a3
+class 10596 10596 0
+class 10597 105a1 e3
+class 105a2 105a2 0
+class 105a3 105b1 e3
+class 105b2 105b2 0
+class 105b3 105b9 e3
+class 105ba 105ba 0
+class 105bb 105bc e3
+class 105bd 105ff 0
+class 10600 10736 a3
+class 10737 1073f 0
+class 10740 10755 a3
+class 10756 1075f 0
+class 10760 10767 a3
+class 10768 1077f 0
+class 10780 10780 e3
+class 10781 10782 a3
+class 10783 10785 e3
+class 10786 10786 0
+class 10787 107b0 e3
+class 107b1 107b1 0
+class 107b2 107ba e3
+class 107bb 107ff 0
+class 10800 10805 a3
+class 10806 10807 0
+class 10808 10808 a3
+class 10809 10809 0
+class 1080a 10835 a3
+class 10836 10836 0
+class 10837 10838 a3
+class 10839 1083b 0
+class 1083c 1083c a3
+class 1083d 1083e 0
+class 1083f 10855 a3
+class 10856 10856 0
+class 10857 1085f 1a0
+class 10860 10876 a3
+class 10877 1087f 1a0
+class 10880 1089e a3
+class 1089f 108a6 0
+class 108a7 108af 1a0
+class 108b0 108df 0
+class 108e0 108f2 a3
+class 108f3 108f3 0
+class 108f4 108f5 a3
+class 108f6 108fa 0
+class 108fb 108ff 1a0
+class 10900 10915 a3
+class 10916 1091b 1a0
+class 1091c 1091e 0
+class 1091f 1091f 1a0
+class 10920 10939 a3
+class 1093a 1093e 0
+class 1093f 1093f 1a0
+class 10940 1097f 0
+class 10980 109b7 a3
+class 109b8 109bb 0
+class 109bc 109bd 1a0
+class 109be 109bf a3
+class 109c0 109cf 1a0
+class 109d0 109d1 0
+class 109d2 109ff 1a0
+class 10a00 10a03 a3
+class 10a04 10a04 0
+class 10a05 10a06 a3
+class 10a07 10a0b 0
+class 10a0c 10a13 a3
+class 10a14 10a14 0
+class 10a15 10a17 a3
+class 10a18 10a18 0
+class 10a19 10a35 a3
+class 10a36 10a37 0
+class 10a38 10a3a 1a0
+class 10a3b 10a3e 0
+class 10a3f 10a48 1a0
+class 10a49 10a4f 0
+class 10a50 10a58 1a0
+class 10a59 10a5f 0
+class 10a60 10a7c a3
+class 10a7d 10a7f 1a0
+class 10a80 10a9c a3
+class 10a9d 10a9f 1a0
+class 10aa0 10abf 0
+class 10ac0 10ac7 a3
+class 10ac8 10ac8 1a0
+class 10ac9 10ae4 a3
+class 10ae5 10ae6 1a0
+class 10ae7 10aea 0
+class 10aeb 10af6 1a0
+class 10af7 10aff 0
+class 10b00 10b35 a3
+class 10b36 10b38 0
+class 10b39 10b3f 1a0
+class 10b40 10b55 a3
+class 10b56 10b57 0
+class 10b58 10b5f 1a0
+class 10b60 10b72 a3
+class 10b73 10b77 0
+class 10b78 10b7f 1a0
+class 10b80 10b91 a3
+class 10b92 10b98 0
+class 10b99 10b9c 1a0
+class 10b9d 10ba8 0
+class 10ba9 10baf 1a0
+class 10bb0 10bff 0
+class 10c00 10c48 a3
+class 10c49 10c7f 0
+class 10c80 10cb2 4a3
+class 10cb3 10cbf 0
+class 10cc0 10cf2 e3
+class 10cf3 10cf9 0
+class 10cfa 10cff 1a0
+class 10d00 10d27 a3
+class 10d28 10d2f 0
+class 10d30 10d39 a3
+class 10d3a 10e5f 0
+class 10e60 10e7e 1a0
+class 10e7f 10e7f 0
+class 10e80 10ea9 a3
+class 10eaa 10eaa 0
+class 10eab 10eac a3
+class 10ead 10ead 1a0
+class 10eae 10eaf 0
+class 10eb0 10eb1 a3
+class 10eb2 10efc 0
+class 10efd 10eff 1a0
+class 10f00 10f1c a3
+class 10f1d 10f26 1a0
+class 10f27 10f27 a3
+class 10f28 10f2f 0
+class 10f30 10f45 a3
+class 10f46 10f59 1a0
+class 10f5a 10f6f 0
+class 10f70 10f81 a3
+class 10f82 10f89 1a0
+class 10f8a 10faf 0
+class 10fb0 10fc4 a3
+class 10fc5 10fcb 1a0
+class 10fcc 10fdf 0
+class 10fe0 10ff6 a3
+class 10ff7 10fff 0
+class 11000 11045 a3
+class 11046 1104d 1a0
+class 1104e 11051 0
+class 11052 11065 1a0
+class 11066 1106f a3
+class 11070 11070 1a0
+class 11071 11075 a3
+class 11076 1107e 0
+class 1107f 1107f 1a0
+class 11080 110b8 a3
+class 110b9 110c1 1a0
+class 110c2 110c2 a3
+class 110c3 110cc 0
+class 110cd 110cd 1a0
+class 110ce 110cf 0
+class 110d0 110e8 a3
+class 110e9 110ef 0
+class 110f0 110f9 a3
+class 110fa 110ff 0
+class 11100 11132 a3
+class 11133 11134 1a0
+class 11135 11135 0
+class 11136 1113f a3
+class 11140 11143 1a0
+class 11144 11147 a3
+class 11148 1114f 0
+class 11150 11172 a3
+class 11173 11175 1a0
+class 11176 11176 a3
+class 11177 1117f 0
+class 11180 111bf a3
+class 111c0 111c0 1a0
+class 111c1 111c4 a3
+class 111c5 111cd 1a0
+class 111ce 111da a3
+class 111db 111db 1a0
+class 111dc 111dc a3
+class 111dd 111df 1a0
+class 111e0 111e0 0
+class 111e1 111f4 1a0
+class 111f5 111ff 0
+class 11200 11211 a3
+class 11212 11212 0
+class 11213 11234 a3
+class 11235 11236 1a0
+class 11237 11237 a3
+class 11238 1123d 1a0
+class 1123e 11241 a3
+class 11242 1127f 0
+class 11280 11286 a3
+class 11287 11287 0
+class 11288 11288 a3
+class 11289 11289 0
+class 1128a 1128d a3
+class 1128e 1128e 0
+class 1128f 1129d a3
+class 1129e 1129e 0
+class 1129f 112a8 a3
+class 112a9 112a9 1a0
+class 112aa 112af 0
+class 112b0 112e8 a3
+class 112e9 112ea 1a0
+class 112eb 112ef 0
+class 112f0 112f9 a3
+class 112fa 112ff 0
+class 11300 11303 a3
+class 11304 11304 0
+class 11305 1130c a3
+class 1130d 1130e 0
+class 1130f 11310 a3
+class 11311 11312 0
+class 11313 11328 a3
+class 11329 11329 0
+class 1132a 11330 a3
+class 11331 11331 0
+class 11332 11333 a3
+class 11334 11334 0
+class 11335 11339 a3
+class 1133a 1133a 0
+class 1133b 1133c 1a0
+class 1133d 11344 a3
+class 11345 11346 0
+class 11347 11348 a3
+class 11349 1134a 0
+class 1134b 1134c a3
+class 1134d 1134d 1a0
+class 1134e 1134f 0
+class 11350 11350 a3
+class 11351 11356 0
+class 11357 11357 a3
+class 11358 1135c 0
+class 1135d 11363 a3
+class 11364 11365 0
+class 11366 1136c 1a0
+class 1136d 1136f 0
+class 11370 11374 1a0
+class 11375 113ff 0
+class 11400 11441 a3
+class 11442 11442 1a0
+class 11443 11445 a3
+class 11446 11446 1a0
+class 11447 1144a a3
+class 1144b 1144f 1a0
+class 11450 11459 a3
+class 1145a 1145b 1a0
+class 1145c 1145c 0
+class 1145d 1145e 1a0
+class 1145f 11461 a3
+class 11462 1147f 0
+class 11480 114c1 a3
+class 114c2 114c3 1a0
+class 114c4 114c5 a3
+class 114c6 114c6 1a0
+class 114c7 114c7 a3
+class 114c8 114cf 0
+class 114d0 114d9 a3
+class 114da 1157f 0
+class 11580 115b5 a3
+class 115b6 115b7 0
+class 115b8 115be a3
+class 115bf 115d7 1a0
+class 115d8 115dd a3
+class 115de 115ff 0
+class 11600 1163e a3
+class 1163f 1163f 1a0
+class 11640 11640 a3
+class 11641 11643 1a0
+class 11644 11644 a3
+class 11645 1164f 0
+class 11650 11659 a3
+class 1165a 1165f 0
+class 11660 1166c 1a0
+class 1166d 1167f 0
+class 11680 116b5 a3
+class 116b6 116b7 1a0
+class 116b8 116b8 a3
+class 116b9 116b9 1a0
+class 116ba 116bf 0
+class 116c0 116c9 a3
+class 116ca 116ff 0
+class 11700 1171a a3
+class 1171b 1171c 0
+class 1171d 1172a a3
+class 1172b 1172b 1a0
+class 1172c 1172f 0
+class 11730 11739 a3
+class 1173a 1173f 1a0
+class 11740 11746 a3
+class 11747 117ff 0
+class 11800 11838 a3
+class 11839 1183b 1a0
+class 1183c 1189f 0
+class 118a0 118bf 4a3
+class 118c0 118df e3
+class 118e0 118e9 a3
+class 118ea 118f2 1a0
+class 118f3 118fe 0
+class 118ff 11906 a3
+class 11907 11908 0
+class 11909 11909 a3
+class 1190a 1190b 0
+class 1190c 11913 a3
+class 11914 11914 0
+class 11915 11916 a3
+class 11917 11917 0
+class 11918 11935 a3
+class 11936 11936 0
+class 11937 11938 a3
+class 11939 1193a 0
+class 1193b 1193c a3
+class 1193d 1193e 1a0
+class 1193f 11942 a3
+class 11943 11946 1a0
+class 11947 1194f 0
+class 11950 11959 a3
+class 1195a 1199f 0
+class 119a0 119a7 a3
+class 119a8 119a9 0
+class 119aa 119d7 a3
+class 119d8 119d9 0
+class 119da 119df a3
+class 119e0 119e0 1a0
+class 119e1 119e1 a3
+class 119e2 119e2 1a0
+class 119e3 119e4 a3
+class 119e5 119ff 0
+class 11a00 11a32 a3
+class 11a33 11a34 1a0
+class 11a35 11a3e a3
+class 11a3f 11a47 1a0
+class 11a48 11a4f 0
+class 11a50 11a97 a3
+class 11a98 11a9c 1a0
+class 11a9d 11a9d a3
+class 11a9e 11aa2 1a0
+class 11aa3 11aaf 0
+class 11ab0 11af8 a3
+class 11af9 11aff 0
+class 11b00 11b09 1a0
+class 11b0a 11bff 0
+class 11c00 11c08 a3
+class 11c09 11c09 0
+class 11c0a 11c36 a3
+class 11c37 11c37 0
+class 11c38 11c3e a3
+class 11c3f 11c3f 1a0
+class 11c40 11c40 a3
+class 11c41 11c45 1a0
+class 11c46 11c4f 0
+class 11c50 11c59 a3
+class 11c5a 11c6c 1a0
+class 11c6d 11c6f 0
+class 11c70 11c71 1a0
+class 11c72 11c8f a3
+class 11c90 11c91 0
+class 11c92 11ca7 a3
+class 11ca8 11ca8 0
+class 11ca9 11cb6 a3
+class 11cb7 11cff 0
+class 11d00 11d06 a3
+class 11d07 11d07 0
+class 11d08 11d09 a3
+class 11d0a 11d0a 0
+class 11d0b 11d36 a3
+class 11d37 11d39 0
+class 11d3a 11d3a a3
+class 11d3b 11d3b 0
+class 11d3c 11d3d a3
+class 11d3e 11d3e 0
+class 11d3f 11d41 a3
+class 11d42 11d42 1a0
+class 11d43 11d43 a3
+class 11d44 11d45 1a0
+class 11d46 11d47 a3
+class 11d48 11d4f 0
+class 11d50 11d59 a3
+class 11d5a 11d5f 0
+class 11d60 11d65 a3
+class 11d66 11d66 0
+class 11d67 11d68 a3
+class 11d69 11d69 0
+class 11d6a 11d8e a3
+class 11d8f 11d8f 0
+class 11d90 11d91 a3
+class 11d92 11d92 0
+class 11d93 11d96 a3
+class 11d97 11d97 1a0
+class 11d98 11d98 a3
+class 11d99 11d9f 0
+class 11da0 11da9 a3
+class 11daa 11edf 0
+class 11ee0 11ef6 a3
+class 11ef7 11ef8 1a0
+class 11ef9 11eff 0
+class 11f00 11f10 a3
+class 11f11 11f11 0
+class 11f12 11f3a a3
+class 11f3b 11f3d 0
+class 11f3e 11f40 a3
+class 11f41 11f4f 1a0
+class 11f50 11f59 a3
+class 11f5a 11faf 0
+class 11fb0 11fb0 a3
+class 11fb1 11fbf 0
+class 11fc0 11ff1 1a0
+class 11ff2 11ffe 0
+class 11fff 11fff 1a0
+class 12000 12399 a3
+class 1239a 123ff 0
+class 12400 1246e a3
+class 1246f 1246f 0
+class 12470 12474 1a0
+class 12475 1247f 0
+class 12480 12543 a3
+class 12544 12f8f 0
+class 12f90 12ff0 a3
+class 12ff1 12ff2 1a0
+class 12ff3 12fff 0
+class 13000 1342f a3
+class 13430 13440 1a0
+class 13441 13446 a3
+class 13447 13455 1a0
+class 13456 143ff 0
+class 14400 14646 a3
+class 14647 167ff 0
+class 16800 16a38 a3
+class 16a39 16a3f 0
+class 16a40 16a5e a3
+class 16a5f 16a5f 0
+class 16a60 16a69 a3
+class 16a6a 16a6d 0
+class 16a6e 16a6f 1a0
+class 16a70 16abe a3
+class 16abf 16abf 0
+class 16ac0 16ac9 a3
+class 16aca 16acf 0
+class 16ad0 16aed a3
+class 16aee 16aef 0
+class 16af0 16af5 1a0
+class 16af6 16aff 0
+class 16b00 16b2f a3
+class 16b30 16b3f 1a0
+class 16b40 16b43 a3
+class 16b44 16b45 1a0
+class 16b46 16b4f 0
+class 16b50 16b59 a3
+class 16b5a 16b5a 0
+class 16b5b 16b61 1a0
+class 16b62 16b62 0
+class 16b63 16b77 a3
+class 16b78 16b7c 0
+class 16b7d 16b8f a3
+class 16b90 16e3f 0
+class 16e40 16e5f 4a3
+class 16e60 16e7f e3
+class 16e80 16e9a 1a0
+class 16e9b 16eff 0
+class 16f00 16f4a a3
+class 16f4b 16f4e 0
+class 16f4f 16f87 a3
+class 16f88 16f8e 0
+class 16f8f 16f9f a3
+class 16fa0 16fdf 0
+class 16fe0 16fe1 a3
+class 16fe2 16fe2 1a0
+class 16fe3 16fe3 a3
+class 16fe4 16fe4 1a0
+class 16fe5 16fef 0
+class 16ff0 16ff1 a3
+class 16ff2 16fff 0
+class 17000 187f7 a3
+class 187f8 187ff 0
+class 18800 18cd5 a3
+class 18cd6 18cff 0
+class 18d00 18d08 a3
+class 18d09 1afef 0
+class 1aff0 1aff3 a3
+class 1aff4 1aff4 0
+class 1aff5 1affb a3
+class 1affc 1affc 0
+class 1affd 1affe a3
+class 1afff 1afff 0
+class 1b000 1b122 a3
+class 1b123 1b131 0
+class 1b132 1b132 a3
+class 1b133 1b14f 0
+class 1b150 1b152 a3
+class 1b153 1b154 0
+class 1b155 1b155 a3
+class 1b156 1b163 0
+class 1b164 1b167 a3
+class 1b168 1b16f 0
+class 1b170 1b2fb a3
+class 1b2fc 1bbff 0
+class 1bc00 1bc6a a3
+class 1bc6b 1bc6f 0
+class 1bc70 1bc7c a3
+class 1bc7d 1bc7f 0
+class 1bc80 1bc88 a3
+class 1bc89 1bc8f 0
+class 1bc90 1bc99 a3
+class 1bc9a 1bc9b 0
+class 1bc9c 1bc9d 1a0
+class 1bc9e 1bc9e a3
+class 1bc9f 1bca3 1a0
+class 1bca4 1ceff 0
+class 1cf00 1cf2d 1a0
+class 1cf2e 1cf2f 0
+class 1cf30 1cf46 1a0
+class 1cf47 1cf4f 0
+class 1cf50 1cfc3 1a0
+class 1cfc4 1cfff 0
+class 1d000 1d0f5 1a0
+class 1d0f6 1d0ff 0
+class 1d100 1d126 1a0
+class 1d127 1d128 0
+class 1d129 1d1ea 1a0
+class 1d1eb 1d1ff 0
+class 1d200 1d245 1a0
+class 1d246 1d2bf 0
+class 1d2c0 1d2d3 1a0
+class 1d2d4 1d2df 0
+class 1d2e0 1d2f3 1a0
+class 1d2f4 1d2ff 0
+class 1d300 1d356 1a0
+class 1d357 1d35f 0
+class 1d360 1d378 1a0
+class 1d379 1d3ff 0
+class 1d400 1d419 4a3
+class 1d41a 1d433 e3
+class 1d434 1d44d 4a3
+class 1d44e 1d454 e3
+class 1d455 1d455 0
+class 1d456 1d467 e3
+class 1d468 1d481 4a3
+class 1d482 1d49b e3
+class 1d49c 1d49c 4a3
+class 1d49d 1d49d 0
+class 1d49e 1d49f 4a3
+class 1d4a0 1d4a1 0
+class 1d4a2 1d4a2 4a3
+class 1d4a3 1d4a4 0
+class 1d4a5 1d4a6 4a3
+class 1d4a7 1d4a8 0
+class 1d4a9 1d4ac 4a3
+class 1d4ad 1d4ad 0
+class 1d4ae 1d4b5 4a3
+class 1d4b6 1d4b9 e3
+class 1d4ba 1d4ba 0
+class 1d4bb 1d4bb e3
+class 1d4bc 1d4bc 0
+class 1d4bd 1d4c3 e3
+class 1d4c4 1d4c4 0
+class 1d4c5 1d4cf e3
+class 1d4d0 1d4e9 4a3
+class 1d4ea 1d503 e3
+class 1d504 1d505 4a3
+class 1d506 1d506 0
+class 1d507 1d50a 4a3
+class 1d50b 1d50c 0
+class 1d50d 1d514 4a3
+class 1d515 1d515 0
+class 1d516 1d51c 4a3
+class 1d51d 1d51d 0
+class 1d51e 1d537 e3
+class 1d538 1d539 4a3
+class 1d53a 1d53a 0
+class 1d53b 1d53e 4a3
+class 1d53f 1d53f 0
+class 1d540 1d544 4a3
+class 1d545 1d545 0
+class 1d546 1d546 4a3
+class 1d547 1d549 0
+class 1d54a 1d550 4a3
+class 1d551 1d551 0
+class 1d552 1d56b e3
+class 1d56c 1d585 4a3
+class 1d586 1d59f e3
+class 1d5a0 1d5b9 4a3
+class 1d5ba 1d5d3 e3
+class 1d5d4 1d5ed 4a3
+class 1d5ee 1d607 e3
+class 1d608 1d621 4a3
+class 1d622 1d63b e3
+class 1d63c 1d655 4a3
+class 1d656 1d66f e3
+class 1d670 1d689 4a3
+class 1d68a 1d6a5 e3
+class 1d6a6 1d6a7 0
+class 1d6a8 1d6c0 4a3
+class 1d6c1 1d6c1 1a0
+class 1d6c2 1d6da e3
+class 1d6db 1d6db 1a0
+class 1d6dc 1d6e1 e3
+class 1d6e2 1d6fa 4a3
+class 1d6fb 1d6fb 1a0
+class 1d6fc 1d714 e3
+class 1d715 1d715 1a0
+class 1d716 1d71b e3
+class 1d71c 1d734 4a3
+class 1d735 1d735 1a0
+class 1d736 1d74e e3
+class 1d74f 1d74f 1a0
+class 1d750 1d755 e3
+class 1d756 1d76e 4a3
+class 1d76f 1d76f 1a0
+class 1d770 1d788 e3
+class 1d789 1d789 1a0
+class 1d78a 1d78f e3
+class 1d790 1d7a8 4a3
+class 1d7a9 1d7a9 1a0
+class 1d7aa 1d7c2 e3
+class 1d7c3 1d7c3 1a0
+class 1d7c4 1d7c9 e3
+class 1d7ca 1d7ca 4a3
+class 1d7cb 1d7cb e3
+class 1d7cc 1d7cd 0
+class 1d7ce 1d7ff a3
+class 1d800 1da8b 1a0
+class 1da8c 1da9a 0
+class 1da9b 1da9f 1a0
+class 1daa0 1daa0 0
+class 1daa1 1daaf 1a0
+class 1dab0 1deff 0
+class 1df00 1df09 e3
+class 1df0a 1df0a a3
+class 1df0b 1df1e e3
+class 1df1f 1df24 0
+class 1df25 1df2a e3
+class 1df2b 1dfff 0
+class 1e000 1e006 a3
+class 1e007 1e007 0
+class 1e008 1e018 a3
+class 1e019 1e01a 0
+class 1e01b 1e021 a3
+class 1e022 1e022 0
+class 1e023 1e024 a3
+class 1e025 1e025 0
+class 1e026 1e02a a3
+class 1e02b 1e02f 0
+class 1e030 1e06d e3
+class 1e06e 1e08e 0
+class 1e08f 1e08f a3
+class 1e090 1e0ff 0
+class 1e100 1e12c a3
+class 1e12d 1e12f 0
+class 1e130 1e136 1a0
+class 1e137 1e13d a3
+class 1e13e 1e13f 0
+class 1e140 1e149 a3
+class 1e14a 1e14d 0
+class 1e14e 1e14e a3
+class 1e14f 1e14f 1a0
+class 1e150 1e28f 0
+class 1e290 1e2ad a3
+class 1e2ae 1e2ae 1a0
+class 1e2af 1e2bf 0
+class 1e2c0 1e2eb a3
+class 1e2ec 1e2ef 1a0
+class 1e2f0 1e2f9 a3
+class 1e2fa 1e2fe 0
+class 1e2ff 1e2ff 1a0
+class 1e300 1e4cf 0
+class 1e4d0 1e4eb a3
+class 1e4ec 1e4ef 1a0
+class 1e4f0 1e4f9 a3
+class 1e4fa 1e7df 0
+class 1e7e0 1e7e6 a3
+class 1e7e7 1e7e7 0
+class 1e7e8 1e7eb a3
+class 1e7ec 1e7ec 0
+class 1e7ed 1e7ee a3
+class 1e7ef 1e7ef 0
+class 1e7f0 1e7fe a3
+class 1e7ff 1e7ff 0
+class 1e800 1e8c4 a3
+class 1e8c5 1e8c6 0
+class 1e8c7 1e8d6 1a0
+class 1e8d7 1e8ff 0
+class 1e900 1e921 4a3
+class 1e922 1e943 e3
+class 1e944 1e946 1a0
+class 1e947 1e947 a3
+class 1e948 1e94a 1a0
+class 1e94b 1e94b a3
+class 1e94c 1e94f 0
+class 1e950 1e959 a3
+class 1e95a 1e95d 0
+class 1e95e 1e95f 1a0
+class 1e960 1ec70 0
+class 1ec71 1ecb4 1a0
+class 1ecb5 1ed00 0
+class 1ed01 1ed3d 1a0
+class 1ed3e 1edff 0
+class 1ee00 1ee03 a3
+class 1ee04 1ee04 0
+class 1ee05 1ee1f a3
+class 1ee20 1ee20 0
+class 1ee21 1ee22 a3
+class 1ee23 1ee23 0
+class 1ee24 1ee24 a3
+class 1ee25 1ee26 0
+class 1ee27 1ee27 a3
+class 1ee28 1ee28 0
+class 1ee29 1ee32 a3
+class 1ee33 1ee33 0
+class 1ee34 1ee37 a3
+class 1ee38 1ee38 0
+class 1ee39 1ee39 a3
+class 1ee3a 1ee3a 0
+class 1ee3b 1ee3b a3
+class 1ee3c 1ee41 0
+class 1ee42 1ee42 a3
+class 1ee43 1ee46 0
+class 1ee47 1ee47 a3
+class 1ee48 1ee48 0
+class 1ee49 1ee49 a3
+class 1ee4a 1ee4a 0
+class 1ee4b 1ee4b a3
+class 1ee4c 1ee4c 0
+class 1ee4d 1ee4f a3
+class 1ee50 1ee50 0
+class 1ee51 1ee52 a3
+class 1ee53 1ee53 0
+class 1ee54 1ee54 a3
+class 1ee55 1ee56 0
+class 1ee57 1ee57 a3
+class 1ee58 1ee58 0
+class 1ee59 1ee59 a3
+class 1ee5a 1ee5a 0
+class 1ee5b 1ee5b a3
+class 1ee5c 1ee5c 0
+class 1ee5d 1ee5d a3
+class 1ee5e 1ee5e 0
+class 1ee5f 1ee5f a3
+class 1ee60 1ee60 0
+class 1ee61 1ee62 a3
+class 1ee63 1ee63 0
+class 1ee64 1ee64 a3
+class 1ee65 1ee66 0
+class 1ee67 1ee6a a3
+class 1ee6b 1ee6b 0
+class 1ee6c 1ee72 a3
+class 1ee73 1ee73 0
+class 1ee74 1ee77 a3
+class 1ee78 1ee78 0
+class 1ee79 1ee7c a3
+class 1ee7d 1ee7d 0
+class 1ee7e 1ee7e a3
+class 1ee7f 1ee7f 0
+class 1ee80 1ee89 a3
+class 1ee8a 1ee8a 0
+class 1ee8b 1ee9b a3
+class 1ee9c 1eea0 0
+class 1eea1 1eea3 a3
+class 1eea4 1eea4 0
+class 1eea5 1eea9 a3
+class 1eeaa 1eeaa 0
+class 1eeab 1eebb a3
+class 1eebc 1eeef 0
+class 1eef0 1eef1 1a0
+class 1eef2 1efff 0
+class 1f000 1f02b 1a0
+class 1f02c 1f02f 0
+class 1f030 1f093 1a0
+class 1f094 1f09f 0
+class 1f0a0 1f0ae 1a0
+class 1f0af 1f0b0 0
+class 1f0b1 1f0bf 1a0
+class 1f0c0 1f0c0 0
+class 1f0c1 1f0cf 1a0
+class 1f0d0 1f0d0 0
+class 1f0d1 1f0f5 1a0
+class 1f0f6 1f0ff 0
+class 1f100 1f12f 1a0
+class 1f130 1f149 4a3
+class 1f14a 1f14f 1a0
+class 1f150 1f169 4a3
+class 1f16a 1f16f 1a0
+class 1f170 1f189 4a3
+class 1f18a 1f1ad 1a0
+class 1f1ae 1f1e5 0
+class 1f1e6 1f202 1a0
+class 1f203 1f20f 0
+class 1f210 1f23b 1a0
+class 1f23c 1f23f 0
+class 1f240 1f248 1a0
+class 1f249 1f24f 0
+class 1f250 1f251 1a0
+class 1f252 1f25f 0
+class 1f260 1f265 1a0
+class 1f266 1f2ff 0
+class 1f300 1f6d7 1a0
+class 1f6d8 1f6db 0
+class 1f6dc 1f6ec 1a0
+class 1f6ed 1f6ef 0
+class 1f6f0 1f6fc 1a0
+class 1f6fd 1f6ff 0
+class 1f700 1f776 1a0
+class 1f777 1f77a 0
+class 1f77b 1f7d9 1a0
+class 1f7da 1f7df 0
+class 1f7e0 1f7eb 1a0
+class 1f7ec 1f7ef 0
+class 1f7f0 1f7f0 1a0
+class 1f7f1 1f7ff 0
+class 1f800 1f80b 1a0
+class 1f80c 1f80f 0
+class 1f810 1f847 1a0
+class 1f848 1f84f 0
+class 1f850 1f859 1a0
+class 1f85a 1f85f 0
+class 1f860 1f887 1a0
+class 1f888 1f88f 0
+class 1f890 1f8ad 1a0
+class 1f8ae 1f8af 0
+class 1f8b0 1f8b1 1a0
+class 1f8b2 1f8ff 0
+class 1f900 1fa53 1a0
+class 1fa54 1fa5f 0
+class 1fa60 1fa6d 1a0
+class 1fa6e 1fa6f 0
+class 1fa70 1fa7c 1a0
+class 1fa7d 1fa7f 0
+class 1fa80 1fa88 1a0
+class 1fa89 1fa8f 0
+class 1fa90 1fabd 1a0
+class 1fabe 1fabe 0
+class 1fabf 1fac5 1a0
+class 1fac6 1facd 0
+class 1face 1fadb 1a0
+class 1fadc 1fadf 0
+class 1fae0 1fae8 1a0
+class 1fae9 1faef 0
+class 1faf0 1faf8 1a0
+class 1faf9 1faff 0
+class 1fb00 1fb92 1a0
+class 1fb93 1fb93 0
+class 1fb94 1fbca 1a0
+class 1fbcb 1fbef 0
+class 1fbf0 1fbf9 a3
+class 1fbfa 1ffff 0
+class 20000 2a6df a3
+class 2a6e0 2a6ff 0
+class 2a700 2b739 a3
+class 2b73a 2b73f 0
+class 2b740 2b81d a3
+class 2b81e 2b81f 0
+class 2b820 2cea1 a3
+class 2cea2 2ceaf 0
+class 2ceb0 2ebe0 a3
+class 2ebe1 2ebef 0
+class 2ebf0 2ee5d a3
+class 2ee5e 2f7ff 0
+class 2f800 2fa1d a3
+class 2fa1e 2ffff 0
+class 30000 3134a a3
+class 3134b 3134f 0
+class 31350 323af a3
+class 323b0 e0000 0
+class e0001 e0001 1a0
+class e0002 e001f 0
+class e0020 e007f 1a0
+class e0080 e00ff 0
+class e0100 e01ef 1a0
+class e01f0 effff 0
+class f0000 ffffd 1a0
+class ffffe fffff 0
+class 100000 10fffd 1a0
+class 10fffe 10ffff 0
+lower 41 61
+lower 42 62
+lower 43 63
+lower 44 64
+lower 45 65
+lower 46 66
+lower 47 67
+lower 48 68
+lower 49 69
+lower 4a 6a
+lower 4b 6b
+lower 4c 6c
+lower 4d 6d
+lower 4e 6e
+lower 4f 6f
+lower 50 70
+lower 51 71
+lower 52 72
+lower 53 73
+lower 54 74
+lower 55 75
+lower 56 76
+lower 57 77
+lower 58 78
+lower 59 79
+lower 5a 7a
+upper 61 41
+upper 62 42
+upper 63 43
+upper 64 44
+upper 65 45
+upper 66 46
+upper 67 47
+upper 68 48
+upper 69 49
+upper 6a 4a
+upper 6b 4b
+upper 6c 4c
+upper 6d 4d
+upper 6e 4e
+upper 6f 4f
+upper 70 50
+upper 71 51
+upper 72 52
+upper 73 53
+upper 74 54
+upper 75 55
+upper 76 56
+upper 77 57
+upper 78 58
+upper 79 59
+upper 7a 5a
+upper b5 39c
+lower c0 e0
+lower c1 e1
+lower c2 e2
+lower c3 e3
+lower c4 e4
+lower c5 e5
+lower c6 e6
+lower c7 e7
+lower c8 e8
+lower c9 e9
+lower ca ea
+lower cb eb
+lower cc ec
+lower cd ed
+lower ce ee
+lower cf ef
+lower d0 f0
+lower d1 f1
+lower d2 f2
+lower d3 f3
+lower d4 f4
+lower d5 f5
+lower d6 f6
+lower d8 f8
+lower d9 f9
+lower da fa
+lower db fb
+lower dc fc
+lower dd fd
+lower de fe
+upper e0 c0
+upper e1 c1
+upper e2 c2
+upper e3 c3
+upper e4 c4
+upper e5 c5
+upper e6 c6
+upper e7 c7
+upper e8 c8
+upper e9 c9
+upper ea ca
+upper eb cb
+upper ec cc
+upper ed cd
+upper ee ce
+upper ef cf
+upper f0 d0
+upper f1 d1
+upper f2 d2
+upper f3 d3
+upper f4 d4
+upper f5 d5
+upper f6 d6
+upper f8 d8
+upper f9 d9
+upper fa da
+upper fb db
+upper fc dc
+upper fd dd
+upper fe de
+upper ff 178
+lower 100 101
+upper 101 100
+lower 102 103
+upper 103 102
+lower 104 105
+upper 105 104
+lower 106 107
+upper 107 106
+lower 108 109
+upper 109 108
+lower 10a 10b
+upper 10b 10a
+lower 10c 10d
+upper 10d 10c
+lower 10e 10f
+upper 10f 10e
+lower 110 111
+upper 111 110
+lower 112 113
+upper 113 112
+lower 114 115
+upper 115 114
+lower 116 117
+upper 117 116
+lower 118 119
+upper 119 118
+lower 11a 11b
+upper 11b 11a
+lower 11c 11d
+upper 11d 11c
+lower 11e 11f
+upper 11f 11e
+lower 120 121
+upper 121 120
+lower 122 123
+upper 123 122
+lower 124 125
+upper 125 124
+lower 126 127
+upper 127 126
+lower 128 129
+upper 129 128
+lower 12a 12b
+upper 12b 12a
+lower 12c 12d
+upper 12d 12c
+lower 12e 12f
+upper 12f 12e
+lower 130 69
+upper 131 49
+lower 132 133
+upper 133 132
+lower 134 135
+upper 135 134
+lower 136 137
+upper 137 136
+lower 139 13a
+upper 13a 139
+lower 13b 13c
+upper 13c 13b
+lower 13d 13e
+upper 13e 13d
+lower 13f 140
+upper 140 13f
+lower 141 142
+upper 142 141
+lower 143 144
+upper 144 143
+lower 145 146
+upper 146 145
+lower 147 148
+upper 148 147
+lower 14a 14b
+upper 14b 14a
+lower 14c 14d
+upper 14d 14c
+lower 14e 14f
+upper 14f 14e
+lower 150 151
+upper 151 150
+lower 152 153
+upper 153 152
+lower 154 155
+upper 155 154
+lower 156 157
+upper 157 156
+lower 158 159
+upper 159 158
+lower 15a 15b
+upper 15b 15a
+lower 15c 15d
+upper 15d 15c
+lower 15e 15f
+upper 15f 15e
+lower 160 161
+upper 161 160
+lower 162 163
+upper 163 162
+lower 164 165
+upper 165 164
+lower 166 167
+upper 167 166
+lower 168 169
+upper 169 168
+lower 16a 16b
+upper 16b 16a
+lower 16c 16d
+upper 16d 16c
+lower 16e 16f
+upper 16f 16e
+lower 170 171
+upper 171 170
+lower 172 173
+upper 173 172
+lower 174 175
+upper 175 174
+lower 176 177
+upper 177 176
+lower 178 ff
+lower 179 17a
+upper 17a 179
+lower 17b 17c
+upper 17c 17b
+lower 17d 17e
+upper 17e 17d
+upper 17f 53
+upper 180 243
+lower 181 253
+lower 182 183
+upper 183 182
+lower 184 185
+upper 185 184
+lower 186 254
+lower 187 188
+upper 188 187
+lower 189 256
+lower 18a 257
+lower 18b 18c
+upper 18c 18b
+lower 18e 1dd
+lower 18f 259
+lower 190 25b
+lower 191 192
+upper 192 191
+lower 193 260
+lower 194 263
+upper 195 1f6
+lower 196 269
+lower 197 268
+lower 198 199
+upper 199 198
+upper 19a 23d
+lower 19c 26f
+lower 19d 272
+upper 19e 220
+lower 19f 275
+lower 1a0 1a1
+upper 1a1 1a0
+lower 1a2 1a3
+upper 1a3 1a2
+lower 1a4 1a5
+upper 1a5 1a4
+lower 1a6 280
+lower 1a7 1a8
+upper 1a8 1a7
+lower 1a9 283
+lower 1ac 1ad
+upper 1ad 1ac
+lower 1ae 288
+lower 1af 1b0
+upper 1b0 1af
+lower 1b1 28a
+lower 1b2 28b
+lower 1b3 1b4
+upper 1b4 1b3
+lower 1b5 1b6
+upper 1b6 1b5
+lower 1b7 292
+lower 1b8 1b9
+upper 1b9 1b8
+lower 1bc 1bd
+upper 1bd 1bc
+upper 1bf 1f7
+lower 1c4 1c6
+lower 1c5 1c6
+upper 1c5 1c4
+upper 1c6 1c4
+lower 1c7 1c9
+lower 1c8 1c9
+upper 1c8 1c7
+upper 1c9 1c7
+lower 1ca 1cc
+lower 1cb 1cc
+upper 1cb 1ca
+upper 1cc 1ca
+lower 1cd 1ce
+upper 1ce 1cd
+lower 1cf 1d0
+upper 1d0 1cf
+lower 1d1 1d2
+upper 1d2 1d1
+lower 1d3 1d4
+upper 1d4 1d3
+lower 1d5 1d6
+upper 1d6 1d5
+lower 1d7 1d8
+upper 1d8 1d7
+lower 1d9 1da
+upper 1da 1d9
+lower 1db 1dc
+upper 1dc 1db
+upper 1dd 18e
+lower 1de 1df
+upper 1df 1de
+lower 1e0 1e1
+upper 1e1 1e0
+lower 1e2 1e3
+upper 1e3 1e2
+lower 1e4 1e5
+upper 1e5 1e4
+lower 1e6 1e7
+upper 1e7 1e6
+lower 1e8 1e9
+upper 1e9 1e8
+lower 1ea 1eb
+upper 1eb 1ea
+lower 1ec 1ed
+upper 1ed 1ec
+lower 1ee 1ef
+upper 1ef 1ee
+lower 1f1 1f3
+lower 1f2 1f3
+upper 1f2 1f1
+upper 1f3 1f1
+lower 1f4 1f5
+upper 1f5 1f4
+lower 1f6 195
+lower 1f7 1bf
+lower 1f8 1f9
+upper 1f9 1f8
+lower 1fa 1fb
+upper 1fb 1fa
+lower 1fc 1fd
+upper 1fd 1fc
+lower 1fe 1ff
+upper 1ff 1fe
+lower 200 201
+upper 201 200
+lower 202 203
+upper 203 202
+lower 204 205
+upper 205 204
+lower 206 207
+upper 207 206
+lower 208 209
+upper 209 208
+lower 20a 20b
+upper 20b 20a
+lower 20c 20d
+upper 20d 20c
+lower 20e 20f
+upper 20f 20e
+lower 210 211
+upper 211 210
+lower 212 213
+upper 213 212
+lower 214 215
+upper 215 214
+lower 216 217
+upper 217 216
+lower 218 219
+upper 219 218
+lower 21a 21b
+upper 21b 21a
+lower 21c 21d
+upper 21d 21c
+lower 21e 21f
+upper 21f 21e
+lower 220 19e
+lower 222 223
+upper 223 222
+lower 224 225
+upper 225 224
+lower 226 227
+upper 227 226
+lower 228 229
+upper 229 228
+lower 22a 22b
+upper 22b 22a
+lower 22c 22d
+upper 22d 22c
+lower 22e 22f
+upper 22f 22e
+lower 230 231
+upper 231 230
+lower 232 233
+upper 233 232
+lower 23a 2c65
+lower 23b 23c
+upper 23c 23b
+lower 23d 19a
+lower 23e 2c66
+upper 23f 2c7e
+upper 240 2c7f
+lower 241 242
+upper 242 241
+lower 243 180
+lower 244 289
+lower 245 28c
+lower 246 247
+upper 247 246
+lower 248 249
+upper 249 248
+lower 24a 24b
+upper 24b 24a
+lower 24c 24d
+upper 24d 24c
+lower 24e 24f
+upper 24f 24e
+upper 250 2c6f
+upper 251 2c6d
+upper 252 2c70
+upper 253 181
+upper 254 186
+upper 256 189
+upper 257 18a
+upper 259 18f
+upper 25b 190
+upper 25c a7ab
+upper 260 193
+upper 261 a7ac
+upper 263 194
+upper 265 a78d
+upper 266 a7aa
+upper 268 197
+upper 269 196
+upper 26a a7ae
+upper 26b 2c62
+upper 26c a7ad
+upper 26f 19c
+upper 271 2c6e
+upper 272 19d
+upper 275 19f
+upper 27d 2c64
+upper 280 1a6
+upper 282 a7c5
+upper 283 1a9
+upper 287 a7b1
+upper 288 1ae
+upper 289 244
+upper 28a 1b1
+upper 28b 1b2
+upper 28c 245
+upper 292 1b7
+upper 29d a7b2
+upper 29e a7b0
+upper 345 399
+lower 370 371
+upper 371 370
+lower 372 373
+upper 373 372
+lower 376 377
+upper 377 376
+upper 37b 3fd
+upper 37c 3fe
+upper 37d 3ff
+lower 37f 3f3
+lower 386 3ac
+lower 388 3ad
+lower 389 3ae
+lower 38a 3af
+lower 38c 3cc
+lower 38e 3cd
+lower 38f 3ce
+lower 391 3b1
+lower 392 3b2
+lower 393 3b3
+lower 394 3b4
+lower 395 3b5
+lower 396 3b6
+lower 397 3b7
+lower 398 3b8
+lower 399 3b9
+lower 39a 3ba
+lower 39b 3bb
+lower 39c 3bc
+lower 39d 3bd
+lower 39e 3be
+lower 39f 3bf
+lower 3a0 3c0
+lower 3a1 3c1
+lower 3a3 3c3
+lower 3a4 3c4
+lower 3a5 3c5
+lower 3a6 3c6
+lower 3a7 3c7
+lower 3a8 3c8
+lower 3a9 3c9
+lower 3aa 3ca
+lower 3ab 3cb
+upper 3ac 386
+upper 3ad 388
+upper 3ae 389
+upper 3af 38a
+upper 3b1 391
+upper 3b2 392
+upper 3b3 393
+upper 3b4 394
+upper 3b5 395
+upper 3b6 396
+upper 3b7 397
+upper 3b8 398
+upper 3b9 399
+upper 3ba 39a
+upper 3bb 39b
+upper 3bc 39c
+upper 3bd 39d
+upper 3be 39e
+upper 3bf 39f
+upper 3c0 3a0
+upper 3c1 3a1
+upper 3c2 3a3
+upper 3c3 3a3
+upper 3c4 3a4
+upper 3c5 3a5
+upper 3c6 3a6
+upper 3c7 3a7
+upper 3c8 3a8
+upper 3c9 3a9
+upper 3ca 3aa
+upper 3cb 3ab
+upper 3cc 38c
+upper 3cd 38e
+upper 3ce 38f
+lower 3cf 3d7
+upper 3d0 392
+upper 3d1 398
+upper 3d5 3a6
+upper 3d6 3a0
+upper 3d7 3cf
+lower 3d8 3d9
+upper 3d9 3d8
+lower 3da 3db
+upper 3db 3da
+lower 3dc 3dd
+upper 3dd 3dc
+lower 3de 3df
+upper 3df 3de
+lower 3e0 3e1
+upper 3e1 3e0
+lower 3e2 3e3
+upper 3e3 3e2
+lower 3e4 3e5
+upper 3e5 3e4
+lower 3e6 3e7
+upper 3e7 3e6
+lower 3e8 3e9
+upper 3e9 3e8
+lower 3ea 3eb
+upper 3eb 3ea
+lower 3ec 3ed
+upper 3ed 3ec
+lower 3ee 3ef
+upper 3ef 3ee
+upper 3f0 39a
+upper 3f1 3a1
+upper 3f2 3f9
+upper 3f3 37f
+lower 3f4 3b8
+upper 3f5 395
+lower 3f7 3f8
+upper 3f8 3f7
+lower 3f9 3f2
+lower 3fa 3fb
+upper 3fb 3fa
+lower 3fd 37b
+lower 3fe 37c
+lower 3ff 37d
+lower 400 450
+lower 401 451
+lower 402 452
+lower 403 453
+lower 404 454
+lower 405 455
+lower 406 456
+lower 407 457
+lower 408 458
+lower 409 459
+lower 40a 45a
+lower 40b 45b
+lower 40c 45c
+lower 40d 45d
+lower 40e 45e
+lower 40f 45f
+lower 410 430
+lower 411 431
+lower 412 432
+lower 413 433
+lower 414 434
+lower 415 435
+lower 416 436
+lower 417 437
+lower 418 438
+lower 419 439
+lower 41a 43a
+lower 41b 43b
+lower 41c 43c
+lower 41d 43d
+lower 41e 43e
+lower 41f 43f
+lower 420 440
+lower 421 441
+lower 422 442
+lower 423 443
+lower 424 444
+lower 425 445
+lower 426 446
+lower 427 447
+lower 428 448
+lower 429 449
+lower 42a 44a
+lower 42b 44b
+lower 42c 44c
+lower 42d 44d
+lower 42e 44e
+lower 42f 44f
+upper 430 410
+upper 431 411
+upper 432 412
+upper 433 413
+upper 434 414
+upper 435 415
+upper 436 416
+upper 437 417
+upper 438 418
+upper 439 419
+upper 43a 41a
+upper 43b 41b
+upper 43c 41c
+upper 43d 41d
+upper 43e 41e
+upper 43f 41f
+upper 440 420
+upper 441 421
+upper 442 422
+upper 443 423
+upper 444 424
+upper 445 425
+upper 446 426
+upper 447 427
+upper 448 428
+upper 449 429
+upper 44a 42a
+upper 44b 42b
+upper 44c 42c
+upper 44d 42d
+upper 44e 42e
+upper 44f 42f
+upper 450 400
+upper 451 401
+upper 452 402
+upper 453 403
+upper 454 404
+upper 455 405
+upper 456 406
+upper 457 407
+upper 458 408
+upper 459 409
+upper 45a 40a
+upper 45b 40b
+upper 45c 40c
+upper 45d 40d
+upper 45e 40e
+upper 45f 40f
+lower 460 461
+upper 461 460
+lower 462 463
+upper 463 462
+lower 464 465
+upper 465 464
+lower 466 467
+upper 467 466
+lower 468 469
+upper 469 468
+lower 46a 46b
+upper 46b 46a
+lower 46c 46d
+upper 46d 46c
+lower 46e 46f
+upper 46f 46e
+lower 470 471
+upper 471 470
+lower 472 473
+upper 473 472
+lower 474 475
+upper 475 474
+lower 476 477
+upper 477 476
+lower 478 479
+upper 479 478
+lower 47a 47b
+upper 47b 47a
+lower 47c 47d
+upper 47d 47c
+lower 47e 47f
+upper 47f 47e
+lower 480 481
+upper 481 480
+lower 48a 48b
+upper 48b 48a
+lower 48c 48d
+upper 48d 48c
+lower 48e 48f
+upper 48f 48e
+lower 490 491
+upper 491 490
+lower 492 493
+upper 493 492
+lower 494 495
+upper 495 494
+lower 496 497
+upper 497 496
+lower 498 499
+upper 499 498
+lower 49a 49b
+upper 49b 49a
+lower 49c 49d
+upper 49d 49c
+lower 49e 49f
+upper 49f 49e
+lower 4a0 4a1
+upper 4a1 4a0
+lower 4a2 4a3
+upper 4a3 4a2
+lower 4a4 4a5
+upper 4a5 4a4
+lower 4a6 4a7
+upper 4a7 4a6
+lower 4a8 4a9
+upper 4a9 4a8
+lower 4aa 4ab
+upper 4ab 4aa
+lower 4ac 4ad
+upper 4ad 4ac
+lower 4ae 4af
+upper 4af 4ae
+lower 4b0 4b1
+upper 4b1 4b0
+lower 4b2 4b3
+upper 4b3 4b2
+lower 4b4 4b5
+upper 4b5 4b4
+lower 4b6 4b7
+upper 4b7 4b6
+lower 4b8 4b9
+upper 4b9 4b8
+lower 4ba 4bb
+upper 4bb 4ba
+lower 4bc 4bd
+upper 4bd 4bc
+lower 4be 4bf
+upper 4bf 4be
+lower 4c0 4cf
+lower 4c1 4c2
+upper 4c2 4c1
+lower 4c3 4c4
+upper 4c4 4c3
+lower 4c5 4c6
+upper 4c6 4c5
+lower 4c7 4c8
+upper 4c8 4c7
+lower 4c9 4ca
+upper 4ca 4c9
+lower 4cb 4cc
+upper 4cc 4cb
+lower 4cd 4ce
+upper 4ce 4cd
+upper 4cf 4c0
+lower 4d0 4d1
+upper 4d1 4d0
+lower 4d2 4d3
+upper 4d3 4d2
+lower 4d4 4d5
+upper 4d5 4d4
+lower 4d6 4d7
+upper 4d7 4d6
+lower 4d8 4d9
+upper 4d9 4d8
+lower 4da 4db
+upper 4db 4da
+lower 4dc 4dd
+upper 4dd 4dc
+lower 4de 4df
+upper 4df 4de
+lower 4e0 4e1
+upper 4e1 4e0
+lower 4e2 4e3
+upper 4e3 4e2
+lower 4e4 4e5
+upper 4e5 4e4
+lower 4e6 4e7
+upper 4e7 4e6
+lower 4e8 4e9
+upper 4e9 4e8
+lower 4ea 4eb
+upper 4eb 4ea
+lower 4ec 4ed
+upper 4ed 4ec
+lower 4ee 4ef
+upper 4ef 4ee
+lower 4f0 4f1
+upper 4f1 4f0
+lower 4f2 4f3
+upper 4f3 4f2
+lower 4f4 4f5
+upper 4f5 4f4
+lower 4f6 4f7
+upper 4f7 4f6
+lower 4f8 4f9
+upper 4f9 4f8
+lower 4fa 4fb
+upper 4fb 4fa
+lower 4fc 4fd
+upper 4fd 4fc
+lower 4fe 4ff
+upper 4ff 4fe
+lower 500 501
+upper 501 500
+lower 502 503
+upper 503 502
+lower 504 505
+upper 505 504
+lower 506 507
+upper 507 506
+lower 508 509
+upper 509 508
+lower 50a 50b
+upper 50b 50a
+lower 50c 50d
+upper 50d 50c
+lower 50e 50f
+upper 50f 50e
+lower 510 511
+upper 511 510
+lower 512 513
+upper 513 512
+lower 514 515
+upper 515 514
+lower 516 517
+upper 517 516
+lower 518 519
+upper 519 518
+lower 51a 51b
+upper 51b 51a
+lower 51c 51d
+upper 51d 51c
+lower 51e 51f
+upper 51f 51e
+lower 520 521
+upper 521 520
+lower 522 523
+upper 523 522
+lower 524 525
+upper 525 524
+lower 526 527
+upper 527 526
+lower 528 529
+upper 529 528
+lower 52a 52b
+upper 52b 52a
+lower 52c 52d
+upper 52d 52c
+lower 52e 52f
+upper 52f 52e
+lower 531 561
+lower 532 562
+lower 533 563
+lower 534 564
+lower 535 565
+lower 536 566
+lower 537 567
+lower 538 568
+lower 539 569
+lower 53a 56a
+lower 53b 56b
+lower 53c 56c
+lower 53d 56d
+lower 53e 56e
+lower 53f 56f
+lower 540 570
+lower 541 571
+lower 542 572
+lower 543 573
+lower 544 574
+lower 545 575
+lower 546 576
+lower 547 577
+lower 548 578
+lower 549 579
+lower 54a 57a
+lower 54b 57b
+lower 54c 57c
+lower 54d 57d
+lower 54e 57e
+lower 54f 57f
+lower 550 580
+lower 551 581
+lower 552 582
+lower 553 583
+lower 554 584
+lower 555 585
+lower 556 586
+upper 561 531
+upper 562 532
+upper 563 533
+upper 564 534
+upper 565 535
+upper 566 536
+upper 567 537
+upper 568 538
+upper 569 539
+upper 56a 53a
+upper 56b 53b
+upper 56c 53c
+upper 56d 53d
+upper 56e 53e
+upper 56f 53f
+upper 570 540
+upper 571 541
+upper 572 542
+upper 573 543
+upper 574 544
+upper 575 545
+upper 576 546
+upper 577 547
+upper 578 548
+upper 579 549
+upper 57a 54a
+upper 57b 54b
+upper 57c 54c
+upper 57d 54d
+upper 57e 54e
+upper 57f 54f
+upper 580 550
+upper 581 551
+upper 582 552
+upper 583 553
+upper 584 554
+upper 585 555
+upper 586 556
+lower 10a0 2d00
+lower 10a1 2d01
+lower 10a2 2d02
+lower 10a3 2d03
+lower 10a4 2d04
+lower 10a5 2d05
+lower 10a6 2d06
+lower 10a7 2d07
+lower 10a8 2d08
+lower 10a9 2d09
+lower 10aa 2d0a
+lower 10ab 2d0b
+lower 10ac 2d0c
+lower 10ad 2d0d
+lower 10ae 2d0e
+lower 10af 2d0f
+lower 10b0 2d10
+lower 10b1 2d11
+lower 10b2 2d12
+lower 10b3 2d13
+lower 10b4 2d14
+lower 10b5 2d15
+lower 10b6 2d16
+lower 10b7 2d17
+lower 10b8 2d18
+lower 10b9 2d19
+lower 10ba 2d1a
+lower 10bb 2d1b
+lower 10bc 2d1c
+lower 10bd 2d1d
+lower 10be 2d1e
+lower 10bf 2d1f
+lower 10c0 2d20
+lower 10c1 2d21
+lower 10c2 2d22
+lower 10c3 2d23
+lower 10c4 2d24
+lower 10c5 2d25
+lower 10c7 2d27
+lower 10cd 2d2d
+upper 10d0 1c90
+upper 10d1 1c91
+upper 10d2 1c92
+upper 10d3 1c93
+upper 10d4 1c94
+upper 10d5 1c95
+upper 10d6 1c96
+upper 10d7 1c97
+upper 10d8 1c98
+upper 10d9 1c99
+upper 10da 1c9a
+upper 10db 1c9b
+upper 10dc 1c9c
+upper 10dd 1c9d
+upper 10de 1c9e
+upper 10df 1c9f
+upper 10e0 1ca0
+upper 10e1 1ca1
+upper 10e2 1ca2
+upper 10e3 1ca3
+upper 10e4 1ca4
+upper 10e5 1ca5
+upper 10e6 1ca6
+upper 10e7 1ca7
+upper 10e8 1ca8
+upper 10e9 1ca9
+upper 10ea 1caa
+upper 10eb 1cab
+upper 10ec 1cac
+upper 10ed 1cad
+upper 10ee 1cae
+upper 10ef 1caf
+upper 10f0 1cb0
+upper 10f1 1cb1
+upper 10f2 1cb2
+upper 10f3 1cb3
+upper 10f4 1cb4
+upper 10f5 1cb5
+upper 10f6 1cb6
+upper 10f7 1cb7
+upper 10f8 1cb8
+upper 10f9 1cb9
+upper 10fa 1cba
+upper 10fd 1cbd
+upper 10fe 1cbe
+upper 10ff 1cbf
+lower 13a0 ab70
+lower 13a1 ab71
+lower 13a2 ab72
+lower 13a3 ab73
+lower 13a4 ab74
+lower 13a5 ab75
+lower 13a6 ab76
+lower 13a7 ab77
+lower 13a8 ab78
+lower 13a9 ab79
+lower 13aa ab7a
+lower 13ab ab7b
+lower 13ac ab7c
+lower 13ad ab7d
+lower 13ae ab7e
+lower 13af ab7f
+lower 13b0 ab80
+lower 13b1 ab81
+lower 13b2 ab82
+lower 13b3 ab83
+lower 13b4 ab84
+lower 13b5 ab85
+lower 13b6 ab86
+lower 13b7 ab87
+lower 13b8 ab88
+lower 13b9 ab89
+lower 13ba ab8a
+lower 13bb ab8b
+lower 13bc ab8c
+lower 13bd ab8d
+lower 13be ab8e
+lower 13bf ab8f
+lower 13c0 ab90
+lower 13c1 ab91
+lower 13c2 ab92
+lower 13c3 ab93
+lower 13c4 ab94
+lower 13c5 ab95
+lower 13c6 ab96
+lower 13c7 ab97
+lower 13c8 ab98
+lower 13c9 ab99
+lower 13ca ab9a
+lower 13cb ab9b
+lower 13cc ab9c
+lower 13cd ab9d
+lower 13ce ab9e
+lower 13cf ab9f
+lower 13d0 aba0
+lower 13d1 aba1
+lower 13d2 aba2
+lower 13d3 aba3
+lower 13d4 aba4
+lower 13d5 aba5
+lower 13d6 aba6
+lower 13d7 aba7
+lower 13d8 aba8
+lower 13d9 aba9
+lower 13da abaa
+lower 13db abab
+lower 13dc abac
+lower 13dd abad
+lower 13de abae
+lower 13df abaf
+lower 13e0 abb0
+lower 13e1 abb1
+lower 13e2 abb2
+lower 13e3 abb3
+lower 13e4 abb4
+lower 13e5 abb5
+lower 13e6 abb6
+lower 13e7 abb7
+lower 13e8 abb8
+lower 13e9 abb9
+lower 13ea abba
+lower 13eb abbb
+lower 13ec abbc
+lower 13ed abbd
+lower 13ee abbe
+lower 13ef abbf
+lower 13f0 13f8
+lower 13f1 13f9
+lower 13f2 13fa
+lower 13f3 13fb
+lower 13f4 13fc
+lower 13f5 13fd
+upper 13f8 13f0
+upper 13f9 13f1
+upper 13fa 13f2
+upper 13fb 13f3
+upper 13fc 13f4
+upper 13fd 13f5
+upper 1c80 412
+upper 1c81 414
+upper 1c82 41e
+upper 1c83 421
+upper 1c84 422
+upper 1c85 422
+upper 1c86 42a
+upper 1c87 462
+upper 1c88 a64a
+lower 1c90 10d0
+lower 1c91 10d1
+lower 1c92 10d2
+lower 1c93 10d3
+lower 1c94 10d4
+lower 1c95 10d5
+lower 1c96 10d6
+lower 1c97 10d7
+lower 1c98 10d8
+lower 1c99 10d9
+lower 1c9a 10da
+lower 1c9b 10db
+lower 1c9c 10dc
+lower 1c9d 10dd
+lower 1c9e 10de
+lower 1c9f 10df
+lower 1ca0 10e0
+lower 1ca1 10e1
+lower 1ca2 10e2
+lower 1ca3 10e3
+lower 1ca4 10e4
+lower 1ca5 10e5
+lower 1ca6 10e6
+lower 1ca7 10e7
+lower 1ca8 10e8
+lower 1ca9 10e9
+lower 1caa 10ea
+lower 1cab 10eb
+lower 1cac 10ec
+lower 1cad 10ed
+lower 1cae 10ee
+lower 1caf 10ef
+lower 1cb0 10f0
+lower 1cb1 10f1
+lower 1cb2 10f2
+lower 1cb3 10f3
+lower 1cb4 10f4
+lower 1cb5 10f5
+lower 1cb6 10f6
+lower 1cb7 10f7
+lower 1cb8 10f8
+lower 1cb9 10f9
+lower 1cba 10fa
+lower 1cbd 10fd
+lower 1cbe 10fe
+lower 1cbf 10ff
+upper 1d79 a77d
+upper 1d7d 2c63
+upper 1d8e a7c6
+lower 1e00 1e01
+upper 1e01 1e00
+lower 1e02 1e03
+upper 1e03 1e02
+lower 1e04 1e05
+upper 1e05 1e04
+lower 1e06 1e07
+upper 1e07 1e06
+lower 1e08 1e09
+upper 1e09 1e08
+lower 1e0a 1e0b
+upper 1e0b 1e0a
+lower 1e0c 1e0d
+upper 1e0d 1e0c
+lower 1e0e 1e0f
+upper 1e0f 1e0e
+lower 1e10 1e11
+upper 1e11 1e10
+lower 1e12 1e13
+upper 1e13 1e12
+lower 1e14 1e15
+upper 1e15 1e14
+lower 1e16 1e17
+upper 1e17 1e16
+lower 1e18 1e19
+upper 1e19 1e18
+lower 1e1a 1e1b
+upper 1e1b 1e1a
+lower 1e1c 1e1d
+upper 1e1d 1e1c
+lower 1e1e 1e1f
+upper 1e1f 1e1e
+lower 1e20 1e21
+upper 1e21 1e20
+lower 1e22 1e23
+upper 1e23 1e22
+lower 1e24 1e25
+upper 1e25 1e24
+lower 1e26 1e27
+upper 1e27 1e26
+lower 1e28 1e29
+upper 1e29 1e28
+lower 1e2a 1e2b
+upper 1e2b 1e2a
+lower 1e2c 1e2d
+upper 1e2d 1e2c
+lower 1e2e 1e2f
+upper 1e2f 1e2e
+lower 1e30 1e31
+upper 1e31 1e30
+lower 1e32 1e33
+upper 1e33 1e32
+lower 1e34 1e35
+upper 1e35 1e34
+lower 1e36 1e37
+upper 1e37 1e36
+lower 1e38 1e39
+upper 1e39 1e38
+lower 1e3a 1e3b
+upper 1e3b 1e3a
+lower 1e3c 1e3d
+upper 1e3d 1e3c
+lower 1e3e 1e3f
+upper 1e3f 1e3e
+lower 1e40 1e41
+upper 1e41 1e40
+lower 1e42 1e43
+upper 1e43 1e42
+lower 1e44 1e45
+upper 1e45 1e44
+lower 1e46 1e47
+upper 1e47 1e46
+lower 1e48 1e49
+upper 1e49 1e48
+lower 1e4a 1e4b
+upper 1e4b 1e4a
+lower 1e4c 1e4d
+upper 1e4d 1e4c
+lower 1e4e 1e4f
+upper 1e4f 1e4e
+lower 1e50 1e51
+upper 1e51 1e50
+lower 1e52 1e53
+upper 1e53 1e52
+lower 1e54 1e55
+upper 1e55 1e54
+lower 1e56 1e57
+upper 1e57 1e56
+lower 1e58 1e59
+upper 1e59 1e58
+lower 1e5a 1e5b
+upper 1e5b 1e5a
+lower 1e5c 1e5d
+upper 1e5d 1e5c
+lower 1e5e 1e5f
+upper 1e5f 1e5e
+lower 1e60 1e61
+upper 1e61 1e60
+lower 1e62 1e63
+upper 1e63 1e62
+lower 1e64 1e65
+upper 1e65 1e64
+lower 1e66 1e67
+upper 1e67 1e66
+lower 1e68 1e69
+upper 1e69 1e68
+lower 1e6a 1e6b
+upper 1e6b 1e6a
+lower 1e6c 1e6d
+upper 1e6d 1e6c
+lower 1e6e 1e6f
+upper 1e6f 1e6e
+lower 1e70 1e71
+upper 1e71 1e70
+lower 1e72 1e73
+upper 1e73 1e72
+lower 1e74 1e75
+upper 1e75 1e74
+lower 1e76 1e77
+upper 1e77 1e76
+lower 1e78 1e79
+upper 1e79 1e78
+lower 1e7a 1e7b
+upper 1e7b 1e7a
+lower 1e7c 1e7d
+upper 1e7d 1e7c
+lower 1e7e 1e7f
+upper 1e7f 1e7e
+lower 1e80 1e81
+upper 1e81 1e80
+lower 1e82 1e83
+upper 1e83 1e82
+lower 1e84 1e85
+upper 1e85 1e84
+lower 1e86 1e87
+upper 1e87 1e86
+lower 1e88 1e89
+upper 1e89 1e88
+lower 1e8a 1e8b
+upper 1e8b 1e8a
+lower 1e8c 1e8d
+upper 1e8d 1e8c
+lower 1e8e 1e8f
+upper 1e8f 1e8e
+lower 1e90 1e91
+upper 1e91 1e90
+lower 1e92 1e93
+upper 1e93 1e92
+lower 1e94 1e95
+upper 1e95 1e94
+upper 1e9b 1e60
+lower 1e9e df
+lower 1ea0 1ea1
+upper 1ea1 1ea0
+lower 1ea2 1ea3
+upper 1ea3 1ea2
+lower 1ea4 1ea5
+upper 1ea5 1ea4
+lower 1ea6 1ea7
+upper 1ea7 1ea6
+lower 1ea8 1ea9
+upper 1ea9 1ea8
+lower 1eaa 1eab
+upper 1eab 1eaa
+lower 1eac 1ead
+upper 1ead 1eac
+lower 1eae 1eaf
+upper 1eaf 1eae
+lower 1eb0 1eb1
+upper 1eb1 1eb0
+lower 1eb2 1eb3
+upper 1eb3 1eb2
+lower 1eb4 1eb5
+upper 1eb5 1eb4
+lower 1eb6 1eb7
+upper 1eb7 1eb6
+lower 1eb8 1eb9
+upper 1eb9 1eb8
+lower 1eba 1ebb
+upper 1ebb 1eba
+lower 1ebc 1ebd
+upper 1ebd 1ebc
+lower 1ebe 1ebf
+upper 1ebf 1ebe
+lower 1ec0 1ec1
+upper 1ec1 1ec0
+lower 1ec2 1ec3
+upper 1ec3 1ec2
+lower 1ec4 1ec5
+upper 1ec5 1ec4
+lower 1ec6 1ec7
+upper 1ec7 1ec6
+lower 1ec8 1ec9
+upper 1ec9 1ec8
+lower 1eca 1ecb
+upper 1ecb 1eca
+lower 1ecc 1ecd
+upper 1ecd 1ecc
+lower 1ece 1ecf
+upper 1ecf 1ece
+lower 1ed0 1ed1
+upper 1ed1 1ed0
+lower 1ed2 1ed3
+upper 1ed3 1ed2
+lower 1ed4 1ed5
+upper 1ed5 1ed4
+lower 1ed6 1ed7
+upper 1ed7 1ed6
+lower 1ed8 1ed9
+upper 1ed9 1ed8
+lower 1eda 1edb
+upper 1edb 1eda
+lower 1edc 1edd
+upper 1edd 1edc
+lower 1ede 1edf
+upper 1edf 1ede
+lower 1ee0 1ee1
+upper 1ee1 1ee0
+lower 1ee2 1ee3
+upper 1ee3 1ee2
+lower 1ee4 1ee5
+upper 1ee5 1ee4
+lower 1ee6 1ee7
+upper 1ee7 1ee6
+lower 1ee8 1ee9
+upper 1ee9 1ee8
+lower 1eea 1eeb
+upper 1eeb 1eea
+lower 1eec 1eed
+upper 1eed 1eec
+lower 1eee 1eef
+upper 1eef 1eee
+lower 1ef0 1ef1
+upper 1ef1 1ef0
+lower 1ef2 1ef3
+upper 1ef3 1ef2
+lower 1ef4 1ef5
+upper 1ef5 1ef4
+lower 1ef6 1ef7
+upper 1ef7 1ef6
+lower 1ef8 1ef9
+upper 1ef9 1ef8
+lower 1efa 1efb
+upper 1efb 1efa
+lower 1efc 1efd
+upper 1efd 1efc
+lower 1efe 1eff
+upper 1eff 1efe
+upper 1f00 1f08
+upper 1f01 1f09
+upper 1f02 1f0a
+upper 1f03 1f0b
+upper 1f04 1f0c
+upper 1f05 1f0d
+upper 1f06 1f0e
+upper 1f07 1f0f
+lower 1f08 1f00
+lower 1f09 1f01
+lower 1f0a 1f02
+lower 1f0b 1f03
+lower 1f0c 1f04
+lower 1f0d 1f05
+lower 1f0e 1f06
+lower 1f0f 1f07
+upper 1f10 1f18
+upper 1f11 1f19
+upper 1f12 1f1a
+upper 1f13 1f1b
+upper 1f14 1f1c
+upper 1f15 1f1d
+lower 1f18 1f10
+lower 1f19 1f11
+lower 1f1a 1f12
+lower 1f1b 1f13
+lower 1f1c 1f14
+lower 1f1d 1f15
+upper 1f20 1f28
+upper 1f21 1f29
+upper 1f22 1f2a
+upper 1f23 1f2b
+upper 1f24 1f2c
+upper 1f25 1f2d
+upper 1f26 1f2e
+upper 1f27 1f2f
+lower 1f28 1f20
+lower 1f29 1f21
+lower 1f2a 1f22
+lower 1f2b 1f23
+lower 1f2c 1f24
+lower 1f2d 1f25
+lower 1f2e 1f26
+lower 1f2f 1f27
+upper 1f30 1f38
+upper 1f31 1f39
+upper 1f32 1f3a
+upper 1f33 1f3b
+upper 1f34 1f3c
+upper 1f35 1f3d
+upper 1f36 1f3e
+upper 1f37 1f3f
+lower 1f38 1f30
+lower 1f39 1f31
+lower 1f3a 1f32
+lower 1f3b 1f33
+lower 1f3c 1f34
+lower 1f3d 1f35
+lower 1f3e 1f36
+lower 1f3f 1f37
+upper 1f40 1f48
+upper 1f41 1f49
+upper 1f42 1f4a
+upper 1f43 1f4b
+upper 1f44 1f4c
+upper 1f45 1f4d
+lower 1f48 1f40
+lower 1f49 1f41
+lower 1f4a 1f42
+lower 1f4b 1f43
+lower 1f4c 1f44
+lower 1f4d 1f45
+upper 1f51 1f59
+upper 1f53 1f5b
+upper 1f55 1f5d
+upper 1f57 1f5f
+lower 1f59 1f51
+lower 1f5b 1f53
+lower 1f5d 1f55
+lower 1f5f 1f57
+upper 1f60 1f68
+upper 1f61 1f69
+upper 1f62 1f6a
+upper 1f63 1f6b
+upper 1f64 1f6c
+upper 1f65 1f6d
+upper 1f66 1f6e
+upper 1f67 1f6f
+lower 1f68 1f60
+lower 1f69 1f61
+lower 1f6a 1f62
+lower 1f6b 1f63
+lower 1f6c 1f64
+lower 1f6d 1f65
+lower 1f6e 1f66
+lower 1f6f 1f67
+upper 1f70 1fba
+upper 1f71 1fbb
+upper 1f72 1fc8
+upper 1f73 1fc9
+upper 1f74 1fca
+upper 1f75 1fcb
+upper 1f76 1fda
+upper 1f77 1fdb
+upper 1f78 1ff8
+upper 1f79 1ff9
+upper 1f7a 1fea
+upper 1f7b 1feb
+upper 1f7c 1ffa
+upper 1f7d 1ffb
+upper 1f80 1f88
+upper 1f81 1f89
+upper 1f82 1f8a
+upper 1f83 1f8b
+upper 1f84 1f8c
+upper 1f85 1f8d
+upper 1f86 1f8e
+upper 1f87 1f8f
+lower 1f88 1f80
+lower 1f89 1f81
+lower 1f8a 1f82
+lower 1f8b 1f83
+lower 1f8c 1f84
+lower 1f8d 1f85
+lower 1f8e 1f86
+lower 1f8f 1f87
+upper 1f90 1f98
+upper 1f91 1f99
+upper 1f92 1f9a
+upper 1f93 1f9b
+upper 1f94 1f9c
+upper 1f95 1f9d
+upper 1f96 1f9e
+upper 1f97 1f9f
+lower 1f98 1f90
+lower 1f99 1f91
+lower 1f9a 1f92
+lower 1f9b 1f93
+lower 1f9c 1f94
+lower 1f9d 1f95
+lower 1f9e 1f96
+lower 1f9f 1f97
+upper 1fa0 1fa8
+upper 1fa1 1fa9
+upper 1fa2 1faa
+upper 1fa3 1fab
+upper 1fa4 1fac
+upper 1fa5 1fad
+upper 1fa6 1fae
+upper 1fa7 1faf
+lower 1fa8 1fa0
+lower 1fa9 1fa1
+lower 1faa 1fa2
+lower 1fab 1fa3
+lower 1fac 1fa4
+lower 1fad 1fa5
+lower 1fae 1fa6
+lower 1faf 1fa7
+upper 1fb0 1fb8
+upper 1fb1 1fb9
+upper 1fb3 1fbc
+lower 1fb8 1fb0
+lower 1fb9 1fb1
+lower 1fba 1f70
+lower 1fbb 1f71
+lower 1fbc 1fb3
+upper 1fbe 399
+upper 1fc3 1fcc
+lower 1fc8 1f72
+lower 1fc9 1f73
+lower 1fca 1f74
+lower 1fcb 1f75
+lower 1fcc 1fc3
+upper 1fd0 1fd8
+upper 1fd1 1fd9
+lower 1fd8 1fd0
+lower 1fd9 1fd1
+lower 1fda 1f76
+lower 1fdb 1f77
+upper 1fe0 1fe8
+upper 1fe1 1fe9
+upper 1fe5 1fec
+lower 1fe8 1fe0
+lower 1fe9 1fe1
+lower 1fea 1f7a
+lower 1feb 1f7b
+lower 1fec 1fe5
+upper 1ff3 1ffc
+lower 1ff8 1f78
+lower 1ff9 1f79
+lower 1ffa 1f7c
+lower 1ffb 1f7d
+lower 1ffc 1ff3
+lower 2126 3c9
+lower 212a 6b
+lower 212b e5
+lower 2132 214e
+upper 214e 2132
+lower 2160 2170
+lower 2161 2171
+lower 2162 2172
+lower 2163 2173
+lower 2164 2174
+lower 2165 2175
+lower 2166 2176
+lower 2167 2177
+lower 2168 2178
+lower 2169 2179
+lower 216a 217a
+lower 216b 217b
+lower 216c 217c
+lower 216d 217d
+lower 216e 217e
+lower 216f 217f
+upper 2170 2160
+upper 2171 2161
+upper 2172 2162
+upper 2173 2163
+upper 2174 2164
+upper 2175 2165
+upper 2176 2166
+upper 2177 2167
+upper 2178 2168
+upper 2179 2169
+upper 217a 216a
+upper 217b 216b
+upper 217c 216c
+upper 217d 216d
+upper 217e 216e
+upper 217f 216f
+lower 2183 2184
+upper 2184 2183
+lower 24b6 24d0
+lower 24b7 24d1
+lower 24b8 24d2
+lower 24b9 24d3
+lower 24ba 24d4
+lower 24bb 24d5
+lower 24bc 24d6
+lower 24bd 24d7
+lower 24be 24d8
+lower 24bf 24d9
+lower 24c0 24da
+lower 24c1 24db
+lower 24c2 24dc
+lower 24c3 24dd
+lower 24c4 24de
+lower 24c5 24df
+lower 24c6 24e0
+lower 24c7 24e1
+lower 24c8 24e2
+lower 24c9 24e3
+lower 24ca 24e4
+lower 24cb 24e5
+lower 24cc 24e6
+lower 24cd 24e7
+lower 24ce 24e8
+lower 24cf 24e9
+upper 24d0 24b6
+upper 24d1 24b7
+upper 24d2 24b8
+upper 24d3 24b9
+upper 24d4 24ba
+upper 24d5 24bb
+upper 24d6 24bc
+upper 24d7 24bd
+upper 24d8 24be
+upper 24d9 24bf
+upper 24da 24c0
+upper 24db 24c1
+upper 24dc 24c2
+upper 24dd 24c3
+upper 24de 24c4
+upper 24df 24c5
+upper 24e0 24c6
+upper 24e1 24c7
+upper 24e2 24c8
+upper 24e3 24c9
+upper 24e4 24ca
+upper 24e5 24cb
+upper 24e6 24cc
+upper 24e7 24cd
+upper 24e8 24ce
+upper 24e9 24cf
+lower 2c00 2c30
+lower 2c01 2c31
+lower 2c02 2c32
+lower 2c03 2c33
+lower 2c04 2c34
+lower 2c05 2c35
+lower 2c06 2c36
+lower 2c07 2c37
+lower 2c08 2c38
+lower 2c09 2c39
+lower 2c0a 2c3a
+lower 2c0b 2c3b
+lower 2c0c 2c3c
+lower 2c0d 2c3d
+lower 2c0e 2c3e
+lower 2c0f 2c3f
+lower 2c10 2c40
+lower 2c11 2c41
+lower 2c12 2c42
+lower 2c13 2c43
+lower 2c14 2c44
+lower 2c15 2c45
+lower 2c16 2c46
+lower 2c17 2c47
+lower 2c18 2c48
+lower 2c19 2c49
+lower 2c1a 2c4a
+lower 2c1b 2c4b
+lower 2c1c 2c4c
+lower 2c1d 2c4d
+lower 2c1e 2c4e
+lower 2c1f 2c4f
+lower 2c20 2c50
+lower 2c21 2c51
+lower 2c22 2c52
+lower 2c23 2c53
+lower 2c24 2c54
+lower 2c25 2c55
+lower 2c26 2c56
+lower 2c27 2c57
+lower 2c28 2c58
+lower 2c29 2c59
+lower 2c2a 2c5a
+lower 2c2b 2c5b
+lower 2c2c 2c5c
+lower 2c2d 2c5d
+lower 2c2e 2c5e
+lower 2c2f 2c5f
+upper 2c30 2c00
+upper 2c31 2c01
+upper 2c32 2c02
+upper 2c33 2c03
+upper 2c34 2c04
+upper 2c35 2c05
+upper 2c36 2c06
+upper 2c37 2c07
+upper 2c38 2c08
+upper 2c39 2c09
+upper 2c3a 2c0a
+upper 2c3b 2c0b
+upper 2c3c 2c0c
+upper 2c3d 2c0d
+upper 2c3e 2c0e
+upper 2c3f 2c0f
+upper 2c40 2c10
+upper 2c41 2c11
+upper 2c42 2c12
+upper 2c43 2c13
+upper 2c44 2c14
+upper 2c45 2c15
+upper 2c46 2c16
+upper 2c47 2c17
+upper 2c48 2c18
+upper 2c49 2c19
+upper 2c4a 2c1a
+upper 2c4b 2c1b
+upper 2c4c 2c1c
+upper 2c4d 2c1d
+upper 2c4e 2c1e
+upper 2c4f 2c1f
+upper 2c50 2c20
+upper 2c51 2c21
+upper 2c52 2c22
+upper 2c53 2c23
+upper 2c54 2c24
+upper 2c55 2c25
+upper 2c56 2c26
+upper 2c57 2c27
+upper 2c58 2c28
+upper 2c59 2c29
+upper 2c5a 2c2a
+upper 2c5b 2c2b
+upper 2c5c 2c2c
+upper 2c5d 2c2d
+upper 2c5e 2c2e
+upper 2c5f 2c2f
+lower 2c60 2c61
+upper 2c61 2c60
+lower 2c62 26b
+lower 2c63 1d7d
+lower 2c64 27d
+upper 2c65 23a
+upper 2c66 23e
+lower 2c67 2c68
+upper 2c68 2c67
+lower 2c69 2c6a
+upper 2c6a 2c69
+lower 2c6b 2c6c
+upper 2c6c 2c6b
+lower 2c6d 251
+lower 2c6e 271
+lower 2c6f 250
+lower 2c70 252
+lower 2c72 2c73
+upper 2c73 2c72
+lower 2c75 2c76
+upper 2c76 2c75
+lower 2c7e 23f
+lower 2c7f 240
+lower 2c80 2c81
+upper 2c81 2c80
+lower 2c82 2c83
+upper 2c83 2c82
+lower 2c84 2c85
+upper 2c85 2c84
+lower 2c86 2c87
+upper 2c87 2c86
+lower 2c88 2c89
+upper 2c89 2c88
+lower 2c8a 2c8b
+upper 2c8b 2c8a
+lower 2c8c 2c8d
+upper 2c8d 2c8c
+lower 2c8e 2c8f
+upper 2c8f 2c8e
+lower 2c90 2c91
+upper 2c91 2c90
+lower 2c92 2c93
+upper 2c93 2c92
+lower 2c94 2c95
+upper 2c95 2c94
+lower 2c96 2c97
+upper 2c97 2c96
+lower 2c98 2c99
+upper 2c99 2c98
+lower 2c9a 2c9b
+upper 2c9b 2c9a
+lower 2c9c 2c9d
+upper 2c9d 2c9c
+lower 2c9e 2c9f
+upper 2c9f 2c9e
+lower 2ca0 2ca1
+upper 2ca1 2ca0
+lower 2ca2 2ca3
+upper 2ca3 2ca2
+lower 2ca4 2ca5
+upper 2ca5 2ca4
+lower 2ca6 2ca7
+upper 2ca7 2ca6
+lower 2ca8 2ca9
+upper 2ca9 2ca8
+lower 2caa 2cab
+upper 2cab 2caa
+lower 2cac 2cad
+upper 2cad 2cac
+lower 2cae 2caf
+upper 2caf 2cae
+lower 2cb0 2cb1
+upper 2cb1 2cb0
+lower 2cb2 2cb3
+upper 2cb3 2cb2
+lower 2cb4 2cb5
+upper 2cb5 2cb4
+lower 2cb6 2cb7
+upper 2cb7 2cb6
+lower 2cb8 2cb9
+upper 2cb9 2cb8
+lower 2cba 2cbb
+upper 2cbb 2cba
+lower 2cbc 2cbd
+upper 2cbd 2cbc
+lower 2cbe 2cbf
+upper 2cbf 2cbe
+lower 2cc0 2cc1
+upper 2cc1 2cc0
+lower 2cc2 2cc3
+upper 2cc3 2cc2
+lower 2cc4 2cc5
+upper 2cc5 2cc4
+lower 2cc6 2cc7
+upper 2cc7 2cc6
+lower 2cc8 2cc9
+upper 2cc9 2cc8
+lower 2cca 2ccb
+upper 2ccb 2cca
+lower 2ccc 2ccd
+upper 2ccd 2ccc
+lower 2cce 2ccf
+upper 2ccf 2cce
+lower 2cd0 2cd1
+upper 2cd1 2cd0
+lower 2cd2 2cd3
+upper 2cd3 2cd2
+lower 2cd4 2cd5
+upper 2cd5 2cd4
+lower 2cd6 2cd7
+upper 2cd7 2cd6
+lower 2cd8 2cd9
+upper 2cd9 2cd8
+lower 2cda 2cdb
+upper 2cdb 2cda
+lower 2cdc 2cdd
+upper 2cdd 2cdc
+lower 2cde 2cdf
+upper 2cdf 2cde
+lower 2ce0 2ce1
+upper 2ce1 2ce0
+lower 2ce2 2ce3
+upper 2ce3 2ce2
+lower 2ceb 2cec
+upper 2cec 2ceb
+lower 2ced 2cee
+upper 2cee 2ced
+lower 2cf2 2cf3
+upper 2cf3 2cf2
+upper 2d00 10a0
+upper 2d01 10a1
+upper 2d02 10a2
+upper 2d03 10a3
+upper 2d04 10a4
+upper 2d05 10a5
+upper 2d06 10a6
+upper 2d07 10a7
+upper 2d08 10a8
+upper 2d09 10a9
+upper 2d0a 10aa
+upper 2d0b 10ab
+upper 2d0c 10ac
+upper 2d0d 10ad
+upper 2d0e 10ae
+upper 2d0f 10af
+upper 2d10 10b0
+upper 2d11 10b1
+upper 2d12 10b2
+upper 2d13 10b3
+upper 2d14 10b4
+upper 2d15 10b5
+upper 2d16 10b6
+upper 2d17 10b7
+upper 2d18 10b8
+upper 2d19 10b9
+upper 2d1a 10ba
+upper 2d1b 10bb
+upper 2d1c 10bc
+upper 2d1d 10bd
+upper 2d1e 10be
+upper 2d1f 10bf
+upper 2d20 10c0
+upper 2d21 10c1
+upper 2d22 10c2
+upper 2d23 10c3
+upper 2d24 10c4
+upper 2d25 10c5
+upper 2d27 10c7
+upper 2d2d 10cd
+lower a640 a641
+upper a641 a640
+lower a642 a643
+upper a643 a642
+lower a644 a645
+upper a645 a644
+lower a646 a647
+upper a647 a646
+lower a648 a649
+upper a649 a648
+lower a64a a64b
+upper a64b a64a
+lower a64c a64d
+upper a64d a64c
+lower a64e a64f
+upper a64f a64e
+lower a650 a651
+upper a651 a650
+lower a652 a653
+upper a653 a652
+lower a654 a655
+upper a655 a654
+lower a656 a657
+upper a657 a656
+lower a658 a659
+upper a659 a658
+lower a65a a65b
+upper a65b a65a
+lower a65c a65d
+upper a65d a65c
+lower a65e a65f
+upper a65f a65e
+lower a660 a661
+upper a661 a660
+lower a662 a663
+upper a663 a662
+lower a664 a665
+upper a665 a664
+lower a666 a667
+upper a667 a666
+lower a668 a669
+upper a669 a668
+lower a66a a66b
+upper a66b a66a
+lower a66c a66d
+upper a66d a66c
+lower a680 a681
+upper a681 a680
+lower a682 a683
+upper a683 a682
+lower a684 a685
+upper a685 a684
+lower a686 a687
+upper a687 a686
+lower a688 a689
+upper a689 a688
+lower a68a a68b
+upper a68b a68a
+lower a68c a68d
+upper a68d a68c
+lower a68e a68f
+upper a68f a68e
+lower a690 a691
+upper a691 a690
+lower a692 a693
+upper a693 a692
+lower a694 a695
+upper a695 a694
+lower a696 a697
+upper a697 a696
+lower a698 a699
+upper a699 a698
+lower a69a a69b
+upper a69b a69a
+lower a722 a723
+upper a723 a722
+lower a724 a725
+upper a725 a724
+lower a726 a727
+upper a727 a726
+lower a728 a729
+upper a729 a728
+lower a72a a72b
+upper a72b a72a
+lower a72c a72d
+upper a72d a72c
+lower a72e a72f
+upper a72f a72e
+lower a732 a733
+upper a733 a732
+lower a734 a735
+upper a735 a734
+lower a736 a737
+upper a737 a736
+lower a738 a739
+upper a739 a738
+lower a73a a73b
+upper a73b a73a
+lower a73c a73d
+upper a73d a73c
+lower a73e a73f
+upper a73f a73e
+lower a740 a741
+upper a741 a740
+lower a742 a743
+upper a743 a742
+lower a744 a745
+upper a745 a744
+lower a746 a747
+upper a747 a746
+lower a748 a749
+upper a749 a748
+lower a74a a74b
+upper a74b a74a
+lower a74c a74d
+upper a74d a74c
+lower a74e a74f
+upper a74f a74e
+lower a750 a751
+upper a751 a750
+lower a752 a753
+upper a753 a752
+lower a754 a755
+upper a755 a754
+lower a756 a757
+upper a757 a756
+lower a758 a759
+upper a759 a758
+lower a75a a75b
+upper a75b a75a
+lower a75c a75d
+upper a75d a75c
+lower a75e a75f
+upper a75f a75e
+lower a760 a761
+upper a761 a760
+lower a762 a763
+upper a763 a762
+lower a764 a765
+upper a765 a764
+lower a766 a767
+upper a767 a766
+lower a768 a769
+upper a769 a768
+lower a76a a76b
+upper a76b a76a
+lower a76c a76d
+upper a76d a76c
+lower a76e a76f
+upper a76f a76e
+lower a779 a77a
+upper a77a a779
+lower a77b a77c
+upper a77c a77b
+lower a77d 1d79
+lower a77e a77f
+upper a77f a77e
+lower a780 a781
+upper a781 a780
+lower a782 a783
+upper a783 a782
+lower a784 a785
+upper a785 a784
+lower a786 a787
+upper a787 a786
+lower a78b a78c
+upper a78c a78b
+lower a78d 265
+lower a790 a791
+upper a791 a790
+lower a792 a793
+upper a793 a792
+upper a794 a7c4
+lower a796 a797
+upper a797 a796
+lower a798 a799
+upper a799 a798
+lower a79a a79b
+upper a79b a79a
+lower a79c a79d
+upper a79d a79c
+lower a79e a79f
+upper a79f a79e
+lower a7a0 a7a1
+upper a7a1 a7a0
+lower a7a2 a7a3
+upper a7a3 a7a2
+lower a7a4 a7a5
+upper a7a5 a7a4
+lower a7a6 a7a7
+upper a7a7 a7a6
+lower a7a8 a7a9
+upper a7a9 a7a8
+lower a7aa 266
+lower a7ab 25c
+lower a7ac 261
+lower a7ad 26c
+lower a7ae 26a
+lower a7b0 29e
+lower a7b1 287
+lower a7b2 29d
+lower a7b3 ab53
+lower a7b4 a7b5
+upper a7b5 a7b4
+lower a7b6 a7b7
+upper a7b7 a7b6
+lower a7b8 a7b9
+upper a7b9 a7b8
+lower a7ba a7bb
+upper a7bb a7ba
+lower a7bc a7bd
+upper a7bd a7bc
+lower a7be a7bf
+upper a7bf a7be
+lower a7c0 a7c1
+upper a7c1 a7c0
+lower a7c2 a7c3
+upper a7c3 a7c2
+lower a7c4 a794
+lower a7c5 282
+lower a7c6 1d8e
+lower a7c7 a7c8
+upper a7c8 a7c7
+lower a7c9 a7ca
+upper a7ca a7c9
+lower a7d0 a7d1
+upper a7d1 a7d0
+lower a7d6 a7d7
+upper a7d7 a7d6
+lower a7d8 a7d9
+upper a7d9 a7d8
+lower a7f5 a7f6
+upper a7f6 a7f5
+upper ab53 a7b3
+upper ab70 13a0
+upper ab71 13a1
+upper ab72 13a2
+upper ab73 13a3
+upper ab74 13a4
+upper ab75 13a5
+upper ab76 13a6
+upper ab77 13a7
+upper ab78 13a8
+upper ab79 13a9
+upper ab7a 13aa
+upper ab7b 13ab
+upper ab7c 13ac
+upper ab7d 13ad
+upper ab7e 13ae
+upper ab7f 13af
+upper ab80 13b0
+upper ab81 13b1
+upper ab82 13b2
+upper ab83 13b3
+upper ab84 13b4
+upper ab85 13b5
+upper ab86 13b6
+upper ab87 13b7
+upper ab88 13b8
+upper ab89 13b9
+upper ab8a 13ba
+upper ab8b 13bb
+upper ab8c 13bc
+upper ab8d 13bd
+upper ab8e 13be
+upper ab8f 13bf
+upper ab90 13c0
+upper ab91 13c1
+upper ab92 13c2
+upper ab93 13c3
+upper ab94 13c4
+upper ab95 13c5
+upper ab96 13c6
+upper ab97 13c7
+upper ab98 13c8
+upper ab99 13c9
+upper ab9a 13ca
+upper ab9b 13cb
+upper ab9c 13cc
+upper ab9d 13cd
+upper ab9e 13ce
+upper ab9f 13cf
+upper aba0 13d0
+upper aba1 13d1
+upper aba2 13d2
+upper aba3 13d3
+upper aba4 13d4
+upper aba5 13d5
+upper aba6 13d6
+upper aba7 13d7
+upper aba8 13d8
+upper aba9 13d9
+upper abaa 13da
+upper abab 13db
+upper abac 13dc
+upper abad 13dd
+upper abae 13de
+upper abaf 13df
+upper abb0 13e0
+upper abb1 13e1
+upper abb2 13e2
+upper abb3 13e3
+upper abb4 13e4
+upper abb5 13e5
+upper abb6 13e6
+upper abb7 13e7
+upper abb8 13e8
+upper abb9 13e9
+upper abba 13ea
+upper abbb 13eb
+upper abbc 13ec
+upper abbd 13ed
+upper abbe 13ee
+upper abbf 13ef
+lower ff21 ff41
+lower ff22 ff42
+lower ff23 ff43
+lower ff24 ff44
+lower ff25 ff45
+lower ff26 ff46
+lower ff27 ff47
+lower ff28 ff48
+lower ff29 ff49
+lower ff2a ff4a
+lower ff2b ff4b
+lower ff2c ff4c
+lower ff2d ff4d
+lower ff2e ff4e
+lower ff2f ff4f
+lower ff30 ff50
+lower ff31 ff51
+lower ff32 ff52
+lower ff33 ff53
+lower ff34 ff54
+lower ff35 ff55
+lower ff36 ff56
+lower ff37 ff57
+lower ff38 ff58
+lower ff39 ff59
+lower ff3a ff5a
+upper ff41 ff21
+upper ff42 ff22
+upper ff43 ff23
+upper ff44 ff24
+upper ff45 ff25
+upper ff46 ff26
+upper ff47 ff27
+upper ff48 ff28
+upper ff49 ff29
+upper ff4a ff2a
+upper ff4b ff2b
+upper ff4c ff2c
+upper ff4d ff2d
+upper ff4e ff2e
+upper ff4f ff2f
+upper ff50 ff30
+upper ff51 ff31
+upper ff52 ff32
+upper ff53 ff33
+upper ff54 ff34
+upper ff55 ff35
+upper ff56 ff36
+upper ff57 ff37
+upper ff58 ff38
+upper ff59 ff39
+upper ff5a ff3a
+lower 10400 10428
+lower 10401 10429
+lower 10402 1042a
+lower 10403 1042b
+lower 10404 1042c
+lower 10405 1042d
+lower 10406 1042e
+lower 10407 1042f
+lower 10408 10430
+lower 10409 10431
+lower 1040a 10432
+lower 1040b 10433
+lower 1040c 10434
+lower 1040d 10435
+lower 1040e 10436
+lower 1040f 10437
+lower 10410 10438
+lower 10411 10439
+lower 10412 1043a
+lower 10413 1043b
+lower 10414 1043c
+lower 10415 1043d
+lower 10416 1043e
+lower 10417 1043f
+lower 10418 10440
+lower 10419 10441
+lower 1041a 10442
+lower 1041b 10443
+lower 1041c 10444
+lower 1041d 10445
+lower 1041e 10446
+lower 1041f 10447
+lower 10420 10448
+lower 10421 10449
+lower 10422 1044a
+lower 10423 1044b
+lower 10424 1044c
+lower 10425 1044d
+lower 10426 1044e
+lower 10427 1044f
+upper 10428 10400
+upper 10429 10401
+upper 1042a 10402
+upper 1042b 10403
+upper 1042c 10404
+upper 1042d 10405
+upper 1042e 10406
+upper 1042f 10407
+upper 10430 10408
+upper 10431 10409
+upper 10432 1040a
+upper 10433 1040b
+upper 10434 1040c
+upper 10435 1040d
+upper 10436 1040e
+upper 10437 1040f
+upper 10438 10410
+upper 10439 10411
+upper 1043a 10412
+upper 1043b 10413
+upper 1043c 10414
+upper 1043d 10415
+upper 1043e 10416
+upper 1043f 10417
+upper 10440 10418
+upper 10441 10419
+upper 10442 1041a
+upper 10443 1041b
+upper 10444 1041c
+upper 10445 1041d
+upper 10446 1041e
+upper 10447 1041f
+upper 10448 10420
+upper 10449 10421
+upper 1044a 10422
+upper 1044b 10423
+upper 1044c 10424
+upper 1044d 10425
+upper 1044e 10426
+upper 1044f 10427
+lower 104b0 104d8
+lower 104b1 104d9
+lower 104b2 104da
+lower 104b3 104db
+lower 104b4 104dc
+lower 104b5 104dd
+lower 104b6 104de
+lower 104b7 104df
+lower 104b8 104e0
+lower 104b9 104e1
+lower 104ba 104e2
+lower 104bb 104e3
+lower 104bc 104e4
+lower 104bd 104e5
+lower 104be 104e6
+lower 104bf 104e7
+lower 104c0 104e8
+lower 104c1 104e9
+lower 104c2 104ea
+lower 104c3 104eb
+lower 104c4 104ec
+lower 104c5 104ed
+lower 104c6 104ee
+lower 104c7 104ef
+lower 104c8 104f0
+lower 104c9 104f1
+lower 104ca 104f2
+lower 104cb 104f3
+lower 104cc 104f4
+lower 104cd 104f5
+lower 104ce 104f6
+lower 104cf 104f7
+lower 104d0 104f8
+lower 104d1 104f9
+lower 104d2 104fa
+lower 104d3 104fb
+upper 104d8 104b0
+upper 104d9 104b1
+upper 104da 104b2
+upper 104db 104b3
+upper 104dc 104b4
+upper 104dd 104b5
+upper 104de 104b6
+upper 104df 104b7
+upper 104e0 104b8
+upper 104e1 104b9
+upper 104e2 104ba
+upper 104e3 104bb
+upper 104e4 104bc
+upper 104e5 104bd
+upper 104e6 104be
+upper 104e7 104bf
+upper 104e8 104c0
+upper 104e9 104c1
+upper 104ea 104c2
+upper 104eb 104c3
+upper 104ec 104c4
+upper 104ed 104c5
+upper 104ee 104c6
+upper 104ef 104c7
+upper 104f0 104c8
+upper 104f1 104c9
+upper 104f2 104ca
+upper 104f3 104cb
+upper 104f4 104cc
+upper 104f5 104cd
+upper 104f6 104ce
+upper 104f7 104cf
+upper 104f8 104d0
+upper 104f9 104d1
+upper 104fa 104d2
+upper 104fb 104d3
+lower 10570 10597
+lower 10571 10598
+lower 10572 10599
+lower 10573 1059a
+lower 10574 1059b
+lower 10575 1059c
+lower 10576 1059d
+lower 10577 1059e
+lower 10578 1059f
+lower 10579 105a0
+lower 1057a 105a1
+lower 1057c 105a3
+lower 1057d 105a4
+lower 1057e 105a5
+lower 1057f 105a6
+lower 10580 105a7
+lower 10581 105a8
+lower 10582 105a9
+lower 10583 105aa
+lower 10584 105ab
+lower 10585 105ac
+lower 10586 105ad
+lower 10587 105ae
+lower 10588 105af
+lower 10589 105b0
+lower 1058a 105b1
+lower 1058c 105b3
+lower 1058d 105b4
+lower 1058e 105b5
+lower 1058f 105b6
+lower 10590 105b7
+lower 10591 105b8
+lower 10592 105b9
+lower 10594 105bb
+lower 10595 105bc
+upper 10597 10570
+upper 10598 10571
+upper 10599 10572
+upper 1059a 10573
+upper 1059b 10574
+upper 1059c 10575
+upper 1059d 10576
+upper 1059e 10577
+upper 1059f 10578
+upper 105a0 10579
+upper 105a1 1057a
+upper 105a3 1057c
+upper 105a4 1057d
+upper 105a5 1057e
+upper 105a6 1057f
+upper 105a7 10580
+upper 105a8 10581
+upper 105a9 10582
+upper 105aa 10583
+upper 105ab 10584
+upper 105ac 10585
+upper 105ad 10586
+upper 105ae 10587
+upper 105af 10588
+upper 105b0 10589
+upper 105b1 1058a
+upper 105b3 1058c
+upper 105b4 1058d
+upper 105b5 1058e
+upper 105b6 1058f
+upper 105b7 10590
+upper 105b8 10591
+upper 105b9 10592
+upper 105bb 10594
+upper 105bc 10595
+lower 10c80 10cc0
+lower 10c81 10cc1
+lower 10c82 10cc2
+lower 10c83 10cc3
+lower 10c84 10cc4
+lower 10c85 10cc5
+lower 10c86 10cc6
+lower 10c87 10cc7
+lower 10c88 10cc8
+lower 10c89 10cc9
+lower 10c8a 10cca
+lower 10c8b 10ccb
+lower 10c8c 10ccc
+lower 10c8d 10ccd
+lower 10c8e 10cce
+lower 10c8f 10ccf
+lower 10c90 10cd0
+lower 10c91 10cd1
+lower 10c92 10cd2
+lower 10c93 10cd3
+lower 10c94 10cd4
+lower 10c95 10cd5
+lower 10c96 10cd6
+lower 10c97 10cd7
+lower 10c98 10cd8
+lower 10c99 10cd9
+lower 10c9a 10cda
+lower 10c9b 10cdb
+lower 10c9c 10cdc
+lower 10c9d 10cdd
+lower 10c9e 10cde
+lower 10c9f 10cdf
+lower 10ca0 10ce0
+lower 10ca1 10ce1
+lower 10ca2 10ce2
+lower 10ca3 10ce3
+lower 10ca4 10ce4
+lower 10ca5 10ce5
+lower 10ca6 10ce6
+lower 10ca7 10ce7
+lower 10ca8 10ce8
+lower 10ca9 10ce9
+lower 10caa 10cea
+lower 10cab 10ceb
+lower 10cac 10cec
+lower 10cad 10ced
+lower 10cae 10cee
+lower 10caf 10cef
+lower 10cb0 10cf0
+lower 10cb1 10cf1
+lower 10cb2 10cf2
+upper 10cc0 10c80
+upper 10cc1 10c81
+upper 10cc2 10c82
+upper 10cc3 10c83
+upper 10cc4 10c84
+upper 10cc5 10c85
+upper 10cc6 10c86
+upper 10cc7 10c87
+upper 10cc8 10c88
+upper 10cc9 10c89
+upper 10cca 10c8a
+upper 10ccb 10c8b
+upper 10ccc 10c8c
+upper 10ccd 10c8d
+upper 10cce 10c8e
+upper 10ccf 10c8f
+upper 10cd0 10c90
+upper 10cd1 10c91
+upper 10cd2 10c92
+upper 10cd3 10c93
+upper 10cd4 10c94
+upper 10cd5 10c95
+upper 10cd6 10c96
+upper 10cd7 10c97
+upper 10cd8 10c98
+upper 10cd9 10c99
+upper 10cda 10c9a
+upper 10cdb 10c9b
+upper 10cdc 10c9c
+upper 10cdd 10c9d
+upper 10cde 10c9e
+upper 10cdf 10c9f
+upper 10ce0 10ca0
+upper 10ce1 10ca1
+upper 10ce2 10ca2
+upper 10ce3 10ca3
+upper 10ce4 10ca4
+upper 10ce5 10ca5
+upper 10ce6 10ca6
+upper 10ce7 10ca7
+upper 10ce8 10ca8
+upper 10ce9 10ca9
+upper 10cea 10caa
+upper 10ceb 10cab
+upper 10cec 10cac
+upper 10ced 10cad
+upper 10cee 10cae
+upper 10cef 10caf
+upper 10cf0 10cb0
+upper 10cf1 10cb1
+upper 10cf2 10cb2
+lower 118a0 118c0
+lower 118a1 118c1
+lower 118a2 118c2
+lower 118a3 118c3
+lower 118a4 118c4
+lower 118a5 118c5
+lower 118a6 118c6
+lower 118a7 118c7
+lower 118a8 118c8
+lower 118a9 118c9
+lower 118aa 118ca
+lower 118ab 118cb
+lower 118ac 118cc
+lower 118ad 118cd
+lower 118ae 118ce
+lower 118af 118cf
+lower 118b0 118d0
+lower 118b1 118d1
+lower 118b2 118d2
+lower 118b3 118d3
+lower 118b4 118d4
+lower 118b5 118d5
+lower 118b6 118d6
+lower 118b7 118d7
+lower 118b8 118d8
+lower 118b9 118d9
+lower 118ba 118da
+lower 118bb 118db
+lower 118bc 118dc
+lower 118bd 118dd
+lower 118be 118de
+lower 118bf 118df
+upper 118c0 118a0
+upper 118c1 118a1
+upper 118c2 118a2
+upper 118c3 118a3
+upper 118c4 118a4
+upper 118c5 118a5
+upper 118c6 118a6
+upper 118c7 118a7
+upper 118c8 118a8
+upper 118c9 118a9
+upper 118ca 118aa
+upper 118cb 118ab
+upper 118cc 118ac
+upper 118cd 118ad
+upper 118ce 118ae
+upper 118cf 118af
+upper 118d0 118b0
+upper 118d1 118b1
+upper 118d2 118b2
+upper 118d3 118b3
+upper 118d4 118b4
+upper 118d5 118b5
+upper 118d6 118b6
+upper 118d7 118b7
+upper 118d8 118b8
+upper 118d9 118b9
+upper 118da 118ba
+upper 118db 118bb
+upper 118dc 118bc
+upper 118dd 118bd
+upper 118de 118be
+upper 118df 118bf
+lower 16e40 16e60
+lower 16e41 16e61
+lower 16e42 16e62
+lower 16e43 16e63
+lower 16e44 16e64
+lower 16e45 16e65
+lower 16e46 16e66
+lower 16e47 16e67
+lower 16e48 16e68
+lower 16e49 16e69
+lower 16e4a 16e6a
+lower 16e4b 16e6b
+lower 16e4c 16e6c
+lower 16e4d 16e6d
+lower 16e4e 16e6e
+lower 16e4f 16e6f
+lower 16e50 16e70
+lower 16e51 16e71
+lower 16e52 16e72
+lower 16e53 16e73
+lower 16e54 16e74
+lower 16e55 16e75
+lower 16e56 16e76
+lower 16e57 16e77
+lower 16e58 16e78
+lower 16e59 16e79
+lower 16e5a 16e7a
+lower 16e5b 16e7b
+lower 16e5c 16e7c
+lower 16e5d 16e7d
+lower 16e5e 16e7e
+lower 16e5f 16e7f
+upper 16e60 16e40
+upper 16e61 16e41
+upper 16e62 16e42
+upper 16e63 16e43
+upper 16e64 16e44
+upper 16e65 16e45
+upper 16e66 16e46
+upper 16e67 16e47
+upper 16e68 16e48
+upper 16e69 16e49
+upper 16e6a 16e4a
+upper 16e6b 16e4b
+upper 16e6c 16e4c
+upper 16e6d 16e4d
+upper 16e6e 16e4e
+upper 16e6f 16e4f
+upper 16e70 16e50
+upper 16e71 16e51
+upper 16e72 16e52
+upper 16e73 16e53
+upper 16e74 16e54
+upper 16e75 16e55
+upper 16e76 16e56
+upper 16e77 16e57
+upper 16e78 16e58
+upper 16e79 16e59
+upper 16e7a 16e5a
+upper 16e7b 16e5b
+upper 16e7c 16e5c
+upper 16e7d 16e5d
+upper 16e7e 16e5e
+upper 16e7f 16e5f
+lower 1e900 1e922
+lower 1e901 1e923
+lower 1e902 1e924
+lower 1e903 1e925
+lower 1e904 1e926
+lower 1e905 1e927
+lower 1e906 1e928
+lower 1e907 1e929
+lower 1e908 1e92a
+lower 1e909 1e92b
+lower 1e90a 1e92c
+lower 1e90b 1e92d
+lower 1e90c 1e92e
+lower 1e90d 1e92f
+lower 1e90e 1e930
+lower 1e90f 1e931
+lower 1e910 1e932
+lower 1e911 1e933
+lower 1e912 1e934
+lower 1e913 1e935
+lower 1e914 1e936
+lower 1e915 1e937
+lower 1e916 1e938
+lower 1e917 1e939
+lower 1e918 1e93a
+lower 1e919 1e93b
+lower 1e91a 1e93c
+lower 1e91b 1e93d
+lower 1e91c 1e93e
+lower 1e91d 1e93f
+lower 1e91e 1e940
+lower 1e91f 1e941
+lower 1e920 1e942
+lower 1e921 1e943
+upper 1e922 1e900
+upper 1e923 1e901
+upper 1e924 1e902
+upper 1e925 1e903
+upper 1e926 1e904
+upper 1e927 1e905
+upper 1e928 1e906
+upper 1e929 1e907
+upper 1e92a 1e908
+upper 1e92b 1e909
+upper 1e92c 1e90a
+upper 1e92d 1e90b
+upper 1e92e 1e90c
+upper 1e92f 1e90d
+upper 1e930 1e90e
+upper 1e931 1e90f
+upper 1e932 1e910
+upper 1e933 1e911
+upper 1e934 1e912
+upper 1e935 1e913
+upper 1e936 1e914
+upper 1e937 1e915
+upper 1e938 1e916
+upper 1e939 1e917
+upper 1e93a 1e918
+upper 1e93b 1e919
+upper 1e93c 1e91a
+upper 1e93d 1e91b
+upper 1e93e 1e91c
+upper 1e93f 1e91d
+upper 1e940 1e91e
+upper 1e941 1e91f
+upper 1e942 1e920
+upper 1e943 1e921

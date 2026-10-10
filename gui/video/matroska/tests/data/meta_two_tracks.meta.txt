@@ -1,0 +1,9 @@
+# meta_two_tracks.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+tag title=Second
+tag FOUND=yes

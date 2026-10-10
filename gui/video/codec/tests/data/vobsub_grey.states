@@ -1,0 +1,8 @@
+# vobsub_grey.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 720 480
+state 1000 d121f51bbd0fe2743b740fb215980bb3
+state 2001 9e3119db8898b8f610596ed99bb3e433
+state 3000 d6a445f0adeaa3926b0f7e799f127059
+state 4001 9e3119db8898b8f610596ed99bb3e433
+state 5000 2a286df3dbe1ae3ed11f29952eed9a05
+state 6001 9e3119db8898b8f610596ed99bb3e433

@@ -159,6 +159,11 @@ pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 /// job-control stop — every value is a legitimate exit code — and cannot
 /// grow an options argument its existing callers do not set.
 pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
+/// `SYS_PROCESS_GET_RUSAGE` — the caller's own resource accounting: `arg0` a
+/// `who` (`RUSAGE_SELF` 0, `RUSAGE_CHILDREN` -1, `RUSAGE_THREAD` 1), `arg1`
+/// a pointer to a [`crate::resource::RusageInfo`], `arg2` its size; writes
+/// `min(size, 56)` bytes, the rest zero. Backs `resource::getrusage`.
+pub const SYS_PROCESS_GET_RUSAGE: u64 = 1064;
 pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;
@@ -1036,12 +1041,17 @@ pub const SYS_SOCKETPAIR_POLL: u64 = 308;
 pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
 pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 
-// Futexes (IPC range 210-214)
+// Futexes (IPC range 210-219)
 pub const SYS_FUTEX_WAIT: u64 = 210;
 pub const SYS_FUTEX_WAKE: u64 = 211;
 pub const SYS_FUTEX_LOCK_PI: u64 = 212;
 pub const SYS_FUTEX_UNLOCK_PI: u64 = 213;
 pub const SYS_FUTEX_WAIT_TIMEOUT: u64 = 214;
+/// [`SYS_FUTEX_LOCK_PI`] for at most `arg1` nanoseconds, then `TimedOut`;
+/// 0 tries once without sleeping.  (216, `SYS_FUTEX_TRYLOCK_PI`, is not
+/// used: it takes only a word that is exactly 0, where Linux's
+/// `FUTEX_TRYLOCK_PI` also takes one a dead owner left -- which this does.)
+pub const SYS_FUTEX_LOCK_PI_TIMEOUT: u64 = 217;
 
 // Eventfd (IPC range 240-249)
 pub const SYS_EVENTFD_CREATE: u64 = 240;
@@ -1213,11 +1223,15 @@ pub fn syscall0(nr: u64) -> i64 {
     #[cfg(not(target_os = "none"))]
     {
         // Host-side intercepts: the clock syscalls are routed to
-        // std::time so time-dependent code paths work in unit tests.
-        // Everything else returns the ENOSYS sentinel.
+        // std::time so time-dependent code paths work in unit tests, and
+        // a sync succeeds -- the host build has no SlateOS file system, so
+        // there is nothing to flush, and a sync of nothing is done (Linux's
+        // `sync` cannot fail either). Everything else returns the ENOSYS
+        // sentinel.
         match nr {
             SYS_CLOCK_MONOTONIC => host_clock::monotonic_ns(),
             SYS_CLOCK_REALTIME => host_clock::realtime_ns(),
+            SYS_FS_SYNC => 0,
             _ => HOST_ENOSYS,
         }
     }
@@ -1591,6 +1605,7 @@ mod tests {
             SYS_FUTEX_LOCK_PI,
             SYS_FUTEX_UNLOCK_PI,
             SYS_FUTEX_WAIT_TIMEOUT,
+            SYS_FUTEX_LOCK_PI_TIMEOUT,
             SYS_EVENTFD_CREATE,
             SYS_EVENTFD_WRITE,
             SYS_EVENTFD_READ,
@@ -1866,6 +1881,7 @@ mod tests {
             SYS_FUTEX_LOCK_PI,
             SYS_FUTEX_UNLOCK_PI,
             SYS_FUTEX_WAIT_TIMEOUT,
+            SYS_FUTEX_LOCK_PI_TIMEOUT,
             SYS_EVENTFD_CREATE,
             SYS_EVENTFD_WRITE,
             SYS_EVENTFD_READ,

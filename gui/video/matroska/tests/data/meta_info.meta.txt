@@ -1,0 +1,7 @@
+# meta_info.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag title=first
+tag encoder=
+stream 0 track
+tag language=eng

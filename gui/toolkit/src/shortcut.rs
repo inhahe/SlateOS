@@ -33,11 +33,16 @@
 //! (`Left` at the first slide, `1` for a view already open), so the property
 //! to assert is "some reachable state answers this key", not "this key is
 //! taken right now".
+//!
+//! The card the list is shown on is here too: [`render_card`] draws it, and
+//! [`Card`] keeps it -- up or away, and modal while up, for the pointer as
+//! well as the keys.
 
 use std::error::Error;
 use std::fmt;
 
-use crate::event::{Key, KeyEvent, Modifiers};
+use crate::event::{Event, Key, KeyEvent, Modifiers, MouseEventKind};
+use crate::frame::Frame;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::surface::{CommandSink, Surface};
@@ -565,6 +570,109 @@ pub fn render_card<S: CommandSink + ?Sized>(
             max_width: Some(w - PAD * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+}
+
+// ── The card as a sheet over its window ────────────────────────────────────
+
+/// The shortcut card as a sheet over its window: whether it is up, and what
+/// it takes while it is.
+///
+/// Every application kept this itself -- a `show_help` flag read by its
+/// drawing and by a key handler that put the card away on F1, Escape or
+/// Enter and swallowed the other keys -- eighty-four times over, and sixty-
+/// nine of them stopped at the keys: a click with the card up went through
+/// to the control drawn under it, a Delete button among them, which acted
+/// unseen (`known-issues/E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it.md`).
+/// The rule is written once here.
+///
+/// Offer every event to [`handle`](Self::handle) first, and do nothing more
+/// with one it takes; draw with [`render`](Self::render) after everything
+/// else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Card {
+    up: bool,
+}
+
+impl Card {
+    /// A card that is put away.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { up: false }
+    }
+
+    /// Whether it is up.
+    #[must_use]
+    pub const fn is_up(self) -> bool {
+        self.up
+    }
+
+    /// Raise it, or put it away: for a program with a control of its own for
+    /// it -- a Help menu's row.
+    pub fn set_up(&mut self, up: bool) {
+        self.up = up;
+    }
+
+    /// Offer `event` to the card: `true` when it took it, and the program is
+    /// to do nothing more with it.
+    ///
+    /// While the card is up it is a modal sheet. F1, Escape and Enter put it
+    /// away, and a press of any button does; every other key, press, wheel
+    /// turn and move is the card's too. A release passes, so a drag begun
+    /// before the card came up still ends; so do the pointer leaving and
+    /// entering the window, so hover is cleared. While the card is down, F1
+    /// raises it.
+    ///
+    /// Bare keys only: Alt+F1, Windows+Escape and the like are the window's
+    /// or the desktop's ([`Modifiers::is_plain`]).
+    pub fn handle(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key) if self.up => {
+                if key.pressed
+                    && key.modifiers.is_plain()
+                    && matches!(key.key, Key::F1 | Key::Escape | Key::Enter)
+                {
+                    self.up = false;
+                }
+                true
+            }
+            Event::Key(key) => {
+                let raises = key.pressed && key.modifiers.is_plain() && key.key == Key::F1;
+                if raises {
+                    self.up = true;
+                }
+                raises
+            }
+            Event::Mouse(mouse) if self.up => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.up = false;
+                    true
+                }
+                MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => false,
+                MouseEventKind::Move | MouseEventKind::Scroll { .. } => true,
+            },
+            _ => false,
+        }
+    }
+
+    /// Draw the card over `frame`, if it is up, as [`render_card`] draws it
+    /// -- after discarding the frame's hit regions ([`Frame::discard_hits`]),
+    /// so nothing under the card can be pressed or lit even by a program that
+    /// hit-tests its frame without asking the card first.
+    pub fn render<T>(
+        self,
+        frame: &mut Frame<T>,
+        palette: &Palette,
+        window: (f32, f32),
+        keep_clear: f32,
+        rows: &[(&str, &str)],
+        closing: &str,
+    ) {
+        if !self.up {
+            return;
+        }
+        frame.discard_hits();
+        render_card(frame, palette, window, keep_clear, rows, closing);
     }
 }
 
@@ -1373,5 +1481,139 @@ mod tests {
                 "{label:?} is printed by an app and cannot be read back"
             );
         }
+    }
+
+    use super::Card;
+    use crate::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use crate::frame::{Frame, Rect};
+
+    fn press(key: Key) -> Event {
+        with(key, Modifiers::NONE)
+    }
+
+    fn with(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn pointer(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind,
+        })
+    }
+
+    /// **The card is raised by F1 and put away by F1, Escape, Enter or a
+    /// press -- and while it is up, it takes everything else**, so a key or a
+    /// click meant for the card never reaches the window under it
+    /// (`requests/e-c-the-shortcut-card-takes-the-pointer-as-well-as-the-keys.md`).
+    #[test]
+    fn the_card_is_modal_while_up_for_keys_and_pointer() {
+        let mut card = Card::new();
+        assert!(!card.is_up());
+        // Down: only F1 is the card's.
+        assert!(!card.handle(&press(Key::Delete)));
+        assert!(!card.handle(&pointer(MouseEventKind::Press(MouseButton::Left))));
+        assert!(card.handle(&press(Key::F1)));
+        assert!(card.is_up());
+        // Up: everything is the card's, and changes nothing but these.
+        for taken in [
+            press(Key::Delete),
+            press(Key::A),
+            pointer(MouseEventKind::Move),
+            pointer(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }),
+        ] {
+            assert!(card.handle(&taken), "{taken:?}");
+            assert!(card.is_up(), "{taken:?}");
+        }
+        // A release, and the pointer leaving or entering, pass.
+        for passed in [
+            pointer(MouseEventKind::Release(MouseButton::Left)),
+            pointer(MouseEventKind::Leave),
+            pointer(MouseEventKind::Enter),
+        ] {
+            assert!(!card.handle(&passed), "{passed:?}");
+            assert!(card.is_up(), "{passed:?}");
+        }
+        for away in [
+            press(Key::F1),
+            press(Key::Escape),
+            press(Key::Enter),
+            pointer(MouseEventKind::Press(MouseButton::Left)),
+            pointer(MouseEventKind::Press(MouseButton::Right)),
+            pointer(MouseEventKind::DoubleClick(MouseButton::Left)),
+        ] {
+            card.set_up(true);
+            assert!(card.handle(&away), "{away:?}");
+            assert!(!card.is_up(), "{away:?}");
+        }
+    }
+
+    /// **Only the bare keys raise and put away the card**: Alt+F1 and
+    /// Windows+Escape are the window's or the desktop's. Shift may be held.
+    #[test]
+    fn only_bare_keys_raise_or_put_away_the_card() {
+        let mut card = Card::new();
+        assert!(!card.handle(&with(Key::F1, Modifiers::alt())));
+        assert!(!card.is_up());
+        assert!(card.handle(&with(Key::F1, Modifiers::shift())));
+        for (key, modifiers) in [
+            (Key::Escape, Modifiers::super_key()),
+            (Key::Enter, Modifiers::alt()),
+            (Key::F1, Modifiers::alt()),
+        ] {
+            assert!(card.handle(&with(key, modifiers)));
+            assert!(card.is_up(), "{key:?} with {modifiers:?}");
+        }
+        // A key's release is the card's and changes nothing.
+        let mut release = KeyEvent {
+            key: Key::Escape,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(card.handle(&Event::Key(release.clone())));
+        assert!(card.is_up());
+        release.key = Key::F1;
+        card.set_up(false);
+        assert!(!card.handle(&Event::Key(release)));
+    }
+
+    /// **Drawn, the card leaves nothing under it to press**: the frame's
+    /// targets are discarded before it is drawn, and a card that is down
+    /// draws nothing and discards nothing.
+    #[test]
+    fn nothing_under_the_card_can_be_pressed() {
+        let palette = Palette::for_mode(false);
+        let rows = [("F1", "Show or hide this card")];
+        let mut frame: Frame<u8> = Frame::new(400.0, 300.0);
+        frame.hit(7, Rect::new(0.0, 0.0, 400.0, 300.0));
+        let card = Card::new();
+        card.render(
+            &mut frame,
+            &palette,
+            (400.0, 300.0),
+            0.0,
+            &rows,
+            "F1 or Esc",
+        );
+        assert_eq!(frame.hit_test(10.0, 10.0), Some(7));
+        let mut card = Card::new();
+        card.set_up(true);
+        card.render(
+            &mut frame,
+            &palette,
+            (400.0, 300.0),
+            0.0,
+            &rows,
+            "F1 or Esc",
+        );
+        assert_eq!(frame.hit_test(10.0, 10.0), None);
+        assert_eq!(frame.hit_test(200.0, 150.0), None);
     }
 }

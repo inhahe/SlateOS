@@ -1,0 +1,29 @@
+# meta_attachments.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+stream 0 track
+tag language=eng
+stream 1 picture png 217 42c022341743ddfe829c4c4cf0fdb278
+tag filename=cover.png
+tag mimetype=image/png
+stream 2 attachment ttf 10 c838e4adffd0661c13916e0549a5f61f
+tag filename=font.ttf
+tag mimetype=application/x-font-ttf
+tag NOTE=font tag
+stream 3 attachment bin_data 3 c1111bd512b29e821b120b86446026b8
+tag filename=
+tag mimetype=binary
+stream 4 picture mjpeg 744 f3301870ac5617418cb04c7eabfc30c5
+tag filename=photo.jpg
+tag mimetype=image/jpeg; q=1
+tag TITLE=Retitled
+stream 5 attachment otf 9 5b319e8202b2927a7348e4e0f28f1314
+tag filename=open.otf
+tag mimetype=application/vnd.ms-opentype
+stream 6 attachment ttf 11 934ea73042fbff6017af7888fddbb898
+tag filename=font2.ttf
+tag mimetype=application/x-truetype-font
+tag NOTE=font tag
+stream 7 attachment none 10 31bc5c2b8fd4f20cd747347b7504a385
+tag filename=notes.txt
+tag mimetype=text/plain

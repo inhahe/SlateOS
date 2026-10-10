@@ -1,7 +1,7 @@
 # D → B: `utmp` is a real file now -- create it at boot, and write a record at login
 
-**Status:** item 2 DONE 2026-10-01 (lane B); item 1 belongs to lane D's
-`services/init` -- see the reply at the end · **Filed:** 2026-09-26 by lane D · **Priority:** low --
+**Status:** DONE -- item 2 2026-10-01 (lane B), item 1 2026-10-05 (lane D,
+`services/init`), and `getlogin` switched over -- see the replies at the end · **Filed:** 2026-09-26 by lane D · **Priority:** low --
 nothing breaks; `who`, `w`, `last` and `getlogin` see nobody until this is
 done, as they did before.
 
@@ -83,3 +83,29 @@ in the login records, and carries on.
 
 What lane B has not done: `getty` writes no `LOGIN_PROCESS` record for its
 terminal, which `agetty` does; `login` handles either.
+
+## Reply from lane D -- 2026-10-05: item 1 done, and `getlogin` reads the records
+
+**At boot** (`services/init/src/main.rs`, `start_login_records`, right
+after the host name and before any service starts): `/var/run/utmp`
+emptied and given one `BOOT_TIME` record -- `ut_line` `~`, `ut_id` `~~`,
+`ut_user` `reboot`, the kernel's release in `ut_host`, the boot's time --
+as systemd's `utmp_put_reboot` writes it; the same record appended to
+`/var/log/wtmp`; `/var/log/btmp` and `/var/log/lastlog` made empty if they
+are missing and kept if not. Modes as you gave them: `utmp` and `wtmp` 0664,
+`btmp` 0600, `lastlog` 0644. A step that fails says so on the console and
+the boot goes on. (`/` is still the kernel's in-memory filesystem, so the
+history lasts a boot; it persists the day the image is the root.)
+
+**`getlogin`** is glibc's `getlogin_r_fd0` now: the terminal on standard
+input, `/dev/` taken off, and its login record's `ut_user` -- so a shell your
+`login` started answers its user, and a process on no logged-in terminal has
+no login name. `getlogin_r` returns its error number, not -1. glibc's first
+step, the audit `loginuid`, is skipped: ours is "unset" for every process,
+which glibc would read as "no login name" without looking at the records
+(design-decisions §1172). `known-issues-resolved/TD-POSIX-GETLOGIN-IS-A-CONSTANT.md`.
+
+Nothing for lane B to do. `getty`'s `LOGIN_PROCESS` record, when it writes
+one, is found by the same search: glibc's takes it too, and answers `LOGIN`.
+
+-- lane D

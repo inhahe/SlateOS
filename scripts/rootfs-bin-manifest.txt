@@ -1,10 +1,18 @@
-# rootfs-bin-manifest.txt -- which SlateOS-native binaries go into /bin.
+# rootfs-bin-manifest.txt -- the SlateOS-native programs the image must carry.
 #
 # Read by scripts/create-ext4-rootfs.sh. One binary name per line; blank lines
-# and #-comments ignored. A name here that has not been built is reported, not
-# silently skipped. A binary that is built but NOT named here does not ship.
+# and #-comments ignored. These are staged first, and are the ones the boot
+# tests and the image's build chain rely on.
 #
-# WHY A MANIFEST AND NOT A SCAN OF target/x86_64-slateos/release/.
+# SINCE 2026-10-01 THIS IS NOT ALL THAT SHIPS. Every program the workspace
+# builds goes on the image (design-decisions §1053, the operator's answer to
+# B-Q21; §1164, how): after these, the recipe stages every other program
+# `scripts/build-userland.py --list` reports, except what
+# scripts/rootfs-bin-kept-off.txt keeps off, each there with its reason. A
+# name here says more than "it ships": that the image is not the image
+# without it.
+#
+# WHY A LIST FROM THE WORKSPACE AND NOT A SCAN OF target/x86_64-slateos/release/.
 # The first version of the staging block did scan that directory, and the
 # coupling it created is a defect: `cargo build` inside a crate directory
 # changed what the operating system image contains. That is not hypothetical.
@@ -17,55 +25,29 @@
 #     *** rootfs.ext4 was NOT written ***
 #
 # A developer debugging one crate must not be able to change, or break, the
-# image that way. What ships is now a deliberate, reviewable list.
+# image that way. The image now sizes itself from what it stages, and what it
+# stages is this list and the workspace's programs -- never what is lying in
+# the build directory.
 #
-# ON SIZE. These binaries are static and average ~813 KiB, so the list is a real
-# budget and not a formality. All 276 come to 204 MiB staged, which does not fit
-# a 384M image; the 84 below come to ~60 MiB, which is measured to fit with the
-# tripwire silent. Adding names is fine -- adding 100 is not, until IMG_SIZE
-# goes up with it.
+# THE NAMES THAT ARE NOT HERE, and are not on the image either -- the fourteen
+# promoted fastpy commands own (design-decisions §108 part 1), and sh, which is
+# dash -- are in rootfs-bin-kept-off.txt now, with their reasons. The staging
+# block also refuses to overwrite a name already staged, so that list and that
+# guard have to BOTH be wrong before a swap can happen silently.
 #
-# ON THE 13 NAMES THAT ARE NOT HERE. cat, chmod, chown, grep, head, ls, mkdir,
-# mv, rm, rmdir, tail, uniq and wc are all built by the coreutils crate and are
-# all deliberately absent, because /bin/<those> already belong to the promoted
-# fastpy commands. design-decisions.md §108 part 1 is explicit that fastpy stays
-# "additive only... No Rust coreutil is touched, shadowed or retired" and that
-# "a silent swap is a user-visible policy change and is not Claude's to make."
-# Listing them here would be exactly that swap. Which implementation a stock
-# install should prefer is deferred-questions.md DQ1, whose trigger -- a fastpy
-# utility with a parity suite and a performance bar -- has not been met.
-# The staging block also refuses to overwrite a name already staged, so this
-# list and that guard have to BOTH be wrong before a swap can happen silently.
-#
-# ON sh. The coreutils crate builds one, and it is left out for the same kind of
-# reason: /bin/sh is dash, staged far earlier, and lane A's boot test asserts on
-# it by name. Replacing the system shell from a block at the bottom of the
-# script is not a staging decision.
-#
-# ON awk AND ar, ADDED 2026-09-13 AND THE ONLY TWO NON-COREUTILS NAMES HERE.
-# The image already carries a build chain -- /bin/make, /bin/cmake, /bin/tcc,
-# /bin/bash, /bin/python3 -- and these are the two pieces of it that were
-# missing rather than two utilities that seemed nice to have:
+# ON awk AND ar, ADDED 2026-09-13. The image already carries a build chain --
+# /bin/make, /bin/cmake, /bin/tcc, /bin/bash, /bin/python3 -- and these are the
+# two pieces of it that were missing:
 #
 #   awk   an autoconf `configure` script is mostly sh, sed and awk. sed and the
-#         rest of that set are here via coreutils; awk is a separate crate and
-#         was not, so a configure run would die on the one tool nobody lists.
+#         rest of that set are here via coreutils, and awk was not, so a
+#         configure run would die on the one tool nobody lists.
 #   ar    building a static library is `ar rcs`. A toolchain that can compile
 #         and link but cannot make an archive cannot build most C projects.
 #
-# awk is in fact a coreutils binary, and it was missing here by accident
-# rather than by decision: this list was generated with `ls src/bin/*.rs`,
-# and cargo also accepts the directory form `src/bin/<name>/main.rs`, which
-# that glob cannot see. coreutils has 85 binaries -- 83 files plus `awk` and
-# `sort` as directories -- not the 83 the glob counted. `sort` stays out for
-# the ordinary reason (fastpy owns /bin/sort); `awk` had no reason at all.
-#
-# Deliberately NOT a bulk import of the other 204 built binaries. They fit --
-# 59 MiB of a 96 MiB budget is used -- but "it compiles and there is room" is
-# not a reason for a thing to be on an operating system. vi, curl, dmesg and
-# top are the strongest of the rest and are left out until something needs
-# them; the argument for these two is that the tools beside them are already
-# here and do not work without them.
+# awk is a coreutils binary, missing by accident: this list was generated with
+# `ls src/bin/*.rs`, and cargo also accepts the directory form
+# `src/bin/<name>/main.rs`, which that glob cannot see.
 
 ar
 awk
@@ -75,16 +57,81 @@ logrotate
 # requests/c-d-ship-powerctl-in-the-image.md.
 powerctl
 #
-# ALIASES. A line `name = producer` creates `name` as a second name for an
-# already-listed binary. Multi-call programs read argv[0] -- our `ar` is
-# `ranlib` and `strip` when invoked under those names -- and that only works if
-# something creates the name. `scripts/multicall-aliases.py` found 167 such
-# names across the tree that nothing produces; these are the ones whose
-# producer is actually on the image. `ranlib` in particular is not optional:
-# an autoconf build calls it straight after `ar`.
+# ALIASES. A line `name = producer` creates `name` as a second name for a
+# binary on the image -- one listed here, or one of every other program the
+# workspace builds, which the recipe stages before it makes these. Multi-call
+# programs read argv[0] -- our `ar` is `ranlib` and `strip` when invoked
+# under those names -- and that only works if something creates the name.
+# `scripts/multicall-aliases.py` found 167 such names across the tree that
+# nothing produced. `ranlib` in particular is not optional: an autoconf
+# build calls it straight after `ar`.
 ranlib = ar
 strip = ar
 killall = kill
+#
+# The names lane B keeps, from its triage of the rest
+# (requests/b-d-stage-every-program-that-builds.md, item 3; design-decisions
+# §1045 for the same file under a second name, §1049 for keeping a command
+# while what it waits for is planned). Each program dispatches on the name,
+# and each branch is implemented and tested in its crate. Some refuse
+# honestly until a kernel facility lands: `lsattr` (FS_IOC_GETFLAGS), the
+# cgroup tools and `systemd-cgls`/`cgtop` (cgroupfs at /sys/fs/cgroup), and
+# the `lp` family (the kernel's print queue).
+gunzip = gzip
+zcat = gzip
+gzcat = gzip
+clear = tput
+reset = tput
+tset = tput
+groupadd = useradd
+groupdel = useradd
+groupmod = useradd
+userdel = useradd
+usermod = useradd
+w = who
+unzip = zip
+xxd = hexdump
+atd = at
+atq = at
+atrm = at
+batch = at
+anacron = crond
+lastb = last
+lastlog = last
+sg = newgrp
+mingetty = getty
+lsattr = chattr
+cgclassify = lscgroup
+cgcreate = lscgroup
+cgdelete = lscgroup
+cgexec = lscgroup
+cgget = lscgroup
+cgset = lscgroup
+lssubsys = lscgroup
+cancel = lp
+lpq = lp
+lpr = lp
+lprm = lp
+lpstat = lp
+mpstat = sar
+pidstat = sar
+sockstat = ss
+ntpdate = ntpd
+sntp = ntpd
+systemd-cat = systemctl
+systemd-escape = systemctl
+systemd-path = systemctl
+systemd-cgls = systemctl
+systemd-cgtop = systemctl
+dnsdomainname = hostname
+domainname = hostname
+nisdomainname = hostname
+ypdomainname = hostname
+efivar = efibootmgr
+sudoedit = sudo
+inotifywatch = inotifywait
+xdg-mime = xdg-open
+mimeopen = xdg-open
 basename
 bc
 cal

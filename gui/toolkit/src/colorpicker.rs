@@ -35,6 +35,7 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::Surface;
+use crate::text::scaled;
 
 // ============================================================================
 // Catppuccin Mocha palette (UI chrome)
@@ -406,7 +407,7 @@ impl ColorPicker {
             recent_colors: Vec::new(),
             hex_input: color_to_hex_string(initial),
             hex_focused: false,
-            sv_size: SV_SQUARE_SIZE,
+            sv_size: scaled(SV_SQUARE_SIZE),
         }
     }
 
@@ -636,29 +637,40 @@ impl ColorPicker {
         let sv_size = self.sv_size;
 
         // Background panel
-        let total_width = sv_size + PADDING + HUE_BAR_WIDTH + PADDING + PREVIEW_SIZE;
+        let total_width = sv_size
+            + scaled(PADDING)
+            + scaled(HUE_BAR_WIDTH)
+            + scaled(PADDING)
+            + scaled(PREVIEW_SIZE);
         let total_height = sv_size;
         cmds.push(RenderCommand::FillRect {
             x,
             y,
-            width: total_width + PADDING * 2.0,
-            height: total_height + PADDING * 2.0,
+            width: total_width + scaled(PADDING) * 2.0,
+            height: total_height + scaled(PADDING) * 2.0,
             color: palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        let cx = x + PADDING;
-        let cy = y + PADDING;
+        let cx = x + scaled(PADDING);
+        let cy = y + scaled(PADDING);
 
         // Saturation/Value square
         self.render_sv_square(palette, &mut cmds, cx, cy, sv_size);
 
         // Hue bar (vertical, to the right of SV square)
-        let hue_x = cx + sv_size + PADDING;
-        self.render_hue_bar(palette, &mut cmds, hue_x, cy, HUE_BAR_WIDTH, sv_size);
+        let hue_x = cx + sv_size + scaled(PADDING);
+        self.render_hue_bar(
+            palette,
+            &mut cmds,
+            hue_x,
+            cy,
+            scaled(HUE_BAR_WIDTH),
+            sv_size,
+        );
 
         // Preview swatch (to the right of hue bar)
-        let preview_x = hue_x + HUE_BAR_WIDTH + PADDING;
+        let preview_x = hue_x + scaled(HUE_BAR_WIDTH) + scaled(PADDING);
         self.render_preview(palette, &mut cmds, preview_x, cy);
 
         cmds
@@ -802,20 +814,26 @@ impl ColorPicker {
             y: y - 2.0,
             text: String::from("New"),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Current color swatch
-        let swatch_y = y + 12.0;
-        render_checkerboard(cmds, x, swatch_y, PREVIEW_SIZE, PREVIEW_SIZE / 2.0);
+        let swatch_y = y + scaled(12.0);
+        render_checkerboard(
+            cmds,
+            x,
+            swatch_y,
+            scaled(PREVIEW_SIZE),
+            scaled(PREVIEW_SIZE) / 2.0,
+        );
         cmds.push(RenderCommand::FillRect {
             x,
             y: swatch_y,
-            width: PREVIEW_SIZE,
-            height: PREVIEW_SIZE / 2.0,
+            width: scaled(PREVIEW_SIZE),
+            height: scaled(PREVIEW_SIZE) / 2.0,
             color: current,
             corner_radii: CornerRadii {
                 top_left: 3.0,
@@ -826,23 +844,29 @@ impl ColorPicker {
         });
 
         // Original color swatch
-        let orig_y = swatch_y + PREVIEW_SIZE / 2.0;
+        let orig_y = swatch_y + scaled(PREVIEW_SIZE) / 2.0;
         cmds.push(RenderCommand::Text {
             x,
-            y: orig_y + PREVIEW_SIZE / 2.0 + 4.0,
+            y: orig_y + scaled(PREVIEW_SIZE) / 2.0 + scaled(4.0),
             text: String::from("Prev"),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        render_checkerboard(cmds, x, orig_y, PREVIEW_SIZE, PREVIEW_SIZE / 2.0);
+        render_checkerboard(
+            cmds,
+            x,
+            orig_y,
+            scaled(PREVIEW_SIZE),
+            scaled(PREVIEW_SIZE) / 2.0,
+        );
         cmds.push(RenderCommand::FillRect {
             x,
             y: orig_y,
-            width: PREVIEW_SIZE,
-            height: PREVIEW_SIZE / 2.0,
+            width: scaled(PREVIEW_SIZE),
+            height: scaled(PREVIEW_SIZE) / 2.0,
             color: self.original,
             corner_radii: CornerRadii {
                 top_left: 0.0,
@@ -856,8 +880,8 @@ impl ColorPicker {
         cmds.push(RenderCommand::StrokeRect {
             x,
             y: swatch_y,
-            width: PREVIEW_SIZE,
-            height: PREVIEW_SIZE,
+            width: scaled(PREVIEW_SIZE),
+            height: scaled(PREVIEW_SIZE),
             color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
@@ -879,7 +903,12 @@ impl ColorPicker {
                 (DragTarget::SvSquare, Rect::new(0.0, 0.0, sv_size, sv_size)),
                 (
                     DragTarget::HueBar,
-                    Rect::new(sv_size + PADDING, 0.0, HUE_BAR_WIDTH, sv_size),
+                    Rect::new(
+                        sv_size + scaled(PADDING),
+                        0.0,
+                        scaled(HUE_BAR_WIDTH),
+                        sv_size,
+                    ),
                 ),
             ],
             local_x,
@@ -1189,7 +1218,7 @@ impl ColorPickerDialog {
             x: 0.0,
             y: 0.0,
             width,
-            height: TITLE_BAR_HEIGHT,
+            height: scaled(TITLE_BAR_HEIGHT),
             color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS + 2.0,
@@ -1199,11 +1228,11 @@ impl ColorPickerDialog {
             },
         });
         cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 9.0,
+            x: scaled(PADDING),
+            y: scaled(9.0),
             text: String::from("Color Picker"),
             color: palette.text,
-            font_size: 13.0,
+            font_size: scaled(13.0),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1217,7 +1246,7 @@ impl ColorPickerDialog {
             &mut cmds,
             layout.hue_x,
             layout.sv_y,
-            HUE_BAR_WIDTH,
+            scaled(HUE_BAR_WIDTH),
             layout.sv_size,
         );
         self.render_alpha_bar(
@@ -1263,7 +1292,7 @@ impl ColorPickerDialog {
         width: f32,
     ) {
         // Checkerboard background to show transparency
-        render_checkerboard(cmds, x, y, width, ALPHA_BAR_HEIGHT);
+        render_checkerboard(cmds, x, y, width, scaled(ALPHA_BAR_HEIGHT));
 
         // Alpha gradient from transparent to opaque (current color)
         let (r, g, b) = hsv_to_rgb(self.picker.hsv);
@@ -1276,7 +1305,7 @@ impl ColorPickerDialog {
                 x: x + i as f32 * step_width,
                 y,
                 width: step_width + 0.5,
-                height: ALPHA_BAR_HEIGHT,
+                height: scaled(ALPHA_BAR_HEIGHT),
                 color: Color::rgba(r, g, b, a),
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1287,7 +1316,7 @@ impl ColorPickerDialog {
             x,
             y,
             width,
-            height: ALPHA_BAR_HEIGHT,
+            height: scaled(ALPHA_BAR_HEIGHT),
             color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
@@ -1300,7 +1329,7 @@ impl ColorPickerDialog {
             x: indicator_x - 2.0,
             y: y - 2.0,
             width: 4.0,
-            height: ALPHA_BAR_HEIGHT + 4.0,
+            height: scaled(ALPHA_BAR_HEIGHT) + 4.0,
             color: Color::WHITE,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -1308,18 +1337,18 @@ impl ColorPickerDialog {
             x: indicator_x - 1.0,
             y: y - 1.0,
             width: 2.0,
-            height: ALPHA_BAR_HEIGHT + 2.0,
+            height: scaled(ALPHA_BAR_HEIGHT) + 2.0,
             color: Color::BLACK,
             corner_radii: CornerRadii::all(1.0),
         });
 
         // Label
         cmds.push(RenderCommand::Text {
-            x: x + width + 6.0,
-            y: y + 2.0,
+            x: x + width + scaled(6.0),
+            y: y + scaled(2.0),
             text: format!("A: {}", self.picker.alpha),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1340,7 +1369,7 @@ impl ColorPickerDialog {
             y,
             text: String::from("Hex:"),
             color: palette.subtext0,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1364,24 +1393,24 @@ impl ColorPickerDialog {
 
         // "#" prefix
         cmds.push(RenderCommand::Text {
-            x: input_x + 4.0,
-            y: y + 2.0,
+            x: input_x + scaled(4.0),
+            y: y + scaled(2.0),
             text: String::from("#"),
             color: palette.subtext0,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         // Hex value
         cmds.push(RenderCommand::Text {
-            x: input_x + 14.0,
-            y: y + 2.0,
+            x: input_x + scaled(14.0),
+            y: y + scaled(2.0),
             text: self.picker.hex_input.clone(),
             color: palette.text,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(input_width - 20.0),
+            max_width: Some(input_width - scaled(20.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
@@ -1421,11 +1450,11 @@ impl ColorPickerDialog {
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 6.0,
+            x: x + scaled(8.0),
+            y: y + scaled(6.0),
             text: String::from("Eyedropper"),
             color: text_color,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1455,11 +1484,11 @@ impl ColorPickerDialog {
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: y + 5.0,
+                x: x + scaled(8.0),
+                y: y + scaled(5.0),
                 text: String::from(label),
                 color: if active { palette.base } else { palette.text },
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1537,25 +1566,25 @@ impl ColorPickerDialog {
 
         // Label
         cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + 2.0,
+            x: scaled(PADDING),
+            y: y + scaled(2.0),
             text: label.to_string(),
             color: palette.subtext0,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Track background
-        let track_y = y + (SLIDER_HEIGHT - SLIDER_TRACK_HEIGHT) / 2.0;
+        let track_y = y + (scaled(SLIDER_HEIGHT) - scaled(SLIDER_TRACK_HEIGHT)) / 2.0;
         palette.push_surface(
             cmds,
             track_x,
             track_y,
             track_width,
-            SLIDER_TRACK_HEIGHT,
-            SLIDER_TRACK_HEIGHT / 2.0,
+            scaled(SLIDER_TRACK_HEIGHT),
+            scaled(SLIDER_TRACK_HEIGHT) / 2.0,
             Surface::ControlTrack,
         );
 
@@ -1565,14 +1594,14 @@ impl ColorPickerDialog {
             x: track_x,
             y: track_y,
             width: fill_width,
-            height: SLIDER_TRACK_HEIGHT,
+            height: scaled(SLIDER_TRACK_HEIGHT),
             color,
-            corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
+            corner_radii: CornerRadii::all(scaled(SLIDER_TRACK_HEIGHT) / 2.0),
         });
 
         // Thumb
         let thumb_x = track_x + fill_width;
-        let thumb_size = SLIDER_THUMB;
+        let thumb_size = scaled(SLIDER_THUMB);
         cmds.push(RenderCommand::FillRect {
             x: thumb_x - thumb_size / 2.0,
             y: y + 1.0,
@@ -1593,11 +1622,11 @@ impl ColorPickerDialog {
 
         // Value text
         cmds.push(RenderCommand::Text {
-            x: track_x + track_width + 4.0,
-            y: y + 2.0,
+            x: track_x + track_width + scaled(4.0),
+            y: y + scaled(2.0),
             text: format!("{value_display}"),
             color: palette.text,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1620,18 +1649,18 @@ impl ColorPickerDialog {
 
         // Label
         cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + 2.0,
+            x: scaled(PADDING),
+            y: y + scaled(2.0),
             text: String::from("H"),
             color: palette.subtext0,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Rainbow gradient track
-        let track_y = y + (SLIDER_HEIGHT - SLIDER_TRACK_HEIGHT) / 2.0;
+        let track_y = y + (scaled(SLIDER_HEIGHT) - scaled(SLIDER_TRACK_HEIGHT)) / 2.0;
         let segments = 36u32;
         let seg_width = track_width / segments as f32;
         for i in 0..segments {
@@ -1641,12 +1670,12 @@ impl ColorPickerDialog {
                 x: track_x + i as f32 * seg_width,
                 y: track_y,
                 width: seg_width + 0.5,
-                height: SLIDER_TRACK_HEIGHT,
+                height: scaled(SLIDER_TRACK_HEIGHT),
                 color: Color::rgb(r, g, b),
                 corner_radii: if i == 0 {
                     CornerRadii {
-                        top_left: SLIDER_TRACK_HEIGHT / 2.0,
-                        bottom_left: SLIDER_TRACK_HEIGHT / 2.0,
+                        top_left: scaled(SLIDER_TRACK_HEIGHT) / 2.0,
+                        bottom_left: scaled(SLIDER_TRACK_HEIGHT) / 2.0,
                         top_right: 0.0,
                         bottom_right: 0.0,
                     }
@@ -1654,8 +1683,8 @@ impl ColorPickerDialog {
                     CornerRadii {
                         top_left: 0.0,
                         bottom_left: 0.0,
-                        top_right: SLIDER_TRACK_HEIGHT / 2.0,
-                        bottom_right: SLIDER_TRACK_HEIGHT / 2.0,
+                        top_right: scaled(SLIDER_TRACK_HEIGHT) / 2.0,
+                        bottom_right: scaled(SLIDER_TRACK_HEIGHT) / 2.0,
                     }
                 } else {
                     CornerRadii::ZERO
@@ -1665,7 +1694,7 @@ impl ColorPickerDialog {
 
         // Thumb
         let thumb_x = track_x + fraction.clamp(0.0, 1.0) * track_width;
-        let thumb_size = SLIDER_THUMB;
+        let thumb_size = scaled(SLIDER_THUMB);
         cmds.push(RenderCommand::FillRect {
             x: thumb_x - thumb_size / 2.0,
             y: y + 1.0,
@@ -1686,11 +1715,11 @@ impl ColorPickerDialog {
 
         // Value text
         cmds.push(RenderCommand::Text {
-            x: track_x + track_width + 4.0,
-            y: y + 2.0,
+            x: track_x + track_width + scaled(4.0),
+            y: y + scaled(2.0),
             text: format!("{value_display}"),
             color: palette.text,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1705,11 +1734,11 @@ impl ColorPickerDialog {
     ) {
         // Section label
         cmds.push(RenderCommand::Text {
-            x: PADDING,
+            x: scaled(PADDING),
             y: layout.preset_y,
             text: String::from("Presets"),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1721,8 +1750,8 @@ impl ColorPickerDialog {
             cmds.push(RenderCommand::FillRect {
                 x: sx,
                 y: sy,
-                width: SWATCH_SIZE,
-                height: SWATCH_SIZE,
+                width: scaled(SWATCH_SIZE),
+                height: scaled(SWATCH_SIZE),
                 color: *color,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -1733,8 +1762,8 @@ impl ColorPickerDialog {
                 cmds.push(RenderCommand::StrokeRect {
                     x: sx - 1.0,
                     y: sy - 1.0,
-                    width: SWATCH_SIZE + 2.0,
-                    height: SWATCH_SIZE + 2.0,
+                    width: scaled(SWATCH_SIZE) + 2.0,
+                    height: scaled(SWATCH_SIZE) + 2.0,
                     color: Color::WHITE,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(3.0),
@@ -1755,11 +1784,11 @@ impl ColorPickerDialog {
 
         // Section label
         cmds.push(RenderCommand::Text {
-            x: PADDING,
+            x: scaled(PADDING),
             y: layout.recent_y,
             text: String::from("Recent"),
             color: palette.subtext0,
-            font_size: FONT_SIZE_SMALL,
+            font_size: scaled(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1770,8 +1799,8 @@ impl ColorPickerDialog {
             cmds.push(RenderCommand::FillRect {
                 x: sx,
                 y: swatch_y,
-                width: SWATCH_SIZE,
-                height: SWATCH_SIZE,
+                width: scaled(SWATCH_SIZE),
+                height: scaled(SWATCH_SIZE),
                 color: *color,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -1789,7 +1818,7 @@ impl ColorPickerDialog {
         let btn_height = 28.0;
 
         // OK button
-        let ok_x = width - btn_width * 2.0 - PADDING * 3.0;
+        let ok_x = width - btn_width * 2.0 - scaled(PADDING) * 3.0;
         cmds.push(RenderCommand::FillRect {
             x: ok_x,
             y,
@@ -1799,18 +1828,20 @@ impl ColorPickerDialog {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
-            x: ok_x + (btn_width - 16.0) / 2.0,
-            y: y + 8.0,
+            x: ok_x
+                + (btn_width - crate::text::measure("OK", scaled(FONT_SIZE), FontWeightHint::Bold))
+                    / 2.0,
+            y: y + (btn_height - scaled(FONT_SIZE)) / 2.0,
             text: String::from("OK"),
             color: palette.base,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Cancel button
-        let cancel_x = width - btn_width - PADDING;
+        let cancel_x = width - btn_width - scaled(PADDING);
         cmds.push(RenderCommand::FillRect {
             x: cancel_x,
             y,
@@ -1820,11 +1851,14 @@ impl ColorPickerDialog {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
-            x: cancel_x + (btn_width - 42.0) / 2.0,
-            y: y + 8.0,
+            x: cancel_x
+                + (btn_width
+                    - crate::text::measure("Cancel", scaled(FONT_SIZE), FontWeightHint::Regular))
+                    / 2.0,
+            y: y + (btn_height - scaled(FONT_SIZE)) / 2.0,
             text: String::from("Cancel"),
             color: palette.ink(palette.red),
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1872,7 +1906,7 @@ impl ColorPickerDialog {
     /// half outside the part that answered.
     fn hit_test_bars(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<DragTarget> {
         let (track_x, track_width) = layout.slider_track();
-        let thumb = SLIDER_THUMB;
+        let thumb = scaled(SLIDER_THUMB);
         let row = |i: u8| {
             let target = match self.slider_tab {
                 SliderTab::Rgb => DragTarget::RgbSlider(i),
@@ -1880,7 +1914,7 @@ impl ColorPickerDialog {
             };
             let covered = Rect::new(
                 track_x - thumb / 2.0,
-                layout.slider_row_y(i) + (SLIDER_HEIGHT - thumb) / 2.0,
+                layout.slider_row_y(i) + (scaled(SLIDER_HEIGHT) - thumb) / 2.0,
                 track_width + thumb,
                 thumb,
             );
@@ -1894,7 +1928,7 @@ impl ColorPickerDialog {
                         layout.sv_x,
                         layout.alpha_y,
                         layout.sv_size,
-                        ALPHA_BAR_HEIGHT,
+                        scaled(ALPHA_BAR_HEIGHT),
                     ),
                 ),
                 row(0),
@@ -1935,10 +1969,10 @@ impl ColorPickerDialog {
         let (track_x, track_width) = layout.slider_track();
         let centre = track_x + self.row_fraction(row).clamp(0.0, 1.0) * track_width;
         Rect::new(
-            centre - SLIDER_THUMB / 2.0,
-            layout.slider_row_y(row) + (SLIDER_HEIGHT - SLIDER_THUMB) / 2.0,
-            SLIDER_THUMB,
-            SLIDER_THUMB,
+            centre - scaled(SLIDER_THUMB) / 2.0,
+            layout.slider_row_y(row) + (scaled(SLIDER_HEIGHT) - scaled(SLIDER_THUMB)) / 2.0,
+            scaled(SLIDER_THUMB),
+            scaled(SLIDER_THUMB),
         )
     }
 
@@ -2003,10 +2037,10 @@ impl ColorPickerDialog {
 /// rectangle for the drawing and the click.
 fn hex_field_rect(x: f32, y: f32, width: f32) -> crate::frame::Rect {
     crate::frame::Rect::new(
-        x + HEX_LABEL_WIDTH,
-        y - 2.0,
-        (width - HEX_LABEL_WIDTH).max(0.0),
-        HEX_FIELD_HEIGHT,
+        x + scaled(HEX_LABEL_WIDTH),
+        y - scaled(2.0),
+        (width - scaled(HEX_LABEL_WIDTH)).max(0.0),
+        scaled(HEX_FIELD_HEIGHT),
     )
 }
 
@@ -2053,20 +2087,25 @@ struct DialogLayout {
 
 impl DialogLayout {
     fn new(sv_size: f32, width: f32, height: f32) -> Self {
-        let sv_x = PADDING;
-        let sv_y = CONTENT_Y + PADDING;
-        let hue_x = sv_x + sv_size + PADDING;
-        let alpha_y = sv_y + sv_size + PADDING;
-        let right_x = hue_x + HUE_BAR_WIDTH + PADDING * 2.0;
-        let hex_y = sv_y + PREVIEW_SIZE + PADDING * 2.0 + 16.0;
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
-        let preset_y = slider_y + SLIDER_TABS_HEIGHT + (SLIDER_HEIGHT + PADDING) * 3.0 + PADDING;
+        let sv_x = scaled(PADDING);
+        let sv_y = scaled(CONTENT_Y) + scaled(PADDING);
+        let hue_x = sv_x + sv_size + scaled(PADDING);
+        let alpha_y = sv_y + sv_size + scaled(PADDING);
+        let right_x = hue_x + scaled(HUE_BAR_WIDTH) + scaled(PADDING) * 2.0;
+        let hex_y = sv_y + scaled(PREVIEW_SIZE) + scaled(PADDING) * 2.0 + scaled(16.0);
+        let slider_y = alpha_y + scaled(ALPHA_BAR_HEIGHT) + scaled(PADDING) * 2.0;
+        let preset_y = slider_y
+            + scaled(SLIDER_TABS_HEIGHT)
+            + (scaled(SLIDER_HEIGHT) + scaled(PADDING)) * 3.0
+            + scaled(PADDING);
 
-        let available_width = width - PADDING * 2.0;
-        let fitting = ((available_width + SWATCH_GAP) / (SWATCH_SIZE + SWATCH_GAP)) as usize;
+        let available_width = width - scaled(PADDING) * 2.0;
+        let fitting = ((available_width + scaled(SWATCH_GAP))
+            / (scaled(SWATCH_SIZE) + scaled(SWATCH_GAP))) as usize;
         let preset_columns = NonZeroUsize::new(fitting).unwrap_or(NonZeroUsize::MIN);
         let preset_rows = PRESET_COLORS.len().div_ceil(preset_columns.get());
-        let preset_height = SECTION_LABEL_HEIGHT + preset_rows as f32 * (SWATCH_SIZE + SWATCH_GAP);
+        let preset_height = scaled(SECTION_LABEL_HEIGHT)
+            + preset_rows as f32 * (scaled(SWATCH_SIZE) + scaled(SWATCH_GAP));
 
         Self {
             width,
@@ -2076,14 +2115,14 @@ impl DialogLayout {
             hue_x,
             alpha_y,
             right_x,
-            right_width: width - right_x - PADDING,
+            right_width: width - right_x - scaled(PADDING),
             hex_y,
-            eye_y: hex_y + 32.0,
+            eye_y: hex_y + scaled(32.0),
             slider_y,
             preset_y,
             preset_columns,
-            recent_y: preset_y + preset_height + PADDING,
-            button_y: height - BUTTON_STRIP_HEIGHT,
+            recent_y: preset_y + preset_height + scaled(PADDING),
+            button_y: height - scaled(BUTTON_STRIP_HEIGHT),
         }
     }
 
@@ -2096,42 +2135,52 @@ impl DialogLayout {
         let col = i % self.preset_columns;
         let row = i / self.preset_columns;
         (
-            PADDING + col as f32 * (SWATCH_SIZE + SWATCH_GAP),
-            self.preset_y + SECTION_LABEL_HEIGHT + row as f32 * (SWATCH_SIZE + SWATCH_GAP),
+            scaled(PADDING) + col as f32 * (scaled(SWATCH_SIZE) + scaled(SWATCH_GAP)),
+            self.preset_y
+                + scaled(SECTION_LABEL_HEIGHT)
+                + row as f32 * (scaled(SWATCH_SIZE) + scaled(SWATCH_GAP)),
         )
     }
 
     /// Top-left corner of recent-colour swatch `i`. They occupy a single row.
     fn recent_swatch(&self, i: usize) -> (f32, f32) {
         (
-            PADDING + i as f32 * (SWATCH_SIZE + SWATCH_GAP),
-            self.recent_y + SECTION_LABEL_HEIGHT,
+            scaled(PADDING) + i as f32 * (scaled(SWATCH_SIZE) + scaled(SWATCH_GAP)),
+            self.recent_y + scaled(SECTION_LABEL_HEIGHT),
         )
     }
 
     /// Whether (`x`, `y`) is inside the `SWATCH_SIZE` square at `origin`.
     fn in_swatch(origin: (f32, f32), x: f32, y: f32) -> bool {
-        x >= origin.0 && x <= origin.0 + SWATCH_SIZE && y >= origin.1 && y <= origin.1 + SWATCH_SIZE
+        x >= origin.0
+            && x <= origin.0 + scaled(SWATCH_SIZE)
+            && y >= origin.1
+            && y <= origin.1 + scaled(SWATCH_SIZE)
     }
 
     /// Top of slider row `i` (0, 1 or 2), below the tab strip.
     fn slider_row_y(&self, i: u8) -> f32 {
-        self.slider_y + SLIDER_TABS_HEIGHT + (SLIDER_HEIGHT + PADDING) * f32::from(i)
+        self.slider_y
+            + scaled(SLIDER_TABS_HEIGHT)
+            + (scaled(SLIDER_HEIGHT) + scaled(PADDING)) * f32::from(i)
     }
 
     /// Left edge and width of a slider's draggable track.
     fn slider_track(&self) -> (f32, f32) {
         (
-            PADDING + SLIDER_LABEL_WIDTH,
-            self.sv_size - SLIDER_LABEL_WIDTH - SLIDER_VALUE_WIDTH - PADDING,
+            scaled(PADDING) + scaled(SLIDER_LABEL_WIDTH),
+            self.sv_size
+                - scaled(SLIDER_LABEL_WIDTH)
+                - scaled(SLIDER_VALUE_WIDTH)
+                - scaled(PADDING),
         )
     }
 
     /// Left edge of slider tab `tab`.
     fn slider_tab_x(tab: SliderTab) -> f32 {
         match tab {
-            SliderTab::Rgb => PADDING,
-            SliderTab::Hsv => PADDING + SLIDER_TAB_PITCH,
+            SliderTab::Rgb => scaled(PADDING),
+            SliderTab::Hsv => scaled(PADDING) + scaled(SLIDER_TAB_PITCH),
         }
     }
 }
@@ -2201,6 +2250,28 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The colour picker follows the user's text size** (on this test's
+    /// thread): at twice the size its labels are twice as large.
+    #[test]
+    fn the_colour_picker_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let sizes: Vec<f32> = ColorPicker::new(Color::rgb(0, 128, 255))
+            .render(&Palette::for_mode(false), 0.0, 0.0)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(!sizes.is_empty());
+        assert!(
+            sizes
+                .iter()
+                .all(|size| *size == FONT_SIZE * 2.0 || *size == FONT_SIZE_SMALL * 2.0),
+            "{sizes:?}"
+        );
+    }
 
     /// Every hex digit, in both cases, must still come out as the value the
     /// three hand-written subtractions produced — and every non-digit must

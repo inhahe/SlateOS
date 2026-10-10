@@ -1,0 +1,11 @@
+# two_cues.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 0 40 4 574 K__ 21f402f25b1a0fd722b83169e10509f8 -
+packet 0 40 40 6 591 ___ ad230529d8ef792800c885ad7cbc255c -
+packet 0 10000 40 4 639 K__ c2add694bf942dc77b376592d9c862cd -
+packet 0 10040 40 6 656 ___ 162c5af971fc89454d5cafddba62e743 -
+packet 0 20000 40 4 704 K__ 78f825aaa0103319aaa1a30bf4fe3ada -
+packet 0 20040 40 6 721 ___ a1f0ead06e66ecfe8c124d502cf379f4 -
+packet 0 30000 40 4 769 K__ 3631578538a2d6ba5879b31a9a42f290 -
+packet 0 30040 40 6 786 ___ ebdc0e75268eb6ba20239add1195cde0 -

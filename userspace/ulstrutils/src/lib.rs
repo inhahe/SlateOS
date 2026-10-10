@@ -29,14 +29,21 @@
 //! properties are given) and [`parse_range`] (`N-M`), and `optutils.h`'s
 //! [`err_exclusive_options`].
 //!
+//! And `carefulputc.h`'s [`fputs_careful`]: text somebody else chose -- a
+//! wtmp file's user and host names in `last` -- with every control character
+//! and every byte that is not a printable character marked, as util-linux
+//! puts such text on a terminal.
+//!
 //! Pure functions over bytes; no I/O. Callers wrap the messages in their own
 //! error types, because each program reports through its own diagnostic path.
 
+mod careful;
 mod matching;
 mod optstr;
 mod optutils;
 mod strtod;
 
+pub use careful::fputs_careful;
 pub use matching::match_fstype;
 pub use optstr::{OptstrInvalid, OptstrItem, parse_range, ul_optstr_next};
 pub use optutils::err_exclusive_options;

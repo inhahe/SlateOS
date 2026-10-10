@@ -1869,6 +1869,7 @@ fn installed_fonts_place_combining_marks() {
     let mut opened = 0usize;
     let mut with_marks = 0usize;
     let mut placed = 0usize;
+    let mut classed_as_base: Vec<String> = Vec::new();
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
@@ -1914,22 +1915,29 @@ fn installed_fonts_place_combining_marks() {
         }
         placed += 1;
         assert!(
-            font.face().is_mark(acute),
-            "{}: anchors an acute onto an '{BASE}' yet does not class U+0301 \
-             as a mark — the mark would be kerned and advanced like a letter",
-            path.display()
-        );
-        assert!(
             !font.face().is_mark(base_gid),
             "{}: '{BASE}' is classed as a combining mark",
             path.display()
         );
-        assert_eq!(
-            mark.advance,
-            0.0,
-            "{}: the acute advances the pen",
-            path.display()
-        );
+        // A face's own GDEF can call its combining acute a base glyph:
+        // Liberation Sans 2's does (`acutecomb` in class 1, FontForge's
+        // classes). HarfBuzz trusts GDEF -- it places the acute by its anchor
+        // all the same, and treats it as the base the face says it is, kerned
+        // and advanced by its own advance (Liberation's is zero: HarfBuzz
+        // 14.3 gives it (53, 20) and no advance) -- and so does this shaper.
+        // Such a face says nothing of how a mark is treated, and is counted
+        // aside rather than failed: asserting the face's classes asserted the
+        // font, not the shaper.
+        if !font.face().is_mark(acute) {
+            classed_as_base.push(path.display().to_string());
+        } else {
+            assert_eq!(
+                mark.advance,
+                0.0,
+                "{}: the acute advances the pen",
+                path.display()
+            );
+        }
         // A displacement is a placement within the glyph, so it is bounded by
         // the em; anything larger means a misread anchor and would put the
         // accent on a different letter.
@@ -1943,6 +1951,15 @@ fn installed_fonts_place_combining_marks() {
     println!("faces opened:              {opened}");
     println!("faces that know marks:     {with_marks}");
     println!("faces placing the acute:   {placed}");
+    println!(
+        "  of them, calling it a base glyph in their own GDEF: {} {classed_as_base:?}",
+        classed_as_base.len()
+    );
+    assert!(
+        classed_as_base.len() < placed,
+        "every face placing the acute calls it a base glyph -- a GDEF \
+         misread, not {placed} misclassing fonts"
+    );
 
     assert!(
         with_marks > 0,

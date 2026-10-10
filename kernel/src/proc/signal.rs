@@ -17,24 +17,36 @@
 //!    entirely in userspace.
 //! 2. `kill()`/`raise()` post a signal into a target process's **pending
 //!    set** (`set_pending`, via the `SYS_SIGNAL_SEND` syscall).
-//! 3. When the target process next returns to userspace from a syscall,
-//!    the syscall-return path checks for a deliverable signal
-//!    (`take_deliverable`) and, if the trampoline is registered, builds a
-//!    [`SignalContext`] on the user stack and redirects execution to the
-//!    trampoline (see `handlers::deliver_pending_signal`).
+//! 3. When a thread of the target process next returns to userspace -- from
+//!    a syscall, or from an interrupt that found it running in ring 3 -- the
+//!    return path checks for a deliverable signal (`take_deliverable`) and,
+//!    if the trampoline is registered, builds a [`SignalContext`] on the user
+//!    stack (with the registers and FPU state the context has no room for
+//!    above it, [`SignalFrameExt`]) and redirects execution to the trampoline
+//!    (see `handlers::deliver_pending_signal` and
+//!    `handlers::deliver_pending_signal_on_interrupt_exit`).
 //! 4. The trampoline invokes the userspace handler then calls
 //!    `SYS_SIGNAL_RETURN` to restore the interrupted context.
 //!
 //! ## What the kernel does and does not know
 //!
-//! The kernel tracks only three things per process: the pending set, the
-//! blocked mask, and the trampoline address. It does **not** track
-//! per-signal dispositions — userspace owns that table and decides
-//! whether to terminate, ignore, or invoke a handler. The one exception
-//! is the kernel-side *default-action* table, used solely to decide what
-//! happens when a signal is posted to a process that has **no trampoline
-//! registered** (a non-POSIX process, or one that has not yet run its
-//! libc init): terminating signals kill it, everything else is dropped.
+//! The kernel tracks the pending set, the blocked mask, the trampoline
+//! address -- and, of the per-signal dispositions, only which signals are
+//! **ignored** (and `SIGCHLD`'s `SA_NOCLDWAIT`). The rest of the handler
+//! table is userspace's: the native libc keeps it and decides there whether
+//! to run a handler or take the default action. The ignored set is the
+//! exception because it is the part of a disposition that must outlive the
+//! program that set it -- `exec` keeps it, `fork` and spawn pass it on, and a
+//! new image's libc table starts empty -- and because the kernel has to act
+//! on it: an ignored signal is discarded when sent, and a parent ignoring
+//! `SIGCHLD` leaves no zombies (`pcb::ExitNotice`). Userspace reports it
+//! (`SYS_SIGNAL_SET_IGNORED`, the Linux shim's `rt_sigaction`); see
+//! `SignalState::ignored`.
+//!
+//! The kernel-side *default-action* table decides what happens when a
+//! signal is posted to a process that has **no trampoline registered** (a
+//! non-POSIX process, or one that has not yet run its libc init):
+//! terminating signals kill it, everything else is dropped.
 //! `SIGKILL` is always fatal and can never be delivered to a handler.
 //!
 //! ## Concurrency
@@ -49,6 +61,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::ProcessId;
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -69,6 +82,11 @@ pub const SIGHUP: u32 = 1;
 
 /// `SIGKILL` — always fatal, never catchable. Standard Linux number.
 pub const SIGKILL: u32 = 9;
+
+/// `SIGCHLD` — a child stopped, continued or exited. Default action ignore;
+/// a parent that sets it to `SIG_IGN` (or gives it `SA_NOCLDWAIT`) leaves no
+/// zombies (`pcb::ExitNotice`). Standard Linux number.
+pub const SIGCHLD: u32 = 17;
 
 /// `SIGCONT` — continue (resume) a stopped process. Never catchable as a
 /// stop-override (always resumes), but a handler may also run. Standard
@@ -229,6 +247,107 @@ pub struct SignalContext {
 /// Size of the signal context in bytes (17 × 8 = 136).
 pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 
+/// What follows the [`SignalContext`] in the **extended** native signal frame:
+/// the signal's `siginfo`, for a process that asked for it with
+/// `SYS_SIGNAL_REGISTER`'s `SIGNAL_FRAME_SIGINFO` flag.
+///
+/// # ABI
+///
+/// Part of the userspace ABI, at `ctx + 136`; fields must not be reordered or
+/// resized. The context before it is unchanged, so `SYS_SIGNAL_RETURN` and a
+/// libc that never asked read the frame exactly as before. 160 bytes in all,
+/// which keeps the context's 16-byte alignment and the fake return slot below
+/// it where they were (`requests/d-a-put-each-signal-s-siginfo-in-the-native-
+/// frame.md`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalInfoTail {
+    /// `si_code`: the sender class ([`si_code`]).
+    pub si_code: i32,
+    /// `si_pid`: the sender, or for `SIGCHLD` the child.
+    pub si_pid: u32,
+    /// `si_uid`: the sender's real uid, or the child's.
+    pub si_uid: u32,
+    /// Zero.
+    pub pad: u32,
+    /// `si_value` for `SI_QUEUE`; for `SIGCHLD`, `si_status` (the exit status
+    /// or the signal), which shares its offset in `siginfo_t`.
+    pub si_value: u64,
+}
+
+/// Size of the extended frame: the context and the tail (136 + 24 = 160).
+pub const SIGNAL_FRAME_EXTENDED_SIZE: usize =
+    SIGNAL_CONTEXT_SIZE + core::mem::size_of::<SignalInfoTail>();
+
+const _: () = assert!(core::mem::size_of::<SignalInfoTail>() == 24);
+const _: () = assert!(SIGNAL_FRAME_EXTENDED_SIZE == 160);
+// The offsets libc reads, as `SYS_SIGNAL_REGISTER`'s docs give them (frame
+// offset = 136 + these).
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_code) == 0);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_pid) == 4);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_uid) == 8);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, pad) == 12);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_value) == 16);
+
+/// What the kernel keeps above a native signal frame -- after the context, and
+/// after the siginfo tail when the trampoline takes one -- for
+/// `SYS_SIGNAL_RETURN` to put back: the two registers the context has no room
+/// for, and the thread's FPU state ([`crate::sched::fpu::capture_signal_image`],
+/// `fpu_len` bytes, right after this header).
+///
+/// Not part of what the C library reads: the context and the tail keep their
+/// offsets, and the handler's stack lies below the context, so nothing it does
+/// reaches these bytes. Added 2026-10-07, when signals began to be delivered
+/// from interrupts -- the interrupted code may be anywhere, with live values in
+/// `rcx`, `r11` and every FPU register.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalFrameExt {
+    /// [`SIGNAL_FRAME_EXT_MAGIC`]: present, and laid out as here.
+    pub magic: u64,
+    /// The interrupted `rcx`.
+    pub rcx: u64,
+    /// The interrupted `r11`.
+    pub r11: u64,
+    /// Bytes of FPU image that follow.
+    pub fpu_len: u64,
+}
+
+/// [`SignalFrameExt::magic`] ("SIGFRAMX").
+pub const SIGNAL_FRAME_EXT_MAGIC: u64 = 0x5849_4D41_5246_4749;
+
+/// Size of [`SignalFrameExt`]'s header.
+pub const SIGNAL_FRAME_EXT_SIZE: usize = core::mem::size_of::<SignalFrameExt>();
+const _: () = assert!(SIGNAL_FRAME_EXT_SIZE == 32);
+
+/// Where a native signal frame of `frame_size` bytes goes on a stack whose top
+/// is `base`: the context's address -- 16-byte aligned, the frame below
+/// `base` -- and the handler's `rsp`, the fake return slot 8 bytes under the
+/// context, so that `rsp % 16 == 8` at entry as the SysV convention has it.
+///
+/// The tail of the extended frame lies above the context, so both forms put
+/// the context and the return slot in the same relation; only how far below
+/// `base` differs.
+#[must_use]
+pub const fn frame_placement(base: u64, frame_size: u64) -> (u64, u64) {
+    let ctx_addr = base.wrapping_sub(frame_size) & !0xF;
+    (ctx_addr, ctx_addr.wrapping_sub(8))
+}
+
+impl SignalInfoTail {
+    /// The tail for a delivered signal's record.
+    #[must_use]
+    pub const fn from_info(info: &SigInfo) -> Self {
+        Self {
+            si_code: info.code,
+            si_pid: info.sender_pid,
+            si_uid: info.sender_uid,
+            pad: 0,
+            si_value: info.value,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-process signal state
 // ---------------------------------------------------------------------------
@@ -243,6 +362,12 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 pub mod si_code {
     /// Sent by `kill(2)` from a user process.
     pub const SI_USER: i32 = 0;
+    /// A POSIX timer expired (`timer_create(2)`): the record's `sender_pid`
+    /// is the timer id (`si_timerid`), `sender_uid` the overrun count
+    /// (`si_overrun`) and `value` the timer's `sigev_value` -- the offsets
+    /// `siginfo_t`'s `_timer` member gives them, the same as `_rt`'s pid, uid
+    /// and value.
+    pub const SI_TIMER: i32 = -2;
     /// Sent by the kernel itself (timer expiry, kernel-injected signals).
     pub const SI_KERNEL: i32 = 0x80;
     /// Sent by `sigqueue(3)` / `rt_sigqueueinfo(2)` (carries an `si_value`).
@@ -251,6 +376,19 @@ pub mod si_code {
     pub const SI_TKILL: i32 = -6;
     /// `SIGCHLD`: child exited normally (`si_code = CLD_EXITED`).
     pub const CLD_EXITED: i32 = 1;
+    /// `SIGCHLD`: child was killed by a signal (`si_code = CLD_KILLED`).
+    pub const CLD_KILLED: i32 = 2;
+    /// `SIGCHLD`: child was killed by a signal and left a core file. The
+    /// kernel writes none today, so nothing reports it yet; it is here so that
+    /// a status word with the core bit set has a code to map to.
+    pub const CLD_DUMPED: i32 = 3;
+    /// `SIGCHLD`: a tracee stopped for its tracer (`si_status` the stop's
+    /// signal) -- `crate::proc::ptrace`.
+    pub const CLD_TRAPPED: i32 = 4;
+    /// `SIGCHLD`: child stopped (`si_status` is the stop signal).
+    pub const CLD_STOPPED: i32 = 5;
+    /// `SIGCHLD`: a stopped child continued (`si_status` is `SIGCONT`).
+    pub const CLD_CONTINUED: i32 = 6;
 }
 
 /// Source metadata recorded when a signal is posted, used to fill the Linux
@@ -285,6 +423,30 @@ impl SigInfo {
         }
     }
 
+    /// The record a Linux `siginfo_t` carries: `si_code`, and the sender's
+    /// pid, uid and value where `kill`, `sigqueue` and `tgkill` put them (a
+    /// tracer's `PTRACE_SETSIGINFO`, kept for a signal it injects).
+    #[must_use]
+    pub fn from_linux(info: &crate::proc::linux_sigframe::LinuxSiginfo) -> Self {
+        let word = |at: usize| -> u32 {
+            let mut b = [0u8; 4];
+            if let Some(src) = info.sifields.get(at..at.saturating_add(4)) {
+                b.copy_from_slice(src);
+            }
+            u32::from_ne_bytes(b)
+        };
+        let mut value = [0u8; 8];
+        if let Some(src) = info.sifields.get(8..16) {
+            value.copy_from_slice(src);
+        }
+        Self {
+            code: info.si_code,
+            sender_pid: word(0),
+            sender_uid: word(4),
+            value: u64::from_ne_bytes(value),
+        }
+    }
+
     /// A thread-directed signal (`tkill`/`tgkill`, i.e. `raise`/`pthread_kill`):
     /// `SI_TKILL` with the sender identity.
     #[must_use]
@@ -308,50 +470,291 @@ impl SigInfo {
         }
     }
 
-    /// A `SIGCHLD` for a child that exited normally: `CLD_EXITED` with the
-    /// child's pid as the sender identity (matching Linux's `si_pid`).
+    /// A `SIGCHLD` for a child that ended: `CLD_EXITED` with its exit status,
+    /// or `CLD_KILLED` with the signal that killed it, as `code_and_status`
+    /// gives them; the child's pid and real uid as the sender (Linux's
+    /// `si_pid`/`si_uid`). The status travels in `value`, which `siginfo_t`'s
+    /// `si_status` shares an offset with.
     #[must_use]
-    pub const fn child(child_pid: u32, child_uid: u32) -> Self {
+    pub const fn child(child_pid: u32, child_uid: u32, code_and_status: (i32, i32)) -> Self {
+        let (code, status) = code_and_status;
+        // Reinterpreted, not converted: `si_status` is an `int` at the low
+        // half of `si_value`'s slot.
+        #[allow(clippy::cast_sign_loss)]
+        let value = status as u32 as u64;
         Self {
-            code: si_code::CLD_EXITED,
+            code,
             sender_pid: child_pid,
             sender_uid: child_uid,
-            value: 0,
+            value,
+        }
+    }
+
+    /// A `sigqueue`d signal: `SI_QUEUE` with the sender and its value.
+    #[must_use]
+    pub const fn queued(sender_pid: u32, sender_uid: u32, value: u64) -> Self {
+        Self {
+            code: si_code::SI_QUEUE,
+            sender_pid,
+            sender_uid,
+            value,
+        }
+    }
+
+    /// A POSIX timer's expiry: `SI_TIMER`, the timer id where a sender's pid
+    /// goes, the overrun count (0 until delivery says otherwise) where its uid
+    /// goes, and the timer's `sigev_value`. See [`si_code::SI_TIMER`].
+    #[must_use]
+    pub const fn timer(timer_id: i32, value: u64) -> Self {
+        // Reinterpreted, not converted: `si_timerid` is an `int` in the slot
+        // `si_pid` uses, and timer ids are never negative.
+        #[allow(clippy::cast_sign_loss)]
+        let sender_pid = timer_id as u32;
+        Self {
+            code: si_code::SI_TIMER,
+            sender_pid,
+            sender_uid: 0,
+            value,
         }
     }
 }
 
-/// Per-process signal bookkeeping.
+/// A POSIX timer's signal waiting in its process's queue -- Linux's
+/// preallocated per-timer `sigqueue`, linked into the shared pending list or,
+/// for `SIGEV_THREAD_ID`, its thread's.
+///
+/// Unlike the one record a standard signal coalesces to, every timer has a
+/// queue entry of its own: two timers that name the same signal deliver twice,
+/// as on Linux (`send_sigqueue` never applies the legacy one-instance rule),
+/// and a dequeued entry tells [`crate::proc::posix_timer`] which timer to
+/// re-arm and charge the overrun to.
 #[derive(Debug, Clone, Copy)]
-struct SignalState {
-    /// Pending set: bit `n-1` set means signal `n` is pending.
-    pending: u64,
-    /// Blocked mask: bit `n-1` set means signal `n` is blocked.
-    blocked: u64,
-    /// Userspace trampoline address (0 = not registered).
-    trampoline: u64,
-    /// Per-signal source metadata (`siginfo`), indexed by `sig - 1`. A slot is
-    /// `Some` only while the corresponding `pending` bit is set: recorded on the
-    /// clear→set transition and taken at delivery. Standard-signal coalescing
-    /// means at most one record is kept per signal number.
+struct QueuedTimerSignal {
+    /// The signal it raises.
+    sig: u32,
+    /// Its timer, within the process.
+    timer_id: i32,
+    /// The arming that queued it ([`crate::proc::posix_timer`]'s generation):
+    /// a timer re-set or deleted since makes the entry stale, and the timer
+    /// module drops a stale entry when it is dequeued (Linux 6.13's rule).
+    token: u64,
+    /// The thread it is aimed at (`SIGEV_THREAD_ID`), or `None` for the
+    /// process -- which of the [`PendingSet`]s its signal's bit lives in.
+    target: Option<TaskId>,
+    /// Its record.
+    info: SigInfo,
+}
+
+/// What [`post_timer_signal`] did with a timer's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerPost {
+    /// Queued; the signal is pending.
+    Queued,
+    /// The timer already had an entry queued, which now stands for this
+    /// expiry (its token is refreshed).
+    AlreadyQueued,
+    /// The signal is ignored and not blocked, so nothing was queued
+    /// (Linux's `prepare_signal`): the timer re-arms itself if periodic.
+    Ignored,
+    /// The process has no signal state (it is exiting), the thread aimed at
+    /// is gone, or no room was reserved for the entry; nothing was queued.
+    Gone,
+}
+
+/// One queue of pending signals: a process's shared queue, which any of its
+/// threads may take from, or a thread's own (Linux's `signal->shared_pending`
+/// and `task->pending`).
+#[derive(Debug, Clone)]
+struct PendingSet {
+    /// Bit `n-1` set: signal `n` has an instance here -- its standard record,
+    /// or a timer entry aimed here ([`SignalState::timer_queue`]), or both.
+    bits: u64,
+    /// The standard record per signal (`siginfo`), indexed by `sig - 1`: the
+    /// one instance a signal sent by `kill`, `sigqueue` or the kernel
+    /// coalesces to in this queue. `Some` exactly while that instance is
+    /// pending -- recorded when the signal was posted with its bit clear,
+    /// taken at delivery. A post that finds the bit already set (by this
+    /// record or a timer entry) is merged into what is there, Linux's
+    /// `legacy_queue`. For a given signal, the record (if any) is older than
+    /// every timer entry aimed at the same queue: it can only be recorded
+    /// while the bit is clear.
     infos: [Option<SigInfo>; NSIG as usize],
+}
+
+impl PendingSet {
+    /// An empty queue.
+    const fn new() -> Self {
+        Self {
+            bits: 0,
+            infos: [None; NSIG as usize],
+        }
+    }
+}
+
+/// A thread's own signal state -- what Linux keeps per task rather than per
+/// process: the blocked mask, `sigsuspend`'s saved mask, the alternate stack,
+/// and the signals sent to this thread alone.
+#[derive(Debug, Clone)]
+struct ThreadSignals {
+    /// Blocked mask: bit `n-1` set means signal `n` is blocked for this thread.
+    blocked: u64,
     /// Saved blocked mask awaiting restore, set by `sigsuspend`/`rt_sigsuspend`
     /// (Linux's `saved_sigmask` + `TIF_RESTORE_SIGMASK`). While `Some`, the
-    /// process is running under a *temporary* blocked mask; the saved mask is
+    /// thread is running under a *temporary* blocked mask; the saved mask is
     /// the one to restore. It is consumed (cleared) either by signal delivery
     /// — `emit_linux_rt_frame` writes it into `uc_sigmask` so `rt_sigreturn`
     /// restores it — or by the no-handler tail of `deliver_linux_signal`,
     /// which restores it directly. `None` means no restore is pending.
     saved_sigmask: Option<u64>,
-    /// Base and length of the process's alternate signal stack, as last
-    /// reported by `SYS_SIGNAL_ALTSTACK`. `(0, 0)` means none is registered.
+    /// The thread's alternate signal stack, as last set by `SYS_SIGNAL_ALTSTACK`
+    /// (native) or `sigaltstack` (Linux); [`AltStack::DISABLED`] when there is
+    /// none.
     ///
     /// The kernel holds this rather than reading libc's copy at delivery time,
     /// because the case an alternate stack exists to serve is a *stack
     /// overflow*: reading userspace memory while building a signal frame for a
     /// fault is the same recursion the feature is meant to escape.
-    altstack_sp: u64,
-    altstack_size: u64,
+    altstack: AltStack,
+    /// Signals sent to this thread alone: `tgkill`, `tkill`, a
+    /// `SIGEV_THREAD_ID` timer.
+    pending: PendingSet,
+}
+
+impl ThreadSignals {
+    /// A thread with mask `blocked`, the alternate stack `altstack`, and
+    /// nothing pending.
+    const fn new(blocked: u64, altstack: AltStack) -> Self {
+        Self {
+            blocked,
+            saved_sigmask: None,
+            altstack,
+            pending: PendingSet::new(),
+        }
+    }
+}
+
+/// `stack_t.ss_flags`: Linux's values, which the native libc uses too.
+pub mod ss_flags {
+    /// Reported: the thread is running on its alternate stack. Requested: an
+    /// alternate stack is to be used (the same as 0).
+    pub const SS_ONSTACK: u32 = 1;
+    /// No alternate stack, reported or requested.
+    pub const SS_DISABLE: u32 = 2;
+    /// Disarm the stack whenever a handler is entered, so that a handler can
+    /// leave it by `siglongjmp` without leaving it marked in use (Linux 4.7).
+    /// The frame's `uc_stack` keeps the stack, and `rt_sigreturn` re-arms it.
+    pub const SS_AUTODISARM: u32 = 1 << 31;
+    /// The flags beside the mode: what a request may add to 0, `SS_ONSTACK`
+    /// or `SS_DISABLE`.
+    pub const SS_FLAG_BITS: u32 = SS_AUTODISARM;
+}
+
+/// A thread's alternate signal stack, as Linux keeps one (`sas_ss_sp`,
+/// `sas_ss_size`, `sas_ss_flags`): its base, its size -- 0 for none -- and
+/// the flags it was set with, which the frame's `uc_stack` reports as they
+/// are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AltStack {
+    /// The lowest address of the stack (`ss_sp`).
+    pub sp: u64,
+    /// Its size in bytes (`ss_size`); 0 means there is no stack.
+    pub size: u64,
+    /// The `ss_flags` it was set with ([`ss_flags`]).
+    pub flags: u32,
+}
+
+impl AltStack {
+    /// No alternate stack: what a thread starts with, and what disabling or
+    /// disarming one leaves (Linux's `sas_ss_reset`).
+    pub const DISABLED: Self = Self {
+        sp: 0,
+        size: 0,
+        flags: ss_flags::SS_DISABLE,
+    };
+
+    /// Whether stack pointer `sp` lies on the stack: in `(base, base + size]`
+    /// -- a stack pointer at the very top has pushed nothing there yet, but
+    /// the next push lands on the stack (Linux's `__on_sig_stack`, for a stack
+    /// that grows down).
+    #[must_use]
+    pub const fn contains(&self, sp: u64) -> bool {
+        sp > self.sp && sp.wrapping_sub(self.sp) <= self.size
+    }
+
+    /// Whether a thread at `sp` counts as running on its stack (Linux's
+    /// `on_sig_stack`). Never with `SS_AUTODISARM`: such a stack is disarmed
+    /// while a handler runs on it, so a stack pointer inside it is the
+    /// program's own doing -- and a signal must still be able to use it.
+    #[must_use]
+    pub const fn on_stack(&self, sp: u64) -> bool {
+        self.flags & ss_flags::SS_AUTODISARM == 0 && self.contains(sp)
+    }
+
+    /// The mode a query reports for a thread at `sp` (Linux's
+    /// `sas_ss_flags`): `SS_DISABLE` with no stack, `SS_ONSTACK` on it, else
+    /// 0.
+    #[must_use]
+    pub const fn mode_at(&self, sp: u64) -> u32 {
+        if self.size == 0 {
+            ss_flags::SS_DISABLE
+        } else if self.on_stack(sp) {
+            ss_flags::SS_ONSTACK
+        } else {
+            0
+        }
+    }
+}
+
+/// Why Linux's `sigaltstack` refused a new stack ([`linux_sigaltstack`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltStackError {
+    /// The thread is running on its current stack (`EPERM`).
+    OnStack,
+    /// `ss_flags` names no mode (`EINVAL`).
+    BadMode,
+    /// The stack is smaller than the minimum (`ENOMEM`).
+    TooSmall,
+}
+
+/// Per-process signal bookkeeping.
+///
+/// Not `Copy`: the timer queue is a `Vec` and the threads a map. Nothing
+/// needs a copy of the whole state -- `fork` builds the child's field by
+/// field, and starts its queues empty as it starts everything pending empty.
+#[derive(Debug, Clone)]
+struct SignalState {
+    /// Signals sent to the process (`kill`, `sigqueue`, the kernel's, a
+    /// process-directed timer), which whichever thread does not block them
+    /// takes.
+    shared: PendingSet,
+    /// What a thread without state of its own in [`Self::threads`] has: the
+    /// mask, saved mask and alternate stack a process's first thread starts
+    /// with (set by spawn, fork and exec), and what a caller from outside the
+    /// process -- the kernel, a self-test -- reads and sets. Its `pending` is
+    /// always empty.
+    template: ThreadSignals,
+    /// Each thread's own state, from [`on_thread_start`] to
+    /// [`on_thread_exit`]. A thread's blocked mask is its own (Linux:
+    /// `sigprocmask` and `pthread_sigmask` are both per thread), inherited
+    /// from the thread that created it.
+    ///
+    /// Boxed, as [`SIGNAL_STATES`]' values are, for the same reason: a
+    /// `ThreadSignals` is over 2 KiB, and a map that holds its values inline
+    /// moves each one through every level of an insert.
+    threads: BTreeMap<TaskId, Box<ThreadSignals>>,
+    /// Userspace trampoline address (0 = not registered).
+    trampoline: u64,
+    /// The trampoline asked for the extended frame -- the context and then
+    /// the signal's `siginfo` ([`SignalInfoTail`]). Goes with the trampoline:
+    /// kept across fork, dropped at exec.
+    extended_frame: bool,
+    /// POSIX timers' signals, oldest first ([`QueuedTimerSignal`]), whichever
+    /// queue each is aimed at. At most one entry per timer, so it never holds
+    /// more entries than the process has timers -- and
+    /// [`reserve_timer_signals`] keeps its capacity at least that, which is
+    /// what lets a timer's expiry queue its signal from the timer interrupt
+    /// without allocating.
+    timer_queue: Vec<QueuedTimerSignal>,
     /// Signals whose handler asked for `SA_ONSTACK`: bit `n-1` set means
     /// signal `n` wants the alternate stack.
     ///
@@ -360,27 +763,190 @@ struct SignalState {
     /// kernel would know the stack but not which signals may use it -- and
     /// either guess breaks POSIX: always using it steals the stack from
     /// handlers that never asked, never using it leaves the feature
-    /// unimplemented.
+    /// unimplemented. A handler's flags are the process's, so this is too.
     onstack_mask: u64,
+    /// Ignored set: bit `n-1` set means the process's disposition for signal
+    /// `n` is `SIG_IGN`. Never holds `SIGKILL` or `SIGSTOP`.
+    ///
+    /// The one part of a disposition the kernel keeps, for both ABIs: the
+    /// native libc reports it (`SYS_SIGNAL_SET_IGNORED`), the Linux shim
+    /// records it at each `rt_sigaction` ([`record_disposition`]). It has to
+    /// be the kernel's, because it is the part that outlives the program that
+    /// set it -- `exec` keeps it and `fork` and spawn pass it on, where a
+    /// libc's table starts empty -- and because the kernel acts on it: an
+    /// ignored signal is discarded when sent ([`classify_post_info`]),
+    /// whether or not anything in the target could have dropped it, and a
+    /// parent that ignores `SIGCHLD` leaves no zombies (`pcb::ExitNotice`).
+    ignored: u64,
+    /// `SA_NOCLDWAIT` on `SIGCHLD`: children are reaped at exit, though
+    /// `SIGCHLD` is still sent. Recorded for the same two reasons as
+    /// [`Self::ignored`] (`SYS_SIGNAL_SET_IGNORED`'s flag, the Linux
+    /// `rt_sigaction`), but unlike it cleared at `exec`, with the rest of a
+    /// handler's flags.
+    nocldwait: bool,
 }
 
 impl Default for SignalState {
     fn default() -> Self {
         Self {
-            pending: 0,
-            blocked: 0,
+            shared: PendingSet::new(),
+            template: ThreadSignals::new(0, AltStack::DISABLED),
+            threads: BTreeMap::new(),
             trampoline: 0,
-            infos: [None; NSIG as usize],
-            saved_sigmask: None,
-            altstack_sp: 0,
-            altstack_size: 0,
+            extended_frame: false,
+            timer_queue: Vec::new(),
             onstack_mask: 0,
+            ignored: 0,
+            nocldwait: false,
         }
     }
 }
 
+/// One pending instance of a signal, taken out of a [`PendingSet`].
+enum Taken {
+    /// The standard record -- a signal sent by `kill`, `sigqueue` or the kernel.
+    Record(SigInfo),
+    /// A POSIX timer's entry, which its timer must see before it is delivered.
+    Timer(QueuedTimerSignal),
+}
+
+/// Whether signal `sig` (slot `idx = sig - 1`) still has an instance in the
+/// queue `set` -- its record, or a timer entry aimed at `target` (`None` the
+/// shared queue).
+fn has_instance(
+    set: &PendingSet,
+    queue: &[QueuedTimerSignal],
+    target: Option<TaskId>,
+    idx: usize,
+    sig: u32,
+) -> bool {
+    set.infos.get(idx).is_some_and(Option::is_some)
+        || queue.iter().any(|q| q.sig == sig && q.target == target)
+}
+
+/// Clear `sig`'s bit `bit` in `set` -- and take it off the global count --
+/// once no instance of it is left there. The bit means "some instance is
+/// pending here", so every path that removes an instance ends here.
+fn settle_bit(
+    set: &mut PendingSet,
+    queue: &[QueuedTimerSignal],
+    target: Option<TaskId>,
+    sig: u32,
+    bit: u64,
+) {
+    let idx = bit.trailing_zeros() as usize;
+    if set.bits & bit != 0 && !has_instance(set, queue, target, idx, sig) {
+        set.bits &= !bit;
+        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// [`settle_bit`] for every signal in `mask`.
+fn settle_bits(
+    set: &mut PendingSet,
+    queue: &[QueuedTimerSignal],
+    target: Option<TaskId>,
+    mask: u64,
+) {
+    let mut rem = mask;
+    while rem != 0 {
+        let bit = rem & rem.wrapping_neg(); // lowest set bit
+        // trailing_zeros is 0..=63, so the signal number is 1..=64.
+        settle_bit(
+            set,
+            queue,
+            target,
+            bit.trailing_zeros().saturating_add(1),
+            bit,
+        );
+        rem &= !bit;
+    }
+}
+
+/// Take the oldest pending instance of signal `sig` (bit `bit`) from the queue
+/// `set` (`target` names it: `None` the shared one): its standard record if it
+/// has one -- always older than any timer entry aimed at the same queue -- else
+/// its oldest timer entry. A bit set with neither (which no path leaves)
+/// yields a generic `SI_USER` record and is cleared.
+fn take_instance(
+    set: &mut PendingSet,
+    queue: &mut Vec<QueuedTimerSignal>,
+    target: Option<TaskId>,
+    sig: u32,
+    bit: u64,
+) -> Taken {
+    let idx = bit.trailing_zeros() as usize;
+    let taken = if let Some(info) = set.infos.get_mut(idx).and_then(Option::take) {
+        Taken::Record(info)
+    } else if let Some(pos) = queue
+        .iter()
+        .position(|q| q.sig == sig && q.target == target)
+    {
+        // `remove` shifts the tail down; it never allocates.
+        Taken::Timer(queue.remove(pos))
+    } else {
+        Taken::Record(SigInfo::user(0, 0))
+    };
+    settle_bit(set, queue, target, sig, bit);
+    taken
+}
+
+impl SignalState {
+    /// The signal state of thread `tid` of this process: its own, or -- for a
+    /// thread without one, or a caller from outside the process -- the
+    /// template.
+    fn thread(&self, tid: TaskId) -> &ThreadSignals {
+        self.threads.get(&tid).map_or(&self.template, Box::as_ref)
+    }
+
+    /// [`Self::thread`], to change.
+    fn thread_mut(&mut self, tid: TaskId) -> &mut ThreadSignals {
+        match self.threads.get_mut(&tid) {
+            Some(t) => t,
+            None => &mut self.template,
+        }
+    }
+
+    /// What thread `tid` could take now or later: the process's queue and its
+    /// own, as one mask.
+    fn pending_for(&self, tid: TaskId) -> u64 {
+        self.shared.bits | self.thread(tid).pending.bits
+    }
+
+    /// Whether every thread blocks `bit` -- so a process-directed signal must
+    /// wait, pending, for one to unblock it. A process with no thread state
+    /// (one not yet running, or the kernel's self-test fixtures) answers from
+    /// the template.
+    fn blocked_everywhere(&self, bit: u64) -> bool {
+        if self.threads.is_empty() {
+            self.template.blocked & bit != 0
+        } else {
+            self.threads.values().all(|t| t.blocked & bit != 0)
+        }
+    }
+
+    /// Bits set across every queue -- what the global count holds for this
+    /// process.
+    fn total_bits(&self) -> u32 {
+        self.threads
+            .values()
+            .map(|t| t.pending.bits.count_ones())
+            .fold(self.shared.bits.count_ones(), u32::saturating_add)
+    }
+}
+
 /// All per-process signal state, keyed by process ID.
-static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, SignalState>> = Mutex::new(BTreeMap::new());
+///
+/// **Boxed.** A `SignalState` is over 4 KiB -- two [`PendingSet`]s, each a
+/// record per signal -- and a `BTreeMap` holding values inline passes the
+/// value by value through every level of an insert (`insert`, `entry`,
+/// `insert_recursing`, `split`, `slice_insert`), each frame with its own copy
+/// in a debug build: 55 KiB of kernel stack for one insert. `fork` inserts the
+/// child's state with a syscall's frames already below it, and on 2026-10-08
+/// that overran the 64 KiB kernel stack -- a double fault in `slice_insert`
+/// under `inherit_for_fork`, the first time `ctest-coreutils-runs` forked.
+/// Boxed, an insert moves a pointer.
+static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, Box<SignalState>>> = Mutex::new(BTreeMap::new());
 
 /// Count of pending signals across all processes.
 ///
@@ -439,7 +1005,7 @@ static SIGNALFD_WAITERS: Mutex<BTreeMap<ProcessId, Vec<SignalFdWaiter>>> =
 
 /// Run `f` with the [`SIGNAL_STATES`] lock held and interrupts disabled.
 #[inline]
-fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, SignalState>) -> R) -> R {
+fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, Box<SignalState>>) -> R) -> R {
     crate::cpu::without_interrupts(|| {
         let mut states = SIGNAL_STATES.lock();
         f(&mut states)
@@ -486,45 +1052,91 @@ pub fn deregister_signalfd_waiter(pid: ProcessId, task: TaskId) {
     });
 }
 
-/// Remove and return every `signalfd` waiter of `pid` whose mask intersects
-/// `bit`, leaving non-matching waiters registered.
+/// How many waiters one pass of [`wake_signalfd_waiters`] takes out of the
+/// registry; it repeats until a pass comes back short.
+const WAKE_BATCH: usize = 16;
+
+/// Move up to `out.len()` waiters of `pid` whose mask intersects `bit` out of
+/// the registry into `out`, returning how many, and leave the rest registered.
 ///
-/// Pure registry mutation (no scheduler interaction), split out from
-/// [`wake_signalfd_waiters`] so the partition logic is unit-testable without a
-/// live scheduler.
-fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
+/// Allocation-free -- it neither grows nor frees anything, not even a list it
+/// empties (`deregister_signalfd_waiter` and [`remove`] drop that, in process
+/// context) -- because it runs in the timer interrupt when an `ITIMER_REAL` or
+/// POSIX timer expiry posts a signal, and the heap's lock is not one an
+/// interrupt may wait for: the code it interrupted may hold it.
+fn take_matching_signalfd_waiters_into(
+    pid: ProcessId,
+    bit: u64,
+    target: Option<TaskId>,
+    out: &mut [TaskId],
+) -> usize {
     with_waiters(|waiters| {
         let Some(list) = waiters.get_mut(&pid) else {
-            return Vec::new();
+            return 0;
         };
-        let mut matched = Vec::new();
+        let mut taken = 0usize;
         list.retain(|w| {
-            if w.mask & bit != 0 {
-                matched.push(w.task);
-                false
-            } else {
-                true
+            if w.mask & bit != 0 && target.is_none_or(|t| t == w.task) {
+                if let Some(slot) = out.get_mut(taken) {
+                    *slot = w.task;
+                    taken = taken.saturating_add(1);
+                    return false;
+                }
             }
+            true
         });
-        if list.is_empty() {
-            waiters.remove(&pid);
-        }
-        matched
+        taken
     })
 }
 
+/// Remove and return every `signalfd` waiter of `pid` whose mask intersects
+/// `bit`, leaving non-matching waiters registered, and drop the registry's
+/// entry for `pid` if that empties it.
+///
+/// Pure registry mutation (no scheduler interaction), for the self-tests of
+/// the partition logic [`wake_signalfd_waiters`] uses; it allocates, so the
+/// wake path itself uses [`take_matching_signalfd_waiters_into`].
+fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
+    let mut matched = Vec::new();
+    let mut batch: [TaskId; WAKE_BATCH] = [0; WAKE_BATCH];
+    loop {
+        let n = take_matching_signalfd_waiters_into(pid, bit, None, &mut batch);
+        matched.extend_from_slice(batch.get(..n).unwrap_or(&[]));
+        if n < WAKE_BATCH {
+            break;
+        }
+    }
+    with_waiters(|waiters| {
+        if waiters.get(&pid).is_some_and(Vec::is_empty) {
+            waiters.remove(&pid);
+        }
+    });
+    matched
+}
+
 /// Wake every `signalfd` reader of `pid` whose mask intersects `bit` (a single
-/// signal bit that just transitioned to pending), removing them from the
-/// registry first so a burst of arriving signals wakes each reader only once.
+/// signal bit that just transitioned to pending) -- for a signal sent to one
+/// thread (`target`), only that thread, the only one that can take it --
+/// removing them from the registry first so a burst of arriving signals wakes
+/// each reader only once.
 ///
 /// Uses the `try_wake`/`defer_wake` idiom so it is safe to call from any
 /// context (it never blocks and never directly enters the scheduler's
-/// run-queue manipulation if the target is not currently parked).
-fn wake_signalfd_waiters(pid: ProcessId, bit: u64) {
-    // Take the matching waiters out, then wake outside the registry lock.
-    for task in take_matching_signalfd_waiters(pid, bit) {
-        if !sched::try_wake(task) {
-            sched::defer_wake(task);
+/// run-queue manipulation if the target is not currently parked), and takes
+/// the waiters out in fixed-size batches so it never allocates (see
+/// [`take_matching_signalfd_waiters_into`]).
+fn wake_signalfd_waiters(pid: ProcessId, bit: u64, target: Option<TaskId>) {
+    let mut batch: [TaskId; WAKE_BATCH] = [0; WAKE_BATCH];
+    loop {
+        // Take a batch out, then wake it outside the registry lock.
+        let n = take_matching_signalfd_waiters_into(pid, bit, target, &mut batch);
+        for &task in batch.get(..n).unwrap_or(&[]) {
+            if !sched::try_wake(task) {
+                sched::defer_wake(task);
+            }
+        }
+        if n < WAKE_BATCH {
+            break;
         }
     }
 }
@@ -576,23 +1188,160 @@ pub fn wake_all_waiters(pid: ProcessId) {
 /// `addr == 0` unregisters, reverting to "no asynchronous delivery"
 /// (pending signals stay pending but are not delivered).
 pub fn register_trampoline(pid: ProcessId, addr: u64) {
+    register_trampoline_frame(pid, addr, false);
+}
+
+/// Register a trampoline and say which frame it reads: with `extended`, the
+/// context followed by the signal's `siginfo` ([`SignalInfoTail`]).
+pub fn register_trampoline_frame(pid: ProcessId, addr: u64, extended: bool) {
     with_states(|states| {
-        states.entry(pid).or_default().trampoline = addr;
+        let st = states.entry(pid).or_default();
+        st.trampoline = addr;
+        st.extended_frame = extended && addr != 0;
     });
 }
 
-/// Record a process's alternate signal stack and the set of signals allowed to
-/// use it.
+/// Whether `pid`'s trampoline reads the extended frame.
+#[must_use]
+pub fn extended_frame(pid: ProcessId) -> bool {
+    with_states(|states| states.get(&pid).is_some_and(|s| s.extended_frame))
+}
+
+/// `pid`'s trampoline and whether it reads the extended frame, or `None` with
+/// no trampoline. Read together, so that a thread re-registering while
+/// another's signal is delivered cannot pair one registration's trampoline
+/// with the other's frame.
+#[must_use]
+pub fn trampoline_frame(pid: ProcessId) -> Option<(u64, bool)> {
+    with_states(|states| {
+        states
+            .get(&pid)
+            .filter(|s| s.trampoline != 0)
+            .map(|s| (s.trampoline, s.extended_frame))
+    })
+}
+
+/// Record the calling thread's alternate signal stack and the set of signals
+/// allowed to use it.
 ///
 /// Both arrive together because libc holds both and they must not drift: the
 /// stack comes from `sigaltstack`, the mask from `sigaction`, and a kernel
 /// holding one without the other can decide nothing. `size == 0` unregisters.
+/// The stack is the calling thread's (Linux: `sigaltstack` is per thread); the
+/// mask, a property of the handlers, is the process's.
 pub fn set_altstack(pid: ProcessId, sp: u64, size: u64, onstack_mask: u64) {
+    let me = sched::current_task_id();
     with_states(|states| {
         let st = states.entry(pid).or_default();
-        st.altstack_sp = sp;
-        st.altstack_size = size;
+        st.thread_mut(me).altstack = if size == 0 {
+            AltStack::DISABLED
+        } else {
+            AltStack { sp, size, flags: 0 }
+        };
         st.onstack_mask = onstack_mask;
+    });
+}
+
+/// The calling thread's alternate signal stack ([`AltStack::DISABLED`] for
+/// none, or for a caller that is not one of `pid`'s threads and a process
+/// whose template has none).
+#[must_use]
+pub fn altstack(pid: ProcessId) -> AltStack {
+    let me = sched::current_task_id();
+    with_states(|states| {
+        states
+            .get(&pid)
+            .map_or(AltStack::DISABLED, |s| s.thread(me).altstack)
+    })
+}
+
+/// Linux's `do_sigaltstack` for the calling thread of `pid`, whose stack
+/// pointer is `sp`: the stack as a query reports it (`sigaltstack`'s `oss`),
+/// and with `new`, the stack replaced by it.
+///
+/// The report is the stored base and size, the mode as seen from `sp`
+/// ([`AltStack::mode_at`]) and the stored `SS_AUTODISARM`. A change is refused
+/// while the thread runs on its current stack ([`AltStackError::OnStack`],
+/// checked first, as Linux does), for a mode other than 0, `SS_ONSTACK` and
+/// `SS_DISABLE` (`BadMode`), and for a stack smaller than `min_size`
+/// (`TooSmall`) -- except that a request for exactly the stack already set is
+/// accepted before the size is looked at, as Linux returns early for one.
+/// Disabling keeps the flags but no base and no size. On a refusal nothing
+/// changes, and Linux reports nothing either.
+///
+/// # Errors
+/// [`AltStackError`], as above.
+pub fn linux_sigaltstack(
+    pid: ProcessId,
+    new: Option<AltStack>,
+    sp: u64,
+    min_size: u64,
+) -> Result<AltStack, AltStackError> {
+    linux_sigaltstack_as(pid, sched::current_task_id(), new, sp, min_size)
+}
+
+/// [`linux_sigaltstack`] for thread `me` (the self-tests name one).
+fn linux_sigaltstack_as(
+    pid: ProcessId,
+    me: TaskId,
+    new: Option<AltStack>,
+    sp: u64,
+    min_size: u64,
+) -> Result<AltStack, AltStackError> {
+    with_states(|states| {
+        let t = states.entry(pid).or_default().thread_mut(me);
+        let cur = t.altstack;
+        let old = AltStack {
+            sp: cur.sp,
+            size: cur.size,
+            flags: cur.mode_at(sp) | (cur.flags & ss_flags::SS_FLAG_BITS),
+        };
+        let Some(new) = new else {
+            return Ok(old);
+        };
+        if cur.on_stack(sp) {
+            return Err(AltStackError::OnStack);
+        }
+        let mode = new.flags & !ss_flags::SS_FLAG_BITS;
+        if mode != 0 && mode != ss_flags::SS_ONSTACK && mode != ss_flags::SS_DISABLE {
+            return Err(AltStackError::BadMode);
+        }
+        if new == cur {
+            return Ok(old);
+        }
+        t.altstack = if mode == ss_flags::SS_DISABLE {
+            AltStack {
+                sp: 0,
+                size: 0,
+                flags: new.flags,
+            }
+        } else if new.size < min_size {
+            return Err(AltStackError::TooSmall);
+        } else {
+            new
+        };
+        Ok(old)
+    })
+}
+
+/// A handler has been entered on the calling thread of `pid`: disarm its
+/// alternate stack if it was set with `SS_AUTODISARM` (Linux's
+/// `signal_delivered`, for every handler, whether or not it ran on the
+/// stack). The handler's frame keeps the stack in `uc_stack`, and
+/// `rt_sigreturn` puts it back.
+pub fn disarm_altstack(pid: ProcessId) {
+    disarm_altstack_as(pid, sched::current_task_id());
+}
+
+/// [`disarm_altstack`] for thread `me` (the self-tests name one).
+fn disarm_altstack_as(pid: ProcessId, me: TaskId) {
+    with_states(|states| {
+        if let Some(s) = states.get_mut(&pid) {
+            let t = s.thread_mut(me);
+            if t.altstack.flags & ss_flags::SS_AUTODISARM != 0 {
+                t.altstack = AltStack::DISABLED;
+            }
+        }
     });
 }
 
@@ -620,13 +1369,15 @@ pub fn altstack_top_for(pid: ProcessId, sig: u32, current_rsp: u64) -> Option<u6
         return None;
     }
     let bit = 1u64 << (sig - 1);
+    let me = sched::current_task_id();
     with_states(|states| {
         let st = states.get(&pid)?;
-        if st.onstack_mask & bit == 0 || st.altstack_size == 0 {
+        let alt = st.thread(me).altstack;
+        if st.onstack_mask & bit == 0 || alt.size == 0 {
             return None;
         }
-        let top = st.altstack_sp.checked_add(st.altstack_size)?;
-        if current_rsp >= st.altstack_sp && current_rsp < top {
+        let top = alt.sp.checked_add(alt.size)?;
+        if current_rsp >= alt.sp && current_rsp < top {
             return None;
         }
         Some(top)
@@ -652,7 +1403,7 @@ pub fn has_trampoline(pid: ProcessId) -> bool {
 pub fn remove(pid: ProcessId) {
     with_states(|states| {
         if let Some(state) = states.remove(&pid) {
-            let n = state.pending.count_ones() as usize;
+            let n = state.total_bits() as usize;
             if n != 0 {
                 PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
             }
@@ -672,15 +1423,44 @@ pub fn remove(pid: ProcessId) {
 /// libc init re-registers). Since our per-signal dispositions live in
 /// userspace and are discarded with the old address space, the kernel's
 /// job is simply to drop the now-stale trampoline so we never jump to a
-/// garbage address in the new image. Pending signals are preserved
-/// (matching POSIX), and will be delivered once the new image registers
-/// its trampoline.
+/// garbage address in the new image.
+///
+/// **Kept:** the pending signals and the blocked mask. POSIX `execve` lists
+/// "process signal mask" among what the new image inherits, and Linux keeps
+/// `current->blocked` untouched; a shell blocks SIGCHLD or SIGINT around a
+/// fork, execs the command, and relies on it starting with them blocked. This
+/// cleared the mask until 2026-10-01, under a comment claiming POSIX asked
+/// for that (`requests/d-a-exec-must-keep-the-signal-mask.md`). Pending
+/// signals are delivered once the new image registers its trampoline and
+/// unblocks them.
+///
+/// **Kept, too:** the ignored set. POSIX: "Signals set to the default action
+/// (SIG_DFL) in the calling process image shall be set to the default action
+/// in the new process image ... Signals set to be ignored (SIG_IGN) by the
+/// calling process image shall be set to be ignored by the new process
+/// image." It is how `nohup cmd` keeps `cmd` alive when its terminal closes,
+/// and it is why the set is the kernel's (see [`SignalState::ignored`]).
+/// **Cleared:** `SA_NOCLDWAIT`, which is a handler's flag, and goes where the
+/// new image's handler table does.
+///
+/// **Deleted:** the process's POSIX timers ([`crate::proc::posix_timer`]),
+/// with any signal of theirs still queued -- POSIX: "timers created by the
+/// calling process ... shall be deleted before replacing the current process
+/// image" (Linux's `exit_itimers` in `begin_new_exec`). `ITIMER_REAL` is a
+/// different timer and survives, as POSIX requires.
 pub fn on_exec(pid: ProcessId) {
+    crate::proc::posix_timer::on_exec(pid);
+    // The thread that execs goes on as the new image's only thread (exec ends
+    // the others): its mask and what was sent to it alone carry over, as
+    // Linux's `de_thread` keeps them; the other threads' state goes with them.
+    let me = sched::current_task_id();
     with_states(|states| {
         if let Some(state) = states.get_mut(&pid) {
+            state.nocldwait = false;
             state.trampoline = 0;
-            // Blocked mask is also reset on exec per POSIX.
-            state.blocked = 0;
+            // The new image registers its own trampoline, and says then which
+            // frame it reads.
+            state.extended_frame = false;
             // An alternate signal stack is NOT preserved across execve (see
             // sigaltstack(2)), and here it must not be: the address named a
             // buffer in the old image's address space, which has just been
@@ -690,94 +1470,413 @@ pub fn on_exec(pid: ProcessId) {
             // would land in the new image's delivery path rather than being a
             // missing feature. The mask goes with it, since the new image's
             // handlers have not asked for anything yet.
-            state.altstack_sp = 0;
-            state.altstack_size = 0;
             state.onstack_mask = 0;
+            let mine = state.threads.remove(&me);
+            let gone: usize = state
+                .threads
+                .values()
+                .map(|t| t.pending.bits.count_ones() as usize)
+                .fold(0, usize::saturating_add);
+            if gone != 0 {
+                PENDING_COUNT.fetch_sub(gone, Ordering::Relaxed);
+            }
+            state.threads.clear();
+            let blocked = mine.as_ref().map_or(state.template.blocked, |t| t.blocked);
+            // The template's `pending` is always empty, so this is all of a
+            // fresh `ThreadSignals::new(blocked, AltStack::DISABLED)`, without
+            // one on the stack.
+            state.template.blocked = blocked;
+            state.template.saved_sigmask = None;
+            state.template.altstack = AltStack::DISABLED;
+            if let Some(mut t) = mine {
+                t.altstack = AltStack::DISABLED;
+                t.saved_sigmask = None;
+                state.threads.insert(me, t);
+            }
         }
     });
 }
 
 /// Inherit signal state from a parent across `fork()`.
 ///
-/// POSIX semantics: the child inherits the parent's blocked-signal mask
-/// and signal dispositions, but the set of pending signals is **empty**
-/// in the child.  Our per-signal dispositions live in userspace (and are
-/// carried over automatically by the copy-on-write address space), so the
-/// kernel's job is to copy the blocked mask and the trampoline address
-/// (the child's CoW-copied trampoline lives at the same user address) and
-/// to start the child with no pending signals.
+/// POSIX semantics: the child inherits the blocked-signal mask of the thread
+/// that forked, and the signal dispositions, but the set of pending signals is
+/// **empty** in the child.  Our per-signal dispositions live in userspace
+/// (and are carried over automatically by the copy-on-write address space), so
+/// the kernel's job is to copy that thread's mask and alternate stack -- which
+/// become the child's first thread's ([`SignalState::template`]) -- and the
+/// trampoline address (the child's CoW-copied trampoline lives at the same
+/// user address), and to start the child with no pending signals.
 ///
-/// Overwrites any existing child state (the child is freshly created, so
-/// there should be none, but this is idempotent).
+/// Called by the forking thread. Overwrites any existing child state (the
+/// child is freshly created, so there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
+    let me = sched::current_task_id();
+    // Made on the heap before the lock, and filled in there: a `SignalState`
+    // built on the stack and moved into the map is the 4 KiB copy the map's
+    // boxing exists to avoid (see `SIGNAL_STATES`).
+    let mut inherited = Box::<SignalState>::default();
     with_states(|states| {
-        let (blocked, trampoline, alt_sp, alt_size, onstack) =
-            states.get(&parent).map_or((0, 0, 0, 0, 0), |s| {
-                (
-                    s.blocked,
-                    s.trampoline,
-                    s.altstack_sp,
-                    s.altstack_size,
-                    s.onstack_mask,
-                )
-            });
+        // What the child takes from the parent; everything else starts empty
+        // -- the pending sets and the timer queue among them (the parent's
+        // POSIX timers are not inherited either, so nothing of theirs belongs
+        // here).
+        if let Some(s) = states.get(&parent) {
+            let t = s.thread(me);
+            // Inherited, per sigaltstack(2): "a child created via fork(2)
+            // inherits a copy of its parent's alternate signal stack
+            // settings". The child's CoW-copied stack lives at the same user
+            // address, exactly as the trampoline does. (Not preserved across
+            // execve -- see `on_exec`.)
+            inherited.template.blocked = t.blocked;
+            inherited.template.altstack = t.altstack;
+            inherited.trampoline = s.trampoline;
+            // The trampoline's frame goes with it.
+            inherited.extended_frame = s.extended_frame;
+            inherited.onstack_mask = s.onstack_mask;
+            // A forked child has its parent's dispositions -- its libc's
+            // table is a copy of the parent's memory -- so the kernel's part
+            // of them is copied too.
+            inherited.ignored = s.ignored;
+            inherited.nocldwait = s.nocldwait;
+        }
         // If the child somehow already had pending signals recorded, drop
         // them from the global counter before overwriting.
         if let Some(existing) = states.get(&child) {
-            let n = existing.pending.count_ones() as usize;
+            let n = existing.total_bits() as usize;
             if n != 0 {
                 PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
             }
         }
-        states.insert(
-            child,
-            SignalState {
-                pending: 0,
-                blocked,
-                trampoline,
-                // POSIX: the child starts with no pending signals, so no
-                // per-signal siginfo records carry over.
-                infos: [None; NSIG as usize],
-                // No sigsuspend in flight in a freshly-forked child.
-                saved_sigmask: None,
-                // Inherited, per sigaltstack(2): "a child created via fork(2)
-                // inherits a copy of its parent's alternate signal stack
-                // settings". The child's CoW-copied stack lives at the same
-                // user address, exactly as the trampoline does above. (Not
-                // preserved across execve -- see the exec path, which clears
-                // them.)
-                altstack_sp: alt_sp,
-                altstack_size: alt_size,
-                onstack_mask: onstack,
-            },
-        );
+        states.insert(child, inherited);
     });
+}
+
+/// Set up the signal state of a process `spawn` has just created, before its
+/// first instruction: what `posix_spawn` promises, which is what a fork and
+/// an exec would have left.
+///
+/// - **Blocked:** `sigmask` if the spawn asked for one
+///   (`POSIX_SPAWN_SETSIGMASK`), else that of the parent's thread that
+///   spawned -- POSIX: "If the POSIX_SPAWN_SETSIGMASK flag is not set ... the
+///   child process shall inherit the parent's signal mask." `SIGKILL` and
+///   `SIGSTOP` are taken out, as [`set_blocked`] does.
+/// - **Ignored:** the parent's, less `sigdefault` (`POSIX_SPAWN_SETSIGDEF`):
+///   an exec keeps ignored signals ignored, and the child is a new image.
+/// - **Everything else** starts empty, as after an exec: nothing pending, no
+///   trampoline, no alternate stack, no `SA_NOCLDWAIT`.
+///
+/// `parent` 0 is the kernel, which has nothing to inherit. Any state already
+/// recorded for `child` is replaced.
+pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, sigdefault: u64) {
+    let me = sched::current_task_id();
+    // On the heap from the start, as `inherit_for_fork`'s is.
+    let mut started = Box::<SignalState>::default();
+    with_states(|states| {
+        let (parent_blocked, parent_ignored) = if parent == 0 {
+            (0, 0)
+        } else {
+            states
+                .get(&parent)
+                .map_or((0, 0), |s| (s.thread(me).blocked, s.ignored))
+        };
+        if let Some(existing) = states.get(&child) {
+            let n = existing.total_bits() as usize;
+            if n != 0 {
+                PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+            }
+        }
+        started.template.blocked = sigmask.unwrap_or(parent_blocked) & !uncatchable_mask();
+        started.ignored = parent_ignored & !sigdefault;
+        states.insert(child, started);
+    });
+}
+
+/// A thread of `pid` is starting: give it signal state of its own -- the
+/// blocked mask of the thread that created it, as Linux's `clone` copies it
+/// (or, when the kernel creates the process's first thread, the template that
+/// spawn, fork or exec set), no alternate stack (a new thread shares the
+/// address space, so it cannot share a stack -- Linux clears it for
+/// `CLONE_VM`), and nothing pending.
+///
+/// The process's first thread takes the template's alternate stack too: a
+/// forked child's is its parent's.
+pub fn on_thread_start(pid: ProcessId, tid: TaskId) {
+    let creator = sched::current_task_id();
+    // On the heap before the lock, and filled in under it (see
+    // `SIGNAL_STATES` for why the map holds boxes).
+    let mut thread = Box::new(ThreadSignals::new(0, AltStack::DISABLED));
+    with_states(|states| {
+        let state = states.entry(pid).or_default();
+        let first = state.threads.is_empty();
+        let from_creator = state.threads.get(&creator).map(|t| t.blocked);
+        (thread.blocked, thread.altstack) = match from_creator {
+            Some(blocked) => (blocked, AltStack::DISABLED),
+            None if first => (state.template.blocked, state.template.altstack),
+            None => (state.template.blocked, AltStack::DISABLED),
+        };
+        state.threads.entry(tid).or_insert(thread);
+    });
+}
+
+/// Thread `tid` of `pid` has ended: drop its signal state, and with it what
+/// was sent to it alone (Linux flushes a dead task's private queue). A POSIX
+/// timer entry aimed at it goes too, and its timer is told, as for any entry
+/// taken without being delivered.
+pub fn on_thread_exit(pid: ProcessId, tid: TaskId) {
+    loop {
+        let mut batch: [Option<QueuedTimerSignal>; CLEAR_BATCH] = [None; CLEAR_BATCH];
+        let taken = with_states(|states| {
+            let Some(state) = states.get_mut(&pid) else {
+                return 0;
+            };
+            let mut taken = 0usize;
+            state.timer_queue.retain(|q| {
+                if q.target == Some(tid) {
+                    if let Some(slot) = batch.get_mut(taken) {
+                        *slot = Some(*q);
+                        taken = taken.saturating_add(1);
+                        return false;
+                    }
+                }
+                true
+            });
+            if taken < CLEAR_BATCH {
+                if let Some(t) = state.threads.remove(&tid) {
+                    let n = t.pending.bits.count_ones() as usize;
+                    if n != 0 {
+                        PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+                    }
+                }
+            }
+            taken
+        });
+        for q in batch.iter().take(taken).flatten() {
+            let _ = crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info);
+        }
+        if taken < CLEAR_BATCH {
+            break;
+        }
+    }
+    // The thread's waiter registration, if it died parked.
+    deregister_signalfd_waiter(pid, tid);
+}
+
+/// `SIGKILL` and `SIGSTOP`: never blocked, never ignored, never caught.
+#[inline]
+#[must_use]
+fn uncatchable_mask() -> u64 {
+    signal_bit(SIGKILL).unwrap_or(0) | signal_bit(SIGSTOP).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Ignored set
+// ---------------------------------------------------------------------------
+
+/// Replace `pid`'s ignored set with `mask` -- signal `n` is bit `n - 1` -- and
+/// `SA_NOCLDWAIT` with `nocldwait`, returning the previous set.
+/// `SYS_SIGNAL_SET_IGNORED`'s core: the native libc's report of every signal
+/// whose disposition is `SIG_IGN`, whenever one moves to or from it.
+///
+/// A signal newly ignored that is pending is discarded, blocked or not --
+/// POSIX: "Setting a signal action to SIG_IGN for a signal that is pending
+/// shall cause the pending signal to be discarded, whether or not it is
+/// blocked." Only *newly* ignored ones: the call carries the whole set, so a
+/// signal already ignored before it is one whose action did not change, and a
+/// pending instance of it (it was blocked when sent) stays for whoever
+/// unblocks or changes it.
+///
+/// # Errors
+///
+/// `InvalidArgument` if `mask` names `SIGKILL` or `SIGSTOP`, which cannot be
+/// ignored; nothing is changed.
+pub fn set_ignored(pid: ProcessId, mask: u64, nocldwait: bool) -> KernelResult<u64> {
+    if mask & uncatchable_mask() != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let old = with_states(|states| {
+        let state = states.entry(pid).or_default();
+        let old = state.ignored;
+        state.ignored = mask;
+        state.nocldwait = nocldwait;
+        old
+    });
+    clear_pending(pid, mask & !old);
+    Ok(old)
+}
+
+/// `pid`'s ignored set: bit `n - 1` for each signal `n` whose disposition is
+/// `SIG_IGN`. 0 for a process with no signal state.
+#[must_use]
+pub fn ignored(pid: ProcessId) -> u64 {
+    with_states(|states| states.get(&pid).map_or(0, |s| s.ignored))
+}
+
+/// Whether `pid`'s disposition for `sig` is `SIG_IGN`. `false` for a number
+/// that is not a signal.
+#[must_use]
+pub fn is_ignored(pid: ProcessId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| ignored(pid) & bit != 0)
+}
+
+/// A process's pending, blocked and ignored sets, read together (bit `n - 1`
+/// for signal `n` in each).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignalSets {
+    /// Signals sent to the process and not yet delivered (`ShdPnd`).
+    pub pending: u64,
+    /// Signals sent to the thread asked about alone (`SigPnd`).
+    pub thread_pending: u64,
+    /// Signals that thread blocks.
+    pub blocked: u64,
+    /// Signals whose disposition is `SIG_IGN`.
+    pub ignored: u64,
+    /// How many signals are queued in the process, every queue counted --
+    /// what `RLIMIT_SIGPENDING` measures.
+    pub queued: u32,
+}
+
+/// `pid`'s [`SignalSets`] as its main thread sees them -- the oldest thread
+/// with state of its own, which is the one `/proc/<pid>` describes -- under
+/// one hold of the lock so they agree: what `/proc/<pid>/status` and
+/// `/proc/<pid>/stat` report. All empty for a process with no signal state.
+#[must_use]
+pub fn sets(pid: ProcessId) -> SignalSets {
+    with_states(|states| {
+        states.get(&pid).map_or_else(SignalSets::default, |s| {
+            let main = s.threads.values().next().map_or(&s.template, Box::as_ref);
+            SignalSets {
+                pending: s.shared.bits,
+                thread_pending: main.pending.bits,
+                blocked: main.blocked,
+                ignored: s.ignored,
+                queued: s.total_bits(),
+            }
+        })
+    })
+}
+
+/// [`sets`] as thread `tid` of `pid` sees them (`/proc/<pid>/task/<tid>`).
+#[must_use]
+pub fn thread_sets(pid: ProcessId, tid: TaskId) -> SignalSets {
+    with_states(|states| {
+        states.get(&pid).map_or_else(SignalSets::default, |s| {
+            let t = s.thread(tid);
+            SignalSets {
+                pending: s.shared.bits,
+                thread_pending: t.pending.bits,
+                blocked: t.blocked,
+                ignored: s.ignored,
+                queued: s.total_bits(),
+            }
+        })
+    })
+}
+
+/// Whether `pid`'s `SIGCHLD` carries `SA_NOCLDWAIT`.
+#[must_use]
+pub fn nocldwait(pid: ProcessId) -> bool {
+    with_states(|states| states.get(&pid).is_some_and(|s| s.nocldwait))
+}
+
+/// Drop `pid`'s `SA_NOCLDWAIT`, as a reset of its handlers does: an exec
+/// ([`on_exec`] does this itself) or a Linux `clone(CLONE_CLEAR_SIGHAND)`.
+pub fn clear_nocldwait(pid: ProcessId) {
+    with_states(|states| {
+        if let Some(state) = states.get_mut(&pid) {
+            state.nocldwait = false;
+        }
+    });
+}
+
+/// What one signal's new disposition is, for [`record_disposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// `SIG_DFL`.
+    Default,
+    /// `SIG_IGN`.
+    Ignore,
+    /// A handler.
+    Handler,
+}
+
+/// Record the kernel's part of one signal's new disposition, for a caller
+/// that changes them one at a time -- the Linux shim's `rt_sigaction`, whose
+/// table holds the rest. Linux's `do_sigaction`, in what the kernel keeps:
+///
+/// - the signal is in the ignored set exactly when the action is `SIG_IGN`;
+/// - a pending instance is discarded, blocked or not, whenever the new action
+///   ignores it -- `SIG_IGN`, or `SIG_DFL` for a signal whose default is to be
+///   ignored (`sig_handler_ignored`);
+/// - for `SIGCHLD`, `nocldwait` is the action's `SA_NOCLDWAIT`.
+///
+/// No effect for `SIGKILL`, `SIGSTOP` or a number that is not a signal: their
+/// actions cannot be changed, and the caller has refused the request.
+pub fn record_disposition(pid: ProcessId, sig: u32, action: Disposition, nocldwait: bool) {
+    let Some(bit) = signal_bit(sig) else {
+        return;
+    };
+    if bit & uncatchable_mask() != 0 {
+        return;
+    }
+    with_states(|states| {
+        let state = states.entry(pid).or_default();
+        if action == Disposition::Ignore {
+            state.ignored |= bit;
+        } else {
+            state.ignored &= !bit;
+        }
+        if sig == SIGCHLD {
+            state.nocldwait = nocldwait;
+        }
+    });
+    let discards = action == Disposition::Ignore
+        || (action == Disposition::Default && default_action(sig) == DefaultAction::Ignore);
+    if discards {
+        clear_pending(pid, bit);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Blocked mask
 // ---------------------------------------------------------------------------
 
-/// Set the blocked-signal mask for a process, returning the previous mask.
+/// Set the calling thread's blocked-signal mask, returning the previous mask.
+///
+/// The mask is the thread's own, as Linux's `sigprocmask` and
+/// `pthread_sigmask` both set the calling thread's. Called from outside the
+/// process -- the kernel, a self-test -- it sets the process's template, the
+/// mask a thread without state of its own has.
 ///
 /// `SIGKILL` and `SIGSTOP` cannot be blocked (their bits are always
 /// cleared from the stored mask), matching POSIX.
 pub fn set_blocked(pid: ProcessId, mask: u64) -> u64 {
+    set_blocked_as(pid, sched::current_task_id(), mask)
+}
+
+/// [`set_blocked`] for thread `me` (the self-tests name one).
+fn set_blocked_as(pid: ProcessId, me: TaskId, mask: u64) -> u64 {
     // SIGKILL (bit 8) and SIGSTOP (bit 18) can never be blocked.
     let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
     let mask = mask & !unblockable;
     with_states(|states| {
-        let state = states.entry(pid).or_default();
-        let old = state.blocked;
-        state.blocked = mask;
+        let t = states.entry(pid).or_default().thread_mut(me);
+        let old = t.blocked;
+        t.blocked = mask;
         old
     })
 }
 
-/// Get the blocked-signal mask for a process.
+/// The calling thread's blocked-signal mask (or, from outside the process,
+/// the template's -- see [`set_blocked`]).
 #[must_use]
 pub fn blocked(pid: ProcessId) -> u64 {
-    with_states(|states| states.get(&pid).map(|s| s.blocked).unwrap_or(0))
+    blocked_as(pid, sched::current_task_id())
+}
+
+/// [`blocked`] for thread `me` (the self-tests name one).
+fn blocked_as(pid: ProcessId, me: TaskId) -> u64 {
+    with_states(|states| states.get(&pid).map_or(0, |s| s.thread(me).blocked))
 }
 
 /// Whether `sig` is currently blocked for `pid`.
@@ -789,10 +1888,16 @@ pub fn is_blocked(pid: ProcessId, sig: u32) -> bool {
     signal_bit(sig).is_some_and(|bit| blocked(pid) & bit != 0)
 }
 
-/// Get the pending-signal set for a process (without clearing it).
+/// The signals pending for the calling thread -- sent to the process, or to
+/// the thread alone -- without taking any (`sigpending`).
 #[must_use]
 pub fn pending(pid: ProcessId) -> u64 {
-    with_states(|states| states.get(&pid).map(|s| s.pending).unwrap_or(0))
+    pending_as(pid, sched::current_task_id())
+}
+
+/// [`pending`] for thread `me` (the self-tests name one).
+fn pending_as(pid: ProcessId, me: TaskId) -> u64 {
+    with_states(|states| states.get(&pid).map_or(0, |s| s.pending_for(me)))
 }
 
 /// Record a *saved* blocked mask awaiting restore (Linux `saved_sigmask` +
@@ -804,8 +1909,9 @@ pub fn pending(pid: ProcessId) -> u64 {
 /// `emit_linux_rt_frame` (which writes it into `uc_sigmask` for `rt_sigreturn`
 /// to restore) or by the no-handler tail of the Linux delivery loop.
 pub fn set_saved_sigmask(pid: ProcessId, mask: u64) {
+    let me = sched::current_task_id();
     with_states(|states| {
-        states.entry(pid).or_default().saved_sigmask = Some(mask);
+        states.entry(pid).or_default().thread_mut(me).saved_sigmask = Some(mask);
     });
 }
 
@@ -816,7 +1922,100 @@ pub fn set_saved_sigmask(pid: ProcessId, mask: u64) {
 /// sigsuspend-style mask restore is outstanding.
 #[must_use]
 pub fn take_saved_sigmask(pid: ProcessId) -> Option<u64> {
-    with_states(|states| states.get_mut(&pid).and_then(|s| s.saved_sigmask.take()))
+    let me = sched::current_task_id();
+    with_states(|states| {
+        states
+            .get_mut(&pid)
+            .and_then(|s| s.thread_mut(me).saved_sigmask.take())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// A tracer's view of a thread's signals (`proc::ptrace`)
+// ---------------------------------------------------------------------------
+
+/// The mask thread `tid` of `pid` has set for itself: the one a `sigsuspend`
+/// saved while the thread waits under a temporary mask of the call's (Linux's
+/// `saved_sigmask` under `TIF_RESTORE_SIGMASK`), else its blocked mask. What
+/// a tracer's `PTRACE_GETSIGMASK` reads. 0 for a process with no signal
+/// state.
+#[must_use]
+pub fn tracee_sigmask(pid: ProcessId, tid: TaskId) -> u64 {
+    with_states(|states| {
+        states.get(&pid).map_or(0, |s| {
+            let t = s.thread(tid);
+            t.saved_sigmask.unwrap_or(t.blocked)
+        })
+    })
+}
+
+/// A tracer's `PTRACE_SETSIGMASK` of thread `tid` of `pid`, which is stopped:
+/// its blocked mask becomes `mask`, less `SIGKILL` and `SIGSTOP`, and a mask a
+/// `sigsuspend` saved is no longer put back -- the thread runs on under
+/// `mask` (Linux's `clear_tsk_restore_sigmask`). A pending signal the new
+/// mask unblocks is taken as the thread leaves its stop, which looks for
+/// signals again on its way to user mode.
+pub fn set_tracee_sigmask(pid: ProcessId, tid: TaskId, mask: u64) {
+    let mask = mask & !uncatchable_mask();
+    with_states(|states| {
+        let t = states.entry(pid).or_default().thread_mut(tid);
+        t.blocked = mask;
+        t.saved_sigmask = None;
+    });
+}
+
+/// The `index`th signal pending in one of `pid`'s queues -- thread `tid`'s
+/// own, or with `shared` the process's -- left where it is: its number and
+/// record. What a tracer's `PTRACE_PEEKSIGINFO` reads; `None` past the end.
+///
+/// Linux lists a queue in the order its signals were sent. This one keeps no
+/// order between different signals, so it lists them by number, each
+/// signal's instances oldest first: its standard record, then its timers'
+/// entries ([`PendingSet::infos`]). Only this listing can tell the two orders
+/// apart -- delivery always takes the lowest-numbered signal first. A pending
+/// `SIGKILL` is not listed, as Linux queues no record for one
+/// (`__send_signal_locked`).
+#[must_use]
+pub fn peek_pending(
+    pid: ProcessId,
+    tid: TaskId,
+    shared: bool,
+    index: u64,
+) -> Option<(u32, SigInfo)> {
+    with_states(|states| {
+        let s = states.get(&pid)?;
+        let (set, target) = if shared {
+            (&s.shared, None)
+        } else {
+            (&s.thread(tid).pending, Some(tid))
+        };
+        let mut left = index;
+        for sig in 1..=NSIG {
+            let Some(bit) = signal_bit(sig) else {
+                continue;
+            };
+            if sig == SIGKILL || set.bits & bit == 0 {
+                continue;
+            }
+            let record = set
+                .infos
+                .get(bit.trailing_zeros() as usize)
+                .copied()
+                .flatten();
+            let timers = s
+                .timer_queue
+                .iter()
+                .filter(|q| q.sig == sig && q.target == target)
+                .map(|q| q.info);
+            for info in record.into_iter().chain(timers) {
+                if left == 0 {
+                    return Some((sig, info));
+                }
+                left = left.saturating_sub(1);
+            }
+        }
+        None
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -842,70 +2041,162 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
 ///
 /// On a clear→set transition the `info` is recorded and `true` is returned.
 /// Re-posting an already-pending standard signal keeps the **first** `info`
-/// (Linux standard-signal coalescing) and returns `false`. Like
+/// (Linux standard-signal coalescing) and returns `false` -- so does posting
+/// a signal that is pending only through a POSIX timer's entry, as Linux's
+/// `legacy_queue` drops a `kill` of a signal any instance of which is queued.
+/// (A real-time signal coalesces here too, where Linux would queue it: the
+/// standard record is one per signal.) Like
 /// [`set_pending`], this is a pure state operation and makes no delivery or
 /// termination decision.
 pub fn set_pending_info(pid: ProcessId, sig: u32, info: SigInfo) -> bool {
     let Some(bit) = signal_bit(sig) else {
         return false;
     };
-    let newly = with_states(|states| {
-        let state = states.entry(pid).or_default();
-        if state.pending & bit == 0 {
-            state.pending |= bit;
-            // `bit == 1 << (sig - 1)`, so the slot index is `sig - 1`,
-            // computed lint-free from the bit position (0..=63).
-            let idx = bit.trailing_zeros() as usize;
-            if let Some(slot) = state.infos.get_mut(idx) {
-                *slot = Some(info);
-            }
-            PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    });
+    let newly = with_states(|states| record(&mut states.entry(pid).or_default().shared, bit, info));
     // Wake any signalfd reader blocked on this signal — but only on a
     // clear→set transition (a re-post of an already-pending signal delivers
     // nothing new to drain).  Done after releasing SIGNAL_STATES (leaf-lock
     // discipline); the SIGNAL_STATES → SIGNALFD_WAITERS ordering is the same
     // happens-before edge the reader's register-then-recheck relies on.
     if newly {
-        wake_signalfd_waiters(pid, bit);
+        wake_signalfd_waiters(pid, bit, None);
     }
     newly
 }
 
-/// Clear the given pending-signal bits for a process.
+/// Record `info` as `bit`'s instance in queue `set` if the signal has none
+/// there, answering whether it was recorded (the bit went from clear to set).
+fn record(set: &mut PendingSet, bit: u64, info: SigInfo) -> bool {
+    if set.bits & bit != 0 {
+        return false;
+    }
+    set.bits |= bit;
+    // `bit == 1 << (sig - 1)`, so the slot index is `sig - 1`, computed
+    // lint-free from the bit position (0..=63).
+    if let Some(slot) = set.infos.get_mut(bit.trailing_zeros() as usize) {
+        *slot = Some(info);
+    }
+    PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Set a signal pending on thread `tid` of process `pid` alone -- `tgkill`,
+/// `tkill`, `pthread_kill` -- recording its source metadata, as
+/// [`set_pending_info`] does for the process. Only that thread can take it,
+/// and only it is woken. A standard signal already pending on the thread is
+/// merged into what is there (a separate queue from the process's: Linux's
+/// `legacy_queue` looks at the queue the signal is going to).
+///
+/// The caller has checked that `tid` is a thread of `pid`.
+pub fn set_thread_pending_info(pid: ProcessId, tid: TaskId, sig: u32, info: SigInfo) -> bool {
+    let Some(bit) = signal_bit(sig) else {
+        return false;
+    };
+    let newly = with_states(|states| {
+        let state = states.entry(pid).or_default();
+        if !state.threads.contains_key(&tid) {
+            // A thread that started before its state could be made (none
+            // should): from the template, as `on_thread_start` would have.
+            let t = Box::new(ThreadSignals::new(
+                state.template.blocked,
+                AltStack::DISABLED,
+            ));
+            state.threads.insert(tid, t);
+        }
+        state
+            .threads
+            .get_mut(&tid)
+            .is_some_and(|t| record(&mut t.pending, bit, info))
+    });
+    if newly {
+        wake_signalfd_waiters(pid, bit, Some(tid));
+    }
+    newly
+}
+
+/// How many timer entries one pass of [`clear_pending`] takes out under the
+/// lock; it repeats until a pass comes back short.
+const CLEAR_BATCH: usize = 16;
+
+/// Drop the standard records of the signals in `mask` from queue `set` (the
+/// bits are settled by the caller, once the timer entries are out too).
+fn drop_records(set: &mut PendingSet, mask: u64) {
+    let mut rem = set.bits & mask;
+    while rem != 0 {
+        if let Some(slot) = set.infos.get_mut(rem.trailing_zeros() as usize) {
+            *slot = None;
+        }
+        rem &= rem.wrapping_sub(1); // clear lowest set bit
+    }
+}
+
+/// Discard every pending instance of the signals in `mask` for a process --
+/// in its queue and in every thread's, as Linux's stop/continue handling and
+/// `do_sigaction` flush both.
 ///
 /// Used for stop/continue mutual cancellation (a `SIGCONT` discards pending
-/// stop signals and a stop discards a pending `SIGCONT`). Decrements the
-/// global pending counter by the number of bits actually cleared so the
-/// fast-path gate in the delivery checkpoint stays accurate.
+/// stop signals and a stop discards a pending `SIGCONT`), and when a signal
+/// becomes ignored ([`set_ignored`], [`record_disposition`]). Takes each
+/// cleared bit off the global pending counter so the fast-path gate in the
+/// delivery checkpoint stays accurate.
+///
+/// A POSIX timer's entry among them is handed to its timer as dequeued --
+/// outside the lock, which the timer module must not be called under -- so a
+/// periodic timer re-arms rather than waiting for ever on a signal that is
+/// gone (the hole Linux 6.6's `flush_sigqueue_mask` leaves, which 6.13 closed
+/// with its ignored list).
 pub fn clear_pending(pid: ProcessId, mask: u64) {
     if mask == 0 {
         return;
     }
-    with_states(|states| {
-        if let Some(state) = states.get_mut(&pid) {
-            let cleared = state.pending & mask;
-            if cleared != 0 {
-                state.pending &= !mask;
-                // Drop the recorded siginfo for every signal whose pending bit
-                // just cleared (mutual stop/cont cancellation, etc.).
-                let mut rem = cleared;
-                while rem != 0 {
-                    let idx = rem.trailing_zeros() as usize;
-                    if let Some(slot) = state.infos.get_mut(idx) {
-                        *slot = None;
-                    }
-                    rem &= rem.wrapping_sub(1); // clear lowest set bit
-                }
-                // `count_ones()` is 0..=64 — fits usize without arithmetic.
-                PENDING_COUNT.fetch_sub(cleared.count_ones() as usize, Ordering::Relaxed);
+    loop {
+        let mut batch: [Option<QueuedTimerSignal>; CLEAR_BATCH] = [None; CLEAR_BATCH];
+        let taken = with_states(|states| {
+            let Some(state) = states.get_mut(&pid) else {
+                return 0;
+            };
+            let SignalState {
+                shared,
+                threads,
+                timer_queue,
+                ..
+            } = &mut **state;
+            drop_records(shared, mask);
+            for t in threads.values_mut() {
+                drop_records(&mut t.pending, mask);
             }
+            // Their timer entries, whichever queue each is aimed at, a batch
+            // at a time (no allocation).
+            let mut taken = 0usize;
+            timer_queue.retain(|q| {
+                let hit = signal_bit(q.sig).is_some_and(|b| mask & b != 0);
+                if hit {
+                    if let Some(slot) = batch.get_mut(taken) {
+                        *slot = Some(*q);
+                        taken = taken.saturating_add(1);
+                        return false;
+                    }
+                }
+                true
+            });
+            // A bit stays set only while entries beyond this batch remain.
+            let shared_bits = shared.bits & mask;
+            settle_bits(shared, timer_queue, None, shared_bits);
+            for (tid, t) in threads.iter_mut() {
+                let bits = t.pending.bits & mask;
+                settle_bits(&mut t.pending, timer_queue, Some(*tid), bits);
+            }
+            taken
+        });
+        for q in batch.iter().take(taken).flatten() {
+            // Discarded, not delivered: what the timer answers does not
+            // matter, only that it re-arms a periodic timer.
+            let _ = crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info);
         }
-    });
+        if taken < CLEAR_BATCH {
+            break;
+        }
+    }
 }
 
 /// Bit mask of the stop-class signals (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`,
@@ -940,6 +2231,14 @@ pub fn discard_pending_cont(pid: ProcessId) {
     clear_pending(pid, sigcont_bit());
 }
 
+/// Discard every pending stop signal (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`,
+/// `SIGTTOU`) for `pid`: a continue's, as Linux's `prepare_signal` flushes
+/// them for a `SIGCONT` -- for one that arrives where [`classify_post_info`]
+/// did not judge it (a timer's; `handlers::act_on_stopped`).
+pub fn discard_pending_stops(pid: ProcessId) {
+    clear_pending(pid, stop_signals_mask());
+}
+
 /// The kernel's decision about what to do with a posted signal.
 ///
 /// Returned by [`classify_post`] so the syscall handler can perform the
@@ -951,8 +2250,10 @@ pub enum PostDecision {
     /// the target's next return to userspace.
     Deliver,
     /// The target has no trampoline and the signal's default action is
-    /// fatal: the caller must terminate the process with this exit code.
-    Terminate(i32),
+    /// fatal: the caller must terminate the process as killed by this
+    /// signal (`pcb::set_killed_by_signal`), which its parent's `wait` then
+    /// reports as `WIFSIGNALED`.
+    Terminate(u32),
     /// The signal was dropped (ignored), or kept pending for later (a stop
     /// signal that is currently blocked on a process with no handler — it
     /// will take effect at the syscall-return checkpoint once unblocked).
@@ -974,10 +2275,20 @@ pub enum PostDecision {
 /// state if delivery is chosen.
 ///
 /// * `SIGKILL` is always `Terminate` (never catchable).
+/// * `SIGCONT` always continues; `SIGSTOP` always stops.
+/// * An **ignored** signal ([`set_ignored`]) is discarded -- unless it is
+///   blocked, when it stays pending as Linux keeps it (`sig_ignored`: the
+///   action may have changed by the time it is unblocked), to be discarded at
+///   delivery if it is still ignored then ([`take_deliverable_info`]).
 /// * If the process has a trampoline registered, the signal is marked
 ///   pending (`Deliver`).
 /// * Otherwise the default action decides: terminating signals →
-///   `Terminate(128 + sig)`, everything else → `Drop`.
+///   `Terminate(sig)`, or kept pending if blocked; everything else →
+///   `Drop`.
+///
+/// A signal sent to the process counts as blocked only when every thread
+/// blocks it -- until one unblocks it, it waits -- Linux's `wants_signal`
+/// across the thread group.
 ///
 /// The caller is responsible for the actual termination (the kernel's
 /// process-kill path) when `Terminate` is returned.
@@ -991,22 +2302,116 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
 /// this sets carries the supplied `info`.
 #[must_use]
 pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecision {
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let term_code = 128i32.wrapping_add(sig as i32);
+    classify(pid, None, sig, info)
+}
 
+/// [`classify_post_info`] for a signal sent to thread `tid` of `pid` alone --
+/// `tgkill`, `tkill`, `pthread_kill`: pending on that thread's queue, and
+/// blocked when *it* blocks the signal. Its effect on the process is the same
+/// -- a fatal default ends every thread, a stop stops them all -- as Linux's
+/// `do_send_specific` gives it.
+///
+/// The caller has checked that `tid` is a thread of `pid`.
+#[must_use]
+pub fn classify_post_thread_info(
+    pid: ProcessId,
+    tid: TaskId,
+    sig: u32,
+    info: SigInfo,
+) -> PostDecision {
+    classify(pid, Some(tid), sig, info)
+}
+
+/// Whether a signal sent to process `pid` would wait, blocked: every thread
+/// blocks `sig` (a process-directed signal waits only while each does). For a
+/// sender deciding whether an ignored signal is kept or dropped as it is sent
+/// (`syscall::linux::post_linux_sigchld`).
+#[must_use]
+pub fn blocked_by_every_thread(pid: ProcessId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| blocked_for_post(pid, None, bit))
+}
+
+/// Whether Linux-ABI process `pid` leaves `sig` at its default action, by its
+/// `rt_sigaction` entry -- which the native trampoline test cannot see: a
+/// Linux program with a handler for any signal has a trampoline registered.
+fn linux_default_action(pid: ProcessId, sig: u32) -> bool {
+    crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux)
+        && matches!(
+            crate::syscall::linux::linux_disposition(pid, sig),
+            crate::syscall::linux::LinuxDisposition::Default
+        )
+}
+
+/// Whether a signal posted to `target` (a thread of `pid`, or `None` the
+/// process) finds `bit` blocked: the thread's mask, or for the process every
+/// thread's.
+fn blocked_for_post(pid: ProcessId, target: Option<TaskId>, bit: u64) -> bool {
+    with_states(|states| {
+        states.get(&pid).is_some_and(|s| match target {
+            Some(tid) => s.thread(tid).blocked & bit != 0,
+            None => s.blocked_everywhere(bit),
+        })
+    })
+}
+
+/// Whether thread `tid` of process `pid` blocks signal `sig` -- for a
+/// signal a tracer injects, which waits, queued, until the thread can take
+/// it (`crate::proc::ptrace`).
+#[must_use]
+pub fn thread_blocks(pid: ProcessId, tid: TaskId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| blocked_for_post(pid, Some(tid), bit))
+}
+
+/// Make `sig` pending on `target`'s queue -- a thread's, or `None` the
+/// process's.
+fn post_to(pid: ProcessId, target: Option<TaskId>, sig: u32, info: SigInfo) {
+    match target {
+        Some(tid) => {
+            set_thread_pending_info(pid, tid, sig, info);
+        }
+        None => {
+            set_pending_info(pid, sig, info);
+        }
+    }
+}
+
+/// The body of [`classify_post_info`] and [`classify_post_thread_info`].
+fn classify(pid: ProcessId, target: Option<TaskId>, sig: u32, info: SigInfo) -> PostDecision {
     // SIGKILL is unconditionally fatal and never delivered to a handler.
     if sig == SIGKILL {
-        return PostDecision::Terminate(term_code);
+        return PostDecision::Terminate(sig);
     }
 
+    // A traced process's signals are its tracer's to decide on: each is
+    // queued, and stops the thread that takes it on its way back to user mode
+    // (`crate::proc::ptrace`'s signal-delivery-stop) -- none acts when it is
+    // sent, an ignored one included (Linux's `sig_ignored` is false for a
+    // traced task). `SIGCONT` still continues a stopped process now, as
+    // Linux's `prepare_signal` does for any target.
+    if crate::proc::ptrace::process_is_traced(pid) {
+        post_to(pid, target, sig, info);
+        if sig == SIGCONT {
+            clear_pending(pid, stop_signals_mask());
+            return PostDecision::Continue;
+        }
+        if sig == SIGSTOP || default_action(sig) == DefaultAction::Stop {
+            clear_pending(pid, sigcont_bit());
+        }
+        return PostDecision::Deliver;
+    }
+
+    let blocked_now = blocked_for_post(pid, target, signal_bit(sig).unwrap_or(0));
+
     // SIGCONT always resumes a stopped process, regardless of whether a
-    // handler is registered, and discards any pending stop signal (mutual
+    // handler is registered -- or of whether it is ignored: POSIX continues
+    // the process either way -- and discards any pending stop signal (mutual
     // cancellation). If a handler is registered it is *also* marked pending
-    // so the handler runs once the process resumes.
+    // so the handler runs once the process resumes; an ignored SIGCONT has
+    // nothing to run.
     if sig == SIGCONT {
         clear_pending(pid, stop_signals_mask());
-        if has_trampoline(pid) {
-            set_pending_info(pid, sig, info);
+        if has_trampoline(pid) && !is_ignored(pid, SIGCONT) {
+            post_to(pid, target, sig, info);
         }
         return PostDecision::Continue;
     }
@@ -1018,25 +2423,63 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
         return PostDecision::Stop(sig);
     }
 
+    // An ignored signal does nothing -- including the catchable stop
+    // signals, which a shell ignores so that ^Z cannot stop it -- whether the
+    // target has a handler trampoline or not. Before the kernel knew the
+    // ignored set, a target with no trampoline took the default action here:
+    // SIGHUP killed a program `nohup` had started.
+    if is_ignored(pid, sig) {
+        if blocked_now {
+            post_to(pid, target, sig, info);
+        }
+        return PostDecision::Drop;
+    }
+
+    // A Linux program's action for each signal is its `rt_sigaction` entry,
+    // which the trampoline test below does not see: one left at the default,
+    // when the default is to ignore it (`SIGCHLD`, `SIGWINCH`, `SIGURG`), is
+    // dropped as it is sent unless it is blocked -- Linux's `sig_ignored`.
+    // Queued for the trampoline, as it was until 2026-10-08, it woke the
+    // program's interruptible sleeps for a signal its delivery then
+    // discarded.
+    if !blocked_now
+        && default_action(sig) == DefaultAction::Ignore
+        && linux_default_action(pid, sig)
+    {
+        return PostDecision::Drop;
+    }
+
     // A registered handler takes precedence for every other catchable
     // signal — including the catchable stop signals (SIGTSTP/TTIN/TTOU),
     // which a handler may choose to ignore rather than stop. Mark it
     // pending for trampoline delivery.
     if has_trampoline(pid) {
-        set_pending_info(pid, sig, info);
+        post_to(pid, target, sig, info);
         return PostDecision::Deliver;
     }
 
     // No trampoline: the kernel default action decides.
     match default_action(sig) {
-        DefaultAction::Terminate => PostDecision::Terminate(term_code),
+        DefaultAction::Terminate => {
+            // A blocked signal is not acted on until it is unblocked, fatal
+            // or not: it waits, pending, and the syscall-return checkpoint
+            // takes the default action once it is deliverable
+            // (`deliver_pending_signal`). Until 2026-10-01 a blocked fatal
+            // signal killed a process with no trampoline on the spot.
+            if blocked_now {
+                post_to(pid, target, sig, info);
+                PostDecision::Drop
+            } else {
+                PostDecision::Terminate(sig)
+            }
+        }
         DefaultAction::Stop => {
             // Catchable stop signal with no handler. If currently blocked,
             // keep it pending: it stops the process at the syscall-return
             // checkpoint once unblocked (deliver_pending_signal). Otherwise
             // stop now, discarding any pending SIGCONT.
-            if blocked(pid) & signal_bit(sig).unwrap_or(0) != 0 {
-                set_pending_info(pid, sig, info);
+            if blocked_now {
+                post_to(pid, target, sig, info);
                 PostDecision::Drop
             } else {
                 clear_pending(pid, sigcont_bit());
@@ -1054,84 +2497,397 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
     }
 }
 
-/// Pick and consume the lowest-numbered deliverable signal for a process.
+/// Pick and consume the lowest-numbered deliverable signal for the calling
+/// thread.
 ///
-/// A signal is deliverable if it is pending and not blocked. The chosen
-/// signal's pending bit is cleared. Returns the signal number, or `None`
-/// if nothing is deliverable.
+/// A signal is deliverable if it is pending -- on the thread or on the
+/// process -- and the thread does not block it. The thread's own queue goes
+/// first, as Linux's `dequeue_signal` takes `task->pending` before the shared
+/// queue. Returns the signal number, or `None` if nothing is deliverable.
+///
+/// A pending signal that is unblocked but **ignored** is discarded here
+/// rather than delivered: it was blocked when it was sent, so it was kept
+/// ([`classify_post_info`]), and it is still ignored now that it could be
+/// delivered -- Linux's `get_signal`, which drops a dequeued `SIG_IGN` signal.
 #[must_use]
 pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
     take_deliverable_info(pid).map(|(sig, _)| sig)
 }
 
+/// What one pass of [`take_deliverable_info`] found under the lock.
+enum DeliveryStep {
+    /// A standard instance to deliver.
+    Deliver(u32, SigInfo),
+    /// A timer entry to deliver, once its timer has seen it.
+    Timer(QueuedTimerSignal),
+    /// A timer entry of an ignored signal, discarded -- its timer still has to
+    /// see it, so a periodic one re-arms.
+    Discarded(QueuedTimerSignal),
+}
+
 /// Like [`take_deliverable`], but also returns the recorded source metadata
 /// ([`SigInfo`]) so the Linux `rt_sigframe` delivery path can fill a faithful
-/// `siginfo_t`. The chosen signal's pending bit **and** its info slot are
-/// cleared. Falls back to a generic `SI_USER`/0/0 record if (unexpectedly) no
-/// info was recorded for the pending bit.
+/// `siginfo_t`. The chosen instance is removed, and the signal's pending bit
+/// cleared once no instance of it is left in its queue. Falls back to a
+/// generic `SI_USER`/0/0 record if (unexpectedly) a bit is set with no
+/// instance.
+///
+/// A POSIX timer's entry is handed to its timer first, outside the lock
+/// ([`crate::proc::posix_timer::signal_dequeued`]): that re-arms a periodic
+/// timer and stamps the overrun count into the record, as Linux's
+/// `dequeue_signal` does -- or drops an entry its timer has been re-set or
+/// deleted since, in which case this looks again.
 #[must_use]
 pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
-    with_states(|states| {
-        let state = states.get_mut(&pid)?;
-        let deliverable = state.pending & !state.blocked;
-        if deliverable == 0 {
-            return None;
+    take_deliverable_info_as(pid, sched::current_task_id())
+}
+
+/// [`take_deliverable_info`] for thread `me` (the self-tests name one).
+pub(crate) fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u32, SigInfo)> {
+    // A traced thread stops for an ignored signal too, before its disposition
+    // drops it (Linux's `get_signal` calls `ptrace_signal` first): nothing is
+    // discarded here for it.
+    let keep_ignored = crate::proc::ptrace::is_traced(me);
+    loop {
+        let step = with_states(|states| {
+            let state = states.get_mut(&pid)?;
+            let SignalState {
+                shared,
+                template,
+                threads,
+                timer_queue,
+                ignored,
+                ..
+            } = &mut **state;
+            let ignored = if keep_ignored { 0 } else { *ignored };
+            let mut mine = threads.get_mut(&me);
+            let blocked = mine.as_ref().map_or(template.blocked, |t| t.blocked);
+            // Ignored and deliverable: discarded, with their records (see
+            // `take_deliverable`), from both queues the thread takes from.
+            let own_discard = mine.as_ref().map_or(0, |t| t.pending.bits) & !blocked & ignored;
+            let shared_discard = shared.bits & !blocked & ignored;
+            if own_discard | shared_discard != 0 {
+                if let Some(t) = mine.as_deref_mut() {
+                    drop_records(&mut t.pending, own_discard);
+                }
+                drop_records(shared, shared_discard);
+                // Their timer entries go one per pass, each to its timer.
+                let pos = timer_queue.iter().position(|q| {
+                    signal_bit(q.sig).is_some_and(|b| {
+                        (q.target == Some(me) && own_discard & b != 0)
+                            || (q.target.is_none() && shared_discard & b != 0)
+                    })
+                });
+                let gone = pos.map(|p| timer_queue.remove(p));
+                if let Some(t) = mine.as_deref_mut() {
+                    settle_bits(&mut t.pending, timer_queue, Some(me), own_discard);
+                }
+                settle_bits(shared, timer_queue, None, shared_discard);
+                if let Some(q) = gone {
+                    return Some(DeliveryStep::Discarded(q));
+                }
+            }
+            // The thread's own queue first, then the process's.
+            let own = mine.as_ref().map_or(0, |t| t.pending.bits) & !blocked;
+            let (set, target, deliverable) = match mine {
+                Some(t) if own != 0 => (&mut t.pending, Some(me), own),
+                _ => {
+                    let bits = shared.bits & !blocked;
+                    (shared, None, bits)
+                }
+            };
+            if deliverable == 0 {
+                return None;
+            }
+            // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
+            let bit_index = deliverable.trailing_zeros();
+            let bit = 1u64 << bit_index;
+            // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+            // `saturating_add` keeps this arithmetic-side-effect free.
+            let sig = bit_index.saturating_add(1);
+            Some(match take_instance(set, timer_queue, target, sig, bit) {
+                Taken::Record(info) => DeliveryStep::Deliver(sig, info),
+                Taken::Timer(q) => DeliveryStep::Timer(q),
+            })
+        })?;
+        match step {
+            DeliveryStep::Deliver(sig, info) => return Some((sig, info)),
+            DeliveryStep::Timer(q) => {
+                if let Some(info) =
+                    crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info)
+                {
+                    return Some((q.sig, info));
+                }
+                // Stale (its timer re-set or deleted since): dropped; look again.
+            }
+            DeliveryStep::Discarded(q) => {
+                // Ignored, so discarded whatever the timer answers -- Linux's
+                // `get_signal` drops it after `dequeue_signal` re-armed the
+                // timer, which is the part that matters here.
+                let _ = crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info);
+            }
         }
-        // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
-        let bit_index = deliverable.trailing_zeros();
-        let bit = 1u64 << bit_index;
-        state.pending &= !bit;
-        let info = state
-            .infos
-            .get_mut(bit_index as usize)
-            .and_then(Option::take)
-            .unwrap_or_else(|| SigInfo::user(0, 0));
-        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-        // `saturating_add` keeps this arithmetic-side-effect free.
-        Some((bit_index.saturating_add(1), info))
-    })
+    }
 }
 
 /// Pick and consume the lowest-numbered pending signal that is also in
-/// `mask`, for a `signalfd` read.
+/// `mask`, for the calling thread's `signalfd` read or `sigtimedwait`, and
+/// return it with its record.
 ///
 /// Unlike [`take_deliverable`], this does **not** consult the blocked
 /// mask: a `signalfd` consumes any pending signal that is in the fd's
 /// acceptance mask (the process is expected to have blocked those signals
 /// so they aren't first delivered to a handler, but the dequeue itself is
 /// gated only by the fd mask, matching Linux's `signalfd_dequeue`). The
-/// chosen signal's pending bit is cleared. Returns the signal number, or
-/// `None` if no pending signal falls within `mask`.
+/// thread's own queue goes first, then the process's. The chosen instance is
+/// removed, and the bit cleared once no instance is left in its queue.
+/// Returns `None` if no pending signal falls within `mask`.
+///
+/// A POSIX timer's entry goes through its timer first, as in
+/// [`take_deliverable_info`].
+#[must_use]
+pub fn take_pending_info_in_mask(pid: ProcessId, mask: u64) -> Option<(u32, SigInfo)> {
+    take_pending_info_in_mask_as(pid, sched::current_task_id(), mask)
+}
+
+/// [`take_pending_info_in_mask`] for thread `me` (the self-tests name one).
+pub(crate) fn take_pending_info_in_mask_as(
+    pid: ProcessId,
+    me: TaskId,
+    mask: u64,
+) -> Option<(u32, SigInfo)> {
+    loop {
+        let (sig, taken) = with_states(|states| {
+            let state = states.get_mut(&pid)?;
+            let SignalState {
+                shared,
+                threads,
+                timer_queue,
+                ..
+            } = &mut **state;
+            let mine = threads.get_mut(&me);
+            let own = mine.as_ref().map_or(0, |t| t.pending.bits) & mask;
+            let (set, target, eligible) = match mine {
+                Some(t) if own != 0 => (&mut t.pending, Some(me), own),
+                _ => {
+                    let bits = shared.bits & mask;
+                    (shared, None, bits)
+                }
+            };
+            if eligible == 0 {
+                return None;
+            }
+            let bit_index = eligible.trailing_zeros();
+            let bit = 1u64 << bit_index;
+            // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+            let sig = bit_index.saturating_add(1);
+            Some((sig, take_instance(set, timer_queue, target, sig, bit)))
+        })?;
+        match taken {
+            Taken::Record(info) => return Some((sig, info)),
+            Taken::Timer(q) => {
+                if let Some(info) =
+                    crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info)
+                {
+                    return Some((q.sig, info));
+                }
+                // Stale: dropped; look again.
+            }
+        }
+    }
+}
+
+/// [`take_pending_info_in_mask`] without the record.
 #[must_use]
 pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
+    take_pending_info_in_mask(pid, mask).map(|(sig, _)| sig)
+}
+
+// ---------------------------------------------------------------------------
+// POSIX timers' signals
+// ---------------------------------------------------------------------------
+
+/// Make room in `pid`'s timer queue for one entry per timer of a process
+/// that will have `timers` POSIX timers, creating its signal state if it has
+/// none. Called as a timer is created, in process context, so that the
+/// expiry -- in the timer interrupt -- never allocates ([`post_timer_signal`]).
+///
+/// # Errors
+///
+/// `OutOfMemory` if the room cannot be had; nothing is changed.
+pub fn reserve_timer_signals(pid: ProcessId, timers: usize) -> KernelResult<()> {
     with_states(|states| {
-        let state = states.get_mut(&pid)?;
-        let eligible = state.pending & mask;
-        if eligible == 0 {
-            return None;
+        let state = states.entry(pid).or_default();
+        if state.timer_queue.capacity() < timers {
+            let more = timers.saturating_sub(state.timer_queue.len());
+            state
+                .timer_queue
+                .try_reserve_exact(more)
+                .map_err(|_| KernelError::OutOfMemory)?;
         }
-        let bit_index = eligible.trailing_zeros();
-        let bit = 1u64 << bit_index;
-        state.pending &= !bit;
-        // Consuming the signal drops its recorded siginfo too.
-        if let Some(slot) = state.infos.get_mut(bit_index as usize) {
-            *slot = None;
-        }
-        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-        Some(bit_index.saturating_add(1))
+        Ok(())
     })
 }
 
-/// Returns `true` if any pending signal for `pid` falls within `mask`.
+/// Queue POSIX timer `timer_id`'s signal `sig` on `pid` -- on the process, or
+/// with `target` on that thread alone (`SIGEV_THREAD_ID`) -- with record
+/// `info`, for the arming `token` names: Linux's `send_sigqueue` of the
+/// timer's preallocated entry. Safe in the timer interrupt: it never
+/// allocates (see [`reserve_timer_signals`]) and wakes with
+/// `try_wake`/`defer_wake`.
 ///
-/// Used by the `poll`/`select`/`epoll` readiness check for a `signalfd`:
-/// the fd is readable exactly when a masked signal is pending. Does not
-/// consume anything.
+/// - The timer's entry already queued: it now stands for this expiry too (its
+///   token and record refreshed), [`TimerPost::AlreadyQueued`].
+/// - The signal ignored and not blocked (by the thread aimed at; for the
+///   process, by every thread): nothing queued, Linux's `prepare_signal` --
+///   [`TimerPost::Ignored`]. (A blocked signal is queued even if ignored: the
+///   action may change before it is unblocked.)
+/// - The thread aimed at gone: nothing queued, [`TimerPost::Gone`].
+/// - Otherwise queued behind every older instance, whether or not the signal
+///   was already pending -- each timer's expiry is delivered on its own.
+///
+/// Wakes the signal waiters -- for a thread's signal, that thread's -- when
+/// the signal's bit goes from clear to set, as [`set_pending_info`] does.
+pub fn post_timer_signal(
+    pid: ProcessId,
+    sig: u32,
+    timer_id: i32,
+    token: u64,
+    target: Option<TaskId>,
+    info: SigInfo,
+) -> TimerPost {
+    let Some(bit) = signal_bit(sig) else {
+        return TimerPost::Gone;
+    };
+    let mut newly = false;
+    let result = with_states(|states| {
+        let Some(state) = states.get_mut(&pid) else {
+            return TimerPost::Gone;
+        };
+        if let Some(q) = state
+            .timer_queue
+            .iter_mut()
+            .find(|q| q.timer_id == timer_id)
+        {
+            q.sig = sig;
+            q.token = token;
+            q.info = info;
+            return TimerPost::AlreadyQueued;
+        }
+        let blocked = match target {
+            Some(tid) => match state.threads.get(&tid) {
+                Some(t) => t.blocked & bit != 0,
+                None => return TimerPost::Gone,
+            },
+            None => state.blocked_everywhere(bit),
+        };
+        if state.ignored & bit != 0 && !blocked {
+            return TimerPost::Ignored;
+        }
+        if state.timer_queue.len() >= state.timer_queue.capacity() {
+            // Never, while every timer reserves its room; refuse rather than
+            // allocate here.
+            return TimerPost::Gone;
+        }
+        state.timer_queue.push(QueuedTimerSignal {
+            sig,
+            timer_id,
+            token,
+            target,
+            info,
+        });
+        let set = match target {
+            Some(tid) => state.threads.get_mut(&tid).map(|t| &mut t.pending),
+            None => Some(&mut state.shared),
+        };
+        if let Some(set) = set {
+            if set.bits & bit == 0 {
+                set.bits |= bit;
+                PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+                newly = true;
+            }
+        }
+        TimerPost::Queued
+    });
+    if newly {
+        wake_signalfd_waiters(pid, bit, target);
+    }
+    result
+}
+
+/// Take timer `timer_id`'s queued signal off `pid`'s queue, if it has one --
+/// for a timer being re-set or deleted, whose pending expiry Linux 6.13 no
+/// longer delivers. Answers whether there was one.
+pub fn remove_timer_signal(pid: ProcessId, timer_id: i32) -> bool {
+    with_states(|states| {
+        let Some(state) = states.get_mut(&pid) else {
+            return false;
+        };
+        let Some(pos) = state
+            .timer_queue
+            .iter()
+            .position(|q| q.timer_id == timer_id)
+        else {
+            return false;
+        };
+        let q = state.timer_queue.remove(pos);
+        if let Some(bit) = signal_bit(q.sig) {
+            let SignalState {
+                shared,
+                threads,
+                timer_queue,
+                ..
+            } = &mut **state;
+            match q.target {
+                Some(tid) => {
+                    if let Some(t) = threads.get_mut(&tid) {
+                        settle_bit(&mut t.pending, timer_queue, Some(tid), q.sig, bit);
+                    }
+                }
+                None => settle_bit(shared, timer_queue, None, q.sig, bit),
+            }
+        }
+        true
+    })
+}
+
+/// How many POSIX timer signals `pid` has queued, and the room reserved for
+/// them -- for the self-tests and `/proc`.
+#[must_use]
+pub fn timer_signals(pid: ProcessId) -> (usize, usize) {
+    with_states(|states| {
+        states
+            .get(&pid)
+            .map_or((0, 0), |s| (s.timer_queue.len(), s.timer_queue.capacity()))
+    })
+}
+
+/// Returns `true` if any signal pending for the calling thread -- on the
+/// process or on the thread -- falls within `mask`.
+///
+/// Used by the `poll`/`select`/`epoll` readiness check for a `signalfd` (the
+/// fd is readable exactly when a masked signal is pending), and by every
+/// interruptible wait to ask whether a deliverable signal has arrived. Does
+/// not consume anything.
 #[must_use]
 pub fn has_pending_in_mask(pid: ProcessId, mask: u64) -> bool {
-    with_states(|states| states.get(&pid).is_some_and(|s| s.pending & mask != 0))
+    let me = sched::current_task_id();
+    with_states(|states| {
+        states
+            .get(&pid)
+            .is_some_and(|s| s.pending_for(me) & mask != 0)
+    })
+}
+
+/// Whether an interruptible wait of the calling thread of `pid`, which a
+/// signal in `mask` would end, is to end now: such a signal is pending, or
+/// the thread is to freeze ([`crate::proc::freezer::interrupt_pending`]),
+/// which ends the wait as a signal does. What every interruptible wait loop
+/// asks; [`has_pending_in_mask`] alone is for the questions that are about
+/// signals only (a `signalfd`'s readiness, which signal to take).
+#[must_use]
+pub fn wait_ends(pid: ProcessId, mask: u64) -> bool {
+    has_pending_in_mask(pid, mask) || crate::proc::freezer::interrupt_pending(pid)
 }
 
 /// Cheap fast-path gate: `true` if any signal might be pending anywhere.
@@ -1176,9 +2932,615 @@ pub fn self_test() -> KernelResult<()> {
     test_take_all_waiters()?;
     test_siginfo_record()?;
     test_altstack_placement()?;
+    test_extended_frame()?;
+    test_ignored_set()?;
+    test_ignored_across_images()?;
+    test_per_thread_state()?;
+    test_linux_altstack()?;
+    test_tracer_view()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (14 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (20 tests)");
     Ok(())
+}
+
+/// What a tracer reads and sets of a stopped thread's signals
+/// (`proc::ptrace`'s `PTRACE_GETSIGMASK`, `SETSIGMASK`, `PEEKSIGINFO`): the
+/// mask a `sigsuspend` saved rather than its temporary one, a set mask without
+/// `SIGKILL` and `SIGSTOP` that cancels the saved one, and the queues listed
+/// by signal number -- a signal's record before its timers' entries, a
+/// thread's queue apart from the process's, `SIGKILL` never.
+fn test_tracer_view() -> KernelResult<()> {
+    const SIGUSR1: u32 = 10;
+    const SIGUSR2: u32 = 12;
+    const SIGRTMIN: u32 = 34;
+    let p = TEST_PID_BASE + 80;
+    let (t1, t2): (TaskId, TaskId) = (0x7C1, 0x7C2);
+    let bit = |sig: u32| signal_bit(sig).unwrap_or(0);
+
+    start_spawned(0, p, Some(bit(SIGUSR1)), 0);
+    on_thread_start(p, t1);
+    on_thread_start(p, t2);
+
+    // A thread in `sigsuspend`: the tracer sees the mask it will go back to.
+    with_states(|st| {
+        if let Some(t) = st.get_mut(&p).and_then(|s| s.threads.get_mut(&t1)) {
+            t.blocked = !bit(SIGUSR2);
+            t.saved_sigmask = Some(bit(SIGUSR1) | bit(SIGHUP));
+        }
+    });
+    check(
+        tracee_sigmask(p, t1) == bit(SIGUSR1) | bit(SIGHUP),
+        "the saved mask is the one a tracer reads",
+    )?;
+    check(tracee_sigmask(p, t2) == bit(SIGUSR1), "t2's own mask")?;
+    // Set: SIGKILL and SIGSTOP stripped, the saved mask no longer restored.
+    set_tracee_sigmask(p, t1, bit(SIGUSR2) | bit(SIGKILL) | bit(SIGSTOP));
+    check(
+        tracee_sigmask(p, t1) == bit(SIGUSR2) && blocked_as(p, t1) == bit(SIGUSR2),
+        "a set mask is the thread's, less SIGKILL and SIGSTOP",
+    )?;
+    check(
+        with_states(|st| {
+            st.get(&p)
+                .is_some_and(|s| s.thread(t1).saved_sigmask.is_none())
+        }),
+        "a set mask cancels the sigsuspend restore",
+    )?;
+    check(tracee_sigmask(p, t2) == bit(SIGUSR1), "t2 untouched")?;
+
+    // The queues. The process's: SIGRTMIN's record and a timer's entry,
+    // SIGUSR1's record, a SIGKILL. t1's: SIGUSR2.
+    check(
+        set_pending_info(p, SIGRTMIN, SigInfo::queued(5, 6, 0x5eed)),
+        "post SIGRTMIN",
+    )?;
+    check(
+        set_pending_info(p, SIGUSR1, SigInfo::user(7, 8)),
+        "post SIGUSR1",
+    )?;
+    check(
+        set_pending_info(p, SIGKILL, SigInfo::user(7, 8)),
+        "post SIGKILL",
+    )?;
+    check(
+        set_thread_pending_info(p, t1, SIGUSR2, SigInfo::tkill(9, 10)),
+        "post SIGUSR2 to t1",
+    )?;
+    with_states(|st| {
+        if let Some(s) = st.get_mut(&p) {
+            s.timer_queue.push(QueuedTimerSignal {
+                sig: SIGRTMIN,
+                timer_id: 3,
+                token: 0,
+                target: None,
+                info: SigInfo::timer(3, 0x77),
+            });
+        }
+    });
+    let shared: [Option<(u32, SigInfo)>; 4] =
+        core::array::from_fn(|i| peek_pending(p, t1, true, i as u64));
+    check(
+        shared[0] == Some((SIGUSR1, SigInfo::user(7, 8)))
+            && shared[1] == Some((SIGRTMIN, SigInfo::queued(5, 6, 0x5eed)))
+            && shared[2] == Some((SIGRTMIN, SigInfo::timer(3, 0x77)))
+            && shared[3].is_none(),
+        "the process's queue by number, a record before its timer's entry, no SIGKILL",
+    )?;
+    check(
+        peek_pending(p, t1, false, 0) == Some((SIGUSR2, SigInfo::tkill(9, 10)))
+            && peek_pending(p, t1, false, 1).is_none(),
+        "t1's own queue",
+    )?;
+    check(
+        peek_pending(p, t2, false, 0).is_none(),
+        "t2 has nothing of its own",
+    )?;
+    check(
+        peek_pending(p, t1, true, u64::MAX).is_none(),
+        "far past the end",
+    )?;
+    check(
+        peek_pending(p, t1, true, 1).is_some() && sets(p).pending & bit(SIGUSR1) != 0,
+        "a peek takes nothing",
+    )?;
+
+    // Everything goes with the process's state, the test's own timer entry
+    // (which no timer of the timer module's owns) included, and the bits off
+    // the count with it.
+    remove(p);
+    serial_println!("[signal]   a tracer's view of masks and queues: OK");
+    Ok(())
+}
+
+/// Per-thread signal state: each thread's own mask, the signals sent to one
+/// thread alone, the order a thread takes them in (its own queue first), a
+/// process-directed signal blocked only when every thread blocks it, a new
+/// thread starting with its creator's mask, and a thread's exit taking its
+/// queue with it. Synthetic threads of a synthetic process, driven through the
+/// explicit-thread variants (the boot task is not one of their threads).
+fn test_per_thread_state() -> KernelResult<()> {
+    const SIGUSR1: u32 = 10;
+    const SIGUSR2: u32 = 12;
+    let p = TEST_PID_BASE + 30;
+    let (t1, t2): (TaskId, TaskId) = (0x7A1, 0x7A2);
+    let bit = |sig: u32| signal_bit(sig).unwrap_or(0);
+
+    start_spawned(0, p, Some(bit(SIGHUP)), 0);
+    on_thread_start(p, t1);
+    on_thread_start(p, t2);
+    check(
+        blocked_as(p, t1) == bit(SIGHUP) && blocked_as(p, t2) == bit(SIGHUP),
+        "threads start with the process's first mask",
+    )?;
+
+    // Masks are per thread.
+    let _ = set_blocked_as(p, t1, bit(SIGUSR2));
+    check(blocked_as(p, t1) == bit(SIGUSR2), "t1's mask set")?;
+    check(blocked_as(p, t2) == bit(SIGHUP), "t2's mask untouched")?;
+
+    // A signal to t1 alone is t1's to take.
+    let before = PENDING_COUNT.load(Ordering::Relaxed);
+    check(
+        set_thread_pending_info(p, t1, SIGUSR1, SigInfo::tkill(1, 0)),
+        "thread-directed post",
+    )?;
+    check(pending_as(p, t1) & bit(SIGUSR1) != 0, "pending for t1")?;
+    check(pending_as(p, t2) & bit(SIGUSR1) == 0, "not pending for t2")?;
+    check(
+        take_deliverable_info_as(p, t2).is_none(),
+        "t2 cannot take it",
+    )?;
+    // t1's own queue goes first, even before a lower-numbered process signal.
+    check(
+        set_pending_info(p, SIGHUP, SigInfo::user(1, 0)),
+        "process post",
+    )?;
+    let _ = set_blocked_as(p, t1, 0);
+    let first = take_deliverable_info_as(p, t1);
+    check(
+        first.is_some_and(|(s, i)| s == SIGUSR1 && i.code == si_code::SI_TKILL),
+        "t1 takes its own signal first",
+    )?;
+    let second = take_deliverable_info_as(p, t1);
+    check(
+        second.is_some_and(|(s, _)| s == SIGHUP),
+        "then the process's",
+    )?;
+    check(
+        PENDING_COUNT.load(Ordering::Relaxed) == before,
+        "the count comes back",
+    )?;
+
+    // A process-directed signal waits only while every thread blocks it.
+    let _ = set_blocked_as(p, t1, bit(SIGUSR2));
+    let _ = set_blocked_as(p, t2, 0);
+    check(
+        with_states(|st| {
+            st.get(&p)
+                .is_some_and(|s| !s.blocked_everywhere(bit(SIGUSR2)))
+        }),
+        "t2 does not block SIGUSR2",
+    )?;
+    check(
+        set_pending_info(p, SIGUSR2, SigInfo::user(1, 0)),
+        "post SIGUSR2",
+    )?;
+    check(take_deliverable_info_as(p, t1).is_none(), "t1 blocks it")?;
+    check(
+        take_deliverable_info_as(p, t2).is_some_and(|(s, _)| s == SIGUSR2),
+        "t2 takes it",
+    )?;
+    let _ = set_blocked_as(p, t2, bit(SIGUSR2));
+    check(
+        with_states(|st| {
+            st.get(&p)
+                .is_some_and(|s| s.blocked_everywhere(bit(SIGUSR2)))
+        }),
+        "now every thread blocks it",
+    )?;
+
+    // A new thread made by t1 starts with t1's mask (on_thread_start reads the
+    // creator from the current task, so record it directly as `clone` would).
+    with_states(|st| {
+        if let Some(s) = st.get_mut(&p) {
+            let m = s.thread(t1).blocked;
+            s.threads
+                .insert(0x7A3, Box::new(ThreadSignals::new(m, AltStack::DISABLED)));
+        }
+    });
+    check(
+        blocked_as(p, 0x7A3) == bit(SIGUSR2),
+        "a new thread has its creator's mask",
+    )?;
+
+    // A thread's exit takes its queue.
+    let before = PENDING_COUNT.load(Ordering::Relaxed);
+    check(
+        set_thread_pending_info(p, t2, SIGUSR1, SigInfo::tkill(1, 0)),
+        "post to t2",
+    )?;
+    on_thread_exit(p, t2);
+    check(
+        PENDING_COUNT.load(Ordering::Relaxed) == before,
+        "t2's exit took its pending signal off the count",
+    )?;
+    check(
+        with_states(|st| st.get(&p).is_some_and(|s| !s.threads.contains_key(&t2))),
+        "t2's state is gone",
+    )?;
+
+    // procfs's view: the main thread (the oldest) and a thread's own.
+    check(
+        set_thread_pending_info(p, t1, SIGUSR1, SigInfo::tkill(1, 0)),
+        "post to t1",
+    )?;
+    let main = sets(p);
+    check(
+        main.thread_pending == bit(SIGUSR1) && main.blocked == bit(SIGUSR2),
+        "sets() is t1's view",
+    )?;
+    check(
+        thread_sets(p, 0x7A3).thread_pending == 0,
+        "t3 has nothing of its own",
+    )?;
+
+    remove(p);
+    serial_println!("[signal]   per-thread masks, queues and exit: OK");
+    Ok(())
+}
+
+/// Linux's `sigaltstack` rules ([`linux_sigaltstack`]), each answer as Linux
+/// 6.6 gives it (`build/altstk_oracle.c`, run in WSL): what a query reports,
+/// the refusals and the order they come in, `SS_ONSTACK` and `SS_DISABLE` as
+/// requests, `SS_AUTODISARM` and its disarming, and that a thread's stack is
+/// its own and a new thread's is none.
+fn test_linux_altstack() -> KernelResult<()> {
+    use ss_flags::{SS_AUTODISARM, SS_DISABLE, SS_ONSTACK};
+    const MIN: u64 = 2048;
+    const SP: u64 = 0x7000_0000;
+    const SIZE: u64 = 0x1_0000;
+    const TOP: u64 = SP + SIZE;
+    const AWAY: u64 = 0x7FFF_0000; // a stack pointer off the alternate stack
+    let p = TEST_PID_BASE + 70;
+    let (t1, t2): (TaskId, TaskId) = (0x7B1, 0x7B2);
+    let stack = |sp: u64, flags: u32, size: u64| AltStack { sp, size, flags };
+    let q = |t: TaskId, at: u64| linux_sigaltstack_as(p, t, None, at, MIN);
+    let set = |t: TaskId, new: AltStack, at: u64| linux_sigaltstack_as(p, t, Some(new), at, MIN);
+
+    let result = (|| -> KernelResult<()> {
+        start_spawned(0, p, None, 0);
+        on_thread_start(p, t1);
+        on_thread_start(p, t2);
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "none at first")?;
+
+        // The refusals report nothing and change nothing.
+        check(
+            set(t1, stack(SP, 0, 1024), AWAY) == Err(AltStackError::TooSmall),
+            "under MINSIGSTKSZ: ENOMEM",
+        )?;
+        check(
+            set(t1, stack(SP, 5, SIZE), AWAY) == Err(AltStackError::BadMode),
+            "mode 5: EINVAL",
+        )?;
+        check(
+            set(t1, stack(SP, SS_AUTODISARM | 0xCAFE, SIZE), AWAY) == Err(AltStackError::BadMode),
+            "SS_AUTODISARM is stripped before the mode is judged",
+        )?;
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "still none")?;
+
+        // Disabling keeps the flags, not the base or size.
+        check(
+            set(t1, stack(SP, SS_DISABLE | SS_AUTODISARM, 1234), AWAY) == Ok(AltStack::DISABLED),
+            "disable",
+        )?;
+        check(
+            q(t1, AWAY) == Ok(stack(0, SS_DISABLE | SS_AUTODISARM, 0)),
+            "a disabled stack reports SS_AUTODISARM",
+        )?;
+
+        // SS_ONSTACK as a request is "enable"; the query reports the mode as
+        // seen from the stack pointer, and the frame (`altstack`) the flags as
+        // set.
+        check(
+            set(t1, stack(SP, SS_ONSTACK, SIZE), AWAY)
+                == Ok(stack(0, SS_DISABLE | SS_AUTODISARM, 0)),
+            "enable with SS_ONSTACK, reporting the old",
+        )?;
+        check(q(t1, AWAY) == Ok(stack(SP, 0, SIZE)), "off the stack: 0")?;
+        check(
+            q(t1, TOP) == Ok(stack(SP, SS_ONSTACK, SIZE)),
+            "the top is on it",
+        )?;
+        check(
+            q(t1, SP + 1) == Ok(stack(SP, SS_ONSTACK, SIZE)),
+            "base + 1 is on it",
+        )?;
+        check(
+            q(t1, SP) == Ok(stack(SP, 0, SIZE)),
+            "the base itself is not",
+        )?;
+        check(
+            with_states(|st| st.get(&p).map(|s| s.thread(t1).altstack))
+                == Some(stack(SP, SS_ONSTACK, SIZE)),
+            "kept as set",
+        )?;
+
+        // On it, no change -- not even to disable it -- but a query is fine.
+        check(
+            set(t1, AltStack::DISABLED, SP + 64) == Err(AltStackError::OnStack),
+            "on the stack: EPERM",
+        )?;
+        check(
+            set(t1, stack(SP, 5, SIZE), SP + 64) == Err(AltStackError::OnStack),
+            "EPERM comes before EINVAL",
+        )?;
+
+        // Exactly the stack already set is accepted before the size check.
+        check(
+            set(t1, stack(SP, SS_ONSTACK, SIZE), AWAY).is_ok(),
+            "the same stack again",
+        )?;
+
+        // Per thread: t2 has none, and t1's is untouched by t2's.
+        check(q(t2, AWAY) == Ok(AltStack::DISABLED), "t2 has none")?;
+        check(
+            set(t2, stack(SP + SIZE, 0, MIN), AWAY).is_ok(),
+            "t2 sets one",
+        )?;
+        check(q(t1, AWAY) == Ok(stack(SP, 0, SIZE)), "t1's is its own")?;
+
+        // SS_AUTODISARM: never "on" the stack, so a change is allowed on it;
+        // disarmed when a handler is entered.
+        check(
+            set(t1, stack(SP, SS_AUTODISARM, SIZE), AWAY).is_ok(),
+            "autodisarm",
+        )?;
+        check(
+            q(t1, SP + 64) == Ok(stack(SP, SS_AUTODISARM, SIZE)),
+            "with SS_AUTODISARM a thread is never on its stack",
+        )?;
+        disarm_altstack_as(p, t2);
+        check(
+            q(t2, AWAY) == Ok(stack(SP + SIZE, 0, MIN)),
+            "no SS_AUTODISARM: kept",
+        )?;
+        disarm_altstack_as(p, t1);
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "disarmed")?;
+
+        // A thread t1 starts has none; fork passes the forking thread's.
+        check(set(t1, stack(SP, 0, SIZE), AWAY).is_ok(), "re-set")?;
+        with_states(|st| {
+            if let Some(s) = st.get_mut(&p) {
+                s.threads
+                    .insert(0x7B3, Box::new(ThreadSignals::new(0, AltStack::DISABLED)));
+            }
+        });
+        check(
+            q(0x7B3, AWAY) == Ok(AltStack::DISABLED),
+            "a new thread has none",
+        )?;
+        Ok(())
+    })();
+    remove(p);
+    result?;
+    serial_println!("[signal]   Linux sigaltstack rules: OK");
+    Ok(())
+}
+
+/// The ignored set at the moment a signal is sent and delivered: discarded
+/// when sent unblocked -- with or without a trampoline, which is the `nohup`
+/// case -- kept when blocked and discarded once unblocked if still ignored,
+/// delivered if the action changed meanwhile; `SIGCONT` continues even
+/// ignored; what may be ignored and what a change discards.
+fn test_ignored_set() -> KernelResult<()> {
+    const SIGHUP_BIT: u64 = 1 << (SIGHUP - 1);
+    const SIGUSR1: u32 = 10;
+    const SIGUSR1_BIT: u64 = 1 << (SIGUSR1 - 1);
+    const SIGTERM: u32 = 15;
+    const SIGTERM_BIT: u64 = 1 << (SIGTERM - 1);
+    let p = TEST_PID_BASE + 50;
+    let q = TEST_PID_BASE + 51;
+    let cleanup = || {
+        remove(p);
+        remove(q);
+    };
+    let result = (|| -> KernelResult<()> {
+        // What may be ignored.
+        for bad in [1u64 << (SIGKILL - 1), 1u64 << (SIGSTOP - 1)] {
+            check(
+                set_ignored(p, SIGHUP_BIT | bad, false) == Err(KernelError::InvalidArgument),
+                "SIGKILL/SIGSTOP in the ignored set is refused",
+            )?;
+            check(ignored(p) == 0, "a refused set changes nothing")?;
+        }
+        check(
+            set_ignored(p, SIGHUP_BIT, false) == Ok(0),
+            "first set answers 0",
+        )?;
+        check(
+            is_ignored(p, SIGHUP) && !is_ignored(p, SIGTERM) && !is_ignored(p, 0),
+            "is_ignored reads the set",
+        )?;
+
+        // Sent unblocked to a process with no trampoline: dropped, where the
+        // default action would have killed it.
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == 0,
+            "an ignored SIGHUP with no trampoline is dropped, not fatal",
+        )?;
+        // ...and with a trampoline: not even pended for it.
+        register_trampoline(p, 0x4000);
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == 0,
+            "an ignored signal is not pended for the trampoline",
+        )?;
+        check(
+            classify_post(p, SIGUSR1) == PostDecision::Deliver,
+            "a signal not ignored is still delivered",
+        )?;
+        check(take_deliverable(p) == Some(SIGUSR1), "and taken")?;
+
+        // Blocked when sent: kept pending...
+        set_blocked(p, SIGHUP_BIT);
+        check(
+            classify_post(p, SIGHUP) == PostDecision::Drop && pending(p) == SIGHUP_BIT,
+            "an ignored but blocked signal stays pending",
+        )?;
+        // ...and discarded, not delivered, once unblocked while still ignored.
+        set_blocked(p, 0);
+        check(
+            take_deliverable(p).is_none() && pending(p) == 0,
+            "unblocked and still ignored: discarded at delivery",
+        )?;
+        // A change of action while it waits is honoured.
+        set_blocked(p, SIGHUP_BIT);
+        let _ = classify_post(p, SIGHUP);
+        check(
+            set_ignored(p, 0, false) == Ok(SIGHUP_BIT),
+            "previous set returned",
+        )?;
+        check(
+            pending(p) == SIGHUP_BIT,
+            "un-ignoring keeps the pending one",
+        )?;
+        set_blocked(p, 0);
+        check(
+            take_deliverable(p) == Some(SIGHUP),
+            "un-ignored before unblocking: delivered",
+        )?;
+
+        // Newly ignored pending signals go, blocked or not; one already
+        // ignored stays.
+        set_blocked(p, SIGUSR1_BIT | SIGTERM_BIT);
+        set_ignored(p, SIGUSR1_BIT, false)?;
+        let _ = classify_post(p, SIGUSR1); // ignored + blocked: kept
+        set_pending(p, SIGTERM);
+        set_ignored(p, SIGUSR1_BIT | SIGTERM_BIT, false)?;
+        check(
+            pending(p) == SIGUSR1_BIT,
+            "newly ignored SIGTERM discarded, already-ignored SIGUSR1 kept",
+        )?;
+        set_ignored(p, 0, false)?;
+        set_blocked(p, 0);
+        let _ = take_deliverable(p);
+
+        // SIGCONT continues even ignored, and runs no handler.
+        set_ignored(p, 1 << (SIGCONT - 1), false)?;
+        check(
+            classify_post(p, SIGCONT) == PostDecision::Continue && pending(p) == 0,
+            "an ignored SIGCONT continues without pending a handler",
+        )?;
+        set_ignored(p, 0, false)?;
+
+        // A blocked fatal signal on a process with no trampoline waits.
+        check(
+            classify_post(q, SIGTERM) == PostDecision::Terminate(SIGTERM),
+            "unblocked SIGTERM with no trampoline is fatal",
+        )?;
+        set_blocked(q, SIGTERM_BIT);
+        check(
+            classify_post(q, SIGTERM) == PostDecision::Drop && pending(q) == SIGTERM_BIT,
+            "blocked SIGTERM with no trampoline is kept pending, not fatal yet",
+        )?;
+
+        // The Linux shim's one-at-a-time record.
+        set_pending(q, SIGCHLD);
+        record_disposition(q, SIGCHLD, Disposition::Default, true);
+        check(
+            pending(q) & (1 << (SIGCHLD - 1)) == 0 && nocldwait(q) && !is_ignored(q, SIGCHLD),
+            "SIG_DFL for a default-ignored signal discards it; SA_NOCLDWAIT kept",
+        )?;
+        set_pending(q, SIGUSR1);
+        record_disposition(q, SIGUSR1, Disposition::Default, false);
+        check(
+            pending(q) & SIGUSR1_BIT != 0,
+            "SIG_DFL for a default-fatal signal discards nothing",
+        )?;
+        record_disposition(q, SIGUSR1, Disposition::Ignore, false);
+        check(
+            is_ignored(q, SIGUSR1) && pending(q) & SIGUSR1_BIT == 0,
+            "SIG_IGN records it and discards the pending one",
+        )?;
+        record_disposition(q, SIGUSR1, Disposition::Handler, false);
+        check(!is_ignored(q, SIGUSR1), "a handler takes it out")?;
+        record_disposition(q, SIGKILL, Disposition::Ignore, false);
+        check(
+            !is_ignored(q, SIGKILL),
+            "SIGKILL can never be recorded ignored",
+        )?;
+        record_disposition(q, SIGCHLD, Disposition::Handler, false);
+        record_disposition(q, SIGUSR1, Disposition::Ignore, true);
+        check(!nocldwait(q), "SA_NOCLDWAIT is SIGCHLD's alone")?;
+        Ok(())
+    })();
+    cleanup();
+    if result.is_ok() {
+        serial_println!("[signal]   ignored set at send and delivery: OK");
+    }
+    result
+}
+
+/// The ignored set across images: `exec` keeps it and drops `SA_NOCLDWAIT`,
+/// `fork` copies both, a spawned child gets its parent's blocked mask and
+/// ignored set less `sigdefault` (or the mask it was given), and a kernel
+/// parent passes nothing on.
+fn test_ignored_across_images() -> KernelResult<()> {
+    const SIGHUP_BIT: u64 = 1 << (SIGHUP - 1);
+    const SIGINT_BIT: u64 = 1 << 1;
+    const SIGQUIT_BIT: u64 = 1 << 2;
+    let parent = TEST_PID_BASE + 60;
+    let forked = TEST_PID_BASE + 61;
+    let spawned = TEST_PID_BASE + 62;
+    let given = TEST_PID_BASE + 63;
+    let orphan = TEST_PID_BASE + 64;
+    let all = [parent, forked, spawned, given, orphan];
+    let result = (|| -> KernelResult<()> {
+        set_ignored(parent, SIGHUP_BIT | SIGQUIT_BIT, true)?;
+        set_blocked(parent, SIGINT_BIT);
+
+        inherit_for_fork(parent, forked);
+        check(
+            ignored(forked) == SIGHUP_BIT | SIGQUIT_BIT && nocldwait(forked),
+            "fork copies the ignored set and SA_NOCLDWAIT",
+        )?;
+
+        start_spawned(parent, spawned, None, SIGQUIT_BIT);
+        check(
+            ignored(spawned) == SIGHUP_BIT && blocked(spawned) == SIGINT_BIT,
+            "spawn: the parent's ignored set less sigdefault, the parent's mask",
+        )?;
+        check(
+            !nocldwait(spawned),
+            "a spawned image starts without SA_NOCLDWAIT",
+        )?;
+
+        let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
+        start_spawned(parent, given, Some(SIGQUIT_BIT | unblockable), 0);
+        check(
+            blocked(given) == SIGQUIT_BIT && ignored(given) == SIGHUP_BIT | SIGQUIT_BIT,
+            "spawn with a mask: that mask, less SIGKILL/SIGSTOP",
+        )?;
+
+        start_spawned(0, orphan, None, 0);
+        check(
+            ignored(orphan) == 0 && blocked(orphan) == 0,
+            "a kernel parent passes nothing on",
+        )?;
+
+        on_exec(parent);
+        check(
+            ignored(parent) == SIGHUP_BIT | SIGQUIT_BIT && !nocldwait(parent),
+            "exec keeps the ignored set and drops SA_NOCLDWAIT",
+        )?;
+        Ok(())
+    })();
+    for pid in all {
+        remove(pid);
+    }
+    if result.is_ok() {
+        serial_println!("[signal]   ignored set across exec, fork and spawn: OK");
+    }
+    result
 }
 
 /// Verify the `SA_ONSTACK` frame placement decision: every branch of
@@ -1366,6 +3728,143 @@ fn test_siginfo_record() -> KernelResult<()> {
     Ok(())
 }
 
+/// The extended native frame
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`): which
+/// frame a trampoline reads, how that travels with it, where the frame goes,
+/// and the records the tail is filled from -- `SIGCHLD`'s status and
+/// `sigqueue`'s value among them.
+fn test_extended_frame() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 12;
+    let child = TEST_PID_BASE + 13;
+
+    // The choice goes with the trampoline.
+    register_trampoline_frame(p, 0x4000, true);
+    check(extended_frame(p), "registered with the flag -> extended")?;
+    check(
+        trampoline_frame(p) == Some((0x4000, true)),
+        "trampoline and frame read together",
+    )?;
+    inherit_for_fork(p, child);
+    check(
+        trampoline_frame(child) == Some((0x4000, true)),
+        "a fork keeps the trampoline's frame",
+    )?;
+    on_exec(child);
+    check(
+        !extended_frame(child) && trampoline_frame(child).is_none(),
+        "exec drops the trampoline and its frame",
+    )?;
+    register_trampoline(p, 0x5000);
+    check(
+        trampoline_frame(p) == Some((0x5000, false)),
+        "registering without the flag -> short frame",
+    )?;
+    register_trampoline_frame(p, 0, true);
+    check(
+        !extended_frame(p) && trampoline_frame(p).is_none(),
+        "unregistering cannot leave an extended frame behind",
+    )?;
+
+    // Placement: the context 16-byte aligned, the frame below the top with
+    // less than 16 bytes of slack, the return slot 8 below the context.
+    for base in [0x7fff_0000u64, 0x7fff_0008, 0x7fff_fff7] {
+        for size in [
+            SIGNAL_CONTEXT_SIZE as u64,
+            SIGNAL_FRAME_EXTENDED_SIZE as u64,
+        ] {
+            let (ctx, rsp) = frame_placement(base, size);
+            let end = ctx.wrapping_add(size);
+            check(ctx % 16 == 0, "context 16-byte aligned")?;
+            check(
+                rsp == ctx.wrapping_sub(8) && rsp % 16 == 8,
+                "return slot 8 below",
+            )?;
+            check(
+                end <= base && base.wrapping_sub(end) < 16,
+                "frame just below the top",
+            )?;
+        }
+    }
+
+    // The tail is the record, field for field.
+    let q = SigInfo::queued(77, 1000, 0x1234_5678_9abc_def0);
+    check(
+        SignalInfoTail::from_info(&q)
+            == SignalInfoTail {
+                si_code: si_code::SI_QUEUE,
+                si_pid: 77,
+                si_uid: 1000,
+                pad: 0,
+                si_value: 0x1234_5678_9abc_def0,
+            },
+        "sigqueue's tail",
+    )?;
+    check(
+        SignalInfoTail::from_info(&SigInfo::kernel()).si_code == si_code::SI_KERNEL,
+        "a kernel signal's tail says SI_KERNEL",
+    )?;
+
+    // SIGCHLD carries how the child ended, as wait reports it.
+    use crate::proc::pcb::{CrashInfo, ExitInfo, JobControlEvent};
+    let exited = ExitInfo::exited(3);
+    let killed = ExitInfo::killed(9);
+    // An exit with a status a signal death's code would read as is still
+    // an exit (requests/b-ad-an-exit-status-of-128-to-255-...).
+    let exited_137 = ExitInfo::exited(137);
+    let crashed = ExitInfo {
+        exit_code: crate::proc::pcb::crash_exit_code(8),
+        crash: Some(CrashInfo {
+            exception_code: 8,
+            faulting_rip: 0,
+            aux: 0,
+            thread_id: 0,
+        }),
+        term_signal: None,
+    };
+    check(
+        exited.sigchld_code_and_status() == (si_code::CLD_EXITED, 3),
+        "exit 3 -> CLD_EXITED, 3",
+    )?;
+    check(
+        killed.sigchld_code_and_status() == (si_code::CLD_KILLED, 9),
+        "killed by 9 -> CLD_KILLED, 9",
+    )?;
+    check(
+        exited_137.sigchld_code_and_status() == (si_code::CLD_EXITED, 137),
+        "exit 137 -> CLD_EXITED, 137, not a kill",
+    )?;
+    check(
+        crashed.sigchld_code_and_status() == (si_code::CLD_KILLED, 11),
+        "a crash -> CLD_KILLED, SIGSEGV (no core file is written)",
+    )?;
+    check(
+        JobControlEvent::Stopped(SIGTSTP).sigchld_code_and_status() == (si_code::CLD_STOPPED, 20),
+        "stopped by SIGTSTP -> CLD_STOPPED, 20",
+    )?;
+    check(
+        JobControlEvent::Continued.sigchld_code_and_status() == (si_code::CLD_CONTINUED, 18),
+        "continued -> CLD_CONTINUED, SIGCONT",
+    )?;
+    let chld = SigInfo::child(42, 1000, killed.sigchld_code_and_status());
+    check(
+        chld.code == si_code::CLD_KILLED
+            && chld.sender_pid == 42
+            && chld.sender_uid == 1000
+            && chld.value == 9,
+        "SIGCHLD's record: code, child, uid, status in the value",
+    )?;
+    // si_status is an int: a negative one is reinterpreted, not widened.
+    check(
+        SigInfo::child(42, 0, (si_code::CLD_EXITED, -1)).value == 0xFFFF_FFFF,
+        "si_status fills the low half of the value slot",
+    )?;
+
+    remove(p);
+    remove(child);
+    serial_println!("[signal]   extended frame, its placement and records: OK");
+    Ok(())
+}
+
 /// Helper: assert a condition, logging and returning an error on failure.
 fn check(cond: bool, what: &str) -> KernelResult<()> {
     if cond {
@@ -1475,11 +3974,11 @@ fn test_blocked_masking() -> KernelResult<()> {
 fn test_classify_post() -> KernelResult<()> {
     let p = TEST_PID_BASE + 4;
     check(
-        classify_post(p, SIGKILL) == PostDecision::Terminate(128 + 9),
+        classify_post(p, SIGKILL) == PostDecision::Terminate(SIGKILL),
         "no-tramp SIGKILL terminate",
     )?;
     check(
-        classify_post(p, 15) == PostDecision::Terminate(128 + 15),
+        classify_post(p, 15) == PostDecision::Terminate(15),
         "no-tramp SIGTERM terminate",
     )?;
     check(
@@ -1496,7 +3995,7 @@ fn test_classify_post() -> KernelResult<()> {
         "SIGTERM pending after deliver",
     )?;
     check(
-        classify_post(p, SIGKILL) == PostDecision::Terminate(128 + 9),
+        classify_post(p, SIGKILL) == PostDecision::Terminate(SIGKILL),
         "SIGKILL terminate even with tramp",
     )?;
     remove(p);
@@ -1580,7 +4079,10 @@ fn test_on_exec() -> KernelResult<()> {
     set_blocked(p, 1 << 0);
     on_exec(p);
     check(!has_trampoline(p), "exec clears trampoline")?;
-    check(blocked(p) == 0, "exec clears blocked mask")?;
+    check(
+        blocked(p) == 1 << 0,
+        "exec keeps the blocked mask (POSIX execve)",
+    )?;
     check(
         pending(p) & (1 << 11) == (1 << 11),
         "exec preserves pending",

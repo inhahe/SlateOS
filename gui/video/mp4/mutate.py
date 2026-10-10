@@ -36,6 +36,20 @@ def seeks(name):
     return f"seeks_in_{name}"
 
 
+# One track read alone (`Demuxer::select_tracks`), and the read-ahead.
+ALONE = "a_track_selected_alone_gives_the_packets_it_gives_among_the_others"
+ALONE_READS_OWN = "a_track_selected_alone_reads_its_own_samples_alone"
+
+# FFmpeg's walks over an index, held to the walks as FFmpeg writes them.
+SEARCH_IS_FFMPEGS = "the_search_answers_as_ffmpegs_walking_search_does"
+EDIT_SEARCH_IS_FFMPEGS = "an_edits_search_answers_as_ffmpegs_walking_one_does"
+
+# The room the file's length leaves the indexes, and FFmpeg's ceilings.
+ROOM = "a_track_takes_no_more_entries_than_the_room_left"
+FILE_ROOM = "a_files_tracks_take_no_more_entries_than_it_has_bytes"
+CUT_EDITED = "an_index_held_to_the_room_is_edited_as_a_whole_one_would_be"
+
+
 INDEX = [
     (
         "PCM is not read in chunks",
@@ -81,21 +95,86 @@ INDEX = [
     ),
     (
         "a search does not step over discarded entries",
-        "        while at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
-        "        while false && at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
-        ["the_search_steps_over_discarded_entries_as_ffmpeg_does", seeks("two_edits")],
+        "        if at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
+        "        if false && at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
+        ["the_search_steps_over_discarded_entries_as_ffmpeg_does", seeks("two_edits"), SEARCH_IS_FFMPEGS],
     ),
     (
         "a backward search does not go back to a key frame",
-        "            m += if backward { -1 } else { 1 };",
-        "            m += 1;",
-        ["the_search_finds_key_frames_backward_and_forward", seeks("av1")],
+        "            m = if backward {\n                walks\n                    .key_to(from)",
+        "            m = if false {\n                walks\n                    .key_to(from)",
+        ["the_search_finds_key_frames_backward_and_forward", seeks("av1"), SEARCH_IS_FFMPEGS],
+    ),
+    # The walks in one step (`Walks`, `Offsets`): each held to FFmpeg's
+    # walks an entry at a time, on random indexes, with the tables built at
+    # once and partway through. The bound itself, SHORT_WALK, has no row:
+    # unbounded, the scale tests do not fail, they run for hours, and the
+    # harness would wait out its timeout three times to call that caught.
+    # Nor does the step's back-off from its upper bound have a row. A step
+    # that stays at the upper bound never narrows the search and loops for
+    # ever; and the bound's time is always past the time wanted while the
+    # search goes on -- one at the time sets the lower bound too and ends
+    # it -- so a test of `>` for `>=` there changes nothing. Its answers are
+    # held to FFmpeg's walking search on random indexes.
+    (
+        "the step over discarded entries stops one short of the last",
+        "            let stop = kept.min(b).min(nb - 1);",
+        "            let stop = kept.min(b).min(nb - 2);",
+        [SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "the table of the next kept entry is one off",
+        "            next = u32::try_from(i).ok()?;",
+        "            next = u32::try_from(i + 1).ok()?;",
+        [SEARCH_IS_FFMPEGS, EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "the table of the last key frame says the one after it",
+        "            last = u32::try_from(i).ok()?.checked_add(1)?;",
+        "            last = u32::try_from(i).ok()?.checked_add(2)?;",
+        [SEARCH_IS_FFMPEGS, EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's search goes back over no entries of its time",
+        "                Some(before) if time(before) == time(i) => i = before,",
+        "                Some(before) if false && time(before) == time(i) => i = before,",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's search back over its time takes no key frame",
+        "        let earliest = if any { start } else { walks.key_from(start) };",
+        "        let earliest = if any { start } else { found };",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an entry past a run of no samples is in no run",
+        "            return if self.stuck {",
+        "            return if false {",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "a long walk back finds the first key frame shown in time",
+        "        self.descend(node * 2 + 1, mid, high, to, pts)\n            .or_else(|| self.descend(node * 2, low, mid, to, pts))",
+        "        self.descend(node * 2, low, mid, to, pts)\n            .or_else(|| self.descend(node * 2 + 1, mid, high, to, pts))",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "a long walk back takes a frame as shown at its decoding time",
+        "                *leaf = Some(e.timestamp.wrapping_add(i64::from(t.offset)));",
+        "                *leaf = Some(e.timestamp);",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's dropped frames count back by the durations an edit before left",
+        "                buffer.clear();",
+        "                let _ = buffer;",
+        [packets("edits_stale_discards"), "an_edits_discarded_frames_count_back_by_their_own_durations"],
     ),
     (
         "an edit's first key frame ignores the composition offsets",
-        "        if self.has_ctts && index >= 0 {",
-        "        if false && self.has_ctts && index >= 0 {",
-        [packets("edit_before_key_shows"), packets("edit_at_shown_key")],
+        "        if self.has_ctts {\n            (*tts_index, *tts_sample) = offsets.position(index);",
+        "        if false {\n            (*tts_index, *tts_sample) = offsets.position(index);",
+        [packets("edit_before_key_shows"), packets("edit_at_shown_key"), EDIT_SEARCH_IS_FFMPEGS],
     ),
     (
         "sound's edit is not searched a second early",
@@ -132,6 +211,90 @@ INDEX = [
         "        self.start_pad = self.skip_samples;",
         "        self.start_pad = 0;",
         [packets("aac"), seeks("vp9_opus")],
+    ),
+    (
+        "a track's index takes nothing from the room",
+        "        *room = room.saturating_sub(taken);",
+        "        let _ = taken;",
+        [ROOM, FILE_ROOM],
+    ),
+    (
+        "an index is not held to the room",
+        "        let samples = self.sample_count.min(limit);",
+        "        let samples = self.sample_count;",
+        [ROOM, FILE_ROOM],
+    ),
+    (
+        "an index held to the room is left unedited",
+        "                if current_sample >= samples {\n                    // The rest",
+        "                if current_sample >= samples {\n                    finished = false;\n                    // The rest",
+        [CUT_EDITED],
+    ),
+    (
+        "an index FFmpeg cannot allocate is built",
+        "        if self.sample_count > INDEX_ALLOC {",
+        "        if false && self.sample_count > INDEX_ALLOC {",
+        [packets("claims_past_ffmpeg_index"), "an_index_ffmpeg_cannot_allocate_is_none"],
+    ),
+    (
+        "times are spread out past FFmpeg's ceiling",
+        "        if self.sample_count == 0 || self.sample_count >= TTS_LIMIT {",
+        "        if self.sample_count == 0 {",
+        [packets("chunked_at_ffmpeg_tts_limit")],
+    ),
+    (
+        "times are spread out past what FFmpeg can allocate",
+        "        if (ctts || stts) && self.sample_count > TTS_ALLOC {",
+        "        if false && (ctts || stts) && self.sample_count > TTS_ALLOC {",
+        [packets("chunked_past_ffmpeg_tts")],
+    ),
+    (
+        "a table of times is allocated though nothing is spread into it",
+        "        let mut tts = vec![Tts::default(); len];",
+        "        let mut tts = vec![Tts::default(); if ctts || stts { len } else { samples }];",
+        ["sound_in_chunks_keeps_no_table_of_times_it_does_not_merge"],
+    ),
+    (
+        "times are spread out past the room",
+        "        let samples = usize::try_from(self.sample_count.min(limit)).unwrap_or(0);",
+        "        let samples = usize::try_from(self.sample_count).unwrap_or(0);",
+        [ROOM],
+    ),
+    (
+        "sound in chunks is indexed past what FFmpeg can allocate",
+        "        if total > INDEX_ALLOC {",
+        "        if false && total > INDEX_ALLOC {",
+        ["packets_ffmpeg_cannot_index_in_chunks_are_none"],
+    ),
+    (
+        "the count of sound's packets does not wrap as FFmpeg's",
+        "            total = total.wrapping_add(chunk_count.wrapping_mul(count));",
+        "            total = total.saturating_add(chunk_count.saturating_mul(count));",
+        [packets("chunked_total_wraps")],
+    ),
+    (
+        "sound in chunks is not held to the room",
+        "                if self.index.len() >= packets {",
+        "                if false && self.index.len() >= packets {",
+        [ROOM],
+    ),
+    (
+        "sound in chunks held to the room is left unedited",
+        "                if self.index.len() >= packets {\n                    // The rest",
+        "                if self.index.len() >= packets {\n                    finished = false;\n                    // The rest",
+        [CUT_EDITED],
+    ),
+    (
+        "a frame count left below zero ends its chunk",
+        "                chunk_samples = chunk_samples.wrapping_sub(samples);",
+        "                chunk_samples = chunk_samples.saturating_sub(samples);",
+        [packets("chunked_misaligned_frames")],
+    ),
+    (
+        "edits giving samples again take more than the room",
+        "                if self.index.len() >= room {",
+        "                if false && self.index.len() >= room {",
+        ["edits_giving_samples_again_take_no_more_than_the_room"],
     ),
 ]
 
@@ -274,6 +437,72 @@ PARSE = [
         "            d.frame_duration = sc.tts.first().map(|t| t.duration);",
         [packets("stts_negative")],
     ),
+    (
+        "a timed text sample entry is not subtitles",
+        "                if let Some(c) = subtitle_codec(format) {",
+        "                if let Some(c) = subtitle_codec(format).filter(|_| false) {",
+        [packets("mov_text")],
+    ),
+    (
+        "a subtitle track's setup is not kept",
+        "            d.config = setup;",
+        "            let _ = setup;",
+        [packets("mov_text")],
+    ),
+    (
+        "a subtitle track's setup runs from the sample entry's start",
+        "        let read = self.r.pos().saturating_sub(start);",
+        "        let read = 0;",
+        [packets("mov_text")],
+    ),
+    (
+        "the room is not the file's length",
+        "        let entries_left = r.len();",
+        "        let entries_left = u64::MAX;",
+        [FILE_ROOM],
+    ),
+    (
+        "an stsc's numbers are unsigned, not FFmpeg's ints",
+        "            || count < 1\n",
+        "            || count == 0\n",
+        ["an_stsc_is_repaired_as_ffmpeg_repairs_it", packets("stsc_count_negative")],
+    ),
+    (
+        "a run FFmpeg cannot index is read",
+        "        if indexed.saturating_add(u64::from(entries)) > u64::from(INDEX_ALLOC) {",
+        "        if false && indexed.saturating_add(u64::from(entries)) > u64::from(INDEX_ALLOC) {",
+        [packets("trun_past_ffmpeg_index")],
+    ),
+    (
+        "a run is indexed past the room",
+        "        let kept = entries.min(u32::try_from(self.entries_left).unwrap_or(u32::MAX));",
+        "        let kept = entries;",
+        [FILE_ROOM],
+    ),
+    (
+        "a run's samples past the room do not move its time on",
+        "                dts = i64::try_from(end).unwrap_or(i64::MAX);",
+        "                let _ = end;",
+        [packets("trun_claims_a_million"), packets("trun_runs_claim_millions")],
+    ),
+    (
+        "a run's samples past the room are not refused as FFmpeg refuses them",
+        "                if frag.size == 0 || end > i128::from(i64::MAX) {",
+        "                if false {",
+        [packets("trun_time_overflows"), packets("trun_run_of_no_size")],
+    ),
+    (
+        "a run's samples giving their fields are indexed past the room",
+        "            if n < kept {",
+        "            if true {",
+        [FILE_ROOM],
+    ),
+    (
+        "a run's samples take nothing from the room",
+        "                self.entries_left = self.entries_left.saturating_sub(1);\n",
+        "",
+        [FILE_ROOM],
+    ),
 ]
 
 DEMUX = [
@@ -312,6 +541,54 @@ DEMUX = [
         "            timestamp.wrapping_sub(sc.min_corrected_pts.wrapping_add(i64::from(sc.dts_shift)));",
         "            timestamp.wrapping_sub(0 * sc.min_corrected_pts.wrapping_add(i64::from(sc.dts_shift)));",
         [seeks("h264_bframes"), seeks("mpeg4_bframes")],
+    ),
+    (
+        "a track not selected is read and given",
+        "                || self.selected.as_ref().is_some_and(|s| !s.contains(&i));",
+        "                || false && self.selected.as_ref().is_some_and(|s| !s.contains(&i));",
+        [ALONE, ALONE_READS_OWN],
+    ),
+    (
+        "a track not selected is read, then let go",
+        "            if !discarded {\n                let pos",
+        "            if true {\n                let pos",
+        [ALONE_READS_OWN],
+    ),
+]
+
+TRACK = [
+    (
+        "QuickTime's text sample entry is not timed text",
+        '        b"tx3g" | b"text" => Some(Codec::MovText),',
+        '        b"tx3g" => Some(Codec::MovText),',
+        ["a_code_is_subtitles_by_ffmpegs_table"],
+    ),
+    (
+        "CEA-608 captions are not subtitles",
+        '        b"c608" => Some(Codec::Other),\n',
+        "",
+        ["a_code_is_subtitles_by_ffmpegs_table"],
+    ),
+]
+
+READER = [
+    (
+        "a new read-ahead reads on from where the old one had read to",
+        "        if let Err(e) = old.seek(SeekFrom::Start(self.pos)) {",
+        "        if let Err(e) = old.stream_position() {",
+        ["a_new_read_ahead_reads_on_from_where_reading_is", ALONE],
+    ),
+    (
+        "a new read-ahead keeps the old one's size",
+        "        self.inner = Some(BufReader::with_capacity(bytes, old.into_inner()));",
+        "        self.inner = Some(BufReader::with_capacity(READ_AHEAD, old.into_inner()));",
+        ["a_small_read_ahead_reads_little_past_what_is_read"],
+    ),
+    (
+        "a read-ahead that cannot be changed loses the source",
+        "            self.inner = Some(old);\n            return Err(e.into());",
+        "            return Err(e.into());",
+        ["a_read_ahead_that_cannot_be_changed_leaves_reading_as_it_was"],
     ),
 ]
 
@@ -355,6 +632,8 @@ if __name__ == "__main__":
         (SRC / "demux.rs", DEMUX),
         (SRC / "lib.rs", PROBE),
         (SRC / "rational.rs", RATIONAL),
+        (SRC / "track.rs", TRACK),
+        (SRC / "reader.rs", READER),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

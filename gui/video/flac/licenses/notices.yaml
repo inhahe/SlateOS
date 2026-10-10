@@ -1,0 +1,16 @@
+# The third-party code gui/video/flac carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# The decoder is libFLAC's, translated: its stream decoder (frame sync, frame
+# and subframe reading, residuals, channel decorrelation, metadata blocks,
+# damage handling and seeking), its bit reader, its fixed and LPC restore
+# functions and its CRCs, each source file naming the libFLAC files it
+# derives from. The test streams in tests/data are this project's own
+# (tests/data/generate_fixtures.py), made by libFLAC's encoder; the IETF
+# conformance files the ignored tests read are fetched, not carried.
+libflac:
+  version: libFLAC 1.5.0 (2025-02-10)
+  licence: BSD-3-Clause
+  texts:
+    - flac-COPYING

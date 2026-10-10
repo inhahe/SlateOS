@@ -338,6 +338,15 @@ pub enum CompositorError {
         /// The image's width and height.
         image: (u32, u32),
     },
+    /// A client asked for a new tray icon while it had its share of the tray,
+    /// [`guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT`].
+    ///
+    /// Reported rather than answered `Ok`: a program whose icon is silently
+    /// not shown has no way to tell that from a shell that is not drawing it.
+    TrayShareTaken,
+    /// The tray holds [`guiremote::tray::MAX_TRAY_ICONS`] icons, the most a
+    /// `TRAY` frame may carry.
+    TrayFull,
 }
 
 impl std::fmt::Display for CompositorError {
@@ -398,6 +407,16 @@ impl std::fmt::Display for CompositorError {
                 f,
                 "a {width}x{height} patch at ({x}, {y}) does not lie inside the \
                  {image_width}x{image_height} image"
+            ),
+            Self::TrayShareTaken => write!(
+                f,
+                "this program already has {} tray icons, the most one may have",
+                guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT
+            ),
+            Self::TrayFull => write!(
+                f,
+                "the tray already holds {} icons",
+                guiremote::tray::MAX_TRAY_ICONS
             ),
         }
     }
@@ -5927,30 +5946,32 @@ struct ModifierEpisode {
     spent: bool,
 }
 
-/// Cut a glyph to what the protocol will carry, on a character boundary.
+/// Cut a tray icon's text to `max` bytes, on a character boundary.
 ///
-/// A client sending a paragraph gets the first few characters of it rather than
-/// a refusal: the icon is the client's own, nobody else is harmed, and a tray
-/// that silently dropped the icon would look like a bug in the program that
-/// sent it. `MAX_GLYPH_BYTES` is generous enough that no honest caller meets
-/// it.
+/// A client sending a paragraph as a glyph, or a page as a tooltip, gets the
+/// first part of it rather than a refusal: the icon is the client's own,
+/// nobody else is harmed, and a tray that silently dropped the icon would look
+/// like a bug in the program that sent it. The bounds
+/// ([`MAX_GLYPH_BYTES`](guiremote::tray::MAX_GLYPH_BYTES),
+/// [`MAX_TOOLTIP_BYTES`](guiremote::tray::MAX_TOOLTIP_BYTES)) are generous
+/// enough that no honest caller meets them.
 ///
 /// Truncating on a *character* boundary matters more than the limit does.
 /// Cutting mid-sequence would put an invalid UTF-8 fragment on the wire, and
 /// the decoder would refuse the whole frame -- so one client's long glyph would
 /// stop the tray updating for every client.
-fn truncate_glyph(glyph: &str) -> String {
-    if glyph.len() <= guiremote::tray::MAX_GLYPH_BYTES {
-        return glyph.to_string();
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
     }
     // `saturating_sub` rather than `-=`: the loop guard already stops at 0,
     // but the lint is right in general and a subtraction that cannot
     // underflow is cheaper to read as one that provably cannot.
-    let mut end = guiremote::tray::MAX_GLYPH_BYTES;
-    while end > 0 && !glyph.is_char_boundary(end) {
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    glyph.get(..end).unwrap_or_default().to_string()
+    text.get(..end).unwrap_or_default().to_string()
 }
 
 impl Compositor {
@@ -6154,19 +6175,44 @@ impl Compositor {
     /// from a client re-sending what it already sent. The push does not depend
     /// on this -- it compares encoded frames -- but a caller that wants to know
     /// should not have to encode one to find out.
-    pub fn set_tray_icon(&mut self, owner: u64, id: u32, glyph: &str, tooltip: &str) -> bool {
-        let glyph = truncate_glyph(glyph);
+    ///
+    /// The glyph and tooltip are cut to their bounds ([`truncate_text`]), so
+    /// what is stored, compared and sent is always what the wire can carry.
+    ///
+    /// # Errors
+    ///
+    /// For a new id only -- replacing is never refused:
+    /// [`CompositorError::TrayShareTaken`] when `owner` already has
+    /// [`MAX_TRAY_ICONS_PER_CLIENT`](guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT)
+    /// icons, and [`CompositorError::TrayFull`] when the tray holds
+    /// [`MAX_TRAY_ICONS`](guiremote::tray::MAX_TRAY_ICONS).
+    pub fn set_tray_icon(
+        &mut self,
+        owner: u64,
+        id: u32,
+        glyph: &str,
+        tooltip: &str,
+    ) -> CompositorResult<bool> {
+        let glyph = truncate_text(glyph, guiremote::tray::MAX_GLYPH_BYTES);
+        let tooltip = truncate_text(tooltip, guiremote::tray::MAX_TOOLTIP_BYTES);
         if let Some(existing) = self
             .tray_icons
             .iter_mut()
             .find(|i| i.owner == owner && i.id == id)
         {
             if existing.glyph == glyph && existing.tooltip == tooltip {
-                return false;
+                return Ok(false);
             }
             existing.glyph = glyph;
-            existing.tooltip = tooltip.to_string();
-            return true;
+            existing.tooltip = tooltip;
+            return Ok(true);
+        }
+        // The client's share first: it is the bound a program can be told
+        // about and do something with, and it is what stops one program
+        // reaching the tray's own bound at all.
+        let held = self.tray_icons.iter().filter(|i| i.owner == owner).count();
+        if u32::try_from(held).unwrap_or(u32::MAX) >= guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT {
+            return Err(CompositorError::TrayShareTaken);
         }
         if u32::try_from(self.tray_icons.len()).unwrap_or(u32::MAX)
             >= guiremote::tray::MAX_TRAY_ICONS
@@ -6175,11 +6221,11 @@ impl Compositor {
             // past this, so accepting one more would build a list no client
             // could read -- the tray would stop updating entirely, for every
             // program, because one of them registered too many.
-            return false;
+            return Err(CompositorError::TrayFull);
         }
         self.tray_icons
             .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
-        true
+        Ok(true)
     }
 
     /// Put `text` on the clipboard, replacing what was there.

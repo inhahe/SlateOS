@@ -1,5 +1,14 @@
 ## TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC (lane C, 2026-08-23)
 
+**Status:** OPEN for lane E only. Decided 2026-09-27 (`design-decisions/1424-...`,
+the operator's answer to C-Q19): the colours stay exactly as chosen, and the
+two pickers warn instead -- the calendar's event-colour picker and Settings'
+accent picker, both lane E's. Lane C's part is built: the one test of "too
+close to see one on the other" both warnings use,
+`guitk::palette::hard_to_tell_apart` (re-exported by `appearance`). The
+desktop's calendar drawing stays as it is, by the decision. Close this when
+lane E's two warnings land.
+
 **In short:** Each calendar event can carry a colour you picked, and the month
 grid draws a small dot in that colour on the event's day. Today's date is drawn
 as a filled disc in your accent colour. If you give an event a colour close to

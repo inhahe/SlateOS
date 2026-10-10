@@ -86,6 +86,12 @@ printf 'x\ny\nz' > nonl.txt
 # Empty input. Every pattern is out of range against it.
 : > empty.txt
 
+# Enough pieces that the sizes printed overflow standard output's buffer
+# while pieces are still being written: 1500 two-line pieces, each size two
+# or three bytes and a newline, past the 4096 bytes after which it is
+# written out mid-run.
+seq 1 3000 > seq3000.txt
+
 # --- machinery ----------------------------------------------------------------
 
 # One invocation of one side, in that side's own directory. `$1` is `ours` or
@@ -102,9 +108,19 @@ printf 'x\ny\nz' > nonl.txt
 # of the stderr the caller captures; `diff-wsl.sh` says why. The subshell does
 # not make it unnecessary — the subshell is the shell that waits on the child,
 # and it inherited the caller's redirected stderr along with everything else.
+#
+# `REDIR` is a redirection applied to `csplit` itself on both sides -- `<&-`,
+# `< .`, `>&-` -- for the cases about standard descriptors. Such a case runs
+# without `diff_run`, whose `4>&2` would need descriptor 2 open; `eval` only
+# for the redirection, the arguments staying in "$@".
+REDIR=
 run_side() {
   local side=$1 dir=$2; shift 2
-  ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" csplit "$@" )
+  if [ -n "$REDIR" ]; then
+    ( cd "$dir" && eval "env \${ENVV[@]+\"\${ENVV[@]}\"} PATH=\"\$bindir/\$side\" csplit \"\$@\" $REDIR" )
+  else
+    ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" csplit "$@" )
+  fi
 }
 
 # A manifest of everything the run left behind: each output file, in name
@@ -190,7 +206,7 @@ report() {
 run_case() {
   local fixture=$1; shift
   compare_argv "$fixture" in.txt "$@"
-  report "${ENVV[*]:+${ENVV[*]} }csplit $fixture $*"
+  report "${ENVV[*]:+${ENVV[*]} }csplit $fixture $*${REDIR:+ $REDIR}"
 }
 
 # The uncommon shape: the whole argv, for the cases that need something before
@@ -198,7 +214,7 @@ run_case() {
 raw_case() {
   local fixture=$1; shift
   compare_argv "$fixture" "$@"
-  report "csplit $*"
+  report "csplit $*${REDIR:+ $REDIR}"
 }
 
 # A case we expect to differ, with the reason. Counted separately so that a
@@ -454,6 +470,67 @@ run_case nonl.txt 3
 run_case nonl.txt '/z/'
 run_case empty.txt '/x/'
 run_case empty.txt '%x%'
+
+# --- standard descriptors that cannot be used -----------------------------------
+# A standard input that is closed, or a directory: upstream reads as the split
+# needs lines, so the read fails where the split first needs one -- after the
+# first piece's file is made, whose size, 0, the cleanup prints before every
+# file is removed. A skip pattern makes no file first, so nothing is counted;
+# `-s` counts nothing; `-k` keeps the empty file.
+REDIR='<&-'
+raw_case - - 1
+raw_case - - '/x/'
+raw_case - - '%x%'
+raw_case - -k - 1
+raw_case - -s - 1
+REDIR='< .'
+raw_case - - 1
+raw_case - - '/x/' '{*}'
+REDIR='>&-'
+run_case seq20.txt 4
+run_case seq20.txt 21
+# Upstream opens each piece through `fopen_safer` (`stdio--.h`), so a closed
+# standard descriptor stays closed and no piece is ever descriptor 1 or 2.
+# Opened plainly, a piece took the lowest free descriptor -- the closed one --
+# and became that standard stream: the sizes, flushed once the buffer filled,
+# were written into whichever piece held descriptor 1, and with `-k` the
+# `match not found` written while the last piece held descriptor 2 was kept
+# inside it.
+run_case seq3000.txt -n 4 2 '{*}'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
+REDIR='2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+run_case marks.txt '/MARK/' '/nomatch/'
+run_case seq20.txt -k 4 '/nomatch/'
+run_case seq20.txt -k 4 25
+run_case seq20.txt -k '/5/' '{9}'
+REDIR='<&- 2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+REDIR='<&- >&-'
+run_case seq3000.txt -n 4 2 '{*}'
+REDIR='>&- 2>&-'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
+REDIR=
+
+# --- a signal removes the pieces, unless -k -------------------------------------
+# Upstream catches SIGINT, SIGTERM, SIGPIPE and the rest and removes every
+# piece it made before it dies of the signal, as an error's cleanup does;
+# under -k it keeps them. Here the reader of the sizes is gone before they
+# are written, so the write at the end is SIGPIPE, after 1500 pieces.
+pieces_left() {
+  local side=$1 dir=$2; shift 2
+  rm -rf "$dir"; mkdir "$dir"
+  ( cd "$dir" && seq 1 3000 | env PATH="$bindir/$side" csplit "$@" | true ) 2>/dev/null
+  find "$dir" -mindepth 1 | wc -l
+}
+for keep in '' -k; do
+  o_left=$(pieces_left ours o_sig $keep -n 4 - 2 '{*}')
+  g_left=$(pieces_left gnu g_sig $keep -n 4 - 2 '{*}')
+  if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+    AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+  rm -rf o_sig g_sig
+  report "csplit ${keep:+$keep }-n 4 - 2 {*} | true [pieces left]"
+done
 
 # --- not implemented ----------------------------------------------------------
 

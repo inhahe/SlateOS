@@ -22,7 +22,7 @@
 use guitk::event::{EventResult, Modifiers, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::motion::Motion;
-use guitk::palette::Palette;
+use guitk::palette::{Palette, readable_on};
 use guitk::render::{FontWeightHint, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
@@ -36,29 +36,6 @@ use oswindow::app::Response;
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Duration;
-
-// ---------------------------------------------------------------------------
-// Catppuccin Mocha theme colors
-// ---------------------------------------------------------------------------
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-#[allow(dead_code)]
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const RED: Color = Color::from_hex(0xF38BA8);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-#[allow(dead_code)]
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -124,12 +101,15 @@ impl NotificationPriority {
         }
     }
 
-    fn accent_color(self) -> Color {
+    /// The stripe that marks a notification's priority: faint for low, the
+    /// user's accent for normal, the palette's "needs attention" and
+    /// "dangerous" hues above.
+    fn accent_color(self, p: &Palette) -> Color {
         match self {
-            Self::Low => SUBTEXT0,
-            Self::Normal => BLUE,
-            Self::High => YELLOW,
-            Self::Critical => RED,
+            Self::Low => p.subtext0,
+            Self::Normal => p.accent,
+            Self::High => p.yellow,
+            Self::Critical => p.red,
         }
     }
 }
@@ -489,6 +469,10 @@ pub struct NotificationDaemon {
     /// How toasts slide: the desktop's motion, from the palette the window
     /// loop hands over (design-decisions §1446).
     motion: Motion,
+    /// What everything is drawn in: the user's theme, handed over by the
+    /// window loop ([`theme_changed`](oswindow::app::App::theme_changed)) at
+    /// start and on every change. The built-in dark palette until then.
+    palette: Palette,
 }
 
 impl NotificationDaemon {
@@ -506,6 +490,7 @@ impl NotificationDaemon {
             viewport_width,
             viewport_height,
             motion: Motion::STANDARD,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1179,6 +1164,7 @@ impl NotificationDaemon {
 
     /// Render the toast overlay (always-on-top layer).
     pub fn render_toasts(&self) -> Vec<RenderCommand> {
+        let p = &self.palette;
         let mut cmds = Vec::new();
         let base_x = self.viewport_width - TOAST_WIDTH - TOAST_RIGHT_MARGIN;
         let mut y = TOAST_TOP_MARGIN;
@@ -1221,7 +1207,7 @@ impl NotificationDaemon {
                 y,
                 width: TOAST_WIDTH,
                 height: h,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: radii,
             });
 
@@ -1231,7 +1217,7 @@ impl NotificationDaemon {
                 y,
                 width: 4.0,
                 height: h,
-                color: notif.priority.accent_color(),
+                color: notif.priority.accent_color(p),
                 corner_radii: CornerRadii {
                     top_left: TOAST_CORNER_RADIUS,
                     bottom_left: TOAST_CORNER_RADIUS,
@@ -1245,7 +1231,7 @@ impl NotificationDaemon {
                 x: toast_x + TOAST_PADDING + 8.0,
                 y: y + TOAST_PADDING,
                 text: notif.app_name.clone(),
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
@@ -1257,7 +1243,7 @@ impl NotificationDaemon {
                 x: toast_x + TOAST_PADDING + 8.0,
                 y: y + TOAST_PADDING + 16.0,
                 text: notif.title.clone(),
-                color: TEXT,
+                color: p.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
@@ -1270,7 +1256,7 @@ impl NotificationDaemon {
                     x: toast_x + TOAST_PADDING + 8.0,
                     y: y + TOAST_PADDING + 34.0 + n as f32 * TOAST_BODY_LINE_HEIGHT,
                     text: line.clone(),
-                    color: SUBTEXT1,
+                    color: p.subtext1,
                     font_size: TOAST_BODY_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0),
@@ -1286,14 +1272,14 @@ impl NotificationDaemon {
                 y: close_y,
                 width: CLOSE_BTN_SIZE,
                 height: CLOSE_BTN_SIZE,
-                color: SURFACE1,
+                color: p.surface1,
                 corner_radii: CornerRadii::all(CLOSE_BTN_SIZE / 2.0),
             });
             cmds.push(RenderCommand::Text {
                 x: close_x + 5.0,
                 y: close_y + 3.0,
                 text: String::from("x"),
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1311,7 +1297,7 @@ impl NotificationDaemon {
                     y: bar_y,
                     width: bar_width,
                     height: PROGRESS_BAR_HEIGHT,
-                    color: SURFACE2,
+                    color: p.surface2,
                     corner_radii: CornerRadii::all(2.0),
                 });
                 // Filled portion.
@@ -1321,7 +1307,7 @@ impl NotificationDaemon {
                     y: bar_y,
                     width: fill_width,
                     height: PROGRESS_BAR_HEIGHT,
-                    color: BLUE,
+                    color: p.accent,
                     corner_radii: CornerRadii::all(2.0),
                 });
                 extra_y += PROGRESS_BAR_HEIGHT + 8.0;
@@ -1342,14 +1328,14 @@ impl NotificationDaemon {
                         y: extra_y,
                         width: btn_width,
                         height: ACTION_BTN_HEIGHT,
-                        color: SURFACE1,
+                        color: p.surface1,
                         corner_radii: CornerRadii::all(6.0),
                     });
                     cmds.push(RenderCommand::Text {
                         x: btn_x + ACTION_BTN_PADDING,
                         y: extra_y + 7.0,
                         text: action.label.clone(),
-                        color: BLUE,
+                        color: p.ink(p.accent),
                         font_size: 12.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -1371,6 +1357,7 @@ impl NotificationDaemon {
 
     /// Render the notification center panel (right-side slide-out).
     pub fn render_center(&self) -> Vec<RenderCommand> {
+        let p = &self.palette;
         if !self.center.visible {
             return Vec::new();
         }
@@ -1384,7 +1371,7 @@ impl NotificationDaemon {
             y: 0.0,
             width: CENTER_WIDTH,
             height: self.viewport_height,
-            color: MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1394,7 +1381,7 @@ impl NotificationDaemon {
             y: 0.0,
             width: CENTER_WIDTH,
             height: CENTER_HEADER_HEIGHT,
-            color: CRUST,
+            color: p.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1402,7 +1389,7 @@ impl NotificationDaemon {
             x: center_x + 16.0,
             y: 14.0,
             text: String::from("Notifications"),
-            color: TEXT,
+            color: p.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1423,7 +1410,7 @@ impl NotificationDaemon {
                 y: 12.0,
                 width: badge_width,
                 height: BADGE_HEIGHT,
-                color: MAUVE,
+                color: p.mauve,
                 corner_radii: CornerRadii::all(11.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1435,7 +1422,7 @@ impl NotificationDaemon {
                 ),
                 y: 15.0,
                 text: badge_text,
-                color: CRUST,
+                color: readable_on(p.mauve),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1450,14 +1437,14 @@ impl NotificationDaemon {
             y: 8.0,
             width: 72.0,
             height: 32.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
             x: clear_x + 10.0,
             y: 16.0,
             text: String::from("Clear all"),
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1486,7 +1473,7 @@ impl NotificationDaemon {
                 x: center_x + CENTER_WIDTH / 2.0 - 60.0,
                 y: CENTER_HEADER_HEIGHT + 40.0,
                 text: String::from("No notifications"),
-                color: OVERLAY0,
+                color: p.subtext0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1507,7 +1494,7 @@ impl NotificationDaemon {
                         y: item_y,
                         width: CENTER_WIDTH,
                         height: CENTER_GROUP_HEADER_HEIGHT,
-                        color: SURFACE0,
+                        color: p.surface0,
                         corner_radii: CornerRadii::ZERO,
                     });
 
@@ -1516,7 +1503,7 @@ impl NotificationDaemon {
                         x: center_x + 12.0,
                         y: item_y + 10.0,
                         text: format!("{collapse_indicator} {app_name}"),
-                        color: TEXT,
+                        color: p.text,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -1528,7 +1515,7 @@ impl NotificationDaemon {
                         x: center_x + CENTER_WIDTH - 40.0,
                         y: item_y + 10.0,
                         text: format!("{count}"),
-                        color: OVERLAY0,
+                        color: p.subtext0,
                         font_size: 12.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -1554,8 +1541,9 @@ impl NotificationDaemon {
         y: f32,
         notif: &Notification,
     ) {
+        let p = &self.palette;
         // Item background (slightly different for unread).
-        let bg_color = if notif.read { MANTLE } else { BASE };
+        let bg_color = if notif.read { p.mantle } else { p.base };
         cmds.push(RenderCommand::FillRect {
             x: center_x,
             y,
@@ -1572,7 +1560,7 @@ impl NotificationDaemon {
                 y: y + CENTER_ITEM_HEIGHT / 2.0 - 3.0,
                 width: 6.0,
                 height: 6.0,
-                color: BLUE,
+                color: p.accent,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -1583,7 +1571,7 @@ impl NotificationDaemon {
             y,
             width: 3.0,
             height: CENTER_ITEM_HEIGHT,
-            color: notif.priority.accent_color(),
+            color: notif.priority.accent_color(p),
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1592,7 +1580,7 @@ impl NotificationDaemon {
             x: center_x + 20.0,
             y: y + 10.0,
             text: notif.title.clone(),
-            color: TEXT,
+            color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(CENTER_WIDTH - 100.0),
@@ -1615,7 +1603,7 @@ impl NotificationDaemon {
             x: center_x + 20.0,
             y: y + 28.0,
             text: body_display,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CENTER_BODY_WIDTH),
@@ -1628,7 +1616,7 @@ impl NotificationDaemon {
             x: center_x + CENTER_WIDTH - 80.0,
             y: y + 10.0,
             text: time_text,
-            color: OVERLAY0,
+            color: p.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1640,7 +1628,7 @@ impl NotificationDaemon {
             x: center_x + 20.0,
             y: y + CENTER_ITEM_HEIGHT - 18.0,
             text: String::from(notif.category.label()),
-            color: OVERLAY0,
+            color: p.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1653,7 +1641,7 @@ impl NotificationDaemon {
             y1: y + CENTER_ITEM_HEIGHT - 1.0,
             x2: center_x + CENTER_WIDTH - 16.0,
             y2: y + CENTER_ITEM_HEIGHT - 1.0,
-            color: SURFACE0,
+            color: p.surface0,
             width: 1.0,
         });
     }
@@ -1858,9 +1846,10 @@ impl oswindow::app::App for NotificationDaemon {
         }
     }
 
-    /// The palette's motion is how the toasts slide. (Its colours are not
-    /// read yet: known-issues `TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`.)
+    /// Everything is drawn in the palette from now on -- its colours, and its
+    /// motion for how the toasts slide.
     fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
         self.set_motion(palette.motion);
     }
 
@@ -2275,7 +2264,9 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (font_size - TOAST_BODY_FONT_SIZE).abs() < 0.01 && color == SUBTEXT1 => {
+                } if (font_size - TOAST_BODY_FONT_SIZE).abs() < 0.01
+                    && color == daemon.palette.subtext1 =>
+                {
                     Some((y, text))
                 }
                 _ => None,
@@ -2725,6 +2716,53 @@ mod tests {
         daemon.dismiss(1);
         daemon.tick(0);
         assert!(daemon.toasts.is_empty(), "a still toast lingered to fade");
+    }
+
+    /// **Everything is drawn from the palette it was handed**, in both modes:
+    /// the toasts of every priority, a progress bar, an action, and the
+    /// centre with its badge, a group, a read and an unread row. A colour of
+    /// the daemon's own -- the dark constants it drew in until 2026-09-29 --
+    /// is a dark value the light palette does not hold, and names itself.
+    #[test]
+    fn everything_is_drawn_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+            oswindow::app::App::theme_changed(&mut daemon, &p);
+            for (i, priority) in [
+                NotificationPriority::Low,
+                NotificationPriority::Normal,
+                NotificationPriority::High,
+                NotificationPriority::Critical,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut notif = make_test_notification(0, priority);
+                if i == 1 {
+                    notif.progress = Some(40);
+                    notif.actions = vec![NotificationAction {
+                        id: String::from("open"),
+                        label: String::from("Open"),
+                    }];
+                }
+                daemon.handle_request(NotificationRequest::Send(notif));
+            }
+            let mut read = make_test_notification(0, NotificationPriority::Normal);
+            read.read = true;
+            daemon.push_history(read);
+            daemon.center.visible = true;
+
+            let mut cmds = daemon.render_toasts();
+            cmds.extend(daemon.render_center());
+            assert!(cmds.len() > 40, "too little drawn to mean anything");
+            appearance::palette_check::assert_drawn_from(
+                &p,
+                &cmds,
+                &[readable_on(p.mauve), p.ink(p.accent)],
+                "the notification daemon",
+            );
+        }
     }
 
     /// **The palette's motion is the daemon's**: the window loop hands a

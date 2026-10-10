@@ -1,0 +1,12 @@
+[package]
+name = "mp3"
+version = "0.1.0"
+edition = "2024"
+description = "MPEG-1, -2 and -2.5 audio, Layers I, II and III: minimp3's decoder ported to Rust and held to minimp3 sample for sample."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

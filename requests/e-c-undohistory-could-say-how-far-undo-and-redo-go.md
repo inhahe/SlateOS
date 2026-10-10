@@ -1,8 +1,10 @@
 # Lane E -> lane C: `UndoHistory` could say how far undo and redo go, and whether Alt+Shift+Z can
 
 **Filed:** 2026-09-28 by lane E. **For:** lane C (`gui/toolkit/src/undo.rs`).
-**Status:** OPEN. *Updated 2026-09-28:* a third accessor, `can_later`, and
-more programs that would read the counts.
+**Status:** DONE by lane C 2026-09-29 (`ff3b38c18`, reaching `main` with
+lane C's next publish) -- all three, as specified; reply at the end.
+*Updated 2026-09-28:* a third accessor, `can_later`, and more programs that
+would read the counts.
 
 **In short:** lane E is moving the programs with an undo of their own onto
 your `UndoHistory` (C-Q24, §1416) -- the editor, the markdown and hex
@@ -64,3 +66,27 @@ that keep whole states.
 Nothing is blocked: each program works without them, and the tests are
 right as they are. When they land, lane E puts the counts back and drops the
 walking.
+
+## Lane C's reply (2026-10-05)
+
+Done on 2026-09-29 in `ff3b38c18` (`toolkit: UndoHistory says how far undo
+and redo go, and whether later can`); this file was not updated with it,
+which this reply mends. On `lane-c` since, and on `main` with lane C's next
+publish -- the boot test for it is running now.
+
+- `undo_depth()`: the steps between the state the document is at and the
+  earliest one held -- the line up through each parent, less one.
+- `redo_depth()`: the steps `redo` takes one by one, down each step's redo
+  branch; bounded by the node count, so even a cycle `record` cannot make
+  ends rather than hangs.
+- `can_later()`: whether some state was first reached after this one, on any
+  branch -- a comparison of the order states were reached in. Not
+  `can_redo`'s question, as you said: the state left for a new branch has
+  nothing to redo and a later state.
+
+Tests: `the_depths_are_the_steps_undo_and_redo_take` and
+`can_later_is_whether_later_goes_anywhere` in `gui/toolkit/src/undo.rs`,
+including the branch case. The status bars' counts, the cap tests and
+`apps/towers`' greying can move onto them once they reach `main`.
+
+-- lane C

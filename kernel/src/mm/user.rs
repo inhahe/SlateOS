@@ -47,6 +47,7 @@
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
+use super::frame;
 use super::page_table::{self, PageFlags, USER_SPACE_END, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::thread;
@@ -115,6 +116,35 @@ pub fn validate_user_write(ptr: u64, len: usize) -> KernelResult<()> {
     validate_user_range(ptr, len, true)
 }
 
+/// Check that `[ptr, ptr+len)` could be a user buffer, without touching it.
+///
+/// The arithmetic half of [`validate_user_read`]: an empty span is always
+/// fine; otherwise the end does not wrap, and the whole span lies below
+/// `USER_SPACE_END`.  No page is examined, so the cost is the same however
+/// long the span -- which is the point.  A handler that will touch only the
+/// first part of a buffer (one pipe call moves at most one pipe buffer)
+/// checks the caller's whole claim with this, as Linux's `access_ok` does,
+/// and validates only the part it touches, through the copy.
+///
+/// A null pointer passes, as `access_ok` passes it: it is a user address no
+/// page is mapped at, so the copy faults -- and only where bytes would have
+/// moved, which is what lets a read of a NULL buffer at the end of a file be
+/// 0, and one on an empty non-blocking pipe `EAGAIN`, as on Linux. This
+/// refused it until 2026-10-08, which put `EFAULT` in front of every one of
+/// those answers.
+///
+/// **Kernel context bypass**: as [`validate_user_read`].
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if the span wraps or reaches kernel space.
+pub fn check_user_span(ptr: u64, len: usize) -> KernelResult<()> {
+    if is_kernel_context() || len == 0 {
+        return Ok(());
+    }
+    access_ok_end(ptr, len).map(|_| ())
+}
+
 /// Validate that a single user-space pointer refers to a valid, mapped
 /// byte.  Shorthand for `validate_user_read(ptr, 1)`.
 ///
@@ -149,6 +179,32 @@ fn is_kernel_context() -> bool {
 /// etc.) calls `is_kernel_context()` first and skips this function
 /// for bare kernel tasks.
 ///
+/// The end of `[ptr, ptr+len)` if it lies in user space -- `ptr + len` not
+/// wrapping, and no byte at or above `USER_SPACE_END` -- whatever `ptr` is,
+/// null included: Linux's `access_ok`, [`check_user_span`]'s arithmetic.
+/// The callers handle `len == 0` first, since an empty span is valid anywhere.
+fn access_ok_end(ptr: u64, len: usize) -> KernelResult<u64> {
+    // Overflow is the failure condition here, not a bug: a wrapping span.
+    let end = ptr
+        .checked_add(len as u64)
+        .ok_or(KernelError::InvalidAddress)?;
+    // The entire range must be in user space.
+    if end > USER_SPACE_END {
+        return Err(KernelError::InvalidAddress);
+    }
+    Ok(end)
+}
+
+/// [`access_ok_end`] for a span about to be walked page by page
+/// ([`validate_user_range`]): a null pointer is refused too, as no page is
+/// ever mapped there.
+fn user_span_end(ptr: u64, len: usize) -> KernelResult<u64> {
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    access_ok_end(ptr, len)
+}
+
 /// Arithmetic here is for address-range boundary checking.  Overflow
 /// is the failure condition, not a bug — it means the user passed a
 /// wrapping pointer range.
@@ -159,22 +215,7 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
         return Ok(());
     }
 
-    // Null pointer is never valid.
-    if ptr == 0 {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    let len_u64 = len as u64;
-
-    // Check for overflow: ptr + len must not wrap around.
-    let end = ptr
-        .checked_add(len_u64)
-        .ok_or(KernelError::InvalidAddress)?;
-
-    // The entire range must be in user space.
-    if end > USER_SPACE_END {
-        return Err(KernelError::InvalidAddress);
-    }
+    let end = user_span_end(ptr, len)?;
 
     // Get the current PML4 from CR3.
     let cr3 = page_table::read_cr3();
@@ -492,30 +533,92 @@ pub unsafe fn copy_to_user(kernel_src: *const u8, user_dst: u64, len: usize) -> 
 // Cross-address-space user memory copies
 // ---------------------------------------------------------------------------
 
-/// Resolve the physical address backing user virtual address `va` in the
-/// address space rooted at `pml4`, optionally requiring the page to be
-/// writable.
+/// Touch the page holding user address `va` in the address space rooted at
+/// `pml4`: `touch` gets the HHDM address of `va` itself (its offset in the
+/// page applied) and must stay within that 4 KiB page. With
+/// `need_writable` the page must be writable.
 ///
-/// Returns the full physical address (including the page offset).
+/// **The frame cannot be freed under the touch.** The target may unmap the
+/// page at the same moment, and nothing here holds it mapped, so the touch
+/// runs inside a remote-copy window ([`frame::RemoteCopyWindow`]): interrupts
+/// off, the page announced, and the mapping walked a second time after the
+/// announcement. A free of the frame waits for a window that announced it,
+/// and a free the announcement came too late for has unmapped the page
+/// before it looked, so the second walk sees the page gone or moved and the
+/// frame is not touched. Linux pins the page instead
+/// (`pin_user_pages_remote`, under the target's `mmap_lock`). Until
+/// 2026-10-03 the copy held only the address-space pin (`pcb::AsPin`) and
+/// touched whatever the first walk found (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
 ///
-/// A first failure is not final. Two perfectly ordinary states make the raw
-/// page walk fail on an address the owning process would have had no trouble
-/// with — an absent page that is committed but not yet populated, and a
-/// present-but-read-only page whose `COW` bit means "copy me on write". Both
-/// are what the hardware fault handler exists to fix, and neither can fix
-/// itself here, because nothing is going to fault: this walk reads the page
-/// table by hand through the HHDM. So on failure we ask the owning process's
-/// resolver to do what the fault would have done, then walk once more. See
-/// [`try_resolve_remote`] for why one retry is the right number.
-fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
-    if let Ok(phys) = user_page_phys_once(pml4, va, need_writable) {
-        return Ok(phys);
+/// **A first failure to find the page is not final.** Two perfectly ordinary
+/// states make the raw page walk fail on an address the owning process would
+/// have had no trouble with — an absent page that is committed but not yet
+/// populated, and a present-but-read-only page whose `COW` bit means "copy
+/// me on write". Both are what the hardware fault handler exists to fix, and
+/// neither can fix itself here, because nothing is going to fault: this walk
+/// reads the page table by hand through the HHDM. So on failure we ask the
+/// owning process's resolver to do what the fault would have done, outside
+/// the window (it allocates and takes locks), then walk once more. See
+/// [`try_resolve_remote`] for why one resolution is the right number.
+///
+/// A page that moves between the two walks of a window is looked up again;
+/// one that keeps moving for [`REMOTE_PAGE_ATTEMPTS`] lookups is reported as
+/// unusable rather than chased for ever.
+fn touch_remote_page<R>(
+    pml4: u64,
+    va: u64,
+    need_writable: bool,
+    touch: impl FnOnce(u64) -> R,
+) -> KernelResult<R> {
+    /// What one window found.
+    enum Found<R> {
+        /// The page was there both times, and was touched.
+        Touched(R),
+        /// The page was gone or different at the second walk.
+        Moved,
+        /// The first walk found no usable page.
+        Absent(KernelError),
     }
-    if !try_resolve_remote(pml4, va, need_writable) {
-        return Err(KernelError::InvalidAddress);
+
+    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
+    let mut touch = Some(touch);
+    let mut resolved = false;
+    for _ in 0..REMOTE_PAGE_ATTEMPTS {
+        let found = crate::cpu::without_interrupts(|| -> KernelResult<Found<R>> {
+            // Dropped at the end of this closure, before interrupts return.
+            let window = frame::RemoteCopyWindow::open()?;
+            let phys = match user_page_phys_once(pml4, va, need_writable) {
+                Ok(phys) => phys,
+                Err(e) => return Ok(Found::Absent(e)),
+            };
+            window.announce(phys);
+            if user_page_phys_once(pml4, va, need_writable).ok() != Some(phys) {
+                return Ok(Found::Moved);
+            }
+            let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
+            let touch = touch.take().ok_or(KernelError::InternalError)?;
+            Ok(Found::Touched(touch(kva)))
+        })?;
+        match found {
+            Found::Touched(result) => return Ok(result),
+            Found::Moved => {}
+            Found::Absent(_) if !resolved => {
+                resolved = true;
+                if !try_resolve_remote(pml4, va, need_writable) {
+                    return Err(KernelError::InvalidAddress);
+                }
+            }
+            Found::Absent(e) => return Err(e),
+        }
     }
-    user_page_phys_once(pml4, va, need_writable)
+    Err(KernelError::InvalidAddress)
 }
+
+/// How many times [`touch_remote_page`] looks a page up before calling it
+/// unusable: a page that moves between the two walks of every one of them
+/// is being remapped faster than it can be copied.
+const REMOTE_PAGE_ATTEMPTS: usize = 64;
 
 /// One raw page-table walk, with no attempt to resolve what it finds.
 fn user_page_phys_once(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
@@ -599,7 +702,7 @@ fn try_resolve_remote(pml4: u64, va: u64, need_writable: bool) -> bool {
 ///
 /// A page that is absent but committed is populated first, exactly as a real
 /// read fault by the owning process would have populated it — see
-/// [`user_page_phys`].
+/// [`touch_remote_page`].
 ///
 /// # Errors
 ///
@@ -624,24 +727,24 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
     if end > USER_SPACE_END {
         return Err(KernelError::InvalidAddress);
     }
-    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
-
     let mut copied: usize = 0;
     let mut va = user_src;
     while copied < len {
         let page_off = va & (PAGE_SIZE - 1);
         let in_page = (PAGE_SIZE - page_off) as usize;
         let n = in_page.min(len - copied);
-        let phys = user_page_phys(pml4, va, false)?;
-        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
-        // SAFETY: `phys` is a mapped physical address returned by translate();
-        // the HHDM maps all physical memory, so `kva` is a valid readable
-        // kernel pointer to `n` bytes that stay within a single 4 KiB page.
-        let src = unsafe { core::slice::from_raw_parts(kva as *const u8, n) };
         let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
-        dst.get_mut(copied..next)
-            .ok_or(KernelError::InvalidAddress)?
-            .copy_from_slice(src);
+        let chunk = dst
+            .get_mut(copied..next)
+            .ok_or(KernelError::InvalidAddress)?;
+        touch_remote_page(pml4, va, false, |kva| {
+            // SAFETY: `kva` is the HHDM address of `va`, in a page the
+            // target maps and that cannot be freed while this runs
+            // (`touch_remote_page`); the HHDM maps all physical memory, and
+            // the `n` bytes from `kva` stay within that one 4 KiB page.
+            let src = unsafe { core::slice::from_raw_parts(kva as *const u8, n) };
+            chunk.copy_from_slice(src);
+        })?;
         copied = next;
         va = va
             .checked_add(n as u64)
@@ -660,7 +763,7 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
 /// "Must be" in the sense of `get_user_pages(FOLL_WRITE)`, not in the sense of
 /// a precondition the caller has to arrange: a destination page that is absent
 /// but committed is populated, and one that is present-but-CoW has its CoW
-/// broken, before the write — see [`user_page_phys`]. A target that has just
+/// broken, before the write — see [`touch_remote_page`]. A target that has just
 /// forked has an entirely CoW address space, so without that this would fail on
 /// every page of the most ordinary case there is.
 ///
@@ -686,24 +789,22 @@ pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()>
     if end > USER_SPACE_END {
         return Err(KernelError::InvalidAddress);
     }
-    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
-
     let mut copied: usize = 0;
     let mut va = user_dst;
     while copied < len {
         let page_off = va & (PAGE_SIZE - 1);
         let in_page = (PAGE_SIZE - page_off) as usize;
         let n = in_page.min(len - copied);
-        let phys = user_page_phys(pml4, va, true)?;
-        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
         let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
         let chunk = src.get(copied..next).ok_or(KernelError::InvalidAddress)?;
-        // SAFETY: `phys` is a mapped, writable physical address (checked via
-        // translate_flags); the HHDM maps all physical memory, so `kva` is a
-        // valid writable kernel pointer to `n` bytes within a single 4 KiB
-        // page.
-        let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
-        out.copy_from_slice(chunk);
+        touch_remote_page(pml4, va, true, |kva| {
+            // SAFETY: `kva` is the HHDM address of `va`, in a page the
+            // target maps writable and that cannot be freed while this runs
+            // (`touch_remote_page`); the `n` bytes from `kva` stay within
+            // that one 4 KiB page.
+            let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
+            out.copy_from_slice(chunk);
+        })?;
         copied = next;
         va = va
             .checked_add(n as u64)
@@ -1218,6 +1319,128 @@ pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()>
 }
 
 // ---------------------------------------------------------------------------
+// Unmapping user memory
+// ---------------------------------------------------------------------------
+
+/// Unmap `[start, end)` from the **user half** of `pml4`, and free each
+/// backing frame once its last mapped sub-page is gone.
+///
+/// Every syscall that tears down part of a user address space comes through
+/// here -- native `munmap`/`shm_unmap`, and the Linux ABI's `munmap`, `brk`
+/// shrink, `MADV_DONTNEED`, and anonymous and file `MAP_FIXED` replacement --
+/// so the two properties below hold for all of them at once rather than at
+/// each caller.
+///
+/// # Only the user half, whatever the caller passes
+///
+/// The range is clamped to `[0, USER_SPACE_END)` before anything is touched.
+/// The kernel half of every PML4 is the *shared* kernel page tables: a
+/// kernel-half address unmapped "from a process" is unmapped from the kernel
+/// and every process at once, and its frame returned to the allocator while the
+/// kernel still uses it.  Until 2026-09-26 native `SYS_MUNMAP` did exactly that
+/// for any address a process chose, with no capability
+/// (known-issues.md `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  Callers validate
+/// their arguments first and must keep doing so -- the clamp is the second
+/// line, so the next caller that forgets cannot reach the kernel half either.
+///
+/// # No frame is freed while a TLB can still reach it
+///
+/// Cleared entries are collected in a [`crate::mm::tlb_gather::TlbGather`]:
+/// one shootdown covers the whole range (a full flush past its threshold), and
+/// only after it do the frames go back to the allocator.  Freeing first --
+/// which native `munmap` did -- leaves a window in which another CPU running a
+/// thread of this process writes through its stale TLB entry into a frame
+/// that already belongs to someone else.  Batching also replaces the
+/// one-IPI-per-4 KiB-page flushes the Linux path used to make.
+///
+/// # Granularity
+///
+/// 4 KiB: a 16 KiB frame can be shared by neighbouring mappings with different
+/// permissions, and the range need not be frame-aligned at either end, so a
+/// frame is freed (and its RSS charge released) only when no sub-page of it is
+/// still mapped.  Frames the allocator does not own (MMIO) are unmapped but
+/// never freed.  `free_frame` is refcount-aware, so a frame still mapped by
+/// another address space (CoW, shared memory) survives.
+///
+/// # Swapped-out pages
+///
+/// A page whose frame is in swap has a swap entry where its PTE was: it is
+/// cleared like a present one, and gives its share of the swap slot back
+/// ([`crate::mm::swap::release_swap_pte`]; the slot is freed with the last
+/// part that named it). Until 2026-10-03 such a page was skipped as absent,
+/// leaking the slot and leaving the entry behind.
+///
+/// Returns the number of 4 KiB pages that were mapped -- present, or in
+/// swap -- and are now unmapped; absent pages are skipped, so the call is
+/// idempotent.
+pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::tlb_gather::TlbGather;
+    use page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
+
+    let end = end.min(USER_SPACE_END);
+    if start >= end {
+        return 0;
+    }
+    let hw = HW_PAGE_SIZE as u64;
+    let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+    let mut gather = TlbGather::new();
+    let mut unmapped = 0usize;
+    let mut va = start & !(hw.wrapping_sub(1));
+    while va < end {
+        // SAFETY: `pml4` is the caller's live page table and `va` is below
+        // USER_SPACE_END (clamped above), so this never touches the shared
+        // kernel half.  `unmap_4k` reports an absent page as `Err`.  The TLB
+        // is invalidated by `gather` before any frame it held is freed.
+        if let Ok(phys4k) = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) } {
+            unmapped = unmapped.saturating_add(1);
+            let frame_va = va & !frame_mask;
+            // Still mapped *into this frame* by a sibling sub-page. The
+            // sub-pages of one group can point into different frames (a
+            // partial copy-on-write break; a sub-page filled beside a shared
+            // sibling's frame), so "a sibling is present" is not the
+            // question: until 2026-10-07 it was, and unmapping the last
+            // sub-page in its own frame kept that frame's reference forever.
+            let unmapped_frame = phys4k & !frame_mask;
+            let still_mapped = (0..HW_PAGES_PER_FRAME).any(|i| {
+                let sibling = frame_va.saturating_add((i as u64).saturating_mul(hw));
+                page_table::translate(pml4, VirtAddr::new(sibling))
+                    .is_some_and(|p| p & !frame_mask == unmapped_frame)
+            });
+            let frame = PhysFrame::from_addr(phys4k & !frame_mask);
+            match frame {
+                Some(pf) if !still_mapped && frame::is_allocator_owned(pf) => {
+                    crate::mm::accounting::uncharge(pml4, 1);
+                    gather.add(frame_va, pf.addr());
+                }
+                _ => {
+                    if !still_mapped {
+                        // Device memory: its mapping goes, the memory stays.
+                        crate::mm::accounting::uncharge(pml4, 1);
+                    }
+                    gather.add_flush_only(va);
+                }
+            }
+        } else {
+            // SAFETY: `pml4` is the caller's live page table and `va` a user
+            // address below USER_SPACE_END, as for `unmap_4k` above.
+            let released = unsafe { crate::mm::swap::release_swap_pte(pml4, va) };
+            if released {
+                // A swap entry maps no frame: nothing for the gather to
+                // flush or free.
+                unmapped = unmapped.saturating_add(1);
+            }
+        }
+        va = match va.checked_add(hw) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    gather.finish();
+    unmapped
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1227,6 +1450,40 @@ pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()>
 /// the kernel-context shortcut) to verify the actual range and
 /// page-table checks work correctly.
 pub fn self_test() -> KernelResult<()> {
+    // Test 0: the span arithmetic on its own (`check_user_span` bypasses it
+    // in this kernel context, so its shared half is driven directly).  The
+    // edges: the last user byte is in, one past it is out, and a length that
+    // wraps is out however small the pointer.
+    for (ptr, len, ok) in [
+        (0x1000_u64, 16_usize, true),
+        (0_u64, 1_usize, false),
+        (USER_SPACE_END - 16, 16, true),
+        (USER_SPACE_END - 16, 17, false),
+        (0x1000, usize::MAX, false),
+        (0x1000, 1 << 62, false),
+    ] {
+        if user_span_end(ptr, len).is_ok() != ok {
+            crate::serial_println!(
+                "[user]   FAIL: user_span_end({:#x}, {:#x}) should be {}",
+                ptr,
+                len,
+                if ok { "a span" } else { "refused" }
+            );
+            return Err(KernelError::InternalError);
+        }
+        // `access_ok`'s half differs in one place: a null pointer passes, the
+        // copy faulting at it.
+        if access_ok_end(ptr, len).is_ok() != (ok || ptr == 0) {
+            crate::serial_println!(
+                "[user]   FAIL: access_ok_end({:#x}, {:#x}) should be {}",
+                ptr,
+                len,
+                if ok || ptr == 0 { "a span" } else { "refused" }
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     // Test 1: Zero-length buffer is always valid.
     validate_user_range(0x1000, 0, false)?;
 
@@ -1408,6 +1665,173 @@ pub fn self_test_cross_as_resolution() -> KernelResult<()> {
     Ok(())
 }
 
+/// Self-test: user-range teardown never reaches the kernel half, frees a frame
+/// only when its last sub-page goes, and native `munmap` refuses every range
+/// that is not wholly the caller's.
+///
+/// The kernel-half case is tested against a **real mapped kernel page** -- a
+/// `vmalloc` allocation, looked up in the kernel's own page table -- which the
+/// ring-3 probe (`proc::elf::build_munmap_abi_test_elf`) deliberately avoids.
+/// If the clamp in [`unmap_user_range`] regresses, what this test loses is its
+/// own scratch page, and it says so, rather than a kernel stack.
+pub fn self_test_unmap_user_range() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    crate::serial_println!("[user] Running user-range teardown self-test...");
+
+    let target = pcb::create("user-unmap-target", 0);
+    let result = unmap_user_range_tests(target);
+    pcb::destroy(target);
+
+    result?;
+    crate::serial_println!(
+        "[user]   unmap_user_range: a mapped kernel page (vmalloc) survives a range that \
+         names it; frames go only with their last sub-page; munmap refuses the kernel half, \
+         overflow, zero length and misalignment, and accepts the last user frame: OK"
+    );
+    Ok(())
+}
+
+/// Body of [`self_test_unmap_user_range`], split out so the caller can destroy
+/// the throwaway process on every exit path.
+fn unmap_user_range_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::pcb;
+    use crate::syscall::handlers::munmap_range;
+
+    let frame_size = FRAME_SIZE as u64;
+    let fail = |what: &str| {
+        crate::serial_println!("[user]   FAIL: unmap_user_range: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    // --- munmap's argument gate, on literals --------------------------------
+    const UNMAPPED: u64 = 0x0000_0030_0000_0000;
+    const LAST_USER_FRAME: u64 = 0x0000_7FFF_FFFF_C000;
+    const KERNEL_HOLE: u64 = 0xFFFF_E800_0000_0000;
+    let refusals: [(u64, u64, KernelError); 6] = [
+        (KERNEL_HOLE, 0x4000, KernelError::InvalidArgument),
+        (LAST_USER_FRAME, 0x8000, KernelError::InvalidArgument),
+        (0xFFFF_FFFF_FFFF_C000, 0x8000, KernelError::InvalidArgument),
+        (UNMAPPED, u64::MAX, KernelError::InvalidArgument),
+        (UNMAPPED, 0, KernelError::InvalidArgument),
+        (
+            UNMAPPED.wrapping_add(0x1000),
+            0x4000,
+            KernelError::BadAlignment,
+        ),
+    ];
+    for (addr, len, want) in refusals {
+        if munmap_range(addr, len) != Err(want) {
+            crate::serial_println!(
+                "[user]   FAIL: munmap_range({:#x}, {:#x}) = {:?}, expected Err({:?})",
+                addr,
+                len,
+                munmap_range(addr, len),
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if munmap_range(UNMAPPED, 1) != Ok((UNMAPPED, UNMAPPED.wrapping_add(frame_size))) {
+        return fail("a one-byte length did not round up to one frame");
+    }
+    if munmap_range(LAST_USER_FRAME, frame_size) != Ok((LAST_USER_FRAME, USER_SPACE_END)) {
+        return fail("the last user frame, ending exactly at USER_SPACE_END, was refused");
+    }
+
+    // --- the clamp, against a real mapped kernel page -----------------------
+    let kernel_pml4 = page_table::kernel_pml4_phys()?;
+    let scratch = crate::mm::vmalloc::vmalloc(FRAME_SIZE)?;
+    let kva = scratch as u64;
+    let clamp_result = (|| {
+        if page_table::translate(kernel_pml4, VirtAddr::new(kva)).is_none() {
+            return fail("the vmalloc scratch page is not mapped in the kernel's table");
+        }
+        // The page itself, and a range that starts in the user half and runs
+        // through it.  Neither may touch it.
+        let direct = unmap_user_range(kernel_pml4, kva, kva.wrapping_add(frame_size));
+        let spanning = unmap_user_range(kernel_pml4, LAST_USER_FRAME, kva.wrapping_add(frame_size));
+        if direct != 0 || spanning != 0 {
+            return fail("a kernel-half range reported pages unmapped");
+        }
+        if page_table::translate(kernel_pml4, VirtAddr::new(kva)).is_none() {
+            return fail("the clamp let a kernel page be unmapped");
+        }
+        Ok(())
+    })();
+    // SAFETY: `scratch` came from `vmalloc` above and is freed exactly once,
+    // whatever the checks found (a page they had unmapped would already be
+    // gone, and `vfree` reports that rather than faulting).
+    let freed = unsafe { crate::mm::vmalloc::vfree(scratch) };
+    clamp_result?;
+    freed?;
+
+    // --- frames go only with their last sub-page ----------------------------
+    let Some(pml4) = pcb::get_pml4(target).filter(|&p| p != 0) else {
+        return fail("test process has no PML4");
+    };
+    let base: u64 = 0x0000_0031_0000_0000;
+    let end = base.wrapping_add(frame_size.wrapping_mul(2));
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    pcb::add_vma(
+        target,
+        Vma {
+            start: base,
+            end,
+            kind: VmaKind::Anonymous,
+            flags: rw,
+            fork: crate::mm::vma::ForkPolicy::COPY,
+        },
+    )?;
+    for va in [base, base.wrapping_add(frame_size)] {
+        if !pcb::try_resolve_fault(target, va, 1 << 2) {
+            return fail("a demand fault in the scratch VMA did not resolve");
+        }
+    }
+    let Some(first) = page_table::translate(pml4, VirtAddr::new(base))
+        .and_then(|p| PhysFrame::from_addr(p & !frame_size.wrapping_sub(1)))
+    else {
+        return fail("the first scratch frame is not mapped after its fault");
+    };
+    // RSS moves exactly when a frame is handed over to be freed, so it is the
+    // deterministic witness; a refcount read after the free could already
+    // belong to the frame's next owner.
+    let rss = || crate::mm::accounting::query(pml4).map_or(u64::MAX, |s| s.rss_frames);
+    let rss_mapped = rss();
+    // One 4 KiB sub-page: the frame is still in use by its other three.
+    if unmap_user_range(pml4, base, base.wrapping_add(0x1000)) != 1 {
+        return fail("unmapping one sub-page did not report one page");
+    }
+    if page_table::translate(pml4, VirtAddr::new(base.wrapping_add(0x1000))).is_none()
+        || frame::refcount(first) == 0
+        || rss() != rss_mapped
+    {
+        return fail("unmapping one sub-page took the rest of the frame with it");
+    }
+    // The rest of both frames: 3 + 4 sub-pages.
+    if unmap_user_range(pml4, base, end) != 7 {
+        return fail("unmapping the rest did not report seven pages");
+    }
+    if page_table::translate(pml4, VirtAddr::new(base)).is_some()
+        || page_table::translate(pml4, VirtAddr::new(end.wrapping_sub(0x1000))).is_some()
+    {
+        return fail("a sub-page is still mapped after its range was unmapped");
+    }
+    if rss() != rss_mapped.wrapping_sub(2) {
+        return fail("the two frames were not released when their last sub-pages went");
+    }
+    // Idempotent: nothing left to unmap is not an error.
+    if unmap_user_range(pml4, base, end) != 0 {
+        return fail("unmapping an empty range reported pages");
+    }
+    Ok(())
+}
+
 /// Bases for the four scratch regions the cross-AS self-test maps into its
 /// target. 192 GiB up, clear of every heap/mmap/stack window, and spaced
 /// 256 KiB apart so no two can be coalesced into one VMA.
@@ -1456,6 +1880,7 @@ fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
                 end: start.wrapping_add(frame_size),
                 kind: VmaKind::Anonymous,
                 flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
         )?;
     }
@@ -1562,7 +1987,7 @@ fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
     // Fork the address space for real: this is what makes the page shared.
     // SAFETY: `target_pml4` is a live PML4 owned by a process that has never
     // run — nothing can be mutating its page tables concurrently.
-    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(target_pml4)? };
+    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(target_pml4, &[])? };
     let verdict = cross_as_cow_test(target_pml4, child_pml4, cow_va, orig_phys, hhdm);
     // SAFETY: `child_pml4` came from `clone_address_space_cow`, is loaded in no
     // CR3, and belongs to no process — nothing else can be using it.

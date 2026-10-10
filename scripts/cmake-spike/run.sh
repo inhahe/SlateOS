@@ -112,6 +112,15 @@ rm -rf "$FINDROOT"
 mkdir -p "$FINDROOT/include" "$FINDROOT/lib"
 cp -rn "$ZINC/x86_64-linux-musl/." "$FINDROOT/include/" 2>/dev/null
 cp -rn "$ZINC/generic-musl/." "$FINDROOT/include/" 2>/dev/null
+# And our header overlay (posix/include) over musl's, as the third thing this
+# spike found -- 2026-10-06, the first build configured through the link
+# wrapper: a `find_path` lands on this directory and puts it on the compile
+# line as an -I, ahead of the overlay the wrapper appends last, so
+# libarchive's <stdlib.h> was musl's alone. Configure had found
+# arc4random_buf in our libc.a; the compile then saw no declaration of it.
+# Each overlay header #include_next's musl's, which zig's own include
+# directories still hold behind every -I.
+cp -r "$SLATE_ROOT/posix/include/." "$FINDROOT/include/" || exit 1
 cp "$SYSROOT/libc.a" "$FINDROOT/lib/" || exit 1
 if [ ! -f "$FINDROOT/include/iconv.h" ]; then
     echo "NO_MUSL_HEADERS — $ZINC did not yield iconv.h, so the sysroot below is"
@@ -120,11 +129,26 @@ if [ ! -f "$FINDROOT/include/iconv.h" ]; then
 fi
 echo "SYSROOT_HEADERS=$(find "$FINDROOT/include" -name '*.h' | wc -l)"
 
+# CONFIGURED AND BUILT THROUGH THE LINK WRAPPER, so that every probe
+# configure makes -- check_function_exists, check_symbol_exists, try_compile
+# -- links against our libc.a and is answered by it rather than by zig's musl
+# (known-issues D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL). Measured
+# 2026-10-06 by configuring both ways and diffing the caches: through zig's
+# musl, cmake went without arc4random, arc4random_buf, closefrom and
+# close_range, and KWSys without backtrace, cxxabi demangling and dladdr --
+# every one of which our libc has. Cross mode (CMAKE_SYSTEM_NAME) keeps any
+# probe from being run on the host, and the build then links each program
+# against our libc.a: nothing it builds is run here (`cmake --install` below
+# is the host cmake's).
+mkdir -p "$SPIKE_LIBS"
+cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+
 "$HOST_CMAKE" -S "cmake-$VER" -B bld \
     -DCMAKE_SYSTEM_NAME=Linux \
     -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
-    -DCMAKE_C_COMPILER="$SLATE_CC" \
-    -DCMAKE_CXX_COMPILER="$SLATE_CXX" \
+    -DCMAKE_C_COMPILER="$SLATE_LINK_CC" \
+    -DCMAKE_CXX_COMPILER="$SLATE_LINK_CXX" \
     -DCMAKE_FIND_ROOT_PATH="$FINDROOT" \
     -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
     -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -143,17 +167,19 @@ tail -25 conf.log
 echo "BUILD_EXIT=$?"
 grep -iE "^.*error" build.log | head -20
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled musl.
-# libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately not linked — it and libc.a each carry a panic
-# handler and collide on __rustc::rust_begin_unwind.
-mkdir -p "$SPIKE_LIBS"
-cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
-
-CXXRT="$(slate_zig_cxx_runtime)" || exit 1
-echo "CXX_RUNTIME_ARCHIVES:"
-printf '%s\n' "$CXXRT"
+# The decisive step: a link against SlateOS's libc and nothing else, through
+# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
+# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
+# and zig's compiler runtime behind it, which is zig's own order (the
+# wrapper's comment says why the order matters). Not zig's c++ driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
+# handler and collide on __rustc::rust_begin_unwind. (The build above linked
+# through the same wrapper; this link is the one measured, symbol by symbol.)
+echo "LINK_WRAPPER=$SLATE_LINK_CXX:"
+grep '^libs=' "$SLATE_LINK_CXX"
 
 # Take the object list from cmake's own build rather than globbing: the tree
 # ships Tests/ and Utilities/ subtrees whose objects the real link does not use.
@@ -171,16 +197,19 @@ if [ -z "$OBJS" ]; then
 fi
 
 # Every static archive the build produced, which is where CMakeLib and the
-# bundled third-party libraries live. Ordered by the linker's needs is not
-# something we can know here, so the whole set is passed twice for the same
-# reason libc.a is.
+# bundled third-party libraries live, in no particular order: ld.lld takes a
+# symbol from any archive on the line, wherever the reference is, so the
+# order the linker needs is not something this has to know. (They were
+# passed twice until 2026-10-01, for GNU ld's sake; the binary is
+# byte-identical either way.)
 LIBS="$(find bld -name '*.a' | sort | tr '\n' ' ')"
 echo "ARCHIVE_COUNT=$(echo "$LIBS" | wc -w)"
 
+# Removed first: ld.lld leaves an existing output alone when a link fails,
+# and the check below would then stage the last run's binary as this one's.
+rm -f cmake-slateos
 # shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_CXX" -static -nostdlib -o cmake-slateos $OBJS $LIBS $LIBS $CXXRT \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
+"$SLATE_LINK_CXX" -o cmake-slateos $OBJS $LIBS 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
 MISSING="/tmp/cmake_missing-$SLATE_LANE.txt"
@@ -269,4 +298,5 @@ if [ -x cmake-slateos ]; then
     echo "SLATE_CMAKE_BUILT"
 else
     echo "NO_SLATE_BINARY"
+    exit 1
 fi

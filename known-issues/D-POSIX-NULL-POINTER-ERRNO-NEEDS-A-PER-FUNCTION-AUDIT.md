@@ -1,5 +1,5 @@
 ### [B] D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT. The rest of `posix/`'s `is_null() -> EFAULT` checks have not been classified against glibc — 2026-08-13 — OPEN (tech debt)
-**Status:** OPEN — tech debt in `posix/**`, which lane D owns since the six-lane split of 2026-09-22; the entry keeps lane B's tag as the record of who found it.
+**Status:** OPEN — tech debt in `posix/**`, which lane D owns since the six-lane split of 2026-09-22; the entry keeps lane B's tag as the record of who found it. Its last item, `read`/`write` on the kernel's kinds, waits on lane A since 2026-10-06 (`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
 
 **Where:** `posix/src/**` — every `if p.is_null() { set_errno(EFAULT); … }`.
 
@@ -540,8 +540,9 @@ Sampled and wrong:
   `ENOSYS` it tests for (§1108). `isastream` called a closed descriptor "not a
   stream"; glibc says `EBADF`.
 
-Sampled and right: `setkey`'s `EFAULT` (crypt.rs: the §303 substitute, with no
-upstream to check against since glibc 2.39 dropped `setkey`); `TIOCSPGRP`
+Sampled and right: `setkey`'s `EFAULT` (des.rs since 2026-10-06, crypt.rs
+before: the §303 substitute, with no upstream to check against since glibc
+2.39 dropped `setkey`); `TIOCSPGRP`
 (ioctl.rs: `ENOTTY` before the `get_user`, as `tiocspgrp`); `perf_event_open`
 (`perf_copy_attr`'s order); `SECCOMP_GET_ACTION_AVAIL`; `getpwuid_r` (the §303
 substitute — upstream's answer depends on the NSS backend); the NULL pointers of
@@ -886,6 +887,11 @@ failure tokens on, and probed there.
 - **`crypt_r(k, s, NULL)`** stays NULL, now documented as the substitute for
   the fault libxcrypt takes writing its token there; it is `EFAULT`.
 - **`encrypt(NULL, …)`, `setkey(NULL)`** keep `EFAULT` for the same reason.
+  (Since 2026-10-06 they are real DES, in des.rs, and still do.)
+- **`crypt_rn(k, s, NULL, size)`** and **`crypt_gensalt_rn(…, NULL, size)`**
+  (2026-10-06) are `EFAULT` for the same reason when `size` is positive --
+  libxcrypt faults writing its token -- and `ERANGE` when it is not, where
+  libxcrypt writes no token and answers `ERANGE` itself.
 - Beside them, the finding of the pass: every failure was NULL where
   libxcrypt returns the token, and three of libxcrypt's refusals were missing
   -- `B-D-CRYPT-FAILED-WITH-NULL` (new, fixed with it).
@@ -1118,6 +1124,19 @@ read at end of file, of an empty non-blocking pipe or of a directory says
 habit — test at each per-kind copy — and it has to be done arm by arm, because
 several arms (eventfd, timerfd, inotify) dereference the buffer themselves
 (design-decisions §1107, point 2).
+**Half done 2026-10-06.** Every kind this library reads and writes itself now
+answers as Linux 6.6 does, measured call by call, a zero count included:
+- eventfd and timerfd check the count first and fault after taking what
+  they hold;
+- an inotify queue takes one event and then faults;
+- epoll is `EINVAL` and an inotify write `EBADF`, whatever the count;
+- a socket with no connection is `ENOTCONN` to read, 0 at a count of 0,
+  and `EPIPE` with `SIGPIPE` to write.
+
+The kernel's kinds -- files, pipes, socketpairs, terminals -- wait on the
+kernel checking its own state before the buffer
+(`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`,
+with Linux's table): only it knows the end of a file or an empty pipe.
 
 Six habits carry forward, one per pass that produced one. From the
 eleventh pass: **port an upstream stub as a stub** — validation in front of its

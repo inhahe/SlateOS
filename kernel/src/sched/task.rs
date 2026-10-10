@@ -40,14 +40,47 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// for the idle task.
 pub type TaskId = u64;
 
-/// Counter for generating unique task IDs.
+/// Which PI futex a blocked task waits on, as the futex subsystem keys it:
+/// `(addr, space)` -- a virtual address and its address space for a private
+/// word, a physical address and the shared key space for a word on a page
+/// shared by design (`ipc::futex::FutexKey`).
+///
+/// Opaque to the scheduler, which only stores it for a blocked task and
+/// hands it back to the futex subsystem's owner lookup while walking a
+/// priority-inheritance chain.  A bare virtual address is not enough: the
+/// walk runs in whichever task is boosting, and an address means nothing
+/// without the address space it was taken in.
+pub type PiWaitKey = (u64, u64);
+
+/// Counter for task ids **and process ids**: one id space, as Linux's.
+///
+/// A process's id is drawn from here too (`proc::pcb`), and its first thread
+/// is given that same number as its task id (`proc::thread`), so a process's
+/// id is its main thread's id and `gettid() == getpid()` there. Every other
+/// task, kernel tasks included, takes a fresh number, so no task id is ever
+/// some *other* process's id. Until 2026-10-01 the two came from separate
+/// counters that both started at 1: `/proc/<n>`, keyed by task id, then
+/// showed whichever process happened to have the number `n`, and `ps`
+/// listed numbers `kill` could not use
+/// (known-issues A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS).
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Allocate a fresh, unique task ID.
-fn alloc_task_id() -> TaskId {
+/// Allocate a fresh, unique id from the space task ids and process ids share.
+pub fn alloc_id() -> TaskId {
     // Relaxed is fine: we only need uniqueness, not ordering relative
     // to other memory operations.
     NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The id [`alloc_id`] would hand out next, without consuming it.
+#[must_use]
+pub fn peek_next_id() -> TaskId {
+    NEXT_TASK_ID.load(Ordering::Relaxed)
+}
+
+/// Allocate a fresh, unique task ID.
+fn alloc_task_id() -> TaskId {
+    alloc_id()
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +183,111 @@ impl Context {
 /// Number of priority levels.  0 = highest (real-time), 31 = lowest
 /// (idle / background).
 pub const NUM_PRIORITIES: usize = 32;
+
+/// Levels `0..RT_LEVELS` are the **real-time band**: where `SCHED_FIFO` and
+/// `SCHED_RR` threads run, above every ordinary thread (nice -20 is level 8,
+/// [`RT_LEVELS`] itself), as `scheduler.txt` asks ("real-time levels at the
+/// top"). Nothing ordinary is lifted into it by the scheduler: the
+/// interactive boost and the anti-starvation boost both stop at its floor.
+/// Priority inheritance does lift a holder into it, which is the point of
+/// inheritance. Kernel tasks may still be placed there (the audio pump).
+///
+/// Eight levels for POSIX's 99 real-time priorities ([`rt_level`]): several
+/// to a level, as Linux's O(1) scheduler had them; a desktop needs few.
+pub const RT_LEVELS: u8 = 8;
+
+/// A `SCHED_RR` thread's time slice: Linux's `RR_TIMESLICE`, 100 ms
+/// (`sched_rr_get_interval` reports it).
+pub const RR_TIMESLICE_TICKS: u32 = 10;
+
+/// How a thread is scheduled: Linux's policies, numbered as Linux numbers
+/// them (`sched_setscheduler`, `sched_getscheduler`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedPolicy {
+    /// `SCHED_OTHER` (0): ordinary time-sharing at its nice level.
+    #[default]
+    Other,
+    /// `SCHED_FIFO` (1): real-time; runs until it blocks, yields or a
+    /// higher level preempts it -- no time slice.
+    Fifo,
+    /// `SCHED_RR` (2): real-time, sharing its level in
+    /// [`RR_TIMESLICE_TICKS`] slices.
+    Rr,
+    /// `SCHED_BATCH` (3): ordinary, but never given the interactive boost --
+    /// Linux's "assume CPU-bound".
+    Batch,
+    /// `SCHED_IDLE` (5): runs only when nothing else will, at the lowest
+    /// level.
+    Idle,
+}
+
+impl SchedPolicy {
+    /// The policy Linux numbers `policy`, if this kernel has it
+    /// (`SCHED_DEADLINE` (6) it has not).
+    #[must_use]
+    pub const fn from_linux(policy: u32) -> Option<Self> {
+        match policy {
+            0 => Some(Self::Other),
+            1 => Some(Self::Fifo),
+            2 => Some(Self::Rr),
+            3 => Some(Self::Batch),
+            5 => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    /// Linux's number for the policy.
+    #[must_use]
+    pub const fn linux(self) -> u32 {
+        match self {
+            Self::Other => 0,
+            Self::Fifo => 1,
+            Self::Rr => 2,
+            Self::Batch => 3,
+            Self::Idle => 5,
+        }
+    }
+
+    /// `SCHED_FIFO` or `SCHED_RR`.
+    #[must_use]
+    pub const fn is_realtime(self) -> bool {
+        matches!(self, Self::Fifo | Self::Rr)
+    }
+}
+
+/// The level a real-time priority runs at: POSIX's 1..=99 (99 most urgent)
+/// spread over the [`RT_LEVELS`] levels of the band, 99 at level 0 and 1 at
+/// level 7. A priority outside 1..=99 is clamped into it.
+#[must_use]
+pub const fn rt_level(rt_priority: u8) -> u8 {
+    let p = if rt_priority == 0 {
+        1
+    } else if rt_priority > 99 {
+        99
+    } else {
+        rt_priority
+    };
+    // (p - 1) * 8 / 99 is 0..=7 for p in 1..=99; no overflow in u16.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    let step = ((p as u16 - 1) * RT_LEVELS as u16 / 99) as u8;
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        RT_LEVELS - 1 - step
+    }
+}
+
+/// A thread's scheduling attributes as `sched_setscheduler` sets them and
+/// `sched_getscheduler`/`sched_getparam` report them (the thread's nice is
+/// its process's, kept by `proc::priority`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SchedAttr {
+    /// The policy.
+    pub policy: SchedPolicy,
+    /// 1..=99 under `SCHED_FIFO`/`SCHED_RR`, 0 under any other policy.
+    pub rt_priority: u8,
+    /// `SCHED_RESET_ON_FORK`.
+    pub reset_on_fork: bool,
+}
 
 /// Priority level for the idle task (lowest possible).
 // Truncation: NUM_PRIORITIES is 32, so 31 fits in u8.
@@ -312,6 +450,23 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, so no atomics needed.
     pub pending_wake: bool,
+    /// Created by [`spawn_suspended`](super::spawn_suspended) and not yet
+    /// [`admit`](super::admit)ted: the task has never run, and only `admit`
+    /// may make it runnable.
+    ///
+    /// Its state is `Blocked` -- or `Suspended`, if it was suspended before
+    /// its admission -- and until 2026-10-09 that was all there was to say,
+    /// so anything that ends a `Blocked` or `Suspended` state could start it:
+    /// a [`wake`](super::wake) from a stale wait-queue entry naming a reused
+    /// id, or the [`resume`](super::resume) of a container thawed while a
+    /// process was joining it. A task started that way ran before its creator
+    /// had finished registering it, the race the two-phase spawn exists to
+    /// close. Now a wake leaves such a task be -- one that has not started
+    /// cannot be waiting for anything -- and `resume` returns it to
+    /// `Blocked`, still awaiting its admission.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub awaiting_admission: bool,
     /// Source location of the most recent [`block_current()`](super::block_current)
     /// call that parked this task, or `None` if it has never blocked.
     ///
@@ -355,11 +510,58 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, like `pending_wake`.
     pub sleep_timer_id: u64,
-    /// Base priority level (0 = highest, 31 = lowest).
+    /// What this task's most recent real park waited on: the kind and its
+    /// argument (a futex address, a channel handle, a pid), as the blocking
+    /// code described it to [`block_current_on`](super::block_current_on).
     ///
-    /// This is the user-assigned priority.  The effective scheduling
-    /// priority may be higher (lower number) due to interactive boost.
+    /// Not diagnostic only: `/proc/<pid>/wchan` and `/proc/<pid>/stat` field
+    /// 35 publish it. It means something only while `state` is `Blocked` --
+    /// it is left in place when the task wakes, so readers go through
+    /// [`wait_of`](super::wait_of), which answers "not waiting" for a task in
+    /// any other state. Written in the same `SCHED` critical section that
+    /// sets `Blocked`, so the two can never disagree.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub wait: crate::wchan::Wait,
+    /// Base priority level (0 = highest, 31 = lowest): the level the task
+    /// is queued at, before boosts.
+    ///
+    /// For an ordinary task this is the user-assigned priority (its nice
+    /// level, or what `SYS_THREAD_SET_PRIORITY` set); for a real-time one
+    /// ([`Self::policy`]) the level of its [`Self::rt_priority`]. The
+    /// effective scheduling priority may be higher (lower number) due to
+    /// interactive boost or inheritance.
     pub priority: u8,
+    /// How the task is scheduled ([`SchedPolicy`]): ordinary unless
+    /// `sched_setscheduler` or `SYS_THREAD_SCHEDULER` said otherwise. A new
+    /// thread or forked child takes its creator's (`sched::inherit_scheduling`),
+    /// as on Linux, and `exec` keeps it.
+    pub policy: SchedPolicy,
+    /// The POSIX real-time priority, 1..=99, of a `SCHED_FIFO`/`SCHED_RR`
+    /// task; 0 for every other policy.
+    pub rt_priority: u8,
+    /// The ordinary level the task returns to when it leaves a real-time
+    /// policy: kept while it is real-time, so a nice change made meanwhile
+    /// waits here, as Linux keeps `static_prio` beside `rt_priority`.
+    pub normal_priority: u8,
+    /// Linux's `SCHED_RESET_ON_FORK`: the tasks this one creates start
+    /// ordinary -- a real-time policy becomes `SCHED_OTHER` at nice 0, a
+    /// negative nice becomes 0 -- and without the flag.
+    pub reset_on_fork: bool,
+    /// Whether the thread has an rseq area registered
+    /// (`proc::thread_clone::register_rseq`): its every dispatch then owes it
+    /// the rseq work on its way back to user mode (`crate::rseq`).
+    pub rseq_registered: bool,
+    /// The thread's debug registers -- the hardware breakpoints and
+    /// watchpoints its debugger set (`sched::debugreg`): loaded when it is
+    /// switched in, none for a new thread and after an exec.
+    pub debug_regs: super::debugreg::DebugRegs,
+    /// The thread is ending itself (`proc::thread::on_thread_exit`, run by
+    /// the thread for itself): a killer leaves it to finish
+    /// ([`super::kill_task_from`] refuses it) rather than switch it out
+    /// half-way through its exit, which would leave the exit unfinished --
+    /// its process never a zombie (`super::claim_thread_exit`).
+    pub exiting: bool,
     /// Saved CPU register state.
     pub context: Context,
     /// Physical address of the stack's backing frame(s).
@@ -506,7 +708,8 @@ pub struct Task {
     /// task blocks on our lock, cleared when we release the lock.
     pub inherited_priority: Option<u8>,
 
-    /// The PI futex address this task is currently blocked on, if any.
+    /// The key of the PI futex this task is currently blocked on, if any
+    /// ([`PiWaitKey`]).
     ///
     /// Set by `futex_lock_pi()` just before the task blocks on a
     /// contended PI mutex.  Cleared when the task acquires the lock
@@ -515,13 +718,13 @@ pub struct Task {
     /// Used for **transitive priority inheritance**: when task A blocks
     /// on a lock held by B, and B is itself blocked on a lock held by
     /// C, the chain A→B→C is walked by following each task's
-    /// `blocked_on_pi_addr` to find the next owner.  This ensures C
+    /// `blocked_on_pi` to find the next owner.  This ensures C
     /// gets boosted to A's priority, preventing unbounded priority
     /// inversion chains.
     ///
     /// The chain walk is depth-limited by [`PI_CHAIN_DEPTH_LIMIT`] to
     /// prevent cycles or excessive traversal.
-    pub blocked_on_pi_addr: Option<u64>,
+    pub blocked_on_pi: Option<PiWaitKey>,
 
     /// The CPU this task last ran on.
     ///
@@ -558,6 +761,32 @@ pub struct Task {
     ///
     /// Convert to nanoseconds via `bench::cycles_to_ns(total_cycles)`.
     pub total_cycles: u64,
+
+    /// The running processor-time totals of the process this task is a
+    /// thread of, shared by all its threads, which the switch-out and the
+    /// tick charge once a CPU-time timer on the process's clock has made
+    /// them keep it ([`super::ProcCpuAccount`]). `None` for a kernel task;
+    /// set as the thread joins its process (`proc::pcb::add_thread`).
+    pub cpu_account: Option<alloc::sync::Arc<super::ProcCpuAccount>>,
+
+    /// The earliest expiry of the CPU-time timers on this thread's own
+    /// clocks, per measure (`CpuClockKind` order: PROF, VIRT, SCHED), in
+    /// nanoseconds of that measure; [`super::NO_CPU_EXPIRY`] for none. The
+    /// tick compares them with the thread's sample. Lowered when a timer is
+    /// armed, recomputed after expiries (`proc::posix_timer`); an entry left
+    /// earlier than the truth only costs the tick a look.
+    pub cpu_timer_next: [u64; 3],
+
+    /// Ticks this thread has run under a real-time policy since it last
+    /// blocked, counted while its process has an `RLIMIT_RTTIME` -- Linux's
+    /// `p->rt.timeout`, which the tick checks against that limit
+    /// (`proc::cputimer`). Cleared when it blocks ([`Self::record_block`]).
+    pub rt_run_ticks: u64,
+
+    /// The user/system split of this thread's run time last reported
+    /// (`getrusage(RUSAGE_THREAD)`, `/proc/<pid>/task/<tid>/stat`), which
+    /// keeps the next from going back ([`super::CpuSample::adjusted`]).
+    pub prev_cputime: super::PrevCputime,
 
     /// CPU time charged to this task while it was executing **user-mode**
     /// (ring 3) code, in timer ticks (USER_HZ = 100, so 10 ms each).
@@ -733,6 +962,17 @@ pub struct Task {
 }
 
 impl Task {
+    /// The task's scheduling attributes, as `sched_getscheduler` and
+    /// `sched_getparam` report them.
+    #[must_use]
+    pub const fn sched_attr(&self) -> SchedAttr {
+        SchedAttr {
+            policy: self.policy,
+            rt_priority: self.rt_priority,
+            reset_on_fork: self.reset_on_fork,
+        }
+    }
+
     /// Get the effective scheduling priority, accounting for both
     /// interactive boost and priority inheritance.
     ///
@@ -741,12 +981,23 @@ impl Task {
     /// - Inherited priority from PI futex (if any)
     ///
     /// Lower number = higher priority.
+    ///
+    /// The interactive boost is an ordinary task's alone, and never carries
+    /// it into the real-time band ([`RT_LEVELS`]): a real-time task runs at
+    /// its level, and an ordinary one at level 8 or 9 is boosted no higher
+    /// than 8. (A kernel task placed in the band keeps the boost it always
+    /// had.) Inheritance may lift any task into the band.
     #[must_use]
     pub fn effective_priority(&self) -> u8 {
-        let base = if self.interactive {
-            self.priority.saturating_sub(INTERACTIVE_BOOST)
-        } else {
+        let boosted = self.interactive && !matches!(self.policy, SchedPolicy::Batch);
+        let base = if self.policy.is_realtime() || !boosted {
             self.priority
+        } else if self.priority >= RT_LEVELS {
+            self.priority
+                .saturating_sub(INTERACTIVE_BOOST)
+                .max(RT_LEVELS)
+        } else {
+            self.priority.saturating_sub(INTERACTIVE_BOOST)
         };
         match self.inherited_priority {
             Some(inh) => base.min(inh),
@@ -784,6 +1035,10 @@ impl Task {
 
         // Reset burst counter for the next wake cycle.
         self.burst_ticks = 0;
+
+        // A real-time thread that sleeps starts its RLIMIT_RTTIME count
+        // again (Linux clears `rt.timeout` as it wakes).
+        self.rt_run_ticks = 0;
     }
 
     /// Whether the task has earned the interactive boost: its CPU bursts
@@ -1016,11 +1271,20 @@ impl Task {
             name_len: tag.len(),
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: IDLE_PRIORITY,
+            reset_on_fork: false,
+            rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
@@ -1033,11 +1297,23 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: 0,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // The BSP's alone. Task 0 is the BSP's idle task, and until the
+            // boot is done the boot itself, which blocks and is woken like any
+            // task: unpinned, a wake could queue it on an idle AP
+            // (`select_wake_cpu`), or an AP could steal it, leaving the BSP
+            // without its idle task and running the boot -- and the BSP-only
+            // work in it -- elsewhere. `running_elsewhere` and `PREV_TASK_IDS`
+            // already assume it never leaves the BSP. (An SMP boot hung at
+            // the first wake of the boot after the wake placement landed.)
+            cpu_affinity: 1,
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1103,11 +1379,20 @@ impl Task {
             name_len: idx_str,
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: IDLE_PRIORITY,
+            reset_on_fork: false,
+            rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
@@ -1120,11 +1405,21 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: cpu_index,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // Its own CPU alone, as the BSP's idle task is pinned to the BSP
+            // (`new_idle`): an idle task that a steal or a balance moved would
+            // leave its CPU with none.
+            cpu_affinity: u32::try_from(cpu_index)
+                .ok()
+                .and_then(|c| 1u64.checked_shl(c))
+                .unwrap_or(CPU_AFFINITY_ALL),
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1154,6 +1449,10 @@ impl Task {
     /// when first scheduled.  When `entry` returns, the task is
     /// automatically marked [`TaskState::Dead`].
     ///
+    /// `requested_id` is the id to give the task -- a process's first thread
+    /// is given its process's id ([`alloc_id`]) -- or `None` for a fresh one.
+    /// The scheduler checks it is free when it inserts the task.
+    ///
     /// # Errors
     ///
     /// - [`KernelError::OutOfMemory`] if stack allocation fails.
@@ -1165,12 +1464,13 @@ impl Task {
         entry: extern "C" fn(u64),
         arg: u64,
         pml4_phys: u64,
+        requested_id: Option<TaskId>,
     ) -> KernelResult<Self> {
         if task_name.is_empty() {
             return Err(KernelError::InvalidArgument);
         }
 
-        let id = alloc_task_id();
+        let id = requested_id.unwrap_or_else(alloc_task_id);
 
         // Copy name (truncate if too long).
         let mut name = [0u8; 32];
@@ -1252,11 +1552,20 @@ impl Task {
             name_len: copy_len,
             state: TaskState::Ready,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
             sleep_timer_id: 0,
+            wait: crate::wchan::Wait::NONE,
             priority,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: priority,
+            reset_on_fork: false,
+            rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context,
             stack_phys,
             stack_bottom,
@@ -1275,11 +1584,15 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: 0,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,

@@ -117,6 +117,12 @@ def advertised(text):
         if any(re.fullmatch(r"[a-z][a-z0-9_-]*", tok) for tok in body.split()):
             continue
         for opt in LONG.findall(body):
+            # An option's name never ends in a dash; a word that does is a
+            # banner's: `vmstat -w` prints `--procs-- ------memory------`,
+            # whose first word the guard above cannot see, because nothing
+            # comes before it. Eleventh false positive.
+            if opt.endswith("-"):
+                continue
             found.setdefault(opt, lit.strip())
         for c in SHORT.findall(body):
             found.setdefault("-" + c, lit.strip())
@@ -188,6 +194,7 @@ fn help() {
     println!("Usage: demo [options]");
     println!("  -r, --real       an option the parser reads");
     println!("  -g, --ghost      an option nothing reads");
+    println!("--banner-- ----columns---- --cpu--");
 }
 fn parse(a: &str) {
     match a {
@@ -222,6 +229,12 @@ def selftest():
         print("  ok    an option named only in a comment is not an advertisement")
     else:
         print("  FAIL  a comment was read as help text")
+        failures += 1
+
+    if not any(o.startswith(("--banner", "--cpu")) for o in ads):
+        print("  ok    a banner's dashed words are not options")
+    else:
+        print("  FAIL  a banner was read as options: %r" % sorted(ads))
         failures += 1
 
     if recognised(text, "--real"):

@@ -118,6 +118,7 @@
 //! `on repetition 6` — the repetition whose piece was written in full — rather
 //! than at 7 with an empty piece.
 
+use coreutils::cleanup;
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
@@ -127,7 +128,14 @@ use ere::{Regex, bre};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees the descriptors `csplit`
+// was given: a closed standard input is a read error, and a closed standard
+// output `write error`, as they are upstream -- not the `/dev/null` Rust's
+// runtime would put on each.
+coreutils::guard_std_fds!();
 
 /// Measured: `csplit --zzz-bogus; echo $?` is 1.
 const CSPLIT: Program = Program::new("csplit", 1);
@@ -234,6 +242,11 @@ fn os_from_bytes(b: &[u8]) -> OsString {
 /// (close_stdout)` does on every exit path at once. See
 /// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::restore();
+    // Upstream's `main`: the usual suspects caught, so that a piece is not
+    // left behind by a signal -- unless `-k` asked to keep them, which is
+    // why nothing is registered under it (see `Sink::create`).
+    cleanup::install();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -749,9 +762,12 @@ struct Sink<'a> {
     /// `-z` elided, which is why `csplit -z f 1` leaves a single `xx00` holding
     /// everything rather than an `xx01`.
     index: usize,
-    /// Names that have been closed and counted, in creation order, for the
-    /// cleanup an error triggers.
+    /// Every piece made and not elided, in creation order: upstream's
+    /// `files_created`, which an error's cleanup -- and a signal's -- removes.
     written: Vec<OsString>,
+    /// Whether the pieces are registered for removal on a signal: not under
+    /// `-k`, whose `delete_all_files` returns at once.
+    register: bool,
     open: Option<(OsString, File, u64)>,
     /// Where each piece's size is printed: `run_main`'s standard output, lent
     /// rather than a handle of its own. Upstream's `fprintf (stdout, ...)` is
@@ -770,8 +786,28 @@ impl Sink<'_> {
         // the "cannot open ... for writing" phrasing it uses for the *input*.
         // Measured, not assumed; the two openings really are worded
         // differently.
-        let file = File::create(&name)
-            .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
+        //
+        // Kept off descriptors 0-2, as upstream's `fopen` under `stdio--.h`
+        // is `fopen_safer`. Opened plainly, a piece took a closed standard
+        // descriptor and became that stream: the sizes, once their buffer
+        // filled, went into the piece holding descriptor 1, and a `match not
+        // found` said while the last piece held descriptor 2 was kept inside
+        // it under `-k`.
+        //
+        // Made and registered in one critical section, as upstream's
+        // `create_output_file` counts it in `files_created` with the caught
+        // signals blocked: no signal can come between the two and leave the
+        // piece behind.
+        let register = self.register;
+        let file = cleanup::change(|list| {
+            let file = stdfd::create_safer(&name)?;
+            if register {
+                cleanup::add_to(list, Path::new(&name));
+            }
+            Ok::<File, io::Error>(file)
+        })
+        .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
+        self.written.push(name.clone());
         self.open = Some((name, file, 0));
         Ok(())
     }
@@ -805,31 +841,36 @@ impl Sink<'_> {
         stdfd::close(file)
             .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
         if bytes == 0 && self.elide_empty {
-            // Upstream's `unlink`, whose failure is said and is not fatal --
-            // except that a file already gone is no failure at all.
-            if let Err(e) = std::fs::remove_file(&name)
+            // Upstream's `unlink`, in a critical section with the count, whose
+            // failure is said and is not fatal -- except that a file already
+            // gone is no failure at all.
+            if let Err(e) = cleanup::remove(Path::new(&name))
                 && e.kind() != io::ErrorKind::NotFound
             {
                 say(format!("{}: {}", quotef_os(&name), strerror(&e)).as_bytes());
             }
             // The file never existed as far as numbering is concerned.
+            self.written.pop();
             return Ok(());
         }
         if !self.quiet {
             // Unread: the stream remembers a failure for `close_stdout`.
             let _ = writeln!(self.out, "{bytes}");
         }
-        self.written.push(name);
         self.index = self.index.saturating_add(1);
         Ok(())
     }
 
+    /// Upstream's `delete_all_files`, outside a handler: every piece made,
+    /// the last first, a failure to remove one said -- unless it is already
+    /// gone -- and the run going on to its status of 1 regardless.
     fn remove_all(&mut self) {
-        for name in self.written.drain(..) {
-            // Best effort: GNU's `remove_files` reports a failure to unlink but
-            // is already on its way out with a status of 1, which is what we
-            // return regardless.
-            let _ = std::fs::remove_file(&name);
+        while let Some(name) = self.written.pop() {
+            if let Err(e) = cleanup::remove(Path::new(&name))
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                say(format!("{}: {}", quotef_os(&name), strerror(&e)).as_bytes());
+            }
         }
     }
 }
@@ -1059,14 +1100,25 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString], out: &mut Stre
         }
     };
 
-    let data = match read_input(file) {
-        Ok(d) => d,
+    let (data, unread) = match read_input(file) {
+        Ok(read) => read,
         Err(e) => {
             diag!("csplit: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let lines = split_lines(&data);
+    // Upstream reads as the split needs lines, so a read that fails is met
+    // wherever the split next needs one -- which is wherever it would have met
+    // end of file -- and is `read error` and `cleanup_fatal` there instead.
+    // See [`at_end`].
+    let read_error = unread.map(|e| format!("read error: {}", strerror(&e)));
+    let mut lines = split_lines(&data);
+    if read_error.is_some() && data.last().is_some_and(|&b| b != b'\n') {
+        // A partial last line waits in upstream's buffer for the rest of
+        // itself, which the failed read never brings: it is never a line.
+        lines.pop();
+    }
+    let read_error = read_error.as_deref();
 
     let mut sink = Sink {
         names: Namer {
@@ -1078,11 +1130,12 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString], out: &mut Stre
         elide_empty: options.elide_empty,
         index: 0,
         written: Vec::new(),
+        register: !options.keep_files,
         open: None,
         out,
     };
 
-    match split(options, &lines, &controls, &mut sink) {
+    match split(options, &lines, &controls, &mut sink, read_error) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             say(&e.message);
@@ -1101,28 +1154,44 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString], out: &mut Stre
     }
 }
 
-fn read_input(file: &OsString) -> Result<Vec<u8>, String> {
+/// The whole input, as far as it could be read, and the read error that ended
+/// it early, if one did. Only a failure to open is `Err`: that one is upstream's
+/// `error (EXIT_FAILURE, ...)` before anything else happens.
+///
+/// Standard input is descriptor 0 read directly: `io::stdin()` answers a read
+/// of a closed descriptor with end of file, where upstream's `safe_read` fails,
+/// and `csplit - 1 <&-` is `csplit: read error: Bad file descriptor` and a `0`.
+fn read_input(file: &OsString) -> Result<(Vec<u8>, Option<io::Error>), String> {
     let mut data = Vec::new();
-    if file == OsStr::new("-") {
-        io::stdin()
-            .read_to_end(&mut data)
-            .map_err(|e| format!("read error: {}", strerror(&e)))?;
-        return Ok(data);
+    // `read_to_end` keeps what it read before a failure, which is the input
+    // upstream had buffered when its next read failed.
+    let read = if file == OsStr::new("-") {
+        stdfd::RawStdin.read_to_end(&mut data)
+    } else {
+        let mut handle = File::open(file).map_err(|e| {
+            format!(
+                "cannot open {} for reading: {}",
+                quoteaf_os(file),
+                strerror(&e)
+            )
+        })?;
+        // GNU's read failure names no file at all — `csplit: read error: Is a
+        // directory` — because it reads through the same buffer for stdin and
+        // for a named file, and that buffer does not know where it came from.
+        handle.read_to_end(&mut data)
+    };
+    Ok((data, read.err()))
+}
+
+/// Where the split meets the end of the input. Upstream reads there; if the
+/// input ended in a failed read, that read is `read error` and
+/// `cleanup_fatal` -- the open file closed and counted, every file removed --
+/// in place of whatever end of file would have meant.
+fn at_end(read_error: Option<&str>) -> Result<(), Fail> {
+    match read_error {
+        Some(message) => Err(Fail::fatal(message.to_string())),
+        None => Ok(()),
     }
-    let mut handle = File::open(file).map_err(|e| {
-        format!(
-            "cannot open {} for reading: {}",
-            quoteaf_os(file),
-            strerror(&e)
-        )
-    })?;
-    // GNU's read failure names no file at all — `csplit: read error: Is a
-    // directory` — because it reads through the same buffer for stdin and for
-    // a named file, and that buffer does not know where it came from.
-    handle
-        .read_to_end(&mut data)
-        .map_err(|e| format!("read error: {}", strerror(&e)))?;
-    Ok(data)
 }
 
 /// Split into lines that each still carry their terminator.
@@ -1160,11 +1229,15 @@ fn line_matches(re: &Regex, line: &[u8], arg: &[u8]) -> Result<bool, Fail> {
 }
 
 /// The whole split. Writes every output file, including the trailing piece.
+///
+/// `read_error` is the read that ended the input early, if one did: see
+/// [`at_end`], which every place that meets the end of `lines` consults.
 fn split(
     options: &Options,
     lines: &[&[u8]],
     controls: &[Control],
     sink: &mut Sink<'_>,
+    read_error: Option<&str>,
 ) -> Result<(), Fail> {
     // `emit` is the first line not yet written; `search` is the first line a
     // regex will look at. See the module doc: they are not the same cursor.
@@ -1182,7 +1255,7 @@ fn split(
                 options,
                 control,
                 repetition,
-                lines,
+                Input { lines, read_error },
                 sink,
                 &mut emit,
                 &mut search,
@@ -1200,13 +1273,23 @@ fn split(
         }
     }
 
+    // `dump_rest_of_file`, which reads to the end of the input.
     sink.create()?;
     let rest = lines.get(emit..).unwrap_or_default();
     for line in rest {
         sink.write(line)?;
     }
+    at_end(read_error)?;
     sink.close()?;
     Ok(())
+}
+
+/// The input as [`apply`] sees it: the lines, and the read error that ended
+/// them early, if one did.
+#[derive(Clone, Copy)]
+struct Input<'a, 'b> {
+    lines: &'a [&'b [u8]],
+    read_error: Option<&'a str>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -1222,16 +1305,18 @@ fn apply(
     options: &Options,
     control: &Control,
     repetition: u64,
-    lines: &[&[u8]],
+    input: Input<'_, '_>,
     sink: &mut Sink<'_>,
     emit: &mut usize,
     search: &mut usize,
 ) -> Result<Step, Fail> {
+    let Input { lines, read_error } = input;
     let forever = control.repeat == Repeat::Forever;
     match &control.kind {
         Kind::Line(n) => {
             sink.create()?;
             if *emit >= lines.len() {
+                at_end(read_error)?;
                 // GNU's `get_first_line_in_buffer`, which runs *after* the
                 // output file has been created and exits without cleanup.
                 return Err(Fail::bare("input disappeared".to_string()));
@@ -1251,6 +1336,11 @@ fn apply(
             // closes — and so counts — the open file first.
             let boundary = target.saturating_sub(1).clamp(*emit, lines.len());
             write_range(sink, lines, *emit, boundary)?;
+            if target.saturating_sub(1) > lines.len() {
+                // The copy ran out of lines: upstream's `remove_line` read
+                // for more.
+                at_end(read_error)?;
+            }
             sink.close()?;
             *emit = advance(options, boundary, lines.len());
             *search = *emit;
@@ -1260,6 +1350,8 @@ fn apply(
             // every line was successfully written first — the section that the
             // split was supposed to *begin* has no lines to begin with.
             if *emit >= lines.len() {
+                // `no_more_lines`, which reads for the next line.
+                at_end(read_error)?;
                 return Err(Fail::fatal(format!(
                     "{}: line number out of range{}",
                     quote(&control.arg),
@@ -1272,6 +1364,9 @@ fn apply(
             sink.create()?;
             let found = find(re, lines, *search, &control.arg)?;
             let Some(m) = found else {
+                // `find_line` read for the line after the last: a failed read
+                // ends the search before anything of this piece is written.
+                at_end(read_error)?;
                 write_range(sink, lines, *emit, lines.len())?;
                 if forever {
                     sink.close()?;
@@ -1294,6 +1389,8 @@ fn apply(
                 Ok(b) => b.max(*emit),
                 Err(e) => {
                     write_range(sink, lines, *emit, lines.len())?;
+                    // The offset reached past the last line read.
+                    at_end(read_error)?;
                     return Err(e);
                 }
             };
@@ -1309,6 +1406,7 @@ fn apply(
             // where `csplit f /nomatch/` leaves a counted (then deleted) piece.
             let found = find(re, lines, *search, &control.arg)?;
             let Some(m) = found else {
+                at_end(read_error)?;
                 if forever {
                     return Ok(Step::Finished);
                 }
@@ -1318,15 +1416,16 @@ fn apply(
                     on_repetition(repetition)
                 )));
             };
-            let boundary = boundary_of(m, *offset, lines.len())
-                .ok_or_else(|| {
-                    Fail::fatal(format!(
-                        "{}: line number out of range{}",
-                        quote(&control.arg),
-                        on_repetition(repetition)
-                    ))
-                })?
-                .max(*emit);
+            let Some(boundary) = boundary_of(m, *offset, lines.len()) else {
+                // The offset reached past the last line read.
+                at_end(read_error)?;
+                return Err(Fail::fatal(format!(
+                    "{}: line number out of range{}",
+                    quote(&control.arg),
+                    on_repetition(repetition)
+                )));
+            };
+            let boundary = boundary.max(*emit);
             *emit = advance(options, boundary, lines.len());
             *search = m.saturating_add(1);
             Ok(Step::Applied)

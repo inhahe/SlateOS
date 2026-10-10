@@ -1,0 +1,6 @@
+# vobsub_damage.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 720 480
+state 1000 f2c16fe9692e15ec843dd8000e803d64
+state 5004 9e3119db8898b8f610596ed99bb3e433
+state 6000 f2c16fe9692e15ec843dd8000e803d64
+state 7250 9e3119db8898b8f610596ed99bb3e433

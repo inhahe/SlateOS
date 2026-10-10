@@ -2,6 +2,17 @@
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-09-30: inside one program, the toolkit's fields share one clipboard.**
+`guitk::clipboard` is the program's clipboard, and `TextInput`, `TextArea`
+and the code view (`CodeView`) cut, copy and paste through it, so text
+copied in one field pastes in another of the same window -- which each
+field keeping a clipboard of its own had stopped, and `apps/email` worked
+around by carrying its clipboard from field to field. Between programs
+nothing has changed: that still waits on C-Q29 below, and this module is
+the one place to connect the answer, every toolkit field already going
+through it. The applications' own clipboards (the fifteen) are lane E's to
+move onto it.
+
 **2026-09-26: the way through is put to the operator** as `open-questions.md`
 C-Q29 -- carry copy, paste and drag on the connection every program already
 has to the window system, which does not wait on A-Q15 (point 2 below), or on

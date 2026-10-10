@@ -25,3 +25,19 @@ screen once they have -- or when the user says to go ahead without the ones
 that did not. What is left is a program with no window: a background process,
 or one that closed its window and kept running. That still needs the session
 manager.
+
+**Widened 2026-10-05: the desktop's own state is not the signed-in
+user's either.** The desktop is one process, started once, whose settings
+and data are those of the account it runs as -- `HOME` and the XDG folders
+of its environment -- whoever signs in at its login screen. So two people
+who share a machine share one desktop: its settings, its pinned programs,
+the start menu's recent programs, the Run box's history, and its
+notifications, which since 2026-10-05 are kept across a restart
+(design-decisions §1468). The second person to sign in can open the
+notification pane and read the first one's notifications -- a message's
+first line, a calendar entry. On a machine one person uses, the common
+case, nothing is wrong. Clearing the pane at log out would not fix it: the
+history file is the same file for both, so clearing it would erase the first
+person's notifications and keeping it would show them at the next start.
+The fix is the same session manager: a desktop started per signed-in user,
+in that user's environment, so each has their own folders.

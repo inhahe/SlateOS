@@ -1,0 +1,12 @@
+[package]
+name = "ulcolors"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux's lib/colors.c and lib/color-names.c: --color, terminal-colors.d and colour names, ported once"
+
+[lints]
+workspace = true
+
+[dependencies]
+# ncurses' terminfo layer: whether `TERM` is set up, and its `colors`.
+terminfo = { path = "../terminfo" }

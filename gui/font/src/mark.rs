@@ -33,20 +33,24 @@
 //!
 //! # What decides that a glyph is a mark
 //!
-//! Either answer the font gives: `GDEF`'s `GlyphClassDef` class 3, **or**
-//! membership of a mark coverage table. The union, not `GDEF` alone, because
-//! `GDEF` alone is measurably wrong on shipping fonts — DejaVu Sans Mono
-//! classes `acutecomb` as class 1 (base) while its own `mark` feature carries
-//! an anchor for it, so trusting `GDEF` exclusively leaves every accent in
-//! that family unattached. And not coverage alone, because a mark the face
-//! has no anchor for would then read as a base, and the *next* mark would
-//! stack onto it.
+//! Where the face has a `GDEF` `GlyphClassDef`, its class 3 and nothing else
+//! ([`MarkPositioning::is_mark`]) -- which is how HarfBuzz reads it: a glyph's
+//! properties come from the class, and the zeroing of a mark's width, and the
+//! stepping over marks that `IgnoreMarks` asks for, read those properties
+//! alone. A glyph the face classes otherwise is not a mark even when a mark
+//! lookup covers it. The lookup still attaches it -- attachment is the
+//! lookup's business, applied in [`gpos`](crate::gpos) by coverage -- but it
+//! keeps its advance. DejaVu Sans Mono Bold Oblique classes `acutecomb` a base
+//! (class 1, 1233 units wide), and Linux Libertine's Graphite build classes
+//! `uni0308` a base and anchors it in its `mark` lookup; HarfBuzz draws both
+//! at their full width, and so does this crate since 2026-10-05. (Until then
+//! membership of a mark coverage table counted too, for the attachment this
+//! module used to do itself.)
 //!
-//! A real shaper asks Unicode instead: general category `Mn`/`Mc`/`Me` is a
-//! property of the character, which is true whatever the font says. That
-//! needs a category table this crate does not have yet; the union above
-//! covers every face that has anchors to attach with, which is every face
-//! where the answer changes anything.
+//! A face with no `GlyphClassDef` has said nothing, and the shaper asks the
+//! character instead: general category `Mn`, HarfBuzz's synthesized classes
+//! (`SubGlyph::mark`). Membership of a mark coverage table is the answer here
+//! only for a face with no classes and a caller with no character to ask.
 
 use alloc::vec::Vec;
 
@@ -83,15 +87,16 @@ pub(crate) struct MarkPositioning {
     /// Which glyphs [`is_mark`](Self::is_mark) could possibly say yes to,
     /// summarised once at parse time.
     ///
-    /// The union of both routes that function takes — `GDEF` class 3 and the
-    /// mark coverage of every subtable — so a glyph this excludes is one
-    /// neither route can claim, and the whole search can be skipped. Marks are
-    /// a small, tightly-clustered corner of a face's glyph space and ordinary
-    /// text contains none of them, so on real text this answers "no" for
+    /// The route that function takes for this face: `GDEF` class 3 where the
+    /// face classifies its glyphs, and the mark coverage of every subtable
+    /// where it does not -- so a glyph this excludes is one the route cannot
+    /// claim, and the whole search can be skipped. Marks are a small,
+    /// tightly-clustered corner of a face's glyph space and ordinary text
+    /// contains none of them, so on real text this answers "no" for
     /// essentially every glyph.
     ///
-    /// [`Digest::full`] where any part of the union could not be read, which
-    /// costs the shortcut for that face and cannot cost correctness.
+    /// [`Digest::full`] where the route could not be read, which costs the
+    /// shortcut for that face and cannot cost correctness.
     could_be_mark: Digest,
 }
 
@@ -135,9 +140,9 @@ impl MarkPositioning {
         if base.is_empty() && mkmk.is_empty() && class_def.is_none() {
             return None;
         }
-        // Summarise both routes `is_mark` can take, once, so that it can
-        // decline in O(1) instead of binary-searching the class definition and
-        // then every mark coverage in the face. Any part that cannot be read
+        // Summarise the route `is_mark` takes for this face, once, so that it
+        // can decline in O(1) instead of binary-searching the class definition
+        // or every mark coverage in the face. Any part that cannot be read
         // widens the whole thing to `full`, because the union of a known set
         // and an unknown one is unknown — and a digest that guessed "no" here
         // would leave a real mark advancing the pen.
@@ -148,19 +153,20 @@ impl MarkPositioning {
                 Some(digest) => could_be_mark.union(digest),
                 None => readable = false,
             }
-        }
-        for &sub in base.iter().chain(mkmk.iter()) {
-            match mark_coverage(data, sub).and_then(|at| coverage_digest(data, at)) {
-                Some(digest) => could_be_mark.union(digest),
-                // Also the answer when the subtable's own format is one
-                // `mark_coverage` declines, where `in_mark_coverage` would
-                // have said "not a mark" and an empty digest would therefore
-                // have been exactly right. Widening instead keeps this
-                // function from having to agree with that one about which
-                // formats are readable — a coupling that would be invisible
-                // until a font exercised it, and whose failure mode is a
-                // dropped mark rather than a slow one.
-                None => readable = false,
+        } else {
+            for &sub in base.iter().chain(mkmk.iter()) {
+                match mark_coverage(data, sub).and_then(|at| coverage_digest(data, at)) {
+                    Some(digest) => could_be_mark.union(digest),
+                    // Also the answer when the subtable's own format is one
+                    // `mark_coverage` declines, where `in_mark_coverage` would
+                    // have said "not a mark" and an empty digest would
+                    // therefore have been exactly right. Widening instead keeps
+                    // this function from having to agree with that one about
+                    // which formats are readable — a coupling that would be
+                    // invisible until a font exercised it, and whose failure
+                    // mode is a dropped mark rather than a slow one.
+                    None => readable = false,
+                }
             }
         }
         Some(Self {
@@ -202,11 +208,11 @@ impl MarkPositioning {
         if !self.could_be_mark.may_have(glyph) {
             return false;
         }
-        if self
-            .class_def
-            .is_some_and(|table| glyph_class(data, table, glyph) == Some(GDEF_CLASS_MARK))
-        {
-            return true;
+        // A face that classifies its glyphs has said which are marks, and the
+        // class is the whole answer -- HarfBuzz zeroes a mark's width by it and
+        // by nothing else, whatever a lookup covers. See the module doc.
+        if let Some(table) = self.class_def {
+            return glyph_class(data, table, glyph) == Some(GDEF_CLASS_MARK);
         }
         self.base
             .iter()
@@ -976,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn gdef_widens_the_set_of_marks_rather_than_replacing_it() {
+    fn where_a_face_classifies_its_glyphs_the_class_is_the_whole_answer() {
         let data = acute_font();
         // GlyphClassDef format 1 over glyphs 4..=5: base, then mark.
         let mut gdef = Vec::new();
@@ -1005,13 +1011,50 @@ mod tests {
             m.is_mark(&all, 5),
             "GDEF says glyph 5 is a mark, though nothing positions it"
         );
-        assert!(
-            m.is_mark(&all, 2),
-            "glyph 2 is positioned as a mark, though GDEF does not list it — \
-             which is DejaVu Sans Mono's actual behaviour"
-        );
+        // Glyph 2 is in the mark lookup's coverage and GDEF does not list it:
+        // class 0, which HarfBuzz reads as not a mark, so its width is kept.
+        // The lookup still attaches it.
+        assert!(!m.is_mark(&all, 2), "GDEF leaves glyph 2 unclassed");
+        assert_eq!(on_base(&m, &all, 1, 2), Some((400, 700)));
         assert!(!m.is_mark(&all, 4), "GDEF calls glyph 4 a base");
         assert!(!m.is_mark(&all, 1), "glyph 1 is the base being attached to");
+    }
+
+    #[test]
+    fn a_glyph_gdef_classes_as_a_base_is_no_mark_whatever_a_lookup_covers() {
+        // `acute_font`'s glyph 2 is in the mark coverage. A `GlyphClassDef`
+        // that states it is a base wins: HarfBuzz zeroes a mark's width by the
+        // class alone, and Linux Libertine's Graphite build is exactly this --
+        // `uni0308` classed a base and listed in the `mark` lookup.
+        let data = acute_font();
+        let mut gdef = Vec::new();
+        gdef.extend_from_slice(&be16(1)); // majorVersion
+        gdef.extend_from_slice(&be16(0)); // minorVersion
+        gdef.extend_from_slice(&be16(12)); // glyphClassDefOffset
+        gdef.extend_from_slice(&be16(0)); // attachList
+        gdef.extend_from_slice(&be16(0)); // ligCaretList
+        gdef.extend_from_slice(&be16(0)); // markAttachClassDef
+        gdef.extend_from_slice(&be16(1)); // ClassDef format 1
+        gdef.extend_from_slice(&be16(2)); // startGlyphID
+        gdef.extend_from_slice(&be16(1)); // glyphCount
+        gdef.extend_from_slice(&be16(1)); // glyph 2: base
+
+        let mut all = data.clone();
+        let gdef_at = all.len();
+        all.extend_from_slice(&gdef);
+        let m = MarkPositioning::parse(
+            &all,
+            Some(span(0, data.len())),
+            Some(span(gdef_at, gdef.len())),
+        )
+        .unwrap();
+        assert!(
+            !m.is_mark(&all, 2),
+            "GDEF classes glyph 2 a base, so the coverage does not make it a mark"
+        );
+        // The anchors are still there to be used: being classed a base changes
+        // whether the glyph takes room, not whether a lookup may place it.
+        assert_eq!(on_base(&m, &all, 1, 2), Some((400, 700)));
     }
 
     /// A `GDEF` whose `GlyphClassDef` is format 2, listing `ranges` as
@@ -1064,9 +1107,12 @@ mod tests {
     /// comment exists to keep the next author out of.
     #[test]
     fn the_mark_digest_never_hides_a_mark() {
-        // Glyph 2 is the mark in the `GPOS` coverage; the rest are marks by
-        // `GDEF` class alone, spread far enough apart to fall in different
-        // digest buckets. 1 and 4_001 are bases, next to a mark on purpose.
+        // Each route `is_mark` can take, asked every glyph id.
+        //
+        // With classes, the class is the whole answer: marks by `GDEF` class,
+        // spread far enough apart to fall in different digest buckets, with 1
+        // and 4_001 bases next to a mark on purpose. Glyph 2 is in the `GPOS`
+        // mark coverage and unclassed, so it is not one.
         let gdef = gdef_ranges(&[
             (900, 902, GDEF_CLASS_MARK),
             (4_000, 4_000, GDEF_CLASS_MARK),
@@ -1075,15 +1121,29 @@ mod tests {
         ]);
         let (all, gpos_at, gdef_at) = with_gdef(&acute_font(), &gdef);
         let m = MarkPositioning::parse(&all, Some(gpos_at), Some(gdef_at)).unwrap();
-
-        let a_mark = |g: u16| {
-            g == 2 || (900..=902).contains(&g) || g == 4_000 || (60_000..=60_010).contains(&g)
-        };
+        let a_mark =
+            |g: u16| (900..=902).contains(&g) || g == 4_000 || (60_000..=60_010).contains(&g);
         for glyph in 0..=u16::MAX {
             assert_eq!(
                 m.is_mark(&all, glyph),
                 a_mark(glyph),
                 "glyph {glyph} was classified wrongly"
+            );
+        }
+
+        // Without classes, the mark coverage: three marks spread as widely.
+        let sub = mark_subtable(
+            1,
+            &[(2, 0, (0, 0)), (900, 0, (0, 0)), (60_000, 0, (0, 0))],
+            &[(1, vec![Some((0, 0))])],
+        );
+        let data = gpos_table(b"mark", LOOKUP_MARK_BASE, &sub);
+        let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
+        for glyph in 0..=u16::MAX {
+            assert_eq!(
+                m.is_mark(&data, glyph),
+                matches!(glyph, 2 | 900 | 60_000),
+                "glyph {glyph} was classified wrongly by its coverage"
             );
         }
     }

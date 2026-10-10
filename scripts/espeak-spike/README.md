@@ -45,7 +45,7 @@ It publishes, for `scripts/create-ext4-rootfs.sh` to stage:
 
 | artifact | what |
 |---|---|
-| `build/spike/espeak-ng-slateos.elf` | the program, relinked `-nostdlib` against `libc.a` |
+| `build/spike/espeak-ng-slateos.elf` | the program, linked again against `libc.a` alone, by zig's `ld.lld` |
 | `build/spike/espeak-ng-data/` | its phoneme tables, voices and dictionaries, 18 MB for all languages |
 
 The two are one artifact: the data is compiled by *this* build's own

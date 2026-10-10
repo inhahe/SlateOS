@@ -1,5 +1,5 @@
 //! A code editor, drawn and driven: [`CodeView`] puts a
-//! [`CodeEditor`](crate::codeedit::CodeEditor) on screen -- a gutter of line
+//! [`CodeEditor`] on screen -- a gutter of line
 //! numbers, the text in the fixed-pitch face, every selection and caret, the
 //! bracket pair at the caret, a scrollbar -- and turns keys and the pointer
 //! into its commands.
@@ -27,16 +27,26 @@
 //!
 //! # Finding
 //!
-//! Ctrl+F and Ctrl+H open the find bar across the top ([`findbar`]); the
+//! Ctrl+F and Ctrl+H open the find bar across the top (`findbar`); the
 //! rows start below it. F3 and Shift+F3 step through the matches from the
 //! text as well.
 //!
 //! # The clipboard
 //!
-//! The view does not own one: Ctrl+C and Ctrl+X hand the text to the host
-//! ([`CodeViewEvent::Copy`], [`CodeViewEvent::Cut`]) and Ctrl+V asks the host
-//! for it ([`CodeViewEvent::Paste`]), which answers with
-//! [`CodeView::paste`] -- the system clipboard is the host's to reach.
+//! The program's ([`crate::clipboard`]), which every field in the toolkit
+//! shares: Ctrl+C and Ctrl+X put the text on it and say so
+//! ([`CodeViewEvent::Copy`], [`CodeViewEvent::Cut`]), and Ctrl+V pastes from
+//! it. Until 2026-09-30 the view asked its host to paste, the host being the
+//! one with a clipboard; now text copied in a text field pastes here and the
+//! other way round, and the system's clipboard, when programs can reach it,
+//! connects behind the program's for every field at once.
+//!
+//! A right-click is the host's, as it is for every field
+//! ([`crate::editmenu`]): [`CodeView::edit_menu`] gives the rows of the menu
+//! it puts up -- Undo, Redo, Cut, Copy, Paste, Delete, Select all -- and
+//! [`CodeView::edit_command`] does what the chosen row says, as its key
+//! would. A right press does not move a caret: what is selected is what the
+//! rows act on.
 //!
 //! # Colouring the code
 //!
@@ -56,9 +66,11 @@ use core::time::Duration;
 
 use crate::codeedit::{CodeEditor, Selection};
 use crate::color::Color;
+use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
 use crate::highlight::{Brackets, HighlightSpan, Highlighter};
+use crate::menu::{ContextMenu, MenuItemId};
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow, TextSpan};
 use crate::scrollbar;
@@ -123,12 +135,11 @@ pub enum CodeViewEvent {
     Changed,
     /// A caret or a selection moved, or the view scrolled: draw again.
     Moved,
-    /// Put this on the clipboard (Ctrl+C).
+    /// This was copied (Ctrl+C), and is on the program's clipboard.
     Copy(String),
-    /// This was cut: put it on the clipboard (Ctrl+X). The text changed.
+    /// This was cut (Ctrl+X), and is on the program's clipboard. The text
+    /// changed.
     Cut(String),
-    /// Ctrl+V: read the clipboard and hand it to [`CodeView::paste`].
-    Paste,
 }
 
 /// One row on screen: part of a line, or all of it.
@@ -335,11 +346,80 @@ impl CodeView {
         highlighter.highlights(self.editor.buffer(), first.range.start..last.range.end)
     }
 
-    /// Paste `text` at every caret: the host's answer to
-    /// [`CodeViewEvent::Paste`].
+    /// Paste `text` at every caret -- what Ctrl+V does with the program's
+    /// clipboard, for a host pasting something else: a menu's Paste Special,
+    /// a dropped file's name.
     pub fn paste(&mut self, text: &str) {
         self.editor.paste(text);
         self.after_edit();
+    }
+
+    /// The menu a right-click on the text offers ([`crate::editmenu`]):
+    /// Undo and Redo, Cut, Copy, Paste, Delete and Select all, each greyed
+    /// when it would do nothing and saying why while the pointer rests on
+    /// it. Cut and Copy are lit with nothing selected, as their keys work
+    /// then: they take the caret's line. The host puts the menu up -- see
+    /// the module docs.
+    #[must_use]
+    pub fn edit_menu(&self) -> ContextMenu {
+        crate::editmenu::menu(EditState {
+            selected: self.editor.selections().iter().any(|s| !s.is_empty()),
+            editable: true,
+            has_text: !self.editor.buffer().is_empty(),
+            history: true,
+            can_undo: self.editor.can_undo(),
+            can_redo: self.editor.can_redo(),
+            copies_line: true,
+        })
+    }
+
+    /// Do what the row `id` of [`edit_menu`](Self::edit_menu) says, as the
+    /// key that does the same would, and answer as it would -- Copy and Cut
+    /// carry what went onto the clipboard; `None` for an id that is none of
+    /// the menu's rows. Delete takes what is selected and nothing past it.
+    pub fn edit_command(&mut self, id: MenuItemId) -> Option<CodeViewEvent> {
+        let event = match EditCommand::from_id(id)? {
+            EditCommand::Undo => self.history(CodeEditor::undo),
+            EditCommand::Redo => self.history(CodeEditor::redo),
+            EditCommand::Cut => self.cut_to_clipboard(),
+            EditCommand::Copy => self.copy_to_clipboard(),
+            EditCommand::Paste => self.paste_clipboard(),
+            EditCommand::Delete => self.changed(CodeEditor::delete_selected),
+            EditCommand::SelectAll => self.moved(CodeEditor::select_all),
+        };
+        self.goal_x = None;
+        Some(event)
+    }
+
+    /// Ctrl+C's work: what is selected -- or the caret's line -- onto the
+    /// program's clipboard.
+    fn copy_to_clipboard(&self) -> CodeViewEvent {
+        let copied = self.editor.copy();
+        if !copied.is_empty() {
+            crate::clipboard::set_text(&copied);
+        }
+        CodeViewEvent::Copy(copied)
+    }
+
+    /// Ctrl+X's: copied, then deleted.
+    fn cut_to_clipboard(&mut self) -> CodeViewEvent {
+        let cut = self.editor.cut();
+        if !cut.is_empty() {
+            crate::clipboard::set_text(&cut);
+        }
+        self.after_edit();
+        CodeViewEvent::Cut(cut)
+    }
+
+    /// Ctrl+V's: the program's clipboard at every caret. An empty clipboard
+    /// changes nothing.
+    fn paste_clipboard(&mut self) -> CodeViewEvent {
+        let clip = crate::clipboard::text();
+        if clip.is_empty() {
+            return CodeViewEvent::Moved;
+        }
+        self.paste(&clip);
+        CodeViewEvent::Changed
     }
 
     /// Open the find bar with the keyboard in its find field -- and the
@@ -1075,7 +1155,7 @@ impl CodeView {
         }
         let m = key.modifiers;
         let shift = m.shift;
-        let ctrl = m.ctrl && !m.alt;
+        let ctrl = m.is_ctrl_chord();
         match key.key {
             Key::F if ctrl => {
                 self.open_find(false);
@@ -1128,13 +1208,9 @@ impl CodeView {
             Key::A if ctrl => Some(self.moved(CodeEditor::select_all)),
             Key::D if ctrl => Some(self.moved(CodeEditor::add_next_occurrence)),
             Key::L if ctrl => Some(self.moved(CodeEditor::select_line)),
-            Key::C if ctrl => Some(CodeViewEvent::Copy(self.editor.copy())),
-            Key::X if ctrl => {
-                let cut = self.editor.cut();
-                self.after_edit();
-                Some(CodeViewEvent::Cut(cut))
-            }
-            Key::V if ctrl => Some(CodeViewEvent::Paste),
+            Key::C if ctrl => Some(self.copy_to_clipboard()),
+            Key::X if ctrl => Some(self.cut_to_clipboard()),
+            Key::V if ctrl => Some(self.paste_clipboard()),
             Key::Z if ctrl && shift => Some(self.history(CodeEditor::redo)),
             Key::Z if ctrl => Some(self.history(CodeEditor::undo)),
             Key::Y if ctrl => Some(self.history(CodeEditor::redo)),
@@ -1562,6 +1638,7 @@ fn signed(n: usize) -> isize {
 )]
 mod tests {
     use super::*;
+    use crate::menu::MenuItem;
 
     const BOUNDS: Rect = Rect {
         x: 10.0,
@@ -2374,11 +2451,20 @@ mod tests {
             Some(CodeViewEvent::Cut("abc".to_owned()))
         );
         assert_eq!(v.editor().text(), "");
+        // Ctrl+V pastes the program's clipboard, where the cut put it.
+        assert_eq!(crate::clipboard::text(), "abc");
         assert_eq!(
             v.handle_key(&key(Key::V, true, false)),
-            Some(CodeViewEvent::Paste)
+            Some(CodeViewEvent::Changed)
         );
-        v.paste("x y x");
+        assert_eq!(v.editor().text(), "abc");
+        // And text a text field copied pastes here too.
+        let mut field = crate::textinput::TextInput::new();
+        field.insert_text("x y x");
+        field.select_all();
+        field.copy();
+        v.handle_key(&key(Key::A, true, false));
+        v.handle_key(&key(Key::V, true, false));
         assert_eq!(v.editor().text(), "x y x");
         v.editor_mut().set_selections(vec![Selection::caret(0)]);
         v.handle_key(&key(Key::D, true, false));
@@ -2388,6 +2474,133 @@ mod tests {
         assert_eq!(v.editor().selections().len(), 1);
         // A key the view does not use is not claimed.
         assert_eq!(v.handle_key(&key(Key::F5, false, false)), None);
+    }
+
+    /// The labels of a view's right-click menu and whether each is lit.
+    fn menu_lit(v: &CodeView) -> Vec<(String, bool)> {
+        v.edit_menu()
+            .items()
+            .iter()
+            .filter_map(|r| match r {
+                MenuItem::Action { label, enabled, .. } => Some((label.clone(), *enabled)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The right-click menu's rows do what the keys do**: Copy and Cut take
+    /// the caret's line with nothing selected, as Ctrl+C and Ctrl+X do, and
+    /// say what they took; Undo takes the cut back; Delete takes only what is
+    /// selected; Paste and Select all; an id that is none of the rows is not
+    /// the view's.
+    #[test]
+    fn the_right_click_menu_does_what_the_keys_do() {
+        crate::clipboard::set_text("");
+        let mut v = view("one\ntwo\n");
+        v.editor_mut().set_selections(vec![Selection::caret(1)]);
+        let want = |rows: [(&str, bool); 7]| -> Vec<(String, bool)> {
+            rows.iter().map(|(l, on)| ((*l).to_owned(), *on)).collect()
+        };
+        assert_eq!(
+            menu_lit(&v),
+            want([
+                ("Undo", false),
+                ("Redo", false),
+                ("Cut", true),
+                ("Copy", true),
+                ("Paste", false),
+                ("Delete", false),
+                ("Select all", true),
+            ])
+        );
+
+        assert_eq!(
+            v.edit_command(EditCommand::Copy.id()),
+            Some(CodeViewEvent::Copy("one\n".to_owned()))
+        );
+        assert_eq!(crate::clipboard::text(), "one\n");
+        assert_eq!(
+            v.edit_command(EditCommand::Cut.id()),
+            Some(CodeViewEvent::Cut("one\n".to_owned()))
+        );
+        assert_eq!(v.editor().text(), "two\n");
+        assert!(menu_lit(&v).contains(&("Undo".to_owned(), true)));
+        assert_eq!(
+            v.edit_command(EditCommand::Undo.id()),
+            Some(CodeViewEvent::Changed)
+        );
+        assert_eq!(v.editor().text(), "one\ntwo\n");
+        assert!(menu_lit(&v).contains(&("Redo".to_owned(), true)));
+        assert_eq!(
+            v.edit_command(EditCommand::Redo.id()),
+            Some(CodeViewEvent::Changed)
+        );
+        assert_eq!(v.editor().text(), "two\n");
+        v.edit_command(EditCommand::Undo.id());
+
+        // Delete with nothing selected leaves the text alone -- the Delete
+        // key would take the character after the caret.
+        v.editor_mut().set_selections(vec![Selection::caret(0)]);
+        assert_eq!(
+            v.edit_command(EditCommand::Delete.id()),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(v.editor().text(), "one\ntwo\n");
+        v.editor_mut()
+            .set_selections(vec![Selection { anchor: 0, head: 3 }]);
+        assert!(menu_lit(&v).contains(&("Delete".to_owned(), true)));
+        assert_eq!(
+            v.edit_command(EditCommand::Delete.id()),
+            Some(CodeViewEvent::Changed)
+        );
+        assert_eq!(v.editor().text(), "\ntwo\n");
+
+        assert!(menu_lit(&v).contains(&("Paste".to_owned(), true)));
+        assert_eq!(
+            v.edit_command(EditCommand::Paste.id()),
+            Some(CodeViewEvent::Changed)
+        );
+        assert_eq!(v.editor().text(), "one\n\ntwo\n");
+        assert_eq!(
+            v.edit_command(EditCommand::SelectAll.id()),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(v.editor().primary().range(), 0..v.editor().text().len());
+
+        assert_eq!(v.edit_command(1), None);
+        assert_eq!(v.editor().text(), "one\n\ntwo\n");
+    }
+
+    /// **An empty view offers nothing to cut or select**, and with an empty
+    /// clipboard nothing to paste.
+    #[test]
+    fn an_empty_view_offers_nothing_to_take() {
+        crate::clipboard::set_text("");
+        let v = view("");
+        assert!(
+            menu_lit(&v).iter().all(|(_, on)| !on),
+            "an empty view lit a row: {:?}",
+            menu_lit(&v)
+        );
+    }
+
+    /// **Pasting an empty clipboard changes nothing, and says so** -- from the
+    /// menu and from Ctrl+V alike: the host must not mark the document
+    /// changed for it.
+    #[test]
+    fn pasting_nothing_is_no_change() {
+        use crate::editmenu::EditCommand;
+        crate::clipboard::set_text("");
+        let mut v = view("abc");
+        assert_eq!(
+            v.edit_command(EditCommand::Paste.id()),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(
+            v.handle_key(&key(Key::V, true, false)),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(v.editor().text(), "abc");
     }
 
     fn alt(k: Key) -> KeyEvent {

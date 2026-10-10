@@ -15,7 +15,6 @@
 //!   → appcompat::add_shim(app, shim)
 //!
 //! Integration:
-//!   → appregistry (app registry)
 //!   → apppermissions (permissions)
 //!   → pkgmgr (package manager)
 //!   → appsandbox (sandbox settings)

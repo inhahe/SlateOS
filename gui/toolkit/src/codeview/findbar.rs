@@ -24,6 +24,7 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::text::scaled;
 use crate::textedit::{self, SingleLine};
 use crate::textinput::{KeyEdit, TextInput};
 
@@ -133,7 +134,7 @@ impl FindBar {
             return 0.0;
         }
         let rows = if self.replace { 2.0 } else { 1.0 };
-        rows * ROW_HEIGHT + PADDING
+        rows * ROW_HEIGHT + scaled(PADDING)
     }
 
     fn input_mut(&mut self) -> &mut TextInput {
@@ -175,7 +176,7 @@ impl FindBar {
                 let field = self.field;
                 match self
                     .input_mut()
-                    .edit_key(key, FONT_SIZE, FontWeightHint::Regular)
+                    .edit_key(key, scaled(FONT_SIZE), FontWeightHint::Regular)
                 {
                     KeyEdit::Unhandled => return None,
                     KeyEdit::Handled => BarAction::Redraw,
@@ -201,27 +202,31 @@ impl FindBar {
     /// Where the parts of the bar are, for a bar across `bounds`' top: the
     /// find field, the replace field (when shown), and the three switches.
     pub(super) fn layout(&self, bounds: Rect) -> Layout {
-        let field_w = (bounds.w - PADDING * 5.0 - SWITCH_WIDTH * 3.0 - COUNT_WIDTH)
-            .clamp(40.0, MAX_FIELD_WIDTH);
-        let x = bounds.x + PADDING;
-        let y = bounds.y + PADDING / 2.0;
-        let h = ROW_HEIGHT - PADDING;
+        let field_w =
+            (bounds.w - scaled(PADDING) * 5.0 - scaled(SWITCH_WIDTH) * 3.0 - scaled(COUNT_WIDTH))
+                .clamp(40.0, scaled(MAX_FIELD_WIDTH));
+        let x = bounds.x + scaled(PADDING);
+        let y = bounds.y + scaled(PADDING) / 2.0;
+        let h = ROW_HEIGHT - scaled(PADDING);
         let find = Rect::new(x, y, field_w, h);
         let replace = self
             .replace
             .then(|| Rect::new(x, y + ROW_HEIGHT, field_w, h));
-        let switch_x = find.right() + PADDING;
+        let switch_x = find.right() + scaled(PADDING);
         let switches = [Switch::Case, Switch::Word, Switch::Regex];
         let mut placed = [(Switch::Case, Rect::EMPTY); 3];
         for (i, (slot, switch)) in placed.iter_mut().zip(switches).enumerate() {
             #[allow(clippy::cast_precision_loss, reason = "three switches")]
-            let offset = i as f32 * (SWITCH_WIDTH + 2.0);
-            *slot = (switch, Rect::new(switch_x + offset, y, SWITCH_WIDTH, h));
+            let offset = i as f32 * (scaled(SWITCH_WIDTH) + scaled(2.0));
+            *slot = (
+                switch,
+                Rect::new(switch_x + offset, y, scaled(SWITCH_WIDTH), h),
+            );
         }
         let count = Rect::new(
-            switch_x + 3.0 * (SWITCH_WIDTH + 2.0) + PADDING,
+            switch_x + 3.0 * (scaled(SWITCH_WIDTH) + scaled(2.0)) + scaled(PADDING),
             y,
-            COUNT_WIDTH,
+            scaled(COUNT_WIDTH),
             h,
         );
         Layout {
@@ -293,13 +298,13 @@ impl FindBar {
                 color: if on { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(3.0),
             });
-            let w = crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold);
+            let w = crate::text::measure(label, scaled(FONT_SIZE), FontWeightHint::Bold);
             sink.emit(RenderCommand::Text {
                 x: rect.x + (rect.w - w) / 2.0,
-                y: rect.y + (rect.h - FONT_SIZE) / 2.0,
+                y: rect.y + (rect.h - scaled(FONT_SIZE)) / 2.0,
                 text: label.to_owned(),
                 color: if on { p.on_accent() } else { p.text },
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -321,12 +326,12 @@ impl FindBar {
         if !status.is_empty() {
             sink.emit(RenderCommand::Text {
                 x: layout.count.x,
-                y: layout.count.y + (layout.count.h - FONT_SIZE) / 2.0,
+                y: layout.count.y + (layout.count.h - scaled(FONT_SIZE)) / 2.0,
                 text: status,
                 color,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((bounds.right() - layout.count.x - PADDING).max(0.0)),
+                max_width: Some((bounds.right() - layout.count.x - scaled(PADDING)).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -365,11 +370,11 @@ impl FindBar {
                 cursor: input.cursor(),
                 selection_anchor: input.selection_anchor(),
                 focused,
-                x: rect.x + 6.0,
-                y: rect.y + (rect.h - FONT_SIZE) / 2.0,
-                width: (rect.w - 12.0).max(0.0),
-                line_height: FONT_SIZE,
-                font_size: FONT_SIZE,
+                x: rect.x + scaled(6.0),
+                y: rect.y + (rect.h - scaled(FONT_SIZE)) / 2.0,
+                width: (rect.w - scaled(12.0)).max(0.0),
+                line_height: scaled(FONT_SIZE),
+                font_size: scaled(FONT_SIZE),
                 weight: FontWeightHint::Regular,
                 color: p.text,
                 selection_bg: p.accent,

@@ -284,7 +284,7 @@ pub(crate) mod native {
     // Overflow = -303
     pub const RESOURCE_EXHAUSTED: i64 = -304;
 
-    // --- Capability (400 range: -400 to -401) ---
+    // --- Capability (400 range: -400 to -402) ---
     pub const PERMISSION_DENIED: i64 = -400;
     /// A handle was presented that does not name a capability this process
     /// holds.  `EACCES`, the same as an outright denial: from the caller's
@@ -292,6 +292,13 @@ pub(crate) mod native {
     /// distinguishing them would tell an unprivileged caller which handles
     /// exist.
     pub const INVALID_CAPABILITY: i64 = -401;
+    /// Refused whatever the caller's rights, by the object's own state: an
+    /// immutable or append-only file (`chattr +i`, `+a`), a seal, a change to
+    /// an ACL by someone who does not own the file.  `EPERM`, as on Linux,
+    /// and not [`PERMISSION_DENIED`]'s `EACCES`: `EACCES` says the caller
+    /// lacks a permission it could be given, `EPERM` that no permission would
+    /// do (lane A's design-decisions 1524).
+    pub const NOT_PERMITTED: i64 = -402;
 
     // --- Filesystem (500 range: -500 to -513) ---
     pub const NOT_FOUND: i64 = -500;
@@ -326,12 +333,17 @@ pub(crate) mod native {
     /// it; `ENOATTR` is the same number under its BSD name.
     pub const NO_ATTRIBUTE: i64 = -514;
 
-    // --- Device / I/O (600 range: -600 to -602) ---
+    // --- Device / I/O (600 range: -600 to -603) ---
     pub const IO_ERROR: i64 = -600;
     pub const NO_SUCH_DEVICE: i64 = -601;
     pub const RESOURCE_BUSY: i64 = -602;
+    /// The name exists, but nothing that can be opened as a file stands
+    /// behind it -- a Unix-domain socket's node, opened as a file (lane A's
+    /// design-decisions 1519). `ENXIO`, which is Linux's answer to `open` on
+    /// a socket.
+    pub const NO_SUCH_DEVICE_OR_ADDRESS: i64 = -603;
 
-    // --- Network (700 range: -700 to -706) ---
+    // --- Network (700 range: -700 to -708) ---
     //
     // This whole range exists to be translated -- each variant's kernel doc
     // comment names the errno it is for -- and none of it was, until
@@ -346,6 +358,15 @@ pub(crate) mod native {
     pub const BROKEN_PIPE: i64 = -704;
     pub const ADDR_IN_USE: i64 = -705;
     pub const MSG_SIZE: i64 = -706;
+    /// The name resolves, but to no address of the kind asked for -- an IPv6
+    /// lookup of a name with only IPv4 addresses (`SYS_DNS_RESOLVE2`).
+    /// `ENODATA`, the errno glibc's resolver leaves for "no data of the
+    /// requested type".
+    pub const NO_ADDRESS: i64 = -707;
+    /// A Unix-domain socket of the other type is at that name -- a stream
+    /// socket connecting to a datagram one (lane A's design-decisions 1519).
+    /// `EPROTOTYPE`, as Linux answers `connect` there.
+    pub const WRONG_SOCKET_TYPE: i64 = -708;
 }
 
 /// The errno a native kernel error code corresponds to.
@@ -403,6 +424,9 @@ pub fn errno_for(code: i64) -> i32 {
 
         // Capability / permission errors
         native::PERMISSION_DENIED | native::INVALID_CAPABILITY => EACCES,
+        // Its own arm, never EACCES's: no permission would make the call
+        // succeed (`chattr +i`), which is what EPERM tells the caller.
+        native::NOT_PERMITTED => EPERM,
 
         // Filesystem errors
         native::NOT_FOUND => ENOENT,
@@ -431,6 +455,7 @@ pub fn errno_for(code: i64) -> i32 {
         native::IO_ERROR => EIO,
         native::NO_SUCH_DEVICE => ENODEV,
         native::RESOURCE_BUSY => EBUSY,
+        native::NO_SUCH_DEVICE_OR_ADDRESS => ENXIO,
 
         // Network errors
         native::CONNECTION_REFUSED => ECONNREFUSED,
@@ -440,6 +465,8 @@ pub fn errno_for(code: i64) -> i32 {
         native::BROKEN_PIPE => EPIPE,
         native::ADDR_IN_USE => EADDRINUSE,
         native::MSG_SIZE => EMSGSIZE,
+        native::NO_ADDRESS => ENODATA,
+        native::WRONG_SOCKET_TYPE => EPROTOTYPE,
 
         // Unknown error → generic I/O error.
         //
@@ -935,10 +962,28 @@ mod tests {
             (native::BROKEN_PIPE, EPIPE),
             (native::ADDR_IN_USE, EADDRINUSE),
             (native::MSG_SIZE, EMSGSIZE),
+            (native::NO_ADDRESS, ENODATA),
+            (native::WRONG_SOCKET_TYPE, EPROTOTYPE),
         ] {
             assert_eq!(translate(code), -1, "code {code} should be an error");
             assert_eq!(get_errno(), want, "code {code} mapped to the wrong errno");
         }
+    }
+
+    #[test]
+    fn test_translate_not_permitted_and_no_such_device_or_address() {
+        // -402 is lane A's refusal by the object's own state (chattr +i, a
+        // seal), and must stay EPERM: an ACL's refusal, -400, is EACCES, and
+        // a program tells "ask for the right" from "no right would do" by
+        // exactly that difference.
+        assert_eq!(translate(native::NOT_PERMITTED), -1);
+        assert_eq!(get_errno(), EPERM);
+        assert_eq!(translate(native::PERMISSION_DENIED), -1);
+        assert_eq!(get_errno(), EACCES);
+
+        // -603: a Unix socket's node opened as a file.
+        assert_eq!(translate(native::NO_SUCH_DEVICE_OR_ADDRESS), -1);
+        assert_eq!(get_errno(), ENXIO);
     }
 
     // -----------------------------------------------------------------

@@ -3,8 +3,8 @@
 **Status:** OPEN -- E-Q5 answered (design-decisions §1239: two windows where
 they are useful, each saving only its own changes; one window for the rest).
 Being fixed program by program with `apps/recordfile` (random ids, a merge by
-id, a watch on the file): **Notes, Contacts, the kanban board and Reminders
-done 2026-10-09/10**; snippets, the e-book library, flashcards and finance to
+id, a watch on the file): **Notes, Contacts, the kanban board, Reminders and
+the e-book library done 2026-10-09/10**; snippets, flashcards and finance to
 do, and the single-window half waits on `requests/e-cf-a-program-can-ask-to-have-only-one-window.md`.
 
 **In short:** Many programs keep their data in a file of their own -- notes,

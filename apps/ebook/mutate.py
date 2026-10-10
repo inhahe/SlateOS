@@ -364,6 +364,96 @@ MAIN += [
     ),
 ]
 
+# Two readers open at once (2026-10-09, design-decisions §1239): each wrote
+# its own library over the other's when it closed, so the one closed last
+# threw away the books the other had opened and the places it had reached.
+TWO_READERS = "two_readers_each_open_a_book_and_both_are_kept"
+HEAR = "a_reader_hears_another_readers_save"
+TAKEN_OUT = "a_book_taken_out_elsewhere_while_read_here_goes_back_to_the_library"
+STAYS_OUT = "a_book_taken_out_in_another_window_stays_out"
+CHOSEN_STAYS = "the_chosen_book_stays_chosen_when_one_before_it_goes"
+FILE_DELETED = "a_library_file_deleted_while_open_is_written_back_whole"
+UNREADABLE = "a_save_leaves_a_library_file_it_cannot_read_as_it_is"
+TOLD_APART = "no_file_an_empty_library_and_a_damaged_one_are_each_told_apart"
+
+SHELF += [
+    (
+        "no file is taken for an empty one",
+        "        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),",
+        "        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(Vec::new())),",
+        [TOLD_APART],
+    ),
+    (
+        "a shelf file too big to read whole is read in part",
+        "        Ok(read) if read.truncated => {",
+        "        Ok(read) if false => {",
+        ["a_shelf_file_too_big_to_read_whole_is_refused"],
+    ),
+]
+
+MAIN += [
+    (
+        "a save writes this window's library over the file",
+        "        let merged = recordfile::merge_by(&self.base, &self.shelved(), &theirs, shelf::key);",
+        "        let merged = self.shelved();\n        let _ = &theirs;",
+        [TWO_READERS],
+    ),
+    (
+        "a save takes the file for unchanged without asking",
+        "        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {",
+        "        let read = if true {",
+        [TWO_READERS],
+    ),
+    (
+        "a missing file is taken for an empty one",
+        "            Ok(None) => self.base.clone(),",
+        "            Ok(None) => Vec::new(),",
+        [FILE_DELETED],
+    ),
+    (
+        "a save over a file it cannot read goes ahead",
+        "            shelf::read(&path)\n        };",
+        "            shelf::read(&path).or(Ok::<_, String>(None))\n        };",
+        [UNREADABLE],
+    ),
+    (
+        "a save does not move on what it compares with",
+        "                self.base = merged.clone();\n",
+        "",
+        [STAYS_OUT],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {",
+        "        if true {",
+        [HEAR],
+    ),
+    (
+        "a reread throws away the place not yet saved",
+        "        let shown = if mine == self.base {",
+        "        let shown = if true {",
+        [HEAR],
+    ),
+    (
+        "a reread does not move on what the next save compares with",
+        "        self.base = theirs;\n",
+        "",
+        [STAYS_OUT],
+    ),
+    (
+        "a book taken out elsewhere stays open here",
+        "        if chosen.is_some() && self.view != AppView::Library {",
+        "        if false {",
+        [TAKEN_OUT],
+    ),
+    (
+        "the chosen book is found again by its number, not its file",
+        "        if let Some(index) = found {\n            self.selected_book = index;\n            return;\n        }",
+        "        if found.is_some() {\n            return;\n        }",
+        [CHOSEN_STAYS],
+    ),
+]
+
 TABLES = {
     "shelf.rs": SHELF,
     "main.rs": MAIN,

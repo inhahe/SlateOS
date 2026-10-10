@@ -16,6 +16,18 @@
 //! - Book metadata (word count, estimated reading time)
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! # Two windows
+//!
+//! The reader may be open twice, and neither window loses what the other
+//! did (design-decisions §1239): a save reads the library file first and puts
+//! in only what this window changed since it last read or wrote it -- a merge
+//! book by book, a book known by its file (`recordfile::merge_by`) -- and the
+//! window is woken to read the file again when another saves
+//! (`recordfile::Watch`). Two windows reading the same book is the one case
+//! where the later save wins, for that book's place alone. Saved whole, as
+//! it was, the window closed last threw away every book the other had opened
+//! and every place it had reached.
 
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
@@ -1383,6 +1395,16 @@ pub struct EbookApp {
     /// the file is never written: saving the books that were understood would
     /// throw away the rest.
     shelf_error: Option<String>,
+    /// The shelf as this window last read or wrote it: what a save merges
+    /// this window's changes against, so another window's, saved since, are
+    /// kept rather than written over (design-decisions §1239).
+    base: Vec<shelf::Shelved>,
+    /// The shelf file as this window last read or wrote it, to tell another
+    /// window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the shelf file, which wakes the window when another one
+    /// saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// The Open dialog.
     picker: FilePicker,
     /// A book asked to be taken out of the library, waiting for a yes or no.
@@ -1433,15 +1455,20 @@ impl EbookApp {
     /// stays on it, unreadable and saying why.
     pub fn with_shelf(path: Option<PathBuf>) -> Self {
         let mut app = Self::empty();
-        match path.as_deref().map(shelf::load) {
+        match path.as_deref().map(shelf::read) {
             None => {}
             Some(Ok(books)) => {
-                for shelved in books {
+                let books = books.unwrap_or_default();
+                for shelved in books.clone() {
                     let book = Book::from_file(&shelved.path);
                     let state = fit_state(shelved.state, &book);
                     app.library.push(book);
                     app.reading_states.push(state);
                 }
+                app.base = books;
+                app.file_stamp = path
+                    .as_deref()
+                    .and_then(|p| recordfile::Stamp::of(p).ok().flatten());
             }
             Some(Err(why)) => {
                 app.status = format!(
@@ -1472,6 +1499,9 @@ impl EbookApp {
             show_help: false,
             shelf_path: None,
             shelf_error: None,
+            base: Vec::new(),
+            file_stamp: None,
+            watch: None,
             picker: FilePicker::new(),
             confirm_remove: None,
             status: String::new(),
@@ -2078,6 +2108,13 @@ impl EbookApp {
     }
 
     /// Write the library down.
+    ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it, book by book (design-decisions
+    /// §1239). Written whole and over, as it used to be, the window closed
+    /// last threw away every book the other had opened and every place it
+    /// had reached.
     fn keep(&mut self) -> Kept {
         if let Some(why) = &self.shelf_error {
             return Kept::Nowhere(format!(
@@ -2092,8 +2129,48 @@ impl EbookApp {
                     .to_string(),
             );
         };
-        let books: Vec<shelf::Shelved> = self
-            .library
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            shelf::read(&path)
+        };
+        let theirs = match read {
+            Ok(Some(theirs)) => theirs,
+            // None there -- a first run, or gone since: nothing has been
+            // taken out of it, so it is what this window started from.
+            Ok(None) => self.base.clone(),
+            Err(why) => {
+                return Kept::Failed(format!(
+                    "Your library could not be saved: {} could not be read ({why}), \
+                     so it is not written over",
+                    path.shown()
+                ));
+            }
+        };
+        let merged = recordfile::merge_by(&self.base, &self.shelved(), &theirs, shelf::key);
+        match shelf::save(&path, &merged) {
+            Ok(()) => {
+                // Taken after the write, so the window's own save is known for
+                // its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged);
+                Kept::Saved
+            }
+            Err(e) => Kept::Failed(format!(
+                "Your library could not be saved to {}: {e}",
+                path.shown()
+            )),
+        }
+    }
+
+    /// The library as the shelf file keeps it: every book read from a file,
+    /// with its place, bookmarks and type size.
+    fn shelved(&self) -> Vec<shelf::Shelved> {
+        self.library
             .iter()
             .zip(&self.reading_states)
             .filter_map(|(book, state)| {
@@ -2102,14 +2179,93 @@ impl EbookApp {
                     state: state.clone(),
                 })
             })
+            .collect()
+    }
+
+    /// Show `shelf`: what this window and the file hold together, after a
+    /// save or another window's. A book already read is not read again; one
+    /// another window opened is read now. The book that was chosen stays
+    /// chosen while it is there -- and one being read that another window took
+    /// out goes back to the library, saying so.
+    fn adopt(&mut self, shelf: Vec<shelf::Shelved>) {
+        let chosen = self.current_book().and_then(|b| b.path.clone());
+        let mut had: Vec<Option<Book>> = std::mem::take(&mut self.library)
+            .into_iter()
+            .map(Some)
             .collect();
-        match shelf::save(&path, &books) {
-            Ok(()) => Kept::Saved,
-            Err(e) => Kept::Failed(format!(
-                "Your library could not be saved to {}: {e}",
-                path.shown()
-            )),
+        let had_states = std::mem::take(&mut self.reading_states);
+        for entry in shelf {
+            let book = had
+                .iter_mut()
+                .find(|b| b.as_ref().and_then(|b| b.path.as_deref()) == Some(entry.path.as_path()))
+                .and_then(Option::take)
+                .unwrap_or_else(|| Book::from_file(&entry.path));
+            self.reading_states.push(fit_state(entry.state, &book));
+            self.library.push(book);
         }
+        // A book made in memory is on no shelf: it stays, after the rest.
+        for (book, state) in had.into_iter().zip(had_states) {
+            if let Some(book) = book.filter(|b| b.path.is_none()) {
+                self.library.push(book);
+                self.reading_states.push(state);
+            }
+        }
+        let found = chosen.as_deref().and_then(|p| {
+            self.library
+                .iter()
+                .position(|b| b.path.as_deref() == Some(p))
+        });
+        if let Some(index) = found {
+            self.selected_book = index;
+            return;
+        }
+        self.selected_book = self.selected_book.min(self.library.len().saturating_sub(1));
+        if chosen.is_some() && self.view != AppView::Library {
+            self.status = String::from(
+                "The book you were reading was taken out of the library in another window.",
+            );
+            self.view = AppView::Library;
+            self.paginated = None;
+            self.close_search();
+        }
+    }
+
+    /// Read the shelf again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's changes not yet saved put into it. Whether
+    /// what is shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case. So is one that has gone.
+    pub fn reread_if_changed(&mut self) -> bool {
+        if self.shelf_error.is_some() {
+            return false;
+        }
+        let Some(path) = self.shelf_path.clone() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(Some(theirs)) = shelf::read(&path) else {
+            return false;
+        };
+        let mine = self.shelved();
+        let shown = if mine == self.base {
+            theirs.clone()
+        } else {
+            recordfile::merge_by(&self.base, &mine, &theirs, shelf::key)
+        };
+        let changed = shown != mine;
+        self.base = theirs;
+        self.file_stamp = now;
+        if changed {
+            self.adopt(shown);
+        }
+        changed
     }
 
     // --------------------------------------------------------------------
@@ -3576,6 +3732,27 @@ impl App for EbookApp {
     /// of text still says what it said -- `known-issues.md` lesson 47.
     fn tick_interval(&self) -> Option<Duration> {
         None
+    }
+
+    /// Watch the shelf file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its library.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if self.shelf_error.is_some() {
+            return;
+        }
+        if let Some(path) = &self.shelf_path {
+            self.watch = recordfile::Watch::start(path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the shelf file written: read it again if another window
+    /// wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -6459,6 +6636,241 @@ mod tests {
         );
         let again = EbookApp::with_shelf(Some(library_file(&scratch)));
         assert!(again.library.is_empty(), "taking it out was not kept");
+    }
+
+    /// Where `path`'s book is in `app`'s library: how far through it.
+    fn place_of(app: &EbookApp, path: &Path) -> Option<usize> {
+        app.library
+            .iter()
+            .position(|b| b.path.as_deref() == Some(path))
+            .map(|i| app.reading_states[i].offset)
+    }
+
+    /// **Two readers each open a book, and both are kept** -- with the place
+    /// each reached. Each wrote its own library whole when it closed, so the
+    /// one closed last threw away the other's books and places
+    /// (design-decisions §1239).
+    #[test]
+    fn two_readers_each_open_a_book_and_both_are_kept() {
+        let scratch = scratchdir::ScratchDir::new("ebook_two_windows");
+        let first_book = book_file(&scratch, "first.txt", &long_text());
+        let second_book = book_file(&scratch, "second.txt", &long_text());
+        let mut first = EbookApp::with_shelf(Some(library_file(&scratch)));
+        let mut second = EbookApp::with_shelf(Some(library_file(&scratch)));
+        first.open_path(&first_book);
+        first.next_page();
+        let first_place = first.current_offset();
+        second.open_path(&second_book);
+        second.next_page();
+        second.next_page();
+        let second_place = second.current_offset();
+        assert_ne!(first_place, 0, "control: the pages did not turn");
+        assert_eq!(first.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(second.on_event(&Event::CloseRequested), Response::Exit);
+
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(
+            place_of(&again, &first_book),
+            Some(first_place),
+            "the first reader's book, or its place, was lost"
+        );
+        assert_eq!(
+            place_of(&again, &second_book),
+            Some(second_place),
+            "the second reader's book, or its place, was lost"
+        );
+    }
+
+    /// **A reader reads the library again when another saves**, keeping the
+    /// place it has reached and not yet saved, and the book it is reading
+    /// open; its own save is not taken for another's.
+    #[test]
+    fn a_reader_hears_another_readers_save() {
+        let scratch = scratchdir::ScratchDir::new("ebook_hear");
+        let book = book_file(&scratch, "long.txt", &long_text());
+        let other = book_file(&scratch, "other.txt", &long_text());
+        let mut first = EbookApp::with_shelf(Some(library_file(&scratch)));
+        let mut second = EbookApp::with_shelf(Some(library_file(&scratch)));
+        first.open_path(&book);
+        assert!(
+            second.reread_if_changed(),
+            "the other window's save was not seen"
+        );
+        assert_eq!(second.library.len(), 1);
+        assert!(!second.reread_if_changed(), "read again with nothing new");
+
+        second.open_book(0);
+        second.next_page();
+        let place = second.current_offset();
+        first.open_path(&other);
+        assert!(second.reread_if_changed());
+        assert_eq!(second.library.len(), 2);
+        assert_eq!(
+            second.view,
+            AppView::Reading,
+            "the book being read was shut"
+        );
+        assert_eq!(second.current_offset(), place, "a place not yet saved went");
+        second.return_to_library();
+        assert!(
+            !second.reread_if_changed(),
+            "its own save taken for another's"
+        );
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(place_of(&again, &book), Some(place));
+        assert_eq!(place_of(&again, &other), Some(0));
+    }
+
+    /// A book another window takes out of the library while this one is
+    /// reading it -- and has not moved in it -- goes, and the window goes back
+    /// to the library and says why rather than showing a book that is not
+    /// there.
+    #[test]
+    fn a_book_taken_out_elsewhere_while_read_here_goes_back_to_the_library() {
+        let scratch = scratchdir::ScratchDir::new("ebook_taken_out");
+        let book = book_file(&scratch, "long.txt", &long_text());
+        let mut first = EbookApp::with_shelf(Some(library_file(&scratch)));
+        first.open_path(&book);
+        first.return_to_library();
+        let mut second = EbookApp::with_shelf(Some(library_file(&scratch)));
+        second.open_book(0);
+        assert_eq!(second.view, AppView::Reading, "control: the book is open");
+        first.remove_book(0);
+        assert!(second.reread_if_changed());
+        assert!(second.library.is_empty());
+        assert_eq!(second.view, AppView::Library);
+        assert!(
+            second
+                .status
+                .contains("taken out of the library in another window"),
+            "{}",
+            second.status
+        );
+    }
+
+    /// A book another window took out stays out when this window saves next
+    /// -- one this window opened, and one it heard of from the other's save.
+    /// A save compares with what the window last wrote or read; a book it has
+    /// that is not in that is taken for one opened since, and kept.
+    #[test]
+    fn a_book_taken_out_in_another_window_stays_out() {
+        let scratch = scratchdir::ScratchDir::new("ebook_stays_out");
+        let start = book_file(&scratch, "start.txt", &long_text());
+        let opened_here = book_file(&scratch, "here.txt", &long_text());
+        let heard_of = book_file(&scratch, "heard.txt", &long_text());
+        let later = book_file(&scratch, "later.txt", &long_text());
+        let mut first = EbookApp::with_shelf(Some(library_file(&scratch)));
+        first.open_path(&start);
+        first.return_to_library();
+        let mut second = EbookApp::with_shelf(Some(library_file(&scratch)));
+
+        second.open_path(&opened_here);
+        second.return_to_library();
+        assert!(first.reread_if_changed());
+        let at = first
+            .library
+            .iter()
+            .position(|b| b.path.as_deref() == Some(opened_here.as_path()))
+            .unwrap();
+        first.remove_book(at);
+        second.open_path(&later);
+        second.return_to_library();
+        let kept = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(
+            place_of(&kept, &opened_here),
+            None,
+            "a book opened here and taken out there came back"
+        );
+
+        first.open_path(&heard_of);
+        first.return_to_library();
+        assert!(second.reread_if_changed());
+        let at = first
+            .library
+            .iter()
+            .position(|b| b.path.as_deref() == Some(heard_of.as_path()))
+            .unwrap();
+        first.remove_book(at);
+        second.open_book(0);
+        second.next_page();
+        second.return_to_library();
+        let kept = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(
+            place_of(&kept, &heard_of),
+            None,
+            "a book heard of here and taken out there came back"
+        );
+    }
+
+    /// The book chosen in the library stays chosen when another window takes
+    /// out one listed before it: the list is counted from the top, so the
+    /// same number names the book after it.
+    #[test]
+    fn the_chosen_book_stays_chosen_when_one_before_it_goes() {
+        let scratch = scratchdir::ScratchDir::new("ebook_chosen_stays");
+        let a = book_file(&scratch, "a.txt", &long_text());
+        let b = book_file(&scratch, "b.txt", &long_text());
+        let c = book_file(&scratch, "c.txt", &long_text());
+        let mut first = EbookApp::with_shelf(Some(library_file(&scratch)));
+        for path in [&a, &b, &c] {
+            first.open_path(path);
+            first.return_to_library();
+        }
+        let mut second = EbookApp::with_shelf(Some(library_file(&scratch)));
+        second.selected_book = second
+            .library
+            .iter()
+            .position(|book| book.path.as_deref() == Some(b.as_path()))
+            .unwrap();
+        let at = first
+            .library
+            .iter()
+            .position(|book| book.path.as_deref() == Some(a.as_path()))
+            .unwrap();
+        first.remove_book(at);
+        assert!(second.reread_if_changed());
+        assert_eq!(
+            second.current_book().and_then(|book| book.path.as_deref()),
+            Some(b.as_path()),
+            "another book is chosen"
+        );
+    }
+
+    /// A save that finds the library file broken -- another program wrote it
+    /// -- leaves it as it is and says so, rather than writing this window's
+    /// library over what it could not read.
+    #[test]
+    fn a_save_leaves_a_library_file_it_cannot_read_as_it_is() {
+        let (scratch, mut app) = kept_app("save_unreadable");
+        let a = book_file(&scratch, "a.txt", &long_text());
+        app.open_path(&a);
+        app.return_to_library();
+        let file = library_file(&scratch);
+        std::fs::write(&file, "not a library\n").unwrap();
+        let b = book_file(&scratch, "b.txt", &long_text());
+        app.open_path(&b);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not a library\n");
+        assert!(app.status.contains("could not be read"), "{}", app.status);
+    }
+
+    /// A library file deleted while the reader is open is written back
+    /// whole at the next save: a file that is not there has had nothing taken
+    /// out of it, so no book this window has is taken for one another window
+    /// took out.
+    #[test]
+    fn a_library_file_deleted_while_open_is_written_back_whole() {
+        let (scratch, mut app) = kept_app("file_deleted");
+        let a = book_file(&scratch, "a.txt", &long_text());
+        let b = book_file(&scratch, "b.txt", &long_text());
+        app.open_path(&a);
+        app.open_path(&b);
+        app.return_to_library();
+        std::fs::remove_file(library_file(&scratch)).unwrap();
+        app.open_book(0);
+        app.next_page();
+        app.return_to_library();
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(again.library.len(), 2, "a book went with the file");
     }
 
     #[test]

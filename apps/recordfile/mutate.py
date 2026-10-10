@@ -33,13 +33,13 @@ WATCH = "the_watch_tells_only_of_the_file_and_waits_for_an_in_place_write"
 MUTATIONS = [
     (
         "a record changed here is not taken",
-        "            Some(mine) if changed_here(id) => result.push(mine.clone()),\n",
-        "            Some(_) if changed_here(id) => result.push(record.clone()),\n",
+        "            Some(mine) if changed_here(&k) => result.push(mine.clone()),\n",
+        "            Some(_) if changed_here(&k) => result.push(record.clone()),\n",
         [EDITS],
     ),
     (
         "a record deleted here stays",
-        "        if deleted_here(id) {\n            continue;\n        }\n",
+        "        if deleted_here(&k) {\n            continue;\n        }\n",
         "",
         [DELETES],
     ),
@@ -51,8 +51,8 @@ MUTATIONS = [
     ),
     (
         "an edit here loses to a deletion there",
-        "        if placed.contains(&id) || !changed_here(id) {\n",
-        "        if placed.contains(&id) || !changed_here(id) || base_by.contains_key(&id) {\n",
+        "        if placed.contains(&k) || !changed_here(&k) {\n",
+        "        if placed.contains(&k) || !changed_here(&k) || base_by.contains_key(&k) {\n",
         [DELETES],
     ),
     (
@@ -63,8 +63,8 @@ MUTATIONS = [
     ),
     (
         "what this window adds goes before what another added first",
-        "            .is_some_and(|r| !base_by.contains_key(&r.id()) && !mine_by.contains_key(&r.id()))\n",
-        "            .is_some_and(|r| false && !base_by.contains_key(&r.id()) && !mine_by.contains_key(&r.id()))\n",
+        "            !base_by.contains_key(&k) && !mine_by.contains_key(&k)\n        }) {\n",
+        "            false && !base_by.contains_key(&k) && !mine_by.contains_key(&k)\n        }) {\n",
         [ADDED],
     ),
     (
@@ -87,9 +87,9 @@ MUTATIONS = [
     ),
     (
         "another file's events are told",
-        "    if name != file {\n        return Verdict::Nothing;\n    }\n",
+        "    if !ours(name) {\n        return Verdict::Nothing;\n    }\n",
         "",
-        [WATCH],
+        [WATCH, "a_folder_watch_tells_of_every_file_of_its_kind"],
     ),
     (
         "an in-place write is told before it is finished",

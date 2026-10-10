@@ -1151,6 +1151,7 @@ dependencies = [
  "oswindow",
  "pathcodec",
  "pathtext",
+ "recordfile",
  "safeio",
  "scratchdir",
  "settingsfile",

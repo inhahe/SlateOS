@@ -115,23 +115,36 @@ pub fn fresh_id(taken: impl Fn(u64) -> bool) -> u64 {
 /// the one before it in `mine`.
 #[must_use]
 pub fn merge<R: Record>(base: &[R], mine: &[R], theirs: &[R]) -> Vec<R> {
-    let by_id =
-        |list: &[R]| -> HashMap<u64, R> { list.iter().map(|r| (r.id(), r.clone())).collect() };
-    let base_by = by_id(base);
-    let mine_by = by_id(mine);
-    let theirs_by = by_id(theirs);
-    // Changed or added here: not as the base had it.
-    let changed_here = |id: u64| {
-        mine_by
-            .get(&id)
-            .is_some_and(|m| base_by.get(&id) != Some(m))
-    };
-    let deleted_here = |id: u64| base_by.contains_key(&id) && !mine_by.contains_key(&id);
+    merge_by(base, mine, theirs, R::id)
+}
 
-    let shared = |list: &[R]| -> Vec<u64> {
+/// [`merge`] for records known by a key of their own rather than by an id
+/// [`fresh_id`] gave out: `key` says which record is which -- a book's file,
+/// a budget's category -- and two records with one key are one record.
+///
+/// Where every window can make the same record (one window opens a book
+/// another opened too, both budget one category), the key is what makes them
+/// one rather than two.
+#[must_use]
+pub fn merge_by<R, K, F>(base: &[R], mine: &[R], theirs: &[R], key: F) -> Vec<R>
+where
+    R: Clone + PartialEq,
+    K: Eq + std::hash::Hash,
+    F: Fn(&R) -> K,
+{
+    let by_key =
+        |list: &[R]| -> HashMap<K, R> { list.iter().map(|r| (key(r), r.clone())).collect() };
+    let base_by = by_key(base);
+    let mine_by = by_key(mine);
+    let theirs_by = by_key(theirs);
+    // Changed or added here: not as the base had it.
+    let changed_here = |k: &K| mine_by.get(k).is_some_and(|m| base_by.get(k) != Some(m));
+    let deleted_here = |k: &K| base_by.contains_key(k) && !mine_by.contains_key(k);
+
+    let shared = |list: &[R]| -> Vec<K> {
         list.iter()
-            .map(Record::id)
-            .filter(|id| base_by.contains_key(id) && mine_by.contains_key(id))
+            .map(&key)
+            .filter(|k| base_by.contains_key(k) && mine_by.contains_key(k))
             .collect()
     };
     let reordered = shared(base) != shared(mine);
@@ -139,18 +152,18 @@ pub fn merge<R: Record>(base: &[R], mine: &[R], theirs: &[R]) -> Vec<R> {
     let mut result: Vec<R> = Vec::with_capacity(theirs.len().max(mine.len()));
     if reordered {
         for record in mine {
-            let id = record.id();
-            if changed_here(id) {
+            let k = key(record);
+            if changed_here(&k) {
                 result.push(record.clone());
-            } else if let Some(theirs) = theirs_by.get(&id) {
+            } else if let Some(theirs) = theirs_by.get(&k) {
                 result.push(theirs.clone());
             }
             // Unchanged here and gone from the file: another window deleted
             // it, and that stands.
         }
         for record in theirs {
-            let id = record.id();
-            if !mine_by.contains_key(&id) && !deleted_here(id) {
+            let k = key(record);
+            if !mine_by.contains_key(&k) && !deleted_here(&k) {
                 result.push(record.clone());
             }
         }
@@ -158,21 +171,21 @@ pub fn merge<R: Record>(base: &[R], mine: &[R], theirs: &[R]) -> Vec<R> {
     }
 
     for record in theirs {
-        let id = record.id();
-        if deleted_here(id) {
+        let k = key(record);
+        if deleted_here(&k) {
             continue;
         }
-        match mine_by.get(&id) {
-            Some(mine) if changed_here(id) => result.push(mine.clone()),
+        match mine_by.get(&k) {
+            Some(mine) if changed_here(&k) => result.push(mine.clone()),
             _ => result.push(record.clone()),
         }
     }
     // Added or changed here and not in the file: each after the record
     // before it in `mine`, or first when nothing before it is in the result.
-    let mut placed: HashSet<u64> = result.iter().map(Record::id).collect();
+    let mut placed: HashSet<K> = result.iter().map(&key).collect();
     for (at, record) in mine.iter().enumerate() {
-        let id = record.id();
-        if placed.contains(&id) || !changed_here(id) {
+        let k = key(record);
+        if placed.contains(&k) || !changed_here(&k) {
             continue;
         }
         let before = mine
@@ -180,18 +193,21 @@ pub fn merge<R: Record>(base: &[R], mine: &[R], theirs: &[R]) -> Vec<R> {
             .unwrap_or_default()
             .iter()
             .rev()
-            .find_map(|prior| result.iter().position(|r| r.id() == prior.id()));
+            .find_map(|prior| {
+                let prior = key(prior);
+                result.iter().position(|r| key(r) == prior)
+            });
         let mut index = before.map_or(0, |i| i.saturating_add(1));
         // Past what other windows added at the same place since: they saved
         // first, so what this window adds there comes after theirs.
-        while result
-            .get(index)
-            .is_some_and(|r| !base_by.contains_key(&r.id()) && !mine_by.contains_key(&r.id()))
-        {
+        while result.get(index).is_some_and(|r| {
+            let k = key(r);
+            !base_by.contains_key(&k) && !mine_by.contains_key(&k)
+        }) {
             index = index.saturating_add(1);
         }
         result.insert(index.min(result.len()), record.clone());
-        placed.insert(id);
+        placed.insert(k);
     }
     result
 }
@@ -259,6 +275,14 @@ pub enum Verdict {
 /// tested on every host.
 #[must_use]
 pub fn verdict(mask: u32, name: &[u8], file: &[u8]) -> Verdict {
+    verdict_for(mask, name, |n| n == file)
+}
+
+/// [`verdict`] for a window keeping every file in the folder that `ours`
+/// says is one of its own -- a library of one file a record, as the
+/// flashcards' decks are.
+#[must_use]
+pub fn verdict_for(mask: u32, name: &[u8], ours: impl Fn(&[u8]) -> bool) -> Verdict {
     use libcall::inotify::{
         IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED, IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM,
         IN_MOVED_TO, IN_Q_OVERFLOW,
@@ -270,7 +294,7 @@ pub fn verdict(mask: u32, name: &[u8], file: &[u8]) -> Verdict {
     if mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF) != 0 && name.is_empty() {
         return Verdict::Ended;
     }
-    if name != file {
+    if !ours(name) {
         return Verdict::Nothing;
     }
     if mask & (IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE) != 0 {
@@ -299,10 +323,27 @@ impl Watch {
     /// folder or name: the window then hears of other windows' saves only
     /// when it next reads the file, before its own save.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Option<Self> {
-        let folder = path.parent()?.to_path_buf();
+        let folder = path.parent()?;
         let file = path.file_name()?.as_encoded_bytes().to_vec();
+        Self::start_folder(folder, move |name| name == file.as_slice(), wake)
+    }
+
+    /// Watch every file in `folder` that `ours` says is one of the window's
+    /// -- a library of one file a record. `None` where it cannot be watched,
+    /// as for [`start`](Self::start).
+    ///
+    /// The folder is made if it is not there yet. A program's folder is made
+    /// by its first save, so on a first run it is not there when a window
+    /// opens, and a watch cannot be put on a folder that is not there: two
+    /// windows opened on a first run would never hear each other's saves.
+    pub fn start_folder(
+        folder: &Path,
+        ours: impl Fn(&[u8]) -> bool + Send + 'static,
+        wake: impl Fn() + Send + 'static,
+    ) -> Option<Self> {
         let inotify = libcall::inotify::Inotify::new().ok()?;
-        let c_folder = c_path(&folder)?;
+        fs::create_dir_all(folder).ok()?;
+        let c_folder = c_path(folder)?;
         let mask = libcall::inotify::IN_MOVED_TO
             | libcall::inotify::IN_MOVED_FROM
             | libcall::inotify::IN_DELETE
@@ -314,7 +355,7 @@ impl Watch {
         let stopping = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name(String::from("recordfile-watch"))
-            .spawn(move || watch_loop(&inotify, &file, &stopping, &wake))
+            .spawn(move || watch_loop(&inotify, &ours, &stopping, &wake))
             .ok()?;
         Some(Self {
             stop,
@@ -337,7 +378,7 @@ impl Drop for Watch {
 /// the watch ends.
 fn watch_loop(
     inotify: &libcall::inotify::Inotify,
-    file: &[u8],
+    ours: &impl Fn(&[u8]) -> bool,
     stop: &AtomicBool,
     wake: &(impl Fn() + Send),
 ) {
@@ -364,7 +405,7 @@ fn watch_loop(
             };
             for event in events {
                 let Ok(event) = event else { break };
-                match verdict(event.mask, event.name, file) {
+                match verdict_for(event.mask, event.name, ours) {
                     Verdict::Now => tell = true,
                     Verdict::WhenQuiet => quiet_until = Instant::now().checked_add(QUIET),
                     Verdict::Ended => {
@@ -425,6 +466,27 @@ mod tests {
 
     fn texts(list: &[Note]) -> Vec<&'static str> {
         list.iter().map(|r| r.text).collect()
+    }
+
+    /// Records known by a key of their own -- here a book's file and how far
+    /// through it the reader is -- merge as records by id do; and the same
+    /// key added in both windows is one record, this window's, not two.
+    #[test]
+    fn records_with_keys_of_their_own_merge_by_their_keys() {
+        let book = |path: &'static str, at: u32| (path, at);
+        let key = |b: &(&'static str, u32)| b.0;
+        let base = [book("/a.txt", 0)];
+        let mine = [book("/a.txt", 10), book("/both.txt", 1)];
+        let theirs = [book("/a.txt", 0), book("/b.txt", 3), book("/both.txt", 7)];
+        assert_eq!(
+            merge_by(&base, &mine, &theirs, key),
+            [book("/a.txt", 10), book("/b.txt", 3), book("/both.txt", 1)]
+        );
+        // Taken out here, and left alone there: gone.
+        assert_eq!(
+            merge_by(&base, &[], &[book("/a.txt", 0), book("/b.txt", 3)], key),
+            [book("/b.txt", 3)]
+        );
     }
 
     /// **Two windows each add a note; both are kept.** Before, the window
@@ -569,6 +631,24 @@ mod tests {
         );
         assert_eq!(verdict(IN_Q_OVERFLOW, b"", b"notes.txt"), Verdict::Now);
         assert_eq!(verdict(IN_IGNORED, b"", b"notes.txt"), Verdict::Ended);
+    }
+
+    /// A folder of one file a record hears every file of its kind, and not
+    /// the temporaries a save writes beside them.
+    #[test]
+    fn a_folder_watch_tells_of_every_file_of_its_kind() {
+        use libcall::inotify::{IN_MODIFY, IN_MOVED_TO};
+        let deck = |name: &[u8]| name.ends_with(b".deck");
+        assert_eq!(verdict_for(IN_MOVED_TO, b"7.deck", deck), Verdict::Now);
+        assert_eq!(verdict_for(IN_MODIFY, b"12.deck", deck), Verdict::WhenQuiet);
+        assert_eq!(
+            verdict_for(IN_MOVED_TO, b".7.deck.slate-save-1-0", deck),
+            Verdict::Nothing
+        );
+        assert_eq!(
+            verdict_for(IN_MOVED_TO, b"notes.txt", deck),
+            Verdict::Nothing
+        );
     }
 
     /// On a system without inotify -- the development host -- nothing is

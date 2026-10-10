@@ -2707,15 +2707,15 @@ MUTATIONS += [
         [FM_CUT, FM_CHORD],
     ),
     (
-        "a field holds no capacity",
-        "    input.set_capacity(Some(capacity));\n    input\n}\n",
-        "    let _ = capacity;\n    input\n}\n",
+        'a field holds no capacity',
+        '            exclusion_draft: textline::field_holding("", EXCLUSION_CAPACITY),\n',
+        '            exclusion_draft: textline::field_holding("", usize::MAX),\n',
         [FM_CAP],
     ),
     (
-        "the menu's keys reach the page too",
-        "            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                return EventResult::Consumed;\n            }\n",
-        "            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        'a press or a key the menu took reaches the page too',
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
         [FM_MODAL],
     ),
     (

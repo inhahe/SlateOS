@@ -57,7 +57,7 @@ MUTATIONS = [
     ),
     (
         "Escape leaves the menu up",
-        "            Some(MenuAction::Closed) => {\n                self.up = None;\n                Outcome::Taken\n            }\n",
+        "            Some(MenuAction::Closed) => {\n                if !menu.is_visible() {\n                    self.up = None;\n                }\n                Outcome::Taken\n            }\n",
         "            Some(MenuAction::Closed) => Outcome::Taken,\n",
         [KEYS],
     ),
@@ -109,8 +109,8 @@ MUTATIONS = [
 MUTATIONS += [
     (
         "a button let go is the menu's",
-        '            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {\n                Outcome::Window\n            }\n',
-        '            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {\n                Outcome::Taken\n            }\n',
+        '            MouseEventKind::Release(_) | MouseEventKind::Enter => Outcome::Window,\n',
+        '            MouseEventKind::Release(_) | MouseEventKind::Enter => Outcome::Taken,\n',
         ["what_is_let_go_and_the_pointer_leaving_are_the_windows"],
     ),
     (
@@ -130,6 +130,39 @@ MUTATIONS += [
         '            Event::Key(key) => self.key(key),\n',
         '            Event::Key(_) => Outcome::Window,\n',
         ["one_call_routes_an_event"],
+    ),
+]
+
+MUTATIONS += [
+    (
+        "a double click is taken for a press",
+        "            MouseEventKind::DoubleClick(_) => Outcome::Taken,\n            MouseEventKind::Press(button) => {\n",
+        "            MouseEventKind::Press(button) | MouseEventKind::DoubleClick(button) => {\n",
+        ["a_double_click_is_the_menus_and_does_nothing_more"],
+    ),
+    (
+        "Left puts the menu away",
+        "                if !menu.is_visible() {\n                    self.up = None;\n                }\n                Outcome::Taken\n            }\n            Some(MenuAction::None) | None => Outcome::Taken,\n",
+        "                self.up = None;\n                Outcome::Taken\n            }\n            Some(MenuAction::None) | None => Outcome::Taken,\n",
+        ["left_does_not_put_the_menu_away"],
+    ),
+    (
+        "the pointer leaving leaves a row waiting",
+        "                menu.handle_mouse_move(f32::NEG_INFINITY, f32::NEG_INFINITY);\n",
+        "",
+        ["the_pointer_leaving_ends_a_rows_wait"],
+    ),
+    (
+        "the menu outlasts the keyboard",
+        "            Event::FocusOut if self.up.take().is_some() => Outcome::Taken,\n",
+        "",
+        ["the_menu_goes_with_the_keyboard_or_the_windows_size"],
+    ),
+    (
+        "the menu outlasts the window's size",
+        "            Event::Resize { .. } | Event::ScaleChanged { .. } => {\n                self.up = None;\n",
+        "            Event::Resize { .. } | Event::ScaleChanged { .. } => {\n",
+        ["the_menu_goes_with_the_keyboard_or_the_windows_size"],
     ),
 ]
 

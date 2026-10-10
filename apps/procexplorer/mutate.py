@@ -523,9 +523,9 @@ MUTATIONS += [
         [FM_MODAL],
     ),
     (
-        "a row chosen for the filter does nothing",
-        "                let _edit = self.filter_editor.edit_command(id);\n",
-        "",
+        'a row chosen for the filter does nothing',
+        '                if self.filter_editor.edit_command(id) == KeyEdit::Changed {\n',
+        '                if false {\n',
         [FM_FILTER],
     ),
     (
@@ -543,10 +543,8 @@ MUTATIONS += [
     ),
     (
         "an edit from the menu leaves the New Task box's complaint up",
-        "                    if run_box.input.text() != before {\n"
-        "                        run_box.error = None;\n"
-        "                    }\n",
-        "",
+        '                    && run_box.input.edit_command(id) == KeyEdit::Changed\n                {\n                    run_box.error = None;\n                }\n',
+        '                    && run_box.input.edit_command(id) == KeyEdit::Changed\n                {\n                }\n',
         [FM_RUN],
     ),
     (

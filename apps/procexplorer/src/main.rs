@@ -25,7 +25,7 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, PickRefused, PickRequest, Response};
 use oswindow::{PickOutcome, PickedWindow};
@@ -2251,20 +2251,16 @@ impl ProcessExplorerState {
         match field {
             MenuField::Filter => {
                 self.sync_filter_editor();
-                let before = self.filter_editor.text().to_owned();
-                let _edit = self.filter_editor.edit_command(id);
-                if self.filter_editor.text() != before {
+                if self.filter_editor.edit_command(id) == KeyEdit::Changed {
                     self.filter_text = self.filter_editor.text().to_owned();
                     self.rebuild_visible_list();
                 }
             }
             MenuField::RunBox => {
-                if let Some(run_box) = self.run_box.as_mut() {
-                    let before = run_box.input.text().to_owned();
-                    let _edit = run_box.input.edit_command(id);
-                    if run_box.input.text() != before {
-                        run_box.error = None;
-                    }
+                if let Some(run_box) = self.run_box.as_mut()
+                    && run_box.input.edit_command(id) == KeyEdit::Changed
+                {
+                    run_box.error = None;
                 }
             }
         }

@@ -2282,7 +2282,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -5043,9 +5043,7 @@ impl TorrentApp {
     /// The menu's row `id`, chosen: done to the magnet box as its key would
     /// be, the last attempt's complaint put away if the link changed.
     fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
-        let before = self.magnet_input.text().to_owned();
-        let _edit = self.magnet_input.edit_command(id);
-        if self.magnet_input.text() != before {
+        if self.magnet_input.edit_command(id) == KeyEdit::Changed {
             self.magnet_error = None;
         }
         EventResult::Consumed

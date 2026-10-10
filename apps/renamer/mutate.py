@@ -317,15 +317,15 @@ MUTATIONS += [
         [RN_MENU],
     ),
     (
-        "a row chosen does nothing",
-        "        let _edit = self.draft.edit_command(id);\n",
-        "",
+        'a row chosen does nothing',
+        '        if self.draft.edit_command(id) == KeyEdit::Changed {\n',
+        '        if false {\n',
         [RN_MENU],
     ),
     (
-        "a change from the menu takes no effect",
-        "        if self.draft.text() != before {\n            self.draft_changed();\n        }\n",
-        "",
+        'a change from the menu takes no effect',
+        '        if self.draft.edit_command(id) == KeyEdit::Changed {\n            self.draft_changed();\n        }\n',
+        '        let _edit = self.draft.edit_command(id);\n',
         [RN_MENU],
     ),
     (

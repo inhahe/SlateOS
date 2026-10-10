@@ -52,7 +52,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text::{self, TextCursor};
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::path::Path;
@@ -2183,9 +2183,7 @@ impl QrApp {
         if self.editor.text() != self.field_text(field) {
             self.load_editor();
         }
-        let before = self.editor.text().to_owned();
-        let _edit = self.editor.edit_command(id);
-        if self.editor.text() != before {
+        if self.editor.edit_command(id) == KeyEdit::Changed {
             *self.field_text_mut(field) = self.editor.text().to_owned();
             self.notice = None;
             self.generate();

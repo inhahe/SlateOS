@@ -274,13 +274,9 @@ fn one_call_routes_an_event() {
     menu.open(6_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
     assert_eq!(menu.event(&Event::Key(key(Key::A))), Outcome::Taken);
     assert_eq!(menu.event(&Event::Tick { elapsed_ms: 16 }), Outcome::Window);
-    assert_eq!(
-        menu.event(&Event::Resize {
-            width: 800,
-            height: 600
-        }),
-        Outcome::Window
-    );
+    // A move leaves the menu where it was: its place is in the window's own
+    // coordinates.
+    assert_eq!(menu.event(&Event::Moved { x: 40, y: 30 }), Outcome::Window);
     assert_eq!(
         menu.event(&Event::Mouse(mouse(
             700.0,
@@ -290,4 +286,91 @@ fn one_call_routes_an_event() {
         Outcome::RightPressElsewhere(700.0, 500.0)
     );
     assert!(!menu.is_up());
+}
+
+/// **The double click after a second press is the menu's and does nothing
+/// more**: the press acted already -- here it put up the menu of the field
+/// under it -- and a double click taken for another press put that menu
+/// away again.
+#[test]
+fn a_double_click_is_the_menus_and_does_nothing_more() {
+    let input = field("hello", true);
+    let mut menu = FieldMenu::new();
+    menu.open(8_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(
+        menu.mouse(&mouse(
+            700.0,
+            500.0,
+            MouseEventKind::DoubleClick(MouseButton::Right)
+        )),
+        Outcome::Taken
+    );
+    assert!(menu.is_up(), "a double click put the menu away");
+    let (x, y) = middle(&menu, EditCommand::Delete);
+    assert_eq!(
+        menu.mouse(&mouse(x, y, MouseEventKind::DoubleClick(MouseButton::Left))),
+        Outcome::Taken,
+        "a double click chose a row its press had not"
+    );
+    assert!(menu.is_up());
+}
+
+/// **Left does not put the menu away**: only Escape does. Left answers a
+/// submenu's parent, and a field's menu has none.
+#[test]
+fn left_does_not_put_the_menu_away() {
+    let input = field("hello", true);
+    let mut menu = FieldMenu::new();
+    menu.open(9_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(menu.key(&key(Key::Left)), Outcome::Taken);
+    assert!(menu.is_up(), "Left put the menu away");
+}
+
+/// **The pointer leaving takes the menu's waiting reason with it**: no row
+/// waits to say why with the pointer gone from the window.
+#[test]
+fn the_pointer_leaving_ends_a_rows_wait() {
+    let input = field("hello", false);
+    let mut menu = FieldMenu::new();
+    menu.open(10_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    let (x, y) = middle(&menu, EditCommand::Copy);
+    menu.mouse(&mouse(x, y, MouseEventKind::Move));
+    assert!(menu.due_in().is_some(), "resting on a dimmed row waits");
+    assert_eq!(
+        menu.mouse(&mouse(-1.0, -1.0, MouseEventKind::Leave)),
+        Outcome::Window
+    );
+    assert_eq!(
+        menu.due_in(),
+        None,
+        "a row still waits with the pointer gone"
+    );
+}
+
+/// **The menu goes when the window loses the keyboard, or is resized or
+/// rescaled**: left up it took the first keys and press after, at a place
+/// that was no longer its. A focus loss that put it away asks for a frame.
+#[test]
+fn the_menu_goes_with_the_keyboard_or_the_windows_size() {
+    let input = field("hello", true);
+    let mut menu = FieldMenu::new();
+    assert_eq!(menu.event(&Event::FocusOut), Outcome::Window);
+    menu.open(11_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(menu.event(&Event::FocusOut), Outcome::Taken);
+    assert!(!menu.is_up(), "the menu outlasted the keyboard");
+    menu.open(11, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(
+        menu.event(&Event::Resize {
+            width: 400,
+            height: 300
+        }),
+        Outcome::Window
+    );
+    assert!(!menu.is_up(), "the menu outlasted the window's size");
+    menu.open(11, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(
+        menu.event(&Event::ScaleChanged { scale: 2.0 }),
+        Outcome::Window
+    );
+    assert!(!menu.is_up(), "the menu outlasted the window's scale");
 }

@@ -59,7 +59,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
@@ -4428,9 +4428,7 @@ impl RenamerApp {
         if self.focus != focus {
             return EventResult::Consumed;
         }
-        let before = self.draft.text().to_owned();
-        let _edit = self.draft.edit_command(id);
-        if self.draft.text() != before {
+        if self.draft.edit_command(id) == KeyEdit::Changed {
             self.draft_changed();
         }
         EventResult::Consumed

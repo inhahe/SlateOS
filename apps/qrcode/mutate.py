@@ -353,15 +353,15 @@ MUTATIONS += [
         [QR_MENU, QR_CAP, QR_CLOCK],
     ),
     (
-        "a row chosen does nothing",
-        "        let _edit = self.editor.edit_command(id);\n",
-        "",
+        'a row chosen does nothing',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
+        '        if false {\n',
         [QR_MENU, QR_CAP],
     ),
     (
-        "the code does not follow the menu",
-        "        if self.editor.text() != before {\n            *self.field_text_mut(field) = self.editor.text().to_owned();\n",
-        "        if self.editor.text() != before {\n",
+        'the code does not follow the menu',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n            *self.field_text_mut(field) = self.editor.text().to_owned();\n',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
         [QR_MENU, QR_CAP],
     ),
     (

@@ -2088,11 +2088,11 @@ fn field_with(text: &str) -> TextInput {
 }
 
 /// What a key would put into the body, for its cap: the typed characters,
-/// or the clipboard for a paste.
-fn would_insert(key: &KeyEvent, clipboard: &str) -> Option<String> {
-    let mods = key.modifiers;
-    if mods.ctrl && !mods.alt {
-        return (key.key == Key::V).then(|| clipboard.to_owned());
+/// or for the key that pastes ([`textline::pastes`]) the program's
+/// clipboard -- read for that key alone, since it may hold megabytes.
+fn would_insert(key: &KeyEvent) -> Option<String> {
+    if textline::pastes(key) {
+        return Some(guitk::clipboard::text());
     }
     key.types_text().then(|| key.typed().collect())
 }
@@ -3280,7 +3280,7 @@ impl EmailApp {
                 // pastes in another.
                 if compose.field == ComposeField::Body {
                     // Past what a message holds, nothing more goes in.
-                    if let Some(inserted) = would_insert(key, &guitk::clipboard::text())
+                    if let Some(inserted) = would_insert(key)
                         && !body_fits(&compose.body, &inserted)
                     {
                         return EventResult::Consumed;
@@ -7395,6 +7395,29 @@ mod tests {
         type_into(&mut app, "Re: ");
         app.handle_event(&key_ev(Key::V, true));
         assert_eq!(body_text(&app), "Re: Quarterly figures");
+    }
+
+    /// **A drag in the body ends where the button comes up, though a field's
+    /// menu came up in the middle of it**: the menu leaves a release to the
+    /// window, whose drag would otherwise go on with no button held.
+    #[test]
+    fn a_body_drag_ends_at_its_release_though_a_menu_came_up_in_it() {
+        let mut app = writing_a_body();
+        type_into(&mut app, "some words to drag across");
+        let (x, y) = field_middle(&app, ComposeField::Body);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert!(
+            app.compose.as_ref().is_some_and(|c| c.body_drag),
+            "the press began no drag"
+        );
+        right_press_on(&mut app, ComposeField::Subject);
+        assert!(app.field_menu.is_up(), "no menu came up");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Release(MouseButton::Left)));
+        assert!(
+            app.compose.as_ref().is_some_and(|c| !c.body_drag),
+            "the release did not end the drag"
+        );
+        assert!(app.field_menu.is_up(), "the release put the menu away");
     }
 
     /// A drag across the body selects what it passes over, and a double

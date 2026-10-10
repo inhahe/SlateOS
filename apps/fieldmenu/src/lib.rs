@@ -57,7 +57,9 @@ pub enum Outcome<F> {
     /// to the window -- a button or a key let go, the pointer leaving or
     /// coming back, any event that is neither a key nor the pointer.
     Window,
-    /// The menu took the event; there is nothing more to do but draw.
+    /// The menu took the event; there is nothing more to do but draw. A
+    /// focus loss that put the menu away is answered so: the window has
+    /// nothing to do with it but draw the menu gone.
     Taken,
     /// The row `id` was chosen for the field: have the field do it
     /// (`edit_command`), then whatever a typed change there brings.
@@ -166,10 +168,20 @@ impl<F: Copy> FieldMenu<F> {
     /// [`key`](Self::key)'s or [`mouse`](Self::mouse)'s, and anything else
     /// is the window's -- a tick included, which the window hands
     /// [`tick`](Self::tick) beside its own ticks' work. See [`Outcome`].
+    ///
+    /// The menu is put away when the window loses the keyboard -- left up,
+    /// it took the first keys and the first press after the user came back
+    /// -- and when the window is resized or rescaled, the place it was put
+    /// for being gone.
     pub fn event(&mut self, event: &Event) -> Outcome<F> {
         match event {
             Event::Mouse(mouse) => self.mouse(mouse),
             Event::Key(key) => self.key(key),
+            Event::FocusOut if self.up.take().is_some() => Outcome::Taken,
+            Event::Resize { .. } | Event::ScaleChanged { .. } => {
+                self.up = None;
+                Outcome::Window
+            }
             _ => Outcome::Window,
         }
     }
@@ -181,7 +193,11 @@ impl<F: Copy> FieldMenu<F> {
         };
         let field = *field;
         match event.kind {
-            MouseEventKind::Press(button) | MouseEventKind::DoubleClick(button) => {
+            // The press before a double click acted already: the double click
+            // is the menu's, as that press was, and does nothing more -- taken
+            // for a press, it closed the menu the press had just opened.
+            MouseEventKind::DoubleClick(_) => Outcome::Taken,
+            MouseEventKind::Press(button) => {
                 let inside = menu
                     .panel_rect()
                     .is_some_and(|panel| panel.contains(event.x, event.y));
@@ -221,9 +237,13 @@ impl<F: Copy> FieldMenu<F> {
             }
             // The window's still: a drag it had going ends where the button
             // comes up, and its hover follows the pointer out and back in.
-            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {
+            // Leaving is the menu's news too: off every row, no row of it
+            // waits to say why.
+            MouseEventKind::Leave => {
+                menu.handle_mouse_move(f32::NEG_INFINITY, f32::NEG_INFINITY);
                 Outcome::Window
             }
+            MouseEventKind::Release(_) | MouseEventKind::Enter => Outcome::Window,
         }
     }
 
@@ -242,8 +262,13 @@ impl<F: Copy> FieldMenu<F> {
                 self.up = None;
                 Outcome::Chosen(field, id)
             }
+            // Escape hides the menu. Left at the top answers Closed too --
+            // meant for the menu a submenu came from, which this one is not --
+            // and leaves it up.
             Some(MenuAction::Closed) => {
-                self.up = None;
+                if !menu.is_visible() {
+                    self.up = None;
+                }
                 Outcome::Taken
             }
             Some(MenuAction::None) | None => Outcome::Taken,

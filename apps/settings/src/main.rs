@@ -2453,7 +2453,7 @@ impl SettingsState {
         Self {
             current_category: SettingsCategory::System,
             current_page: SettingsPage::Display,
-            search_query: field_holding(SEARCH_CAPACITY),
+            search_query: textline::field_holding("", SEARCH_CAPACITY),
             search_focused: false,
             show_help: false,
             sidebar_hovered: None,
@@ -2468,7 +2468,7 @@ impl SettingsState {
             dialog: None,
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
-            exclusion_draft: field_holding(EXCLUSION_CAPACITY),
+            exclusion_draft: textline::field_holding("", EXCLUSION_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
             focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
@@ -3773,14 +3773,6 @@ enum MenuField {
     Search,
     /// A field on the page.
     Page(FieldId),
-}
-
-/// An empty one-line field that typing and pasting -- by key or from its
-/// right-click menu -- fill to at most `capacity` characters.
-fn field_holding(capacity: usize) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_capacity(Some(capacity));
-    input
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -9438,6 +9430,23 @@ impl SettingsState {
             self.color_dialog_event(event);
             return EventResult::Consumed;
         }
+        // A text field's menu takes the presses, the keys, the pointer and
+        // the wheel while it is up, as any menu does -- a row chosen, a press
+        // outside putting it away and reaching nothing under it, a right
+        // press there opening that field's own -- and the arrows move through
+        // its rows, Enter does the lit one, Escape puts it away.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(id, field);
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -9459,20 +9468,6 @@ impl SettingsState {
         // desktop's and arrives carrying its key -- Alt+Down changed the
         // category and Alt+Enter, in the exclusion field, added the pattern.
         let plain = textline::is_plain(evt.modifiers);
-
-        // A text field's menu takes the keys while it is up: the arrows move
-        // through its rows, Enter does the lit one, Escape puts it away --
-        // none of them reaches the field or the page under it.
-        match self.field_menu.key(evt) {
-            fieldmenu::Outcome::Window => {}
-            fieldmenu::Outcome::Chosen(field, id) => {
-                self.do_field_menu_row(id, field);
-                return EventResult::Consumed;
-            }
-            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                return EventResult::Consumed;
-            }
-        }
 
         // Above the focused-field branch below, which takes the keyboard and
         // returns. Placed after it, the card could be raised from a page and
@@ -9737,22 +9732,6 @@ impl SettingsState {
                 _ => {}
             }
         }
-        // A text field's menu takes every press while it is up, as any menu
-        // does -- a row chosen, a press outside putting it away and reaching
-        // nothing under it, a right press there opening that field's own --
-        // and the pointer and the wheel over it.
-        match self.field_menu.mouse(evt) {
-            fieldmenu::Outcome::Window => {}
-            fieldmenu::Outcome::Taken => return EventResult::Consumed,
-            fieldmenu::Outcome::Chosen(field, id) => {
-                self.do_field_menu_row(id, field);
-                return EventResult::Consumed;
-            }
-            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
-                let _another = self.open_field_menu(x, y);
-                return EventResult::Consumed;
-            }
-        }
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             // An open list is put away by a press of any button, as by a left
@@ -9761,8 +9740,9 @@ impl SettingsState {
                 self.open_dropdown = None;
                 EventResult::Consumed
             }
-            // During a drag -- a slider's, the scrollbar's -- nobody's: a menu
-            // opened now would take the release that ends the drag.
+            // During a drag -- a slider's, the scrollbar's -- nobody's: the
+            // drag holds the pointer until it is let go, and a menu opened in
+            // the middle of it would take the moves the drag follows.
             MouseEventKind::Press(MouseButton::Right)
                 if self.dragging.is_some() || self.page_bar_grab.is_some() =>
             {
@@ -10774,7 +10754,7 @@ impl oswindow::app::App for SettingsState {
     /// moment it is due.
     fn tick_interval(&self) -> Option<std::time::Duration> {
         // And a text field's menu, whose dimmed rows say why while the
-        // pointer rests on one, on the same clock.
+        // pointer rests on one -- on its own clock, which the ticks move.
         let menu = self.field_menu.due_in();
         let why = self.why_disabled.due_in(self.clock_ms);
         match (why, menu) {

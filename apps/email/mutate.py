@@ -156,9 +156,9 @@ MUTATIONS = [
         ["the_body_stops_at_its_capacity"],
     ),
     (
-        "a paste is not capped",
-        "        return (key.key == Key::V).then(|| clipboard.to_owned());",
-        "        return None;",
+        'a paste is not capped',
+        '        return Some(guitk::clipboard::text());\n',
+        '        return None;\n',
         ["the_body_stops_at_its_capacity"],
     ),
     (
@@ -470,6 +470,15 @@ MUTATIONS += [
         '        self.field_menu.due_in().map(Duration::from_millis)\n',
         '        self.field_menu.due_in().map(Duration::from_millis).filter(|_| false)\n',
         [E_CLOCK],
+    ),
+]
+
+MUTATIONS += [
+    (
+        'a release the menu passes on is kept from the window',
+        '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window => {}\n',
+        '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window\n                if self.field_menu.is_up()\n                    && matches!(\n                        event,\n                        Event::Mouse(MouseEvent {\n                            kind: MouseEventKind::Release(_),\n                            ..\n                        })\n                    ) =>\n            {\n                return EventResult::Consumed;\n            }\n            fieldmenu::Outcome::Window => {}\n',
+        ["a_body_drag_ends_at_its_release_though_a_menu_came_up_in_it"],
     ),
 ]
 

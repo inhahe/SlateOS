@@ -409,15 +409,15 @@ MAIN += [
         [TM_MENU],
     ),
     (
-        "a row chosen does nothing",
-        "        let _edit = self.magnet_input.edit_command(id);\n",
-        "",
+        'a row chosen does nothing',
+        '        if self.magnet_input.edit_command(id) == KeyEdit::Changed {\n',
+        '        if false {\n',
         [TM_MENU, TM_CLOCK],
     ),
     (
-        "the complaint outlives a change from the menu",
-        "        if self.magnet_input.text() != before {\n            self.magnet_error = None;\n        }\n        EventResult::Consumed\n",
-        "        EventResult::Consumed\n",
+        'the complaint outlives a change from the menu',
+        '        if self.magnet_input.edit_command(id) == KeyEdit::Changed {\n            self.magnet_error = None;\n        }\n',
+        '        let _edit = self.magnet_input.edit_command(id);\n',
         [TM_MENU],
     ),
     (

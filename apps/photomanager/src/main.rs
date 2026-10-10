@@ -2889,11 +2889,9 @@ impl PhotoApp {
         // that is what being over everything means.
         //
         // Put away only when the press put it away -- a row chosen, or a press
-        // outside it: a press on Colour label opens the submenu and one on a
-        // greyed row does nothing, and the menu used to go after every press,
-        // so the colour labels could not be reached with the pointer. And it
-        // has the pointer's moves while it is up, so its rows light, its
-        // submenu opens, and a greyed row says why.
+        // outside it: a press on Colour label opens the submenu, and one on a
+        // greyed row does nothing. And it has the pointer's moves while it is
+        // up, so its rows light, its submenu opens, and a greyed row says why.
         if let Some(menu) = self.photo_menu.as_mut() {
             match event.kind {
                 MouseEventKind::Press(_) => {
@@ -8461,8 +8459,7 @@ mod tests {
 
     /// **The colour labels are reached with the pointer**: a press on Colour
     /// label opens it and leaves the menu up, moving onto it opens it too,
-    /// and a press on a colour in it gives the photograph that label. The
-    /// menu used to go after every press and never saw the pointer move.
+    /// and a press on a colour in it gives the photograph that label.
     #[test]
     fn the_colour_labels_are_reached_with_the_pointer() {
         let mut app = app_with_photos("menu-colour");

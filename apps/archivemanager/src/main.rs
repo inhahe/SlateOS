@@ -535,7 +535,7 @@ impl TreeSource for Folders<'_> {
 /// files are in it directly.
 fn folder_item(node: &TreeNode, key: String) -> TreeItem<String> {
     // No picture: every row of this pane is a folder, so one would say
-    // nothing. (It was an emoji, which no font here draws.)
+    // nothing.
     let label = node.name.clone();
     let item = if node.children.is_empty() {
         TreeItem::leaf(key, label)
@@ -2078,7 +2078,6 @@ pub fn render_column_headers(
     HEADER_H
 }
 
-/// Render a single row in the file list.
 /// The side of a file-list row's picture, in pixels.
 const ROW_ICON_SIDE: u16 = 14;
 
@@ -2094,6 +2093,7 @@ fn entry_icon(entry: &ArchiveEntry) -> &'static str {
     }
 }
 
+/// Render a single row in the file list.
 pub fn render_file_row(
     entry: &ArchiveEntry,
     pal: &Palette,
@@ -2121,8 +2121,7 @@ pub fn render_file_row(
     let mut x = x_offset + 4.0;
 
     // Name column: the entry's picture from the icon theme -- a folder, a
-    // locked file, a file -- in the name's ink, then the name. (They were
-    // emoji, which no font here draws.)
+    // locked file, a file -- in the name's ink, then the name.
     let name_color = if entry.is_dir { pal.blue } else { pal.text };
     frame.push(RenderCommand::Image {
         x: x + 4.0,

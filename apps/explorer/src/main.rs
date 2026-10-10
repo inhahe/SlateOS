@@ -217,7 +217,7 @@ impl FileType {
 
     /// The icon drawn for a file of this kind where the theme has no picture
     /// for its exact type: one the built-in set draws, so every row has a
-    /// picture. Until 2026-10-10 these were emoji, which no font here draws
+    /// picture -- not an emoji, which no font here draws
     /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
     ///
     /// A video's, an archive's and source code's own generic names
@@ -3976,10 +3976,8 @@ impl ExplorerState {
         let chosen = menu.handle_click(x, y);
         // Put away only when the press put it away -- a row chosen, or a
         // press outside it. A press on a submenu's row opens the submenu and
-        // one on a greyed row does nothing, and both leave the menu up: the
-        // menu was dropped after every press, so a submenu a click opened
-        // went with it, and Open With and Sort by could not be reached with
-        // the pointer at all.
+        // one on a greyed row does nothing, and both leave the menu up: put
+        // away then, a submenu a click opened would go with it.
         if !menu.is_visible() {
             self.menu = None;
         }
@@ -6888,8 +6886,7 @@ impl ExplorerState {
                 was.is_some() || dropped || divider
             }
             // With a menu up, the pointer lights its rows and opens its
-            // submenus -- it did neither, so a submenu opened only on a press,
-            // and that press then put the whole menu away.
+            // submenus.
             MouseEventKind::Move if self.menu.is_some() => self.hover_menu(m.x, m.y),
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
             MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
@@ -11664,10 +11661,7 @@ mod tests {
 
     /// **A submenu is reached with the pointer**: moving onto Sort by opens
     /// it, a press on Sort by opens it too and leaves the menu up, and a
-    /// press on a row in it chooses that row. The menu used to be put away
-    /// after every press and never saw the pointer move, so a submenu opened
-    /// only on a press -- which then put the whole menu away -- and Sort by
-    /// and Open With could not be reached with the pointer at all.
+    /// press on a row in it chooses that row.
     #[test]
     fn a_submenu_is_reached_with_the_pointer() {
         let scratch = temp_dir("menu_submenu");

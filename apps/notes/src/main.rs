@@ -6154,9 +6154,7 @@ mod tests {
 
     /// **Move to is reached with the pointer**: moving onto it opens it, a
     /// press on it opens it and leaves the menu up, and a press on a
-    /// notebook in it moves the note there. The menu used to be put away
-    /// after every press and never saw the pointer move, so Move to could
-    /// not be reached with the pointer at all.
+    /// notebook in it moves the note there.
     #[test]
     fn move_to_is_reached_with_the_pointer() {
         let (mut app, id, _work, personal) = note_menu_up();

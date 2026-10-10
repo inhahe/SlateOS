@@ -4524,9 +4524,9 @@ impl App for RenamerApp {
         (WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX)
     }
 
-    /// No clock: nothing here ages. A rename's time is read when it happens.
     /// A clock only while a box's menu is up and a dimmed row the pointer
-    /// rests on is waiting to say why; nothing else here ages.
+    /// rests on is waiting to say why; nothing else here ages -- a rename's
+    /// time is read when it happens.
     fn tick_interval(&self) -> Option<Duration> {
         self.field_menu
             .due_in(self.clock_ms)

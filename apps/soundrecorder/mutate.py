@@ -307,6 +307,76 @@ MUTATIONS = [
     ),
 ]
 
+# The name box's right-click menu (2026-10-10, requests/c-e-text-fields-have-
+# a-right-click-menu.md), through apps/fieldmenu, on the program's clipboard,
+# the box holding the label's capacity, the clock for a dimmed row's reason
+# beside the recording's.
+SR_MENU = "the_name_boxs_right_click_menu_edits_the_name"
+SR_CLOCK = "the_name_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MUTATIONS += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [SR_MENU, SR_CLOCK],
+    ),
+    (
+        "a right press with no name being written opens the menu",
+        "        if !self.rename_rect().is_some_and(|rect| rect.contains(x, y)) {\n",
+        "        if self.rename.is_some() && !self.rename_rect().is_some_and(|rect| rect.contains(x, y)) {\n",
+        [SR_MENU],
+    ),
+    (
+        "a row chosen by press does nothing",
+        "                fieldmenu::Outcome::Chosen((), id) => {\n                    if let Some(input) = self.rename.as_mut() {\n                        let _edit = input.edit_command(id);\n                    }\n                    return EventResult::Consumed;\n                }\n                fieldmenu::Outcome::RightPressElsewhere(x, y) => {",
+        "                fieldmenu::Outcome::Chosen((), _id) => {\n                    return EventResult::Consumed;\n                }\n                fieldmenu::Outcome::RightPressElsewhere(x, y) => {",
+        [SR_MENU, SR_CLOCK],
+    ),
+    (
+        "the menu's keys reach the box too",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                    return EventResult::Consumed;\n                }\n",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [SR_MENU],
+    ),
+    (
+        "a press the menu took reaches the window too",
+        "                fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "                fieldmenu::Outcome::Taken => {}\n",
+        [SR_MENU],
+    ),
+    (
+        "the menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [SR_MENU],
+    ),
+    (
+        "the keys keep a clipboard of their own",
+        "                    let _edit = textline::apply_key_on_clipboard(input, key, LABEL_CAPACITY, 13.0);\n",
+        "                    let _edit = textline::apply_key(input, key, LABEL_CAPACITY, \"\", 13.0);\n",
+        [SR_MENU],
+    ),
+    (
+        "the box holds no capacity",
+        "        input.set_capacity(Some(LABEL_CAPACITY));\n",
+        "",
+        [SR_CLOCK],
+    ),
+    (
+        "no clock while the menu waits",
+        "        let menu = self\n            .field_menu\n            .due_in(self.menu_clock_ms)\n            .map(Duration::from_millis);\n",
+        "        let menu: Option<Duration> = None;\n",
+        [SR_CLOCK],
+    ),
+    (
+        "the clock does not move the menu",
+        "                let reason = self.field_menu.tick(self.menu_clock_ms);\n",
+        "                let reason = false;\n",
+        [SR_CLOCK],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "soundrecorder", timeout=900, only=only))

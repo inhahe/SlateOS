@@ -70,7 +70,10 @@ mod track;
 
 pub use demux::{Demuxer, Packet, SegmentInfo};
 pub use metadata::{Attachment, AttachmentKind, Chapter, Metadata};
-pub use track::{Audio, Codec, Colour, Projection, Track, TrackKind, Video};
+pub use track::{
+    Audio, Chromaticities, Codec, Colour, ContentLight, Luminance, Mastering, Projection, Track,
+    TrackKind, Video,
+};
 
 /// Why a file could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

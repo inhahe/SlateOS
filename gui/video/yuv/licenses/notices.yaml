@@ -8,6 +8,12 @@
 # named once for the tree, and libavif is named in gui/imagecodec's manifest,
 # beside its licence text (libavif-LICENSE.txt), for the much larger part of
 # libavif that crate ports.
+#
+# Nor is src/managed.rs: Skia's colour conversion and tone map
+# (src/core/SkColorSpaceXformSteps.cpp, src/codec/SkHdrAgtm.cpp) and its
+# skcms (modules/skcms, part of the Skia tree: skcms_PrimariesToXYZD50 and
+# the matrix arithmetic), BSD-3-Clause. Skia is named in gui/imagecodec's
+# manifest, beside its licence text (skia-LICENSE).
 
 # libyuv, at the revision libavif 1.4.2 pins,
 # 644251f252a84bf8ce91ff0aca86a9b16b069ab8, whose include/libyuv/version.h

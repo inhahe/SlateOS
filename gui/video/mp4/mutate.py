@@ -377,8 +377,8 @@ PARSE = [
     ),
     (
         "a short vpcC is not refused",
-        "        if a.size < 5 {",
-        "        if a.size < 0 {",
+        "        if a.size < 5 {\n            return Err(Error::Invalid(\"an empty VP codec configuration box\"));",
+        "        if a.size < 0 {\n            return Err(Error::Invalid(\"an empty VP codec configuration box\"));",
         [packets("vpcc_short")],
     ),
     (
@@ -386,6 +386,67 @@ PARSE = [
         "        if self.r.u8()? == 1 {",
         "        if self.r.u8()? <= 1 {",
         [packets("vpcc_version_0")],
+    ),
+    # The light boxes.
+    (
+        "mdcv's primaries are read in red, green, blue order",
+        "        for start in [2usize, 4, 0, 6] {",
+        "        for start in [0usize, 2, 4, 6] {",
+        [packets("light_mdcv_clli")],
+    ),
+    (
+        "SmDm's peak is read in mdcv's units",
+        "                max_luminance_scale: 1 << 8,",
+        "                max_luminance_scale: 10_000,",
+        [packets("light_smdm_coll"), packets("light_first_of_two")],
+    ),
+    (
+        "a second mastering display stands over the first",
+        "        if self.last().is_some_and(|(_, d)| d.mastering.is_some()) {\n            return Ok(());\n        }",
+        "",
+        [packets("light_first_of_two")],
+    ),
+    (
+        "a second content light level stands over the first",
+        "        if self.last().is_some_and(|(_, d)| d.content_light.is_some()) {\n            return Ok(());\n        }",
+        "",
+        [packets("light_first_of_two")],
+    ),
+    (
+        "a SmDm of another version is read",
+        "        if self.r.u8()? != 0 || self.last().is_some_and(|(_, d)| d.mastering.is_some()) {",
+        "        if self.r.u8()? == 255 || self.last().is_some_and(|(_, d)| d.mastering.is_some()) {",
+        [packets("light_versions")],
+    ),
+    (
+        "a CoLL of another version is read",
+        "        if self.r.u8()? != 0 {\n            return Ok(());\n        }\n        self.r.skip(3)?;\n        self.content_light()",
+        "        if self.r.u8()? == 255 {\n            return Ok(());\n        }\n        self.r.skip(3)?;\n        self.content_light()",
+        [packets("light_versions")],
+    ),
+    (
+        "a short mdcv is not refused",
+        "        if a.size < 24 {",
+        "        if a.size < 20 {",
+        [packets("light_mdcv_short")],
+    ),
+    (
+        "a short clli is not refused",
+        "        if a.size < 4 {\n            return Err(Error::Invalid(\"an empty content light level box\"));",
+        "        if a.size < 0 {\n            return Err(Error::Invalid(\"an empty content light level box\"));",
+        [packets("light_clli_short")],
+    ),
+    (
+        "an empty SmDm is not refused",
+        "        if a.size < 5 {\n            return Err(Error::Invalid(\"an empty mastering display box\"));",
+        "        if a.size < 0 {\n            return Err(Error::Invalid(\"an empty mastering display box\"));",
+        [packets("light_smdm_empty")],
+    ),
+    (
+        "a mastering display outside a track is read",
+        "    fn mdcv(&mut self, a: Atom) -> Result<(), Error> {\n        if self.streams.is_empty() {\n            return Err(Error::Invalid(\"a mastering display box outside a track\"));",
+        "    fn mdcv(&mut self, a: Atom) -> Result<(), Error> {\n        if self.streams.is_empty() {\n            return Ok(());",
+        [packets("light_outside_a_track")],
     ),
     (
         "a pasp with no vertical spacing is kept",
@@ -565,7 +626,7 @@ TRACK = [
     ),
     (
         "CEA-608 captions are not subtitles",
-        '        b"c608" => Some(Codec::Other),\n',
+        '        b"c608" => Some(Codec::Cea608),\n',
         "",
         ["a_code_is_subtitles_by_ffmpegs_table"],
     ),

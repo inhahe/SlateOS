@@ -4344,8 +4344,10 @@ lane C's `guitk`.
     vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
     One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
     (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
-    reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
-    chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
+    reuse. `[ ]` The rest of the gap to libvpx's SIMD on one core: SSSE3/AVX2
+    copies of motion compensation and the loop filter, chosen at run time,
+    one checked `unsafe` call each -- the operator allowed it 2026-10-09
+    (F-Q5, §1373); the same for VP8's lane shuffles.
   - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
     CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
     transforms and quantisers, bit-exact against libvpx's C; the bitstream
@@ -4401,12 +4403,22 @@ lane C's `guitk`.
     queues the frames to decode. Tested end to end, compositor to decoded
     pixels. `[ ]` The remote desktop service that reads the stream, and with
     it coding off the compositor's thread
-    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`).
+    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`):
+    as the operator decided it (F-Q6, §1374), a device pairs by PIN as with
+    Chrome Remote Desktop and is remembered by key; the viewer is a web page
+    the machine serves over HTTPS, for phones, tablets and desktops, zooming
+    and scrolling the remote screen; and turning it on sets up the dynamic
+    DNS name, the router's port and a Let's Encrypt certificate, from lane
+    D's pieces, in lane C's Settings page
+    (`requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
-  and gets thumbnails wherever a picture does. HEIC waits on
-  `open-questions.md` F-Q1 (a patent question), and would reuse the container.
+  and gets thumbnails wherever a picture does.
+  - `[ ]` HEIC, as an optional install (F-Q1 answered B, §1370): an HEVC
+    decoder (libde265, LGPL, as a separate replaceable helper) that a fresh
+    install lacks and offers the first time a HEIC file is opened; the
+    container reader serves HEIC as is. One decoder for HEVC video too.
   - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
     alpha, gain maps, sequences; `dimensions` and `pixel_format` match
     Pillow's libavif on all 224 files of the AOM and libavif corpora.
@@ -4433,9 +4445,11 @@ lane C's `guitk`.
     byte for byte on 28 fixtures made here
     (`tests/data/generate_avif_rescale.py`).
   - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
-    twice dav1d's time, one thread); making rav1d faster waits on
-    `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
-    (known-issues.md, "[F] AVIF decoding has no committed benchmark").
+    twice dav1d's time, one thread). `[ ]` rav1d's hand-written assembly
+    (F-Q4 answered A, §1372): its `asm` feature, assembled with NASM at
+    build time and chosen at run time, its pixels held to the Rust's on every
+    fixture (known-issues.md, "[F] AVIF decoding has no committed
+    benchmark").
 
 - `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
   codec support"): the video player (`apps/videoplayer`, lane E) has its
@@ -4511,7 +4525,8 @@ lane C's `guitk`.
         seeks held to ffprobe's, and every byte of six files damaged in
         turn; and what a track says of its picture (colour, pixel shape,
         display matrix, clean aperture), held to ffprobe over 28 files more.
-        It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+        It carries FFmpeg's licence (LGPL), kept so by the operator (F-Q7
+        answered A, §1375).
       - `[x]` A file's claims held to its length: its tracks index at most a
         sample a byte of it between them, FFmpeg's own ceilings kept exactly
         -- after the fuzzer found a 734-byte file that asked for 46 GB.
@@ -4532,10 +4547,11 @@ lane C's `guitk`.
     - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
   - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
-    write into MP4: `videocodec` refuses them by name today. A decoder for
-    each, held to its reference as VP8's and VP9's are. Whether to include
-    one, and which code to start from, is the operator's:
-    `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
+    write into MP4: `videocodec` refuses them by name today.
+    - `[ ]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
+      answered B, §1376), included, held picture for picture to FFmpeg and
+      the conformance streams; every profile, interlaced, 10-bit and 4:2:2.
+    - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point
       decoder ported -- SILK, hybrid and CELT, concealment, in-band FEC,
@@ -4620,7 +4636,7 @@ lane C's `guitk`.
           dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
-        - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
+        - `[ ]` AAC, which most MP4 files carry: FFmpeg's fixed-point decoder translated into `gui/video/aac` (F-Q9 answered B, §1377), included, LC and HE-AAC, held bit for bit to FFmpeg as Opus and Vorbis are to theirs.
   - `[x]` Subtitles (2026-10-05, design-decisions §1360):
     `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
     cue by cue -- start, end, and the text as SRT markup whatever the
@@ -4680,16 +4696,74 @@ lane C's `guitk`.
       thousands of random documents; a document made to be slow given up
       on. Held to ttconv's reading of each fixture's samples: MP4Box's, and
       written box by box in samples of 2 s, 1.5 s and one, and a seek.
-    - `[ ]` CEA-608 captions in MP4 (`c608`)
-      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+    - `[x]` CEA-608 captions in MP4 (`c608`, 2026-10-05, design-decisions
+      §1369): television's captions, which FFmpeg's and CCExtractor's
+      readers each show otherwise than a television in places. Decoded by
+      the FCC's rules (47 CFR 79.101), channel CC1: pop-on, roll-up and
+      paint-on, every command, the extended characters by McPoodle's
+      tables; a cue for each stretch the screen shows the same, each row a
+      line in the grid's face, placed by its third. Seven fixtures written
+      box by box, each checked against FFmpeg or CCExtractor where either
+      is right, two against the rules alone; seeks. What a caption track's
+      other channels and CEA-708 would take:
+      `known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`.
+
+- `[-]` `[F]` **Colour management, as Chrome does it** (F-Q10 answered A,
+  §1378): pictures' ICC profiles through a port of skcms, Skia's colour
+  library; HDR and wide-gamut video through Chrome's own handling, held to
+  Chrome's pixels; the screen taken to be sRGB until screens report their
+  colours, then the compositor's to manage
+  (`known-issues/F-video-is-shown-without-colour-management.md`).
+  - `[x]` What a video says of its light, read as FFmpeg reads it -- the
+    transfer (PQ, HLG), the mastering display and the content light level,
+    from AV1's metadata OBUs, Matroska's `Colour`, MP4's `colr`, `mdcv` and
+    `clli` and VP9's `SmDm` and `CoLL` -- which Chrome's handling needs.
+  - `[x]` Chrome's handling of HDR on an sRGB screen (§1379): Skia's PQ and
+    HLG curves, its RWTMO tone map by the content's peak, BT.2020 to sRGB,
+    chroma upsampled as Chrome's GPU samples it; on every HDR video frame
+    and HDR AVIF (its `clli`), held to Chrome 154's own pixels
+    (`gui/video/yuv/src/managed.rs`).
+  - `[x]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
+    table lookups a pixel, to the scalar passes' bits -- steps 2 to 5 1.7
+    to 3.6 times faster (`gui/video/yuv/src/managed/avx2.rs`).
+  - `[ ]` HDR's speed, the rest: step 1 (Y'CbCr and its chroma in floating
+    point, some two fifths of a frame now) and the tone map's `exp2f` in
+    its curved middle, eight pixels at a time to the same bits.
+  - `[x]` SDR video's colours to sRGB as Chrome converts them (§1381):
+    every primaries other than BT.709's (BT.601's two too, BT.2020 SDR,
+    P3) and the curves Chrome does not take for the sRGB one, where the
+    video says its colour whole as Chrome takes it -- held to Chrome 154's
+    screenshots (`gui/video/codec/tests/sdr.rs`).
+  - `[x]` SDR AVIF's colours the same: Chrome's AVIF decoder converts by
+    its `nclx` (MIAF's defaults for what is unspecified), on the GPU as
+    video -- held to Chrome's screenshots
+    (`gui/imagecodec/tests/avif_sdr.rs`).
+  - `[ ]` Ordinary video and AVIF converted as Chrome's GPU converts them:
+    floating point with the exact constants, not libyuv's fixed point,
+    whose capped blue weight puts saturated blues up to 15 levels off
+    (`known-issues/F-ordinary-video-is-libyuv-s-arithmetic-not-chrome-s.md`);
+    measure 4K's speed first, and tell lane E.
+  - `[ ]` Video that does not fully say its colours: Chrome's BT.601 or
+    the players' guess -- `open-questions/F-Q11.md`, the operator's.
+  - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
+  - `[ ]` Gain maps (ISO 21496-1: UltraHDR JPEG, AVIF `tmap`), and HDR
+    screens' headroom, once screens report their colours.
+- `[ ]` `[F]` **Screen capture** (F-Q3 answered, §1371): the capture request
+  in `gui/remote`'s protocol and `gui/window`'s call; in the compositor,
+  Print Screen and its own region and window picker, whose pick is the
+  permission, and for programs capturing on their own schedule a prompt only
+  the compositor can draw -- once, for the program's run, or always (kept in
+  lane A's grant store by the program's fingerprint, §1568). Answers lane
+  E's `requests/e-f-an-application-cannot-read-the-screen-so-no-screenshot-can-be-taken.md`.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a
   channel's peer, a TCP peer cannot say what process it is, and `client_pid`
   is a per-connection number. Unblocks the process explorer's window picker
   (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
-  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
-  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  screen capture's prompt (F-Q3, §1371: who is asking, and an "always" kept
+  by the program's fingerprint), per-program grouping on the taskbar, and
+  the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
   design-decisions §1336.
   - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
     `Socket` runs over TCP or a channel from the service registry, through
@@ -4717,6 +4791,78 @@ lane C's `guitk`.
   - `[x]` The attested pid in the window list (`WindowInfo::process`,
     window list version 6), for per-program grouping on the taskbar; `pid`
     stays the per-connection number.
+
+- `[x]` `[F]` **A program's tray icon names a theme icon and its program** --
+  done 2026-10-05 (`design-decisions/1382-...`), for lane C's
+  `requests/c-f-let-a-tray-icon-name-a-theme-icon.md` and
+  `requests/c-f-name-a-tray-icons-program.md`. A tray icon was one character,
+  and the pictures a tray most wants are emoji no font here draws; it now
+  carries an `IconName` from the theme for the shell to draw, and the
+  program's name, which `oswindow` fills in from the one the program declares
+  (`EventLoop::set_app_id`, set by `app::open`), so the shell can remember
+  where a user put a program's icon. A program holds at most 32 icons and a
+  tooltip a kilobyte, and is told when refused. Lane C draws the named icon
+  and keys the tray's arrangement by the program's name.
+
+- `[x]` `[F]` **The shell can draw a live picture of any window** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-let-the-shell-draw-a-live-picture-of-a-window.md`
+  (`roadmap-detailed.md` → Taskbar: "hover thumbnails, Aero Peek-style
+  preview on hover"; also the overview and Alt-Tab).
+  `RenderCommand::WindowPicture` names a window; the compositor draws its
+  client area fitted and area-averaged into the rectangle, again whenever it
+  changes, and only in a shell's frames (§1385). Lane C builds the previews,
+  Peek and the cards on it.
+
+- `[x]` `[F]` **Text in a font family the drawing names** -- done
+  2026-10-10, with lane C, for `requests/c-f-text-in-a-family-the-drawing-names.md`
+  (`roadmap-detailed.md` §3.5: a font picker's live preview, a document's
+  runs). `FontFamily::Named(FamilyName)` (lane C's `5cc5a8029`, merged) on
+  the wire as `FontFamilyTag::Named` and its name; the compositor loads a
+  named family with the toolkit's own `ensure_family`, so a run is drawn in
+  the face it was measured in, at most four new families a frame.
+
+- `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
+  F's part** (the operator's rule, `design-decisions.md` §1242;
+  `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).
+  - `[x]` The keyboard goes back to the window that had it (§1384): one
+    rule for closing, minimising, hiding and leaving a desktop -- the
+    window used most recently that can take it, in the same band or below.
+    Fixed with it: a minimised or hidden window was never told it lost the
+    keyboard (and stayed focused in the window list); minimising and
+    switching desktops handed the keyboard to the taskbar; a refused focus
+    told the focused window it had lost it; closing a window behind a
+    minimised one kept on top left no window focused; and an accent half
+    typed in a closed window completed itself in the next.
+  - `[x]` A shell action giving the keyboard back without closing the
+    window: `ShellControlAction::ReturnKeyboard` (Escape in the prompt) --
+    never back into the window giving it up.
+  - `[x]` Nothing but the user moves the keyboard into the prompt, and no
+    program takes it on its own say-so without the user's action
+    (§1386, the next item).
+  - `[~]` A window that opens without taking the keyboard (a field of
+    `WindowSpec`) -- **blocked by** lane C's `chrome()` naming every
+    field of a window's terms
+    (`requests/f-c-build-the-shells-window-terms-from-spec-new.md`).
+
+- `[x]` `[F]` **A program takes the keyboard on its own say-so only when the
+  user's action asked for it** -- done 2026-10-10 (§1386), the general case
+  lane E's §1242 request left to lane F, and the keyboard half of lane C's
+  `c-abf-...` F2. Activation tokens as Wayland's xdg-activation has them: a
+  launcher draws one (`GetActivationToken`, sixteen bytes from the kernel's
+  random source) standing for the user's latest action in its windows and
+  hands it to the program it starts (`SLATE_ACTIVATION_TOKEN`,
+  `EventLoop::vouch_for`); `oswindow` presents it with the program's first
+  window; `Window::activate` brings an existing window forward on one. Good
+  once, and only while the window holding the keyboard has seen no later
+  action. A program's own `Restore` no longer takes the keyboard (it could
+  take the keys, and the clipboard, whenever it liked); a refused window
+  opens beneath the one with the keyboard and asks for attention. A tray
+  click passed on by the shell counts as the user's action for the icon's
+  program. New windows with no token still take the keyboard (GNOME's and
+  KDE's default) -- refusing them too is F-Q12. Launchers asked to hand
+  tokens on: `requests/f-c-hand-a-started-program-an-activation-token.md`,
+  `requests/f-e-hand-a-started-program-an-activation-token.md`.
 
 - `[F]` Port FreeRDP (line ~5058)
 

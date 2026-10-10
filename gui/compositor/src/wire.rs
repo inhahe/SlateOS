@@ -48,12 +48,12 @@
 use guiremote::DecodeError;
 use guiremote::channel::PeerCred;
 use guiremote::control::{
-    DisplayInfo, Request, RequestBody, Response, ResponseBody, encode_responses_into,
+    DisplayInfo, Layer, Request, RequestBody, Response, ResponseBody, encode_responses_into,
 };
 use guiremote::frame::{Frame, try_decode_any};
 use guiremote::submit::Submission;
 use guiremote::window_list::encode_window_list_into;
-use guitk::render::RenderTree;
+use guitk::render::{RenderCommand, RenderTree};
 
 use crate::{Compositor, CompositorRequest, CompositorResponse, WindowId};
 
@@ -482,14 +482,27 @@ fn to_compositor_request(
     body: RequestBody,
 ) -> Result<CompositorRequest, ResponseBody> {
     Ok(match body {
-        RequestBody::CreateWindow(spec) => CompositorRequest::CreateWindow {
-            spec,
-            // From the link, never from the frame: a client that could state
-            // its own pid could claim another process's windows in the taskbar.
-            client_pid: link.client_pid,
-            // And the process the kernel names for the link, if it named one.
-            owner_pid: link.peer.map(|peer| peer.pid),
-        },
+        RequestBody::CreateWindow(spec) => {
+            // The bands either side of the applications' are the shell's: in
+            // front of every window, its taskbar, menus and prompts; behind
+            // them, the wallpaper. A program that could open a window there
+            // could cover a security prompt with a look-alike, or lay a fake
+            // desktop behind everything, so asking for one takes the shell's
+            // check, as the window list does.
+            if spec.layer != Layer::Normal {
+                link.require_shell()?;
+            }
+            CompositorRequest::CreateWindow {
+                spec,
+                // From the link, never from the frame: a client that could
+                // state its own pid could claim another process's windows in
+                // the taskbar.
+                client_pid: link.client_pid,
+                // And the process the kernel names for the link, if it named
+                // one.
+                owner_pid: link.peer.map(|peer| peer.pid),
+            }
+        }
         RequestBody::DestroyWindow { window } => CompositorRequest::DestroyWindow {
             window_id: link.resolve(window)?,
         },
@@ -672,6 +685,13 @@ fn to_compositor_request(
         RequestBody::SetClipboard { .. } | RequestBody::GetClipboard => {
             return Err(ResponseBody::Error {
                 message: "clipboard requests are link-level".to_string(),
+            });
+        }
+        RequestBody::GetActivationToken
+        | RequestBody::UseActivationToken { .. }
+        | RequestBody::Activate { .. } => {
+            return Err(ResponseBody::Error {
+                message: "activation requests are link-level".to_string(),
             });
         }
         // Link-level too: a sleep request's answer is owed to the link that
@@ -1025,13 +1045,13 @@ impl Compositor {
             // connection: two to know whose icon it is, one because a
             // subscription is a property of the link.
             match &req.body {
-                RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+                RequestBody::SetTrayIcon { id, icon } => {
                     let owner = link.client_pid;
                     // `Ok` whether or not anything changed -- a program
                     // re-sending its icon has done nothing wrong -- and the
                     // refusal itself when the icon is not shown, so the
                     // program can tell a full tray from a shell not drawing.
-                    let body = match self.set_tray_icon(owner, *id, glyph, tooltip) {
+                    let body = match self.set_tray_icon(owner, *id, icon) {
                         Ok(_) => ResponseBody::Ok,
                         Err(refused) => ResponseBody::Error {
                             message: refused.to_string(),
@@ -1056,7 +1076,13 @@ impl Compositor {
                         // clicking one the program removed a frame ago is an
                         // ordinary race, not a mistake it could have avoided.
                         Ok(()) => {
-                            self.click_tray_icon(owner, id, button);
+                            // The click was the user's, on the shell's panel,
+                            // and meant for the program: so the program may
+                            // bring a window forward for it, as a launcher's
+                            // token would let it (design-decisions 1386).
+                            if self.click_tray_icon(owner, id, button) {
+                                self.grant_activation(owner, link.client_pid);
+                            }
                             ResponseBody::Ok
                         }
                         Err(refusal) => refusal,
@@ -1097,6 +1123,41 @@ impl Compositor {
                     let body = self.clipboard_refusal(link).unwrap_or_else(|| {
                         ResponseBody::Clipboard(self.clipboard().map(str::to_owned))
                     });
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // Activation (design-decisions 1386), answered here because
+                // each is about the connection: whose windows a token's action
+                // is read from, whose next window a presented one is for.
+                RequestBody::GetActivationToken => {
+                    let body = match self.issue_activation_token(link.client_pid) {
+                        Ok(token) => ResponseBody::ActivationToken(token),
+                        Err(none) => ResponseBody::Error {
+                            message: none.to_string(),
+                        },
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                RequestBody::UseActivationToken { token } => {
+                    // `Ok` whatever the token: a program presenting guesses
+                    // learns nothing about anyone's tokens.
+                    self.present_activation_token(link.client_pid, *token);
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    continue;
+                }
+                RequestBody::Activate { window, token } => {
+                    // Its own windows only, as every window request is: a
+                    // token lets a program bring itself forward, never another.
+                    let body = match link.resolve(*window) {
+                        Ok(window_id) => match self.activate_on_request(window_id, *token) {
+                            Ok(()) => ResponseBody::Ok,
+                            Err(e) => ResponseBody::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(refusal) => refusal,
+                    };
                     replies.push(Response::new(req.seq, body));
                     continue;
                 }
@@ -1286,7 +1347,15 @@ impl Compositor {
             return;
         }
         let Submission { commands, .. } = submission;
-        let RenderTree { commands } = commands;
+        let RenderTree { mut commands } = commands;
+        // A picture of another window is a stronger read than its title, so it
+        // is honoured only from a shell -- the check the window list goes
+        // through -- and drawn as nothing in anyone else's frame. Removed here,
+        // where the frame arrives, so the compositor never holds a picture a
+        // client was not entitled to.
+        if link.require_shell().is_err() {
+            commands.retain(|c| !matches!(c, RenderCommand::WindowPicture { .. }));
+        }
         // The error is the same "no such window" that `owns` just ruled out,
         // save for a window destroyed between the check and here, which is not
         // something a client can be told about on a frame with no reply.
@@ -1443,6 +1512,7 @@ mod tests {
         decode_responses,
     };
     use guiremote::input::decode_input_frame;
+    use guiremote::tray::{IconName, TraySpec};
     use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
@@ -1854,6 +1924,266 @@ mod tests {
         );
     }
 
+    /// A picture of another window is a shell's to draw: from a client that
+    /// fails the shell check it is dropped where the frame arrives, and the
+    /// rest of the frame lands; from the shell it is kept.
+    #[test]
+    fn only_a_shell_may_picture_another_window() {
+        let kept = |holds_key: Option<bool>| {
+            let (mut comp, mut link) = wired();
+            let mine = open(&mut comp, &mut link, "Panel");
+            let mut other = ClientLink::new(99);
+            let theirs = open(&mut comp, &mut other, "Password manager");
+            link.attest(
+                Some(PeerCred {
+                    pid: 300,
+                    uid: 1000,
+                    gid: 1000,
+                }),
+                holds_key,
+            );
+            link.set_shell_gate(ShellGate::KeyHolders);
+
+            let mut tree = RenderTree::new();
+            tree.fill_rect(0.0, 0.0, 10.0, 10.0, Color::from_hex(0x11_22_33));
+            tree.commands.push(RenderCommand::WindowPicture {
+                window: theirs,
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 40.0,
+            });
+            link.receive(&encode_submit(mine, &tree));
+            comp.serve(&mut link).expect("serves");
+            let commands = &comp
+                .window_ref(WindowId::from_raw(mine))
+                .expect("window")
+                .render_tree
+                .commands;
+            (
+                commands.len(),
+                commands
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::WindowPicture { .. })),
+            )
+        };
+        assert_eq!(
+            kept(Some(false)),
+            (1, false),
+            "a program's picture was kept"
+        );
+        assert_eq!(
+            kept(None),
+            (1, false),
+            "an unvouched client's picture was kept"
+        );
+        assert_eq!(
+            kept(Some(true)),
+            (2, true),
+            "the shell's picture was dropped"
+        );
+    }
+
+    /// The bands either side of the applications' are the shell's: once the
+    /// gate is armed, a client the kernel does not vouch for as the shell is
+    /// refused a window in front of every window or behind them all, and
+    /// still opens ordinary ones; the shell opens all three.
+    #[test]
+    fn a_band_other_than_the_applications_takes_the_shells_check() {
+        for (holds_key, layer, opens) in [
+            (Some(false), Layer::Overlay, false),
+            (Some(false), Layer::Background, false),
+            (None, Layer::Overlay, false),
+            (Some(false), Layer::Normal, true),
+            (Some(true), Layer::Overlay, true),
+            (Some(true), Layer::Background, true),
+        ] {
+            let (mut comp, mut link) = wired();
+            link.attest(
+                Some(PeerCred {
+                    pid: 300,
+                    uid: 1000,
+                    gid: 1000,
+                }),
+                holds_key,
+            );
+            link.set_shell_gate(ShellGate::KeyHolders);
+            let mut spec = WindowSpec::new("Surface", 100, 80);
+            spec.layer = layer;
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::CreateWindow(spec)]);
+            let opened = matches!(responses[0].body, ResponseBody::WindowCreated { .. });
+            assert_eq!(opened, opens, "{layer:?}, key {holds_key:?}");
+            assert!(
+                opens || is_refusal(&responses[0].body),
+                "{:?}",
+                responses[0].body
+            );
+            assert_eq!(comp.window_list().windows.len(), usize::from(opens));
+        }
+        // Under the open gate -- every session until its shell holds the
+        // key -- anyone may, as before.
+        let (mut comp, mut link) = wired();
+        let mut spec = WindowSpec::new("Surface", 100, 80);
+        spec.layer = Layer::Overlay;
+        let responses = exchange(&mut comp, &mut link, vec![RequestBody::CreateWindow(spec)]);
+        assert!(matches!(
+            responses[0].body,
+            ResponseBody::WindowCreated { .. }
+        ));
+    }
+
+    /// One request's answer.
+    fn reply(comp: &mut Compositor, link: &mut ClientLink, body: RequestBody) -> ResponseBody {
+        let mut responses = exchange(comp, link, vec![body]);
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        responses.remove(0).body
+    }
+
+    /// The user types a key into whatever has the keyboard.
+    fn type_a_key(comp: &mut Compositor) {
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        comp.handle_input(crate::InputEvent::KeyUp { scancode: 0x1E });
+    }
+
+    /// Activation over the wire (design-decisions 1386): a token drawn by the
+    /// program the user is in lets the program it starts open in front --
+    /// under the strict policy, where nothing else would -- and only once.
+    #[test]
+    fn a_token_drawn_over_the_wire_opens_the_started_program_in_front() {
+        let (mut comp, mut launcher) = wired();
+        comp.activation.count_tokens();
+        comp.set_new_window_policy(crate::NewWindows::Strict);
+        let menu = open(&mut comp, &mut launcher, "Start menu");
+        type_a_key(&mut comp);
+        let ResponseBody::ActivationToken(token) =
+            reply(&mut comp, &mut launcher, RequestBody::GetActivationToken)
+        else {
+            panic!("no token");
+        };
+
+        let mut started = ClientLink::new(77);
+        assert_eq!(
+            reply(
+                &mut comp,
+                &mut started,
+                RequestBody::UseActivationToken { token }
+            ),
+            ResponseBody::Ok
+        );
+        let window = open(&mut comp, &mut started, "Started");
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+
+        // The same token from another program: used up, and the window
+        // opens behind.
+        let mut other = ClientLink::new(78);
+        assert_eq!(
+            reply(
+                &mut comp,
+                &mut other,
+                RequestBody::UseActivationToken { token }
+            ),
+            ResponseBody::Ok,
+            "a presented token is answered Ok whatever it was"
+        );
+        open(&mut comp, &mut other, "Other");
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+        let _ = menu;
+    }
+
+    /// A token brings forward only the presenter's own windows: `Activate`
+    /// naming another program's window is refused as every window request
+    /// naming one is, and changes nothing.
+    #[test]
+    fn a_program_activates_only_its_own_windows() {
+        let (mut comp, mut mine) = wired();
+        comp.activation.count_tokens();
+        let theirs_link = &mut ClientLink::new(99);
+        let theirs = open(&mut comp, theirs_link, "Theirs");
+        comp.minimize_window(WindowId::from_raw(theirs)).unwrap();
+        open(&mut comp, &mut mine, "Mine");
+        type_a_key(&mut comp);
+        let ResponseBody::ActivationToken(token) =
+            reply(&mut comp, &mut mine, RequestBody::GetActivationToken)
+        else {
+            panic!("no token");
+        };
+        let focused = comp.focused_window();
+        let refused = reply(
+            &mut comp,
+            &mut mine,
+            RequestBody::Activate {
+                window: theirs,
+                token,
+            },
+        );
+        // The answer any window request naming another program's window
+        // gets: no such window, as far as this program is told.
+        assert!(matches!(refused, ResponseBody::Error { .. }), "{refused:?}");
+        assert!(
+            comp.window_ref(WindowId::from_raw(theirs))
+                .unwrap()
+                .minimized
+        );
+        assert_eq!(comp.focused_window(), focused);
+    }
+
+    /// A program's own `Restore` no longer takes the keyboard from another
+    /// program's window -- and a click on its tray icon, passed on by the
+    /// shell, is what lets it: "restore from the tray".
+    #[test]
+    fn a_tray_click_lets_the_icons_program_restore_its_window() {
+        let (mut comp, mut shell) = wired();
+        comp.activation.count_tokens();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut player = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut player,
+            vec![RequestBody::SetTrayIcon {
+                id: 7,
+                icon: TraySpec::new("M", "Music"),
+            }],
+        );
+        let window = open(&mut comp, &mut player, "Player");
+        comp.minimize_window(WindowId::from_raw(window)).unwrap();
+        open(&mut comp, &mut shell, "Taskbar");
+        type_a_key(&mut comp);
+
+        // Unprompted, a restore leaves the window where it is.
+        reply(&mut comp, &mut player, RequestBody::Restore { window });
+        assert!(
+            comp.window_ref(WindowId::from_raw(window))
+                .unwrap()
+                .minimized
+        );
+
+        let clicked = reply(
+            &mut comp,
+            &mut shell,
+            RequestBody::ClickTrayIcon {
+                owner: 99,
+                id: 7,
+                button: guitk::event::MouseButton::Left,
+            },
+        );
+        assert_eq!(clicked, ResponseBody::Ok);
+        reply(&mut comp, &mut player, RequestBody::Restore { window });
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+        assert!(
+            !comp
+                .window_ref(WindowId::from_raw(window))
+                .unwrap()
+                .minimized
+        );
+    }
+
     #[test]
     fn requests_and_pictures_interleave_on_one_connection() {
         // The reason the demultiplexer exists: a client draws and controls its
@@ -2177,8 +2507,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("B"),
-                tooltip: String::from("Battery: 87%"),
+                icon: TraySpec::new("B", "Battery: 87%"),
             }],
         );
         assert!(matches!(replies[0].body, ResponseBody::Ok));
@@ -2216,8 +2545,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 7,
-                glyph: String::from("M"),
-                tooltip: String::from("Music"),
+                icon: TraySpec::new("M", "Music"),
             }],
         );
         // The negative control: this program has opened no window, so if the
@@ -2296,8 +2624,7 @@ mod tests {
                 &mut app,
                 vec![RequestBody::SetTrayIcon {
                     id: 1,
-                    glyph: String::from("B"),
-                    tooltip: tooltip.to_string(),
+                    icon: TraySpec::new("B", tooltip.to_string()),
                 }],
             );
         }
@@ -2323,8 +2650,7 @@ mod tests {
                 &mut app,
                 vec![RequestBody::SetTrayIcon {
                     id: 1,
-                    glyph: String::from("X"),
-                    tooltip: format!("from {pid}"),
+                    icon: TraySpec::new("X", format!("from {pid}")),
                 }],
             );
         }
@@ -2351,8 +2677,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("M"),
-                tooltip: String::from("Music"),
+                icon: TraySpec::new("M", "Music"),
             }],
         );
         assert_eq!(
@@ -2822,8 +3147,7 @@ mod tests {
         );
         let set = |id: u32| RequestBody::SetTrayIcon {
             id,
-            glyph: String::from("X"),
-            tooltip: format!("icon {id}"),
+            icon: TraySpec::new("X", format!("icon {id}")),
         };
         let mut greedy = ClientLink::new(99);
         let replies = exchange(
@@ -2874,7 +3198,8 @@ mod tests {
         let programs = MAX_TRAY_ICONS / MAX_TRAY_ICONS_PER_CLIENT;
         for owner in 0..u64::from(programs) {
             for id in 0..MAX_TRAY_ICONS_PER_CLIENT {
-                comp.set_tray_icon(owner, id, "X", "").expect("room");
+                comp.set_tray_icon(owner, id, &TraySpec::new("X", ""))
+                    .expect("room");
             }
         }
         assert_eq!(
@@ -2887,8 +3212,7 @@ mod tests {
             &mut late,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("L"),
-                tooltip: String::from("late"),
+                icon: TraySpec::new("L", "late"),
             }],
         );
         match &replies[0].body {
@@ -2926,8 +3250,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("T"),
-                tooltip: tooltip.clone(),
+                icon: TraySpec::new("T", tooltip.clone()),
             }],
         );
         assert!(
@@ -2948,9 +3271,150 @@ mod tests {
 
         // At the bound exactly, nothing is cut.
         let exact = "t".repeat(MAX_TOOLTIP_BYTES);
-        comp.set_tray_icon(99, 1, "T", &exact)
+        comp.set_tray_icon(99, 1, &TraySpec::new("T", exact.clone()))
             .expect("a replacement");
         assert_eq!(comp.tray_list().icons[0].tooltip, exact);
+    }
+
+    /// The shell is told which program an icon is and which theme icon to
+    /// draw for it -- what lets it draw a battery rather than a box, and keep
+    /// a user's arrangement of the tray across the program's restarts.
+    #[test]
+    fn a_shell_is_told_an_icons_program_and_its_theme_icon() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let battery = IconName::new("battery-caution").expect("a name");
+        let mut app = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![
+                RequestBody::SetTrayIcon {
+                    id: 1,
+                    icon: TraySpec::new("B", "Battery: 12%")
+                        .with_app_id("powerd")
+                        .with_icon_name(battery),
+                },
+                // A program that says neither: today's icon, unchanged.
+                RequestBody::SetTrayIcon {
+                    id: 2,
+                    icon: TraySpec::new("W", "Wi-Fi"),
+                },
+            ],
+        );
+        let lists = pump_trays(&mut comp, &mut shell);
+        let icons = &lists.last().expect("a frame").icons;
+        assert_eq!(icons[0].app_id, "powerd");
+        assert_eq!(icons[0].icon_name, Some(battery));
+        assert_eq!(icons[0].glyph, "B", "the glyph stays, as the fallback");
+        assert_eq!(icons[1].app_id, "");
+        assert_eq!(icons[1].icon_name, None);
+    }
+
+    /// A program switching only its theme icon -- the battery from good to
+    /// caution, the glyph unchanged -- has changed what the shell draws, and
+    /// the shell is sent the new list.
+    #[test]
+    fn changing_only_the_theme_icon_is_a_change() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        for name in ["battery-good", "battery-caution"] {
+            let replies = exchange(
+                &mut comp,
+                &mut app,
+                vec![RequestBody::SetTrayIcon {
+                    id: 1,
+                    icon: TraySpec::new("B", "Battery").with_icon_name(IconName::new(name)),
+                }],
+            );
+            assert!(matches!(replies[0].body, ResponseBody::Ok));
+            let lists = pump_trays(&mut comp, &mut shell);
+            assert_eq!(lists.len(), 1, "{name}: the change sent no frame");
+            assert_eq!(lists[0].icons[0].icon_name, IconName::new(name));
+        }
+        let same = comp
+            .set_tray_icon(
+                99,
+                1,
+                &TraySpec::new("B", "Battery").with_icon_name(IconName::new("battery-caution")),
+            )
+            .expect("a replacement");
+        assert!(!same, "the same icon again was counted a change");
+    }
+
+    /// A program's name is kept to 255 bytes, cut where a character ends, as
+    /// a glyph and a tooltip are: too long is cut, never refused.
+    #[test]
+    fn a_long_program_name_is_cut_on_a_character_boundary() {
+        use guiremote::tray::MAX_APP_ID_BYTES;
+        let (mut comp, _shell) = wired();
+        // "€" is three bytes; 255 is a multiple of three, so one byte in
+        // front puts the bound inside a "€".
+        let app_id = format!("x{}", "\u{20ac}".repeat(MAX_APP_ID_BYTES));
+        comp.set_tray_icon(99, 1, &TraySpec::new("A", "").with_app_id(app_id.clone()))
+            .expect("cut, not refused");
+        let kept = comp.tray_list().icons[0].app_id.clone();
+        assert_eq!(kept.len(), 253, "x and 84 whole euro signs");
+        assert!(app_id.starts_with(&kept));
+    }
+
+    /// `guiremote`'s icon-name rule is the theme's: a name the shell's
+    /// `appearance::icons::is_valid_name` would refuse never crosses the
+    /// wire, and every name it accepts does, up to the wire's 64 bytes.
+    ///
+    /// Two crates hold the rule because `guiremote` is linked by every
+    /// program and `appearance` reads files and decodes pictures; the
+    /// compositor links both, so this is where the two are held together.
+    #[test]
+    fn the_wires_icon_names_are_the_ones_a_theme_can_hold() {
+        let mut probes: Vec<String> = [
+            "",
+            "-",
+            "a",
+            "-a",
+            "a-",
+            "_",
+            "a_b",
+            "battery-caution",
+            "Battery",
+            "a/b",
+            "..",
+            ".",
+            "a.b",
+            "a b",
+            "\u{e9}",
+            "\u{0}",
+            "9",
+            "z-0_9",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        // Every single byte that is a character, as a name and as one's tail.
+        for b in 0u8..=127 {
+            let c = char::from(b);
+            probes.push(c.to_string());
+            probes.push(format!("a{c}"));
+        }
+        probes.push("a".repeat(IconName::MAX_LEN));
+        probes.push("a".repeat(IconName::MAX_LEN + 1));
+        for probe in &probes {
+            let theme = appearance::icons::is_valid_name(probe) && probe.len() <= IconName::MAX_LEN;
+            assert_eq!(
+                IconName::new(probe).is_some(),
+                theme,
+                "{probe:?}: the wire and the theme disagree"
+            );
+        }
     }
 
     /// An unchanged tray is not resent.
@@ -2968,8 +3432,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("N"),
-                tooltip: String::from("Network"),
+                icon: TraySpec::new("N", "Network"),
             }],
         );
         assert_eq!(pump_trays(&mut comp, &mut shell).len(), 1);

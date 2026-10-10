@@ -16,6 +16,8 @@ text 0001 - "struck"
 cue 5000000000 6000000000 2
 text 1000 ffff00 "loud yellow "
 text 1100 00ffff "quiet cyan"
+text 1000 ffff00 " "
+text 1100 00ff00 "its own lime"
 text 1000 ffff00 " loud again"
 cue 7000000000 8000000000 2
 text 0000 - "two"

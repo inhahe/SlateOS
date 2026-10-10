@@ -28,6 +28,7 @@
 
 use std::time::{Duration, Instant};
 
+use yuv::managed::{self, Conversion, Light, Signal, Transfer};
 use yuv::reformat::{self, Format, Picture, Reformat};
 use yuv::{Plane, PlaneBuf};
 
@@ -189,6 +190,67 @@ fn run<T: Noise>(case: &Case) -> f64 {
     })
 }
 
+/// Milliseconds to convert `picture`, an HDR picture, once by `map`: as
+/// [`millis`].
+fn millis_hdr(picture: &Picture<'_, u16>, map: &Conversion<'_>) -> f64 {
+    let mut out = Vec::new();
+    managed::to_argb_into(picture, map, &mut out).unwrap();
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let start = Instant::now();
+        let mut n = 0u32;
+        while start.elapsed() < Duration::from_millis(500) {
+            managed::to_argb_into(picture, map, &mut out).unwrap();
+            n += 1;
+        }
+        best = best.min(start.elapsed().as_secs_f64() * 1000.0 / f64::from(n));
+    }
+    best
+}
+
+/// A 10-bit 4:2:0 BT.2020 picture of noise -- its luma held to `luma_max`
+/// (of 1023) and, if `grey`, its chroma to the middle -- converted as HDR of
+/// `transfer` with a MaxCLL of `max_cll`.
+fn run_hdr(transfer: Transfer, max_cll: f32, luma_max: u16, grey: bool) -> f64 {
+    let (cw, ch) = chroma(Format::Yuv420);
+    let mut y: PlaneBuf<u16> = noise(WIDTH, HEIGHT, 10, 1);
+    for s in &mut y.samples {
+        *s = (*s).min(luma_max);
+    }
+    let mut u: PlaneBuf<u16> = noise(cw, ch, 10, 2);
+    let mut v: PlaneBuf<u16> = noise(cw, ch, 10, 3);
+    if grey {
+        u.samples.fill(512);
+        v.samples.fill(512);
+    }
+    let signal = Signal::new(transfer);
+    let map = Conversion::new(
+        &signal,
+        9,
+        Light {
+            max_cll,
+            ..Light::default()
+        },
+    );
+    millis_hdr(
+        &Picture {
+            width: WIDTH,
+            height: HEIGHT,
+            depth: 10,
+            format: Format::Yuv420,
+            matrix: 9,
+            primaries: 9,
+            full_range: false,
+            y: y.view(),
+            u: Some(u.view()),
+            v: Some(v.view()),
+            alpha: None,
+            alpha_premultiplied: false,
+        },
+        &map,
+    )
+}
+
 #[test]
 #[ignore = "a measurement: run with --release --ignored --nocapture"]
 fn bench_reformat() {
@@ -205,4 +267,23 @@ fn bench_reformat() {
         "  libavif, 8-bit 4:2:0 BT.709: {:.2} (libyuv's C), {:.2} (libyuv's x86 SIMD)",
         LIBAVIF.0, LIBAVIF.1
     );
+    println!("HDR, 10-bit 4:2:0 BT.2020, as Chrome shows it (`yuv::managed`):");
+    let cases = [
+        (Transfer::Pq, 1000.0, 1023, false, "PQ, MaxCLL 1000, noise"),
+        (Transfer::Pq, 4000.0, 1023, false, "PQ, MaxCLL 4000, noise"),
+        (
+            Transfer::Pq,
+            1000.0,
+            560,
+            true,
+            "PQ, MaxCLL 1000, greys below the reference white",
+        ),
+        (Transfer::Hlg, 0.0, 1023, false, "HLG, noise"),
+    ];
+    for (transfer, max_cll, luma_max, grey, name) in cases {
+        println!(
+            "  {:7.2}  {name}",
+            run_hdr(transfer, max_cll, luma_max, grey)
+        );
+    }
 }

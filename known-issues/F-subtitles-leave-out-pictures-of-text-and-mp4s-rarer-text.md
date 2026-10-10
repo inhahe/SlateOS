@@ -1,24 +1,33 @@
-### [F] Subtitles leave out MP4's rarer text formats, and DVD's custom colours -- 2026-10-05
+### [F] Subtitles leave out a caption track's other channels, and DVD's custom colours -- 2026-10-05
 
 **Status:** OPEN (lane F) -- limitations of `videocodec::Subtitles`, each
 with what doing it would take.
 
 **In short:** `videocodec::Subtitles` reads a film's text subtitles --
-SubRip, ASS, SSA and WebVTT in Matroska and WebM, 3GPP timed text, WebVTT
-and TTML in MP4 --
-into SRT markup for lane E's player (design-decisions §1360), and Blu-ray's,
-DVD's and DVB's pictures of text as images (§1362, §1363, §1365). One text
-format MP4 can hold is not read -- television's CEA-608 captions -- nor
-DVD's own colours where a rip gives them.
+SubRip, ASS, SSA and WebVTT in Matroska and WebM, 3GPP timed text, WebVTT,
+TTML and CEA-608 captions in MP4 -- into SRT markup for lane E's player
+(design-decisions §1360), and Blu-ray's, DVD's and DVB's pictures of text as
+images (§1362, §1363, §1365). Of a CEA-608 track, only the first channel
+-- what a television shows unless told otherwise -- is read; and DVD's own
+colours where a rip gives them are not.
 
 | What | Today | To do it |
 |---|---|---|
 | DVD subtitles' `custom colors` (VSFilter's recolouring, in the `.idx`) | ignored, as FFmpeg ignores it | the four colours the line gives in place of the palette's, `tridx` marking the transparent -- if a real rip needs it |
-| CEA-608 captions in MP4 (`c608`) | a subtitle track of format `Other`, refused | a 608 decoder (byte pairs, roll-up and pop-on captions) |
+| CEA-608's other channels: CC2 (a second language), and field 2's CC3, CC4 and XDS (programme data) | CC1 alone is read (`subtitle/cea608.rs`); the rest passed over | each channel offered as a track of its own (`SubtitleInfo`), the decoder run on the pairs of its field and channel -- if a real file carries one |
+| CEA-708, digital television's captions (`c708`, and inside H.264's SEI) | not read; FFmpeg's MP4 reader names no `c708` either | a 708 decoder: windows, pen styles, its own character sets |
 
-**Where.** `gui/video/codec/src/subtitle.rs` and `subtitle/` (`vobsub.rs`);
+**Where.** `gui/video/codec/src/subtitle.rs` and `subtitle/` (`vobsub.rs`,
+`cea608.rs`);
 `gui/video/codec/src/container.rs` (`subtitles`); `gui/video/mp4/src/track.rs`
 (`subtitle_codec`).
+
+**Was here, fixed 2026-10-05:** MP4's CEA-608 captions (`c608`: television's,
+as QuickTime and broadcast recorders keep them) were refused. They are read
+now by the FCC's rules for caption decoders (47 CFR 79.101), FFmpeg's and
+CCExtractor's readers each departing from them in places, a cue for each
+stretch the screen shows the same (`subtitle/cea608.rs`, design-decisions
+§1369).
 
 **Was here, fixed 2026-10-05:** MP4's TTML (`stpp`, IMSC 1: what
 broadcasters' DASH segments carry) was not read: a film with only it had

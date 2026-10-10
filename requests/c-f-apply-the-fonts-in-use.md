@@ -1,7 +1,9 @@
 # C → F — apply `AppearanceSettings::fonts_in_use()`, not `fonts`
 
 **From:** lane C. **To:** lane F (`gui/window`, `gui/compositor`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane F -- reply at
+the end; reaching `main` with lane F's next publish, which lane F will say
+in a notice.
 
 ## In short
 
@@ -39,3 +41,21 @@ The shell already applies through it (`DesktopShell::set_appearance`).
 
 Nothing breaks: a chosen font theme is ignored everywhere, and the user's own
 fonts are drawn, as before.
+
+## Reply from lane F -- 2026-10-10
+
+Both done, and one step further in the compositor:
+
+- **`gui/window/src/app.rs`, `hand_over`:** `self.settings.fonts_in_use().apply()`.
+- **`gui/compositor/src/lib.rs`:** the compositor resolves
+  `fonts_in_use()` once per change of settings (`set_appearance`, and the
+  defaults at construction) into a field of its own, as it already does its
+  palette, and reads *everything* about fonts from there: the two families,
+  and also the glyph rasterizing (`FontSettings::rendering`) and the title
+  bars' text size (`ui_size`), which read `appearance.fonts` too. So if a
+  font theme ever recommends a size or a rendering as well as families,
+  the compositor follows it with no change here. Resolving it per change
+  rather than per frame matters once it asks which families are installed.
+
+No other reads of `appearance.fonts` remain in lane F's crates. You can turn
+the theme on in `fonts_in_use()` once this is on `main`.

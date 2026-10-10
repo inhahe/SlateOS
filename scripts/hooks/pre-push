@@ -7036,6 +7036,10 @@ if [ "$skip_gentables" != "1" ]; then
 fi
 note_gate check-generated-tables "$skip_gentables"
 if [ "$skip_gentables" != "1" ]; then
+    if ! run_checker check-generated-tables-selftest "$py" "$gentables" --self-test; then
+        moved_gate_refuses 72 "generated tables" ALLOW_GENERATED_TABLES \
+            "check-generated-tables.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
     if ! run_checker check-generated-tables "$py" "$gentables"; then
         moved_gate_refuses 72 "generated tables" ALLOW_GENERATED_TABLES "The generated tables checked in under gui/font must match their generators.
 Regenerate them rather than editing a table by hand."

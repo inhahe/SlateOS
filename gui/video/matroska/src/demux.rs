@@ -16,7 +16,7 @@ use crate::cues::{self, Cue};
 use crate::ebml::{Header, Id, MAX_BINARY, Reader, Size};
 use crate::metadata::{Attachment, Chapter, Lists, Metadata, describe};
 use crate::nest::{self, SeekEntry};
-use crate::track::{Track, TrackKind, read_track};
+use crate::track::{EntryError, Track, TrackKind, read_track};
 use crate::{Error, ids};
 
 /// The segment's description: `Info`.
@@ -281,6 +281,15 @@ impl Level1 {
     }
 }
 
+/// A Tracks element's damage: the error, how many of its entries were read
+/// before it, and whether it is an entry FFmpeg refuses the file for rather
+/// than broken elements.
+struct Damage {
+    error: Error,
+    read: usize,
+    refused: bool,
+}
+
 impl<R: Read + Seek> Demuxer<R> {
     /// Read `source`'s header, its segment's description and its tracks.
     ///
@@ -531,8 +540,14 @@ impl<R: Read + Seek> Demuxer<R> {
     ///   the damage, and that is not followed here). Met through a SeekHead,
     ///   the SeekHead is followed no further, and its Cues are not used --
     ///   FFmpeg marks its index broken.
-    /// - A damaged Tracks refuses the file, as it always has here: FFmpeg's
-    ///   second pass would list each track before the damage twice.
+    /// - A Tracks damaged after one of its entries refuses the file, as it
+    ///   always has here: FFmpeg's second pass would list each track before
+    ///   the damage twice. So does one with an entry FFmpeg refuses the file
+    ///   for (a projection's private data, a crop leaving nothing). One
+    ///   damaged before its first entry -- often no Tracks at all, but its ID
+    ///   met inside a damaged element by the search for the next one, as in
+    ///   a SeekHead whose nine-byte `SeekID` holds Tracks's own ID -- is
+    ///   passed over as the others are, as FFmpeg passes over it.
     fn read_description(&mut self, segment_ends: Option<u64>) -> Result<(), Error> {
         // Where the Segment says it ends, which bounds its top-level elements
         // until a resynchronisation: after one, FFmpeg takes the Segment for
@@ -555,32 +570,49 @@ impl<R: Read + Seek> Demuxer<R> {
             let mut next = end.min(self.segment_end);
             if ids::is_top_level(h.id) {
                 level1.met(h.id, h.start);
-                match h.id {
-                    ids::TRACKS => self.read_tracks(&h)?,
-                    ids::CUES => cues_read.push(h.start),
-                    _ => {
-                        let read = if segment_ends.is_some_and(|e| end > e) {
-                            Err(Error::Invalid("an element running past its Segment"))
-                        } else {
-                            self.read_listed(&h, IN_SEGMENT, &mut lists)
-                        };
-                        match read {
-                            Ok(()) => {}
-                            Err(Error::Io(kind)) => return Err(Error::Io(kind)),
-                            Err(_) => {
-                                // Past its four-byte ID, and one more.
-                                match self.find_top_level(h.start.saturating_add(5))? {
-                                    Some(at) => {
-                                        next = at;
-                                        // As FFmpeg, a Segment resynchronised
-                                        // in is read to the end of the file,
-                                        // its stated end no longer a bound.
-                                        self.segment_end = self.r.len();
-                                        segment_ends = None;
-                                    }
-                                    None => break,
-                                }
+                let read = match h.id {
+                    ids::CUES => {
+                        cues_read.push(h.start);
+                        Ok(())
+                    }
+                    ids::TRACKS => match self.read_tracks(&h) {
+                        Ok(()) => Ok(()),
+                        // An entry FFmpeg refuses the file for, refused
+                        // here too; or damaged after some of its tracks:
+                        // FFmpeg's second pass would list those twice, which
+                        // is not followed -- the file is refused, as it
+                        // always has been here.
+                        Err(Damage {
+                            error,
+                            read,
+                            refused,
+                        }) if refused || read > 0 => return Err(error),
+                        // Damaged before its first: passed over as any other
+                        // element is, as FFmpeg passes over it -- often no
+                        // Tracks at all, but its ID met inside a damaged
+                        // element by a resynchronisation.
+                        Err(Damage { error, .. }) => Err(error),
+                    },
+                    _ if segment_ends.is_some_and(|e| end > e) => {
+                        Err(Error::Invalid("an element running past its Segment"))
+                    }
+                    _ => self.read_listed(&h, IN_SEGMENT, &mut lists),
+                };
+                match read {
+                    Ok(()) => {}
+                    Err(Error::Io(kind)) => return Err(Error::Io(kind)),
+                    Err(_) => {
+                        // Past its four-byte ID, and one more.
+                        match self.find_top_level(h.start.saturating_add(5))? {
+                            Some(at) => {
+                                next = at;
+                                // As FFmpeg, a Segment resynchronised in is
+                                // read to the end of the file, its stated
+                                // end no longer a bound.
+                                self.segment_end = self.r.len();
+                                segment_ends = None;
                             }
+                            None => break,
                         }
                     }
                 }
@@ -681,7 +713,7 @@ impl<R: Read + Seek> Demuxer<R> {
             return Err(Error::Invalid("a top-level element of unknown size"));
         }
         match id {
-            ids::TRACKS => self.read_tracks(&h),
+            ids::TRACKS => self.read_tracks(&h).map_err(|d| d.error),
             ids::CUES => {
                 // Read at once by FFmpeg: these are its index then.
                 cues_read.push(pos);
@@ -707,20 +739,36 @@ impl<R: Read + Seek> Demuxer<R> {
     }
 
     /// A Tracks element: its tracks added to those of any before it, as
-    /// FFmpeg adds them.
-    fn read_tracks(&mut self, h: &Header) -> Result<(), Error> {
+    /// FFmpeg adds them -- or, damaged, none of them, and how many of its
+    /// entries were read before the damage.
+    fn read_tracks(&mut self, h: &Header) -> Result<(), Damage> {
         let (mut tracks, mut declared) = (Vec::new(), Vec::new());
-        self.r.children(h, |r, entry| {
+        let mut refused = None;
+        let walked = self.r.children(h, |r, entry| {
             if entry.id != ids::TRACK_ENTRY {
                 return Ok(());
             }
-            let (number, track) = read_track(r, entry)?;
+            let (number, track) = match read_track(r, entry) {
+                Ok(read) => read,
+                Err(EntryError::Damaged(e)) => return Err(e),
+                Err(EntryError::Refused(e)) => {
+                    refused = Some(e);
+                    return Err(e);
+                }
+            };
             declared.push((number, track.is_some()));
             if let Some(t) = track {
                 tracks.push(t);
             }
             Ok(())
-        })?;
+        });
+        if let Err(error) = walked {
+            return Err(Damage {
+                error,
+                read: declared.len(),
+                refused: refused.is_some(),
+            });
+        }
         self.tracks.extend(tracks);
         // Timing comes once the TimestampScale is certain.
         self.declared.extend(

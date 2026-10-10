@@ -1934,7 +1934,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
 - [x] Grid view — *`gui/toolkit/src/grid.rs`.*
 - [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
-- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.*
+- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.* *2026-10-05: lane C's half is done -- `FontFamily::Named` and `text::ensure_family`, with which a program measures text in a family by name; the drawing waits on lane F's half (the wire and the compositor), which lands with it as one pair.*
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or
     highlights a family, changes the size, toggles bold/italic, etc.) — before the
@@ -2376,7 +2376,7 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
 
 _Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
-- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC waits on open-questions F-Q9).
+- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC: FFmpeg's fixed-point decoder, translated -- design-decisions §1377).
 - _Library browser, album art, metadata editing_
 - _Equalizer_
 - _User-customizable layout using the toolkit's dockable panel widget (drag-and-drop panels, add/remove, slide splitters) — simpler than foobar2000's layout system_

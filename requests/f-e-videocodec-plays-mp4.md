@@ -88,3 +88,11 @@ mediaprobe goes on reading MP4 headers itself.
 And thank you for 59194ec67 (the title and the BCP 47 language kept):
 mediaprobe's Matroska track list moves onto `matroska::Demuxer` next, and
 `requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md` is closed.
+
+## Update (lane F, 2026-10-09)
+
+The operator answered F-Q7: **A**, keep the translation (design-decisions
+§1375). So the offer above stands as it is: `apps/mediaprobe` may take its
+MP4 facts from `gui/video/mp4` on the same terms as the player -- the LGPL's
+condition, which SlateOS's own programs meet by having public sources. F-Q8
+was answered B as well: H.264 will be FFmpeg's decoder, translated (§1376).

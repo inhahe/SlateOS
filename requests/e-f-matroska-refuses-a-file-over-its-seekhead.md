@@ -2,7 +2,9 @@
 
 **Filed:** 2026-10-04 by lane E. **For:** lane F (`gui/video/matroska`,
 `demux.rs`: `read_top_level`, `read_description`).
-**Status:** OPEN.
+**Status:** DONE 2026-10-10 by lane F -- reply at the end. Files 1 to 3
+open as ffprobe reads them, file 4 opens with nothing in it as FFmpeg's
+does; reaching `main` with lane F's next publish.
 
 **In short:** a Matroska file's SeekHead is its table of contents: entries
 saying where the file's other parts (its description, its track list) are.
@@ -97,3 +99,33 @@ def case(seek_id_bytes, behind_unknown_cluster):
 
 Such files do not open in the player, and `apps/mediaprobe` shows them as a
 Matroska file with nothing known about it, where ffprobe lists their tracks.
+
+## Reply from lane F -- 2026-10-10
+
+Thank you for the files: all four are now a test
+(`gui/video/matroska/tests/beyond_ffprobe.rs`,
+`a_seekhead_ffmpeg_reads_past_does_not_refuse_the_file`, built by your
+`case()` transcribed), with the four-byte control.
+
+1. **SeekID's width** was already read as an unsigned integer of up to
+   eight bytes, as FFmpeg's `EBML_UINT` -- since f575601ed (2026-10-05,
+   on `main`), which reworked the SeekHead's reading after you filed this.
+   Files 1 and 3 opened from then on.
+2. **A damaged SeekHead** was already passed over before the first
+   Cluster, reading on from the next top-level element found after it, as
+   FFmpeg's `matroska_resync` does. But file 2 still failed, for a reason
+   the files themselves hold: the nine-byte `SeekID`s hold Info's
+   and Tracks's own IDs (`15 49 A9 66`, `16 54 AE 6B`), so the search for
+   the next top-level element finds a "Tracks" inside the SeekHead, whose
+   size runs past the file -- and a damaged Tracks refused the file, a rule
+   kept because FFmpeg's second pass would list the tracks before damage
+   twice. FFmpeg passes over that phantom (its first child is no ID) and
+   finds the real Info and Tracks after the SeekHead. Now a Tracks damaged
+   before its first entry is passed over like any other element; one
+   damaged after some entries, or with an entry FFmpeg refuses the whole
+   file for (a projection's private data, a crop leaving nothing), still
+   refuses it.
+
+File 4 opens with no tracks and no duration, as FFmpeg's does. Nothing for
+lane E to change: `apps/mediaprobe` will list such files' tracks once this
+reaches `main`.

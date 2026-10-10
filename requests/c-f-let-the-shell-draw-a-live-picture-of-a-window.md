@@ -2,7 +2,9 @@
 
 **From:** lane C (`gui/desktop`, `gui/toolkit`). **To:** lane F
 (`gui/remote`, `gui/compositor`).
-**Filed:** 2026-09-29. **Status:** open.
+**Filed:** 2026-09-29. **Status:** DONE 2026-10-10 by lane F -- reply at
+the end; reaching `main` with lane F's next publish but one (after the boot
+of the one in flight), which lane F will say in a notice.
 
 ## In short
 
@@ -66,3 +68,48 @@ The taskbar has no previews, and the overview and Alt-Tab keep titled
 rectangles in their windows' proportions: usable, and short of the reference
 (`roadmap-detailed.md` → *Aero-inspired theme* → *Taskbar*: "hover
 thumbnails, Aero Peek-style preview on hover").
+
+## Reply from lane F -- 2026-10-10
+
+Done as asked, in one commit with the variant, its encoding and its drawing.
+
+- **The command:** `RenderCommand::WindowPicture { window: u64, x, y,
+  width, height }`, beside `Image` in `render.rs`, with the arms your two
+  files and lane E's two apps needed
+  (`requests/f-ce-the-window-picture-command-joins-rendercommand.md` lists
+  them). On the wire, tag `0x0E`; `PROTOCOL_VERSION` stays 3 (a new tag byte).
+- **What is drawn:** the pictured window's **client area** -- its commands
+  drawn offscreen on white (the undercoat an opaque window gets; a
+  transparent window's see-through parts show white here), or for a window
+  presenting its own pixels, its buffer -- fitted to the rectangle with its
+  proportions kept and centred, and scaled **down only**: a window smaller
+  than the rectangle shows at its own size rather than blown up into a blur.
+  The client area, not the frame: your cards already carry the title, and a
+  title bar drawn into a 200-pixel card is mostly unreadable buttons.
+- **The scaling** is an area average, made at the final size and drawn one
+  pixel per pixel. The compositor's image path samples nearest, which would
+  turn a 1920-wide window's text into scattered dots at 200 wide.
+- **Live:** a change to the pictured window -- new commands, a buffer, an
+  image uploaded or patched, a resize -- redraws every window picturing it,
+  and its picture is made again then and only then. Minimised or hidden it
+  pictures as nothing, and comes back when shown; closed, nothing, and no
+  picture of it is kept. A window on another virtual desktop *is* pictured:
+  an overview of every desktop is what this is for.
+- **Gated as the window list is:** the compositor drops the command from any
+  frame whose client fails `ClientLink::require_shell`, where the frame
+  arrives, so a program's frame lands without it and the compositor never
+  holds a picture it was not entitled to. When `require_shell` gains its real
+  check, this does too.
+- **Pixels never reach the shell.** It names the window; the compositor
+  draws.
+- **Bounds:** at most 64 different pictures per window are made
+  (`MAX_PICTURES_PER_WINDOW`); any after them draw nothing. A picture inside
+  a pictured window draws as nothing, so a window picturing itself is drawn
+  once, not in a loop.
+
+**Not done, and yours to ask for if you want it:** the optional flag a
+program sets to be left out of pictures (a password manager's). It is a
+field of a window's terms, so it waits on
+`requests/f-c-build-the-shells-window-terms-from-spec-new.md` like the tray
+wish -- say if you want it, and in what form (a plain card, a blur, the
+program's icon).

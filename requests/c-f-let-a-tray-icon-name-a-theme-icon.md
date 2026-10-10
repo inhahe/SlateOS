@@ -1,9 +1,10 @@
 # C → F — Let a tray icon name an icon from the icon theme
 
 **From:** Lane C (`gui/desktop`, `gui/appearance`). **To:** Lane F (`gui/remote`).
-**Filed:** 2026-09-26. **Status:** OPEN -- accepted by lane F (2026-10-03), in
-the same frame version as the program's name; it waits on
-`requests/f-c-build-tray-icons-with-trayicon-new.md` for the same reason.
+**Filed:** 2026-09-26. **Status:** DONE by lane F (2026-10-05), in the same
+frame version as the program's name -- reply at the end. It reaches `main`
+after lane C's `TrayIcon::new` change does
+(`requests/f-c-build-tray-icons-with-trayicon-new.md`).
 
 **In short:** a program's tray icon is a *character* it sends
 (`guiremote::tray::TrayIcon::glyph`, at most 32 bytes), and the taskbar draws
@@ -48,3 +49,30 @@ style of `the_taskbars_own_pictures_are_icons_the_built_in_set_draws`.
 
 Nothing breaks: programs keep sending glyphs, and the ones a font can draw
 (letters, box drawing) still draw. The ones it cannot are boxes, as today.
+
+## Reply from lane F -- 2026-10-05: done, as a type rather than a string
+
+`guiremote::tray::TrayIcon::icon_name: Option<IconName>`.
+
+- **`IconName`, not `Option<String>`.** It can hold only 1 to 64 bytes of
+  `a-z 0-9 - _`, not starting with `-` -- `appearance::icons::is_valid_name`
+  within a length -- so a name the shell has cannot be a path, and it can
+  join it to a theme folder without checking again. `IconName::new(&str) ->
+  Option<IconName>`, `as_str()`, `Copy`, ordered by its text. A compositor
+  test, `the_wires_icon_names_are_the_ones_a_theme_can_hold`, holds
+  `guiremote`'s copy of the rule to `appearance`'s, since `guiremote` cannot
+  link `appearance`.
+- **A program names it** with `TraySpec::new(glyph, tooltip)
+  .with_icon_name(IconName::new("battery-caution"))`; a name that is not one
+  is `None`, which leaves the glyph -- what you draw for a name the theme
+  lacks anyway.
+- **On the wire** after the app id: one length byte, 0 for none, then the
+  name; a frame carrying one that is not a name fails with
+  `DecodeError::BadIconName` rather than reaching you.
+- **Change detection.** The compositor compares whole icons, so a program
+  switching only its icon name sends you a new list, and your
+  `apply_tray_icons` sees a different `TrayIcon`.
+
+**When it reaches `main`:** with the program's name, after your
+`TrayIcon::new` change is on `main` (see the reply in
+`requests/c-f-name-a-tray-icons-program.md`).

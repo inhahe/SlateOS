@@ -11,7 +11,8 @@ use crate::index::{DISCARD, Edit, Entry, INDEX_ALLOC, KEYFRAME, Stream, Stsc, TT
 use crate::rational::{self, Q};
 use crate::reader::Reader;
 use crate::track::{
-    Audio, Codec, Colour, Kind, Video, audio_codec, read_esds, subtitle_codec, video_codec,
+    Audio, Codec, Colour, ContentLight, Kind, Mastering, Video, audio_codec, read_esds,
+    subtitle_codec, video_codec,
 };
 
 /// A box being read: its type and the size of its body (FFmpeg's
@@ -78,6 +79,10 @@ pub(crate) struct Description {
     /// The pixel's shape as FFmpeg settles it (`st->sample_aspect_ratio`).
     pub sample_aspect: Option<Q>,
     pub colour: Option<Colour>,
+    /// `mdcv`'s or `SmDm`'s mastering display, the first (`sc->mastering`).
+    pub mastering: Option<Mastering>,
+    /// `clli`'s or `CoLL`'s content light level, the first (`sc->coll`).
+    pub content_light: Option<ContentLight>,
     /// `tkhd`'s display matrix after the movie's, unless it is the identity
     /// (`sc->display_matrix`).
     pub matrix: Option<[i32; 9]>,
@@ -106,6 +111,8 @@ impl Description {
                 .filter(|q| q.num != 0)
                 .map(|q| (q.num, q.den)),
             colour: self.colour,
+            mastering: self.mastering,
+            content_light: self.content_light,
             matrix: self.matrix,
             crop: [left, top, right, bottom],
             frame_duration: self.frame_duration,
@@ -340,6 +347,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             b"vpcC" => self.vpcc(a)?,
             b"esds" => self.esds(a)?,
             b"colr" => self.colr(a)?,
+            b"mdcv" => self.mdcv(a)?,
+            b"SmDm" => self.smdm(a)?,
+            b"clli" => self.clli(a)?,
+            b"CoLL" => self.coll(a)?,
             b"pasp" => self.pasp()?,
             b"clap" => self.clap()?,
             b"trex" => self.trex()?,
@@ -1321,6 +1332,124 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 return Err(Error::Invalid("an ICC profile box too short"));
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// `mdcv`, the mastering display (`mov_read_mdcv`): its primaries --
+    /// green, blue, then red, as the box orders them -- and white point in
+    /// units of 0.00002, its peak and black in units of 0.0001 cd/m2. FFmpeg
+    /// refuses the file for a box outside a track or under 24 bytes, and
+    /// keeps the first of this and `SmDm`.
+    fn mdcv(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Err(Error::Invalid("a mastering display box outside a track"));
+        }
+        if a.size < 24 {
+            return Err(Error::Invalid("a mastering display box too short"));
+        }
+        if self.last().is_some_and(|(_, d)| d.mastering.is_some()) {
+            return Ok(());
+        }
+        let mut chromaticities = [0u16; 8];
+        // Green, blue, red, white: each x and y to its place among red,
+        // green, blue and white.
+        for start in [2usize, 4, 0, 6] {
+            let xy = [self.r.u16()?, self.r.u16()?];
+            if let Some(pair) = chromaticities.get_mut(start..).and_then(|s| s.get_mut(..2)) {
+                pair.copy_from_slice(&xy);
+            }
+        }
+        let max_luminance = self.r.u32()?;
+        let min_luminance = self.r.u32()?;
+        if let Some((_, d)) = self.last() {
+            d.mastering = Some(Mastering {
+                chromaticities,
+                chromaticity_scale: 50_000,
+                max_luminance,
+                max_luminance_scale: 10_000,
+                min_luminance,
+                min_luminance_scale: 10_000,
+            });
+        }
+        Ok(())
+    }
+
+    /// `SmDm`, VP9's mastering display (`mov_read_smdm`), a full box: red,
+    /// green and blue, then the white point, in 0.16 fixed point, the peak
+    /// in 24.8 and the black in 18.14. FFmpeg refuses the file for one
+    /// outside a track or under 5 bytes, passes over a version but 0, and
+    /// keeps the first of this and `mdcv`.
+    fn smdm(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Err(Error::Invalid("a mastering display box outside a track"));
+        }
+        if a.size < 5 {
+            return Err(Error::Invalid("an empty mastering display box"));
+        }
+        if self.r.u8()? != 0 || self.last().is_some_and(|(_, d)| d.mastering.is_some()) {
+            return Ok(());
+        }
+        // The flags.
+        self.r.skip(3)?;
+        let mut chromaticities = [0u16; 8];
+        for c in &mut chromaticities {
+            *c = self.r.u16()?;
+        }
+        let max_luminance = self.r.u32()?;
+        let min_luminance = self.r.u32()?;
+        if let Some((_, d)) = self.last() {
+            d.mastering = Some(Mastering {
+                chromaticities,
+                chromaticity_scale: 1 << 16,
+                max_luminance,
+                max_luminance_scale: 1 << 8,
+                min_luminance,
+                min_luminance_scale: 1 << 14,
+            });
+        }
+        Ok(())
+    }
+
+    /// `clli`, the content light level (`mov_read_clli`): MaxCLL and
+    /// MaxFALL. FFmpeg refuses the file for a box outside a track or under 4
+    /// bytes, and keeps the first of this and `CoLL`.
+    fn clli(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Err(Error::Invalid("a content light level box outside a track"));
+        }
+        if a.size < 4 {
+            return Err(Error::Invalid("an empty content light level box"));
+        }
+        self.content_light()
+    }
+
+    /// `CoLL`, VP9's content light level (`mov_read_coll`), a full box: as
+    /// `clli` after its version and flags. FFmpeg refuses the file for one
+    /// outside a track or under 5 bytes, and passes over a version but 0.
+    fn coll(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Err(Error::Invalid("a content light level box outside a track"));
+        }
+        if a.size < 5 {
+            return Err(Error::Invalid("an empty content light level box"));
+        }
+        if self.r.u8()? != 0 {
+            return Ok(());
+        }
+        self.r.skip(3)?;
+        self.content_light()
+    }
+
+    /// MaxCLL and MaxFALL, for the track that has none yet.
+    fn content_light(&mut self) -> Result<(), Error> {
+        if self.last().is_some_and(|(_, d)| d.content_light.is_some()) {
+            return Ok(());
+        }
+        let max_cll = self.r.u16()?;
+        let max_fall = self.r.u16()?;
+        if let Some((_, d)) = self.last() {
+            d.content_light = Some(ContentLight { max_cll, max_fall });
         }
         Ok(())
     }

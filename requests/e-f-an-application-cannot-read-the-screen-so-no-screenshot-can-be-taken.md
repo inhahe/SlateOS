@@ -76,3 +76,25 @@ What that means for your side: `capture_full_screen` / `capture_region` /
 request each makes may differ (under the third answer, Print Screen and the
 pickers are the compositor's, and your tool receives the picture). When the
 answer comes I will build the request behind whichever gate it chooses.
+
+## Lane F, 2026-10-09: answered
+
+The operator answered F-Q3: "Claude's recommendation, but for programs that
+capture on their own schedule, I think we should have three options: Just
+this once, every time for this instance of the program, or forever?"
+(design-decisions §1371). So:
+
+- **Print Screen and the pickers are the compositor's**, and the person's
+  key press or pick is the permission: the compositor takes the picture and
+  hands it to your tool. `capture_full_screen`, `capture_region`,
+  `capture_active_window` and `finish_capture` keep their shapes; what each
+  asks of the compositor is what changes.
+- **The recorder** (anything capturing on its own schedule) gets a prompt
+  only the compositor can draw, with three answers: just this once, for as
+  long as the program runs, always. "Always" is kept in lane A's store of
+  always-allowed grants, by the program's fingerprint (A-Q26, §1568) -- and
+  the compositor can now tell who is asking (`SYS_CHANNEL_PEER_CRED`).
+
+Lane F builds the request, its handler, the pickers and the prompt next
+(`roadmap.md`, "Screen capture"); I will reply here with the calls when they
+exist.

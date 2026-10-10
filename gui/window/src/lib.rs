@@ -88,6 +88,10 @@ pub use guiremote::control::{
     BlurKind, BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
     PickedWindow, ShellControlAction, WindowSpec as Spec,
 };
+/// What a program puts in the system tray ([`EventLoop::set_tray_icon`]),
+/// and what a shell is told is there ([`EventLoop::tray_icons`]) -- so a
+/// program with a tray icon need not depend on `guiremote` to build one.
+pub use guiremote::tray::{IconName, TrayIcon, TraySpec};
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
 pub use guiremote::window_list::{WindowInfo, WindowList};
@@ -96,6 +100,10 @@ pub use guiremote::window_list::{WindowInfo, WindowList};
 // application synthetically does, which is what [`testing`] is for.
 pub use guiremote::input::InputEvent;
 pub use guiremote::{Pipe, pipe};
+// Activation tokens (design-decisions 1386): what a launcher hands a program
+// it starts, so the program's first window may take the keyboard. Re-exported
+// so a launcher names them through the toolkit it already uses.
+pub use guiremote::{ACTIVATION_TOKEN_ENV, ActivationToken};
 pub use guitk::event::{
     Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
     SettingsName,
@@ -112,6 +120,30 @@ pub use guitk::render::{RenderCommand, RenderTree};
 /// `SLATE_DISPLAY`" is the useful half of a failure to connect — without
 /// depending on `guiremote` to learn its spelling.
 pub use guiremote::socket::DISPLAY_VAR;
+
+/// The activation token this program's launcher left in its environment
+/// ([`ACTIVATION_TOKEN_ENV`]) -- the first time the process asks, and never
+/// again: a token is good once, and its use is the first window.
+///
+/// Read, not removed. Removing an environment variable is unsound once other
+/// threads may be reading the environment, and a program's first window may
+/// come after it has started some. A child it starts inherits the variable,
+/// which is harmless: the token is used up by then -- and if it is not, as
+/// for a wrapper that opens no window of its own, the child is what the user
+/// started.
+fn take_launch_token() -> Option<ActivationToken> {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    if TAKEN.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    launch_token_in(std::env::var_os(ACTIVATION_TOKEN_ENV).as_deref())
+}
+
+/// [`take_launch_token`]'s reading of the variable: 32 hexadecimal digits,
+/// or no token. Bytes, as an environment variable is.
+fn launch_token_in(value: Option<&std::ffi::OsStr>) -> Option<ActivationToken> {
+    ActivationToken::from_text(value?.as_encoded_bytes())
+}
 
 /// A live link to the compositor.
 ///
@@ -597,12 +629,37 @@ impl<T: Transport> WindowHandle<'_, T> {
 
     /// Return the window to its pre-minimised/maximised geometry.
     ///
+    /// It takes the keyboard only if this program's window has it already,
+    /// or with an activation token presented first
+    /// ([`EventLoop::use_activation_token`]); otherwise a minimised window
+    /// stays minimised and asks for the user's attention (design-decisions
+    /// 1386). To bring a window forward because the user asked for it
+    /// somewhere else, use [`Self::activate`] with the token that came with
+    /// the request.
+    ///
     /// # Errors
     ///
     /// As [`Connection::confirm`].
     pub fn restore(&mut self) -> Result<(), Error<T>> {
         self.events
             .confirm(RequestBody::Restore { window: self.id })
+    }
+
+    /// Bring the window to the user on an activation token -- shown if
+    /// minimised, its desktop switched to, raised, given the keyboard --
+    /// because the user asked for it somewhere else: a second copy of this
+    /// program was started with the token, say, and handed it here
+    /// (design-decisions 1386). A token that is no longer good asks for the
+    /// user's attention instead.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A token that is not good is not an error.
+    pub fn activate(&mut self, token: ActivationToken) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::Activate {
+            window: self.id,
+            token,
+        })
     }
 
     /// Ask for the user's attention: a chat with a new message, a finished
@@ -980,6 +1037,13 @@ pub struct EventLoop<T: Transport> {
     /// sleep -- and has not yet been announced, by sequence number. See
     /// [`EventLoop::take_answered`].
     awaited: Vec<u32>,
+    /// The program's declared name, for windows and tray icons that do not
+    /// name one. See [`EventLoop::set_app_id`].
+    app_id: String,
+    /// The token this program's launcher left it ([`ACTIVATION_TOKEN_ENV`]),
+    /// until the first window this loop opens presents it (design-decisions
+    /// 1386). Read as the loop is made, once per process.
+    launch_token: Option<ActivationToken>,
 }
 
 /// Two presses of one button in one window, close together in time and on
@@ -1104,7 +1168,7 @@ impl<T: Transport> EventLoop<T> {
     }
 
     /// Take over an existing connection.
-    pub const fn over(conn: Connection<T>) -> Self {
+    pub fn over(conn: Connection<T>) -> Self {
         Self {
             conn,
             windows: Vec::new(),
@@ -1118,6 +1182,8 @@ impl<T: Transport> EventLoop<T> {
             clicks: Clicks::new(),
             modifiers: Modifiers::NONE,
             awaited: Vec::new(),
+            app_id: String::new(),
+            launch_token: take_launch_token(),
         }
     }
 
@@ -1161,7 +1227,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1193,7 +1260,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1271,7 +1339,8 @@ impl<T: Transport> EventLoop<T> {
                 | ResponseBody::WorkArea { .. }
                 | ResponseBody::Modifiers(_)
                 | ResponseBody::Clipboard(_)
-                | ResponseBody::Picked(_),
+                | ResponseBody::Picked(_)
+                | ResponseBody::ActivationToken(_),
             ) => Err(ClientError::Mismatched),
         }
     }
@@ -1328,7 +1397,8 @@ impl<T: Transport> EventLoop<T> {
                 | ResponseBody::Display(_)
                 | ResponseBody::WorkArea { .. }
                 | ResponseBody::Modifiers(_)
-                | ResponseBody::Clipboard(_),
+                | ResponseBody::Clipboard(_)
+                | ResponseBody::ActivationToken(_),
             ) => Err(ClientError::Mismatched),
         }
     }
@@ -1364,17 +1434,91 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
+    }
+
+    /// Hand a program about to be started the user's word that they asked
+    /// for it: an activation token in its environment
+    /// ([`ACTIVATION_TOKEN_ENV`]), so that its first window may take the
+    /// keyboard (design-decisions 1386). Call it as the user starts the
+    /// program -- the token stands for their latest action in this program's
+    /// windows -- just before spawning `command`.
+    ///
+    /// When no token can be had -- the user has done nothing in this
+    /// program's windows, so it has no action of theirs to vouch for, or the
+    /// compositor has no random source -- the variable is *removed* from
+    /// `command`, not left as this program inherited it: a token this
+    /// program's own launcher handed it is not this program's to pass on.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`]: the connection failed. A compositor
+    /// that cannot draw a token is not an error here; the program then opens
+    /// as any program started without one does.
+    pub fn vouch_for(&mut self, command: &mut std::process::Command) -> Result<(), Error<T>> {
+        match self.conn.activation_token() {
+            Ok(token) => {
+                command.env(ACTIVATION_TOKEN_ENV, token.to_text());
+                Ok(())
+            }
+            Err(ClientError::Refused(_)) => {
+                command.env_remove(ACTIVATION_TOKEN_ENV);
+                Ok(())
+            }
+            Err(failed) => {
+                command.env_remove(ACTIVATION_TOKEN_ENV);
+                Err(failed)
+            }
+        }
+    }
+
+    /// Ask the compositor for an activation token, to hand on some way
+    /// other than a child's environment -- to a running copy of this program,
+    /// say. [`Self::vouch_for`] is the usual way in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::activation_token`].
+    pub fn activation_token(&mut self) -> Result<ActivationToken, Error<T>> {
+        self.conn.activation_token()
+    }
+
+    /// Present `token` for the next window this program opens, or its next
+    /// restore, whichever comes first: that window takes the keyboard if the
+    /// token is still good (design-decisions 1386). The token a launcher left
+    /// in this program's environment is presented with its first window
+    /// without asking; this is for one handed over another way.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A token that is not good is not an error:
+    /// the window opens behind and asks for the user's attention.
+    pub fn use_activation_token(&mut self, token: ActivationToken) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::UseActivationToken { token })
     }
 
     /// Create a window from a protocol spec. [`WindowBuilder::build`] is the
     /// usual way in.
     ///
+    /// A spec naming no program takes the one this loop was told
+    /// ([`set_app_id`](Self::set_app_id)), so a program that declares its name
+    /// once has it on every window.
+    ///
     /// # Errors
     ///
     /// As [`Connection::create_window`].
-    pub fn create(&mut self, spec: WindowSpec) -> Result<u64, Error<T>> {
+    pub fn create(&mut self, mut spec: WindowSpec) -> Result<u64, Error<T>> {
+        if spec.app_id.is_empty() {
+            spec.app_id.clone_from(&self.app_id);
+        }
+        // The token this program's launcher left it, presented with the first
+        // window it opens: the user started it, so that window may take the
+        // keyboard (design-decisions 1386).
+        if let Some(token) = self.launch_token.take() {
+            self.use_activation_token(token)?;
+        }
         let id = self.conn.create_window(spec.clone())?;
         self.windows.push(Window {
             id,
@@ -1475,7 +1619,7 @@ impl<T: Transport> EventLoop<T> {
 
     /// The tray's icons, or an empty slice before the first frame arrives.
     #[must_use]
-    pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
+    pub fn tray_icons(&self) -> &[TrayIcon] {
         self.conn.tray_icons()
     }
 
@@ -1485,13 +1629,53 @@ impl<T: Transport> EventLoop<T> {
         self.conn.tray_revision()
     }
 
-    /// Put an icon in the system tray, or replace this program's icon.
+    /// Put an icon in the system tray, or replace this program's icon `id`.
+    ///
+    /// `icon` says what to draw -- a glyph, and if the theme should draw a
+    /// picture instead, its name:
+    ///
+    /// ```ignore
+    /// events.set_tray_icon(
+    ///     1,
+    ///     TraySpec::new("B", "Battery: 12%").with_icon_name(IconName::new("battery-caution")),
+    /// )?;
+    /// ```
+    ///
+    /// An icon naming no program takes the one this loop was told
+    /// ([`set_app_id`](Self::set_app_id)), as a window does: the shell
+    /// remembers where a user put a program's icon by that name.
     ///
     /// # Errors
     ///
-    /// As [`Connection::confirm`].
-    pub fn set_tray_icon(&mut self, id: u32, glyph: &str, tooltip: &str) -> Result<(), Error<T>> {
-        self.conn.set_tray_icon(id, glyph, tooltip)
+    /// As [`Connection::confirm`]: [`ClientError::Refused`] when this program
+    /// has its share of the tray, or the tray is full.
+    pub fn set_tray_icon(&mut self, id: u32, mut icon: TraySpec) -> Result<(), Error<T>> {
+        if icon.app_id.is_empty() {
+            icon.app_id.clone_from(&self.app_id);
+        }
+        self.conn.set_tray_icon(id, icon)
+    }
+
+    /// Declare which program this is: the name its windows and tray icons
+    /// carry when they do not name one of their own.
+    ///
+    /// Conventionally the executable's stem, lower-cased; [`app::launch`]
+    /// declares [`App::app_id`](crate::app::App::app_id), which is that
+    /// unless the application says otherwise. A program driving the loop
+    /// itself -- one that lives in the tray with no window, say -- declares
+    /// it here, or its icons carry no name and the shell cannot remember
+    /// where the user put them.
+    ///
+    /// Advisory, as a window's app id is: the compositor cannot check it.
+    pub fn set_app_id(&mut self, app_id: impl Into<String>) {
+        self.app_id = app_id.into();
+    }
+
+    /// The program's declared name, empty until
+    /// [`set_app_id`](Self::set_app_id).
+    #[must_use]
+    pub fn app_id(&self) -> &str {
+        &self.app_id
     }
 
     /// Take this program's icon out of the tray.
@@ -2719,6 +2903,18 @@ pub mod testing {
                             }
                             ResponseBody::Ok
                         }
+                        // A token per request, told apart by the request's
+                        // own number: the harness checks no randomness, only
+                        // that a program hands on what it was given.
+                        RequestBody::GetActivationToken => {
+                            let mut bytes = *b"harness token   ";
+                            if let Some(tail) = bytes.get_mut(12..) {
+                                tail.copy_from_slice(&req.seq.to_le_bytes());
+                            }
+                            ResponseBody::ActivationToken(guiremote::ActivationToken::from_bytes(
+                                bytes,
+                            ))
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2920,6 +3116,9 @@ pub mod testing {
                 RequestBody::WakeDisplays => "WakeDisplays",
                 RequestBody::PickWindow => "PickWindow",
                 RequestBody::CancelPick => "CancelPick",
+                RequestBody::GetActivationToken => "GetActivationToken",
+                RequestBody::UseActivationToken { .. } => "UseActivationToken",
+                RequestBody::Activate { .. } => "Activate",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -4013,6 +4212,117 @@ mod tests {
         assert_eq!(events.window_count(), 0, "and nothing is recorded");
     }
 
+    /// What a command says about the activation token variable.
+    #[derive(Debug, PartialEq, Eq)]
+    enum TokenVariable {
+        /// Nothing: the child inherits whatever this process has.
+        Untouched,
+        /// Removed: the child gets none.
+        Removed,
+        /// Set to this.
+        Set(std::ffi::OsString),
+    }
+
+    fn token_variable(command: &std::process::Command) -> TokenVariable {
+        match command
+            .get_envs()
+            .find(|(name, _)| name.to_str() == Some(ACTIVATION_TOKEN_ENV))
+        {
+            None => TokenVariable::Untouched,
+            Some((_, None)) => TokenVariable::Removed,
+            Some((_, Some(value))) => TokenVariable::Set(value.to_os_string()),
+        }
+    }
+
+    /// A launcher hands the program it starts the compositor's word for the
+    /// user's action (design-decisions 1386): a token, as text, in the
+    /// command's environment.
+    #[test]
+    fn vouching_for_a_program_puts_a_token_in_its_environment() {
+        let (mut events, server) = wired();
+        let mut command = std::process::Command::new("program");
+        events.vouch_for(&mut command).unwrap();
+        let TokenVariable::Set(value) = token_variable(&command) else {
+            panic!("no token was set: {:?}", token_variable(&command));
+        };
+        assert!(
+            ActivationToken::from_text(value.as_encoded_bytes()).is_some(),
+            "{value:?} is not a token's text"
+        );
+        assert_eq!(server.borrow_mut().asked(), vec!["GetActivationToken"]);
+    }
+
+    /// With no token to be had, the variable is removed from the command: the
+    /// launcher's own, handed to it by whatever started *it*, is not passed
+    /// on as the user's word for this program. And that is not an error.
+    #[test]
+    fn with_no_token_to_hand_on_a_launcher_passes_on_none_of_its_own() {
+        let (mut events, server) = wired();
+        server.borrow_mut().refuse = Some("no random source".to_string());
+        let mut command = std::process::Command::new("program");
+        command.env(ACTIVATION_TOKEN_ENV, "0".repeat(32));
+        events.vouch_for(&mut command).unwrap();
+        assert_eq!(token_variable(&command), TokenVariable::Removed);
+    }
+
+    /// A token handed over some other way is presented before the window it
+    /// is for, so that window opens under it; `activate` names the window it
+    /// brings forward and carries the token's bytes.
+    #[test]
+    fn a_presented_token_comes_before_the_window_it_is_for() {
+        let (mut events, server) = wired();
+        let token = ActivationToken::from_bytes([7; 16]);
+        events.use_activation_token(token).unwrap();
+        let id = open(&mut events, "Reopened");
+        events.window_mut(id).unwrap().activate(token).unwrap();
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["UseActivationToken", "CreateWindow", "Activate"]
+        );
+        let sent = server
+            .borrow()
+            .seen
+            .iter()
+            .find_map(|r| match r.body {
+                RequestBody::Activate { window, token } => Some((window, token)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(sent, (id, token));
+    }
+
+    /// The token a launcher left is presented before the program's first
+    /// window, and only that one: a token is good once, and the second
+    /// window is not what the user started the program for.
+    #[test]
+    fn the_launchers_token_goes_with_the_first_window_only() {
+        let (mut events, server) = wired();
+        events.launch_token = Some(ActivationToken::from_bytes([3; 16]));
+        open(&mut events, "First");
+        open(&mut events, "Second");
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["UseActivationToken", "CreateWindow", "CreateWindow"]
+        );
+    }
+
+    /// The launcher's token, as the environment carries it.
+    #[test]
+    fn a_launch_token_is_read_as_its_text_and_nothing_else() {
+        let token = ActivationToken::from_bytes([0xAB; 16]);
+        let text = token.to_text();
+        assert_eq!(
+            launch_token_in(Some(std::ffi::OsStr::new(&text))),
+            Some(token)
+        );
+        assert_eq!(launch_token_in(None), None);
+        assert_eq!(launch_token_in(Some(std::ffi::OsStr::new(""))), None);
+        assert_eq!(
+            launch_token_in(Some(std::ffi::OsStr::new("not a token at all"))),
+            None
+        );
+    }
+
     #[test]
     fn closing_a_window_forgets_it_and_its_late_events_are_counted() {
         let (mut events, server) = wired();
@@ -4150,7 +4460,9 @@ mod tests {
     fn the_tray_calls_go_to_the_compositor_rather_than_staying_here() {
         let (mut events, server) = wired();
         events.watch_tray(true).unwrap();
-        events.set_tray_icon(1, "B", "Battery: 87%").unwrap();
+        events
+            .set_tray_icon(1, TraySpec::new("B", "Battery: 87%"))
+            .unwrap();
         events.remove_tray_icon(1).unwrap();
 
         let seen = server.borrow();
@@ -4163,8 +4475,8 @@ mod tests {
         assert!(
             seen.seen.iter().any(|r| matches!(
                 &r.body,
-                RequestBody::SetTrayIcon { id: 1, glyph, tooltip }
-                    if glyph == "B" && tooltip == "Battery: 87%"
+                RequestBody::SetTrayIcon { id: 1, icon }
+                    if icon.glyph == "B" && icon.tooltip == "Battery: 87%"
             )),
             "the icon and its tooltip should have gone out as sent"
         );
@@ -4174,6 +4486,72 @@ mod tests {
                 .any(|r| matches!(r.body, RequestBody::RemoveTrayIcon { id: 1 })),
             "removing should have gone out too"
         );
+    }
+
+    /// The tray icons sent, by id, as the compositor saw them.
+    fn sent_tray_icons(server: &RefCell<super::testing::TestDesktop>) -> Vec<(u32, TraySpec)> {
+        server
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match &r.body {
+                RequestBody::SetTrayIcon { id, icon } => Some((*id, icon.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tray icon carries the program's declared name, unless it names its
+    /// own -- the name the shell remembers a user's arrangement by -- and the
+    /// theme icon it names goes out as named.
+    #[test]
+    fn a_tray_icon_carries_the_programs_declared_name() {
+        let (mut events, server) = wired();
+        let caution = IconName::new("battery-caution");
+        events
+            .set_tray_icon(1, TraySpec::new("B", "Battery").with_icon_name(caution))
+            .unwrap();
+        events.set_app_id("powerd");
+        assert_eq!(events.app_id(), "powerd");
+        events
+            .set_tray_icon(2, TraySpec::new("B", "Battery"))
+            .unwrap();
+        events
+            .set_tray_icon(3, TraySpec::new("N", "Network").with_app_id("netd"))
+            .unwrap();
+
+        let sent = sent_tray_icons(&server);
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0].1.app_id, "", "before the program said, no name");
+        assert_eq!(sent[0].1.icon_name, caution);
+        assert_eq!(sent[1].1.app_id, "powerd");
+        assert_eq!(sent[2].1.app_id, "netd", "an icon's own name wins");
+    }
+
+    /// The declared name is the default for a window too, so a program says
+    /// it once; a window naming its own keeps it.
+    #[test]
+    fn a_window_naming_no_program_takes_the_declared_name() {
+        let (mut events, server) = wired();
+        events.set_app_id("editor");
+        let first = WindowBuilder::new("notes.md - Editor", 640, 480)
+            .build(&mut events)
+            .unwrap();
+        let _ = WindowBuilder::new("Find", 320, 120)
+            .app_id("finder")
+            .build(&mut events)
+            .unwrap();
+        assert_eq!(events.window(first).unwrap().app_id(), "editor");
+        let borrowed = server.borrow();
+        let created: Vec<&str> = borrowed
+            .seen
+            .iter()
+            .filter_map(|r| match &r.body {
+                RequestBody::CreateWindow(spec) => Some(spec.app_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, ["editor", "finder"]);
     }
 
     #[test]

@@ -79,6 +79,14 @@ pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
 // The video-encoded capture fallback: a remote stream's VP9 of each window
 // that presents its own pixels. See the module docs.
 mod video;
+// Live pictures of windows (`RenderCommand::WindowPicture`): fitting, the
+// area-average downscale, and the set of pictures one draw names.
+mod picture;
+use picture::{PictureKey, PictureSet};
+// When a program may take the keyboard on its own say-so: the action count,
+// activation tokens, and the rule (design-decisions 1386).
+mod activation;
+pub use activation::{NewWindows, NoToken};
 // Sticky, filter and mouse keys. The state machines live here rather than
 // beside the settings because the compositor is the only place every
 // keystroke passes through; `inputsettings` owns what the user chose.
@@ -137,6 +145,7 @@ pub use guiremote::control::CursorShape;
 pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
+use guiremote::ActivationToken;
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
@@ -1031,6 +1040,15 @@ pub struct Window {
     /// request is moot, and focusing a window clears it. See
     /// [`Compositor::set_attention`].
     pub demands_attention: bool,
+    /// The number of the latest of the user's actions this window took part
+    /// in: set when it takes the keyboard, and at each key press, typed text
+    /// or click while it holds it. Zero for a window that has done neither.
+    ///
+    /// Mutter's user time, kept by the compositor rather than claimed by the
+    /// client. An activation standing for an earlier action than the user time
+    /// of the window holding the keyboard is one the user has moved on from
+    /// (design-decisions 1386).
+    pub user_time: u64,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1155,6 +1173,14 @@ pub struct Window {
     /// that something else focuses still receives keys; see
     /// `design-decisions.md` 566.
     pub input_transparent: bool,
+    /// Counts every change to what the window shows in its client area --
+    /// new commands, a buffer attached or detached, an image uploaded,
+    /// patched or dropped, a new size -- so a picture of it
+    /// ([`RenderCommand::WindowPicture`]) knows when it is out of date.
+    content_revision: u64,
+    /// The windows this window's commands picture, each once: whose changes
+    /// must redraw this one. Recomputed whenever its commands arrive.
+    pictured: Vec<WindowId>,
     /// Smallest client area the window may be resized to, if it named one.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window may be resized to, if it named one.
@@ -1254,6 +1280,7 @@ impl Window {
             maximized: false,
             focused: false,
             demands_attention: false,
+            user_time: 0,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
@@ -1273,6 +1300,8 @@ impl Window {
             resizable: spec.resizable,
             transparent: spec.transparent,
             input_transparent: spec.input_transparent,
+            content_revision: 0,
+            pictured: Vec::new(),
             min_size: spec.min_size,
             max_size: spec.max_size,
             cursor: CursorShape::Arrow,
@@ -3476,7 +3505,10 @@ pub enum CompositorRequest {
     Maximize { window_id: WindowId },
     /// Enter or leave fullscreen (enables direct-scanout bypass for games).
     SetFullscreen { window_id: WindowId, enable: bool },
-    /// Restore a window from minimized/maximized state.
+    /// A program restoring its own window from minimized/maximized state,
+    /// taking the keyboard only as [`Compositor::restore_on_request`] allows.
+    /// The user's restore -- the taskbar's, the title bar's -- is
+    /// [`ShellControlAction::Restore`] and [`Compositor::restore_window`].
     Restore { window_id: WindowId },
     /// Show or hide a window without destroying it.
     SetVisible { window_id: WindowId, visible: bool },
@@ -4147,9 +4179,9 @@ impl TranslateStack {
 // Text rendering
 // ---------------------------------------------------------------------------
 
-/// How glyphs are rasterized, from the appearance settings: `smoothing`, the
+/// How glyphs are rasterized, from the fonts in use: `smoothing`, the
 /// subpixel order and `hinting` -- and, from the theme `palette` resolved from
-/// them, which of a colour font's palettes its emoji are painted with: the
+/// the settings, which of a colour font's palettes its emoji are painted with: the
 /// one the font marks for a light background on a light theme, for a dark one
 /// on a dark theme (design-decisions §1327). Taken resolved rather than
 /// resolved here, because a palette is resolved once per change of settings
@@ -4160,11 +4192,11 @@ impl TranslateStack {
 /// (`FontSettings::apply`): one mapping, so a setting added later cannot be
 /// read one way here and another in the windows beside these decorations.
 fn font_rendering(
-    settings: &AppearanceSettings,
+    fonts: &appearance::FontSettings,
     palette: &appearance::Palette,
 ) -> osfont::raster::Rendering {
     use osfont::colr::ColourPalette;
-    settings.fonts.rendering(if palette.light {
+    fonts.rendering(if palette.light {
         ColourPalette::Light
     } else {
         ColourPalette::Dark
@@ -4207,8 +4239,112 @@ fn family_of(family: FontFamily) -> Family {
     match family {
         FontFamily::Ui => Family::Ui,
         FontFamily::Mono => Family::Mono,
+        FontFamily::Named(name) => Family::Named(name),
     }
 }
+
+/// The windows `commands` picture ([`RenderCommand::WindowPicture`]), each
+/// once, in the order first named: whose changes must redraw the window
+/// drawing them ([`Compositor::content_changed`]).
+fn pictured_in(commands: &[RenderCommand]) -> Vec<WindowId> {
+    let mut seen = std::collections::HashSet::new();
+    commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::WindowPicture { window, .. } if seen.insert(*window) => {
+                Some(WindowId::from_raw(*window))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pictures `viewer`'s `commands` name, from `thumbnails` as
+/// [`Compositor::prepare_pictures`] left them, ready for one draw. A free
+/// function over the two fields it reads, so the draw can hold the render
+/// engine and the backend mutably beside it.
+fn picture_set<'a>(
+    thumbnails: &'a HashMap<(WindowId, WindowId, u32, u32), Thumbnail>,
+    windows: &[Window],
+    viewer: WindowId,
+    commands: &[RenderCommand],
+) -> PictureSet<'a> {
+    let mut set = PictureSet::empty();
+    if thumbnails.is_empty() {
+        return set;
+    }
+    let sizes: HashMap<WindowId, (u32, u32)> = windows
+        .iter()
+        .map(|w| (w.id, (w.width, w.height)))
+        .collect();
+    for cmd in commands {
+        let RenderCommand::WindowPicture {
+            window,
+            width,
+            height,
+            ..
+        } = cmd
+        else {
+            continue;
+        };
+        let pictured = WindowId::from_raw(*window);
+        let Some(&size) = sizes.get(&pictured) else {
+            continue;
+        };
+        let Some((dw, dh)) = picture::fitted(size, (*width, *height)) else {
+            continue;
+        };
+        if let Some(thumb) = thumbnails.get(&(viewer, pictured, dw, dh)) {
+            set.insert(PictureKey::new(*window, *width, *height), &thumb.image);
+        }
+    }
+    set
+}
+
+/// `buffer`'s pixels as a `width` by `height` client area shows them: over
+/// white -- the undercoat a window's picture is made on -- and white where
+/// the buffer does not reach. `None` for a size too large to hold.
+fn buffer_over_white(buffer: &SharedBuffer, width: u32, height: u32) -> Option<Vec<u32>> {
+    let stride = usize::try_from(width).ok()?;
+    let mut out = vec![0xFF_FF_FF_FF; stride.checked_mul(usize::try_from(height).ok()?)?];
+    for y in 0..buffer.height().min(height) {
+        let row = usize::try_from(y).ok()?.checked_mul(stride)?;
+        for x in 0..buffer.width().min(width) {
+            let at = row.checked_add(usize::try_from(x).ok()?)?;
+            if let (Some(px), Some(slot)) = (buffer.pixel(x, y), out.get_mut(at)) {
+                *slot = over_white(px);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A straight-alpha `0xAARRGGBB` pixel composited over white, opaque.
+fn over_white(px: u32) -> u32 {
+    let alpha = px >> 24;
+    let channel = |shift: u32| {
+        let c = (px >> shift) & 0xFF;
+        // At most 255 * 255 * 2 + 127 before the division: no overflow.
+        c.saturating_mul(alpha)
+            .saturating_add(255u32.saturating_mul(255u32.saturating_sub(alpha)))
+            .saturating_add(127)
+            / 255
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+/// How many named font families the compositor loads in one frame, at most
+/// ([`RenderEngine::begin_frame`]).
+///
+/// Loading a family reads its files, and the cache holds only
+/// `osfont::system::MAX_NAMED_FAMILIES` of them, earliest forgotten first: a
+/// client drawing in more families than that, again every frame, would have
+/// every frame load them all anew. With the bound, a frame loads at most
+/// this many, a run whose family could not be loaded yet is drawn in the UI
+/// face, and the frame after loads the next ones -- so an honest drawing
+/// (a font picker's list, scrolled) settles within a few frames, and a
+/// thrashing one costs a few loads a frame rather than dozens.
+const NAMED_FAMILY_LOADS_PER_FRAME: u32 = 4;
 
 /// Draw a shaped run from `pen`, stopping before the first glyph that would
 /// cross `limit`, and leave `pen` where it stopped.
@@ -4331,6 +4467,13 @@ struct RenderEngine {
     /// and the status bar drawn after it must get the UI face back rather than
     /// whatever the last push happened to be.
     font_stack: Vec<FontFamily>,
+    /// Named families loaded since [`begin_frame`](Self::begin_frame), against
+    /// [`NAMED_FAMILY_LOADS_PER_FRAME`].
+    named_loads: u32,
+    /// Whether a named family was left unloaded this frame for want of the
+    /// budget: the frame drew its runs in the UI face, and another frame is
+    /// owed to draw them right ([`take_deferred_load`](Self::take_deferred_load)).
+    deferred_load: bool,
 }
 
 impl RenderEngine {
@@ -4362,7 +4505,45 @@ impl RenderEngine {
             translate_stack: TranslateStack::default(),
             fonts,
             font_stack: Vec::new(),
+            named_loads: 0,
+            deferred_load: false,
         }
+    }
+
+    /// A new frame: its budget of named-family loads is whole again.
+    fn begin_frame(&mut self) {
+        self.named_loads = 0;
+    }
+
+    /// Whether a named family was left for a later frame since this was last
+    /// asked, clearing it.
+    fn take_deferred_load(&mut self) -> bool {
+        core::mem::take(&mut self.deferred_load)
+    }
+
+    /// Make the named family `name` drawable, as the toolkit makes it
+    /// measurable -- [`guitk::text::ensure_family`], the same rule on this
+    /// process's own cache, so a run is drawn in the face it was measured in
+    /// -- within this frame's budget of loads. A family already in the cache
+    /// costs nothing and no budget; one past the budget is left for a later
+    /// frame, its runs drawn in the UI face meanwhile, which is what the cache
+    /// answers for a named family it has no face for.
+    fn ensure_named(&mut self, name: guitk::render::FamilyName) {
+        if self
+            .fonts
+            .has_face(Family::Named(name), osfont::system::Weight::Regular)
+        {
+            return;
+        }
+        if self.named_loads >= NAMED_FAMILY_LOADS_PER_FRAME {
+            self.deferred_load = true;
+            return;
+        }
+        self.named_loads = self.named_loads.saturating_add(1);
+        // Whether it loaded is the cache's to answer from now on: a family
+        // this machine lacks is drawn in the UI face, and remembered as
+        // missing so it costs no search again.
+        let _ = guitk::text::ensure_family(&mut self.fonts, name);
     }
 
     /// Execute a list of render commands, drawing into the framebuffer within
@@ -4372,6 +4553,40 @@ impl RenderEngine {
         fb: &mut T,
         commands: &[RenderCommand],
         images: &HashMap<u64, ImageAsset>,
+        window_x: i32,
+        window_y: i32,
+        window_width: u32,
+        window_height: u32,
+        opacity: f32,
+    ) {
+        self.execute_with_pictures(
+            fb,
+            commands,
+            images,
+            &PictureSet::empty(),
+            window_x,
+            window_y,
+            window_width,
+            window_height,
+            opacity,
+        );
+    }
+
+    /// [`execute`](Self::execute), with the pictures of other windows the
+    /// commands name made and ready ([`RenderCommand::WindowPicture`]). They
+    /// must be made before the draw starts: making one draws the pictured
+    /// window, which would reset this engine's clip, translate and font
+    /// stacks in the middle of this draw.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "execute's arguments and the pictures; grouping them would only rename them"
+    )]
+    fn execute_with_pictures<T: RenderTarget + ?Sized>(
+        &mut self,
+        fb: &mut T,
+        commands: &[RenderCommand],
+        images: &HashMap<u64, ImageAsset>,
+        pictures: &PictureSet<'_>,
         window_x: i32,
         window_y: i32,
         window_width: u32,
@@ -4388,7 +4603,7 @@ impl RenderEngine {
         self.translate_stack.push(window_x as f32, window_y as f32);
 
         for cmd in commands {
-            self.execute_command(fb, cmd, images, opacity);
+            self.execute_command(fb, cmd, images, pictures, opacity);
         }
 
         self.clip_stack.clear();
@@ -4404,6 +4619,7 @@ impl RenderEngine {
         fb: &mut T,
         cmd: &RenderCommand,
         images: &HashMap<u64, ImageAsset>,
+        pictures: &PictureSet<'_>,
         opacity: f32,
     ) {
         let (tx, ty) = self.translate_stack.offset();
@@ -4548,6 +4764,9 @@ impl RenderEngine {
                 self.translate_stack.pop();
             }
             RenderCommand::PushFont { family } => {
+                if let FontFamily::Named(name) = family {
+                    self.ensure_named(*name);
+                }
                 self.font_stack.push(*family);
             }
             RenderCommand::PopFont => {
@@ -4569,6 +4788,27 @@ impl RenderEngine {
                     let px = (*x + tx) as i32;
                     let py = (*y + ty) as i32;
                     let dest = Rect::new(px, py, *width as u32, *height as u32);
+                    let clip = self.clip_stack.current().copied();
+                    fb.draw_image(image, dest, clip.as_ref(), opacity);
+                }
+            }
+            RenderCommand::WindowPicture {
+                window,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                // Made before this draw began, at the size it is drawn at
+                // (`Compositor::prepare_pictures`); none was made for a window
+                // gone, minimised or unknown, and that draws nothing.
+                if let Some(image) = pictures.get(PictureKey::new(*window, *width, *height)) {
+                    let (iw, ih) = (image.width(), image.height());
+                    // Centred in its rectangle, one pixel per pixel: the
+                    // picture is already as large as fits.
+                    let px = (*x + tx + (*width - iw as f32) / 2.0).round() as i32;
+                    let py = (*y + ty + (*height - ih as f32) / 2.0).round() as i32;
+                    let dest = Rect::new(px, py, iw, ih);
                     let clip = self.clip_stack.current().copied();
                     fb.draw_image(image, dest, clip.as_ref(), opacity);
                 }
@@ -5535,6 +5775,17 @@ impl StreamSession {
     }
 }
 
+/// A picture of a window, made at the size a viewer draws it
+/// ([`Compositor::thumbnails`]).
+#[derive(Debug)]
+struct Thumbnail {
+    /// The pictured window's [`Window::content_revision`] when it was made:
+    /// a different one now means it is out of date.
+    revision: u64,
+    /// The picture, already at its drawn size.
+    image: ImageAsset,
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -5543,6 +5794,27 @@ pub struct Compositor {
     z_stack: Vec<WindowId>,
     /// The currently focused window (receives keyboard input).
     focused_window: Option<WindowId>,
+    /// Every living window that has held the keyboard, least recently first,
+    /// each once: where the keyboard goes back to when the window holding it
+    /// stops being somewhere the user can type
+    /// ([`hand_keyboard_back`](Self::hand_keyboard_back)).
+    ///
+    /// The order the user worked in, which the stacking order is not: a
+    /// window a rule keeps on top, a panel, a window raised by a shell -- each
+    /// sits above the window the user was typing in without the user having
+    /// moved there. Bounded by the window count: a window is in it at most
+    /// once and leaves it when it closes.
+    focus_history: Vec<WindowId>,
+    /// When a program may take the keyboard on its own say-so: the count of
+    /// the user's actions, the activation tokens outstanding, what each
+    /// connection presented. See the [`activation`] module.
+    activation: activation::Activations,
+    /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
+    /// made at the size they are drawn at: keyed by the viewer, the pictured
+    /// window and that size, and remade when the pictured window's content
+    /// changes. Bounded by the pictures the viewers draw: a viewer's entries
+    /// are replaced each time it is drawn, and a window's go when it closes.
+    thumbnails: HashMap<(WindowId, WindowId, u32, u32), Thumbnail>,
     /// The backend we composite through.
     ///
     /// Named for the seam rather than for the surface: nothing in this struct
@@ -5640,6 +5912,19 @@ pub struct Compositor {
     /// added to it, and that is not a property anyone can see from the call
     /// site.
     palette: appearance::Palette,
+    /// The fonts this compositor draws in -- families, sizes and how glyphs
+    /// are rasterized: [`AppearanceSettings::fonts_in_use`], the user's own
+    /// with a chosen font theme's families in their place, resolved once per
+    /// change of settings for [`palette`](Self::palette)'s reason. What it
+    /// asks will grow to include which families this machine has, which is
+    /// no question for a render loop.
+    ///
+    /// Read here, never from `appearance.fonts`: a program measures its
+    /// labels in the fonts in use (`oswindow`'s event loop applies the same
+    /// call), and a compositor drawing the title bars in the user's raw
+    /// choice would measure one face and draw another the moment a theme
+    /// recommended fonts (`requests/c-f-apply-the-fonts-in-use.md`).
+    fonts_in_use: appearance::FontSettings,
     /// The user's appearance preferences, as far as the compositor can act on
     /// them: how round window corners are and whether windows cast shadows.
     ///
@@ -5977,8 +6262,11 @@ fn truncate_text(text: &str, max: usize) -> String {
 impl Compositor {
     /// Create a new compositor with the given display dimensions.
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
-        // The defaults' palette, resolved once for the fonts and the field.
-        let palette = appearance::Palette::from_settings(&AppearanceSettings::default());
+        // The defaults' palette and fonts, resolved once for the font cache
+        // and the fields.
+        let defaults = AppearanceSettings::default();
+        let palette = appearance::Palette::from_settings(&defaults);
+        let fonts_in_use = defaults.fonts_in_use();
         let backend = RenderBackend::software(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
         let frame_interval = frame_interval_for(refresh_rate);
@@ -5987,6 +6275,9 @@ impl Compositor {
             windows: Vec::new(),
             z_stack: Vec::new(),
             focused_window: None,
+            focus_history: Vec::new(),
+            activation: activation::Activations::new(),
+            thumbnails: HashMap::new(),
             backend,
             display_manager,
             damage: DamageRegion::new(),
@@ -6011,15 +6302,16 @@ impl Compositor {
                 let mut engine = RenderEngine::new();
                 engine
                     .fonts
-                    .set_rendering(font_rendering(&AppearanceSettings::default(), &palette));
+                    .set_rendering(font_rendering(&fonts_in_use, &palette));
                 engine
             },
             theme: DecorationTheme::default(),
             palette,
+            fonts_in_use,
             // The defaults, not the user's file: a constructor that read
             // `$HOME` would make every test of this crate depend on the machine
             // running it. `main` loads the file and calls `set_appearance`.
-            appearance: AppearanceSettings::default(),
+            appearance: defaults,
             // `None`, not the defaults, and for a sharper reason than the line
             // above: this is pushed into the input source, so "the defaults"
             // would be a push that overwrites the settings that source was
@@ -6089,7 +6381,8 @@ impl Compositor {
             return;
         }
         self.appearance = settings;
-        // The user's chosen families, installed into *this* cache.
+        self.fonts_in_use = self.appearance.fonts_in_use();
+        // The families in use, installed into *this* cache.
         //
         // Not `FontSettings::apply`, which is what every other process calls:
         // that sets the toolkit's process-global choice, and this process does
@@ -6103,11 +6396,11 @@ impl Compositor {
         // A family this machine does not have leaves the previous, working
         // face in place, which is the right answer and not something a
         // compositor can improve on; hence the discarded results.
-        let ui = self.appearance.fonts.ui_font.clone();
+        let ui = self.fonts_in_use.ui_font.clone();
         if !ui.is_empty() {
             let _ = guitk::text::install_family(&mut self.render_engine.fonts, &ui);
         }
-        let mono = self.appearance.fonts.mono_font.clone();
+        let mono = self.fonts_in_use.mono_font.clone();
         if !mono.is_empty() {
             let _ = guitk::text::install_family_as(
                 &mut self.render_engine.fonts,
@@ -6123,7 +6416,7 @@ impl Compositor {
         self.palette = appearance::Palette::from_settings(&self.appearance);
         self.render_engine
             .fonts
-            .set_rendering(font_rendering(&self.appearance, &self.palette));
+            .set_rendering(font_rendering(&self.fonts_in_use, &self.palette));
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
     }
@@ -6176,8 +6469,11 @@ impl Compositor {
     /// on this -- it compares encoded frames -- but a caller that wants to know
     /// should not have to encode one to find out.
     ///
-    /// The glyph and tooltip are cut to their bounds ([`truncate_text`]), so
-    /// what is stored, compared and sent is always what the wire can carry.
+    /// The glyph, tooltip and program name are cut to their bounds
+    /// ([`truncate_text`]), so what is stored, compared and sent is always
+    /// what the wire can carry. The icon name needs no cut: an
+    /// [`IconName`](guiremote::tray::IconName) is within its bound by
+    /// construction.
     ///
     /// # Errors
     ///
@@ -6190,21 +6486,29 @@ impl Compositor {
         &mut self,
         owner: u64,
         id: u32,
-        glyph: &str,
-        tooltip: &str,
+        spec: &guiremote::tray::TraySpec,
     ) -> CompositorResult<bool> {
-        let glyph = truncate_text(glyph, guiremote::tray::MAX_GLYPH_BYTES);
-        let tooltip = truncate_text(tooltip, guiremote::tray::MAX_TOOLTIP_BYTES);
+        use guiremote::tray::{MAX_APP_ID_BYTES, MAX_GLYPH_BYTES, MAX_TOOLTIP_BYTES, TrayIcon};
+        let icon = TrayIcon::new(
+            owner,
+            id,
+            truncate_text(&spec.glyph, MAX_GLYPH_BYTES),
+            truncate_text(&spec.tooltip, MAX_TOOLTIP_BYTES),
+        )
+        .with_app_id(truncate_text(&spec.app_id, MAX_APP_ID_BYTES))
+        .with_icon_name(spec.icon_name);
         if let Some(existing) = self
             .tray_icons
             .iter_mut()
             .find(|i| i.owner == owner && i.id == id)
         {
-            if existing.glyph == glyph && existing.tooltip == tooltip {
+            // The whole icon, so a field added to it is compared without
+            // anyone remembering to: a program switching only its theme icon
+            // has changed what the shell draws.
+            if *existing == icon {
                 return Ok(false);
             }
-            existing.glyph = glyph;
-            existing.tooltip = tooltip;
+            *existing = icon;
             return Ok(true);
         }
         // The client's share first: it is the bound a program can be told
@@ -6223,8 +6527,7 @@ impl Compositor {
             // program, because one of them registered too many.
             return Err(CompositorError::TrayFull);
         }
-        self.tray_icons
-            .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
+        self.tray_icons.push(icon);
         Ok(true)
     }
 
@@ -6308,6 +6611,8 @@ impl Compositor {
     /// and died, and a pick nobody will hear about must not keep the pointer
     /// a crosshair.
     pub fn forget_client_requests(&mut self, client: u64) {
+        // And what it presented for a window it will now never open.
+        self.activation.forget(client);
         self.sleep_waiters.retain(|&(owner, _)| owner != client);
         self.deferred_replies
             .retain(|(owner, _, _)| *owner != client);
@@ -6743,10 +7048,24 @@ impl Compositor {
         let id = window.id;
 
         self.windows.push(window);
-        self.raise_within_layer(id);
 
-        // Focus the new window.
-        self.focus_window(id);
+        // Whether it takes the keyboard is the activation rule's
+        // (design-decisions 1386): yes when nothing has it, when the program
+        // the user is in opened it, or on a good activation; with none at all,
+        // yes unless the policy is strict.
+        let presented = self.activation.take(client_pid);
+        if self.may_take_keyboard(client_pid, presented, true) {
+            self.raise_within_layer(id);
+            self.focus_window(id);
+        } else {
+            // Behind the window the user is in, as Mutter places a window it
+            // refuses: in front, a window that cannot be typed into would look
+            // as though it could, and the user's next keys would go somewhere
+            // they cannot see.
+            self.place_beneath_keyboard(id);
+            // It was there a moment ago; there is no error to have.
+            let _ = self.set_attention(id, true);
+        }
 
         // Mark damage for the new window's area.
         self.damage_window(id);
@@ -6791,26 +7110,28 @@ impl Compositor {
             self.pointer_grab = None;
         }
 
+        // Its pictures draw as nothing from now on, and pictures made of it,
+        // or for it, are kept for nobody.
+        self.damage_viewers(window_id);
+        self.thumbnails
+            .retain(|&(viewer, pictured, _, _), _| viewer != window_id && pictured != window_id);
+
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
+        self.focus_history.retain(|&id| id != window_id);
         self.update_z_orders();
 
-        // If this was the focused window, focus the topmost remaining window
-        // *at or below the closed window's band*. Taking the topmost window
-        // outright would mean closing an application hands focus to the
-        // taskbar, which is in front of everything by construction and is
-        // never what the user was looking at next.
+        // The keyboard goes back to the window that had it before, by the one
+        // rule every other way of leaving the screen follows. No `FocusLost`:
+        // there is no window left to tell.
         if self.focused_window == Some(window_id) {
             self.focused_window = None;
-            if let Some(&next) = self
-                .z_stack
-                .iter()
-                .rev()
-                .find(|&&id| self.layer_of(id) <= closed_layer)
-            {
-                self.focus_window(next);
-            }
+            // An accent armed in the closed window must not complete itself in
+            // the next one; `focus_window` disarms it only when it takes the
+            // keyboard *from* a window, and none holds it now.
+            self.dead_keys.cancel();
+            self.hand_keyboard_back(closed_layer, window_id);
         }
 
         self.full_recomposite = true;
@@ -6858,8 +7179,9 @@ impl Compositor {
             (w, h)
         };
 
-        // Damage new area.
-        self.damage_window(window_id);
+        // Damage new area -- and every picture of the window, whose shape
+        // just changed.
+        self.content_changed(window_id);
 
         // Notify client of resize.
         self.pending_notifications
@@ -6883,11 +7205,8 @@ impl Compositor {
         window.visible = false;
         window.dirty = true;
 
-        // Focus next window if this was focused.
-        if self.focused_window == Some(window_id) {
-            self.focused_window = None;
-            self.focus_topmost_visible();
-        }
+        self.damage_viewers(window_id);
+        self.release_keyboard(window_id);
 
         self.full_recomposite = true;
         Ok(())
@@ -7370,6 +7689,50 @@ impl Compositor {
     /// rectangle is consumed by the restore, so nothing afterwards knows the
     /// window was ever anywhere else.
     pub fn restore_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        self.restore_geometry(window_id, true)?;
+        self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// A program's own `Restore` of its window (design-decisions 1386).
+    ///
+    /// What [`restore_window`](Self::restore_window) does -- the user's
+    /// restore, from the taskbar or the title bar -- when the program may take
+    /// the keyboard: its window has it already, or it presented a good
+    /// activation first. Otherwise nothing that would put the window in front
+    /// of the user's: a minimised window stays minimised and asks for the
+    /// user's attention, and an un-maximise or un-snap, which changes only the
+    /// program's own window, still happens.
+    ///
+    /// That is the difference from what this request did until 2026-10-10,
+    /// which was to give the window the keyboard whatever the program's
+    /// reason: any program could take the keys -- and with them the clipboard,
+    /// which only the window with the keyboard may read -- at a moment of its
+    /// choosing, by restoring a window it already had.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn restore_on_request(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let client = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .client_pid;
+        let presented = self.activation.take(client);
+        if self.may_take_keyboard(client, presented, false) {
+            return self.restore_window(window_id);
+        }
+        if self.window_ref(window_id).is_some_and(|w| w.minimized) {
+            return self.set_attention(window_id, true);
+        }
+        self.restore_geometry(window_id, false)
+    }
+
+    /// The part of a restore that is the window's own business: out of a
+    /// maximise or a snap, back to the rectangle it had, and -- when
+    /// `unminimize` -- shown again if minimised. The keyboard is the caller's
+    /// decision.
+    fn restore_geometry(&mut self, window_id: WindowId, unminimize: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
         // Read before the window is borrowed mutably. `home` is deliberately the
@@ -7386,7 +7749,7 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
 
-        if window.minimized {
+        if unminimize && window.minimized {
             window.minimized = false;
             window.visible = true;
         }
@@ -7412,8 +7775,8 @@ impl Compositor {
         }
 
         window.dirty = true;
-        self.damage_window(window_id);
-        self.focus_window(window_id);
+        // Shown again, perhaps at another size: its pictures change too.
+        self.content_changed(window_id);
         self.full_recomposite = true;
 
         Ok(())
@@ -7591,8 +7954,27 @@ impl Compositor {
         }
     }
 
-    /// Set focus to a specific window.
+    /// Give a window the keyboard, and raise it within its band.
+    ///
+    /// Refused, changing nothing, for a window that is not on screen: a
+    /// minimized window and a window on another workspace alike, because the
+    /// keyboard would be going somewhere the user cannot see, and no amount
+    /// of typing would reveal where. [`activate_window`](Self::activate_window)
+    /// is the verb that means "make it reachable *and* focus it", and it
+    /// undoes both kinds of hiding before calling this.
+    ///
+    /// The refusal is decided before anything moves. It used to come after
+    /// the window holding the keyboard had been told it lost it -- and kept
+    /// it anyway, the compositor's record and the client's disagreeing about
+    /// where keys went from then on.
     pub fn focus_window(&mut self, window_id: WindowId) {
+        let workspace = self.current_workspace;
+        if !self
+            .window_ref(window_id)
+            .is_some_and(|w| w.is_showing(workspace))
+        {
+            return;
+        }
         let old_focused = self.focused_window;
 
         // Unfocus the previously focused window.
@@ -7613,31 +7995,238 @@ impl Compositor {
                 .push_back(EventNotification::FocusLost { window_id: old_id });
         }
 
-        // Focus the new window — unless it is not on screen. A minimized
-        // window and a window on another workspace are refused for the same
-        // reason: the keyboard would be going somewhere the user cannot see,
-        // and no amount of typing would reveal where. `activate_window` is the
-        // verb that means "make it reachable *and* focus it", and it undoes
-        // both kinds of hiding before calling this.
-        let workspace = self.current_workspace;
-        if let Some(win) = self.window_mut(window_id)
-            && win.is_showing(workspace)
-        {
+        // It took the keyboard because of the user's latest action -- a click,
+        // a launch, a shortcut -- so that action is now its own: an activation
+        // drawn before it is one the user has moved on from, even if they have
+        // not yet typed a key here.
+        let latest = self.activation.serial();
+        if let Some(win) = self.window_mut(window_id) {
             win.focused = true;
             // The user is looking at it now, which is all the request asked.
             win.demands_attention = false;
             win.dirty = true;
-            self.focused_window = Some(window_id);
-
-            // Bring to the top of its own band — not to the top of the whole
-            // stack, which would let any application window climb over the
-            // taskbar simply by being clicked.
-            self.raise_within_layer(window_id);
-
-            self.damage_window(window_id);
-            self.pending_notifications
-                .push_back(EventNotification::FocusGained { window_id });
+            win.user_time = win.user_time.max(latest);
         }
+        self.focused_window = Some(window_id);
+        self.focus_history.retain(|&id| id != window_id);
+        self.focus_history.push(window_id);
+
+        // Bring to the top of its own band — not to the top of the whole
+        // stack, which would let any application window climb over the
+        // taskbar simply by being clicked.
+        self.raise_within_layer(window_id);
+
+        self.damage_window(window_id);
+        self.pending_notifications
+            .push_back(EventNotification::FocusGained { window_id });
+    }
+
+    /// Take the keyboard from `window_id` if it holds it -- the window is
+    /// still there but has left the screen: minimized, hidden, filed on a
+    /// desktop not showing, or on the desktop just switched away from -- and
+    /// give it back to the window that had it before
+    /// ([`hand_keyboard_back`](Self::hand_keyboard_back)).
+    ///
+    /// The one way all of those leave. Each used to spell it out for itself,
+    /// and two of the four forgot to tell the window: a minimized window went
+    /// on believing it had the keyboard, and the window list showed it
+    /// focused beside the window that really was.
+    fn release_keyboard(&mut self, window_id: WindowId) {
+        if self.focused_window != Some(window_id) {
+            return;
+        }
+        let band = self.layer_of(window_id);
+        if let Some(win) = self.window_mut(window_id) {
+            win.focused = false;
+            win.dirty = true;
+        }
+        self.damage_window(window_id);
+        self.focused_window = None;
+        // As in `focus_window`: an accent belongs to the window it was armed
+        // in, and no window holds the keyboard to complete it now.
+        self.dead_keys.cancel();
+        self.pending_notifications
+            .push_back(EventNotification::FocusLost { window_id });
+        self.hand_keyboard_back(band, window_id);
+    }
+
+    /// Give the keyboard, which no window holds, back to the window that held
+    /// it most recently and can again -- on screen, and in `band` (the band
+    /// of the window that had it) or below; else to the topmost window that
+    /// can; else to none.
+    ///
+    /// **Most recently, not topmost.** The topmost window is not where the
+    /// user was: a window a rule keeps always on top sits above the one they
+    /// were typing in without their having moved to it. The stacking order
+    /// is only the fallback, for a desktop whose windows never held the
+    /// keyboard.
+    ///
+    /// **In its band or below**, so that closing or minimizing an application
+    /// does not hand the keyboard to the taskbar, which is in front of every
+    /// application by construction and is never what the user was looking at
+    /// next -- and a desktop with no application left focuses nothing rather
+    /// than the panel.
+    ///
+    /// **Never to `leaving`**, the window that gave it up. Every other way of
+    /// giving it up also takes the window off the screen, which already rules
+    /// it out; [`return_keyboard`](Self::return_keyboard) leaves it there.
+    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId) {
+        let workspace = self.current_workspace;
+        let can = |comp: &Self, id: WindowId| {
+            id != leaving
+                && comp.layer_of(id) <= band
+                && comp.window_ref(id).is_some_and(|w| w.is_showing(workspace))
+        };
+        let next = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| can(self, id))
+            .or_else(|| self.z_stack.iter().rev().copied().find(|&id| can(self, id)));
+        if let Some(id) = next {
+            self.focus_window(id);
+        }
+    }
+
+    /// Give the keyboard back, if `window_id` holds it, to the window that held
+    /// it before ([`hand_keyboard_back`](Self::hand_keyboard_back)), leaving
+    /// the window where it is: Escape inside a prompt the user moved into
+    /// (§1242). Nothing if it does not hold the keyboard.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn return_keyboard(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.release_keyboard(window_id);
+        Ok(())
+    }
+
+    /// Whether `client`'s window may take the keyboard on the program's own
+    /// say-so -- opening (`opening`), or a restore or an activate -- given
+    /// what the program presented. The rule is the [`activation`] module's;
+    /// this supplies who holds the keyboard now.
+    fn may_take_keyboard(
+        &self,
+        client: u64,
+        presented: Option<activation::Presented>,
+        opening: bool,
+    ) -> bool {
+        let holder = self
+            .focused_window
+            .and_then(|id| self.window_ref(id))
+            .map(|w| (w.client_pid, w.user_time));
+        self.activation.allows(holder, client, presented, opening)
+    }
+
+    /// Stack `id` directly beneath the window holding the keyboard, where a
+    /// window refused the keyboard belongs, when the two share a band and a
+    /// tier. Otherwise at the top of its own band -- beneath the holder
+    /// already, or in a band no window of the holder's can be above.
+    ///
+    /// The one way besides [`raise_within_layer`](Self::raise_within_layer)
+    /// that a window enters `z_stack`, and it keeps the same invariant: placed
+    /// next to a window of its own band and tier, the band stays contiguous.
+    fn place_beneath_keyboard(&mut self, id: WindowId) {
+        let key = self.stack_key(id);
+        let holder = self
+            .focused_window
+            .filter(|&holder| holder != id && self.stack_key(holder) == key);
+        let Some(holder) = holder else {
+            self.raise_within_layer(id);
+            return;
+        };
+        self.z_stack.retain(|&other| other != id);
+        match self.z_stack.iter().position(|&w| w == holder) {
+            Some(at) => {
+                self.z_stack.insert(at, id);
+                self.update_z_orders();
+            }
+            None => self.raise_within_layer(id),
+        }
+    }
+
+    /// The latest of the user's actions in any of `client`'s windows; zero if
+    /// the user has touched none of them.
+    fn user_time_of(&self, client: u64) -> u64 {
+        self.windows
+            .iter()
+            .filter(|w| w.client_pid == client)
+            .map(|w| w.user_time)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Draw an activation token for `client` to hand a program it starts
+    /// (design-decisions 1386), standing for the latest of the user's actions
+    /// in `client`'s windows.
+    ///
+    /// # Errors
+    ///
+    /// [`NoToken::NoAction`] when the user has done nothing in `client`'s
+    /// windows; [`NoToken::NoRandomness`] when the compositor cannot draw an
+    /// unguessable token.
+    pub fn issue_activation_token(&mut self, client: u64) -> Result<ActivationToken, NoToken> {
+        let stands_for = self.user_time_of(client);
+        self.activation.issue(client, stands_for)
+    }
+
+    /// `client` presents `token` for its next window or restore, whichever
+    /// comes first. Used up whether or not it is good; a token the
+    /// compositor does not hold counts against the program, not for it.
+    pub fn present_activation_token(&mut self, client: u64, token: ActivationToken) {
+        self.activation.present(client, token);
+    }
+
+    /// Give `client`'s next window or restore the activation the user's
+    /// latest action in `shell`'s windows stands for: the shell passed on a
+    /// click meant for `client` -- its tray icon. Nothing when the shell's
+    /// windows have seen no action.
+    pub fn grant_activation(&mut self, client: u64, shell: u64) {
+        let stands_for = self.user_time_of(shell);
+        self.activation.grant(client, stands_for);
+    }
+
+    /// A program's `Activate`: bring its window to the user on a token --
+    /// shown, its desktop switched to, raised and given the keyboard, as
+    /// [`activate_window`](Self::activate_window) does for the user's own
+    /// click -- or, when the token is not good, ask for the user's attention
+    /// instead (design-decisions 1386).
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn activate_on_request(
+        &mut self,
+        window_id: WindowId,
+        token: ActivationToken,
+    ) -> CompositorResult<()> {
+        let client = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .client_pid;
+        self.activation.present(client, token);
+        let presented = self.activation.take(client);
+        if self.may_take_keyboard(client, presented, false) {
+            self.activate_window(window_id)
+        } else {
+            self.set_attention(window_id, true)
+        }
+    }
+
+    /// Whether a new window presented with no activation may take the
+    /// keyboard from another program's ([`NewWindows`]).
+    pub const fn set_new_window_policy(&mut self, policy: NewWindows) {
+        self.activation.new_windows = policy;
+    }
+
+    /// The policy [`Self::set_new_window_policy`] set.
+    #[must_use]
+    pub const fn new_window_policy(&self) -> NewWindows {
+        self.activation.new_windows
     }
 
     /// Mark a window as asking for the user's attention (`wanted`), or withdraw
@@ -7704,6 +8293,8 @@ impl Compositor {
             self.switch_workspace(workspace);
         }
         self.damage_window(window_id);
+        // Shown again if it was minimised: its pictures are back.
+        self.damage_viewers(window_id);
         self.focus_window(window_id);
         Ok(())
     }
@@ -7725,8 +8316,10 @@ impl Compositor {
     ///
     /// Focus follows the screen. A window on the desktop being left cannot keep
     /// the keyboard (that is a window nobody can see swallowing every
-    /// keystroke), so focus moves to the topmost window that *is* showing, and
-    /// to nothing at all on an empty desktop.
+    /// keystroke), so it goes to the window last typed in on the desktop
+    /// arriving ([`hand_keyboard_back`](Self::hand_keyboard_back)), and to
+    /// nothing at all on an empty desktop -- not to the taskbar, which is on
+    /// every desktop.
     ///
     /// A no-op when the named workspace is already the one showing, so a shell
     /// re-asserting its state costs nothing. There is no upper bound to check
@@ -7745,14 +8338,7 @@ impl Compositor {
                 .window_ref(focused)
                 .is_some_and(|w| w.is_showing(workspace))
         {
-            if let Some(win) = self.window_mut(focused) {
-                win.focused = false;
-                win.dirty = true;
-            }
-            self.focused_window = None;
-            self.pending_notifications
-                .push_back(EventNotification::FocusLost { window_id: focused });
-            self.focus_topmost_visible();
+            self.release_keyboard(focused);
         }
     }
 
@@ -7789,14 +8375,8 @@ impl Compositor {
         let vanished = !window.is_showing(showing);
         self.full_recomposite = true;
         self.damage_window(window_id);
-        if vanished && self.focused_window == Some(window_id) {
-            if let Some(win) = self.window_mut(window_id) {
-                win.focused = false;
-            }
-            self.focused_window = None;
-            self.pending_notifications
-                .push_back(EventNotification::FocusLost { window_id });
-            self.focus_topmost_visible();
+        if vanished {
+            self.release_keyboard(window_id);
         }
         Ok(())
     }
@@ -7865,13 +8445,13 @@ impl Compositor {
             window.minimized = false;
         }
         window.dirty = true;
+        // Hidden, a window's pictures draw as nothing; shown, they are back.
+        self.damage_viewers(window_id);
 
-        // Hiding the focused window leaves focus nowhere; hand it to whatever
-        // is now on top rather than leaving keystrokes going to a window the
-        // user cannot see.
-        if !visible && self.focused_window == Some(window_id) {
-            self.focused_window = None;
-            self.focus_topmost_visible();
+        // Hiding the focused window must not leave keystrokes going to a window
+        // the user cannot see.
+        if !visible {
+            self.release_keyboard(window_id);
         }
 
         self.damage_window(window_id);
@@ -7913,18 +8493,61 @@ impl Compositor {
     }
 
     /// Submit render commands from a client for its window.
+    ///
+    /// Any [`RenderCommand::WindowPicture`] among them is drawn from the
+    /// pictured window's content as it is then, and again whenever that
+    /// window changes. Whether a client may picture other windows at all is
+    /// decided before this, where the commands arrive (`wire`): this takes
+    /// what it is given.
     pub fn submit_render(
         &mut self,
         window_id: WindowId,
         commands: Vec<RenderCommand>,
     ) -> CompositorResult<()> {
+        let pictured = pictured_in(&commands);
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         window.render_tree = RenderTree { commands };
+        window.pictured = pictured;
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
+    }
+
+    /// Note that what `window_id` shows in its client area changed: its
+    /// [`Window::content_revision`] moves on, it is damaged, and so is every
+    /// other window whose commands picture it -- a picture is as live as the
+    /// window ([`RenderCommand::WindowPicture`]).
+    ///
+    /// The viewers are damaged here directly rather than through this, so a
+    /// window picturing another that pictures it back is drawn again once,
+    /// not round and round.
+    fn content_changed(&mut self, window_id: WindowId) {
+        if let Some(win) = self.window_mut(window_id) {
+            win.content_revision = win.content_revision.wrapping_add(1);
+        }
+        self.damage_window(window_id);
+        self.damage_viewers(window_id);
+    }
+
+    /// Damage every other window whose commands picture `window_id`: its
+    /// picture of it is no longer what it shows -- the content changed, or
+    /// the window was minimised, shown again, hidden or closed, which draw
+    /// its picture as nothing or bring it back.
+    fn damage_viewers(&mut self, window_id: WindowId) {
+        let viewers: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| w.id != window_id && w.pictured.contains(&window_id))
+            .map(|w| w.id)
+            .collect();
+        for viewer in viewers {
+            if let Some(win) = self.window_mut(viewer) {
+                win.dirty = true;
+            }
+            self.damage_window(viewer);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7962,7 +8585,7 @@ impl Compositor {
         window.buffer = Some(buffer);
         window.dirty = true;
         self.next_buffer_serial = serial.wrapping_add(1);
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -7978,7 +8601,7 @@ impl Compositor {
             h
         };
         if handle.is_some() {
-            self.damage_window(window_id);
+            self.content_changed(window_id);
         }
         handle
     }
@@ -8045,7 +8668,7 @@ impl Compositor {
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         window.images.insert(image_id, image);
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -8087,7 +8710,7 @@ impl Compositor {
         image.patch(at, size, stride, bytes)?;
         image.stamp_patch(revision, at, size);
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -8115,7 +8738,7 @@ impl Compositor {
             None => false,
         };
         if removed {
-            self.damage_window(window_id);
+            self.content_changed(window_id);
         }
         removed
     }
@@ -8305,6 +8928,34 @@ impl Compositor {
         // pointer mid-drag, which is the one moment a user would notice.
         self.refresh_window_scales();
 
+        // The user's actions, as activations count them (design-decisions
+        // 1386): a key going down, text typed, a button pressed. Not motion,
+        // not a scroll, not a release -- none of those is the user turning to
+        // something.
+        let action = matches!(
+            event,
+            InputEvent::KeyDown { .. }
+                | InputEvent::TextInput { .. }
+                | InputEvent::MouseButton { pressed: true, .. }
+        );
+
+        self.dispatch_input(event);
+
+        // After the event is handled, so that a click is counted for the
+        // window it focused rather than the one it left.
+        if action {
+            let serial = self.activation.note_action();
+            if let Some(id) = self.focused_window
+                && let Some(win) = self.window_mut(id)
+            {
+                win.user_time = serial;
+            }
+        }
+    }
+
+    /// Hand one event to its handler: [`Self::handle_input`] once the activity
+    /// bookkeeping is done.
+    fn dispatch_input(&mut self, event: InputEvent) {
         match event {
             InputEvent::MouseMove { x, y } => {
                 self.pointer_on_output = true;
@@ -9989,12 +10640,17 @@ impl Compositor {
         }
         self.scanout = Scanout::Composited;
 
+        self.render_engine.begin_frame();
         let (region, change) = self.plan_repaint();
         let plan = self.stack_plan();
         self.repaint_background(&region, &plan);
         self.repaint_windows(&region, &plan);
         self.damage_history.record(change);
-        self.full_recomposite = false;
+        // A named family this frame had no budget left to load drew its runs
+        // in the UI face; the next frame, with a fresh budget, draws them
+        // again. Whole, because which windows named it is not recorded, and
+        // it lasts only the few frames a long list of families takes to load.
+        self.full_recomposite = self.render_engine.take_deferred_load();
         self.framebuffer_stale = false;
         self.damage.clear();
 
@@ -10608,16 +11264,29 @@ impl Compositor {
             // `no_images` cannot actually be reached (the window was found a few
             // lines above, and nothing since could have removed it) and costs
             // nothing when it is not: an empty `HashMap` does not allocate.
+            // The pictures of other windows the commands name, made before the
+            // draw ([`Self::prepare_pictures`]) -- for a window naming none, as
+            // almost every window does, nothing at all.
+            if commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::WindowPicture { .. }))
+            {
+                self.prepare_pictures(window_id, &commands);
+            }
             let no_images = HashMap::new();
             let images = self
                 .windows
                 .iter()
                 .find(|w| w.id == window_id)
                 .map_or(&no_images, |w| &w.images);
-            self.render_engine.execute(
+            // Disjoint field borrows again: the thumbnails and the windows
+            // shared, the engine and the backend unique.
+            let pictures = picture_set(&self.thumbnails, &self.windows, window_id, &commands);
+            self.render_engine.execute_with_pictures(
                 &mut self.backend,
                 &commands,
                 images,
+                &pictures,
                 win_x,
                 win_y,
                 win_width,
@@ -10630,6 +11299,110 @@ impl Compositor {
         if let Some(win) = self.window_mut(window_id) {
             win.dirty = false;
         }
+    }
+
+    /// Make, or keep, the pictures `viewer`'s `commands` name
+    /// ([`RenderCommand::WindowPicture`]) in [`Self::thumbnails`], each at the
+    /// size it is drawn at, and drop the viewer's pictures they no longer
+    /// name.
+    ///
+    /// A picture is made again only when the pictured window's content has
+    /// changed since ([`Window::content_revision`]). None is made of a window
+    /// gone, minimised or hidden, and its picture draws as nothing; a window
+    /// on another virtual desktop is pictured, since an overview of every
+    /// desktop is what pictures are for. At most
+    /// [`picture::MAX_PICTURES_PER_WINDOW`] different ones.
+    fn prepare_pictures(&mut self, viewer: WindowId, commands: &[RenderCommand]) {
+        // (pictured, width, height, its revision now)
+        let mut wanted: Vec<(WindowId, u32, u32, u64)> = Vec::new();
+        for cmd in commands {
+            if wanted.len() >= picture::MAX_PICTURES_PER_WINDOW {
+                break;
+            }
+            let RenderCommand::WindowPicture {
+                window,
+                width,
+                height,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let pictured = WindowId::from_raw(*window);
+            let Some(win) = self.window_ref(pictured) else {
+                continue;
+            };
+            if win.minimized || !win.visible {
+                continue;
+            }
+            let Some((dw, dh)) = picture::fitted((win.width, win.height), (*width, *height)) else {
+                continue;
+            };
+            let revision = win.content_revision;
+            if !wanted
+                .iter()
+                .any(|&(p, w, h, _)| (p, w, h) == (pictured, dw, dh))
+            {
+                wanted.push((pictured, dw, dh, revision));
+            }
+        }
+        self.thumbnails.retain(|&(v, p, w, h), _| {
+            v != viewer
+                || wanted
+                    .iter()
+                    .any(|&(wp, ww, wh, _)| (wp, ww, wh) == (p, w, h))
+        });
+        for (pictured, dw, dh, revision) in wanted {
+            let key = (viewer, pictured, dw, dh);
+            if self
+                .thumbnails
+                .get(&key)
+                .is_some_and(|t| t.revision == revision)
+            {
+                continue;
+            }
+            match self.make_picture(pictured, dw, dh) {
+                Some(image) => {
+                    self.thumbnails.insert(key, Thumbnail { revision, image });
+                }
+                None => {
+                    self.thumbnails.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// A picture of `pictured`'s client area at `dw` by `dh` ([`picture`]):
+    /// its buffer, or its commands drawn offscreen, on white -- the undercoat
+    /// an opaque window gets, which a transparent window's see-through parts
+    /// show as here -- then area-averaged down to size. `None` if the window
+    /// is gone, or its size cannot be drawn.
+    ///
+    /// Any pictures in the pictured window's own commands draw as nothing
+    /// here: a picture of a picture would be a picture too far, and for a
+    /// window picturing itself, a loop.
+    fn make_picture(&mut self, pictured: WindowId, dw: u32, dh: u32) -> Option<ImageAsset> {
+        let win = self.window_ref(pictured)?;
+        let (sw, sh) = (win.width, win.height);
+        let full = if let Some(buffer) = win.buffer.as_ref() {
+            buffer_over_white(buffer, sw, sh)?
+        } else {
+            let commands = win.render_tree.commands.clone();
+            let mut target = RenderBackend::software(sw, sh).ok()?;
+            self.render_engine
+                .fill_rect(&mut target, 0, 0, sw, sh, 0xFF_FF_FF_FF, 1.0);
+            let no_images = HashMap::new();
+            let images = self
+                .windows
+                .iter()
+                .find(|w| w.id == pictured)
+                .map_or(&no_images, |w| &w.images);
+            self.render_engine
+                .execute(&mut target, &commands, images, 0, 0, sw, sh, 1.0);
+            target.working_pixels().to_vec()
+        };
+        let scaled = picture::downscale(&full, sw, sh, dw, dh)?;
+        ImageAsset::from_pixels(dw, dh, scaled)
     }
 
     /// Render the window shadow: concentric outlines around the frame box,
@@ -10785,7 +11558,7 @@ impl Compositor {
         // grows and the writing on it does not, which reads as a bug long
         // before anyone measures the pixels. `max` keeps a fractional scale, or
         // a font size a config file made tiny, from producing zero.
-        let font_size = (self.appearance.fonts.ui_size * bar.scale).max(1.0);
+        let font_size = (self.fonts_in_use.ui_size * bar.scale).max(1.0);
         let text_x = tb_x.saturating_add(inset as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
@@ -10942,7 +11715,7 @@ impl Compositor {
                     },
                 }
             }
-            CompositorRequest::Restore { window_id } => match self.restore_window(window_id) {
+            CompositorRequest::Restore { window_id } => match self.restore_on_request(window_id) {
                 Ok(()) => CompositorResponse::Ok,
                 Err(e) => CompositorResponse::Error {
                     message: e.to_string(),
@@ -11077,6 +11850,7 @@ impl Compositor {
                     // the result depend on what the window was already doing,
                     // and the rule would undo itself if it ever ran twice.
                     ShellControlAction::Fullscreen => self.set_fullscreen(window_id, true),
+                    ShellControlAction::ReturnKeyboard => self.return_keyboard(window_id),
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -11881,7 +12655,9 @@ impl Compositor {
     /// is simply the number of windows in bands at or below `layer` — after all
     /// of them, before the first window of any higher band. That partitioning
     /// is the invariant this whole layering rests on, and it is maintained by
-    /// this function being the *only* way anything enters the stack.
+    /// this function being the way anything enters the stack -- the one other,
+    /// [`place_beneath_keyboard`](Self::place_beneath_keyboard), places a
+    /// window only next to one of its own band and tier.
     fn stack_insertion_index(&self, key: (Layer, StackTier)) -> usize {
         self.z_stack
             .iter()
@@ -12174,18 +12950,6 @@ impl Compositor {
     #[must_use]
     pub fn stream_session_count(&self) -> usize {
         self.stream_sessions.len()
-    }
-
-    /// Focus the topmost visible window.
-    fn focus_topmost_visible(&mut self) {
-        let topmost = self.z_stack.iter().rev().copied().find(|&id| {
-            self.window_ref(id)
-                .is_some_and(|w| w.is_showing(self.current_workspace))
-        });
-
-        if let Some(id) = topmost {
-            self.focus_window(id);
-        }
     }
 
     /// Mark the area occupied by a window (including decorations) as damaged.
@@ -14408,6 +15172,35 @@ mod tests {
             first_key(&mut comp).text,
             "e",
             "the accent followed focus into the next window"
+        );
+    }
+
+    /// And closing the window it was armed in disarms it, though no window
+    /// is left to take the keyboard *from* when the next one is given it.
+    #[test]
+    fn closing_the_focused_window_disarms_a_pending_dead_key() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let staying = comp.create_window("Staying".to_string(), 400, 300, 1);
+        let closing = comp.create_window("Closing".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        assert_eq!(comp.focused_window, Some(closing));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        let _ = first_key(&mut comp);
+
+        comp.destroy_window(closing).unwrap();
+        assert_eq!(comp.focused_window, Some(staying));
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x12, // E
+            character: None,
+        });
+        assert_eq!(
+            first_key(&mut comp).text,
+            "e",
+            "the accent armed in the closed window completed itself in the next"
         );
     }
 
@@ -18179,13 +18972,33 @@ mod tests {
         attach(&mut comp, 0);
         let stream = comp.start_stream();
         let mut viewer = SceneViewer::new();
-        let mut decoder = videocodec::Decoder::new(
-            videocodec::Codec::Vp9,
-            &[],
-            videocodec::ColourHint::default(),
-            videocodec::Limits::default(),
-        )
-        .unwrap();
+        // A viewer decodes as a player does a file whose container says the
+        // colour: the scene protocol's (design-decisions §1383).
+        let said = guiremote::scene::VIDEO_VP9_COLOUR;
+        let said = videocodec::Colour {
+            matrix: said.matrix.into(),
+            primaries: said.primaries.into(),
+            transfer: said.transfer.into(),
+            full_range: said.full_range,
+            whole: true,
+        };
+        let new_decoder = |hint| {
+            videocodec::Decoder::new(
+                videocodec::Codec::Vp9,
+                &[],
+                hint,
+                videocodec::Limits::default(),
+            )
+            .unwrap()
+        };
+        let mut decoder = new_decoder(videocodec::ColourHint::cicp(
+            said.matrix,
+            said.primaries,
+            said.transfer,
+            said.full_range,
+        ));
+        // And one that hears the stream alone, to hold what it says itself.
+        let mut bare = new_decoder(videocodec::ColourHint::default());
         // Every frame the viewer holds for the game, decoded and converted in
         // order as a viewer would; the last one's pixels. A stop is not
         // expected until the end.
@@ -18197,22 +19010,35 @@ mod tests {
                     panic!("a stop while the game still presents its buffer");
                 };
                 assert_eq!((video.width, video.height), (160, 96));
-                decoder
-                    .send(&videocodec::Packet {
-                        data: &video.frame,
-                        alpha: None,
-                        time: 0,
-                        duration: 0,
-                        keyframe: false,
-                        discard: false,
-                    })
-                    .unwrap();
+                let packet = videocodec::Packet {
+                    data: &video.frame,
+                    alpha: None,
+                    time: 0,
+                    duration: 0,
+                    keyframe: false,
+                    discard: false,
+                };
+                bare.send(&packet).unwrap();
+                while let Some(picture) = bare.receive() {
+                    // The stream says BT.601 itself (VP9's colour space 1),
+                    // so that no reader of it alone guesses BT.709 for a
+                    // window 1280 wide. Chrome reads that one field whole,
+                    // SMPTE 170M's primaries and curve with its weights, and
+                    // would convert them: the reason the protocol says the
+                    // colour. A stream that said nothing would not be whole.
+                    let colour = picture.colour();
+                    assert_eq!(
+                        (colour.matrix, colour.primaries, colour.transfer),
+                        (6, 6, 6)
+                    );
+                    assert!(colour.whole && colour.converted());
+                }
+                decoder.send(&packet).unwrap();
                 while let Some(picture) = decoder.receive() {
-                    // The stream says it is BT.601 (VP9's colour space 1,
-                    // H.273's 5), as the compositor converted it; a stream
-                    // that said nothing would be guessed (6 at this size,
-                    // 1 -- BT.709 -- at 1280 wide).
-                    assert_eq!(picture.colour().matrix, 5);
+                    // The container's colour first, as Chrome's VP9 decoder
+                    // takes a file's: sRGB's pixels, shown unconverted.
+                    assert_eq!(picture.colour(), said);
+                    assert!(!picture.colour().converted());
                     last = Some(picture.to_frame().unwrap().pixels);
                 }
             }
@@ -19491,6 +20317,395 @@ mod tests {
 
         comp.destroy_window(only).unwrap();
         assert_eq!(comp.focused_window, None);
+    }
+
+    /// The keyboard goes back to the window the user was typing in, not to
+    /// whatever is on top of the stack -- here a window a rule keeps always
+    /// on top, which sits above the user's window without their having
+    /// used it.
+    #[test]
+    fn closing_a_window_gives_the_keyboard_back_to_the_one_that_had_it() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let pinned = layered(&mut comp, "Sticky note", Layer::Normal);
+        let editor = layered(&mut comp, "Editor", Layer::Normal);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+        let dialog = layered(&mut comp, "Save as", Layer::Normal);
+        assert_eq!(comp.focused_window, Some(dialog));
+
+        comp.destroy_window(dialog).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "the keyboard went to the window kept on top, not the one the user was in"
+        );
+    }
+
+    /// Minimizing or hiding the window with the keyboard gives it back by
+    /// the same rule -- not to the taskbar, which the topmost-window rule
+    /// these used to follow picked -- and tells the window it lost it, so
+    /// the window list never shows one minimized and focused.
+    #[test]
+    fn leaving_the_screen_gives_the_keyboard_back_and_says_so() {
+        /// A way the window with the keyboard leaves the screen.
+        type Leave = fn(&mut Compositor, WindowId);
+        let leave: [(&str, Leave); 2] = [
+            ("minimized", |comp, id| comp.minimize_window(id).unwrap()),
+            ("hidden", |comp, id| comp.set_visible(id, false).unwrap()),
+        ];
+        for (how, leave) in leave {
+            let mut comp = Compositor::new(800, 600, 60).unwrap();
+            let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+            let behind = layered(&mut comp, "Behind", Layer::Normal);
+            let front = layered(&mut comp, "Front", Layer::Normal);
+            let _ = comp.drain_notifications();
+
+            leave(&mut comp, front);
+            assert_eq!(comp.focused_window, Some(behind), "{how}");
+            assert_ne!(comp.focused_window, Some(panel), "{how}");
+            assert!(
+                !comp.window_ref(front).unwrap().focused,
+                "{how}: the window still believes it has the keyboard"
+            );
+            assert!(
+                comp.drain_notifications().iter().any(
+                    |n| matches!(n, EventNotification::FocusLost { window_id } if *window_id == front)
+                ),
+                "{how}: the window was not told it lost the keyboard"
+            );
+            let focused: Vec<u64> = comp
+                .window_list()
+                .windows
+                .iter()
+                .filter(|w| w.focused)
+                .map(|w| w.id)
+                .collect();
+            assert_eq!(focused, vec![behind.raw()], "{how}");
+        }
+    }
+
+    /// Focusing a window that cannot take the keyboard changes nothing: the
+    /// window holding it keeps it and is told nothing.
+    #[test]
+    fn a_refused_focus_leaves_the_keyboard_where_it_was() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let hidden = comp.create_window("Hidden".to_string(), 100, 80, 1);
+        let working = comp.create_window("Working".to_string(), 100, 80, 1);
+        comp.minimize_window(hidden).unwrap();
+        assert_eq!(comp.focused_window, Some(working));
+        let _ = comp.drain_notifications();
+
+        comp.focus_window(hidden);
+        assert_eq!(comp.focused_window, Some(working));
+        assert!(comp.window_ref(working).unwrap().focused);
+        assert!(
+            comp.drain_notifications().is_empty(),
+            "the window with the keyboard was told something"
+        );
+    }
+
+    /// Closing a window passes over a minimized one stacked above the window
+    /// to go back to. The topmost-window rule picked the minimized one, which
+    /// cannot take the keyboard, and left it with nobody.
+    #[test]
+    fn closing_a_window_passes_over_a_minimized_one_kept_on_top() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let back = comp.create_window("Back".to_string(), 100, 80, 1);
+        let pinned = comp.create_window("Pinned".to_string(), 100, 80, 1);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+        comp.minimize_window(pinned).unwrap();
+        let closing = comp.create_window("Closing".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(closing));
+
+        comp.destroy_window(closing).unwrap();
+        assert_eq!(comp.focused_window, Some(back));
+    }
+
+    /// Switching desktops gives the keyboard to the window last typed in on
+    /// the desktop arriving, and to nothing on an empty one -- never to the
+    /// taskbar, which is on every desktop.
+    #[test]
+    fn switching_desktops_does_not_hand_the_keyboard_to_the_taskbar() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        let here = layered(&mut comp, "Here", Layer::Normal);
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.focused_window, None,
+            "an empty desktop focuses nothing, the taskbar included"
+        );
+        let there = layered(&mut comp, "There", Layer::Normal);
+
+        comp.switch_workspace(0);
+        assert_eq!(comp.focused_window, Some(here));
+        comp.switch_workspace(1);
+        assert_eq!(comp.focused_window, Some(there));
+        assert!(!comp.window_ref(panel).unwrap().focused);
+    }
+
+    // -----------------------------------------------------------------------
+    // Activation: when a program may take the keyboard on its own say-so
+    // (design-decisions 1386). Each test names its programs by connection
+    // number: 1 is the launcher or the program the user is in.
+    // -----------------------------------------------------------------------
+
+    /// A compositor whose tokens are numbered: the host the tests run on has
+    /// no kernel random source.
+    fn activating() -> Compositor {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.activation.count_tokens();
+        comp
+    }
+
+    /// The user types a key into whatever has the keyboard.
+    fn type_a_key(comp: &mut Compositor) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1E });
+    }
+
+    fn opened(comp: &mut Compositor, title: &str, client: u64) -> WindowId {
+        comp.create_window(title.to_string(), 200, 100, client)
+    }
+
+    /// The hole this closes: a program restoring a window it already had took
+    /// the keyboard -- and with it the clipboard, which only the window with
+    /// the keyboard may read -- whenever it liked.
+    #[test]
+    fn a_program_cannot_take_the_keyboard_by_restoring_its_own_window() {
+        let mut comp = activating();
+        let lurker = opened(&mut comp, "Lurker", 2);
+        let editor = opened(&mut comp, "Editor", 1);
+        type_a_key(&mut comp);
+        assert_eq!(comp.focused_window, Some(editor));
+
+        // Restored while on screen: nothing in front of the user moves.
+        comp.handle_request(CompositorRequest::Restore { window_id: lurker });
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "a program's restore took the keyboard"
+        );
+        assert_eq!(comp.z_stack.last(), Some(&editor));
+
+        // Minimised: it stays minimised, and asks for the user's attention.
+        comp.minimize_window(lurker).unwrap();
+        comp.handle_request(CompositorRequest::Restore { window_id: lurker });
+        let win = comp.window_ref(lurker).unwrap();
+        assert!(
+            win.minimized,
+            "a restore put a window in front of the user's"
+        );
+        assert!(win.demands_attention);
+        assert_eq!(comp.focused_window, Some(editor));
+    }
+
+    /// The program the user is in restores its own windows as before.
+    #[test]
+    fn the_program_the_user_is_in_restores_its_windows_as_before() {
+        let mut comp = activating();
+        let first = opened(&mut comp, "First", 1);
+        let second = opened(&mut comp, "Second", 1);
+        comp.minimize_window(first).unwrap();
+        assert_eq!(comp.focused_window, Some(second));
+        comp.handle_request(CompositorRequest::Restore { window_id: first });
+        assert_eq!(comp.focused_window, Some(first));
+        assert!(!comp.window_ref(first).unwrap().minimized);
+    }
+
+    /// A launcher's token lets the program it started take the keyboard --
+    /// once. Under the strict policy, so that the token is what decides.
+    #[test]
+    fn a_launchers_token_lets_the_program_it_started_take_the_keyboard_once() {
+        let mut comp = activating();
+        comp.set_new_window_policy(NewWindows::Strict);
+        let _menu = opened(&mut comp, "Start menu", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+
+        comp.present_activation_token(2, token);
+        let program = opened(&mut comp, "Program", 2);
+        assert_eq!(comp.focused_window, Some(program));
+
+        // The same token, presented by a third program: used up.
+        comp.present_activation_token(3, token);
+        let other = opened(&mut comp, "Other", 3);
+        assert_eq!(comp.focused_window, Some(program), "a token was good twice");
+        assert!(comp.window_ref(other).unwrap().demands_attention);
+    }
+
+    /// A program the user started and then left -- they went on typing
+    /// elsewhere while it loaded -- opens behind the window they are in and
+    /// asks for attention, rather than taking the keys mid-word.
+    #[test]
+    fn a_program_the_user_has_moved_on_from_opens_behind() {
+        let mut comp = activating();
+        let _launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+
+        let editor = opened(&mut comp, "Editor", 3);
+        type_a_key(&mut comp);
+
+        comp.present_activation_token(2, token);
+        let slow = opened(&mut comp, "Slow", 2);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(slow).unwrap().demands_attention);
+        let at = |id| comp.z_stack.iter().position(|&w| w == id).unwrap();
+        assert_eq!(
+            at(slow) + 1,
+            at(editor),
+            "a window refused the keyboard was not put directly beneath the one with it"
+        );
+    }
+
+    /// Under the smart default a new window with no token takes the keyboard,
+    /// as GNOME's and KDE's do; under the strict policy it opens behind.
+    /// Either way a window of the program the user is in takes it.
+    #[test]
+    fn a_new_window_with_no_token_follows_the_policy() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 1);
+        let smart = opened(&mut comp, "Smart", 2);
+        assert_eq!(comp.focused_window, Some(smart));
+
+        comp.set_new_window_policy(NewWindows::Strict);
+        comp.focus_window(editor);
+        let strict = opened(&mut comp, "Strict", 3);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(strict).unwrap().demands_attention);
+
+        let dialog = opened(&mut comp, "Dialog", 1);
+        assert_eq!(comp.focused_window, Some(dialog));
+    }
+
+    /// A token the compositor never drew counts *against* the program that
+    /// presents it -- even under the smart default, where presenting nothing
+    /// would have been let through. And a program the user has not touched
+    /// draws none, so its launches carry nothing rather than a dud.
+    #[test]
+    fn an_unknown_token_counts_against_whoever_presents_it() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 1);
+        type_a_key(&mut comp);
+        assert_eq!(comp.issue_activation_token(9), Err(NoToken::NoAction));
+        comp.present_activation_token(2, ActivationToken::from_bytes([0x55; 16]));
+        let program = opened(&mut comp, "Program", 2);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(program).unwrap().demands_attention);
+    }
+
+    /// `Activate` on a good token brings a window back from minimised, raised
+    /// and given the keyboard; on a stale one it only asks for attention.
+    #[test]
+    fn activate_brings_a_window_forward_on_a_good_token_only() {
+        let mut comp = activating();
+        let running = opened(&mut comp, "Running", 2);
+        comp.minimize_window(running).unwrap();
+        let launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+
+        let token = comp.issue_activation_token(1).unwrap();
+        comp.activate_on_request(running, token).unwrap();
+        assert_eq!(comp.focused_window, Some(running));
+        assert!(!comp.window_ref(running).unwrap().minimized);
+        assert_eq!(comp.z_stack.last(), Some(&running));
+
+        comp.focus_window(launcher);
+        let token = comp.issue_activation_token(1).unwrap();
+        type_a_key(&mut comp);
+        comp.activate_on_request(running, token).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(launcher),
+            "a stale token activated"
+        );
+        assert!(comp.window_ref(running).unwrap().demands_attention);
+    }
+
+    /// The shell passing on a click meant for a program -- its tray icon --
+    /// lets that program restore its window: "restore from the tray".
+    #[test]
+    fn a_grant_from_the_shell_lets_a_program_restore_its_window() {
+        let mut comp = activating();
+        let player = opened(&mut comp, "Player", 2);
+        comp.minimize_window(player).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        comp.focus_window(panel);
+        type_a_key(&mut comp);
+
+        comp.grant_activation(2, 1);
+        comp.handle_request(CompositorRequest::Restore { window_id: player });
+        assert_eq!(comp.focused_window, Some(player));
+        assert!(!comp.window_ref(player).unwrap().minimized);
+    }
+
+    /// Escape inside a prompt the user moved into (§1242): the keyboard goes
+    /// back to the window they came from, and the prompt stays up.
+    #[test]
+    fn a_prompt_gives_the_keyboard_back_and_stays_up() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let editor = opened(&mut comp, "Editor", 2);
+        let prompt = layered(&mut comp, "Allow?", Layer::Overlay);
+        comp.focus_window(prompt);
+        let give_back = |comp: &mut Compositor| {
+            comp.handle_request(CompositorRequest::ShellControl {
+                window_id: prompt,
+                action: ShellControlAction::ReturnKeyboard,
+            })
+        };
+        assert!(matches!(give_back(&mut comp), CompositorResponse::Ok));
+        assert_eq!(comp.focused_window, Some(editor));
+        let workspace = comp.current_workspace;
+        assert!(comp.window_ref(prompt).unwrap().is_showing(workspace));
+        assert!(!comp.window_ref(prompt).unwrap().focused);
+
+        // Again, now that it does not hold the keyboard: nothing moves.
+        assert!(matches!(give_back(&mut comp), CompositorResponse::Ok));
+        assert_eq!(comp.focused_window, Some(editor));
+    }
+
+    /// With nowhere for it to go back to, the keyboard goes nowhere -- not
+    /// back into the prompt that gave it up, though it is the topmost window
+    /// on screen.
+    #[test]
+    fn a_prompt_alone_gives_the_keyboard_to_nobody() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let prompt = layered(&mut comp, "Allow?", Layer::Overlay);
+        assert_eq!(comp.focused_window, Some(prompt));
+        comp.handle_request(CompositorRequest::ShellControl {
+            window_id: prompt,
+            action: ShellControlAction::ReturnKeyboard,
+        });
+        assert_eq!(comp.focused_window, None);
+    }
+
+    /// The user's action belongs to the window that took the keyboard for
+    /// it, before a key is typed there: a token drawn earlier is stale
+    /// against a window the user just clicked into.
+    #[test]
+    fn taking_the_keyboard_makes_the_latest_action_the_windows_own() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 3);
+        let _launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+        // The user goes on in the launcher, then clicks into the editor --
+        // where they have never typed a key.
+        type_a_key(&mut comp);
+        comp.focus_window(editor);
+        assert_eq!(comp.window_ref(editor).unwrap().user_time, 2);
+
+        comp.present_activation_token(2, token);
+        let late = opened(&mut comp, "Late", 2);
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "a token drawn before the user moved took the keyboard from where they moved to"
+        );
+        assert!(comp.window_ref(late).unwrap().demands_attention);
     }
 
     #[test]
@@ -21082,6 +22297,143 @@ mod tests {
             with.title_bar_focused, accent,
             "the focused bar changed to something that is not the accent"
         );
+    }
+
+    /// What the named-family tests draw: Latin every face has, wide enough
+    /// that two families' glyphs differ.
+    const NAMED_SAMPLE: &str = "Hamburgefonstiv 0123 WMQ";
+
+    /// A window drawing [`NAMED_SAMPLE`] in `family`.
+    fn text_window(comp: &mut Compositor, family: FontFamily) -> WindowId {
+        let mut spec = WindowSpec::new("Text", 360, 48);
+        spec.position = Some((10, 10));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.submit_render(
+            id,
+            vec![
+                RenderCommand::PushFont { family },
+                RenderCommand::Text {
+                    x: 4.0,
+                    y: 8.0,
+                    text: NAMED_SAMPLE.to_string(),
+                    color: Color::rgba(0, 0, 0, 255),
+                    font_size: 20.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                },
+                RenderCommand::PopFont,
+            ],
+        )
+        .expect("render");
+        id
+    }
+
+    /// Window `id`'s client area, drawn alone onto a cleared surface.
+    fn drawn_client(comp: &mut Compositor, id: WindowId) -> Vec<u32> {
+        comp.refresh_window_scales();
+        comp.backend.clear(0xFF00_0000);
+        comp.render_window(id);
+        let client = comp.window_ref(id).expect("window").client_rect();
+        let mut out = Vec::new();
+        for y in client.y..client.bottom() {
+            for x in client.x..client.right() {
+                let (x, y) = (u32::try_from(x).expect("x"), u32::try_from(y).expect("y"));
+                out.push(working_pixel(&comp.backend, x, y).unwrap_or(0));
+            }
+        }
+        out
+    }
+
+    /// **Text in a family the drawing names is drawn in that family's face**
+    /// -- exactly as it is drawn when the user chooses the same family as the
+    /// interface font, which is the face the program measured it in
+    /// (`guitk::text::ensure_family` loads both by one rule).
+    ///
+    /// The family is the first installed one that, *chosen as the interface
+    /// font*, draws unlike the default interface font -- found through the
+    /// settings, not through named runs, so a compositor that drew named runs
+    /// in the UI face has no family to hide behind: the comparison it then
+    /// fails is against the chosen family's drawing. A host with no such
+    /// family passes vacuously.
+    #[test]
+    fn a_named_family_is_drawn_in_the_face_it_names() {
+        let mut plain = ungated_compositor(400, 100);
+        let ui_window = text_window(&mut plain, FontFamily::Ui);
+        let default_ui = drawn_client(&mut plain, ui_window);
+        let found = guitk::text::available_families()
+            .into_iter()
+            .find_map(|family| {
+                let named = FontFamily::named(&family)?;
+                let mut settings = AppearanceSettings::default();
+                settings.fonts.ui_font.clone_from(&family);
+                let mut chosen = ungated_compositor(400, 100);
+                chosen.set_appearance(settings);
+                let id = text_window(&mut chosen, FontFamily::Ui);
+                let as_ui = drawn_client(&mut chosen, id);
+                (as_ui != default_ui).then_some((family, named, as_ui))
+            });
+        let Some((family, named, as_ui)) = found else {
+            return;
+        };
+        let mut comp = ungated_compositor(400, 100);
+        let id = text_window(&mut comp, named);
+        assert_eq!(drawn_client(&mut comp, id), as_ui, "{family}");
+    }
+
+    /// **A frame loads at most its budget of named families, and the frames
+    /// after it the rest** (`NAMED_FAMILY_LOADS_PER_FRAME`): the first frame
+    /// owes another, which draws the runs left in the UI face in their own,
+    /// and then nothing is owed.
+    #[test]
+    fn a_frame_loads_its_budget_of_named_families_and_the_next_the_rest() {
+        let budget = usize::try_from(NAMED_FAMILY_LOADS_PER_FRAME).expect("budget");
+        let names: Vec<guitk::render::FamilyName> = guitk::text::available_families()
+            .iter()
+            .filter_map(|family| guitk::render::FamilyName::new(family))
+            .filter(|&name| guitk::text::ensure_family(&mut FontCache::new(), name))
+            .take(budget + 2)
+            .collect();
+        if names.len() < budget + 2 {
+            return;
+        }
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Picker".to_string(), 360, 260, 1);
+        let mut commands = Vec::new();
+        for (row, &name) in names.iter().enumerate() {
+            commands.push(RenderCommand::PushFont {
+                family: FontFamily::Named(name),
+            });
+            commands.push(RenderCommand::Text {
+                x: 4.0,
+                y: 4.0 + 24.0 * row as f32,
+                text: NAMED_SAMPLE.to_string(),
+                color: Color::rgba(0, 0, 0, 255),
+                font_size: 18.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            commands.push(RenderCommand::PopFont);
+        }
+        comp.submit_render(id, commands).expect("render");
+        let loaded = |comp: &Compositor| {
+            names
+                .iter()
+                .filter(|&&name| {
+                    comp.render_engine
+                        .fonts
+                        .has_face(Family::Named(name), Weight::Regular)
+                })
+                .count()
+        };
+
+        assert!(comp.compose_frame());
+        assert_eq!(loaded(&comp), budget, "the first frame loads its budget");
+        assert!(comp.frame_owed(), "and owes a frame for the rest");
+        assert!(comp.compose_frame());
+        assert_eq!(loaded(&comp), budget + 2, "the next frame loads the rest");
+        assert!(!comp.frame_owed(), "every run is in its own face now");
     }
 
     #[test]
@@ -24087,6 +25439,196 @@ mod tests {
         assert_eq!(of(notes_id), "editor");
         assert_eq!(of(draft_id), "editor");
         assert_eq!(of(other_id), "explorer");
+    }
+
+    // ---- Live pictures of windows ----
+
+    /// A window `width` by `height` at `at` whose client area is `color` all
+    /// over, drawn by commands.
+    fn filled_window(
+        comp: &mut Compositor,
+        (width, height): (u32, u32),
+        at: (i32, i32),
+        color: Color,
+    ) -> WindowId {
+        let mut spec = WindowSpec::new("Filled", width, height);
+        spec.position = Some(at);
+        let id = comp.create_window_from_spec(&spec, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(0.0, 0.0, width as f32, height as f32, color);
+        comp.submit_render(id, tree.commands).expect("render");
+        id
+    }
+
+    /// A 200 by 200 window picturing `pictured` in a 100 by 100 rectangle at
+    /// its client area's corner.
+    fn viewer_of(comp: &mut Compositor, pictured: WindowId) -> WindowId {
+        let mut spec = WindowSpec::new("Viewer", 200, 200);
+        spec.position = Some((20, 40));
+        let id = comp.create_window_from_spec(&spec, 2);
+        comp.submit_render(
+            id,
+            vec![RenderCommand::WindowPicture {
+                window: pictured.raw(),
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }],
+        )
+        .expect("render");
+        id
+    }
+
+    /// The colour, without alpha, at `(x, y)` of `viewer`'s client area,
+    /// with the viewer drawn alone.
+    fn viewer_rgb(comp: &mut Compositor, viewer: WindowId, x: i32, y: i32) -> u32 {
+        comp.refresh_window_scales();
+        comp.backend.clear(0xFF00_0000);
+        comp.render_window(viewer);
+        let client = comp.window_ref(viewer).expect("viewer").client_rect();
+        let (x, y) = (
+            u32::try_from(client.x + x).expect("x"),
+            u32::try_from(client.y + y).expect("y"),
+        );
+        working_pixel(&comp.backend, x, y).expect("pixel") & 0x00FF_FFFF
+    }
+
+    const RED: u32 = 0xFF_0000;
+    const BLUE: u32 = 0x00_00FF;
+    const WHITE: u32 = 0xFF_FFFF;
+
+    /// A window is pictured as large as fits its rectangle with its
+    /// proportions kept, centred: 400 by 200 in 100 by 100 is 100 by 50,
+    /// rows 25 to 74. Around it, the viewer's own white.
+    #[test]
+    fn a_window_is_pictured_fitted_and_centred_in_its_rectangle() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), RED, "the middle");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 25), RED, "the top row");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 74), RED, "the bottom row");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 24), WHITE, "above it");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 75), WHITE, "below it");
+        assert_eq!(
+            viewer_rgb(&mut comp, viewer, 150, 50),
+            WHITE,
+            "beside the rectangle"
+        );
+    }
+
+    /// A picture is as live as its window: a change to the window redraws
+    /// the viewer with the change; minimised it pictures as nothing and back
+    /// it is there; closed it pictures as nothing, and no picture of it is
+    /// kept.
+    #[test]
+    fn a_picture_follows_its_window() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), RED);
+
+        let mut tree = RenderTree::new();
+        tree.fill_rect(0.0, 0.0, 400.0, 200.0, Color::rgba(0, 0, 255, 255));
+        comp.submit_render(pictured, tree.commands).expect("render");
+        assert!(
+            comp.window_ref(viewer).expect("viewer").dirty,
+            "the viewer was not told its picture changed"
+        );
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), BLUE);
+
+        comp.minimize_window(pictured).expect("minimise");
+        assert!(comp.window_ref(viewer).expect("viewer").dirty);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), WHITE);
+        comp.activate_window(pictured).expect("activate");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), BLUE);
+
+        comp.destroy_window(pictured).expect("close");
+        assert!(comp.window_ref(viewer).expect("viewer").dirty);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), WHITE);
+        assert!(comp.thumbnails.keys().all(|&(_, p, _, _)| p != pictured));
+    }
+
+    /// A picture is made again only when its window has changed: drawing
+    /// the viewer again draws the same picture, not a new one.
+    #[test]
+    fn a_picture_is_made_again_only_when_its_window_changes() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        let made = |comp: &Compositor| {
+            comp.thumbnails
+                .values()
+                .map(|t| (t.revision, t.image.pixels().as_ptr() as usize))
+                .collect::<Vec<_>>()
+        };
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        let first = made(&comp);
+        assert_eq!(first.len(), 1);
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        assert_eq!(made(&comp), first, "made again with nothing changed");
+        comp.submit_render(pictured, Vec::new()).expect("render");
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        assert_ne!(
+            made(&comp)[0].0,
+            first[0].0,
+            "not made again after a change"
+        );
+    }
+
+    /// A window that presents its own pixels -- a game, a video -- is
+    /// pictured from its buffer.
+    #[test]
+    fn a_window_presenting_its_own_pixels_is_pictured_from_them() {
+        let mut comp = ungated_compositor(800, 600);
+        let (pictured, _, _) = painted_window(
+            &mut comp,
+            Layer::Normal,
+            Rect::new(300, 300, 400, 200),
+            0xFF00_FF00,
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), 0x00_FF00);
+    }
+
+    /// A window picturing itself draws its own picture once, with the
+    /// picture inside it drawn as nothing -- not a picture of a picture, and
+    /// not a loop.
+    #[test]
+    fn a_window_picturing_itself_does_not_recurse() {
+        let mut comp = ungated_compositor(800, 600);
+        let mut spec = WindowSpec::new("Mirror", 200, 200);
+        spec.position = Some((20, 40));
+        let id = comp.create_window_from_spec(&spec, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(100.0, 0.0, 100.0, 200.0, Color::rgba(255, 0, 0, 255));
+        tree.commands.push(RenderCommand::WindowPicture {
+            window: id.raw(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        });
+        comp.submit_render(id, tree.commands).expect("render");
+        // Its own right half, red, pictured at half size in the corner.
+        assert_eq!(viewer_rgb(&mut comp, id, 75, 50), RED);
+        assert_eq!(viewer_rgb(&mut comp, id, 25, 50), WHITE);
     }
 
     #[test]

@@ -113,8 +113,15 @@
 //! maps and image sequences, accepted or refused by a port of libavif's own
 //! parser; the AV1 frames decoded by rav1d (dav1d in Rust) as libavif drives
 //! dav1d; and the YUV converted to pixels by ports of libavif's and libyuv's
-//! arithmetic, so that a picture comes out as Chrome and Pillow show it, to
-//! the last bit. For a sequence [`decode`] gives the first frame, and
+//! arithmetic, so that a picture comes out as Pillow shows it, to the last
+//! bit -- and as Chrome shows it to within a level or two in everyday
+//! colours, up to 15 in saturated blues and yellows (Chrome converts on the
+//! GPU in floating point, libyuv in integers with a capped blue weight:
+//! `known-issues/F-ordinary-video-is-libyuv-s-arithmetic-not-chrome-s.md`).
+//! A picture whose colour Chrome converts -- HDR, or SDR in other primaries
+//! or another curve than sRGB's -- is converted as Chrome converts it,
+//! within a level of Chrome's pixels (design-decisions §1378, §1381). For a
+//! sequence [`decode`] gives the first frame, and
 //! `avif::Animation` plays every frame in turn -- in order, or from the
 //! nearest key frame to any one asked for -- as libavif decodes them. Built
 //! without the default `avif` feature, the container is still read and

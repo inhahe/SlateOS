@@ -1,9 +1,10 @@
 //! The only part of local input that cannot be tested off the target.
 //!
-//! Four system calls — `open`, `read`, `ioctl`, `close` — and the rule for
-//! turning a kernel return value into an error. Everything else about reading a
-//! keyboard and a mouse is protocol and policy, lives in [`super`], and is
-//! exercised on the build machine against a fake device.
+//! Four calls — `open`, `read`, `ioctl`, `close`, the C library's
+//! (`crate::present::libc`) — and the rule for turning their failures into
+//! an error. Everything else about reading a keyboard and a mouse is protocol
+//! and policy, lives in [`super`], and is exercised on the build machine
+//! against a fake device.
 //!
 //! This mirrors [`drm::sys`](crate::present::drm::sys) deliberately, down to
 //! the shape of the traits, because it is the same problem: a display server
@@ -195,90 +196,34 @@ pub const MAX_DEVICES: u32 = 32;
 #[cfg(target_os = "linux")]
 pub use target::{Device, Devices};
 
-/// The real thing: a `/dev/input/eventN` file descriptor and raw system calls.
+/// The real thing: a `/dev/input/eventN` file descriptor and the C library's
+/// calls on it (`crate::present::libc`).
 ///
 /// Gated on `target_os = "linux"` rather than on a SlateOS-specific cfg because
 /// the SlateOS target *is* `target_os = "linux"` (see
-/// `toolchain/x86_64-slateos.json`), and because the ABI this speaks is the
-/// real one — a build of the compositor for a Linux host reads a Linux
-/// keyboard with this same code.
+/// `toolchain/x86_64-slateos.json`), and because the calls are the C
+/// library's, right in either: a build of the compositor for a Linux host
+/// reads a Linux keyboard with this same code.
 #[cfg(target_os = "linux")]
 mod target {
     use super::{Errno, EventSys};
-    use std::arch::asm;
-
-    /// `read`.
-    const SYS_READ: u64 = 0;
-    /// `open`.
-    const SYS_OPEN: u64 = 2;
-    /// `close`.
-    const SYS_CLOSE: u64 = 3;
-    /// `ioctl`.
-    const SYS_IOCTL: u64 = 16;
+    use crate::present::libc;
 
     /// `open` flags: read-only — this is an input device, there is nothing to
     /// write to it.
-    const O_RDONLY: u64 = 0;
+    const O_RDONLY: i32 = 0;
     /// Never block the compositing loop on an idle keyboard.
-    const O_NONBLOCK: u64 = 0o4000;
+    const O_NONBLOCK: i32 = 0o4000;
     /// Don't leak the keyboard into a child across `exec`. A compositor spawns
     /// applications; none of them should inherit a device that can read every
     /// keystroke on the machine, passwords included.
-    const O_CLOEXEC: u64 = 0o2_000_000;
+    const O_CLOEXEC: i32 = 0o2_000_000;
 
-    /// Issue a system call with six arguments.
-    ///
-    /// Returns the kernel's raw return value: negative values in `-4095..0`
-    /// are `-errno`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the arguments are valid for the syscall named by
-    /// `n` — in particular that any pointer argument points to memory of the
-    /// size the kernel will read or write.
-    #[inline]
-    unsafe fn syscall6(n: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
-        let ret: i64;
-        // SAFETY: the `syscall` instruction clobbers `rcx` and `r11`, both
-        // declared `lateout(_)` below, and returns its result in `rax`. The
-        // register assignment (rdi, rsi, rdx, r10, r8, r9) is the x86-64 Linux
-        // syscall ABI. Validity of the arguments themselves is this function's
-        // documented precondition.
-        unsafe {
-            asm!(
-                "syscall",
-                inlateout("rax") n as i64 => ret,
-                in("rdi") a1,
-                in("rsi") a2,
-                in("rdx") a3,
-                in("r10") a4,
-                in("r8") a5,
-                in("r9") a6,
-                lateout("rcx") _,
-                lateout("r11") _,
-            );
-        }
-        ret
-    }
-
-    /// Turn a raw syscall return into a `Result`.
-    ///
-    /// Linux signals failure by returning `-errno` in the range `-4095..0`;
-    /// everything else is a successful result.
-    fn decode(ret: i64) -> Result<i64, Errno> {
-        if (-4095..0).contains(&ret) {
-            // `ret` is in -4095..0, so the negation is in 1..=4095 and fits in
-            // an `i32`. `checked_neg` rather than `-` anyway: the one input
-            // that would make the unary minus overflow is `i64::MIN`, and the
-            // fact that the range check already excludes it is a fact about
-            // two lines that could drift apart.
-            Err(ret
-                .checked_neg()
-                .and_then(|v| Errno::try_from(v).ok())
-                .unwrap_or(super::ENODEV))
-        } else {
-            Ok(ret)
-        }
+    /// The `errno` of the call that just failed; `ENODEV` if none can be
+    /// read, because a device that fails for an unknown reason is a device
+    /// this compositor cannot read.
+    fn errno() -> Errno {
+        libc::last_errno(super::ENODEV)
     }
 
     /// An open input device.
@@ -303,24 +248,25 @@ mod target {
         /// The kernel's `errno` — `ENOENT` when there is no such device node,
         /// `EACCES` when the compositor holds no input capability.
         pub fn open(path: &[u8]) -> Result<Self, Errno> {
-            // SAFETY: `path.as_ptr()` is valid for `path.len()` bytes and the
-            // caller's contract is that it is NUL-terminated within them, so
-            // the kernel's read stops inside the slice. `open` writes nothing.
-            let ret = unsafe {
-                syscall6(
-                    SYS_OPEN,
-                    path.as_ptr() as u64,
+            // A path with no NUL inside it would be read past its end.
+            if !path.contains(&0) {
+                return Err(super::ENOENT);
+            }
+            // SAFETY: `path.as_ptr()` is valid for `path.len()` bytes and holds
+            // a NUL within them (checked above), so the read stops inside the
+            // slice. `open` writes nothing; the mode is read only with
+            // `O_CREAT`, which is not passed.
+            let fd = unsafe {
+                libc::open(
+                    path.as_ptr().cast(),
                     O_RDONLY | O_NONBLOCK | O_CLOEXEC,
-                    0,
-                    0,
-                    0,
-                    0,
+                    libc::NO_MODE,
                 )
             };
-            let fd = decode(ret)?;
-            Ok(Self {
-                fd: i32::try_from(fd).unwrap_or(-1),
-            })
+            if fd < 0 {
+                return Err(errno());
+            }
+            Ok(Self { fd })
         }
     }
 
@@ -330,7 +276,7 @@ mod target {
                 // SAFETY: `close` takes an integer and touches no memory. The
                 // fd came from a successful `open` and is closed exactly once,
                 // because `Device` is not `Clone` and this runs at most once.
-                let _ = unsafe { syscall6(SYS_CLOSE, self.fd as u64, 0, 0, 0, 0, 0) };
+                let _ = unsafe { libc::close(self.fd) };
             }
         }
     }
@@ -338,21 +284,13 @@ mod target {
     impl EventSys for Device {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             // SAFETY: `buf` is a live, exclusively borrowed slice for the
-            // duration of the call, and the kernel is told exactly how many
+            // duration of the call, and the C library is told exactly how many
             // bytes of it it may write.
-            let ret = unsafe {
-                syscall6(
-                    SYS_READ,
-                    self.fd as u64,
-                    buf.as_mut_ptr() as u64,
-                    buf.len() as u64,
-                    0,
-                    0,
-                    0,
-                )
-            };
-            let n = decode(ret)?;
-            if n <= 0 {
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                return Err(errno());
+            }
+            if n == 0 {
                 // An input device has no end of file. A zero here is the
                 // kernel misbehaving, and reading it as "the device is
                 // finished" would silently stop the keyboard working.
@@ -366,18 +304,12 @@ mod target {
             // length the kernel will write is encoded in `request` itself by
             // `uapi::ioc` — the callers in `super` build the request from the
             // very slice they pass, so the two cannot disagree.
-            let ret = unsafe {
-                syscall6(
-                    SYS_IOCTL,
-                    self.fd as u64,
-                    u64::from(request),
-                    buf.as_mut_ptr() as u64,
-                    0,
-                    0,
-                    0,
-                )
+            let n = unsafe {
+                libc::ioctl(self.fd, core::ffi::c_ulong::from(request), buf.as_mut_ptr())
             };
-            let n = decode(ret)?;
+            if n < 0 {
+                return Err(errno());
+            }
             Ok(usize::try_from(n).unwrap_or(0).min(buf.len()))
         }
 

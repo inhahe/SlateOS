@@ -116,3 +116,40 @@ obtain any capability it asks for -- and have it remembered for eight hours --
 by asking while the user types.
 
 -- lane E
+
+## Reply, lane F -- 2026-10-10: (2), (3) and the general case built; (1) waits on one change of lane C's
+
+On `lane-f`, reaching `main` with lane F's next publish.
+
+**(1) A window that opens without the keyboard -- waiting.** It is a field
+of the window's terms, and the shell builds its terms as a struct literal
+that names every field, so any field lane F adds stops the shell compiling.
+`requests/f-c-build-the-shells-window-terms-from-spec-new.md` asks lane C for
+the one-line change that lets a field be added; the field follows the day it
+is on `main`. Until then the prompt would take the keyboard as it opens.
+
+**(2) Moving the keyboard in, and back -- built.** In: the shell's chord
+asks for its prompt with `ShellControlAction::Activate`, which focuses and
+raises a window (the shell's own included); a click does the same. Back:
+the new `ShellControlAction::ReturnKeyboard` gives the keyboard to the
+window that had it before and leaves the prompt on screen -- Escape inside
+it; and the prompt closing does the same by design-decisions 1384. Never
+back into the prompt itself, even when it is the only window on screen
+(`a_prompt_alone_gives_the_keyboard_to_nobody`).
+
+**(3) Nothing else may move the keyboard into the prompt -- holds.** A
+program can name only its own windows in any request that moves the
+keyboard, and `ShellControl` takes the shell's check.
+
+**The general case -- built** (design-decisions 1386). A program takes the
+keyboard by itself only when the user is already in it, or when the user's
+own action asked for it: a launcher hands the program it starts a one-time
+activation token, standing for the user's click, which the program presents
+with its first window. Until today a program could take the keys whenever it
+liked by restoring a window it already had; it no longer can -- a minimised
+window stays minimised and asks for attention. A program the user started
+and then left (they went on typing elsewhere) opens behind. New windows
+presented with no token at all still take the keyboard, as GNOME's and KDE's
+do by default, because a program started from a terminal cannot be handed a
+token; whether to refuse them is put to the operator as F-Q12.
+

@@ -35,7 +35,7 @@
 //! is also why the compositor is not constructed until `run` has found a
 //! display: until then nobody knows how big it should be.
 
-use compositor::{Compositor, Server, ShellGate};
+use compositor::{Compositor, NewWindows, Server, ShellGate};
 use guiremote::socket::Listener;
 
 /// The default size of a window a person is expected to look at.
@@ -88,6 +88,10 @@ struct Options {
     /// the key, the gate would refuse the shell itself. The session that
     /// grants the key passes this in the same place, so the two cannot drift.
     require_shell_key: bool,
+    /// Whether a new window with no activation token may take the keyboard
+    /// from another program's (design-decisions 1386; F-Q12). A flag, so the
+    /// strict rule can be tried before it is anybody's default.
+    new_windows: NewWindows,
     /// Whether to print usage and stop.
     help: bool,
 }
@@ -95,7 +99,7 @@ struct Options {
 /// What to print for `--help`, and on a usage error.
 const USAGE: &str = "\
 usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
-                  [--require-shell-key]
+                  [--require-shell-key] [--focus-new-windows smart|strict]
 
   ADDRESS       host:port to listen on, or service:NAME to listen only as the
                 SlateOS service NAME. Defaults to $SLATE_DISPLAY, then to the
@@ -113,7 +117,24 @@ usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
                 shell's requests (every window's title, other programs'
                 windows, panels, workspaces). For a session that starts its
                 shell holding the key; without it, any client may.
+  --focus-new-windows smart|strict
+                whether a program's new window takes the keyboard from
+                another program's when the program cannot show that the user
+                started it (an activation token). smart, the default, lets it,
+                as GNOME and KDE do; strict opens it behind, asking for
+                attention.
   --            stop reading options; the next argument is the address.";
+
+/// Parse a `--focus-new-windows` value: GNOME's names for the two policies.
+fn parse_new_windows(text: &str) -> Result<NewWindows, String> {
+    match text {
+        "smart" => Ok(NewWindows::Smart),
+        "strict" => Ok(NewWindows::Strict),
+        other => Err(format!(
+            "`{other}` is not a focus policy; expected `smart` or `strict`"
+        )),
+    }
+}
 
 /// Parse a `WxH` size.
 ///
@@ -222,6 +243,16 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String
             "-h" | "--help" => out.help = true,
             "--headless" => out.headless = true,
             "--require-shell-key" => out.require_shell_key = true,
+            "--focus-new-windows" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--focus-new-windows needs `smart` or `strict`".to_owned())?;
+                out.new_windows = parse_new_windows(&value)?;
+            }
+            other if other.starts_with("--focus-new-windows=") => {
+                out.new_windows =
+                    parse_new_windows(other.trim_start_matches("--focus-new-windows="))?;
+            }
             "--size" => {
                 let value = args
                     .next()
@@ -345,7 +376,7 @@ fn report_listening(listener: &Listener) {
 /// Separated from `run` because every platform needs it and none of them needs
 /// it *first*: the size is not known until the display is, which on a real
 /// screen means after the card has been opened and its mode read.
-fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
+fn make_compositor(width: u32, height: u32, refresh_hz: u32, options: &Options) -> Compositor {
     let mut compositor = match Compositor::new(width, height, refresh_hz) {
         Ok(c) => c,
         Err(e) => {
@@ -353,6 +384,7 @@ fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
             std::process::exit(1);
         }
     };
+    compositor.set_new_window_policy(options.new_windows);
     // The user's window-corner and drop-shadow choices. Read here rather than
     // in `Compositor::new` so that the library's *constructor* has no opinion
     // about `$HOME` and its tests do not depend on the machine running them.
@@ -372,7 +404,7 @@ fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
 /// Serve with no display, at whatever size was asked for.
 fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
     let (width, height) = options.size.unwrap_or(HEADLESS_SIZE);
-    let mut compositor = make_compositor(width, height, REFRESH_HZ);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ, options);
     server.run(&mut compositor)
 }
 
@@ -427,8 +459,12 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
             // then attaching would grow it a second time.
             let first = heads.first();
             let (first_w, first_h) = first.map_or((width, height), |h| (h.width, h.height));
-            let mut compositor =
-                make_compositor(first_w, first_h, first.map_or(REFRESH_HZ, |h| h.refresh_hz));
+            let mut compositor = make_compositor(
+                first_w,
+                first_h,
+                first.map_or(REFRESH_HZ, |h| h.refresh_hz),
+                options,
+            );
             // The compositor invented the id 0 for the screen it was built at,
             // before anything had told it which screen that was. Every monitor
             // on the desktop has to be named by its connector, because that is
@@ -545,7 +581,7 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
         return run_headless(server, options);
     }
     let (width, height) = options.size.unwrap_or(WINDOWED_SIZE);
-    let mut compositor = make_compositor(width, height, REFRESH_HZ);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ, options);
     match compositor::present::host::Window::new("SlateOS", width, height) {
         Ok(mut window) => {
             eprintln!("compositor: showing the desktop in a host window; close it to stop");
@@ -583,7 +619,7 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{Options, card_from_value, parse_args, parse_card, parse_size};
+    use super::{NewWindows, Options, card_from_value, parse_args, parse_card, parse_size};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         parse_args(args.iter().map(|s| (*s).to_owned()))
@@ -662,6 +698,26 @@ mod tests {
         let parsed = parse(&["--require-shell-key", "127.0.0.1:7374"]).unwrap();
         assert!(parsed.require_shell_key);
         assert_eq!(parsed.addr.as_deref(), Some("127.0.0.1:7374"));
+    }
+
+    /// GNOME's names for the two policies, either spelling of the option; the
+    /// default is smart, and a policy it does not know is an error naming it.
+    #[test]
+    fn the_focus_policy_is_smart_unless_asked_for_strict() {
+        assert_eq!(parse(&[]).unwrap().new_windows, NewWindows::Smart);
+        assert_eq!(
+            parse(&["--focus-new-windows", "strict"])
+                .unwrap()
+                .new_windows,
+            NewWindows::Strict
+        );
+        assert_eq!(
+            parse(&["--focus-new-windows=smart"]).unwrap().new_windows,
+            NewWindows::Smart
+        );
+        let err = parse(&["--focus-new-windows", "lax"]).unwrap_err();
+        assert!(err.contains("`lax`"), "{err}");
+        assert!(parse(&["--focus-new-windows"]).is_err());
     }
 
     #[test]

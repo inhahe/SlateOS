@@ -58,6 +58,7 @@
 
 use guitk::event::{Key, Modifiers, SettingsName};
 
+use crate::activation::ActivationToken;
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
@@ -141,7 +142,19 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// [`ResponseBody::Picked`] (response tag `0x08`); and
 /// [`RequestBody::CancelPick`] (tag `0x32`). Incompatible on 2's terms in
 /// both directions.
-pub const CONTROL_VERSION: u8 = 24;
+/// **25** — [`RequestBody::SetTrayIcon`] gained the program's name and a
+/// theme icon's name, written after the tooltip
+/// ([`TraySpec`](crate::tray::TraySpec)). Moves bytes on 3's terms: a
+/// version-24 decoder would read the app id's length as the next message's
+/// `seq`.
+/// **26** — activation (design-decisions 1386):
+/// [`RequestBody::GetActivationToken`] (tag `0x33`) and its answer
+/// [`ResponseBody::ActivationToken`] (response tag `0x09`),
+/// [`RequestBody::UseActivationToken`] (tag `0x34`) and
+/// [`RequestBody::Activate`] (tag `0x35`); and
+/// [`ShellControlAction::ReturnKeyboard`] (action byte 30). Incompatible on
+/// 2's terms in both directions.
+pub const CONTROL_VERSION: u8 = 26;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -616,6 +629,12 @@ pub enum ShellControlAction {
     /// compositor rearranging everybody else's. A shell acting on another
     /// client's window has to go through this enum.
     Fullscreen,
+    /// Give the keyboard back, if this window holds it, to the window that
+    /// held it before (design-decisions 1384) -- leaving this one where it
+    /// is. What Escape inside a prompt the user moved into does: the prompt
+    /// stays up, unanswered, and the user's keys go back to what they were
+    /// typing in (§1242). Nothing if the window does not hold the keyboard.
+    ReturnKeyboard,
 }
 
 impl ShellControlAction {
@@ -633,6 +652,11 @@ impl ShellControlAction {
     /// not collide.
     const FULLSCREEN_BYTE: u8 = Self::ZONE_BYTE_BASE + SnapSlot::COUNT;
 
+    /// The wire byte for [`ReturnKeyboard`](Self::ReturnKeyboard), appended
+    /// after [`FULLSCREEN_BYTE`](Self::FULLSCREEN_BYTE) for the reason that
+    /// one was.
+    const RETURN_KEYBOARD_BYTE: u8 = Self::FULLSCREEN_BYTE + 1;
+
     /// Every action that names no zone.
     ///
     /// Exists so that the codec tests iterate the actions rather than a
@@ -647,7 +671,7 @@ impl ShellControlAction {
     /// [`SnapSlot::all`] is their list, and listing them again here would be
     /// the stale hand-written list this array exists to avoid. The tests below
     /// iterate both together.
-    pub const ZONELESS: [Self; 8] = [
+    pub const ZONELESS: [Self; 9] = [
         Self::Activate,
         Self::Minimize,
         Self::Restore,
@@ -656,6 +680,7 @@ impl ShellControlAction {
         Self::SnapLeft,
         Self::SnapRight,
         Self::Fullscreen,
+        Self::ReturnKeyboard,
     ];
 
     /// The wire byte for this action.
@@ -683,6 +708,7 @@ impl ShellControlAction {
             // older peer answers `None` to it, which is exactly what it should
             // do with a verb it does not know.
             Self::Fullscreen => Self::FULLSCREEN_BYTE,
+            Self::ReturnKeyboard => Self::RETURN_KEYBOARD_BYTE,
         }
     }
 
@@ -706,6 +732,7 @@ impl ShellControlAction {
             5 => Some(Self::SnapLeft),
             6 => Some(Self::SnapRight),
             b if b == Self::FULLSCREEN_BYTE => Some(Self::Fullscreen),
+            b if b == Self::RETURN_KEYBOARD_BYTE => Some(Self::ReturnKeyboard),
             // Cannot underflow: the arms above cover everything below the base.
             _ => match SnapSlot::from_index(b.saturating_sub(Self::ZONE_BYTE_BASE)) {
                 Some(slot) => Some(Self::SnapToZone(slot)),
@@ -877,6 +904,13 @@ impl Request {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RequestBody {
     /// Create a window. Answered with [`ResponseBody::WindowCreated`].
+    ///
+    /// It takes the keyboard when nothing has it, when this connection's own
+    /// window has it, or when the activation token this connection presented
+    /// ([`UseActivationToken`](Self::UseActivationToken)) is still good. With
+    /// no token at all it takes the keyboard too, unless the compositor runs
+    /// the strict policy -- design-decisions 1386. Otherwise it opens behind
+    /// the window the user is in and asks for their attention.
     CreateWindow(WindowSpec),
     /// Destroy a window and release its id.
     DestroyWindow { window: u64 },
@@ -895,6 +929,14 @@ pub enum RequestBody {
     /// Maximise a window to fill the work area.
     Maximize { window: u64 },
     /// Return a window from minimised or maximised to its previous geometry.
+    ///
+    /// It takes the keyboard only when this connection's own window has it,
+    /// or with a good activation token presented first
+    /// ([`UseActivationToken`](Self::UseActivationToken)) -- never on the
+    /// program's say-so alone, which would let any program take the keys at a
+    /// moment of its choosing (design-decisions 1386). Otherwise a minimised
+    /// window stays minimised and asks for the user's attention; an
+    /// un-maximise still happens, since it changes nothing but the window.
     Restore { window: u64 },
     /// Show or hide a window without destroying it.
     SetVisible { window: u64, visible: bool },
@@ -1021,8 +1063,9 @@ pub enum RequestBody {
     /// tray on another program's behalf, and clicking it would deliver to a
     /// process that never asked.
     ///
-    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES) and
-    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) is cut, on a
+    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES),
+    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) and
+    /// [`MAX_APP_ID_BYTES`](crate::tray::MAX_APP_ID_BYTES) is cut, on a
     /// character boundary. A new id is refused with [`ResponseBody::Error`]
     /// once this client has
     /// [`MAX_TRAY_ICONS_PER_CLIENT`](crate::tray::MAX_TRAY_ICONS_PER_CLIENT)
@@ -1030,8 +1073,7 @@ pub enum RequestBody {
     /// replacing an icon the client has is never refused.
     SetTrayIcon {
         id: u32,
-        glyph: String,
-        tooltip: String,
+        icon: crate::tray::TraySpec,
     },
     /// Take this client's icon out of the tray.
     ///
@@ -1364,6 +1406,40 @@ pub enum RequestBody {
     /// Give up this connection's [`PickWindow`](Self::PickWindow): its answer
     /// is then `Picked(None)`. Answered `Ok` whether or not a pick was open.
     CancelPick,
+    /// Ask for an activation token: the compositor's word, for a program this
+    /// one is about to start, that the user asked for it
+    /// ([`activation`](crate::activation), design-decisions 1386). Answered
+    /// with [`ResponseBody::ActivationToken`], or an error when the compositor
+    /// has no random source to draw one from.
+    ///
+    /// Put it in the started program's environment as
+    /// [`ACTIVATION_TOKEN_ENV`](crate::activation::ACTIVATION_TOKEN_ENV). It
+    /// stands for the latest of the user's actions in this connection's
+    /// windows, and is good once, and only while the user has done nothing in
+    /// the window holding the keyboard since -- so ask as the user starts the
+    /// program, not in advance. Any connection may ask; one whose windows the
+    /// user has not touched is refused, having no action of theirs to vouch
+    /// for, and its launches carry no token.
+    GetActivationToken,
+    /// Present an activation token for this connection's next window, or its
+    /// next [`Restore`](Self::Restore), whichever comes first: that window
+    /// takes the keyboard if the token is still good. Answered with
+    /// [`ResponseBody::Ok`] whatever the token was, so presenting guesses
+    /// tells a program nothing about anyone's tokens.
+    ///
+    /// A program's toolkit sends it before the program's first window, with
+    /// the token its launcher left in
+    /// [`ACTIVATION_TOKEN_ENV`](crate::activation::ACTIVATION_TOKEN_ENV).
+    UseActivationToken { token: ActivationToken },
+    /// Bring one of the sender's own windows to the user on an activation
+    /// token: shown if minimised, its desktop switched to, raised and given
+    /// the keyboard -- what a program started a second time does with its
+    /// first copy's window, or a program asked by another to show something.
+    /// Answered with [`ResponseBody::Ok`] whatever the token was. A token that
+    /// is no longer good asks for the user's attention instead, as
+    /// [`RequestAttention`](Self::RequestAttention) does: the user decides
+    /// whether to look.
+    Activate { window: u64, token: ActivationToken },
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1639,6 +1715,9 @@ enum RequestTag {
     WakeDisplays = 0x30,
     PickWindow = 0x31,
     CancelPick = 0x32,
+    GetActivationToken = 0x33,
+    UseActivationToken = 0x34,
+    Activate = 0x35,
 }
 
 impl RequestTag {
@@ -1693,6 +1772,9 @@ impl RequestTag {
             0x30 => Self::WakeDisplays,
             0x31 => Self::PickWindow,
             0x32 => Self::CancelPick,
+            0x33 => Self::GetActivationToken,
+            0x34 => Self::UseActivationToken,
+            0x35 => Self::Activate,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1769,6 +1851,9 @@ pub enum ResponseBody {
     /// Answer to [`RequestBody::PickWindow`]: the window the user clicked, or
     /// `None` when they gave up or clicked where there is no window.
     Picked(Option<PickedWindow>),
+    /// Answer to [`RequestBody::GetActivationToken`]: sixteen bytes on the
+    /// wire.
+    ActivationToken(ActivationToken),
 }
 
 /// The window a user picked ([`RequestBody::PickWindow`]).
@@ -1798,6 +1883,7 @@ enum ResponseTag {
     Modifiers = 0x06,
     Clipboard = 0x07,
     Picked = 0x08,
+    ActivationToken = 0x09,
 }
 
 impl ResponseTag {
@@ -1811,6 +1897,7 @@ impl ResponseTag {
             0x06 => Self::Modifiers,
             0x07 => Self::Clipboard,
             0x08 => Self::Picked,
+            0x09 => Self::ActivationToken,
             _ => return None,
         })
     }
@@ -2017,11 +2104,13 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SubscribeWindowList as u8);
             out.push(u8::from(*subscribe));
         }
-        RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+        RequestBody::SetTrayIcon { id, icon } => {
             out.push(RequestTag::SetTrayIcon as u8);
             write_u32(out, *id);
-            write_string(out, glyph);
-            write_string(out, tooltip);
+            write_string(out, &icon.glyph);
+            write_string(out, &icon.tooltip);
+            write_string(out, &icon.app_id);
+            crate::tray::write_icon_name(out, icon.icon_name);
         }
         RequestBody::RemoveTrayIcon { id } => {
             out.push(RequestTag::RemoveTrayIcon as u8);
@@ -2064,6 +2153,16 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::WakeDisplays => out.push(RequestTag::WakeDisplays as u8),
         RequestBody::PickWindow => out.push(RequestTag::PickWindow as u8),
         RequestBody::CancelPick => out.push(RequestTag::CancelPick as u8),
+        RequestBody::GetActivationToken => out.push(RequestTag::GetActivationToken as u8),
+        RequestBody::UseActivationToken { token } => {
+            out.push(RequestTag::UseActivationToken as u8);
+            out.extend_from_slice(&token.to_bytes());
+        }
+        RequestBody::Activate { window, token } => {
+            out.push(RequestTag::Activate as u8);
+            write_u64(out, *window);
+            out.extend_from_slice(&token.to_bytes());
+        }
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2237,6 +2336,10 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
                 None => out.push(0),
             }
         }
+        ResponseBody::ActivationToken(token) => {
+            out.push(ResponseTag::ActivationToken as u8);
+            out.extend_from_slice(&token.to_bytes());
+        }
     }
 }
 
@@ -2379,8 +2482,12 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         },
         RequestTag::SetTrayIcon => RequestBody::SetTrayIcon {
             id: r.read_u32()?,
-            glyph: r.read_string()?,
-            tooltip: r.read_string()?,
+            icon: crate::tray::TraySpec {
+                glyph: r.read_string()?,
+                tooltip: r.read_string()?,
+                app_id: r.read_string()?,
+                icon_name: crate::tray::read_icon_name(r)?,
+            },
         },
         RequestTag::RemoveTrayIcon => RequestBody::RemoveTrayIcon { id: r.read_u32()? },
         RequestTag::SubscribeTrayIcons => RequestBody::SubscribeTrayIcons {
@@ -2528,6 +2635,14 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::WakeDisplays => RequestBody::WakeDisplays,
         RequestTag::PickWindow => RequestBody::PickWindow,
         RequestTag::CancelPick => RequestBody::CancelPick,
+        RequestTag::GetActivationToken => RequestBody::GetActivationToken,
+        RequestTag::UseActivationToken => RequestBody::UseActivationToken {
+            token: ActivationToken::from_bytes(r.take_array()?),
+        },
+        RequestTag::Activate => RequestBody::Activate {
+            window: r.read_u64()?,
+            token: ActivationToken::from_bytes(r.take_array()?),
+        },
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2710,6 +2825,9 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
         } else {
             None
         }),
+        ResponseTag::ActivationToken => {
+            ResponseBody::ActivationToken(ActivationToken::from_bytes(r.take_array()?))
+        }
     })
 }
 
@@ -2996,8 +3114,86 @@ mod tests {
             Request::new(35, RequestBody::WakeDisplays),
             Request::new(36, RequestBody::PickWindow),
             Request::new(37, RequestBody::CancelPick),
+            Request::new(38, RequestBody::GetActivationToken),
+            Request::new(
+                39,
+                RequestBody::UseActivationToken {
+                    token: ActivationToken::from_bytes([0xA5; 16]),
+                },
+            ),
+            Request::new(
+                40,
+                RequestBody::Activate {
+                    window: u64::MAX,
+                    token: ActivationToken::from_bytes(*b"sixteen bytes!!!"),
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// A token travels as its sixteen bytes, nothing else: the request that
+    /// carries one is a tag, the window if it names one, and the token.
+    #[test]
+    fn an_activation_token_is_its_sixteen_bytes_on_the_wire() {
+        let token = ActivationToken::from_bytes(*b"0123456789abcdef");
+        let mut out = Vec::new();
+        encode_request_body(&mut out, &RequestBody::UseActivationToken { token });
+        assert_eq!(out.first(), Some(&0x34));
+        assert_eq!(out.get(1..), Some(&b"0123456789abcdef"[..]));
+
+        out.clear();
+        encode_request_body(&mut out, &RequestBody::Activate { window: 7, token });
+        assert_eq!(out.len(), 1 + 8 + 16);
+
+        // One byte short of a token is an incomplete frame, not a token.
+        let reqs = [Request::new(1, RequestBody::UseActivationToken { token })];
+        let frame = encode_requests(&reqs);
+        assert!(
+            try_decode_requests(frame.get(..frame.len() - 1).unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A tray icon's request carries its whole spec -- the program's name and
+    /// the theme icon's name after the tooltip -- and a name off the wire is
+    /// held to the rule a program's is: one naming a path fails the frame.
+    #[test]
+    fn a_tray_icon_request_carries_its_whole_spec() {
+        use crate::tray::{IconName, TraySpec};
+        let reqs = vec![
+            Request::new(
+                1,
+                RequestBody::SetTrayIcon {
+                    id: 7,
+                    icon: TraySpec::new("B", "Battery: 12%")
+                        .with_app_id("powerd")
+                        .with_icon_name(IconName::new("battery-caution")),
+                },
+            ),
+            // Every field empty: a name of none is one byte, not a string.
+            Request::new(
+                2,
+                RequestBody::SetTrayIcon {
+                    id: u32::MAX,
+                    icon: TraySpec::new("", ""),
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+
+        let named = encode_requests(&reqs[..1]);
+        let at = named
+            .windows(15)
+            .position(|w| w == b"battery-caution")
+            .expect("the name is in the frame");
+        let mut bad = named.clone();
+        bad[at..at + 3].copy_from_slice(b"../");
+        assert_eq!(
+            decode_requests(&bad).map(|(r, _)| r),
+            Err(DecodeError::BadIconName)
+        );
     }
 
     /// The held-modifiers question carries nothing, and its answer is every
@@ -3311,8 +3507,23 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x33),
+            Some(RequestTag::GetActivationToken),
+            "0x33 was taken by GetActivationToken in control version 26"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x34),
+            Some(RequestTag::UseActivationToken),
+            "0x34 was taken by UseActivationToken in control version 26"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x35),
+            Some(RequestTag::Activate),
+            "0x35 was taken by Activate in control version 26"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x36),
             None,
-            "0x33 is the next free tag"
+            "0x36 is the next free tag"
         );
     }
 
@@ -3496,7 +3707,8 @@ mod tests {
                 | ShellControlAction::SnapLeft
                 | ShellControlAction::SnapRight
                 | ShellControlAction::SnapToZone(_)
-                | ShellControlAction::Fullscreen => {}
+                | ShellControlAction::Fullscreen
+                | ShellControlAction::ReturnKeyboard => {}
             }
         }
 
@@ -3718,17 +3930,26 @@ mod tests {
                 })),
             ),
             Response::new(12, ResponseBody::Picked(None)),
+            Response::new(
+                13,
+                ResponseBody::ActivationToken(ActivationToken::from_bytes([0x5A; 16])),
+            ),
         ];
         assert_eq!(round_trip_responses(&resps), resps);
     }
 
     #[test]
-    fn a_response_tag_past_picked_is_refused() {
+    fn a_response_tag_past_activation_token_is_refused() {
         assert_eq!(ResponseTag::from_byte(0x08), Some(ResponseTag::Picked));
         assert_eq!(
             ResponseTag::from_byte(0x09),
+            Some(ResponseTag::ActivationToken),
+            "0x09 was taken by ActivationToken in control version 26"
+        );
+        assert_eq!(
+            ResponseTag::from_byte(0x0A),
             None,
-            "0x09 is the next free tag"
+            "0x0A is the next free tag"
         );
     }
 

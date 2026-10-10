@@ -55,6 +55,7 @@ use crate::control::{
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
+use crate::tray::TraySpec;
 use crate::window_list::{WindowInfo, WindowList};
 
 /// A duplex byte pipe to the compositor.
@@ -555,20 +556,16 @@ impl<T: Transport> Connection<T> {
     /// adding a second icon, which is what makes a changing battery level one
     /// icon instead of a growing row of them.
     ///
+    /// `icon` is sent as it is. An empty [`app_id`](TraySpec::app_id) stays
+    /// empty here; `oswindow`'s loop fills in the program's declared name.
+    ///
     /// # Errors
     ///
-    /// As [`confirm`](Self::confirm).
-    pub fn set_tray_icon(
-        &mut self,
-        id: u32,
-        glyph: &str,
-        tooltip: &str,
-    ) -> Result<(), ClientError<T::Error>> {
-        self.confirm(RequestBody::SetTrayIcon {
-            id,
-            glyph: glyph.to_string(),
-            tooltip: tooltip.to_string(),
-        })
+    /// As [`confirm`](Self::confirm): [`ClientError::Refused`] when this
+    /// program has its share of the tray, or the tray is full (see
+    /// [`RequestBody::SetTrayIcon`]).
+    pub fn set_tray_icon(&mut self, id: u32, icon: TraySpec) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SetTrayIcon { id, icon })
     }
 
     /// Take this program's icon out of the tray.
@@ -887,6 +884,35 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Ask the compositor for an activation token, to hand a program this one
+    /// is about to start in its environment
+    /// ([`ACTIVATION_TOKEN_ENV`](crate::activation::ACTIVATION_TOKEN_ENV),
+    /// design-decisions 1386). Ask as the user starts the program: the token
+    /// stands for the user's latest action in this connection's windows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] when the
+    /// compositor cannot draw one -- it has no random source -- and
+    /// [`ClientError::Mismatched`] if it answered with something other than a
+    /// token.
+    pub fn activation_token(
+        &mut self,
+    ) -> Result<crate::activation::ActivationToken, ClientError<T::Error>> {
+        match self.round_trip(RequestBody::GetActivationToken)? {
+            ResponseBody::ActivationToken(token) => Ok(token),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
@@ -926,7 +952,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Display(_)
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -949,7 +976,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 

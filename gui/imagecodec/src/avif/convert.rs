@@ -8,12 +8,23 @@
 //! alpha -- is `gui/video/yuv`'s [`yuv::reformat`], which frames of video
 //! go through too, so that the two agree. This hands it the picture as
 //! libavif's `avifImage` would describe it.
+//!
+//! An HDR picture -- PQ or HLG by its code points -- is shown as Chrome
+//! shows it on an sRGB screen instead (design-decisions §1378):
+//! `yuv::hdr`, by the `clli` box's MaxCLL, the one HDR metadata Chrome's AVIF
+//! decoder takes. Which pictures those are is Chrome's call too
+//! (`AVIFImageDecoder`'s `GetColorSpace`): unspecified code points are
+//! MIAF's defaults (BT.709 primaries, the sRGB curve, BT.601's matrix); code
+//! points Chrome has no name for make it fall back to an ordinary BT.709
+//! picture; and an ICC profile, when there is one, is the picture's colour
+//! instead of its code points -- so none of those is HDR.
 
 use alloc::vec::Vec;
 
 use super::Error;
 use super::decode::{Decoded, Plane, Yuv};
 use super::setup::YuvFormat;
+use yuv::hdr::{self, Light, Signal, ToneMap, Transfer};
 use yuv::reformat::{self, Format, Picture, Reformat};
 
 /// Why a picture cannot be converted: `AVIF_RESULT_REFORMAT_FAILED`.
@@ -64,11 +75,56 @@ fn convert<T: Reformat>(image: &Yuv<T>) -> Result<Vec<u32>, Error> {
         alpha: image.alpha.as_ref().map(Plane::view),
         alpha_premultiplied: image.alpha_premultiplied,
     };
-    reformat::to_argb(&picture).map_err(|e| match e {
+    let converted = match hdr_of(image) {
+        None => reformat::to_argb(&picture),
+        Some((transfer, primaries)) => {
+            // The curves' tables, a millisecond or two: made for each
+            // picture, as this crate keeps nothing between pictures.
+            let signal = Signal::new(transfer);
+            let light = Light {
+                max_cll: image.light.map_or(0.0, |(max_cll, _)| f32::from(max_cll)),
+                mastering_peak: 0.0,
+            };
+            hdr::to_argb(&picture, &ToneMap::new(&signal, primaries, light))
+        }
+    };
+    converted.map_err(|e| match e {
         reformat::Error::Unsupported => UNSUPPORTED,
         reformat::Error::Size if width == 0 || height == 0 => NO_LUMA,
         reformat::Error::Size => BAD_SIZE,
     })
+}
+
+/// Whether Chrome shows `image` as HDR, and if so its transfer and the
+/// primaries it takes it to have: `AVIFImageDecoder`'s `GetColorSpace` and
+/// `media::VideoColorSpace`'s validity, for a picture whose colour is its
+/// code points (not an ICC profile). Unspecified primaries are BT.709, an
+/// unspecified transfer the sRGB curve and an unspecified matrix BT.601 (as
+/// grey's always is); a code Chrome has no name for (`GetPrimaryID`,
+/// `GetTransferID`, `GetMatrixID`) leaves the colour unspecified, which
+/// Chrome shows as ordinary BT.709.
+fn hdr_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
+    const UNSPECIFIED: u16 = 2;
+    if image.icc {
+        return None;
+    }
+    let primaries = if image.primaries == UNSPECIFIED {
+        1
+    } else {
+        image.primaries
+    };
+    let matrix = if image.format == YuvFormat::Yuv400 || image.matrix == UNSPECIFIED {
+        6
+    } else {
+        image.matrix
+    };
+    let primaries_named = matches!(primaries, 1 | 4..=12 | 22);
+    let matrix_named = matches!(matrix, 0..=2 | 4..=9 | 11);
+    if !primaries_named || !matrix_named {
+        return None;
+    }
+    // An unspecified transfer is the sRGB curve: not HDR.
+    Transfer::from_h273(image.transfer).map(|transfer| (transfer, primaries))
 }
 
 #[cfg(test)]
@@ -102,6 +158,8 @@ mod tests {
             primaries: 1,
             transfer: 13,
             matrix,
+            icc: false,
+            light: None,
             planes: [Some(plane(3, 3)), chroma.clone(), chroma],
             alpha: None,
             alpha_premultiplied: false,

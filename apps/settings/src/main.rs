@@ -11,6 +11,7 @@ mod lockscreen;
 mod recyclebins;
 mod remote;
 mod snapshots;
+mod thumbs;
 
 use appearance::Palette;
 use appearance::{
@@ -790,6 +791,19 @@ pub struct SettingsState {
     /// environment names them -- or none in a test, which must not read the
     /// machine's.
     cursor_icon_dirs: Vec<PathBuf>,
+    /// The Background page's source just chosen and not set up yet -- a
+    /// folder not yet picked: shown in its place until it is set up or
+    /// another is chosen (design-decisions §1243). `None` shows the source
+    /// the desktop shows.
+    wallpaper_source_pending: Option<WallpaperSource>,
+    /// The themes the Background page offers by their pictures, read on
+    /// entering the page: each recommended picture for the mode the desktop
+    /// is in.
+    wallpaper_theme_cards: Vec<PictureCard>,
+    /// The pictures installed themes bundle, offered as pictures to choose.
+    bundled_picture_cards: Vec<PictureCard>,
+    /// Those pictures drawn small, decoded on a thread of their own.
+    thumbs: thumbs::Thumbs,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -935,6 +949,9 @@ pub enum DropdownId {
     /// installed XCursor theme -- a GNOME or KDE one included -- or the
     /// built-in pointer (`cursor_theme`, design-decisions §1459).
     CursorTheme,
+    /// Where the desktop's background comes from: a picture, a theme's, by
+    /// time of day, a folder, or none (design-decisions §1243).
+    WallpaperSource,
     /// The shapes of the controls -- a theme's `widget-style`, chosen apart
     /// from its colours (`widget_theme`, design-decisions §1435).
     WidgetTheme,
@@ -1018,7 +1035,8 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 31] = [
+    pub const FIXED: [Self; 32] = [
+        Self::WallpaperSource,
         Self::QuietStart,
         Self::QuietEnd,
         Self::NotifHistory,
@@ -1219,6 +1237,80 @@ impl SettingsState {
             .chain(self.cursor_icon_dirs.iter().cloned())
             .collect();
         self.cursor_themes = appearance::cursors::available_in(&roots);
+    }
+
+    /// The Background page's offers, read on entering it: each theme that
+    /// recommends a picture, by its picture for the mode the desktop is in
+    /// now, and every picture installed themes bundle -- each asked for small
+    /// at once, so it is decoding while the page is read.
+    fn refresh_picture_cards(&mut self) {
+        let light = self.appearance.settings.is_light();
+        let mut themes = Vec::new();
+        let mut bundled = Vec::new();
+        for info in &self.themes {
+            if info.provides_wallpapers() {
+                let picture =
+                    appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &info.id)
+                        .picture(light)
+                        .map(std::path::Path::to_path_buf);
+                themes.push(PictureCard {
+                    theme: Some(info.id.clone()),
+                    name: info.name.clone(),
+                    picture,
+                });
+            }
+            for picture in &info.wallpapers {
+                let file = picture.file_name().map_or_else(
+                    || picture.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                bundled.push(PictureCard {
+                    theme: None,
+                    name: format!("{file} ({})", info.name),
+                    picture: Some(picture.clone()),
+                });
+            }
+        }
+        for card in themes.iter().chain(&bundled) {
+            if let Some(picture) = &card.picture {
+                self.thumbs.ask(picture);
+            }
+        }
+        self.wallpaper_theme_cards = themes;
+        self.bundled_picture_cards = bundled;
+    }
+
+    /// The source the Background page shows: the one just chosen, while it
+    /// is not set up and nothing above it has been set since; else the one
+    /// the desktop shows.
+    fn wallpaper_source(&self) -> WallpaperSource {
+        let shown = WallpaperSource::shown(&self.appearance.settings);
+        match self.wallpaper_source_pending {
+            Some(pending) if pending.rank() > shown.rank() => pending,
+            _ => shown,
+        }
+    }
+
+    /// Choose where the background comes from (design-decisions §1243): the
+    /// sources the desktop would show over it are cleared, so that it is the
+    /// one shown; those below it are kept, unseen, as what shows if it is
+    /// cleared. Chosen and not set up yet -- no folder picked -- it is
+    /// remembered as chosen until it is.
+    fn choose_wallpaper_source(&mut self, source: WallpaperSource) {
+        let s = &mut self.appearance.settings;
+        if source.rank() < WallpaperSource::TimeOfDay.rank() {
+            s.wallpaper_schedule.clear();
+        }
+        if source.rank() < WallpaperSource::Folder.rank() {
+            s.wallpaper_folder = None;
+        }
+        if source.rank() < WallpaperSource::Theme.rank() {
+            s.wallpaper_theme = appearance::themes::WallpaperTheme::built_in();
+        }
+        if source.rank() < WallpaperSource::Picture.rank() {
+            s.wallpaper = None;
+        }
+        self.wallpaper_source_pending = Some(source);
     }
 
     /// The chosen cursor theme's name as shown: its listed name, or its
@@ -1473,6 +1565,15 @@ impl SettingsState {
         }
         if page == SettingsPage::Themes {
             self.refresh_themes();
+        }
+        // The themes with pictures, and theirs, read on entry as the themes
+        // page reads them.
+        if page == SettingsPage::Wallpaper {
+            self.refresh_themes();
+            self.refresh_picture_cards();
+            // A source chosen on an earlier visit and never set up is not what
+            // the desktop shows; the page opens on what it does.
+            self.wallpaper_source_pending = None;
         }
         // The notices, read on entry: a list is cheap, and the page shows
         // what is installed now.
@@ -2046,6 +2147,11 @@ impl SettingsState {
             // The environment's names, not a read of the folders: that is
             // `refresh_themes`'s, on entering the page.
             cursor_icon_dirs: appearance::cursors::icon_dirs(),
+            wallpaper_source_pending: None,
+            wallpaper_theme_cards: Vec::new(),
+            bundled_picture_cards: Vec::new(),
+            // No thread yet: one starts when the first picture is asked for.
+            thumbs: thumbs::Thumbs::new(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -3010,6 +3116,11 @@ enum SelectId {
     AccountPicture,
     /// One saved exclusion pattern, by position. Selecting it removes it.
     ExclusionPattern,
+    /// A theme offered by its picture on the Background page, by its place
+    /// in `wallpaper_theme_cards`.
+    WallpaperTheme,
+    /// A picture a theme bundles, by its place in `bundled_picture_cards`.
+    BundledPicture,
 }
 
 /// A place on a page where typing goes.
@@ -4423,73 +4534,126 @@ impl SettingsState {
         s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
     }
 
-    /// The Wallpaper page: which picture the desktop shows.
+    /// The Background page: where the desktop's background comes from
+    /// (design-decisions §1243).
     ///
-    /// The shell could already crop, letterbox, tile, centre and span a
-    /// wallpaper across monitors, tint it by time of day and rotate a
-    /// slideshow. `set_image` was called four times in the whole tree and all
-    /// four were in the shell's own tests: the feature was complete except
-    /// that no user could reach it.
-    ///
-    /// Only the picture is offered, not the fit mode, the slideshow or the
-    /// dynamic tint. Those are settings `appearance.yaml` does not carry yet,
-    /// and a control that writes a value nothing reads is the defect the Mouse
-    /// page below refuses in its own words.
+    /// One question first -- Show: a picture, a theme's pictures, pictures by
+    /// time of day, a folder of pictures in turn, or none -- and then only the
+    /// controls of the answer. The desktop shows the highest of those that is
+    /// set, so a page with a section for each let a user set one and never
+    /// see it, outranked by another set long before. Choosing a source clears
+    /// those above it ([`SettingsState::choose_wallpaper_source`]), and each
+    /// source's Clear empties it and stays on it, to choose again.
     fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
-        s.section("Desktop Picture");
-        // Pictures by time of day are the wallpaper while they are set (lane
-        // C's `wallpaper_schedule`): the picture and the rotation each say
-        // so, rather than read as what the desktop shows.
-        let scheduled = !self.appearance.settings.wallpaper_schedule.is_empty();
-
-        match self.appearance.settings.wallpaper.as_deref() {
-            Some(path) => {
-                // `display()` because this is the line of text under the
-                // heading, and a label is text by definition. The path itself
-                // is held exactly; nothing is rebuilt from this string.
-                s.note(&path.shown().to_string(), 28.0);
-                if scheduled {
-                    s.note(
-                        "Not shown while there are pictures by time of day, below.",
-                        28.0,
-                    );
-                }
-            }
-            None if scheduled => s.note("No picture.", 28.0),
-            None => {
-                s.note(
-                    "No picture. The desktop is the plain background, which follows your theme.",
-                    28.0,
-                );
-            }
+        let source = self.wallpaper_source();
+        s.section("Desktop Background");
+        s.dropdown_row("Show", DropdownId::WallpaperSource, source.label());
+        match source {
+            WallpaperSource::Picture => self.build_wallpaper_picture(s),
+            WallpaperSource::Theme => self.build_wallpaper_themes(s),
+            WallpaperSource::TimeOfDay => self.build_wallpaper_schedule(s),
+            WallpaperSource::Folder => self.build_wallpaper_rotation(s),
+            WallpaperSource::Plain => self.build_wallpaper_plain(s),
         }
+        // How a picture is placed is the same for every source of one, and
+        // is offered once there is a picture to place: a control whose every
+        // option does the same nothing is one a user reads as broken rather
+        // than as inapplicable.
+        if source != WallpaperSource::Plain
+            && WallpaperSource::shown(&self.appearance.settings) == source
+        {
+            s.dropdown_row(
+                "How it is placed",
+                DropdownId::WallpaperFit,
+                self.appearance.settings.wallpaper_fit.label(),
+            );
+        }
+        s.gap();
+        self.build_login_background(s);
+    }
 
+    /// "A picture": the user's own, from a file or from the pictures the
+    /// installed themes bring.
+    fn build_wallpaper_picture<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
+        match self.appearance.settings.wallpaper.as_deref() {
+            // `shown()` because this is a line of text under the heading; the
+            // path itself is held exactly, and nothing is rebuilt from this.
+            Some(path) => s.note(&path.shown().to_string(), 28.0),
+            None => s.note("No picture chosen yet.", 28.0),
+        }
         s.button_row(
             "Desktop picture",
             "Choose...",
             pal.accent,
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+        // Offered only when there is one to remove. A "Remove" that is always
+        // there is a button whose press does nothing most of the time, and a
+        // user cannot tell that from one that failed.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.button_row(
+                "Remove the picture",
+                "Remove",
+                pal.surface1,
+                Some(RowHit::Press(ButtonId::ClearWallpaper)),
+            );
+        }
+        // A theme's pictures, offered as pictures like any other (lane C,
+        // c-e-a-themes-wallpapers-on-the-background-page): choosing one sets
+        // the picture, not the theme.
+        if !self.bundled_picture_cards.is_empty() {
+            s.note("Or one of the pictures your themes bring:", 28.0);
+            let chosen = self.appearance.settings.wallpaper.as_deref();
+            self.picture_grid(
+                s,
+                &self.bundled_picture_cards,
+                SelectId::BundledPicture,
+                |card| chosen.is_some() && card.picture.as_deref() == chosen,
+            );
+        }
+    }
 
-        self.build_wallpaper_schedule(s);
-
-        s.section("Rotation");
-        match self.appearance.settings.wallpaper_folder.as_deref() {
-            Some(folder) => {
-                s.note(&folder.shown().to_string(), 28.0);
-                if scheduled {
-                    s.note(
-                        "Not shown while there are pictures by time of day, above.",
-                        28.0,
-                    );
-                }
-            }
-            None if scheduled => s.note("No folder.", 28.0),
-            None => s.note(
-                "No folder. The desktop shows the single picture above.",
+    /// "A theme's pictures": each installed theme that recommends a picture,
+    /// shown by its picture for the mode the desktop is drawn in now.
+    fn build_wallpaper_themes<S: PageSink>(&self, s: &mut S) {
+        let settings = &self.appearance.settings;
+        if self.wallpaper_theme_cards.is_empty() {
+            s.note(
+                "No installed theme brings pictures. A theme brings them in a wallpapers folder beside its theme.yaml.",
                 28.0,
-            ),
+            );
+        } else {
+            s.note(
+                if settings.is_light() {
+                    "Each theme by its picture for light mode, the mode now. A theme with one for each mode changes it with the mode."
+                } else {
+                    "Each theme by its picture for dark mode, the mode now. A theme with one for each mode changes it with the mode."
+                },
+                28.0,
+            );
+            let chosen = settings.wallpaper_theme.id();
+            self.picture_grid(
+                s,
+                &self.wallpaper_theme_cards,
+                SelectId::WallpaperTheme,
+                |card| card.theme.as_deref() == Some(chosen),
+            );
+        }
+        // Why a chosen theme's pictures are not in use: the desktop shows the
+        // user's own picture meanwhile and says nothing on screen.
+        if let Some(problem) = settings.wallpaper_theme.problem() {
+            s.note(problem, 28.0);
+        }
+    }
+
+    /// "A folder of pictures, in turn": the folder, how often, in what order,
+    /// and which pictures in it to skip.
+    fn build_wallpaper_rotation<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        match self.appearance.settings.wallpaper_folder.as_deref() {
+            Some(folder) => s.note(&folder.shown().to_string(), 28.0),
+            None => s.note("No folder chosen yet.", 28.0),
         }
         s.button_row(
             "Rotate through a folder",
@@ -4500,7 +4664,7 @@ impl SettingsState {
         // The interval and the order are about a folder, so they appear with
         // one and not before: three controls of which two govern nothing read
         // as broken rather than as inapplicable, which is the judgement the
-        // fit dropdown below already makes.
+        // fit dropdown makes too.
         if self.appearance.settings.wallpaper_folder.is_some() {
             s.dropdown_row(
                 "Change picture",
@@ -4556,32 +4720,78 @@ impl SettingsState {
                 Some(RowHit::Press(ButtonId::ClearRotation)),
             );
         }
-        // Offered only with a picture to place, for the reason Remove is:
-        // a control whose every option does the same nothing is one a user
-        // reads as broken rather than as inapplicable.
-        if self.appearance.settings.wallpaper.is_some() {
-            s.dropdown_row(
-                "How it is placed",
-                DropdownId::WallpaperFit,
-                self.appearance.settings.wallpaper_fit.label(),
-            );
-        }
-        // Offered only when there is one to remove. A "Remove" that is always
-        // there is a button whose press does nothing most of the time, and a
-        // user cannot tell that from one that failed.
-        if self.appearance.settings.wallpaper.is_some() {
-            s.button_row(
-                "Remove the picture",
-                "Remove",
-                pal.surface1,
-                Some(RowHit::Press(ButtonId::ClearWallpaper)),
-            );
-        }
+    }
 
-        // On this page rather than a page of its own, because the setting most
-        // people want is "the same as that one" and a choice is easiest to make
-        // next to the thing it is being compared with. `design.txt` line 1247
-        // asks for exactly that: an easy way to make the two the same.
+    /// "No picture": the plain background -- and the quickest way to a
+    /// picture from here, as there was before there was a choice to make.
+    fn build_wallpaper_plain<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.note(
+            "No picture. The desktop is the plain background, which follows your theme.",
+            28.0,
+        );
+        s.button_row(
+            "Desktop picture",
+            "Choose...",
+            pal.accent,
+            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+        );
+    }
+
+    /// A grid of picture cards: each a click target as `select` by its place
+    /// in `cards`, drawn with its picture small once that is ready, and ringed
+    /// when `chosen` says it is the one in use.
+    fn picture_grid<S: PageSink>(
+        &self,
+        s: &mut S,
+        cards: &[PictureCard],
+        select: SelectId,
+        chosen: impl Fn(&PictureCard) -> bool,
+    ) {
+        let pal = self.palette();
+        let (x, y) = (s.x(), s.y());
+        for idx in 0..cards.len() {
+            let (cx, cy) = picture_card_origin(idx, x, y);
+            s.hit_rect(
+                cx,
+                cy,
+                PICTURE_CARD_WIDTH,
+                PICTURE_CARD_HEIGHT,
+                RowHit::Select(select, idx),
+            );
+        }
+        let drawn: Vec<(String, Option<thumbs::Thumb>, bool)> = cards
+            .iter()
+            .map(|card| {
+                (
+                    card.name.clone(),
+                    card.picture.as_deref().and_then(|p| self.thumbs.get(p)),
+                    chosen(card),
+                )
+            })
+            .collect();
+        s.draw(move |tree, x, y| {
+            for (idx, (name, thumb, chosen)) in drawn.iter().enumerate() {
+                render_picture_card(
+                    tree,
+                    &pal,
+                    picture_card_origin(idx, x, y),
+                    name,
+                    *thumb,
+                    *chosen,
+                );
+            }
+        });
+        s.advance(picture_grid_height(cards.len()));
+    }
+
+    /// The login screen's background, on this page rather than one of its
+    /// own, because the setting most people want is "the same as that one"
+    /// and a choice is easiest to make next to the thing it is being compared
+    /// with. `design.txt` line 1247 asks for exactly that: an easy way to make
+    /// the two the same.
+    fn build_login_background<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
         s.section("Login screen");
         s.dropdown_row(
             "Background",
@@ -5956,15 +6166,14 @@ impl SettingsState {
     /// `c-e-day-and-night-wallpapers-need-a-place-in-settings`).
     ///
     /// Choosing either picture sets it at its time, 06:00 or 18:00, which a
-    /// dropdown then moves; Clear stops it. A schedule is the wallpaper --
-    /// it wins over the picture and the rotation -- so the section says so
-    /// while one is set, and which picture is up now. A schedule written by
-    /// hand with more than two pictures is listed as it is, with Clear: this
-    /// page sets two.
+    /// dropdown then moves; Clear empties both, to choose again. The page
+    /// says which picture is up now. A schedule written by hand with more
+    /// than two pictures is listed as it is, with Clear: this page sets two.
+    /// Shown as the Background page's "Pictures by time of day"
+    /// (design-decisions §1243), under the Show line that names it.
     fn build_wallpaper_schedule<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
         let schedule = &self.appearance.settings.wallpaper_schedule;
-        s.section("By time of day");
         let Some((day, night)) = day_and_night(schedule) else {
             for entry in schedule {
                 s.value_row(
@@ -6015,16 +6224,11 @@ impl SettingsState {
             );
             return;
         }
-        let now = self.scheduled_up_at(datetimesettings::clock::now_utc_secs());
-        s.note(
-            &format!(
-                "While these are set they are the wallpaper, in place of the picture above and the rotation below.{}",
-                now.map_or_else(String::new, |up| format!(" Up now: {up}."))
-            ),
-            28.0,
-        );
+        if let Some(up) = self.scheduled_up_at(datetimesettings::clock::now_utc_secs()) {
+            s.note(&format!("Up now: {up}."), 28.0);
+        }
         s.button_row(
-            "Stop changing by time of day",
+            "Clear both pictures",
             "Clear",
             pal.subtext0,
             Some(RowHit::Press(ButtonId::ClearSchedule)),
@@ -6543,6 +6747,18 @@ impl SettingsState {
                     .themes
                     .iter()
                     .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::WallpaperSource => {
+                let items = WallpaperSource::ALL
+                    .iter()
+                    .map(|source| source.label().to_string())
+                    .collect();
+                let shown = self.wallpaper_source();
+                let at = WallpaperSource::ALL
+                    .iter()
+                    .position(|source| *source == shown)
                     .unwrap_or(0);
                 (items, at)
             }
@@ -7418,8 +7634,30 @@ impl SettingsState {
             RowHit::Press(ButtonId::RemoveClock(index)) => {
                 self.datetime.settings.remove_clock(index);
             }
+            // Each Clear empties the source shown and stays on it, to choose
+            // again; the page's Show list is what changes the source.
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
+                self.wallpaper_source_pending = Some(WallpaperSource::Picture);
+            }
+            RowHit::Select(SelectId::WallpaperTheme, idx) => {
+                if let Some(id) = self
+                    .wallpaper_theme_cards
+                    .get(idx)
+                    .and_then(|card| card.theme.clone())
+                {
+                    self.appearance.settings.wallpaper_theme =
+                        appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &id);
+                }
+            }
+            RowHit::Select(SelectId::BundledPicture, idx) => {
+                if let Some(picture) = self
+                    .bundled_picture_cards
+                    .get(idx)
+                    .and_then(|card| card.picture.clone())
+                {
+                    self.appearance.settings.wallpaper = Some(picture);
+                }
             }
             RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
             RowHit::Press(ButtonId::ChooseLoginImage) => self.open_login_image_dialog(),
@@ -7431,6 +7669,7 @@ impl SettingsState {
             }
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
+                self.wallpaper_source_pending = Some(WallpaperSource::Folder);
             }
             RowHit::Press(ButtonId::EventColour(id)) => {
                 let what = self
@@ -7451,6 +7690,7 @@ impl SettingsState {
             RowHit::Press(ButtonId::ChooseNightWallpaper) => self.open_schedule_dialog(false),
             RowHit::Press(ButtonId::ClearSchedule) => {
                 self.appearance.settings.wallpaper_schedule.clear();
+                self.wallpaper_source_pending = Some(WallpaperSource::TimeOfDay);
             }
         }
     }
@@ -7795,6 +8035,11 @@ impl SettingsState {
                         };
                 }
             }
+            DropdownId::WallpaperSource => {
+                if let Some(source) = WallpaperSource::ALL.get(index) {
+                    self.choose_wallpaper_source(*source);
+                }
+            }
             DropdownId::CursorTheme => {
                 if let Some(info) = self.cursor_themes.get(index) {
                     self.appearance.settings.cursor_theme =
@@ -8136,7 +8381,37 @@ impl oswindow::app::App for SettingsState {
         // out for a window that is not the one on screen is the visible cost.
         self.window_width = width.max(0.0);
         self.window_height = height.max(0.0);
+        // Pictures finished since the last wake -- or with no waker at all,
+        // as on a link that cannot be woken -- are drawn in this frame, and
+        // uploaded before it by `take_images`.
+        self.thumbs.collect();
         self.render_tree()
+    }
+
+    /// The Background page decodes pictures on a thread of its own
+    /// (design-decisions §1243), which wakes the loop when one is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.thumbs.attach_waker(waker);
+    }
+
+    /// A picture is decoded: draw it.
+    fn on_wake(&mut self) -> Response {
+        if self.thumbs.collect() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    /// The pictures decoded and not yet uploaded, asked for after each
+    /// render and before its frame goes out, so a frame never names a
+    /// picture the compositor does not have.
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        self.thumbs.take_uploads()
     }
 }
 
@@ -8155,6 +8430,201 @@ fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App>
             .filter(|own| !installed.contains(&own.id)),
     );
     list
+}
+
+/// Where the desktop's background comes from: the Background page's first
+/// question (design-decisions §1243), in the order the page lists them.
+///
+/// The desktop shows the highest of them that is set, in its own order --
+/// pictures by time of day, a rotating folder, a theme's picture, a picture
+/// (`gui/desktop/src/session.rs`, `sync_wallpaper`) -- so choosing one clears
+/// those above it, and those below are kept as what shows if it is cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WallpaperSource {
+    /// One picture of the user's own.
+    Picture,
+    /// A theme's recommended picture, for the mode the desktop is drawn in.
+    Theme,
+    /// A picture up from the morning and one from the evening.
+    TimeOfDay,
+    /// The pictures in a folder, in turn.
+    Folder,
+    /// No picture: the plain background, in the theme's colours.
+    Plain,
+}
+
+impl WallpaperSource {
+    /// Every source, in the page's order.
+    const ALL: [Self; 5] = [
+        Self::Picture,
+        Self::Theme,
+        Self::TimeOfDay,
+        Self::Folder,
+        Self::Plain,
+    ];
+
+    /// What the page calls it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Picture => "A picture",
+            Self::Theme => "A theme's pictures",
+            Self::TimeOfDay => "Pictures by time of day",
+            Self::Folder => "A folder of pictures, in turn",
+            Self::Plain => "No picture",
+        }
+    }
+
+    /// Its place in the desktop's order: a source shows over every source
+    /// with a lower rank.
+    fn rank(self) -> u8 {
+        match self {
+            Self::TimeOfDay => 4,
+            Self::Folder => 3,
+            Self::Theme => 2,
+            Self::Picture => 1,
+            Self::Plain => 0,
+        }
+    }
+
+    /// The source the desktop shows with `settings`: the highest that is set.
+    fn shown(settings: &appearance::AppearanceSettings) -> Self {
+        if !settings.wallpaper_schedule.is_empty() {
+            Self::TimeOfDay
+        } else if settings.wallpaper_folder.is_some() {
+            Self::Folder
+        } else if !settings.wallpaper_theme.is_built_in() {
+            Self::Theme
+        } else if settings.wallpaper.is_some() {
+            Self::Picture
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// A picture offered on the Background page: a theme by its recommended
+/// picture, or a picture a theme bundles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PictureCard {
+    /// The theme it chooses, for a theme's card; `None` for a bundled
+    /// picture's, which chooses the picture itself.
+    theme: Option<std::ffi::OsString>,
+    /// What the card says under its picture.
+    name: String,
+    /// The picture drawn on it; `None` for a theme that recommends none for
+    /// the mode the desktop is in, which has nothing to show.
+    picture: Option<PathBuf>,
+}
+
+/// The width of a picture card, and of the picture drawn on it.
+const PICTURE_CARD_WIDTH: f32 = 176.0;
+/// The height of the picture on a card: sixteen by nine.
+const PICTURE_CARD_PICTURE_HEIGHT: f32 = 99.0;
+/// The height of a card: its picture and the line naming it.
+const PICTURE_CARD_HEIGHT: f32 = PICTURE_CARD_PICTURE_HEIGHT + 24.0;
+/// The gap between one card and the next, across and down.
+const PICTURE_CARD_GAP: f32 = 12.0;
+/// How many cards to a row.
+const PICTURE_CARD_COLUMNS: usize = 4;
+
+/// Where the `index`-th picture card goes, with the grid's top left corner
+/// at (`x`, `y`).
+fn picture_card_origin(index: usize, x: f32, y: f32) -> (f32, f32) {
+    let col = index % PICTURE_CARD_COLUMNS;
+    let row = index / PICTURE_CARD_COLUMNS;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a page's cards number in the dozens"
+    )]
+    let (col, row) = (col as f32, row as f32);
+    (
+        x + col * (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP),
+        y + row * (PICTURE_CARD_HEIGHT + PICTURE_CARD_GAP),
+    )
+}
+
+/// The height of a grid of `count` picture cards.
+fn picture_grid_height(count: usize) -> f32 {
+    let rows = count.div_ceil(PICTURE_CARD_COLUMNS);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a page's cards number in the dozens"
+    )]
+    let rows = rows as f32;
+    rows * (PICTURE_CARD_HEIGHT + PICTURE_CARD_GAP)
+}
+
+/// Draw one picture card with its top left corner at (`x`, `y`): its picture
+/// fitted inside the card's picture box with its shape kept -- or, while it
+/// decodes or when it cannot be, a plain box saying so -- its name under it,
+/// and a ring round the picture when it is the one chosen.
+fn render_picture_card(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    (x, y): (f32, f32),
+    name: &str,
+    thumb: Option<thumbs::Thumb>,
+    chosen: bool,
+) {
+    fill_rounded(
+        tree,
+        x,
+        y,
+        PICTURE_CARD_WIDTH,
+        PICTURE_CARD_PICTURE_HEIGHT,
+        pal.surface0,
+        6.0,
+    );
+    let words = match thumb {
+        Some(thumbs::Thumb::Ready { id, width, height }) if width > 0 && height > 0 => {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a thumbnail is a few hundred pixels across"
+            )]
+            let (w, h) = (width as f32, height as f32);
+            let scale = (PICTURE_CARD_WIDTH / w).min(PICTURE_CARD_PICTURE_HEIGHT / h);
+            let (dw, dh) = (w * scale, h * scale);
+            tree.push(RenderCommand::Image {
+                x: x + (PICTURE_CARD_WIDTH - dw) / 2.0,
+                y: y + (PICTURE_CARD_PICTURE_HEIGHT - dh) / 2.0,
+                width: dw,
+                height: dh,
+                image_id: id,
+            });
+            None
+        }
+        Some(thumbs::Thumb::Loading) => Some("Loading..."),
+        _ => Some("No preview"),
+    };
+    if let Some(words) = words {
+        tree.text_in(
+            x + 10.0,
+            y + PICTURE_CARD_PICTURE_HEIGHT / 2.0 - 8.0,
+            PICTURE_CARD_WIDTH - 20.0,
+            words,
+            pal.subtext0,
+            12.0,
+        );
+    }
+    if chosen {
+        tree.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: PICTURE_CARD_WIDTH,
+            height: PICTURE_CARD_PICTURE_HEIGHT,
+            color: pal.accent,
+            line_width: 3.0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+    }
+    tree.text_in(
+        x,
+        y + PICTURE_CARD_PICTURE_HEIGHT + 6.0,
+        PICTURE_CARD_WIDTH,
+        name,
+        if chosen { pal.accent } else { pal.text },
+        12.0,
+    );
 }
 
 /// When a new morning picture goes up: 06:00, as lane C's schedule has it.
@@ -8704,13 +9174,15 @@ mod tests {
 
     /// **A morning and an evening picture are chosen on the Wallpaper page**
     /// (lane C's `c-e-day-and-night-wallpapers-need-a-place-in-settings`):
-    /// each with its own Choose, up from 06:00 and 18:00, each moved by its
-    /// dropdown on its own side of the other, and Clear stops them. It could
-    /// be set only by editing `appearance.yaml`.
+    /// under Show's "Pictures by time of day", each with its own Choose, up
+    /// from 06:00 and 18:00, each moved by its dropdown on its own side of the
+    /// other, and Clear empties them and stays, to choose again. It could be
+    /// set only by editing `appearance.yaml`.
     #[test]
     fn a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
+        show_source(&mut state, WallpaperSource::TimeOfDay);
         let schedule = |state: &SettingsState| -> Vec<(String, PathBuf)> {
             state
                 .appearance
@@ -8794,6 +9266,12 @@ mod tests {
 
         press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
         assert!(schedule(&state).is_empty(), "Clear left the schedule");
+        assert_eq!(
+            state.wallpaper_source(),
+            WallpaperSource::TimeOfDay,
+            "Clear left the source it cleared"
+        );
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
     }
 
     /// **A schedule written by hand is shown as it is**, with Clear; the page
@@ -8855,22 +9333,218 @@ mod tests {
         );
     }
 
-    /// **The picture and the rotation say so while a schedule hides them**:
-    /// pictures by time of day are the wallpaper while they are set, and
-    /// "No folder. The desktop shows the single picture above." was then
-    /// untrue. Without a schedule each reads as it did.
+    /// Press the control `what` names on the page through the event path a
+    /// click takes, which also saves what it changed.
+    fn press_on(state: &mut SettingsState, what: RowHit) {
+        let (x, y) = center_of(state, what).unwrap_or_else(|| panic!("{what:?} is not drawn"));
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// Choose `source` in the Background page's Show list as a user does: a
+    /// press on the row, then on the entry.
+    fn show_source(state: &mut SettingsState, source: WallpaperSource) {
+        press_on(state, RowHit::Dropdown(DropdownId::WallpaperSource));
+        assert_eq!(state.open_dropdown, Some(DropdownId::WallpaperSource));
+        let at = WallpaperSource::ALL
+            .iter()
+            .position(|s| *s == source)
+            .expect("every source is listed");
+        press_dropdown_item(state, at);
+        assert!(state.open_dropdown.is_none(), "choosing left the list open");
+    }
+
+    /// A scratch theme folder with one theme that brings pictures -- Aurora,
+    /// a day picture and a night one, recommended for light and dark -- and
+    /// one that does not.
+    fn scratch_wallpaper_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-wallpaper-themes");
+        let aurora = dir.dir().join("aurora");
+        let pictures = aurora.join("wallpapers");
+        std::fs::create_dir_all(&pictures).expect("pictures folder");
+        thumbs::tests::png(&pictures, "day.png", 64, 36);
+        thumbs::tests::png(&pictures, "night.png", 32, 18);
+        std::fs::write(
+            aurora.join("theme.yaml"),
+            "meta:\n  name: Aurora\nwallpapers:\n  dark: wallpapers/night.png\n  light: wallpapers/day.png\n",
+        )
+        .expect("theme file");
+        let plain = dir.dir().join("plain");
+        std::fs::create_dir_all(&plain).expect("theme folder");
+        std::fs::write(
+            plain.join("theme.yaml"),
+            "meta:\n  name: Plain\ncolors:\n  base: \"#101018\"\n",
+        )
+        .expect("theme file");
+        dir
+    }
+
+    /// The Background page over `dir`'s themes, and no other desktop's.
+    fn wallpaper_state(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: Some(dir.dir().to_path_buf()),
+            system: dir.dir().join("no-system-themes"),
+        };
+        state.cursor_icon_dirs = Vec::new();
+        state.go_to_page(SettingsPage::Wallpaper);
+        state
+    }
+
+    /// **Only the source the desktop shows has its controls on the page**
+    /// (design-decisions §1243). Pictures by time of day outrank a folder,
+    /// which outranks a picture; the page used to show a section for each, so
+    /// a picture set under a schedule was written and never seen.
     #[test]
-    fn the_picture_and_the_rotation_say_when_a_schedule_hides_them() {
-        let hidden_above = "Not shown while there are pictures by time of day, above.";
-        let hidden_below = "Not shown while there are pictures by time of day, below.";
-        let single = "No folder. The desktop shows the single picture above.";
+    fn only_the_source_the_desktop_shows_has_its_controls_on_the_page() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
-        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
-        let text = format!("{:?}", state.render_tree());
-        assert!(text.contains(single), "{text}");
-        assert!(!text.contains(hidden_below) && !text.contains(hidden_above));
+        let settings = &mut state.appearance.settings;
+        settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+        settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+        settings
+            .wallpaper_schedule
+            .push(appearance::ScheduledWallpaper {
+                from: DAY_FROM,
+                image: PathBuf::from("/pics/day.jpg"),
+            });
+        let drawn = |state: &SettingsState, what: RowHit| center_of(state, what).is_some();
 
+        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)));
+        assert!(!drawn(
+            &state,
+            RowHit::Press(ButtonId::ChooseRotationFolder)
+        ));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        let texts = drawn_texts(&state);
+        assert!(
+            texts.iter().any(|t| t == "Pictures by time of day"),
+            "{texts:?}"
+        );
+
+        state.appearance.settings.wallpaper_schedule.clear();
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseRotationFolder)));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)));
+
+        state.appearance.settings.wallpaper_folder = None;
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        assert!(!drawn(
+            &state,
+            RowHit::Press(ButtonId::ChooseRotationFolder)
+        ));
+
+        state.appearance.settings.wallpaper = None;
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Plain);
+        let texts = drawn_texts(&state);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("No picture. The desktop is the plain background")),
+            "{texts:?}"
+        );
+    }
+
+    /// **Choosing a source clears those above it and keeps those below**
+    /// (design-decisions §1243): what is chosen is what the desktop shows,
+    /// and each source below it keeps its settings as what shows if it is
+    /// cleared.
+    #[test]
+    fn choosing_a_source_clears_those_above_it_and_keeps_those_below() {
+        use std::ffi::OsStr;
+        let everything = || {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            let s = &mut state.appearance.settings;
+            s.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+            s.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
+                "aurora",
+                None,
+                Some(PathBuf::from("/themes/aurora/day.png")),
+            );
+            s.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+            s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                from: DAY_FROM,
+                image: PathBuf::from("/pics/day.jpg"),
+            });
+            state
+        };
+        // Kept: the schedule, the folder, the theme, the picture.
+        for (source, kept) in [
+            (WallpaperSource::TimeOfDay, [true, true, true, true]),
+            (WallpaperSource::Folder, [false, true, true, true]),
+            (WallpaperSource::Theme, [false, false, true, true]),
+            (WallpaperSource::Picture, [false, false, false, true]),
+            (WallpaperSource::Plain, [false, false, false, false]),
+        ] {
+            let mut state = everything();
+            show_source(&mut state, source);
+            let s = &state.appearance.settings;
+            let got = [
+                !s.wallpaper_schedule.is_empty(),
+                s.wallpaper_folder.is_some(),
+                s.wallpaper_theme.id() == OsStr::new("aurora"),
+                s.wallpaper.is_some(),
+            ];
+            assert_eq!(got, kept, "{source:?}");
+            assert_eq!(
+                WallpaperSource::shown(s),
+                source,
+                "{source:?} is not what the desktop shows"
+            );
+            assert_eq!(state.wallpaper_source(), source);
+        }
+    }
+
+    /// **A source chosen and not set up yet is shown until it is**: the page
+    /// offers the folder's Choose while the desktop goes on showing the
+    /// picture below it, and once a folder is chosen the folder is shown.
+    /// Leaving the page forgets a choice never set up.
+    #[test]
+    fn a_source_chosen_and_not_set_up_is_shown_until_it_is() {
+        let dir = scratchdir::ScratchDir::new("settings-wallpaper-pending");
+        let mut state = wallpaper_state(&dir);
+        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+        show_source(&mut state, WallpaperSource::Folder);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+        assert_eq!(
+            WallpaperSource::shown(&state.appearance.settings),
+            WallpaperSource::Picture,
+            "the picture below the folder was not kept"
+        );
+        let texts = drawn_texts(&state);
+        assert!(
+            texts.iter().any(|t| t == "No folder chosen yet."),
+            "{texts:?}"
+        );
+        // Nothing of the folder's to place yet.
+        assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none());
+        press_on(&mut state, RowHit::Press(ButtonId::ChooseRotationFolder));
+        assert!(state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/rotation"))));
+        assert_eq!(
+            WallpaperSource::shown(&state.appearance.settings),
+            WallpaperSource::Folder
+        );
+        assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some());
+
+        // Chosen and never set up, and the page left: it opens again on what
+        // the desktop shows.
+        show_source(&mut state, WallpaperSource::TimeOfDay);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        state.go_to_page(SettingsPage::Themes);
+        state.go_to_page(SettingsPage::Wallpaper);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+
+        // A source chosen and not set up gives way to one set above it since
+        // -- by another program, say: the page shows what the desktop does.
+        show_source(&mut state, WallpaperSource::Picture);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
         state
             .appearance
             .settings
@@ -8879,28 +9553,272 @@ mod tests {
                 from: DAY_FROM,
                 image: PathBuf::from("/pics/day.jpg"),
             });
-        let text = format!("{:?}", state.render_tree());
-        assert!(
-            text.contains(hidden_below),
-            "the picture does not say it is hidden"
-        );
-        assert!(
-            !text.contains(single),
-            "the rotation still says the picture is shown"
-        );
+        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+    }
 
+    /// **Each source's Clear empties it and stays on it**, to choose again:
+    /// the Show list is what changes the source. Each from a page opened on a
+    /// source already set, as a user finds it -- not one just chosen, which
+    /// the page would stay on anyway.
+    #[test]
+    fn each_clear_empties_its_source_and_stays_on_it() {
+        let fresh = |set: fn(&mut appearance::AppearanceSettings)| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            // Below every source here, so a Clear that let go of its source
+            // would show this instead.
+            state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+            set(&mut state.appearance.settings);
+            state
+        };
+
+        let mut state = fresh(|s| {
+            s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                from: DAY_FROM,
+                image: PathBuf::from("/pics/day.jpg"),
+            });
+        });
+        press_on(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+        assert!(state.appearance.settings.wallpaper_schedule.is_empty());
+        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
+
+        let mut state = fresh(|s| s.wallpaper_folder = Some(PathBuf::from("/pics/rotation")));
+        press_on(&mut state, RowHit::Press(ButtonId::ClearRotation));
+        assert_eq!(state.appearance.settings.wallpaper_folder, None);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some());
+
+        let mut state = fresh(|_| {});
+        press_on(&mut state, RowHit::Press(ButtonId::ClearWallpaper));
+        assert_eq!(state.appearance.settings.wallpaper, None);
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some());
+    }
+
+    /// **A picture decoded is drawn in the next frame, and a wake says so**:
+    /// the decoding thread's result is collected both when it wakes the
+    /// window and before any frame, and the frame names the picture only
+    /// after its upload is queued.
+    #[test]
+    fn a_picture_decoded_is_drawn_and_a_wake_asks_for_a_frame() {
+        use oswindow::app::App as _;
+        let dir = scratch_wallpaper_themes();
+        let deadline = || {
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(10))
+                .expect("a deadline")
+        };
+        // The wake path.
+        let mut state = wallpaper_state(&dir);
+        assert!(state.wants_waker());
+        let until = deadline();
+        while !matches!(state.on_wake(), Response::Redraw) {
+            assert!(std::time::Instant::now() < until, "no wake found a picture");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!state.take_images().is_empty(), "a wake queued no upload");
+
+        // The frame path, with nothing but frames.
+        let mut state = wallpaper_state(&dir);
+        show_source(&mut state, WallpaperSource::Theme);
+        let until = deadline();
+        loop {
+            let tree = state.render(1200.0, 800.0);
+            if tree
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Image { .. }))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "no frame drew the picture"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !state.take_images().is_empty(),
+            "a frame named a picture with no upload queued"
+        );
+    }
+
+    /// The Show list names every source, in the page's order, and opens on
+    /// the one shown.
+    #[test]
+    fn the_show_list_names_every_source_and_opens_on_the_one_shown() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
         state.appearance.settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
-        let text = format!("{:?}", state.render_tree());
-        assert!(
-            text.contains(hidden_above),
-            "the rotation does not say it is hidden"
+        state.show_dropdown(DropdownId::WallpaperSource);
+        let layout = state.dropdown_layout().expect("a layout");
+        assert_eq!(
+            layout.items,
+            WallpaperSource::ALL
+                .iter()
+                .map(|s| s.label().to_string())
+                .collect::<Vec<_>>()
         );
+        assert_eq!(
+            layout.items[layout.selected],
+            "A folder of pictures, in turn"
+        );
+    }
 
-        state.appearance.settings.wallpaper = None;
-        let text = format!("{:?}", state.render_tree());
+    /// **A theme is chosen by its picture** (lane C,
+    /// `c-e-a-themes-wallpapers-on-the-background-page`): the themes that
+    /// bring pictures, each by its picture for the mode the desktop is in,
+    /// drawn small once decoded -- uploaded before the frame that names it --
+    /// and a press on one writes `theme.wallpaper` to `appearance.yaml`.
+    #[test]
+    fn a_theme_is_chosen_by_its_picture() {
+        with_scratch_config("settings-wallpaper-theme", |_root| {
+            let dir = scratch_wallpaper_themes();
+            let mut state = wallpaper_state(&dir);
+            assert_eq!(
+                state.wallpaper_theme_cards.len(),
+                1,
+                "only Aurora brings pictures: {:?}",
+                state.wallpaper_theme_cards
+            );
+            let card = state.wallpaper_theme_cards[0].clone();
+            assert_eq!(card.name, "Aurora");
+            let for_now = if state.appearance.settings.is_light() {
+                "day.png"
+            } else {
+                "night.png"
+            };
+            let picture = card.picture.expect("Aurora has a picture for the mode now");
+            assert!(
+                picture.ends_with(for_now),
+                "{picture:?} is not for the mode now"
+            );
+
+            show_source(&mut state, WallpaperSource::Theme);
+            let thumbs::Thumb::Ready { id, .. } =
+                thumbs::tests::settle(&mut state.thumbs, &picture)
+            else {
+                panic!(
+                    "the picture was not decoded: {:?}",
+                    state.thumbs.get(&picture)
+                );
+            };
+            let uploads = oswindow::app::App::take_images(&mut state);
+            assert!(
+                uploads.iter().any(|u| matches!(
+                    u,
+                    oswindow::app::ImageChange::Upload { id: up, .. } if *up == id
+                )),
+                "the picture was not uploaded"
+            );
+            let tree = state.render_tree();
+            assert!(
+                tree.commands.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Image { image_id, .. } if *image_id == id
+                )),
+                "the picture is not drawn"
+            );
+
+            press_on(&mut state, RowHit::Select(SelectId::WallpaperTheme, 0));
+            assert_eq!(
+                state.appearance.settings.wallpaper_theme.id(),
+                std::ffi::OsStr::new("aurora")
+            );
+            // The theme chosen is the one marked: its name in the accent.
+            let accent = state.palette().accent;
+            let tree = state.render_tree();
+            assert!(
+                tree.commands.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, color, .. } if text == "Aurora" && *color == accent
+                )),
+                "the chosen theme is not marked"
+            );
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.wallpaper_theme.id(), std::ffi::OsStr::new("aurora"));
+        });
+    }
+
+    /// **The pictures themes bring are offered as pictures**: under "A
+    /// picture", each by its file's name and its theme's, and a press sets it
+    /// as the picture -- not the theme.
+    #[test]
+    fn the_pictures_themes_bring_are_offered_as_pictures() {
+        let dir = scratch_wallpaper_themes();
+        let mut state = wallpaper_state(&dir);
+        show_source(&mut state, WallpaperSource::Picture);
+        let names: Vec<String> = state
+            .bundled_picture_cards
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         assert!(
-            !text.contains("the plain background"),
-            "no picture reads as the plain background under a schedule"
+            names.contains(&String::from("day.png (Aurora)"))
+                && names.contains(&String::from("night.png (Aurora)")),
+            "{names:?}"
+        );
+        // Each card chooses its own picture.
+        for name in ["night.png (Aurora)", "day.png (Aurora)"] {
+            let at = names.iter().position(|n| n == name).expect("listed");
+            let picture = state.bundled_picture_cards[at]
+                .picture
+                .clone()
+                .expect("a bundled card has its picture");
+            press_on(&mut state, RowHit::Select(SelectId::BundledPicture, at));
+            assert_eq!(
+                state.appearance.settings.wallpaper.as_deref(),
+                Some(picture.as_path()),
+                "{name}"
+            );
+        }
+        assert!(
+            state.appearance.settings.wallpaper_theme.is_built_in(),
+            "a picture chose a theme"
+        );
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+    }
+
+    /// **A chosen theme whose pictures cannot be used says why** under its
+    /// pictures; the desktop shows the user's own picture meanwhile.
+    #[test]
+    fn a_theme_whose_pictures_cannot_be_used_says_why() {
+        let dir = scratch_wallpaper_themes();
+        let mut state = wallpaper_state(&dir);
+        state.appearance.settings.wallpaper_theme = appearance::themes::WallpaperTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("gone"),
+        );
+        let problem = state
+            .appearance
+            .settings
+            .wallpaper_theme
+            .problem()
+            .expect("control: a theme not installed has a problem")
+            .to_string();
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Theme);
+        let texts = drawn_texts(&state);
+        assert!(
+            texts.contains(&problem),
+            "{problem:?} is not said: {texts:?}"
+        );
+    }
+
+    /// With no theme that brings pictures, "A theme's pictures" says where
+    /// they come from rather than showing nothing.
+    #[test]
+    fn with_no_theme_that_brings_pictures_the_page_says_where_they_come_from() {
+        let dir = scratchdir::ScratchDir::new("settings-no-wallpaper-themes");
+        let mut state = wallpaper_state(&dir);
+        show_source(&mut state, WallpaperSource::Theme);
+        let texts = drawn_texts(&state);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("No installed theme brings pictures")),
+            "{texts:?}"
         );
     }
 
@@ -11869,15 +12787,17 @@ mod tests {
     fn rotation_detail_rows_wait_for_a_folder() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
-
         state.appearance.settings.wallpaper_folder = None;
+        // The way to start rotating is one choice away, in the Show list.
+        show_source(&mut state, WallpaperSource::Folder);
+
         assert!(
             center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_none(),
             "a shuffle switch was drawn with no folder to shuffle"
         );
         assert!(
             center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some(),
-            "the page must always offer a way to START rotating"
+            "the folder source offers no way to START rotating"
         );
 
         state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pics"));

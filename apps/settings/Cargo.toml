@@ -55,6 +55,10 @@ calendarstore = { path = "../calendarstore" }
 # the Recycle Bin page reads and sets them, and the file manager applies them.
 recyclebin = { path = "../recyclebin" }
 
+# The Background page draws themes' pictures small (design-decisions §1243):
+# decoded scaled, on a thread of the page's own.
+imagecodec = { path = "../../gui/imagecodec" }
+
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program
 # names the socket layer.

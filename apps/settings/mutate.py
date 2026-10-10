@@ -431,8 +431,8 @@ MUTATIONS = [
     ),
     (
         'the pictures by time of day are not on the page',
-        '        self.build_wallpaper_schedule(s);\n',
-        '',
+        '            WallpaperSource::TimeOfDay => self.build_wallpaper_schedule(s),',
+        '            WallpaperSource::TimeOfDay => self.build_wallpaper_plain(s),',
         ['a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page', 'a_schedule_of_more_than_two_pictures_is_listed_as_it_is'],
     ),
     (
@@ -515,8 +515,8 @@ MUTATIONS = [
     ),
     (
         'the picture up now is not said',
-        'now.map_or_else(String::new, |up| format!(" Up now: {up}."))',
-        'now.map_or_else(String::new, |_| String::new())',
+        '            s.note(&format!("Up now: {up}."), 28.0);',
+        '            let _ = up;',
         ['a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page'],
     ),
     (
@@ -525,30 +525,10 @@ MUTATIONS = [
         '.scheduled_wallpaper_at(utc_secs, datetimesettings::Tz::utc())',
         ['the_picture_up_now_is_the_one_for_this_machines_time_of_day'],
     ),
-    (
-        'the picture does not say a schedule hides it',
-        '                if scheduled {\n                    s.note(\n                        "Not shown while there are pictures by time of day, below.",',
-        '                if false {\n                    s.note(\n                        "Not shown while there are pictures by time of day, below.",',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'the rotation does not say a schedule hides it',
-        '                if scheduled {\n                    s.note(\n                        "Not shown while there are pictures by time of day, above.",',
-        '                if false {\n                    s.note(\n                        "Not shown while there are pictures by time of day, above.",',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'the rotation says the single picture is shown under a schedule',
-        '            None if scheduled => s.note("No folder.", 28.0),\n',
-        '',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'no picture reads as the plain background under a schedule',
-        '            None if scheduled => s.note("No picture.", 28.0),\n',
-        '',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
+    # No rows for the notes saying a source is hidden under a schedule: since
+    # design-decisions §1243 a source the desktop does not show is not on the
+    # page at all, which only_the_source_the_desktop_shows_has_its_controls_on_
+    # the_page holds and the WallpaperSource rows below sweep.
     (
         'a chord raises the list of keys',
         '        if evt.key == Key::F1 && plain {',
@@ -797,6 +777,16 @@ AXIS_ROWS = "each_theme_axis_row_opens_its_own_list"
 UNREADABLE = "a_theme_that_cannot_be_read_says_why_in_every_list"
 CANNOT_SERVE = "a_theme_chosen_for_an_axis_it_cannot_serve_says_why"
 FRAMES_WRITTEN = "window_frames_and_a_taskbar_panel_chosen_are_written"
+SOURCES_SHOWN = "only_the_source_the_desktop_shows_has_its_controls_on_the_page"
+SOURCES_CLEARED = "choosing_a_source_clears_those_above_it_and_keeps_those_below"
+SOURCE_PENDING = "a_source_chosen_and_not_set_up_is_shown_until_it_is"
+EACH_CLEAR = "each_clear_empties_its_source_and_stays_on_it"
+SHOW_LIST = "the_show_list_names_every_source_and_opens_on_the_one_shown"
+THEME_CHOSEN = "a_theme_is_chosen_by_its_picture"
+BUNDLED = "the_pictures_themes_bring_are_offered_as_pictures"
+THEME_PROBLEM = "a_theme_whose_pictures_cannot_be_used_says_why"
+NO_THEMES = "with_no_theme_that_brings_pictures_the_page_says_where_they_come_from"
+FRAMES_AND_WAKES = "a_picture_decoded_is_drawn_and_a_wake_asks_for_a_frame"
 
 
 def axis_rows(what, label, variant, field, provides, without, apart, extra=()):
@@ -1021,6 +1011,210 @@ MUTATIONS += [
         "        (!self.cursor_themes.iter().skip(1).any(|t| t.id.as_os_str() == id))",
         ["a_cursor_theme_not_installed_says_so"],
     ),
+    # The Background page's one choice of source, and themes by their
+    # pictures (2026-10-10; design-decisions §1243, lane C's
+    # c-e-a-themes-wallpapers-on-the-background-page).
+    (
+        "a schedule is never what the desktop shows",
+        "        if !settings.wallpaper_schedule.is_empty() {\n            Self::TimeOfDay",
+        "        if false {\n            Self::TimeOfDay",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "a folder is never what the desktop shows",
+        "        } else if settings.wallpaper_folder.is_some() {\n            Self::Folder",
+        "        } else if false {\n            Self::Folder",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "a theme is never what the desktop shows",
+        "        } else if !settings.wallpaper_theme.is_built_in() {\n            Self::Theme",
+        "        } else if false {\n            Self::Theme",
+        [SOURCES_CLEARED, THEME_PROBLEM],
+    ),
+    (
+        "a picture is never what the desktop shows",
+        "        } else if settings.wallpaper.is_some() {\n            Self::Picture",
+        "        } else if false {\n            Self::Picture",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "choosing a source leaves the schedule above it",
+        "        if source.rank() < WallpaperSource::TimeOfDay.rank() {\n"
+        "            s.wallpaper_schedule.clear();\n"
+        "        }\n",
+        "",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing the folder clears the folder",
+        "        if source.rank() < WallpaperSource::Folder.rank() {",
+        "        if source.rank() <= WallpaperSource::Folder.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing a theme clears the theme",
+        "        if source.rank() < WallpaperSource::Theme.rank() {",
+        "        if source.rank() <= WallpaperSource::Theme.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing a picture clears the picture",
+        "        if source.rank() < WallpaperSource::Picture.rank() {",
+        "        if source.rank() <= WallpaperSource::Picture.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "a source chosen and not set up is not shown",
+        "            Some(pending) if pending.rank() > shown.rank() => pending,",
+        "            Some(pending) if false => pending,",
+        [SOURCE_PENDING, "a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page"],
+    ),
+    (
+        "a source chosen is shown over one set above it since",
+        "            Some(pending) if pending.rank() > shown.rank() => pending,",
+        "            Some(pending) if pending.rank() > 0 => pending,",
+        [SOURCE_PENDING],
+    ),
+    (
+        "a source chosen and never set up outlives the page",
+        "            // the desktop shows; the page opens on what it does.\n"
+        "            self.wallpaper_source_pending = None;",
+        "            // the desktop shows; the page opens on what it does.",
+        [SOURCE_PENDING],
+    ),
+    (
+        "the schedule's Clear leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::TimeOfDay);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the folder's Clear leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::Folder);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the picture's Remove leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::Picture);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the Show list opens on the first source",
+        "                    .position(|source| *source == shown)",
+        "                    .position(|source| *source == WallpaperSource::Picture)",
+        [SHOW_LIST],
+    ),
+    (
+        "choosing in the Show list does nothing",
+        "                    self.choose_wallpaper_source(*source);",
+        "                    let _ = source;",
+        [SOURCES_CLEARED, SOURCE_PENDING],
+    ),
+    (
+        "the fit is offered with nothing to place",
+        "            && WallpaperSource::shown(&self.appearance.settings) == source\n",
+        "",
+        [SOURCE_PENDING],
+    ),
+    (
+        "the theme source draws no themes",
+        "            WallpaperSource::Theme => self.build_wallpaper_themes(s),",
+        "            WallpaperSource::Theme => self.build_wallpaper_plain(s),",
+        [THEME_CHOSEN, THEME_PROBLEM, NO_THEMES],
+    ),
+    (
+        "a theme with pictures is not offered",
+        "            if info.provides_wallpapers() {",
+        "            if false {",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a theme is shown by its other mode's picture",
+        "                        .picture(light)",
+        "                        .picture(!light)",
+        [THEME_CHOSEN],
+    ),
+    (
+        "the pictures themes bring are not offered",
+        "            for picture in &info.wallpapers {",
+        "            for picture in info.wallpapers.iter().take(0) {",
+        [BUNDLED],
+    ),
+    (
+        "the pictures are not asked for",
+        "                self.thumbs.ask(picture);",
+        "                let _ = picture;",
+        [THEME_CHOSEN, FRAMES_AND_WAKES],
+    ),
+    (
+        "a theme's card chooses nothing",
+        "                        appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &id);",
+        "                        appearance::themes::WallpaperTheme::built_in();\n                    let _ = &id;",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a bundled picture's card chooses nothing",
+        "                    self.appearance.settings.wallpaper = Some(picture);",
+        "                    let _ = picture;",
+        [BUNDLED],
+    ),
+    (
+        "the picture source offers no bundled pictures",
+        "        if !self.bundled_picture_cards.is_empty() {",
+        "        if false {",
+        [BUNDLED],
+    ),
+    (
+        "every card is the first card",
+        "                RowHit::Select(select, idx),",
+        "                RowHit::Select(select, 0),",
+        [BUNDLED],
+    ),
+    (
+        "the theme chosen is not marked",
+        "card.theme.as_deref() == Some(chosen)",
+        "card.theme.as_deref() == Some(chosen) && false",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a card draws another picture",
+        "                image_id: id,",
+        "                image_id: id ^ 1,",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a theme that cannot be used says nothing",
+        "        if let Some(problem) = settings.wallpaper_theme.problem() {\n            s.note(problem, 28.0);",
+        "        if let Some(problem) = settings.wallpaper_theme.problem() {\n            let _ = problem;",
+        [THEME_PROBLEM],
+    ),
+    (
+        "no uploads reach the window",
+        "        self.thumbs.take_uploads()\n",
+        "        Vec::new()\n",
+        [THEME_CHOSEN, FRAMES_AND_WAKES],
+    ),
+    (
+        "a frame does not collect decoded pictures",
+        "        self.thumbs.collect();\n        self.render_tree()",
+        "        self.render_tree()",
+        [FRAMES_AND_WAKES],
+    ),
+    (
+        "a wake does not collect decoded pictures",
+        "        if self.thumbs.collect() {",
+        "        if false {",
+        [FRAMES_AND_WAKES],
+    ),
+    (
+        "the window asks for no waker",
+        "    fn wants_waker(&self) -> bool {\n        true",
+        "    fn wants_waker(&self) -> bool {\n        false",
+        [FRAMES_AND_WAKES],
+    ),
     # The colour list's own unreadable theme.
     (
         "an unreadable theme is listed as an icon pack",
@@ -1066,9 +1260,62 @@ RECYCLEBINS = [
     ),
 ]
 
+# The Background page's pictures, made small off the window's thread
+# (2026-10-10, design-decisions §1243).
+THUMB_SMALL = "a_picture_is_made_small_and_uploaded_once"
+THUMB_FAILS = "a_picture_that_cannot_be_read_fails"
+THUMB_IDS = "each_picture_has_an_id_of_its_own"
+THUMB_WAKE = "a_picture_decoded_wakes_the_window"
+
+THUMBS = [
+    (
+        "a picture is not made small",
+        "MAX_WIDTH, MAX_HEIGHT)",
+        "4096, 4096)",
+        [THUMB_SMALL],
+    ),
+    (
+        "a decoded picture is not uploaded",
+        "                    self.uploads.push(ImageChange::Upload {",
+        "                    let _ = (ImageChange::Upload {",
+        [THUMB_SMALL, THUMB_IDS],
+    ),
+    (
+        "a picture asked for twice is decoded twice",
+        "        if let Some((_, thumb)) = self.by_path.get(path) {\n            return *thumb;\n        }\n",
+        "",
+        [THUMB_SMALL],
+    ),
+    (
+        "two pictures share an id",
+        "        self.next_id = self.next_id.wrapping_add(1);\n",
+        "",
+        [THUMB_IDS],
+    ),
+    (
+        "a picture that cannot be read waits for ever",
+        "                Err(_why) => Thumb::Failed,",
+        "                Err(_why) => Thumb::Loading,",
+        [THUMB_FAILS],
+    ),
+    (
+        "the worker wakes nobody",
+        "                            waker.wake_by_ref();",
+        "                            let _ = waker;",
+        [THUMB_WAKE],
+    ),
+    (
+        "a ready picture's size is not its own",
+        "                    Thumb::Ready { id, width, height }",
+        "                    Thumb::Ready { id, width: height, height: width }",
+        [THUMB_SMALL],
+    ),
+]
+
 TABLES = {
     "main.rs": MUTATIONS,
     "recyclebins.rs": RECYCLEBINS,
+    "thumbs.rs": THUMBS,
 }
 
 if __name__ == "__main__":

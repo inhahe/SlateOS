@@ -24,7 +24,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| F-Q1 | F | -- | relayed 2026-10-09 (B) |
+| F-Q1 | F | §1370 (HEIC, and HEVC video, a separate install) | recorded |
 | C-Q31 | C | the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | relayed 2026-10-09 for lane C's decision entry |
 | B-Q24 | B | -- | relayed 2026-10-09 (answered twice, "Claude's recommendation" and "A", which agree: A) |
 | A-Q22 | A | §1564 | recorded |
@@ -50,14 +50,14 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | E-Q3 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
 | E-Q4 | E | -- | relayed 2026-10-09 (Claude's recommendation, with a question) |
 | E-Q5 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| F-Q3 | F | -- | relayed 2026-10-09 (Claude's recommendation, with three choices for a capture) |
-| F-Q4 | F | -- | relayed 2026-10-09 (A) |
-| F-Q5 | F | -- | relayed 2026-10-09 (A, with a note) |
-| F-Q6 | F | -- | relayed 2026-10-09 (B, with additions) |
-| F-Q7 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q8 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q9 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q10 | F | -- | relayed 2026-10-09 (A, with a question) |
+| F-Q3 | F | §1371 (the person's action is the permission; scheduled capture asks once, for its run, or always, in A-Q26's store) | recorded |
+| F-Q4 | F | §1372 (rav1d's assembly) | recorded |
+| F-Q5 | F | §1373; the note in `deferred-questions/F-when-slateos-is-built-for-x86-64-v3-...` | recorded |
+| F-Q6 | F | §1374 (PIN pairing; turning it on sets up the name, the port and a certificate; a browser viewer for any screen); lanes C and D asked in `requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md` | recorded |
+| F-Q7 | F | §1375 (kept), answered "A" in `open-questions/answers.2.txt` after lane A's replies | recorded |
+| F-Q8 | F | §1376 (FFmpeg's H.264 decoder, translated), answered "B" in `open-questions/answers.2.txt` | recorded |
+| F-Q9 | F | §1377 (FFmpeg's fixed-point AAC decoder, translated), answered "B" in `open-questions/answers.2.txt` | recorded |
+| F-Q10 | F | §1378 (Chrome's colour management: skcms, Chrome's HDR handling); its question -- printers -- answered by lane A: Little CMS when printing is built | recorded |
 | B-Q23 | B | -- | **not answered** in this file; the first "B-Q24" line may have been meant for it -- lane A asked the operator |
 
 ## open-questions-answers.2.txt

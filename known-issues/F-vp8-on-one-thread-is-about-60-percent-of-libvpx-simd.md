@@ -1,8 +1,9 @@
 ### [F] VP8 of one token partition decodes at about 60% of libvpx's SIMD speed -- 2026-10-05
 
 **Status:** OPEN (lane F) -- the first of two fixes is in (2026-10-05); the
-larger part of the second waits on `open-questions/F-Q5.md` (SIMD needs
-`unsafe`).
+larger part of the second, SIMD behind run-time checks, which needs
+`unsafe`, was allowed by the operator 2026-10-09 (F-Q5, design-decisions
+§1373) and is to do.
 
 **In short:** most VP8 video is coded in one "token partition" (one stream
 of coefficients per frame), which no decoder can split among processor
@@ -40,8 +41,8 @@ times as fast on two threads as on one, 720p 1.25, 640x360 1.17 -- short
 of the 1.45 the filter's third of the work allows, because decoding a row
 is still on one thread with the frame header and modes before it.
 
-**What remains: fewer instructions in the hot loops** -- and the largest
-part waits on `open-questions/F-Q5.md`. By callgrind (20 frames of the 1080p
+**What remains: fewer instructions in the hot loops** -- the largest
+part by the run-time SIMD §1373 allows. By callgrind (20 frames of the 1080p
 stream, one thread, 2.01 G instructions), the loop filter's edges are a
 third of the whole (673 M), and their arithmetic, which the compiler
 already runs sixteen pixels at a time, is the small part of that: about
@@ -53,7 +54,7 @@ them scalar: 484 instructions), shifts and masks on eight-byte words (525
 executed against the byte copy's 428), and the SSE2 intrinsics themselves,
 which Rust 1.95 lets safe code name only from a function marked as needing
 SSE2 -- itself callable only with `unsafe`, though every x86-64 processor
-has SSE2. F-Q5's option A, extended to VP8, would allow it. Motion
+has SSE2. The operator allowed that one `unsafe` call (F-Q5, §1373). Motion
 compensation (about 460 M) and the coefficients (about 220 M) follow.
 
 A third pipeline stage -- coefficients on one thread, prediction and

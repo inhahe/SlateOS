@@ -65,9 +65,9 @@
 //! the reading order and the picture's description follow `mov.c`'s
 //! functions closely, each named where it is ported, with `libavutil`'s
 //! rationals beneath them. FFmpeg is LGPL version 2.1 or later, and so is
-//! this crate, its licence in `licenses/`. Whether SlateOS keeps an LGPL
-//! demuxer or has one written again from the specification and these tests
-//! is `open-questions/F-Q7.md`.
+//! this crate, its licence in `licenses/`. The operator decided to keep it
+//! so rather than have it written again from the specification
+//! (design-decisions §1375).
 //!
 //! # A hostile file
 //!

@@ -1,6 +1,11 @@
 ### [F] Video is shown without colour management: HDR looks dim and grey, wide gamut oversaturated -- 2026-10-04
 
 **Status:** OPEN (lane F) -- a missing subsystem, not a bug in what exists.
+**Decided 2026-10-09** (F-Q10, design-decisions §1378): colour management
+copies Chrome's -- skcms for pictures' profiles, Chrome's own HDR handling
+for video, held to Chrome's pixels. In progress: what each video says of its
+light (transfer, mastering display, content light level) is read, as FFmpeg
+reads it; Chrome's tone mapping is next (`roadmap.md`, "Colour management").
 
 **In short:** a video's pictures are turned into pixels by the recipe the
 video names (its matrix and range, `gui/video/codec`, design-decisions §1346),

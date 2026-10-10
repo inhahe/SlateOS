@@ -4247,8 +4247,10 @@ lane C's `guitk`.
     vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
     One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
     (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
-    reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
-    chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
+    reuse. `[ ]` The rest of the gap to libvpx's SIMD on one core: SSSE3/AVX2
+    copies of motion compensation and the loop filter, chosen at run time,
+    one checked `unsafe` call each -- the operator allowed it 2026-10-09
+    (F-Q5, §1373); the same for VP8's lane shuffles.
   - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
     CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
     transforms and quantisers, bit-exact against libvpx's C; the bitstream
@@ -4304,12 +4306,22 @@ lane C's `guitk`.
     queues the frames to decode. Tested end to end, compositor to decoded
     pixels. `[ ]` The remote desktop service that reads the stream, and with
     it coding off the compositor's thread
-    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`).
+    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`):
+    as the operator decided it (F-Q6, §1374), a device pairs by PIN as with
+    Chrome Remote Desktop and is remembered by key; the viewer is a web page
+    the machine serves over HTTPS, for phones, tablets and desktops, zooming
+    and scrolling the remote screen; and turning it on sets up the dynamic
+    DNS name, the router's port and a Let's Encrypt certificate, from lane
+    D's pieces, in lane C's Settings page
+    (`requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
-  and gets thumbnails wherever a picture does. HEIC waits on
-  `open-questions.md` F-Q1 (a patent question), and would reuse the container.
+  and gets thumbnails wherever a picture does.
+  - `[ ]` HEIC, as an optional install (F-Q1 answered B, §1370): an HEVC
+    decoder (libde265, LGPL, as a separate replaceable helper) that a fresh
+    install lacks and offers the first time a HEIC file is opened; the
+    container reader serves HEIC as is. One decoder for HEVC video too.
   - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
     alpha, gain maps, sequences; `dimensions` and `pixel_format` match
     Pillow's libavif on all 224 files of the AOM and libavif corpora.
@@ -4336,9 +4348,11 @@ lane C's `guitk`.
     byte for byte on 28 fixtures made here
     (`tests/data/generate_avif_rescale.py`).
   - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
-    twice dav1d's time, one thread); making rav1d faster waits on
-    `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
-    (known-issues.md, "[F] AVIF decoding has no committed benchmark").
+    twice dav1d's time, one thread). `[ ]` rav1d's hand-written assembly
+    (F-Q4 answered A, §1372): its `asm` feature, assembled with NASM at
+    build time and chosen at run time, its pixels held to the Rust's on every
+    fixture (known-issues.md, "[F] AVIF decoding has no committed
+    benchmark").
 
 - `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
   codec support"): the video player (`apps/videoplayer`, lane E) has its
@@ -4414,7 +4428,8 @@ lane C's `guitk`.
         seeks held to ffprobe's, and every byte of six files damaged in
         turn; and what a track says of its picture (colour, pixel shape,
         display matrix, clean aperture), held to ffprobe over 28 files more.
-        It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+        It carries FFmpeg's licence (LGPL), kept so by the operator (F-Q7
+        answered A, §1375).
       - `[x]` A file's claims held to its length: its tracks index at most a
         sample a byte of it between them, FFmpeg's own ceilings kept exactly
         -- after the fuzzer found a 734-byte file that asked for 46 GB.
@@ -4435,10 +4450,11 @@ lane C's `guitk`.
     - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
   - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
-    write into MP4: `videocodec` refuses them by name today. A decoder for
-    each, held to its reference as VP8's and VP9's are. Whether to include
-    one, and which code to start from, is the operator's:
-    `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
+    write into MP4: `videocodec` refuses them by name today.
+    - `[ ]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
+      answered B, §1376), included, held picture for picture to FFmpeg and
+      the conformance streams; every profile, interlaced, 10-bit and 4:2:2.
+    - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point
       decoder ported -- SILK, hybrid and CELT, concealment, in-band FEC,
@@ -4523,7 +4539,7 @@ lane C's `guitk`.
           dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
-        - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
+        - `[ ]` AAC, which most MP4 files carry: FFmpeg's fixed-point decoder translated into `gui/video/aac` (F-Q9 answered B, §1377), included, LC and HE-AAC, held bit for bit to FFmpeg as Opus and Vorbis are to theirs.
   - `[x]` Subtitles (2026-10-05, design-decisions §1360):
     `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
     cue by cue -- start, end, and the text as SRT markup whatever the
@@ -4595,13 +4611,36 @@ lane C's `guitk`.
       other channels and CEA-708 would take:
       `known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`.
 
+- `[-]` `[F]` **Colour management, as Chrome does it** (F-Q10 answered A,
+  §1378): pictures' ICC profiles through a port of skcms, Skia's colour
+  library; HDR and wide-gamut video through Chrome's own handling, held to
+  Chrome's pixels; the screen taken to be sRGB until screens report their
+  colours, then the compositor's to manage
+  (`known-issues/F-video-is-shown-without-colour-management.md`).
+  - `[-]` What a video says of its light, read as FFmpeg reads it -- the
+    transfer (PQ, HLG), the mastering display and the content light level,
+    from AV1's metadata OBUs, Matroska's `Colour`, MP4's `colr`, `mdcv` and
+    `clli` and VP9's `SmDm` and `CoLL` -- which Chrome's handling needs.
+    Done in a scratch branch (`lane-f-hdr`), merging next.
+  - `[ ]` Chrome's tone mapping of PQ and HLG, and its BT.2020 colours, on
+    every HDR frame.
+  - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
+- `[ ]` `[F]` **Screen capture** (F-Q3 answered, §1371): the capture request
+  in `gui/remote`'s protocol and `gui/window`'s call; in the compositor,
+  Print Screen and its own region and window picker, whose pick is the
+  permission, and for programs capturing on their own schedule a prompt only
+  the compositor can draw -- once, for the program's run, or always (kept in
+  lane A's grant store by the program's fingerprint, §1568). Answers lane
+  E's `requests/e-f-an-application-cannot-read-the-screen-so-no-screenshot-can-be-taken.md`.
+
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a
   channel's peer, a TCP peer cannot say what process it is, and `client_pid`
   is a per-connection number. Unblocks the process explorer's window picker
   (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
-  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
-  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  screen capture's prompt (F-Q3, §1371: who is asking, and an "always" kept
+  by the program's fingerprint), per-program grouping on the taskbar, and
+  the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
   design-decisions §1336.
   - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
     `Socket` runs over TCP or a channel from the service registry, through

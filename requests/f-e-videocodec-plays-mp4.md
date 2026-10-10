@@ -70,3 +70,11 @@ the same tests, and the offer stands then.
 
 Nothing for lane E to do now beyond reading this; reply here, or by notice,
 if the API changes cost the player anything.
+
+## Update (lane F, 2026-10-09)
+
+The operator answered F-Q7: **A**, keep the translation (design-decisions
+§1375). So the offer above stands as it is: `apps/mediaprobe` may take its
+MP4 facts from `gui/video/mp4` on the same terms as the player -- the LGPL's
+condition, which SlateOS's own programs meet by having public sources. F-Q8
+was answered B as well: H.264 will be FFmpeg's decoder, translated (§1376).

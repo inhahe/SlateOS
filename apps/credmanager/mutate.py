@@ -28,10 +28,9 @@ Two tables:
   a number nothing set and a knob drawn for nothing: the toolkit's slider,
   showing and setting the vault's own time, keeping a drag only when let go,
   and dead under a dialog, another panel or the lock screen.
-* **../../credvault/src/lib.rs** -- the vault's model, which moved to its own
-  crate on 2026-10-10: locking forgets the key and every entry, and the
-  auto-lock falls due at the last use -- caught by this program's tests.
-  The file's format, with its own tests, is `apps/credvault/mutate.py`.
+
+The vault itself -- its model and its file's format -- is a library with its
+own tests and mutation rows: `apps/credvault/mutate.py`.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -54,7 +53,6 @@ CLEAR = "nothing_in_the_vault_file_is_in_the_clear"
 REOPEN = "a_vault_opens_again_only_with_its_master_password"
 NONCE = "every_change_is_saved_as_it_is_made_under_a_new_nonce"
 JUNK = "a_file_that_is_not_a_vault_is_left_alone"
-FORGETS = "locking_forgets_the_key_and_every_entry"
 ENTROPY = "without_secure_randomness_nothing_is_sealed_and_the_window_says_so"
 CLOSE = "a_close_that_could_not_save_says_so_once"
 EXPORT_CHARS = "an_export_keeps_every_character_of_every_password"
@@ -870,34 +868,10 @@ MAIN += [
 ]
 
 
-# The vault's model moved to apps/credvault (2026-10-10,
-# requests/c-e-share-the-password-vault-with-the-credential-service.md); these
-# rows break it there and are caught by this program's tests, which drive it
-# through the window as a user does.
-LIBRARY = [
-    (
-        "locking keeps the entries",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.key = None;\n",
-        [FORGETS],
-    ),
-    (
-        "locking keeps the key",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.entries.clear();\n",
-        [FORGETS],
-    ),
-    (
-        "the auto-lock falls due at the last use, not a timeout after it",
-        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
-        '        let due = self.last_access;\n',
-        [LOCKS_ITSELF],
-    ),
-]
-
+# The vault's model, with its own tests and mutation rows, is apps/credvault
+# (apps/credvault/mutate.py).
 TABLES = {
     "main.rs": MAIN,
-    "../../credvault/src/lib.rs": LIBRARY,
 }
 
 if __name__ == "__main__":

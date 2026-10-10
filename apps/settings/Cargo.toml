@@ -39,6 +39,10 @@ sound = { path = "../../gui/sound" }
 # and written as the desktop reads them (lane C's `gui/windowrules`,
 # requests/c-e-a-window-rules-page-in-settings.md).
 windowrules = { path = "../../gui/windowrules" }
+# What programs add to a file's right-click menu -- service menus, in the
+# format KDE's file manager reads (lane C's `gui/servicemenus`, §1448) -- and
+# which of them the user turned on, for the Context Menus page.
+servicemenus = { path = "../../gui/servicemenus" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.

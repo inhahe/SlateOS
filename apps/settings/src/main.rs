@@ -198,6 +198,7 @@ impl SettingsCategory {
             Self::Apps => &[
                 SettingsPage::DefaultApps,
                 SettingsPage::WindowRules,
+                SettingsPage::ContextMenus,
                 SettingsPage::StartupApps,
                 SettingsPage::InstalledApps,
             ],
@@ -250,6 +251,9 @@ pub enum SettingsPage {
     /// What happens to a program's windows as they open: lane C's window
     /// rules (`gui/windowrules`), kept in `window-rules.yaml`.
     WindowRules,
+    /// What programs add to a file's right-click menu, each switched on or
+    /// off: lane C's service menus (`gui/servicemenus`, §1448).
+    ContextMenus,
     StartupApps,
     InstalledApps,
     // Accounts
@@ -305,6 +309,7 @@ impl SettingsPage {
             Self::LockScreen => "lock-screen",
             Self::DefaultApps => "default-apps",
             Self::WindowRules => "window-rules",
+            Self::ContextMenus => "context-menus",
             Self::StartupApps => "startup-apps",
             Self::InstalledApps => "installed-apps",
             Self::UserAccounts => "user-accounts",
@@ -357,6 +362,7 @@ impl SettingsPage {
             Self::LockScreen => "Lock Screen",
             Self::DefaultApps => "Default Apps",
             Self::WindowRules => "Window Rules",
+            Self::ContextMenus => "Context Menus",
             Self::StartupApps => "Startup Apps",
             Self::InstalledApps => "Installed Apps",
             Self::UserAccounts => "User Accounts",
@@ -880,6 +886,19 @@ pub struct SettingsState {
     /// The rule being written, while the editor is open: the page is the
     /// editor then.
     rule_draft: Option<rules::RuleDraft>,
+    /// What programs add to a file's right-click menu, as the Context Menus
+    /// page lists them: every service menu found, and every file that looked
+    /// like one and is not offered (`servicemenus::scan`). Read on entering
+    /// the page.
+    service_menus: servicemenus::Scan,
+    /// Which of them are on: `context-menus.yaml`, kept with its comments.
+    service_choices: servicemenus::ChoicesFile,
+    /// Where service menus are looked for: `None` is the environment's
+    /// (`servicemenus::Dirs::standard`); a test points it at scratch ones, so
+    /// the page lists no menu of the machine running it.
+    service_dirs: Option<servicemenus::Dirs>,
+    /// Why the last switch could not be kept, if it could not.
+    service_error: Option<String>,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -1740,6 +1759,11 @@ impl SettingsState {
         if page == SettingsPage::WindowRules {
             self.refresh_rules();
         }
+        // The context menus and the choices about them, read on entry: a
+        // program installed since may have added one.
+        if page == SettingsPage::ContextMenus {
+            self.refresh_service_menus();
+        }
         // The themes that recommend fonts, read on entry as the Themes page
         // reads them.
         if page == SettingsPage::Fonts {
@@ -2212,6 +2236,10 @@ impl SettingsState {
             before != (self.lock_clock_seconds, self.lock_clock_date)
         } else if name == windowrules::file::CONFIG_NAME {
             self.reread_rules()
+        } else if name == servicemenus::CONFIG_NAME {
+            let before = self.service_choices.choices.clone();
+            self.service_choices = servicemenus::ChoicesFile::load();
+            before != self.service_choices.choices
         } else if name == associations::CONFIG_NAME {
             let before = (
                 std::mem::take(&mut self.default_apps),
@@ -2491,6 +2519,10 @@ impl SettingsState {
             rules_error: None,
             rule_deleted: None,
             rule_draft: None,
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::ChoicesFile::new(),
+            service_dirs: None,
+            service_error: None,
             mono_families: Vec::new(),
             family_check: guitk::text::family_installed,
             lock_after_minutes: 0,
@@ -2616,6 +2648,24 @@ fn listed<T>(
         items.iter().map(&label).collect(),
         items.iter().position(chosen).unwrap_or(0),
     )
+}
+
+/// A context menu in a sentence: what it adds, the kinds of file it is for,
+/// and whose it is -- which is why it is on or off before anyone chose.
+fn service_menu_said(menu: &servicemenus::ServiceMenu) -> String {
+    // Never none: `servicemenus::scan` lists a menu with no usable item
+    // among the skipped files, with why.
+    let items: Vec<String> = menu
+        .actions
+        .iter()
+        .map(|action| format!("\u{201c}{}\u{201d}", action.name))
+        .collect();
+    let adds = format!("Adds {}", items.join(", "));
+    let whose = match menu.origin {
+        servicemenus::Origin::System => "Installed with the system: on until you turn it off.",
+        servicemenus::Origin::User => "Yours: off until you turn it on.",
+    };
+    format!("{adds}, for {}. {whose}", menu.mime_types.join(", "))
 }
 
 fn text_clipped(
@@ -3427,6 +3477,9 @@ enum ToggleId {
     /// Whether the rule being written is for the first window it matches
     /// only.
     RuleOnce,
+    /// Whether the `n`-th service menu is offered: written by
+    /// [`SettingsState::set_service_menu`], not through the snapshot.
+    ServiceMenu(usize),
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -4936,6 +4989,7 @@ impl SettingsState {
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
             SettingsPage::WindowRules => self.build_window_rules_page(sink),
+            SettingsPage::ContextMenus => self.build_context_menus_page(sink),
             SettingsPage::About => self.build_about_page(sink),
             SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
@@ -5361,6 +5415,100 @@ impl SettingsState {
                 pal.base,
                 16.0,
             );
+        }
+    }
+
+    // --- Context Menus page ---
+
+    /// The Context Menus page
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`, section 2):
+    /// what programs add to the menu a right-click on a file opens. Every
+    /// service menu found -- by its name, with a switch, what it adds, the
+    /// kinds of file it is for and whose it is -- and every file that looked
+    /// like one and is not offered, and every item of a menu that is not,
+    /// each with why: the one place a user can learn why an item they
+    /// installed never appears.
+    ///
+    /// A switch is written to `context-menus.yaml` as it is flipped
+    /// ([`Self::set_service_menu`]); the desktop and the file manager read it
+    /// again when the change is announced, so it holds from the next
+    /// right-click.
+    fn build_context_menus_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Context Menus");
+        s.note(
+            "What programs add to the menu a right-click on a file opens. A menu installed with the system is on until you turn it off; one put in your own folder is off until you turn it on.",
+            44.0,
+        );
+        if let Some(error) = &self.service_error {
+            s.problem(error);
+        }
+        if self.service_menus.menus.is_empty() {
+            s.note(
+                "No program has added anything to the right-click menu.",
+                28.0,
+            );
+        }
+        for (index, menu) in self.service_menus.menus.iter().enumerate() {
+            s.gap();
+            let name = menu
+                .name
+                .clone()
+                .unwrap_or_else(|| std::path::Path::new(&menu.id).shown().to_string());
+            s.named_toggle_row(
+                &name,
+                ToggleId::ServiceMenu(index),
+                self.service_choices.choices.is_on(menu),
+            );
+            s.note(&service_menu_said(menu), 28.0);
+            for why in &menu.unusable {
+                s.note(&format!("Not offered: {why}."), 28.0);
+            }
+        }
+        if !self.service_menus.skipped.is_empty() {
+            s.gap();
+            s.section("Not Offered");
+            s.note(
+                "These files look like context menus and are not offered, each for the reason beside it.",
+                28.0,
+            );
+            for skipped in &self.service_menus.skipped {
+                let file = skipped.path.file_name().map_or_else(
+                    || skipped.path.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                s.note(&format!("{file}: {}.", skipped.why), 28.0);
+            }
+        }
+    }
+
+    /// Read the context menus and the choices about them, from where they
+    /// are looked for.
+    fn refresh_service_menus(&mut self) {
+        let dirs = self
+            .service_dirs
+            .clone()
+            .unwrap_or_else(servicemenus::Dirs::standard);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        self.service_menus = servicemenus::scan(&dirs, locale.as_ref());
+        self.service_choices = servicemenus::ChoicesFile::load();
+    }
+
+    /// Turn the `index`-th context menu on or off, and keep it -- or say why
+    /// it could not be kept, and show the choices as the file holds them:
+    /// what the desktop and the file manager go by, not the switch as it was
+    /// flipped.
+    fn set_service_menu(&mut self, index: usize) {
+        let Some(menu) = self.service_menus.menus.get(index) else {
+            return;
+        };
+        let on = self.service_choices.choices.is_on(menu);
+        self.service_choices.choices.set(menu, !on);
+        match self.service_choices.save() {
+            Ok(()) => self.service_error = None,
+            Err(e) => {
+                self.service_error = Some(format!("The choice could not be kept: {e}"));
+                self.service_choices = servicemenus::ChoicesFile::load();
+            }
         }
     }
 
@@ -9481,6 +9629,7 @@ impl SettingsState {
             }
             RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),
             RowHit::Toggle(ToggleId::RuleEnabled(index)) => self.set_rule_enabled(index),
+            RowHit::Toggle(ToggleId::ServiceMenu(index)) => self.set_service_menu(index),
             RowHit::Toggle(id) => {
                 // Saved, where it is one of the lock screen's two, by the
                 // whole-snapshot comparison in `handle_event`, as every other
@@ -9794,6 +9943,9 @@ impl SettingsState {
             // snapshot: see `set_rule_enabled`.
             ToggleId::RuleEnabled(_) => return None,
             ToggleId::RuleOnce => &mut self.rule_draft.as_mut()?.once,
+            // `context-menus.yaml` is written as each switch is flipped: see
+            // `set_service_menu`.
+            ToggleId::ServiceMenu(_) => return None,
         })
     }
 
@@ -17310,6 +17462,296 @@ mod tests {
                 .any(|t| t.starts_with("No theme installed here recommends fonts")),
             "the page says no theme recommends fonts when one does"
         );
+    }
+
+    // --- The Context Menus page ---------------------------------------------------
+
+    /// A system data folder and a user's, in a scratch folder: the system's
+    /// holding a menu for text, one item of it with no command, a menu with
+    /// no name of its own, and a file that names no kind of file; the user's
+    /// holding a menu of their own.
+    fn scratch_service_menus() -> (scratchdir::ScratchDir, servicemenus::Dirs) {
+        let dir = scratchdir::ScratchDir::new("settings-context-menus");
+        let system = dir.dir().join("system");
+        let user = dir.dir().join("user");
+        for (base, name, text) in [
+            (
+                &system,
+                "shout.desktop",
+                "[Desktop Entry]\nType=Service\nName=Shouting\nMimeType=text/plain;\nActions=shout;mute;\n\n[Desktop Action shout]\nName=Shout it\nExec=shout %f\n\n[Desktop Action mute]\nName=Mute it\n",
+            ),
+            (
+                &system,
+                "nowhere.desktop",
+                "[Desktop Entry]\nType=Service\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go %f\n",
+            ),
+            (
+                &system,
+                "plain.desktop",
+                "[Desktop Entry]\nType=Service\nMimeType=text/plain;\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go %f\n",
+            ),
+            (
+                &user,
+                "mine.desktop",
+                "[Desktop Entry]\nType=Service\nName=Mine\nMimeType=image/png;\nActions=look;\n\n[Desktop Action look]\nName=Look at it\nExec=look %f\n",
+            ),
+        ] {
+            let folder = base.join("kio").join("servicemenus");
+            std::fs::create_dir_all(&folder).expect("the menus folder");
+            std::fs::write(folder.join(name), text).expect("the menu");
+        }
+        let dirs = servicemenus::Dirs {
+            user: Some(user),
+            system: vec![system],
+        };
+        (dir, dirs)
+    }
+
+    /// The Context Menus page over `dirs`' menus.
+    fn context_menus_page(dirs: &servicemenus::Dirs) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.service_dirs = Some(dirs.clone());
+        state.current_category = SettingsCategory::Apps;
+        state.go_to_page(SettingsPage::ContextMenus);
+        state
+    }
+
+    /// The `n`-th menu the page lists, by its name.
+    fn service_menu_named(state: &SettingsState, name: &str) -> usize {
+        state
+            .service_menus
+            .menus
+            .iter()
+            .position(|menu| menu.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("the page lists no menu {name:?}"))
+    }
+
+    /// Whether the switch `id` is drawn on -- its track filled green -- read
+    /// from the paint inside the switch's click band; `None` if no switch is
+    /// drawn there.
+    fn switch_drawn_on(state: &SettingsState, id: ToggleId) -> Option<bool> {
+        let (bx, by, bw, bh) = hit_bands(state)
+            .into_iter()
+            .find(|(what, _)| *what == RowHit::Toggle(id))?
+            .1;
+        let pal = state.palette();
+        state.render_tree().commands.iter().find_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if (*width - TOGGLE_WIDTH).abs() < 0.01
+                && (*height - TOGGLE_HEIGHT).abs() < 0.01
+                && *x >= bx
+                && x + width <= bx + bw
+                && *y >= by
+                && y + height <= by + bh =>
+            {
+                Some(*color == pal.green)
+            }
+            _ => None,
+        })
+    }
+
+    /// **Every context menu is listed with what it adds, for which files and
+    /// whose it is, and what is not offered says why**
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`): a system
+    /// menu on, the user's own off, an item with no command and a file that
+    /// names no kind of file each with its reason.
+    #[test]
+    fn every_context_menu_is_listed_and_what_is_not_offered_says_why() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-listed", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let state = context_menus_page(&dirs);
+            let texts = drawn_texts(&state);
+            // A menu with no name of its own is listed by its file's.
+            for name in ["Shouting", "Mine", "plain.desktop"] {
+                assert!(
+                    texts.iter().any(|t| t == name),
+                    "{name} is not listed: {texts:?}"
+                );
+            }
+            let shouting = service_menu_named(&state, "Shouting");
+            let mine = service_menu_named(&state, "Mine");
+            let on = |at: usize| {
+                state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[at])
+            };
+            assert!(on(shouting), "a system menu is not on");
+            assert!(
+                !on(mine),
+                "the user's own menu is on before they turned it on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(shouting)),
+                Some(true),
+                "a system menu's switch is not drawn on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(mine)),
+                Some(false),
+                "the user's own menu's switch is not drawn off"
+            );
+            let said = texts.join(" ");
+            for words in [
+                "\u{201c}Shout it\u{201d}, for text/plain. Installed with the system",
+                "Yours: off until you turn it on.",
+                "Not offered: mute: it has no Exec.",
+                "nowhere.desktop: names no kind of file it is for (MimeType).",
+            ] {
+                assert!(said.contains(words), "{words:?} is not said: {said}");
+            }
+        });
+    }
+
+    /// **A switch turns a menu on or off, and is written to the file the
+    /// desktop and the file manager read** -- a system menu off, the user's
+    /// own on.
+    #[test]
+    fn a_context_menus_switch_reaches_the_file() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-switch", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let mine = service_menu_named(&state, "Mine");
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(mine)));
+            assert_eq!(state.service_error, None);
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(shouting)),
+                Some(false),
+                "the switch turned off is drawn on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(mine)),
+                Some(true),
+                "the switch turned on is drawn off"
+            );
+            let saved = servicemenus::ChoicesFile::load().choices;
+            assert!(
+                !saved.is_on(&state.service_menus.menus[shouting]),
+                "turning a system menu off was not written"
+            );
+            assert!(
+                saved.is_on(&state.service_menus.menus[mine]),
+                "turning the user's own menu on was not written"
+            );
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert!(
+                servicemenus::ChoicesFile::load()
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting]),
+                "turning it on again was not written"
+            );
+        });
+    }
+
+    /// **The choices changed elsewhere are read again** -- the file manager
+    /// or a hand edit -- and with no menus at all the page says so.
+    #[test]
+    fn context_menu_choices_changed_elsewhere_are_read_again() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-reread", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let mut elsewhere = servicemenus::ChoicesFile::load();
+            elsewhere
+                .choices
+                .set(&state.service_menus.menus[shouting], false);
+            elsewhere.save().expect("written elsewhere");
+            state.handle_event(&announce(servicemenus::CONFIG_NAME));
+            assert!(
+                !state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting]),
+                "a choice made elsewhere is not shown"
+            );
+
+            let empty = servicemenus::Dirs {
+                user: None,
+                system: Vec::new(),
+            };
+            let state = context_menus_page(&empty);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t.starts_with("No program has added anything")),
+                "with no menus the page does not say so"
+            );
+        });
+    }
+
+    /// **A change whose file cannot be written says why, in full, and the
+    /// page shows what the file holds** -- a window rule's switch and a
+    /// context menu's, each file blocked by a folder of its name -- **and
+    /// once it can be written, the next change is kept and the complaint
+    /// goes.**
+    #[test]
+    fn a_change_that_cannot_be_kept_says_why_and_shows_what_the_file_holds() {
+        settingsfile::testing::with_scratch_config("settings-not-kept", |root| {
+            let block = |name: &str| {
+                let path = settingsfile::testing::scratch_path(root, name);
+                std::fs::create_dir_all(&path).expect("a folder where the file goes");
+                path
+            };
+            let said =
+                |state: &SettingsState, words: &str| drawn_texts(state).join(" ").contains(words);
+
+            let rules_file = block(windowrules::file::CONFIG_NAME);
+            let mut state = rules_page(root, None);
+            let was = state.rules[0].enabled;
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert!(
+                said(&state, "The rules could not be kept:"),
+                "{:?}",
+                drawn_texts(&state)
+            );
+            assert_eq!(
+                state.rules[0].enabled, was,
+                "the page shows a change the file does not hold"
+            );
+            std::fs::remove_dir(&rules_file).expect("the folder taken away");
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert_eq!(
+                state.rules_error, None,
+                "the complaint outlived a change that was kept"
+            );
+            assert_ne!(state.rules[0].enabled, was);
+
+            let menus_file = block(servicemenus::CONFIG_NAME);
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let is_on = |state: &SettingsState| {
+                state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting])
+            };
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert!(
+                said(&state, "The choice could not be kept:"),
+                "{:?}",
+                drawn_texts(&state)
+            );
+            assert!(
+                is_on(&state),
+                "the switch shows a change the file does not hold"
+            );
+            std::fs::remove_dir(&menus_file).expect("the folder taken away");
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert_eq!(
+                state.service_error, None,
+                "the complaint outlived a change that was kept"
+            );
+            assert!(!is_on(&state));
+        });
     }
 
     // --- Notes wrap to their column --------------------------------------------

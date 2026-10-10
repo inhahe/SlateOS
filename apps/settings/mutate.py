@@ -2398,6 +2398,121 @@ MUTATIONS += [
 ]
 
 
+# The Context Menus page (2026-10-10, requests/c-e-programs-add-to-a-files-
+# right-click-menu.md, section 2): every service menu with a switch, what it
+# adds, for which files and whose; what is not offered with why; a switch
+# written as it is flipped, or why it could not be.
+CM_LISTED = "every_context_menu_is_listed_and_what_is_not_offered_says_why"
+CM_SWITCH = "a_context_menus_switch_reaches_the_file"
+CM_REREAD = "context_menu_choices_changed_elsewhere_are_read_again"
+CM_NOT_KEPT = "a_change_that_cannot_be_kept_says_why_and_shows_what_the_file_holds"
+
+MUTATIONS += [
+    (
+        "the context menus are not read on entering the page",
+        "        if page == SettingsPage::ContextMenus {\n            self.refresh_service_menus();\n        }\n",
+        "",
+        [CM_LISTED],
+    ),
+    (
+        "a context menu's switch does nothing",
+        "            RowHit::Toggle(ToggleId::ServiceMenu(index)) => self.set_service_menu(index),\n",
+        "            RowHit::Toggle(ToggleId::ServiceMenu(_index)) => {}\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch flips nothing",
+        "        self.service_choices.choices.set(menu, !on);\n",
+        "        self.service_choices.choices.set(menu, on);\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch is not written",
+        "        match self.service_choices.save() {\n",
+        "        match Ok::<(), std::io::Error>(()) {\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch is drawn the other way",
+        "                self.service_choices.choices.is_on(menu),\n",
+        "                !self.service_choices.choices.is_on(menu),\n",
+        [CM_LISTED, CM_SWITCH],
+    ),
+    (
+        "a context menu with no name of its own is listed by none",
+        "                .unwrap_or_else(|| std::path::Path::new(&menu.id).shown().to_string());\n",
+        "                .unwrap_or_default();\n",
+        [CM_LISTED],
+    ),
+    (
+        "what a context menu adds is not said",
+        "            s.note(&service_menu_said(menu), 28.0);\n",
+        "",
+        [CM_LISTED],
+    ),
+    (
+        "an item not offered does not say why",
+        "                s.note(&format!(\"Not offered: {why}.\"), 28.0);\n",
+        "                let _ = why;\n",
+        [CM_LISTED],
+    ),
+    (
+        "a file not offered does not say why",
+        "                s.note(&format!(\"{file}: {}.\", skipped.why), 28.0);\n",
+        "                let _ = (file, &skipped.why);\n",
+        [CM_LISTED],
+    ),
+    (
+        "the user's own menu is said to be the system's",
+        "        servicemenus::Origin::User => \"Yours: off until you turn it on.\",\n",
+        "        servicemenus::Origin::User => \"Installed with the system: on until you turn it off.\",\n",
+        [CM_LISTED],
+    ),
+    (
+        "the kinds of file a menu is for are not said",
+        "    format!(\"{adds}, for {}. {whose}\", menu.mime_types.join(\", \"))\n",
+        "    format!(\"{adds}. {whose}\")\n",
+        [CM_LISTED],
+    ),
+    (
+        "with no context menus the page says nothing",
+        "        if self.service_menus.menus.is_empty() {\n",
+        "        if self.service_menus.menus.len() > 99 {\n",
+        [CM_REREAD],
+    ),
+    (
+        "context menu choices made elsewhere are not read",
+        "            let before = self.service_choices.choices.clone();\n            self.service_choices = servicemenus::ChoicesFile::load();\n",
+        "            let before = self.service_choices.choices.clone();\n",
+        [CM_REREAD],
+    ),
+    (
+        "a switch that could not be kept shows the change anyway",
+        "                self.service_error = Some(format!(\"The choice could not be kept: {e}\"));\n                self.service_choices = servicemenus::ChoicesFile::load();\n",
+        "                self.service_error = Some(format!(\"The choice could not be kept: {e}\"));\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "a context menu's complaint outlives a change kept",
+        "            Ok(()) => self.service_error = None,\n",
+        "            Ok(()) => {}\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "why a context menu's switch could not be kept is not said",
+        "        if let Some(error) = &self.service_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.service_error {}\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "why the rules could not be kept is not said",
+        "        if let Some(error) = &self.rules_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.rules_error {}\n",
+        [CM_NOT_KEPT],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

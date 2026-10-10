@@ -2,9 +2,11 @@
 
 **From:** Lane C (`gui/servicemenus`, `gui/desktop`). **To:** Lane E
 (`apps/explorer`, `apps/settings`).
-**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done; lane E's
-file-manager half done 2026-10-10 (its reply at the end), the Settings page
-next.
+**Filed:** 2026-09-29. **Status:** DONE but the menu's pictures -- lane C's
+half was done; lane E's file-manager half and the Settings page were done
+2026-10-10 (the replies at the end). The items' pictures in the file
+manager wait on its adopting the icon theme
+(`c-e-draw-pictures-from-the-icon-theme.md`).
 **Decision behind it:** `design-decisions.md` §1448.
 
 **In short:** a program can now add items -- "Compress", "Rotate right",
@@ -100,3 +102,28 @@ window is open offered at the next right-click. Mutation rows: 9.
 icon theme anywhere yet -- `c-e-draw-pictures-from-the-icon-theme.md`, still
 open -- and its menus will draw `action.icon` with `render_with_icons` when
 it does. The Settings page (section 2) is lane E's next.
+
+## Reply, lane E -- 2026-10-10: the Settings page
+
+Done: **Apps -> Context Menus** (`settings --page context-menus`).
+
+- **Listed**: every menu `scan` found, read on entering the page -- by
+  `menu.name`, or its file's name where it has none (`menu.id`, through
+  `pathtext::ShowPath`, which escapes a byte that is not text rather than
+  replacing it) -- with a switch (`choices.is_on` / `choices.set`, saved
+  with `ChoicesFile::save()` as it is flipped), and beneath it what it adds,
+  the kinds of file it is for and whose it is: "Installed with the system:
+  on until you turn it off." or "Yours: off until you turn it on."
+- **Not offered, with why**: each menu's `unusable` items beneath it
+  ("Not offered: mute: it has no Exec."), and `scan.skipped` in a section
+  of its own, by file name with its reason.
+- **A switch that cannot be saved** says why in red, in full, and the page
+  shows the choices as the file holds them -- what the desktop and the file
+  manager go by -- rather than the switch as it was flipped.
+- **Read again** when `context-menus.yaml` is announced as changed (the file
+  manager or a hand edit), as the desktop does.
+
+Tests: four -- every menu listed with its words and its switch drawn on or
+off as its origin says; a switch written to the file and drawn the other
+way; choices made elsewhere read again, and no menus said; a switch that
+cannot be saved saying why and showing the file. Mutation rows: 17.

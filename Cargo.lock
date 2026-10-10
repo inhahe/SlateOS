@@ -3748,6 +3748,7 @@ dependencies = [
  "quoting",
  "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "sound",
  "textline",

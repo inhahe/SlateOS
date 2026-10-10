@@ -8,9 +8,13 @@
 //! that bypasses the transform (lossless) reads the scans untransposed.
 //!
 //! The twelve tables live end to end in one array, in the order of
-//! `H264Context`'s fields. That is not cosmetic: a damaged stream can run a
-//! 4x4 block's coefficients one place past its scan, and FFmpeg then reads
-//! the first entry of the table after it -- which is what is read here.
+//! `H264Context`'s fields, after the 16 zero bytes FFmpeg keeps before them
+//! (`scan_padding`). That is not cosmetic: a damaged stream can run a 4x4
+//! block's coefficients one place past its scan, and FFmpeg then reads the
+//! first entry of the table after it; or run a CAVLC block's zeros out
+//! before its scan's start, and FFmpeg then reads up to 16 places before
+//! the first table -- zeros, which put the coefficients there at position
+//! 0, where they stay for the blocks after to take up. Both are read here.
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -73,17 +77,19 @@ const ZIGZAG_SCAN8X8_CAVLC: [u8; 64] = [
     56, 36, 23, 51, 45, 46, 54, 63,
 ];
 
+/// The zero bytes before the first table (`scan_padding`).
+const PADDING: usize = 16;
 /// Where each table starts in [`ScanTables::all`], in `H264Context`'s
 /// order.
-pub(crate) const ZIGZAG: usize = 0;
+pub(crate) const ZIGZAG: usize = PADDING;
 pub(crate) const ZIGZAG8X8: usize = ZIGZAG + 16;
 pub(crate) const ZIGZAG8X8_CAVLC: usize = ZIGZAG8X8 + 64;
 pub(crate) const FIELD: usize = ZIGZAG8X8_CAVLC + 64;
 pub(crate) const FIELD8X8: usize = FIELD + 16;
 pub(crate) const FIELD8X8_CAVLC: usize = FIELD8X8 + 64;
-/// The same six at QP 0.
-pub(crate) const Q0: usize = FIELD8X8_CAVLC + 64;
-const ALL: usize = 2 * Q0;
+/// How far each of the six is from its copy for QP 0.
+pub(crate) const Q0: usize = FIELD8X8_CAVLC + 64 - ZIGZAG;
+const ALL: usize = ZIGZAG + 2 * Q0;
 
 /// The scans a stream's slices read (`zigzag_scan` to
 /// `field_scan8x8_cavlc_q0`).
@@ -127,7 +133,7 @@ impl ScanTables {
             all[Q0 + FIELD8X8_CAVLC..Q0 + FIELD8X8_CAVLC + 64]
                 .copy_from_slice(&FIELD_SCAN8X8_CAVLC);
         } else {
-            all.copy_within(..Q0, Q0);
+            all.copy_within(ZIGZAG..ZIGZAG + Q0, ZIGZAG + Q0);
         }
         Self { all }
     }
@@ -166,8 +172,9 @@ pub(crate) struct Scan<'a> {
 
 impl Scan<'_> {
     /// The position `at` places past the scan's start. A position before
-    /// the first table or past the last is one FFmpeg reads from whatever
-    /// lies there in its context; it is refused here.
+    /// the padding or past the last table is one FFmpeg reads from whatever
+    /// lies there in its context -- a pointer's bytes before, `mb_y`'s after;
+    /// it is refused here.
     pub(crate) fn get(self, at: isize) -> Result<usize, DecodeError> {
         self.start
             .checked_add_signed(at)

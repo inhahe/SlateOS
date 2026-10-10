@@ -31,11 +31,35 @@ fn scans_are_stored_transposed_except_at_qp0_bypassing_the_transform() {
     assert_eq!(s.all[ZIGZAG + 2], 1);
     assert_eq!(s.all[ZIGZAG + 1], 4);
     // Without bypass, QP 0 reads the same transposed scans.
-    assert_eq!(s.all[..Q0], s.all[Q0..]);
+    assert_eq!(s.all[ZIGZAG..ZIGZAG + Q0], s.all[ZIGZAG + Q0..]);
     let b = ScanTables::new(true);
-    assert_eq!(b.all[..Q0], s.all[..Q0]);
+    assert_eq!(b.all[..ZIGZAG + Q0], s.all[..ZIGZAG + Q0]);
     assert_eq!(b.all[Q0 + ZIGZAG..Q0 + ZIGZAG + 16], ZIGZAG_SCAN);
     assert_eq!(b.all[Q0 + FIELD8X8_CAVLC + 1], FIELD_SCAN8X8_CAVLC[1]);
+}
+
+/// Up to 16 places before the first scan are FFmpeg's padding, zeros: a
+/// CAVLC block whose zeros run out before its scan's start puts its
+/// remaining coefficients at position 0. Before that is refused.
+#[test]
+fn before_the_first_scan_is_sixteen_zeros() {
+    let s = ScanTables::new(false);
+    let scan = Scan {
+        tables: &s.all,
+        start: ZIGZAG,
+    };
+    for at in -16..0 {
+        assert_eq!(scan.get(at), Ok(0));
+    }
+    assert_eq!(scan.get(-17), Err(DecodeError));
+    assert_eq!(scan.get(0), Ok(usize::from(s.all[ZIGZAG])));
+    // Past the last table is refused too.
+    let last = Scan {
+        tables: &s.all,
+        start: Q0 + FIELD8X8_CAVLC,
+    };
+    assert_eq!(last.get(63), Ok(63));
+    assert_eq!(last.get(64), Err(DecodeError));
 }
 
 /// A 4x4 run one past its scan reads the first entry of the 8x8 table that

@@ -1,12 +1,8 @@
-//! The vault on disk.
-//!
-//! Until 2026-09-27 the credential manager kept nothing: every entry was gone
-//! when the window closed, and the window said so in red. The vault is now one
-//! file, `<config>/credmanager/vault`, encrypted under a key made from the
-//! master password with the vetted primitives `rustcrypto/seal` wraps
-//! (`design-decisions.md` §539, §1218): Argon2id makes the key, and
-//! XChaCha20-Poly1305 encrypts -- and refuses to open anything that has been
-//! altered by so much as a bit.
+//! The vault on disk: one file ([`crate::store::vault_path`]), encrypted
+//! under a key made from the master password with the vetted primitives
+//! `rustcrypto/seal` wraps (`design-decisions.md` §539, §1218). Argon2id
+//! makes the key, and XChaCha20-Poly1305 encrypts -- and refuses to open
+//! anything that has been altered by so much as a bit.
 //!
 //! **The file:**
 //!
@@ -65,7 +61,9 @@ pub const HEADER_LEN: usize = NONCE_AT + seal::NONCE_LEN;
 /// The first line of the contents.
 const CONTENTS_HEADER: &str = "# SlateOS vault, format 1";
 
-/// The most key derivation a file may ask for.
+/// The most memory, in KiB, a file may ask its key to be made with: one of
+/// the three caps on the key derivation a file may ask for, which
+/// [`Header::parse`] refuses past.
 ///
 /// A vault file names the Argon2id parameters its key is made with, and
 /// opening one does that work before anything else can be checked -- so a
@@ -73,15 +71,21 @@ const CONTENTS_HEADER: &str = "# SlateOS vault, format 1";
 /// at the lock screen. Nothing this program writes comes near these; they are
 /// four times RFC 9106's largest recommendation (2 GiB, one pass) in memory,
 /// and far past any sane number of passes or lanes.
-const MAX_MEMORY_KIB: u32 = 8 * 1024 * 1024;
-const MAX_ITERATIONS: u32 = 64;
-const MAX_LANES: u32 = 64;
+pub const MAX_MEMORY_KIB: u32 = 8 * 1024 * 1024;
+/// The most passes a file may ask for; see [`MAX_MEMORY_KIB`].
+pub const MAX_ITERATIONS: u32 = 64;
+/// The most lanes a file may ask for; see [`MAX_MEMORY_KIB`].
+pub const MAX_LANES: u32 = 64;
 
 /// What makes the key, and the nonce the contents were sealed with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
+    /// How the key is made from the master password.
     pub kdf: seal::KdfParams,
+    /// What it is made with besides: drawn at random when the vault is made,
+    /// and kept for its life.
     pub salt: [u8; seal::SALT_LEN],
+    /// What the contents were sealed with: new for every seal.
     pub nonce: seal::Nonce,
 }
 
@@ -156,7 +160,8 @@ pub enum OpenError {
     /// The file ends before its contents begin.
     Truncated,
     /// The file asks for more work to make its key than any vault this
-    /// program writes; see [`MAX_MEMORY_KIB`].
+    /// program writes: past [`MAX_MEMORY_KIB`], [`MAX_ITERATIONS`] or
+    /// [`MAX_LANES`].
     TooCostly,
     /// The key made from this password does not open the file: the password
     /// is not the one it was saved with, or the file has been changed since.
@@ -246,10 +251,15 @@ pub fn open_file(bytes: &[u8], key: &seal::Key) -> Result<String, OpenError> {
 /// What a vault's contents hold.
 #[derive(Clone, Debug)]
 pub struct Contents {
+    /// The vault's name.
     pub name: String,
+    /// How many minutes it may sit unused, once open, before it locks itself.
     pub auto_lock_minutes: u32,
+    /// The id the next entry or folder made gets: past every id in it.
     pub next_id: u64,
+    /// Its folders.
     pub folders: Vec<Folder>,
+    /// Its entries.
     pub entries: Vec<Entry>,
 }
 

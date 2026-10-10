@@ -789,7 +789,6 @@ dependencies = [
  "oswindow",
  "pathtext",
  "scratchdir",
- "seal",
  "sha2",
  "textfmt",
  "textline",

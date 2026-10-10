@@ -76,7 +76,7 @@ use oswindow::app::{self, App, Response};
 
 use credvault::{
     CreditCardData, DEFAULT_AUTO_LOCK_MINUTES, Entry, EntryData, EntryType, IdentityData,
-    LoginData, MIN_MASTER_PASSWORD_CHARS, NEW_VAULT_KDF, SecureNoteData, SshKeyData, Vault,
+    LoginData, MIN_MASTER_PASSWORD_CHARS, NEW_VAULT_KDF, SecureNoteData, SshKeyData, Vault, seal,
     vaultfile,
 };
 #[cfg(test)]
@@ -4028,7 +4028,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     );
     y += 30.0;
 
-    let entry_count_text = format!("{} items", state.vault.entry_count());
+    let entry_count_text = format!("{} items", state.vault.entries().len());
     draw_text(
         frame,
         text_x,

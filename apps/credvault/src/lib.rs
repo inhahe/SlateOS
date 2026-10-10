@@ -1,22 +1,35 @@
 //! A SlateOS password vault: its entries, and the sealed file they are kept
 //! in -- the vault the password manager (`apps/credmanager`) keeps, as a
-//! library both it and the credential service (`gui/credentials`, lane C)
-//! build on (`requests/c-e-share-the-password-vault-with-the-credential-service.md`).
+//! library both it and the credential service (`gui/credentials`) build on
+//! (`requests/c-e-share-the-password-vault-with-the-credential-service.md`).
 //!
-//! One file, `<config>/credmanager/vault`, sealed under a key made from the
-//! master password with the vetted primitives `rustcrypto/seal` wraps
-//! (design-decisions §539, §1218): Argon2id makes the key and
-//! XChaCha20-Poly1305 seals the entries. The layout is [`vaultfile`]'s.
+//! - [`Vault`] is the model: the entries while it is unlocked, and the sealed
+//!   bytes they are kept in.
+//! - [`vaultfile`] is the format of those bytes: sealed under a key made from
+//!   the master password with the vetted primitives `rustcrypto/seal` wraps
+//!   (design-decisions §539, §1218) -- Argon2id makes the key and
+//!   XChaCha20-Poly1305 seals the entries.
+//! - [`store`] is where the file is kept, and how it is read and written.
 //!
 //! **Read with the code that writes it.** The service reads the vault the
-//! password manager saves; with one copy of the format, a change to it is
-//! one change, and neither can read a file the other wrote differently.
+//! password manager saves. With one copy of the format, the place and the
+//! reading, a change to any of them is one change, and neither program can
+//! read a file the other wrote differently.
 //!
-//! **Written whole.** The password manager replaces the file whole -- a new
-//! file renamed over the old (`safeio::write_atomically`) -- so a reader in
-//! another process never sees half a save.
+//! **Times are Unix seconds** -- every `now` this library is given, and every
+//! time it keeps: an entry's `created_at` and `modified_at`, a vault's
+//! [`last_access`](Vault::last_access).
+
+// A library two programs build on: its docs are the contract between them, so
+// the compiler checks every public item has one.
+#![warn(missing_docs)]
 
 use std::collections::HashSet;
+
+/// The cipher and key derivation the vault is sealed with: [`seal::KdfParams`],
+/// [`seal::Key`] and [`seal::Nonce`] appear in this library's signatures, and
+/// a caller names them through here rather than depending on `seal` itself.
+pub use seal;
 
 pub mod store;
 pub mod vaultfile;
@@ -29,17 +42,23 @@ pub const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
 // Entry types
 // =============================================================================
 
-/// The type of credential entry stored in the vault.
+/// The kinds of entry a vault holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EntryType {
+    /// A site's or service's sign-in: [`LoginData`].
     Login,
+    /// Free text kept secret: [`SecureNoteData`].
     SecureNote,
+    /// A payment card, its number masked: [`CreditCardData`].
     CreditCard,
+    /// A person's contact details: [`IdentityData`].
     Identity,
+    /// An SSH key's public half and fingerprint: [`SshKeyData`].
     SshKey,
 }
 
 impl EntryType {
+    /// The kind's name, as the user reads it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Login => "Login",
@@ -50,6 +69,7 @@ impl EntryType {
         }
     }
 
+    /// Every kind, in the order a list of them shows them.
     pub fn all() -> &'static [EntryType] {
         &[
             Self::Login,
@@ -65,18 +85,27 @@ impl EntryType {
 // Login fields
 // =============================================================================
 
-/// Login credential with site, username, password, URL, notes, TOTP.
+/// A sign-in to a site or service.
 #[derive(Clone)]
 pub struct LoginData {
+    /// The site's name as the user knows it: what the entry is listed by.
     pub site: String,
+    /// The name or address the user signs in with.
     pub username: String,
+    /// The password.
     pub password: String,
+    /// Where to sign in; may be empty.
     pub url: String,
+    /// Anything else the user wrote down about it.
     pub notes: String,
+    /// The secret the site's one-time codes (TOTP) are made from, as the site
+    /// gave it -- or `None` for a site that uses none.
     pub totp_secret: Option<String>,
 }
 
 impl LoginData {
+    /// A sign-in to `site` as `username` with `password`, nothing else filled
+    /// in.
     pub fn new(site: &str, username: &str, password: &str) -> Self {
         Self {
             site: site.to_string(),
@@ -93,14 +122,18 @@ impl LoginData {
 // Secure note fields
 // =============================================================================
 
-/// Encrypted secure note with title and free-form content.
+/// Free text kept as secret as a password: a recovery code, a PIN, a safe's
+/// combination.
 #[derive(Clone)]
 pub struct SecureNoteData {
+    /// What the entry is listed by.
     pub title: String,
+    /// The secret text itself.
     pub content: String,
 }
 
 impl SecureNoteData {
+    /// A note titled `title` holding `content`.
     pub fn new(title: &str, content: &str) -> Self {
         Self {
             title: title.to_string(),
@@ -113,17 +146,26 @@ impl SecureNoteData {
 // Credit card fields
 // =============================================================================
 
-/// Credit card entry with masked number, expiry, and cardholder name.
+/// A payment card. Its number is kept masked -- the last four digits -- so
+/// the vault never holds digits it has no use for.
 #[derive(Clone)]
 pub struct CreditCardData {
+    /// What the entry is listed by: the user's name for the card.
     pub name: String,
+    /// The number as [`mask_number`](Self::mask_number) leaves it.
     pub number_masked: String,
+    /// When it expires, as printed on it.
     pub expiry: String,
+    /// The name on the card.
     pub cardholder: String,
+    /// Anything else the user wrote down about it.
     pub notes: String,
 }
 
 impl CreditCardData {
+    /// A card named `name`, whose number is `number_masked` -- already
+    /// masked: this keeps what it is given -- expiring `expiry`, in
+    /// `cardholder`'s name.
     pub fn new(name: &str, number_masked: &str, expiry: &str, cardholder: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -134,7 +176,9 @@ impl CreditCardData {
         }
     }
 
-    /// Mask a card number, showing only last 4 digits.
+    /// `full_number`'s digits with all but the last four as `*` -- every
+    /// other character dropped. A number of fewer than four digits is all
+    /// `*`.
     pub fn mask_number(full_number: &str) -> String {
         let digits: String = full_number.chars().filter(|c| c.is_ascii_digit()).collect();
         if digits.len() < 4 {
@@ -153,16 +197,21 @@ impl CreditCardData {
 // Identity fields
 // =============================================================================
 
-/// Personal identity entry with contact details.
+/// A person's contact details, for filling in forms.
 #[derive(Clone)]
 pub struct IdentityData {
+    /// The person's name: what the entry is listed by.
     pub name: String,
+    /// Their email address.
     pub email: String,
+    /// Their phone number.
     pub phone: String,
+    /// Their postal address.
     pub address: String,
 }
 
 impl IdentityData {
+    /// `name`, reached at `email`, with no phone or address yet.
     pub fn new(name: &str, email: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -177,15 +226,20 @@ impl IdentityData {
 // SSH key fields
 // =============================================================================
 
-/// SSH key entry with fingerprint and public key.
+/// An SSH key, by its public half: what to recognise it by and what to give
+/// a server. The private half is not kept here.
 #[derive(Clone)]
 pub struct SshKeyData {
+    /// What the entry is listed by: the user's name for the key.
     pub name: String,
+    /// The key's fingerprint, to recognise it by. Kept as the user gave it.
     pub fingerprint: String,
+    /// The public key, to give a server. Kept as the user gave it.
     pub public_key: String,
 }
 
 impl SshKeyData {
+    /// The key named `name`, with `fingerprint` and `public_key`.
     pub fn new(name: &str, fingerprint: &str, public_key: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -264,14 +318,20 @@ fn wipe(bytes: &mut [u8]) {
 /// The payload of an entry, varying by type.
 #[derive(Clone, Debug)]
 pub enum EntryData {
+    /// [`EntryType::Login`]'s.
     Login(LoginData),
+    /// [`EntryType::SecureNote`]'s.
     SecureNote(SecureNoteData),
+    /// [`EntryType::CreditCard`]'s.
     CreditCard(CreditCardData),
+    /// [`EntryType::Identity`]'s.
     Identity(IdentityData),
+    /// [`EntryType::SshKey`]'s.
     SshKey(SshKeyData),
 }
 
 impl EntryData {
+    /// Which kind of entry this is.
     pub fn entry_type(&self) -> EntryType {
         match self {
             Self::Login(_) => EntryType::Login,
@@ -282,7 +342,8 @@ impl EntryData {
         }
     }
 
-    /// Display name for the entry.
+    /// What the entry is listed by: a login's site, a note's title, the
+    /// others' name.
     pub fn display_name(&self) -> &str {
         match self {
             Self::Login(d) => &d.site,
@@ -293,7 +354,9 @@ impl EntryData {
         }
     }
 
-    /// Subtitle line (username, masked number, email, fingerprint).
+    /// The line shown under the name in a list: a login's username, a card's
+    /// masked number, an identity's email, a key's fingerprint -- and nothing
+    /// for a note, whose every word is secret.
     pub fn subtitle(&self) -> &str {
         match self {
             Self::Login(d) => &d.username,
@@ -304,7 +367,9 @@ impl EntryData {
         }
     }
 
-    /// Check if text matches a search query (case-insensitive).
+    /// Whether `query` appears in any of the entry's fields, ignoring the
+    /// case of ASCII letters -- except a login's password and one-time-code
+    /// secret and a card's expiry, which are not looked at.
     pub fn matches_search(&self, query: &str) -> bool {
         let q = query.to_ascii_lowercase();
         let name_match = self.display_name().to_ascii_lowercase().contains(&q);
@@ -327,7 +392,7 @@ impl EntryData {
         name_match || sub_match || extra
     }
 
-    /// Extract password if this is a login entry.
+    /// A login's password; `None` for every other kind.
     pub fn password(&self) -> Option<&str> {
         match self {
             Self::Login(d) => Some(&d.password),
@@ -336,47 +401,61 @@ impl EntryData {
     }
 }
 
-/// A single credential entry in the vault.
+/// One entry in a vault: what it holds, and how it is filed.
 #[derive(Clone, Debug)]
 pub struct Entry {
+    /// Its id, unique among the vault's entries and folders.
     pub id: u64,
+    /// What it holds.
     pub data: EntryData,
+    /// The folder it is filed in, or `None` for none.
     pub folder_id: Option<u64>,
+    /// Its tags, each once.
     pub tags: Vec<String>,
+    /// Whether the user marked it a favourite.
     pub starred: bool,
+    /// When it was made, in Unix seconds.
     pub created_at: u64,
+    /// When what it holds last changed, in Unix seconds.
     pub modified_at: u64,
-    /// Whether this password was flagged as compromised.
+    /// Whether its password is known to have been breached.
     pub compromised: bool,
 }
 
 impl Entry {
-    pub fn new(id: u64, data: EntryData, timestamp: u64) -> Self {
+    /// Entry `id` holding `data`, made at `now` (Unix seconds): in no folder,
+    /// untagged, not a favourite and not flagged.
+    pub fn new(id: u64, data: EntryData, now: u64) -> Self {
         Self {
             id,
             data,
             folder_id: None,
             tags: Vec::new(),
             starred: false,
-            created_at: timestamp,
-            modified_at: timestamp,
+            created_at: now,
+            modified_at: now,
             compromised: false,
         }
     }
 
+    /// Which kind of entry this is.
     pub fn entry_type(&self) -> EntryType {
         self.data.entry_type()
     }
 
+    /// [`EntryData::display_name`]: what the entry is listed by.
     pub fn display_name(&self) -> &str {
         self.data.display_name()
     }
 
+    /// [`EntryData::subtitle`]: the line under its name in a list.
     pub fn subtitle(&self) -> &str {
         self.data.subtitle()
     }
 
-    /// Age of the password in days (from `now` timestamp).
+    /// Whole days from the last change to what it holds until `now` (Unix
+    /// seconds). For a login it stands for the password's age, and an edit
+    /// to any of its fields restarts it.
     pub fn password_age_days(&self, now: u64) -> u64 {
         now.saturating_sub(self.modified_at) / 86400
     }
@@ -386,20 +465,19 @@ impl Entry {
 // Folder
 // =============================================================================
 
-/// A folder for organizing entries.
+/// A folder entries are filed in. Folders nest: one may be inside another.
 #[derive(Clone, Debug)]
-/// A folder in the sidebar.
-///
-/// `SidebarSelection::Folder` can filter by one and nothing can create one, so
-/// no folder is ever constructed. See `todo.txt`.
-#[allow(dead_code, reason = "no control creates a folder yet -- see todo.txt")]
 pub struct Folder {
+    /// Its id, unique among the vault's entries and folders.
     pub id: u64,
+    /// Its name, as the user gave it.
     pub name: String,
+    /// The folder it is inside, or `None` at the top.
     pub parent_id: Option<u64>,
 }
 
 impl Folder {
+    /// Folder `id`, named `name`, at the top.
     pub fn new(id: u64, name: &str) -> Self {
         Self {
             id,
@@ -439,8 +517,7 @@ pub const TEST_KDF: seal::KdfParams = seal::KdfParams {
     lanes: 1,
 };
 
-/// The master password of the vault built by [`Vault::for_test`] -- and by
-/// the password manager's test window, which is built on it.
+/// The master password of the vault built by [`Vault::for_test`].
 #[cfg(any(test, feature = "testing"))]
 pub const TEST_MASTER_PASSWORD: &str = "master123";
 
@@ -542,8 +619,9 @@ impl Vault {
         Ok(Self::locked(header.kdf, header.salt, bytes))
     }
 
-    /// No vault yet: what the window holds while the first one is being made,
-    /// or while the file there cannot be read.
+    /// No vault yet: locked, with nothing sealed -- what a program holds
+    /// while the first vault is being made, or while the file it would read
+    /// cannot be. Unlocking it fails.
     pub fn none_yet() -> Self {
         Self::locked(NEW_VAULT_KDF, [0; seal::SALT_LEN], Vec::new())
     }
@@ -583,6 +661,7 @@ impl Vault {
         vault
     }
 
+    /// An id for a new entry or folder, past every one the vault has.
     fn next_id(&mut self) -> u64 {
         let id = self.id_gen;
         self.id_gen = self.id_gen.saturating_add(1);
@@ -772,12 +851,16 @@ impl Vault {
         self.auto_lock_in(now) == Some(0)
     }
 
+    /// Count `now` (Unix seconds) as a use of the vault: the auto-lock
+    /// counts from the last.
     pub fn touch(&mut self, now: u64) {
         self.last_access = now;
     }
 
     // -- Entry CRUD ---------------------------------------------------------
 
+    /// Add an entry holding `data`, made at `now` (Unix seconds) -- a use of
+    /// the vault, as [`touch`](Self::touch) counts one. Its id.
     pub fn add_entry(&mut self, data: EntryData, now: u64) -> u64 {
         let id = self.next_id();
         self.entries.push(Entry::new(id, data, now));
@@ -785,28 +868,25 @@ impl Vault {
         id
     }
 
-    /// Delete an entry.
-    ///
-    /// Reached from the entry's Delete button and the Delete key, after a
-    /// question -- see `ask_delete`. It had no caller until 2026-09-27.
+    /// Delete entry `entry_id`. Whether there was one.
     pub fn remove_entry(&mut self, entry_id: u64) -> bool {
         let before = self.entries.len();
         self.entries.retain(|e| e.id != entry_id);
         self.entries.len() < before
     }
 
+    /// Entry `entry_id`, if the vault has it -- none while it is locked.
     pub fn get_entry(&self, entry_id: u64) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == entry_id)
     }
 
-    /// An entry that can be changed. No caller yet, for the same reason as
-    /// `remove_entry`: the detail view shows a credential and cannot edit one.
+    /// Entry `entry_id`, to change.
     fn get_entry_mut(&mut self, entry_id: u64) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }
 
-    /// Replace an entry's payload, from the form's Edit. It had no caller
-    /// until 2026-09-27.
+    /// Replace what entry `entry_id` holds with `data`, changed at `now`
+    /// (Unix seconds). Whether there was one.
     pub fn update_entry(&mut self, entry_id: u64, data: EntryData, now: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.data = data;
@@ -817,9 +897,8 @@ impl Vault {
         }
     }
 
-    /// Mark an entry a favourite. The sidebar can filter by favourites and
-    /// nothing can set one, so the filter is always empty. See `todo.txt`.
-    #[allow(dead_code, reason = "no favourite control yet -- see todo.txt")]
+    /// Mark entry `entry_id` a favourite, or a favourite no longer. Whether
+    /// there was one.
     pub fn toggle_star(&mut self, entry_id: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.starred = !entry.starred;
@@ -829,9 +908,8 @@ impl Vault {
         }
     }
 
-    /// Flag a credential as known-breached. Nothing calls it: there is no
-    /// breach feed to learn it from and no control to set it by hand.
-    #[allow(dead_code, reason = "no breach feed and no control -- see todo.txt")]
+    /// Flag entry `entry_id`'s password as known to have been breached, or
+    /// clear the flag. Whether there was one.
     pub fn set_compromised(&mut self, entry_id: u64, compromised: bool) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.compromised = compromised;
@@ -841,10 +919,8 @@ impl Vault {
         }
     }
 
-    /// Tag an entry. The sidebar lists every tag in the vault and filters by
-    /// them, and nothing can put one on an entry, so the list is always empty.
-    /// See `todo.txt`.
-    #[allow(dead_code, reason = "no tag control yet -- see todo.txt")]
+    /// Tag entry `entry_id` with `tag` -- once, however often it is added.
+    /// Whether there was one.
     pub fn add_tag(&mut self, entry_id: u64, tag: &str) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             let tag_str = tag.to_string();
@@ -857,7 +933,7 @@ impl Vault {
         }
     }
 
-    #[allow(dead_code, reason = "no tag control yet -- see todo.txt")]
+    /// Take `tag` off entry `entry_id`. Whether it was on it.
     pub fn remove_tag(&mut self, entry_id: u64, tag: &str) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             let before = entry.tags.len();
@@ -871,7 +947,6 @@ impl Vault {
     /// Move entry `entry_id` into folder `folder_id` (`None`: into no
     /// folder). Whether it did: a folder the vault does not have is refused,
     /// since a vault holding an entry in one could never be opened again.
-    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     pub fn set_folder(&mut self, entry_id: u64, folder_id: Option<u64>) -> bool {
         if folder_id.is_some_and(|f| self.get_folder(f).is_none()) {
             return false;
@@ -886,9 +961,7 @@ impl Vault {
 
     // -- Folder CRUD --------------------------------------------------------
 
-    /// Make a folder. Nothing calls it, which is why the sidebar's folder
-    /// section is always empty. See `Folder` and `todo.txt`.
-    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
+    /// Make a folder named `name`, at the top. Its id.
     pub fn add_folder(&mut self, name: &str) -> u64 {
         let id = self.next_id();
         self.folders.push(Folder::new(id, name));
@@ -899,7 +972,6 @@ impl Vault {
     /// folders inside it -- moves up into the folder it was in, so nothing is
     /// left in a folder the vault no longer has: a vault holding anything
     /// there could never be opened again. Whether there was one to remove.
-    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     pub fn remove_folder(&mut self, folder_id: u64) -> bool {
         let Some(at) = self.folders.iter().position(|f| f.id == folder_id) else {
             return false;
@@ -918,11 +990,12 @@ impl Vault {
         true
     }
 
+    /// Folder `folder_id`, if the vault has it -- none while it is locked.
     pub fn get_folder(&self, folder_id: u64) -> Option<&Folder> {
         self.folders.iter().find(|f| f.id == folder_id)
     }
 
-    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
+    /// Rename folder `folder_id` to `new_name`. Whether there was one.
     pub fn rename_folder(&mut self, folder_id: u64, new_name: &str) -> bool {
         if let Some(folder) = self.folders.iter_mut().find(|f| f.id == folder_id) {
             folder.name = new_name.to_string();
@@ -934,6 +1007,8 @@ impl Vault {
 
     // -- Query helpers -------------------------------------------------------
 
+    /// The entries filed in folder `folder_id` itself -- not in the folders
+    /// inside it -- or, for `None`, in no folder.
     pub fn entries_in_folder(&self, folder_id: Option<u64>) -> Vec<&Entry> {
         self.entries
             .iter()
@@ -941,10 +1016,12 @@ impl Vault {
             .collect()
     }
 
+    /// The entries marked favourite.
     pub fn starred_entries(&self) -> Vec<&Entry> {
         self.entries.iter().filter(|e| e.starred).collect()
     }
 
+    /// The entries tagged `tag`.
     pub fn entries_with_tag(&self, tag: &str) -> Vec<&Entry> {
         self.entries
             .iter()
@@ -952,6 +1029,7 @@ impl Vault {
             .collect()
     }
 
+    /// The entries of kind `entry_type`.
     pub fn entries_of_type(&self, entry_type: EntryType) -> Vec<&Entry> {
         self.entries
             .iter()
@@ -959,24 +1037,7 @@ impl Vault {
             .collect()
     }
 
-    /// Full-text search across a vault. The toolbar's search box filters
-    /// through `refresh_filter` instead, so this second search has no caller;
-    /// one of the two should go once it is clear which the UI wants.
-    #[allow(
-        dead_code,
-        reason = "the toolbar filters through refresh_filter -- see todo.txt"
-    )]
-    pub fn search_entries(&self, query: &str) -> Vec<&Entry> {
-        if query.is_empty() {
-            return self.entries.iter().collect();
-        }
-        self.entries
-            .iter()
-            .filter(|e| e.data.matches_search(query))
-            .collect()
-    }
-
-    /// All unique tags across all entries.
+    /// Every tag on any entry, once each, sorted.
     pub fn all_tags(&self) -> Vec<String> {
         let mut tags: Vec<String> = self
             .entries
@@ -987,10 +1048,6 @@ impl Vault {
             .collect();
         tags.sort();
         tags
-    }
-
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
     }
 }
 
@@ -1245,10 +1302,17 @@ mod tests {
 
     #[test]
     fn test_entry_data_search_login() {
-        let d = EntryData::Login(LoginData::new("GitHub", "alice", "pass"));
+        let mut login = LoginData::new("GitHub", "alice", "pass");
+        login.totp_secret = Some("JBSWY3DP".to_string());
+        let d = EntryData::Login(login);
         assert!(d.matches_search("git"));
         assert!(d.matches_search("alice"));
         assert!(!d.matches_search("zzz"));
+        assert!(!d.matches_search("pass"), "a search looked at the password");
+        assert!(
+            !d.matches_search("jbswy"),
+            "a search looked at the TOTP secret"
+        );
     }
 
     #[test]
@@ -1760,23 +1824,6 @@ mod tests {
         assert_eq!(v.entries_of_type(EntryType::Login).len(), 1);
         assert_eq!(v.entries_of_type(EntryType::SecureNote).len(), 1);
         assert_eq!(v.entries_of_type(EntryType::CreditCard).len(), 0);
-    }
-
-    #[test]
-    fn test_vault_search() {
-        let mut v = Vault::for_test("V", "pw");
-        v.add_entry(
-            EntryData::Login(LoginData::new("github.com", "alice", "pass")),
-            100,
-        );
-        v.add_entry(
-            EntryData::Login(LoginData::new("gitlab.com", "bob", "pass")),
-            100,
-        );
-        assert_eq!(v.search_entries("git").len(), 2);
-        assert_eq!(v.search_entries("alice").len(), 1);
-        assert_eq!(v.search_entries("").len(), 2);
-        assert_eq!(v.search_entries("zzz").len(), 0);
     }
 
     #[test]

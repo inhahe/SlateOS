@@ -8,8 +8,9 @@ Three tables:
 
 * **the file** (`vaultfile.rs`): a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
-* **the model** (`lib.rs`): locking forgets the key and every entry, and the
-  auto-lock falls due a timeout after the last use.
+* **the model** (`lib.rs`): locking forgets the key and every entry, the
+  auto-lock falls due a timeout after the last use, and a search never looks
+  at a password.
 * **the store** (`store.rs`): a file larger than any vault is refused, not
   read in part, and no file is no vault rather than an error.
 
@@ -39,6 +40,7 @@ MADE_AT = "a_new_vault_counts_its_auto_lock_from_when_it_was_made"
 HEADER_FIRST = "bytes_that_are_no_vault_are_refused_before_any_key_is_made"
 TAKES = "a_vault_takes_a_backups_contents_and_keeps_its_own_key"
 READ = "a_vault_file_is_read_whole_or_said_to_be_missing_or_too_large"
+SEARCH = "test_entry_data_search_login"
 
 MUTATIONS = [
     (
@@ -147,6 +149,13 @@ MODEL_MUTATIONS = [
         "        let mut key = vaultfile::key_for(password, self.kdf, &self.salt)?;\n"
         "        let _header = vaultfile::Header::parse(&self.sealed)?;\n",
         [HEADER_FIRST],
+    ),
+    (
+        "a search looks at a login's password",
+        "                d.url.to_ascii_lowercase().contains(&q) || d.notes.to_ascii_lowercase().contains(&q)\n",
+        "                d.url.to_ascii_lowercase().contains(&q) || d.notes.to_ascii_lowercase().contains(&q)\n"
+        "                    || d.password.to_ascii_lowercase().contains(&q)\n",
+        [SEARCH],
     ),
     (
         "a locked backup's nothing is taken",

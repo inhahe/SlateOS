@@ -6,13 +6,12 @@ edition = "2024"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
-# The vault -- its entries and its sealed file -- shared with the credential
-# service, which reads it with the very code that writes it
-# (requests/c-e-share-the-password-vault-with-the-credential-service.md).
+# The vault -- its entries, its sealed file and where it is kept -- shared
+# with the credential service, which reads it with the very code that writes
+# it (requests/c-e-share-the-password-vault-with-the-credential-service.md).
+# Its `seal` re-export names the key derivation's parameters and the lengths
+# of the salt and nonce this program draws.
 credvault = { path = "../credvault" }
-# The key derivation's parameters (a new vault's, and the cheaper ones tests
-# set) and the lengths of the salt and nonce this program draws.
-seal = { path = "../../rustcrypto/seal" }
 # A fingerprint of the contents, to save exactly when they change.
 sha2 = { path = "../../sha2" }
 # A path shown by its bytes, never a lossy decode.

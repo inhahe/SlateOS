@@ -950,6 +950,77 @@ MUTATIONS += [
         '"{how}, {} ms a move at Normal speed.", 200)',
         [AXES_APART],
     ),
+    # The cursor theme (2026-10-10; lane C,
+    # c-e-choose-the-cursor-theme-in-settings): every XCursor theme installed,
+    # other desktops' included.
+    (
+        "the cursors row opens another list",
+        '"Cursors", DropdownId::CursorTheme, &',
+        '"Cursors", DropdownId::IconTheme, &',
+        [AXIS_ROWS, "a_cursor_theme_chosen_is_written"],
+    ),
+    (
+        "the cursors row names the colour theme",
+        "        let id = self.appearance.settings.cursor_theme.id();\n"
+        "        self.cursor_themes",
+        "        let id = self.appearance.settings.color_theme.id();\n"
+        "        self.cursor_themes",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "a cursor theme chosen is not kept",
+        "                    self.appearance.settings.cursor_theme =\n"
+        "                        appearance::cursors::CursorTheme::load(&info.id);",
+        "                    let _ = &info.id;",
+        [
+            "the_cursor_theme_is_chosen_from_every_installed_one",
+            "a_cursor_theme_chosen_is_written",
+        ],
+    ),
+    (
+        "the cursor list opens on the built-in pointer",
+        "t.id.as_os_str() == self.appearance.settings.cursor_theme.id())",
+        "t.id.as_os_str() == appearance::cursors::CursorTheme::built_in().id())",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "other desktops' cursor themes are not looked for",
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n",
+        "",
+        [
+            "the_cursor_theme_is_chosen_from_every_installed_one",
+            "a_cursor_theme_chosen_is_written",
+        ],
+    ),
+    (
+        "the theme folders' own cursor themes are not looked for",
+        "            .chain(std::iter::once(self.theme_dirs.system.clone()))\n"
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n"
+        "            .collect();",
+        "            .chain(std::iter::once(self.theme_dirs.system.clone()))\n"
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n"
+        "            .skip(1)\n"
+        "            .collect();",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "a cursor theme not installed is not said",
+        "        if let Some(note) = self.cursor_theme_note() {\n            s.note(&note, 28.0);",
+        "        if let Some(note) = self.cursor_theme_note() {\n            let _ = note;",
+        ["a_cursor_theme_not_installed_says_so"],
+    ),
+    (
+        "every cursor theme is said not to be installed",
+        "        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id))",
+        "        (!theme.is_built_in())",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "the built-in pointer is said not to be installed",
+        "        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id))",
+        "        (!self.cursor_themes.iter().skip(1).any(|t| t.id.as_os_str() == id))",
+        ["a_cursor_theme_not_installed_says_so"],
+    ),
     # The colour list's own unreadable theme.
     (
         "an unreadable theme is listed as an icon pack",

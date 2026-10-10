@@ -782,6 +782,14 @@ pub struct SettingsState {
     /// Where they are read from: the standard folders, or a scratch pair in a
     /// test, which must not read the machine's.
     theme_dirs: appearance::themes::ThemeDirs,
+    /// The installed cursor themes, the built-in one first: read with the
+    /// themes, on entering the Themes page.
+    cursor_themes: Vec<appearance::cursors::CursorThemeInfo>,
+    /// Where cursor themes are looked for after `theme_dirs`: other
+    /// desktops' folders (`~/.icons`, each `$XDG_DATA_DIRS/icons`), as the
+    /// environment names them -- or none in a test, which must not read the
+    /// machine's.
+    cursor_icon_dirs: Vec<PathBuf>,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -923,6 +931,10 @@ pub enum DropdownId {
     ColorTheme,
     /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
     IconTheme,
+    /// The cursor theme: the pictures the pointer is drawn as, from any
+    /// installed XCursor theme -- a GNOME or KDE one included -- or the
+    /// built-in pointer (`cursor_theme`, design-decisions §1459).
+    CursorTheme,
     /// The shapes of the controls -- a theme's `widget-style`, chosen apart
     /// from its colours (`widget_theme`, design-decisions §1435).
     WidgetTheme,
@@ -1006,7 +1018,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 30] = [
+    pub const FIXED: [Self; 31] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::NotifHistory,
@@ -1016,6 +1028,7 @@ impl DropdownId {
         Self::AutoDarkFrom,
         Self::ColorTheme,
         Self::IconTheme,
+        Self::CursorTheme,
         Self::WidgetTheme,
         Self::AnimationTheme,
         Self::DecorationTheme,
@@ -1195,6 +1208,46 @@ impl SettingsState {
     /// I/O, and so on entering the Themes page rather than per frame.
     pub fn refresh_themes(&mut self) {
         self.themes = appearance::themes::available_in(&self.theme_dirs);
+        // Where a chosen cursor theme is looked for, in the order it is
+        // (`CursorTheme::cursor`): the theme folders, then other desktops'.
+        let roots: Vec<PathBuf> = self
+            .theme_dirs
+            .user
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.theme_dirs.system.clone()))
+            .chain(self.cursor_icon_dirs.iter().cloned())
+            .collect();
+        self.cursor_themes = appearance::cursors::available_in(&roots);
+    }
+
+    /// The chosen cursor theme's name as shown: its listed name, or its
+    /// folder's name drawn as text for one not installed (any more).
+    fn cursor_theme_name(&self) -> String {
+        let id = self.appearance.settings.cursor_theme.id();
+        self.cursor_themes
+            .iter()
+            .find(|t| t.id.as_os_str() == id)
+            .map_or_else(
+                || std::path::Path::new(id).shown().to_string(),
+                |t| t.name.clone(),
+            )
+    }
+
+    /// What the page says under the cursors: that a chosen theme is not
+    /// installed, so the built-in pointer is drawn -- the desktop says
+    /// nothing, and the row alone would show a name as if all were well.
+    fn cursor_theme_note(&self) -> Option<String> {
+        let theme = &self.appearance.settings.cursor_theme;
+        let id = theme.id();
+        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id)).then(
+            || {
+                format!(
+                    "No cursor theme called \"{}\" is installed, so the built-in pointer is drawn.",
+                    std::path::Path::new(id).shown()
+                )
+            },
+        )
     }
 
     /// The listed theme a chosen colour or icon theme is, by its id.
@@ -1989,6 +2042,10 @@ impl SettingsState {
             font_families: Vec::new(),
             themes: Vec::new(),
             theme_dirs: appearance::themes::ThemeDirs::standard(),
+            cursor_themes: Vec::new(),
+            // The environment's names, not a read of the folders: that is
+            // `refresh_themes`'s, on entering the page.
+            cursor_icon_dirs: appearance::cursors::icon_dirs(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -4691,6 +4748,15 @@ impl SettingsState {
         }
         let icon_name = self.theme_name(self.appearance.settings.icon_theme.id());
         s.dropdown_row("Icons", DropdownId::IconTheme, &icon_name);
+        // The pointer's pictures, from any cursor theme installed -- one made
+        // for GNOME or KDE included (lane C, c-e-choose-the-cursor-theme-in-
+        // settings). Its size and colours are on the Visual page, beside the
+        // other things that make the pointer easier to see.
+        let cursor_name = self.cursor_theme_name();
+        s.dropdown_row("Cursors", DropdownId::CursorTheme, &cursor_name);
+        if let Some(note) = self.cursor_theme_note() {
+            s.note(&note, 28.0);
+        }
         // The controls' shapes, a theme's own axis as icons are (lane C,
         // c-e-a-theme-can-shape-the-controls): a theme that sets colours and
         // controls is offered in both lists, and chosen in each apart.
@@ -6480,6 +6546,15 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, at)
             }
+            DropdownId::CursorTheme => {
+                let items = self.cursor_themes.iter().map(|t| t.name.clone()).collect();
+                let at = self
+                    .cursor_themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.cursor_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
             DropdownId::WidgetTheme => {
                 let items = self.themes.iter().map(Self::widget_theme_item).collect();
                 let at = self
@@ -7718,6 +7793,12 @@ impl SettingsState {
                         } else {
                             appearance::icons::IconTheme::load(&info.id)
                         };
+                }
+            }
+            DropdownId::CursorTheme => {
+                if let Some(info) = self.cursor_themes.get(index) {
+                    self.appearance.settings.cursor_theme =
+                        appearance::cursors::CursorTheme::load(&info.id);
                 }
             }
             DropdownId::WidgetTheme => {
@@ -9443,8 +9524,145 @@ mod tests {
             user: Some(dir.dir().to_path_buf()),
             system: dir.dir().join("no-system-themes"),
         };
+        // Nor other desktops' cursor themes: a test that wants some names a
+        // scratch folder of them.
+        app.cursor_icon_dirs = Vec::new();
         app.go_to_page(SettingsPage::Themes);
         app
+    }
+
+    /// Other desktops' cursor themes, as `~/.icons` holds them: Adwaita,
+    /// named by its folder, and one whose `index.theme` names it.
+    fn scratch_cursor_icons() -> scratchdir::ScratchDir {
+        let icons = scratchdir::ScratchDir::new("settings-cursor-icons");
+        for id in ["Adwaita", "Pointy"] {
+            std::fs::create_dir_all(icons.dir().join(id).join("cursors")).expect("cursors folder");
+        }
+        std::fs::write(
+            icons.dir().join("Pointy").join("index.theme"),
+            "[Icon Theme]\nName=Pointy Pointer\n",
+        )
+        .expect("index.theme");
+        icons
+    }
+
+    /// The Themes page over the scratch themes, with the scratch cursor
+    /// themes as other desktops' -- and, in the theme folders, Nord's own
+    /// cursors.
+    fn cursors_state(
+        dir: &scratchdir::ScratchDir,
+        icons: &scratchdir::ScratchDir,
+    ) -> SettingsState {
+        std::fs::create_dir_all(dir.dir().join("nord").join("cursors")).expect("cursors folder");
+        let mut app = themes_state(dir);
+        app.cursor_icon_dirs = vec![icons.dir().to_path_buf()];
+        app.refresh_themes();
+        app
+    }
+
+    /// Every installed cursor theme is listed -- the built-in pointer first,
+    /// then by name, a theme folder's own and other desktops' alike, each by
+    /// the name its `index.theme` gives it, else its folder's -- and the one
+    /// chosen is the pointer's, written as `theme.cursors`
+    /// (c-e-choose-the-cursor-theme-in-settings).
+    #[test]
+    fn the_cursor_theme_is_chosen_from_every_installed_one() {
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let icons = scratch_cursor_icons();
+        let mut app = cursors_state(&dir, &icons);
+        app.show_dropdown(DropdownId::CursorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        assert_eq!(
+            items,
+            [
+                appearance::themes::BUILT_IN_NAME,
+                "Adwaita",
+                "nord",
+                "Pointy Pointer"
+            ],
+        );
+        let at = items.iter().position(|i| i == "Pointy Pointer").unwrap();
+        app.apply_dropdown_selection(at);
+        assert_eq!(
+            app.appearance.settings.cursor_theme.id(),
+            OsStr::new("Pointy")
+        );
+        assert_eq!(
+            ticked_in(&mut app, DropdownId::CursorTheme),
+            "Pointy Pointer"
+        );
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Pointy Pointer"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("is installed")),
+            "an installed theme is said not to be: {texts:?}"
+        );
+        // And back to the built-in pointer.
+        app.show_dropdown(DropdownId::CursorTheme);
+        app.apply_dropdown_selection(0);
+        assert!(app.appearance.settings.cursor_theme.is_built_in());
+    }
+
+    /// A cursor theme chosen as a person chooses it -- a press on the row, a
+    /// press on the entry -- is written to `appearance.yaml`.
+    #[test]
+    fn a_cursor_theme_chosen_is_written() {
+        with_scratch_config("settings-cursor-theme", |_root| {
+            let dir = scratch_themes();
+            let icons = scratch_cursor_icons();
+            let mut app = cursors_state(&dir, &icons);
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(DropdownId::CursorTheme))
+                .expect("the page draws no cursors row");
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(DropdownId::CursorTheme));
+            let at = app
+                .dropdown_layout()
+                .expect("a layout")
+                .items
+                .iter()
+                .position(|i| i == "Adwaita")
+                .expect("Adwaita is listed");
+            press_dropdown_item(&mut app, at);
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.cursor_theme.id(), std::ffi::OsStr::new("Adwaita"));
+        });
+    }
+
+    /// A cursor theme chosen and then removed -- or written by hand and never
+    /// installed -- is shown by its name and said not to be installed: the
+    /// desktop draws the built-in pointer and says nothing.
+    #[test]
+    fn a_cursor_theme_not_installed_says_so() {
+        let dir = scratch_themes();
+        let icons = scratch_cursor_icons();
+        let mut app = cursors_state(&dir, &icons);
+        app.appearance.settings.cursor_theme =
+            appearance::cursors::CursorTheme::load(std::ffi::OsStr::new("Bibata"));
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Bibata"), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t
+                == "No cursor theme called \"Bibata\" is installed, so the built-in pointer is drawn."),
+            "{texts:?}"
+        );
+        // The list opens on the built-in pointer, which is what is drawn.
+        assert_eq!(
+            ticked_in(&mut app, DropdownId::CursorTheme),
+            appearance::themes::BUILT_IN_NAME
+        );
+        // The built-in pointer is never "not installed".
+        app.appearance.settings.cursor_theme = appearance::cursors::CursorTheme::built_in();
+        let texts = drawn_texts(&app);
+        assert!(
+            !texts.iter().any(|t| t.contains("is installed")),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -9635,6 +9853,7 @@ mod tests {
         let dir = scratch_themes();
         let mut app = themes_state(&dir);
         for id in [
+            DropdownId::CursorTheme,
             DropdownId::WidgetTheme,
             DropdownId::AnimationTheme,
             DropdownId::DecorationTheme,

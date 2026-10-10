@@ -2157,6 +2157,121 @@ MUTATIONS += [
 ]
 
 
+# Fonts from a theme (2026-10-10, requests/c-e-fonts-from-a-theme-on-the-
+# fonts-page.md): where the fonts come from, chosen first; a theme's
+# recommendations, which are installed and which will be drawn.
+F_SOURCE = "the_fonts_come_from_your_own_choice_or_a_theme_and_reach_the_file"
+F_THEME = "a_themes_fonts_say_which_are_installed_and_which_will_be_drawn"
+F_PROBLEM = "a_font_theme_that_cannot_be_used_says_why_and_your_own_fonts_are_offered"
+F_OWN = "a_family_of_your_own_is_your_own_fonts"
+F_NONE = "with_no_theme_recommending_fonts_the_page_says_so"
+
+MUTATIONS += [
+    (
+        "the themes are not read on entering the Fonts page",
+        "        if page == SettingsPage::Fonts {\n            self.refresh_themes();\n        }\n",
+        "",
+        [F_SOURCE],
+    ),
+    (
+        "the built-in theme is not called my own fonts",
+        "        if info.origin == appearance::themes::Origin::BuiltIn {\n            MY_OWN_FONTS.to_owned()\n",
+        "        if info.origin == appearance::themes::Origin::BuiltIn {\n            info.name.clone()\n",
+        [F_SOURCE],
+    ),
+    (
+        "a theme recommending no fonts does not say so",
+        "            format!(\"{} -- recommends no fonts\", info.name)\n",
+        "            info.name.clone()\n",
+        [F_SOURCE],
+    ),
+    (
+        "a theme recommending no fonts is chosen for them",
+        "                    } else if info.provides_fonts() {\n                        self.appearance.settings.font_theme =\n",
+        "                    } else if info.provides_fonts() || info.problem.is_none() {\n                        self.appearance.settings.font_theme =\n",
+        [F_SOURCE],
+    ),
+    (
+        "my own fonts cannot be chosen again",
+        "                        self.appearance.settings.font_theme =\n                            appearance::themes::FontTheme::built_in();\n",
+        "",
+        [F_SOURCE],
+    ),
+    (
+        "the fonts list opens on my own fonts whatever is chosen",
+        ".position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id())",
+        ".position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id() && t.dir.is_none())",
+        [F_SOURCE],
+    ),
+    (
+        "the fonts row does not name the theme chosen",
+        "                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar panel list",
+        "                |_t| MY_OWN_FONTS.to_owned(),\n            )\n    }\n\n    /// A theme's row in the Taskbar panel list",
+        [F_SOURCE],
+    ),
+    (
+        "a font theme no longer installed is shown as my own fonts",
+        "                || std::path::Path::new(theme.id()).shown().to_string(),\n                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar",
+        "                || MY_OWN_FONTS.to_owned(),\n                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar",
+        [F_PROBLEM],
+    ),
+    (
+        "a theme's fonts are not shown",
+        "            self.build_theme_fonts(s);\n",
+        "            self.build_own_fonts(s);\n",
+        [F_THEME],
+    ),
+    (
+        "a font theme that cannot be used offers no fonts",
+        "        if theme.is_built_in() || theme.problem().is_some() {\n",
+        "        if theme.is_built_in() {\n",
+        [F_PROBLEM],
+    ),
+    (
+        "why a font theme cannot be used is not said",
+        "        if let Some(problem) = theme.problem() {\n            s.note(problem, 40.0);\n        }\n",
+        "",
+        [F_PROBLEM],
+    ),
+    (
+        "every recommended family is said to be installed",
+        "                if installed(family) {\n",
+        "                if installed(family) || !family.is_empty() {\n",
+        [F_THEME],
+    ),
+    (
+        "the family drawn is the user's own",
+        "        let drawn = settings.fonts_with_theme(installed);\n",
+        "        let drawn = settings.fonts.clone();\n",
+        [F_THEME],
+    ),
+    (
+        "a family of one's own leaves the theme chosen",
+        "                    self.appearance.settings.fonts.ui_font = family.clone();\n                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();\n",
+        "                    self.appearance.settings.fonts.ui_font = family.clone();\n",
+        [F_OWN],
+    ),
+    (
+        "a fixed-pitch family of one's own leaves the theme chosen",
+        "                    self.appearance.settings.fonts.mono_font = family.clone();\n                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();\n",
+        "                    self.appearance.settings.fonts.mono_font = family.clone();\n",
+        [F_OWN],
+    ),
+    (
+        "the page says no theme recommends fonts when one does",
+        "        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {\n",
+        "        if theme.is_built_in() {\n",
+        [F_NONE],
+    ),
+    (
+        "the page never says no theme recommends fonts",
+        "        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {\n",
+        "        if theme.is_built_in() && self.themes.is_empty() {\n",
+        [F_NONE],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

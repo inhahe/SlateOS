@@ -884,6 +884,11 @@ pub struct SettingsState {
     /// offering the unfiltered list under "Terminal Font" is what breaks a
     /// terminal's grid.
     mono_families: Vec<String>,
+    /// Whether a family is installed here: `guitk::text::family_installed`,
+    /// the one question the desktop asks when it chooses among a theme's
+    /// fonts. A test's state answers from a fixture instead, so what it sees
+    /// does not hang on the fonts of the machine running it.
+    family_check: fn(&str) -> bool,
     /// Minutes before the session locks itself; nought is never.
     ///
     /// Held rather than re-read while drawing, like the two lists above:
@@ -1074,6 +1079,9 @@ pub enum DropdownId {
     /// `available_families`, which is how it declines to make that decision on
     /// the user's behalf.
     MonoFont,
+    /// Where the desktop's fonts come from: the user's own, or a theme's
+    /// recommendations (`font_theme`, design-decisions §1472).
+    FontTheme,
     /// When the morning picture goes up.
     DayWallpaperFrom,
     /// When the evening picture goes up.
@@ -1132,8 +1140,9 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 49] = [
+    pub const FIXED: [Self; 50] = [
         Self::SoundTheme,
+        Self::FontTheme,
         Self::EventSound(0),
         Self::RuleMatch,
         Self::RulePlace,
@@ -1541,6 +1550,37 @@ impl SettingsState {
         }
     }
 
+    /// A theme's row in the fonts list: "My own fonts" for the built-in
+    /// theme, which recommends none; a theme's name; or why it cannot be
+    /// chosen -- unreadable, or recommending no font.
+    fn font_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.origin == appearance::themes::Origin::BuiltIn {
+            MY_OWN_FONTS.to_owned()
+        } else if info.provides_fonts() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- recommends no fonts", info.name)
+        }
+    }
+
+    /// Where the fonts come from, as the row shows it: "My own fonts", the
+    /// theme's name, or -- for a theme no longer installed -- its folder's.
+    fn font_theme_shown(&self) -> String {
+        let theme = &self.appearance.settings.font_theme;
+        if theme.is_built_in() {
+            return MY_OWN_FONTS.to_owned();
+        }
+        self.themes
+            .iter()
+            .find(|t| t.id.as_os_str() == theme.id())
+            .map_or_else(
+                || std::path::Path::new(theme.id()).shown().to_string(),
+                |t| t.name.clone(),
+            )
+    }
+
     /// A theme's row in the Taskbar panel list: its name, or why it cannot
     /// be chosen -- unreadable, or with no `taskbar-panel` to offer.
     fn panel_theme_item(info: &appearance::themes::ThemeInfo) -> String {
@@ -1698,6 +1738,11 @@ impl SettingsState {
         // change the file while the window is open.
         if page == SettingsPage::WindowRules {
             self.refresh_rules();
+        }
+        // The themes that recommend fonts, read on entry as the Themes page
+        // reads them.
+        if page == SettingsPage::Fonts {
+            self.refresh_themes();
         }
         // The themes with pictures, and theirs, read on entry as the themes
         // page reads them.
@@ -2437,6 +2482,7 @@ impl SettingsState {
             rule_deleted: None,
             rule_draft: None,
             mono_families: Vec::new(),
+            family_check: guitk::text::family_installed,
             lock_after_minutes: 0,
             lock_clock_seconds: false,
             lock_clock_date: true,
@@ -2530,6 +2576,10 @@ const NAME_WIDTH: f32 = CONTROL_COLUMN_DX - 16.0;
 
 /// The gap between two buttons of a strip.
 const BUTTON_GAP: f32 = 8.0;
+
+/// The fonts list's words for the user's own fonts: the built-in theme's row,
+/// which recommends none.
+const MY_OWN_FONTS: &str = "My own fonts";
 
 /// The field of the rule editor's `draft` that `field` names, or `None` for
 /// a field that is not the editor's.
@@ -7546,6 +7596,88 @@ impl SettingsState {
         self.refresh_bins();
     }
 
+    /// The Fonts page: where the fonts come from first -- the user's own, or
+    /// a theme's recommendations (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`,
+    /// design-decisions §1472) -- then that source's rows.
+    ///
+    /// Asked first, as the Background page asks where its picture comes from
+    /// (§1243): a theme's family is drawn in place of the user's own, so a
+    /// page offering both side by side would let a user pick a family and
+    /// see another drawn. A theme that cannot be used leaves the user's own
+    /// fonts in use, and so offers them, under the reason.
+    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+        let theme = &self.appearance.settings.font_theme;
+        s.section("Where Fonts Come From");
+        s.dropdown_row("Fonts", DropdownId::FontTheme, &self.font_theme_shown());
+        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {
+            s.note(
+                "No theme installed here recommends fonts, so they are your own, chosen below.",
+                28.0,
+            );
+        }
+        if let Some(problem) = theme.problem() {
+            s.note(problem, 40.0);
+        }
+        s.gap();
+        if theme.is_built_in() || theme.problem().is_some() {
+            self.build_own_fonts(s);
+        } else {
+            self.build_theme_fonts(s);
+        }
+    }
+
+    /// A theme's fonts: for each role, the families it recommends in the
+    /// order they are tried, which of them this machine has, the user's own
+    /// for when it has none, and the one that will be drawn -- what
+    /// `AppearanceSettings::fonts_with_theme` answers.
+    fn build_theme_fonts<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let settings = &self.appearance.settings;
+        let theme = &settings.font_theme;
+        let installed = self.family_check;
+        let drawn = settings.fonts_with_theme(installed);
+        let roles = [
+            (
+                "Interface Text",
+                theme.ui(),
+                &settings.fonts.ui_font,
+                &drawn.ui_font,
+                guitk::text::font_family(),
+            ),
+            (
+                "Fixed-Pitch Text",
+                theme.mono(),
+                &settings.fonts.mono_font,
+                &drawn.mono_font,
+                guitk::text::mono_family(),
+            ),
+        ];
+        for (title, families, own, chosen, in_use) in roles {
+            s.section(title);
+            if families.is_empty() {
+                s.note("The theme recommends none, so your own is used.", 28.0);
+            }
+            for family in families {
+                if installed(family) {
+                    s.value_row(family, "Installed", pal.text);
+                } else {
+                    s.value_row(family, "Not installed", pal.peach);
+                }
+            }
+            s.value_row("If none is installed", own, pal.subtext0);
+            s.value_row("Will be drawn in", chosen, pal.text);
+            match in_use {
+                Some(family) => s.value_row("In use now", &family, pal.subtext0),
+                None => s.value_row("In use now", "Built-in face", pal.subtext0),
+            }
+            s.gap();
+        }
+        s.note(
+            "Programs still draw your own fonts for now: drawing a theme's is to come, and this choice is kept for it. A family that is not installed is installed from its font file; Settings cannot yet install a theme's fonts for you, since no package here says which fonts it carries.",
+            60.0,
+        );
+    }
+
     /// The font the interface is drawn in.
     ///
     /// Two rows that look redundant and are not: what the user has *chosen*
@@ -7556,7 +7688,7 @@ impl SettingsState {
     /// That disagreement is the one thing a user needs to see to understand
     /// why picking a font changed nothing, and it is invisible from the
     /// setting alone.
-    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+    fn build_own_fonts<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
         let chosen = self.appearance.settings.fonts.ui_font.clone();
         let installed = self.font_families.contains(&chosen);
@@ -8471,6 +8603,15 @@ impl SettingsState {
                     .position(|m| *m == self.lock_after_minutes)
                     .unwrap_or(0);
                 (items, current)
+            }
+            DropdownId::FontTheme => {
+                let items = self.themes.iter().map(Self::font_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id())
+                    .unwrap_or(0);
+                (items, at)
             }
             DropdownId::UiFont => {
                 // A configured family that is not installed has no row to
@@ -9909,14 +10050,29 @@ impl SettingsState {
                     self.session_dirty = true;
                 }
             }
+            // A family of one's own is one's own fonts: a theme left chosen
+            // would draw its family in place of the one just picked.
             DropdownId::UiFont => {
                 if let Some(family) = self.font_families.get(index) {
                     self.appearance.settings.fonts.ui_font = family.clone();
+                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
                 }
             }
             DropdownId::MonoFont => {
                 if let Some(family) = self.mono_families.get(index) {
                     self.appearance.settings.fonts.mono_font = family.clone();
+                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
+                }
+            }
+            DropdownId::FontTheme => {
+                if let Some(info) = self.themes.get(index) {
+                    if info.origin == appearance::themes::Origin::BuiltIn {
+                        self.appearance.settings.font_theme =
+                            appearance::themes::FontTheme::built_in();
+                    } else if info.provides_fonts() {
+                        self.appearance.settings.font_theme =
+                            appearance::themes::FontTheme::load_from(&self.theme_dirs, &info.id);
+                    }
                 }
             }
             DropdownId::ColorFilter => {
@@ -16785,6 +16941,237 @@ mod tests {
                 "saving wrote over the change, or put the rule elsewhere"
             );
         });
+    }
+
+    // --- Fonts from a theme ------------------------------------------------------------
+
+    /// Themes in a scratch folder: one recommending fonts, one recommending
+    /// none.
+    fn scratch_font_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-font-themes");
+        let theme = |id: &str, yaml: &str| {
+            let folder = dir.dir().join(id);
+            std::fs::create_dir_all(&folder).expect("theme folder");
+            std::fs::write(folder.join("theme.yaml"), yaml).expect("theme file");
+        };
+        theme(
+            "typeset",
+            "meta:\n  name: Typeset\nfonts:\n  ui: [Inter, Example Sans]\n  mono: Fira Code\n",
+        );
+        theme(
+            "bare",
+            "meta:\n  name: Bare\ncolors:\n  base: \"#101018\"\n",
+        );
+        dir
+    }
+
+    /// The Fonts page over `dir`'s themes, on a machine that has Example
+    /// Sans and Example Mono and no other family.
+    fn fonts_page(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: dir.dir().to_path_buf(),
+        };
+        state.font_families = vec!["Example Sans".to_owned(), "Example Mono".to_owned()];
+        state.mono_families = vec!["Example Mono".to_owned()];
+        state.family_check = |family| matches!(family, "Example Sans" | "Example Mono");
+        state.current_category = SettingsCategory::Personalization;
+        state.go_to_page(SettingsPage::Fonts);
+        state
+    }
+
+    /// The values the page draws beside `label`, in order: what each row
+    /// labelled so says.
+    fn values_beside(texts: &[String], label: &str) -> Vec<String> {
+        texts
+            .windows(2)
+            .filter(|pair| pair[0] == label)
+            .map(|pair| pair[1].clone())
+            .collect()
+    }
+
+    /// **The fonts come from the user's own choice or a theme's, chosen
+    /// first, and reach the file** (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`):
+    /// "My own fonts" and every installed theme, one that recommends none
+    /// saying so and not chosen.
+    #[test]
+    fn the_fonts_come_from_your_own_choice_or_a_theme_and_reach_the_file() {
+        settingsfile::testing::with_scratch_config("settings-font-source", |_| {
+            let dir = scratch_font_themes();
+            let mut state = fonts_page(&dir);
+            let saved = || appearance::AppearanceFile::load().settings;
+
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            let layout = state.dropdown_layout().expect("the list opened");
+            let items = layout.items.clone();
+            assert_eq!(items.first().map(String::as_str), Some("My own fonts"));
+            assert_eq!(
+                layout.selected, 0,
+                "the list does not open on the fonts in use"
+            );
+            assert!(
+                items.iter().any(|i| i == "Bare -- recommends no fonts"),
+                "{items:?}"
+            );
+            let typeset = items
+                .iter()
+                .position(|i| i == "Typeset")
+                .expect("the theme with fonts is offered");
+            press_dropdown_item(&mut state, typeset);
+            assert_eq!(saved().font_theme.id(), std::ffi::OsStr::new("typeset"));
+            assert_eq!(state.font_theme_shown(), "Typeset");
+
+            let bare = items
+                .iter()
+                .position(|i| i.starts_with("Bare"))
+                .expect("listed");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            press_dropdown_item(&mut state, bare);
+            assert_eq!(
+                saved().font_theme.id(),
+                std::ffi::OsStr::new("typeset"),
+                "a theme that recommends no fonts was chosen for them"
+            );
+
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                typeset,
+                "the list does not open on the theme chosen"
+            );
+            press_dropdown_item(&mut state, 0);
+            assert!(
+                saved().font_theme.is_built_in(),
+                "my own fonts were not written"
+            );
+        });
+    }
+
+    /// **A theme's fonts say which are installed, and which will be drawn**:
+    /// the first installed of each role's, or the user's own where none is.
+    /// The user's own pickers are not offered beside them, since a family
+    /// picked there would not be the one drawn.
+    #[test]
+    fn a_themes_fonts_say_which_are_installed_and_which_will_be_drawn() {
+        let dir = scratch_font_themes();
+        let mut state = fonts_page(&dir);
+        state.appearance.settings.fonts.mono_font = "Example Mono".to_owned();
+        state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("typeset"),
+        );
+        let texts = drawn_texts(&state);
+        // The first of each: a recommended family's own row. A family can
+        // be drawn again further down, as what "Will be drawn in" says.
+        let first = |label: &str| values_beside(&texts, label).into_iter().next();
+        assert_eq!(first("Inter").as_deref(), Some("Not installed"));
+        assert_eq!(first("Example Sans").as_deref(), Some("Installed"));
+        assert_eq!(first("Fira Code").as_deref(), Some("Not installed"));
+        assert_eq!(
+            values_beside(&texts, "Will be drawn in"),
+            ["Example Sans", "Example Mono"],
+            "the drawn families are not the first installed, or the user's own"
+        );
+        assert_eq!(
+            values_beside(&texts, "If none is installed")
+                .last()
+                .map(String::as_str),
+            Some("Example Mono")
+        );
+        for own in [DropdownId::UiFont, DropdownId::MonoFont] {
+            assert!(
+                center_of(&state, RowHit::Dropdown(own)).is_none(),
+                "{own:?} is offered beside the theme's fonts"
+            );
+        }
+    }
+
+    /// **A font theme that cannot be used says why, and the user's own fonts
+    /// -- the ones in use -- are offered under it.**
+    #[test]
+    fn a_font_theme_that_cannot_be_used_says_why_and_your_own_fonts_are_offered() {
+        let dir = scratch_font_themes();
+        let mut state = fonts_page(&dir);
+        state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("gone"),
+        );
+        let problem = state
+            .appearance
+            .settings
+            .font_theme
+            .problem()
+            .expect("a theme not installed cannot be used")
+            .to_owned();
+        let texts = drawn_texts(&state);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.len() > 10 && problem.starts_with(t.as_str())),
+            "the reason is not said: {problem:?}"
+        );
+        assert_eq!(state.font_theme_shown(), "gone");
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::UiFont)).is_some(),
+            "the user's own fonts are not offered"
+        );
+    }
+
+    /// **A family of one's own is one's own fonts**: picking one sets the
+    /// theme's fonts aside, or the family picked would not be drawn.
+    #[test]
+    fn a_family_of_your_own_is_your_own_fonts() {
+        settingsfile::testing::with_scratch_config("settings-own-family", |_| {
+            let dir = scratch_font_themes();
+            let mut state = fonts_page(&dir);
+            for (row, family) in [
+                (DropdownId::UiFont, "Example Sans"),
+                (DropdownId::MonoFont, "Example Mono"),
+            ] {
+                state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+                    &state.theme_dirs,
+                    std::ffi::OsStr::new("gone"),
+                );
+                press_on(&mut state, RowHit::Dropdown(row));
+                press_dropdown_item(&mut state, 0);
+                let saved = appearance::AppearanceFile::load().settings;
+                assert_eq!(
+                    if row == DropdownId::UiFont {
+                        saved.fonts.ui_font
+                    } else {
+                        saved.fonts.mono_font
+                    },
+                    family
+                );
+                assert!(
+                    saved.font_theme.is_built_in(),
+                    "{row:?}: a theme was left chosen over the family picked"
+                );
+            }
+        });
+    }
+
+    /// **With no theme recommending fonts, the page says so** rather than
+    /// leave a list of one choice unexplained.
+    #[test]
+    fn with_no_theme_recommending_fonts_the_page_says_so() {
+        let dir = scratchdir::ScratchDir::new("settings-no-font-themes");
+        let state = fonts_page(&dir);
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t.starts_with("No theme installed here recommends fonts")),
+            "the page does not say why the list has only your own fonts"
+        );
+        let mut typeset = fonts_page(&scratch_font_themes());
+        typeset.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
+        assert!(
+            !drawn_texts(&typeset)
+                .iter()
+                .any(|t| t.starts_with("No theme installed here recommends fonts")),
+            "the page says no theme recommends fonts when one does"
+        );
     }
 
     // --- Notes wrap to their column --------------------------------------------

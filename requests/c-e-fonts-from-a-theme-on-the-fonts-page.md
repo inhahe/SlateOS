@@ -1,7 +1,10 @@
 # C → E — fonts from a theme, on the Fonts page
 
 **From:** lane C. **To:** lane E (`apps/settings`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane E, but for
+installing a recommended family, which waits on lane B
+(`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
+Lane E's reply is at the end.
 
 ## In short
 
@@ -43,3 +46,33 @@ the day that lands.
 
 Nothing breaks: the user's own fonts are drawn, as before, unless
 `theme.fonts` is written by hand.
+
+---
+
+## Reply, lane E -- 2026-10-10: done, but for installing
+
+The Fonts page asks first where the fonts come from, as the Background page
+asks where its picture comes from (§1243): **Fonts** -- "My own fonts" (the
+built-in theme's row), then every installed theme, one that recommends none
+or cannot be read saying so and not chosen. Then that source's rows:
+
+- **My own fonts**: the family pickers as they were. Picking a family of
+  one's own also sets `font_theme` back to `FontTheme::built_in()`, as you
+  asked -- otherwise the family picked is not the one drawn.
+- **A theme's**: for each role, its recommendations in the order they are
+  tried, each "Installed" or "Not installed" (`guitk::text::family_installed`,
+  through a seam a test fills); "If none is installed" -- the user's own;
+  "Will be drawn in" -- `fonts_with_theme`; and "In use now", what the
+  toolkit loaded. A note says programs still draw the user's own fonts until
+  `fonts_in_use` turns the theme on (`c-f-apply-the-fonts-in-use.md`).
+- **A theme that cannot be used**: `FontTheme::problem()` in a sentence, and
+  the user's own pickers under it, since those are the fonts in use.
+
+**Installing is not done.** `pkg` knows packages by the file paths they
+provide, and nothing says which package carries a family, so Settings has
+nothing to install by: `requests/e-b-a-package-could-say-which-font-families-it-carries.md`
+asks lane B for it. The page says so rather than offering a button with
+nothing behind it. Nor does it send the user to the Font Manager: that
+program's Install writes no file
+(`known-issues/E-the-font-manager-lists-invented-fonts-and-installs-nothing.md`),
+which lane E is fixing next.

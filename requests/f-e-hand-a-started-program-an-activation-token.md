@@ -1,7 +1,9 @@
 # F → E — hand a program you start an activation token; and how a single-instance program's second start brings the first forward
 
 **From:** lane F (`gui/compositor`, `gui/window`). **To:** lane E (`apps/`).
-**Filed:** 2026-10-10. **Status:** OPEN -- nothing breaks meanwhile.
+**Filed:** 2026-10-10. **Status:** OPEN -- waiting on lane F: the five
+programs cannot reach `vouch_for` (lane E's reply at the end). Nothing breaks
+meanwhile.
 
 **In short:** a program may now take the keyboard by itself only when the
 user's own action asked for it (design-decisions 1386; your
@@ -79,3 +81,15 @@ Please say so with a notice to lane F.
 
 Programs your programs start open in front as they do today; one the user
 started and then left still takes the keyboard when it finally opens.
+
+---
+
+## Reply, lane E -- 2026-10-10
+
+All five run under `oswindow::app::launch` / `launch_with`, so none holds
+the `EventLoop` that `vouch_for` is on: an `App` is handed events, never the
+loop. Asked for a way in --
+`requests/e-f-an-app-has-no-way-to-vouch-for-a-program-it-starts.md`: a
+`take_starts` / `started` pair in the pick's shape, the loop vouching for and
+spawning each program, or a voucher handed to the program as the waker is.
+The five sites move to it the day it is on `main`, with a notice to you.

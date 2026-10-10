@@ -30,6 +30,8 @@ COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
 FORGETS = "locking_forgets_the_key_and_every_entry"
 AUTO_LOCK = "test_vault_auto_lock"
 FOLDERS = "a_folder_edit_leaves_a_vault_that_opens"
+NO_SECRET = "a_debug_print_shows_no_secret"
+WIPE = "wipe_overwrites_every_byte"
 
 MUTATIONS = [
     (
@@ -104,6 +106,26 @@ MODEL_MUTATIONS = [
         "            }\n",
         "",
         [FOLDERS],
+    ),
+    (
+        "a login's {:?} prints its password",
+        "        f.debug_struct(\"LoginData\")\n            .field(\"site\", &self.site)\n",
+        "        f.debug_struct(\"LoginData\")\n            .field(\"site\", &self.site)\n"
+        "            .field(\"password\", &self.password)\n",
+        [NO_SECRET],
+    ),
+    (
+        "a note's {:?} prints what it says",
+        "        f.debug_struct(\"SecureNoteData\")\n            .field(\"title\", &self.title)\n",
+        "        f.debug_struct(\"SecureNoteData\")\n            .field(\"title\", &self.title)\n"
+        "            .field(\"content\", &self.content)\n",
+        [NO_SECRET],
+    ),
+    (
+        "wipe overwrites nothing",
+        "        unsafe { core::ptr::write_volatile(byte, 0) };\n",
+        "        let _ = byte;\n",
+        [WIPE],
     ),
 ]
 

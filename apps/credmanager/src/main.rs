@@ -2476,7 +2476,10 @@ struct NewVault {
 }
 
 /// A question the vault's own controls ask before they act.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: while a restore waits, it holds the backup's vault -- open,
+/// with its key -- and a copy would be a second key nothing wipes.
+#[derive(Debug)]
 enum VaultDialog {
     /// Plain-text export: what the file will be, before a place is chosen.
     ExportWarning,

@@ -65,7 +65,7 @@ impl EntryType {
 // =============================================================================
 
 /// Login credential with site, username, password, URL, notes, TOTP.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LoginData {
     pub site: String,
     pub username: String,
@@ -93,7 +93,7 @@ impl LoginData {
 // =============================================================================
 
 /// Encrypted secure note with title and free-form content.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SecureNoteData {
     pub title: String,
     pub content: String,
@@ -113,7 +113,7 @@ impl SecureNoteData {
 // =============================================================================
 
 /// Credit card entry with masked number, expiry, and cardholder name.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CreditCardData {
     pub name: String,
     pub number_masked: String,
@@ -153,7 +153,7 @@ impl CreditCardData {
 // =============================================================================
 
 /// Personal identity entry with contact details.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IdentityData {
     pub name: String,
     pub email: String,
@@ -177,7 +177,7 @@ impl IdentityData {
 // =============================================================================
 
 /// SSH key entry with fingerprint and public key.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SshKeyData {
     pub name: String,
     pub fingerprint: String,
@@ -192,6 +192,68 @@ impl SshKeyData {
             public_key: public_key.to_string(),
         }
     }
+}
+
+// =============================================================================
+// What `{:?}` shows
+// =============================================================================
+//
+// An entry's name, and nothing it guards: `{:?}` is how a value reaches a log,
+// and a password, a note, a card's details or a person's address must not.
+
+impl std::fmt::Debug for LoginData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginData")
+            .field("site", &self.site)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SecureNoteData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureNoteData")
+            .field("title", &self.title)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for CreditCardData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreditCardData")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for IdentityData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityData")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SshKeyData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshKeyData")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Overwrite `bytes` with zeros, in a way the optimiser may not remove.
+///
+/// `write_volatile` in a loop rather than `fill`: the optimiser is entitled
+/// to delete a store to memory that is never read again, and memory about to
+/// be let go is exactly that.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned, exclusively borrowed `u8` for
+        // the duration of the iteration; a volatile write of a `u8` to it is
+        // in bounds and initialises it.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 // =============================================================================
@@ -398,7 +460,6 @@ pub enum VaultState {
 /// that does not open it is the wrong password (or a changed file), and there
 /// is no other check, so none that is cheaper to run. **Locking** forgets the
 /// key and every entry.
-#[derive(Clone, Debug)]
 pub struct Vault {
     pub name: String,
     pub state: VaultState,
@@ -416,6 +477,28 @@ pub struct Vault {
     pub last_access: u64,
     pub auto_lock_minutes: u32,
     pub id_gen: u64,
+}
+
+/// What a vault is, never what it holds: no key, and no entry's contents.
+impl std::fmt::Debug for Vault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vault")
+            .field("name", &self.name)
+            .field("state", &self.state)
+            .field("entries", &self.entries.len())
+            .field("folders", &self.folders.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The key is overwritten before its memory is let go, however the vault
+/// goes: locked, replaced, or dropped while open.
+impl Drop for Vault {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.as_mut() {
+            wipe(key);
+        }
+    }
 }
 
 impl Vault {
@@ -512,15 +595,32 @@ impl Vault {
     /// been changed), or what it holds is not a vault this program reads.
     /// Nothing about the vault changes then.
     pub fn open(&mut self, password: &str, now: u64) -> Result<(), vaultfile::OpenError> {
-        let key = vaultfile::key_for(password, self.kdf, &self.salt)?;
-        let text = vaultfile::open_file(&self.sealed, &key)?;
-        let contents = vaultfile::parse_contents(&text).map_err(vaultfile::OpenError::Contents)?;
+        let mut key = vaultfile::key_for(password, self.kdf, &self.salt)?;
+        let opened = vaultfile::open_file(&self.sealed, &key).and_then(|text| {
+            let contents = vaultfile::parse_contents(&text).map_err(vaultfile::OpenError::Contents);
+            // The whole vault in the clear, overwritten once it is read.
+            let mut bytes = text.into_bytes();
+            wipe(&mut bytes);
+            contents
+        });
+        let contents = match opened {
+            Ok(contents) => contents,
+            Err(why) => {
+                wipe(&mut key);
+                return Err(why);
+            }
+        };
+        if let Some(old) = self.key.as_mut() {
+            wipe(old);
+        }
         self.name = contents.name;
         self.auto_lock_minutes = contents.auto_lock_minutes;
         self.id_gen = contents.next_id;
         self.folders = contents.folders;
         self.entries = contents.entries;
         self.key = Some(key);
+        // `seal::Key` is an array: storing it copied it, and the copy goes too.
+        wipe(&mut key);
         self.state = VaultState::Unlocked;
         self.last_access = now;
         Ok(())
@@ -540,7 +640,7 @@ impl Vault {
             // whatever reuses the memory. The entries' strings are freed
             // without being overwritten: `String` does not promise that, and
             // a crate that does is not vendored.
-            key.fill(0);
+            wipe(key);
         }
         self.key = None;
         self.entries.clear();
@@ -1276,6 +1376,55 @@ mod tests {
         );
         assert_eq!(reopened.entries.len(), 1);
         assert_eq!(reopened.folders.len(), 2);
+    }
+
+    /// **`{:?}` shows no secret** -- not a vault's key, and nothing an entry
+    /// guards -- since `{:?}` is how a value reaches a log. It names each
+    /// entry, so a print still says which one.
+    #[test]
+    fn a_debug_print_shows_no_secret() {
+        let mut v = unlocked_vault();
+        let mut login = LoginData::new("example.org", "ann", "pw-SECRET-1");
+        login.notes = "notes-SECRET-2".to_string();
+        login.totp_secret = Some("totp-SECRET-3".to_string());
+        v.add_entry(EntryData::Login(login), 0);
+        v.add_entry(
+            EntryData::SecureNote(SecureNoteData::new("plan", "note-SECRET-4")),
+            0,
+        );
+        let mut card = CreditCardData::new("visa", "****1234", "12/30", "holder-SECRET-5");
+        card.notes = "card-SECRET-6".to_string();
+        v.add_entry(EntryData::CreditCard(card), 0);
+        let mut person = IdentityData::new("me", "mail-SECRET-7@example.org");
+        person.address = "addr-SECRET-8".to_string();
+        v.add_entry(EntryData::Identity(person), 0);
+        v.add_entry(
+            EntryData::SshKey(SshKeyData::new("box", "fp", "pub-SECRET-9")),
+            0,
+        );
+        let contents = vaultfile::parse_contents(&vaultfile::contents_text(&v));
+        let printed = format!("{v:?} {:?} {contents:?}", v.entries);
+        assert!(
+            printed.contains("example.org"),
+            "no entry is named: {printed}"
+        );
+        assert!(
+            !printed.contains("SECRET"),
+            "a secret was printed: {printed}"
+        );
+        let key = v.key.unwrap();
+        assert!(
+            !printed.contains(&format!("{key:?}")),
+            "the key was printed"
+        );
+    }
+
+    /// `wipe` overwrites every byte it is given.
+    #[test]
+    fn wipe_overwrites_every_byte() {
+        let mut bytes = [0xA5_u8; 40];
+        wipe(&mut bytes);
+        assert_eq!(bytes, [0; 40]);
     }
 
     /// **Locking forgets the key and every entry and folder**, and unlocking

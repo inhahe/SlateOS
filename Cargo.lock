@@ -28,6 +28,15 @@ name = "aes"
 version = "0.1.0"
 
 [[package]]
+name = "aes"
+version = "0.9.3"
+dependencies = [
+ "cipher",
+ "cpubits",
+ "cpufeatures",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -546,6 +555,7 @@ dependencies = [
 name = "cipher"
 version = "0.5.2"
 dependencies = [
+ "blobby",
  "block-buffer",
  "crypto-common",
  "inout",
@@ -714,6 +724,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "cpubits"
+version = "0.1.1"
 
 [[package]]
 name = "cpufeatures"
@@ -1933,7 +1947,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "bitflags",
  "bzip2",
  "crc32",
@@ -2620,7 +2634,7 @@ dependencies = [
 name = "net80211"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "crc32",
  "hmac",
 ]
@@ -3557,12 +3571,15 @@ name = "seal"
 version = "0.1.0"
 dependencies = [
  "aead",
+ "aes 0.9.3",
  "argon2",
  "blake2 0.11.0",
  "chacha20",
  "chacha20poly1305",
+ "cipher",
  "hex-literal",
  "poly1305",
+ "xts-mode",
 ]
 
 [[package]]
@@ -3666,7 +3683,7 @@ dependencies = [
 name = "sevenz"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "bzip2",
  "crc32",
  "deflate",
@@ -4849,6 +4866,13 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "xts-mode"
+version = "0.6.0"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]

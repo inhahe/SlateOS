@@ -23,6 +23,13 @@ hex-literal = { path = "../hex-literal" }
 chacha20 = { path = "../chacha20", default-features = false, features = ["cipher"] }
 poly1305 = { path = "../poly1305" }
 blake2 = { path = "../blake2", default-features = false }
+# AES and XTS, which `seal` does not use: lane A's disk-encryption layer
+# does (AES-256-XTS, the sector number as the tweak). Their vectors run here
+# for the reason the rest do -- the vendored crates' own suites cannot run in
+# this workspace. `cipher`'s `dev` module reads `aes`'s NESSIE files in place.
+aes = { path = "../aes" }
+xts-mode = { path = "../xts-mode", default-features = false }
+cipher = { path = "../cipher", features = ["dev"] }
 
 [lints]
 workspace = true

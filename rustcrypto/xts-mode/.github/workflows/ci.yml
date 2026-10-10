@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: ${{matrix.name || format('Rust {0}', matrix.toolchain)}}
+    runs-on: ${{matrix.os || 'ubuntu'}}-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: stable
+          - toolchain: beta
+          - toolchain: nightly
+          - toolchain: 1.85.0
+          - name: macOS
+            os: macos
+            toolchain: stable
+          - name: Windows
+            os: windows
+            toolchain: stable
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }} 
+      - run: cargo build
+      - run: cargo test
+      - run: cargo test --no-default-features
+      - run: cargo test --features "openssl_tests"
+        # Skip OpenSSL tests on windows
+        if: matrix.os != 'windows'
+      # Also test using minimal versions of dependencies
+      - run: rustup toolchain add nightly
+      - run: cargo +nightly update -Z minimal-versions
+      - run: cargo test
+
+  no-std:
+    name: Build no-std on ${{format('Rust {0}', matrix.toolchain)}}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: stable
+          - toolchain: beta
+          - toolchain: nightly
+          - toolchain: 1.85.0
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }} 
+      - run: rustup target add thumbv6m-none-eabi
+      - run: cargo build --no-default-features --target thumbv6m-none-eabi
+      # Also build using minimal versions of dependencies
+      - run: rustup toolchain add nightly
+      - run: cargo +nightly update -Z minimal-versions
+      - run: cargo build --no-default-features --target thumbv6m-none-eabi
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: cargo clippy --all-targets --all-features
+
+  rustfmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: cargo fmt --check
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: cargo doc --no-deps --all-features
+
+  readme:
+    name: Check if README.md is outdated
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-readme
+      - name: Update README.md
+        run: cargo readme > README.md
+      - name: Check diff
+        run: git add . && git diff --quiet && git diff --cached --quiet
+      

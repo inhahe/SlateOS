@@ -1,0 +1,3 @@
+# NIST CAVP vector files, kept byte for byte as NIST published them
+# (rustcrypto/README.md records their SHA-256).
+*.rsp -text

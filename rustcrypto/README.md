@@ -24,12 +24,23 @@ through `ctutils`/`cmov`).
 |---|---|---|
 | `apps/credmanager` (lane E) | `seal` | the password vault on disk, and its encrypted backup (C-Q25 / §1417) |
 | `gui/credentials` (lane C) | `seal` | the system keyring's vault (moving over from its SHA-256 keystream) |
-| `kernel` diskencrypt (lane A) | `argon2` | the disk key's password derivation (§978, A-Q21) |
+| `kernel` diskencrypt (lane A) | `seal` | each key slot: the disk's master key sealed under a passphrase's Argon2id key (§978, A-Q21, §1523) |
 | `kernel` diskencrypt (lane A) | `aes`, `xts-mode` | the sector cipher: AES-256 in XTS mode, the sector number as the tweak (`aes-xts-plain64`, as LUKS2 and dm-crypt) -- `requests/a-e-vendor-aes-and-xts-mode-for-disk-encryption.md` |
 
 Use `seal` unless there is a reason not to: it is the one place the choice of
 cipher, nonce size and Argon2 variant is made, so two callers cannot drift into
-two formats. The kernel uses `argon2` directly because it needs no cipher.
+two formats. The kernel uses it too: it once took `argon2` alone, "because it
+needs no cipher", and then each key slot came to seal the volume's master key
+under the passphrase's key (`requests/a-e-the-kernel-links-seal-not-argon2-directly.md`).
+
+**The kernel's build.** `seal` and what it pulls in run in the kernel's
+`x86_64-unknown-none` target as they are: `cpufeatures` answers "no" on
+`target_os = "none"`, so `chacha20`, `poly1305` and `argon2` take their
+portable paths and the soft-float kernel never touches a vector register.
+Keep that true when updating any of them -- a backend that assumed SSE2, or
+chose AVX2 some other way, would corrupt user registers in the kernel. The
+kernel calls `derive_key`, `encrypt` and `decrypt`, with `KdfParams` of
+19 MiB x 2 x 1 for passphrases and 8 KiB x 1 x 1 for 256-bit recovery keys.
 
 ## What is here
 

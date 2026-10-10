@@ -50,6 +50,7 @@ use guiremote::channel::PeerCred;
 use guiremote::control::{
     DisplayInfo, Layer, Request, RequestBody, Response, ResponseBody, encode_responses_into,
 };
+use guiremote::export::Parent;
 use guiremote::frame::{Frame, try_decode_any};
 use guiremote::submit::Submission;
 use guiremote::window_list::encode_window_list_into;
@@ -694,6 +695,11 @@ fn to_compositor_request(
                 message: "activation requests are link-level".to_string(),
             });
         }
+        RequestBody::ExportWindow { .. } | RequestBody::SetParent { .. } => {
+            return Err(ResponseBody::Error {
+                message: "window-parent requests are link-level".to_string(),
+            });
+        }
         // Link-level too: a sleep request's answer is owed to the link that
         // asked, at a moment no `CompositorRequest` can name.
         RequestBody::SleepDisplays | RequestBody::WakeDisplays => {
@@ -1032,6 +1038,30 @@ impl Compositor {
         self.focus_refusal(link, "the clipboard")
     }
 
+    /// The windows a `SetParent` from `link` names: its own window, and the
+    /// parent -- one of its own by id, or one another program lent it by
+    /// handle (design-decisions 1387). A window of another program's is never
+    /// named by its id here: that would let any program float a window over
+    /// anyone else's.
+    fn parent_request(
+        &self,
+        link: &ClientLink,
+        window: u64,
+        parent: Parent,
+    ) -> Result<(WindowId, Option<WindowId>), ResponseBody> {
+        let window_id = link.resolve(window)?;
+        let parent = match parent {
+            Parent::None => None,
+            Parent::Own(id) => Some(link.resolve(id)?),
+            Parent::Exported(handle) => {
+                Some(self.exported(handle).ok_or_else(|| ResponseBody::Error {
+                    message: "no window is lent under that handle".to_string(),
+                })?)
+            }
+        };
+        Ok((window_id, parent))
+    }
+
     /// Dispatch a batch of control requests and append the replies.
     fn answer_requests(&mut self, link: &mut ClientLink, requests: &[Request]) {
         let mut replies = Vec::with_capacity(requests.len());
@@ -1151,6 +1181,35 @@ impl Compositor {
                     // token lets a program bring itself forward, never another.
                     let body = match link.resolve(*window) {
                         Ok(window_id) => match self.activate_on_request(window_id, *token) {
+                            Ok(()) => ResponseBody::Ok,
+                            Err(e) => ResponseBody::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // A window lent to another program, and what a window belongs
+                // to (design-decisions 1387): here because a parent is named
+                // by this connection's own windows or by a handle.
+                RequestBody::ExportWindow { window } => {
+                    let body = match link.resolve(*window) {
+                        Ok(window_id) => match self.export_window(window_id) {
+                            Ok(handle) => ResponseBody::ExportedWindow(handle),
+                            Err(e) => ResponseBody::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                RequestBody::SetParent { window, parent } => {
+                    let body = match self.parent_request(link, *window, *parent) {
+                        Ok((window_id, parent)) => match self.set_parent(window_id, parent) {
                             Ok(()) => ResponseBody::Ok,
                             Err(e) => ResponseBody::Error {
                                 message: e.to_string(),
@@ -2128,6 +2187,68 @@ mod tests {
                 .minimized
         );
         assert_eq!(comp.focused_window(), focused);
+    }
+
+    /// The file explorer's window can belong to the program's only through
+    /// the handle the program lent (design-decisions 1387): by the program's
+    /// raw window id, or a guessed handle, it is refused; and a program can
+    /// lend only its own windows.
+    #[test]
+    fn a_window_belongs_to_another_programs_only_through_a_lent_handle() {
+        let (mut comp, mut program) = wired();
+        comp.activation.count_tokens();
+        let mine = open(&mut comp, &mut program, "Editor");
+        let mut explorer = ClientLink::new(99);
+        let chooser = open(&mut comp, &mut explorer, "Open");
+        let parent_of =
+            |comp: &Compositor| comp.window_ref(WindowId::from_raw(chooser)).unwrap().parent;
+
+        for parent in [
+            Parent::Own(mine),
+            Parent::Exported(guiremote::ExportedWindow::from_bytes([1; 16])),
+        ] {
+            let refused = reply(
+                &mut comp,
+                &mut explorer,
+                RequestBody::SetParent {
+                    window: chooser,
+                    parent,
+                },
+            );
+            assert!(
+                matches!(refused, ResponseBody::Error { .. }),
+                "{parent:?}: {refused:?}"
+            );
+        }
+        assert_eq!(parent_of(&comp), None);
+        assert!(matches!(
+            reply(
+                &mut comp,
+                &mut explorer,
+                RequestBody::ExportWindow { window: mine }
+            ),
+            ResponseBody::Error { .. }
+        ));
+
+        let ResponseBody::ExportedWindow(handle) = reply(
+            &mut comp,
+            &mut program,
+            RequestBody::ExportWindow { window: mine },
+        ) else {
+            panic!("the program could not lend its own window");
+        };
+        assert_eq!(
+            reply(
+                &mut comp,
+                &mut explorer,
+                RequestBody::SetParent {
+                    window: chooser,
+                    parent: Parent::Exported(handle),
+                },
+            ),
+            ResponseBody::Ok
+        );
+        assert_eq!(parent_of(&comp), Some(WindowId::from_raw(mine)));
     }
 
     /// A program's own `Restore` no longer takes the keyboard from another

@@ -145,9 +145,9 @@ pub use guiremote::control::CursorShape;
 pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
-use guiremote::ActivationToken;
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
+use guiremote::{ActivationToken, ExportedWindow};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -1049,6 +1049,17 @@ pub struct Window {
     /// of the window holding the keyboard is one the user has moved on from
     /// (design-decisions 1386).
     pub user_time: u64,
+    /// The window this one belongs to, if any (design-decisions 1387): a
+    /// dialog's parent, or the program's window the file explorer's Open
+    /// window was opened for. Kept above it and raised with it; the keyboard
+    /// goes back to it when this window leaves; minimised and restored with
+    /// it. Always a window in the same band, and never this window or one
+    /// that belongs to it. Cleared when the parent closes.
+    pub parent: Option<WindowId>,
+    /// Whether this window is minimised because the window it belongs to was,
+    /// and so comes back when that one does. A window the user minimised on
+    /// its own stays minimised.
+    pub minimized_with_parent: bool,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1281,6 +1292,8 @@ impl Window {
             focused: false,
             demands_attention: false,
             user_time: 0,
+            parent: None,
+            minimized_with_parent: false,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
@@ -5809,6 +5822,11 @@ pub struct Compositor {
     /// the user's actions, the activation tokens outstanding, what each
     /// connection presented. See the [`activation`] module.
     activation: activation::Activations,
+    /// Windows lent to other programs, by the handle each was lent under
+    /// (design-decisions 1387). One entry per window at most -- exporting a
+    /// window again gives the same handle -- and a window's entry goes when it
+    /// closes, so this is bounded by the window count.
+    exports: Vec<(ExportedWindow, WindowId)>,
     /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
     /// made at the size they are drawn at: keyed by the viewer, the pictured
     /// window and that size, and remade when the pictured window's content
@@ -6277,6 +6295,7 @@ impl Compositor {
             focused_window: None,
             focus_history: Vec::new(),
             activation: activation::Activations::new(),
+            exports: Vec::new(),
             thumbnails: HashMap::new(),
             backend,
             display_manager,
@@ -7117,10 +7136,22 @@ impl Compositor {
             .retain(|&(viewer, pictured, _, _), _| viewer != window_id && pictured != window_id);
 
         let closed_layer = self.layer_of(window_id);
+        let closed_parent = self.window_ref(window_id).and_then(|w| w.parent);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
         self.focus_history.retain(|&id| id != window_id);
         self.update_z_orders();
+
+        // Lent to nobody any more, and what belonged to it belongs to nothing
+        // now: an ordinary window, as a transient whose parent closed is
+        // (design-decisions 1387).
+        self.exports.retain(|&(_, w)| w != window_id);
+        for win in &mut self.windows {
+            if win.parent == Some(window_id) {
+                win.parent = None;
+                win.minimized_with_parent = false;
+            }
+        }
 
         // The keyboard goes back to the window that had it before, by the one
         // rule every other way of leaving the screen follows. No `FocusLost`:
@@ -7131,7 +7162,7 @@ impl Compositor {
             // the next one; `focus_window` disarms it only when it takes the
             // keyboard *from* a window, and none holds it now.
             self.dead_keys.cancel();
-            self.hand_keyboard_back(closed_layer, window_id);
+            self.hand_keyboard_back(closed_layer, window_id, closed_parent);
         }
 
         self.full_recomposite = true;
@@ -7194,22 +7225,63 @@ impl Compositor {
         Ok(())
     }
 
-    /// Minimize a window.
+    /// Minimize a window -- and the windows that belong to it, which come
+    /// back when it does (design-decisions 1387): a dialog left floating over
+    /// the desktop after its program was minimised is a dialog for nothing on
+    /// screen.
     pub fn minimize_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        // Its own first, so that the keyboard leaving the window is not handed
+        // for a moment to a dialog about to go with it.
+        let belonging = self.belonging_to(window_id);
+        for &child in &belonging {
+            if let Some(win) = self.window_mut(child)
+                && !win.minimized
+            {
+                win.minimized = true;
+                win.visible = false;
+                win.dirty = true;
+                win.minimized_with_parent = true;
+                self.damage_window(child);
+                self.damage_viewers(child);
+            }
+        }
+
         self.damage_window(window_id);
-
-        let window = self
-            .window_mut(window_id)
-            .ok_or(CompositorError::WindowNotFound(window_id))?;
-        window.minimized = true;
-        window.visible = false;
-        window.dirty = true;
-
+        if let Some(window) = self.window_mut(window_id) {
+            window.minimized = true;
+            window.visible = false;
+            window.dirty = true;
+        }
         self.damage_viewers(window_id);
-        self.release_keyboard(window_id);
+
+        for id in belonging.into_iter().chain(std::iter::once(window_id)) {
+            self.release_keyboard(id);
+        }
 
         self.full_recomposite = true;
         Ok(())
+    }
+
+    /// Show again the windows minimised along with `window_id`, now that it
+    /// is back (design-decisions 1387). The ones the user minimised on their
+    /// own stay minimised.
+    fn unminimize_belonging(&mut self, window_id: WindowId) {
+        for child in self.belonging_to(window_id) {
+            if let Some(win) = self.window_mut(child)
+                && win.minimized_with_parent
+            {
+                win.minimized = false;
+                win.visible = true;
+                win.dirty = true;
+                win.minimized_with_parent = false;
+                self.damage_window(child);
+                self.damage_viewers(child);
+                self.full_recomposite = true;
+            }
+        }
     }
 
     /// Maximize a window to fill the monitor it is on.
@@ -7749,7 +7821,8 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
 
-        if unminimize && window.minimized {
+        let unminimized = unminimize && window.minimized;
+        if unminimized {
             window.minimized = false;
             window.visible = true;
         }
@@ -7777,6 +7850,9 @@ impl Compositor {
         window.dirty = true;
         // Shown again, perhaps at another size: its pictures change too.
         self.content_changed(window_id);
+        if unminimized {
+            self.unminimize_belonging(window_id);
+        }
         self.full_recomposite = true;
 
         Ok(())
@@ -8013,8 +8089,10 @@ impl Compositor {
 
         // Bring to the top of its own band — not to the top of the whole
         // stack, which would let any application window climb over the
-        // taskbar simply by being clicked.
-        self.raise_within_layer(window_id);
+        // taskbar simply by being clicked -- and with it the windows it
+        // belongs to and that belong to it, so a dialog is never left behind
+        // the window it is for (design-decisions 1387).
+        self.raise_family(window_id);
 
         self.damage_window(window_id);
         self.pending_notifications
@@ -8036,6 +8114,7 @@ impl Compositor {
             return;
         }
         let band = self.layer_of(window_id);
+        let parent = self.window_ref(window_id).and_then(|w| w.parent);
         if let Some(win) = self.window_mut(window_id) {
             win.focused = false;
             win.dirty = true;
@@ -8047,7 +8126,7 @@ impl Compositor {
         self.dead_keys.cancel();
         self.pending_notifications
             .push_back(EventNotification::FocusLost { window_id });
-        self.hand_keyboard_back(band, window_id);
+        self.hand_keyboard_back(band, window_id, parent);
     }
 
     /// Give the keyboard, which no window holds, back to the window that held
@@ -8070,19 +8149,26 @@ impl Compositor {
     /// **Never to `leaving`**, the window that gave it up. Every other way of
     /// giving it up also takes the window off the screen, which already rules
     /// it out; [`return_keyboard`](Self::return_keyboard) leaves it there.
-    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId) {
+    ///
+    /// **First to `parent`**, the window `leaving` belonged to, if it can
+    /// take it: a dialog closing gives the keyboard back to the window it was
+    /// for, whatever the user touched in between (design-decisions 1387).
+    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId, parent: Option<WindowId>) {
         let workspace = self.current_workspace;
         let can = |comp: &Self, id: WindowId| {
             id != leaving
                 && comp.layer_of(id) <= band
                 && comp.window_ref(id).is_some_and(|w| w.is_showing(workspace))
         };
-        let next = self
-            .focus_history
-            .iter()
-            .rev()
-            .copied()
-            .find(|&id| can(self, id))
+        let next = parent
+            .filter(|&p| can(self, p))
+            .or_else(|| {
+                self.focus_history
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&id| can(self, id))
+            })
             .or_else(|| self.z_stack.iter().rev().copied().find(|&id| can(self, id)));
         if let Some(id) = next {
             self.focus_window(id);
@@ -8229,6 +8315,197 @@ impl Compositor {
         self.activation.new_windows
     }
 
+    // -----------------------------------------------------------------------
+    // Windows that belong to others (design-decisions 1387)
+    // -----------------------------------------------------------------------
+
+    /// The window at the top of `id`'s chain of parents: `id` itself if it
+    /// belongs to none. Walks at most as many steps as there are windows, so
+    /// a loop -- which [`Self::set_parent`] refuses to make -- could not hang
+    /// it.
+    fn root_of(&self, id: WindowId) -> WindowId {
+        let mut at = id;
+        for _ in 0..self.windows.len() {
+            match self.window_ref(at).and_then(|w| w.parent) {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// Whether `id` is `ancestor` or belongs to it, near or far.
+    fn belongs_to(&self, id: WindowId, ancestor: WindowId) -> bool {
+        let mut at = Some(id);
+        for _ in 0..=self.windows.len() {
+            match at {
+                Some(w) if w == ancestor => return true,
+                Some(w) => at = self.window_ref(w).and_then(|win| win.parent),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The windows that belong to `id`, near or far, bottom to top.
+    fn belonging_to(&self, id: WindowId) -> Vec<WindowId> {
+        self.z_stack
+            .iter()
+            .copied()
+            .filter(|&w| w != id && self.belongs_to(w, id))
+            .collect()
+    }
+
+    /// Raise `id` with its family -- the windows in its chain of parents and
+    /// everything belonging to any of them -- keeping each window above the
+    /// one it belongs to, and `id`'s own branch above its siblings'. A window
+    /// with no family is raised alone, as [`Self::raise_within_layer`] does.
+    fn raise_family(&mut self, id: WindowId) {
+        if !self.z_stack.contains(&id) {
+            self.raise_within_layer(id);
+        }
+        let root = self.root_of(id);
+        // Bottom to top, as they stand now; each raise puts a window at the
+        // top of its band, so raising them in this order keeps it.
+        let family: Vec<WindowId> = self
+            .z_stack
+            .iter()
+            .copied()
+            .filter(|&w| self.root_of(w) == root)
+            .collect();
+        let (branch, rest): (Vec<WindowId>, Vec<WindowId>) =
+            family.into_iter().partition(|&w| self.belongs_to(w, id));
+        for w in rest.into_iter().chain(branch) {
+            self.raise_within_layer(w);
+        }
+    }
+
+    /// Lend `window_id` to another program (design-decisions 1387): the
+    /// handle a window of that program's names, with [`Self::set_parent`], to
+    /// belong to it. The same handle for the same window every time, so a
+    /// program exporting before every dialog does not fill a table; gone when
+    /// the window closes.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window;
+    /// [`CompositorError::Refused`] when no unguessable handle can be drawn.
+    pub fn export_window(&mut self, window_id: WindowId) -> CompositorResult<ExportedWindow> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        if let Some(&(handle, _)) = self.exports.iter().find(|(_, w)| *w == window_id) {
+            return Ok(handle);
+        }
+        let bytes = self.activation.draw_bytes().map_err(|_| {
+            CompositorError::Refused("the compositor has no random source to draw a handle from")
+        })?;
+        let handle = ExportedWindow::from_bytes(bytes);
+        self.exports.push((handle, window_id));
+        Ok(handle)
+    }
+
+    /// The window lent under `handle`, while it is open.
+    #[must_use]
+    pub fn exported(&self, handle: ExportedWindow) -> Option<WindowId> {
+        self.exports
+            .iter()
+            .find(|(h, _)| *h == handle)
+            .map(|&(_, w)| w)
+    }
+
+    /// Make `window_id` belong to `parent`, or to nothing with `None`
+    /// (design-decisions 1387): kept above it and raised with it, moved to
+    /// its desktop and placed centred over it, given the keyboard if `parent`
+    /// has it -- the parent's program lent it for this -- and the keyboard
+    /// handed back to it when `window_id` leaves the screen.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for either window gone;
+    /// [`CompositorError::Refused`] for a parent in another band, or one that
+    /// is `window_id` itself or belongs to it, which would put a window above
+    /// itself.
+    pub fn set_parent(
+        &mut self,
+        window_id: WindowId,
+        parent: Option<WindowId>,
+    ) -> CompositorResult<()> {
+        let layer = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .layer;
+        let Some(parent) = parent else {
+            if let Some(win) = self.window_mut(window_id) {
+                win.parent = None;
+                win.minimized_with_parent = false;
+            }
+            return Ok(());
+        };
+        let (parent_layer, parent_workspace) = self
+            .window_ref(parent)
+            .map(|w| (w.layer, w.workspace))
+            .ok_or(CompositorError::WindowNotFound(parent))?;
+        if parent_layer != layer {
+            return Err(CompositorError::Refused(
+                "a window can belong only to a window in its own band",
+            ));
+        }
+        if self.belongs_to(parent, window_id) {
+            return Err(CompositorError::Refused(
+                "a window cannot belong to itself, or to a window that belongs to it",
+            ));
+        }
+        if let Some(win) = self.window_mut(window_id) {
+            win.parent = Some(parent);
+            // It goes where the window it is for is: a dialog on another
+            // desktop than its program is lost to the user twice over.
+            win.workspace = parent_workspace;
+        }
+        self.center_over(window_id, parent)?;
+        self.raise_family(window_id);
+        if self.focused_window == Some(parent) {
+            self.focus_window(window_id);
+        }
+        self.full_recomposite = true;
+        Ok(())
+    }
+
+    /// Place `child` centred over `parent`'s frame, as a dialog opens over the
+    /// window it is for -- kept where it can be reached, as a restored window
+    /// is ([`kept_reachable`]).
+    fn center_over(&mut self, child: WindowId, parent: WindowId) -> CompositorResult<()> {
+        let parent_frame = self
+            .window_ref(parent)
+            .map(Window::frame_rect)
+            .ok_or(CompositorError::WindowNotFound(parent))?;
+        let child_frame = self
+            .window_ref(child)
+            .map(Window::frame_rect)
+            .ok_or(CompositorError::WindowNotFound(child))?;
+        let centred = |origin: i32, outer: u32, inner: u32| {
+            let offset = i64::from(outer)
+                .saturating_sub(i64::from(inner))
+                .checked_div(2)
+                .unwrap_or(0);
+            i32::try_from(i64::from(origin).saturating_add(offset)).unwrap_or(origin)
+        };
+        let target = Rect::new(
+            centred(parent_frame.x, parent_frame.width, child_frame.width),
+            centred(parent_frame.y, parent_frame.height, child_frame.height),
+            child_frame.width,
+            child_frame.height,
+        );
+        let desktop = self.display_manager.virtual_bounds();
+        let home = self.work_bounds_for(parent_frame);
+        let placed = kept_reachable(target, desktop, home);
+        let (x, y, _, _) = self
+            .window_ref(child)
+            .map(|w| w.client_geometry_for_frame(placed))
+            .ok_or(CompositorError::WindowNotFound(child))?;
+        self.move_window(child, x, y)
+    }
+
     /// Mark a window as asking for the user's attention (`wanted`), or withdraw
     /// the request.
     ///
@@ -8283,11 +8560,13 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         let (layer, workspace) = (window.layer, window.workspace);
-        if window.minimized {
+        let was_minimized = window.minimized;
+        if was_minimized {
             window.minimized = false;
             window.visible = true;
             window.dirty = true;
             self.full_recomposite = true;
+            self.unminimize_belonging(window_id);
         }
         if matches!(layer, Layer::Normal) {
             self.switch_workspace(workspace);
@@ -20680,6 +20959,156 @@ mod tests {
             action: ShellControlAction::ReturnKeyboard,
         });
         assert_eq!(comp.focused_window, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Windows that belong to others (design-decisions 1387)
+    // -----------------------------------------------------------------------
+
+    fn depth(comp: &Compositor, id: WindowId) -> usize {
+        comp.z_stack.iter().position(|&w| w == id).unwrap()
+    }
+
+    /// The file explorer's Open window over the program that asked: clicking
+    /// the program brings the dialog up with it, above it, every time.
+    #[test]
+    fn a_dialog_stays_above_the_window_it_belongs_to() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let dialog = opened(&mut comp, "Open", 2);
+        let other = opened(&mut comp, "Other", 3);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        comp.focus_window(program);
+        assert!(
+            depth(&comp, dialog) > depth(&comp, program),
+            "the dialog went behind the program it belongs to"
+        );
+        assert!(depth(&comp, program) > depth(&comp, other));
+
+        comp.focus_window(other);
+        assert!(depth(&comp, other) > depth(&comp, dialog));
+        comp.focus_window(program);
+        assert!(depth(&comp, dialog) > depth(&comp, program));
+        assert!(depth(&comp, program) > depth(&comp, other));
+    }
+
+    /// Attaching places the dialog centred over its window and gives it the
+    /// keyboard, the window it belongs to having had it.
+    #[test]
+    fn attaching_a_dialog_centres_it_over_its_window_and_gives_it_the_keyboard() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        comp.move_window(program, 100, 120).unwrap();
+        let dialog = comp.create_window("Open".to_string(), 80, 40, 2);
+        comp.focus_window(program);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        let outer = comp.window_ref(program).unwrap().frame_rect();
+        let inner = comp.window_ref(dialog).unwrap().frame_rect();
+        let left = inner.x - outer.x;
+        let right = (outer.x + outer.width as i32) - (inner.x + inner.width as i32);
+        let top = inner.y - outer.y;
+        let bottom = (outer.y + outer.height as i32) - (inner.y + inner.height as i32);
+        assert!(
+            (left - right).abs() <= 1,
+            "not centred across: {left} / {right}"
+        );
+        assert!(
+            (top - bottom).abs() <= 1,
+            "not centred down: {top} / {bottom}"
+        );
+        assert_eq!(comp.focused_window, Some(dialog));
+    }
+
+    /// Closing a dialog gives the keyboard back to the window it was for --
+    /// not to whatever the user touched most recently before coming back.
+    #[test]
+    fn a_closing_dialog_gives_the_keyboard_back_to_its_window() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let elsewhere = opened(&mut comp, "Elsewhere", 3);
+        let dialog = opened(&mut comp, "Open", 2);
+        comp.set_parent(dialog, Some(program)).unwrap();
+        comp.focus_window(elsewhere);
+        comp.focus_window(dialog);
+        comp.destroy_window(dialog).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(program),
+            "the keyboard went to the most recent window, not the dialog's"
+        );
+    }
+
+    /// Minimising the program takes its dialog with it, and restoring brings
+    /// it back -- but not a dialog the user minimised on its own.
+    #[test]
+    fn a_dialog_is_minimised_and_restored_with_its_window() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let dialog = opened(&mut comp, "Open", 2);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        comp.minimize_window(program).unwrap();
+        assert!(comp.window_ref(dialog).unwrap().minimized);
+        assert_eq!(comp.focused_window, None);
+        comp.restore_window(program).unwrap();
+        assert!(!comp.window_ref(dialog).unwrap().minimized);
+        assert!(depth(&comp, dialog) > depth(&comp, program));
+
+        comp.minimize_window(dialog).unwrap();
+        comp.minimize_window(program).unwrap();
+        comp.activate_window(program).unwrap();
+        assert!(
+            comp.window_ref(dialog).unwrap().minimized,
+            "a dialog the user minimised came back with its window"
+        );
+    }
+
+    /// No loops, no parent in another band; and a closed parent leaves an
+    /// ordinary window.
+    #[test]
+    fn a_window_cannot_belong_to_itself_or_across_bands_and_outlives_its_parent() {
+        let mut comp = activating();
+        let a = opened(&mut comp, "A", 1);
+        let b = opened(&mut comp, "B", 1);
+        let c = opened(&mut comp, "C", 1);
+        comp.set_parent(b, Some(a)).unwrap();
+        comp.set_parent(c, Some(b)).unwrap();
+        for (child, parent) in [(a, c), (a, b), (a, a)] {
+            assert!(
+                matches!(
+                    comp.set_parent(child, Some(parent)),
+                    Err(CompositorError::Refused(_))
+                ),
+                "a loop through {parent:?} was allowed"
+            );
+        }
+        let panel = layered(&mut comp, "Panel", Layer::Overlay);
+        assert!(matches!(
+            comp.set_parent(a, Some(panel)),
+            Err(CompositorError::Refused(_))
+        ));
+
+        comp.destroy_window(b).unwrap();
+        assert_eq!(comp.window_ref(c).unwrap().parent, None);
+        comp.set_parent(c, Some(a)).unwrap();
+        comp.set_parent(c, None).unwrap();
+        assert_eq!(comp.window_ref(c).unwrap().parent, None);
+    }
+
+    /// The same window exported twice is the same handle, and the handle
+    /// goes with the window.
+    #[test]
+    fn a_window_is_lent_under_one_handle_that_closes_with_it() {
+        let mut comp = activating();
+        let w = opened(&mut comp, "W", 1);
+        let handle = comp.export_window(w).unwrap();
+        assert_eq!(comp.export_window(w).unwrap(), handle);
+        assert_eq!(comp.exported(handle), Some(w));
+        comp.destroy_window(w).unwrap();
+        assert_eq!(comp.exported(handle), None);
+        assert!(comp.exports.is_empty());
     }
 
     /// The user's action belongs to the window that took the keyboard for

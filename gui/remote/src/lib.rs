@@ -110,6 +110,12 @@ pub use control::{
 pub mod activation;
 pub use activation::{ACTIVATION_TOKEN_ENV, ActivationToken};
 
+pub mod export;
+pub use export::{ExportedWindow, Parent};
+
+// The text form of the 16-byte secrets above, written once for both.
+mod hex16;
+
 pub mod submit;
 pub use submit::{
     SUBMIT_MAGIC, SUBMIT_VERSION, Submission, decode_submit, encode_submit, encode_submit_into,

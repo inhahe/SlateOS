@@ -39,3 +39,45 @@ explorer has the request).
 
 The chooser opens as an ordinary window: it works, and it can go behind the
 program that asked, which then looks frozen until the user finds the chooser.
+
+## Reply, lane F -- 2026-10-10: built -- by a lent handle rather than the raw id
+
+On `lane-f`, reaching `main` with lane F's next publish (design-decisions
+1387, control version 27).
+
+**What the owner names, your question.** Not the raw window id: a program
+that could make its window belong to any window by id could pin a look-alike
+over somebody else's -- a bank's window -- and keep it there as the user
+clicks. Instead the owner *lends* its window, as Wayland's xdg-foreign does:
+
+1. **The asking program**, before it sends its request, calls
+   `window.export()` (`oswindow::WindowHandle::export`) on its window and
+   puts the `ExportedWindow` it gets -- sixteen bytes; `to_text()` gives 32
+   hex digits if your request is text -- in `filechooser::Request::owner`
+   instead of the window id. The same window gives the same handle every
+   time; it dies with the window.
+2. **The explorer**, once its chooser window exists, calls
+   `window.set_parent(Parent::Exported(owner))`
+   (`ExportedWindow::from_text` if it came as text). A handle nobody lent
+   is refused, as is the owner's raw id.
+
+**What "belongs" does** -- everything you asked, and two things more a
+dialog needs:
+
+- kept above the owner, and raising the owner raises it with it;
+- placed centred over the owner when attached (kept on screen), and moved
+  to the owner's desktop;
+- given the keyboard on attaching if the owner has it -- the owner lent its
+  window for this, so this holds even under the strict policy of
+  design-decisions 1386;
+- when it closes (or hides, or gives the keyboard back), the keyboard goes
+  to the owner first;
+- *also*: minimising the owner minimises it, and restoring the owner brings
+  it back;
+- *also*: a program's own dialogs can belong to its windows the same way,
+  without lending anything: `set_parent(Parent::Own(main_window_id))`.
+
+If the owner closes first, the chooser becomes an ordinary window. Not done:
+keeping the chooser off the taskbar (it still has its own entry) -- that
+needs a field in the window list, which `session.rs` builds by struct
+literal; say if you want it.

@@ -59,6 +59,7 @@
 use guitk::event::{Key, Modifiers, SettingsName};
 
 use crate::activation::ActivationToken;
+use crate::export::{ExportedWindow, Parent};
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
@@ -154,7 +155,12 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// [`RequestBody::Activate`] (tag `0x35`); and
 /// [`ShellControlAction::ReturnKeyboard`] (action byte 30). Incompatible on
 /// 2's terms in both directions.
-pub const CONTROL_VERSION: u8 = 26;
+/// **27** — a window that belongs to another (design-decisions 1387):
+/// [`RequestBody::ExportWindow`] (tag `0x36`) and its answer
+/// [`ResponseBody::ExportedWindow`] (response tag `0x0A`), and
+/// [`RequestBody::SetParent`] (tag `0x37`). Incompatible on 2's terms in both
+/// directions.
+pub const CONTROL_VERSION: u8 = 27;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1440,6 +1446,24 @@ pub enum RequestBody {
     /// [`RequestAttention`](Self::RequestAttention) does: the user decides
     /// whether to look.
     Activate { window: u64, token: ActivationToken },
+    /// Lend one of the sender's own windows to another program, so that a
+    /// window of that program's can belong to it ([`export`](crate::export),
+    /// design-decisions 1387): the file explorer's Open and Save window, kept
+    /// above the program that asked. Answered with
+    /// [`ResponseBody::ExportedWindow`] -- sixteen bytes to send the other
+    /// program -- or an error when the compositor has no random source to
+    /// draw them from. Exporting the same window again gives the same bytes;
+    /// they are good until the window closes.
+    ExportWindow { window: u64 },
+    /// Make one of the sender's windows belong to another ([`Parent`]): kept
+    /// above it and raised with it, placed over it, given the keyboard if the
+    /// window it belongs to has it, and the keyboard handed back to that
+    /// window when this one closes. [`Parent::None`] makes it an ordinary
+    /// window again. Answered with [`ResponseBody::Ok`], or an error for a
+    /// parent that cannot be one: a handle no window was lent under, a window
+    /// that is not the sender's, a window in another band, or one this window
+    /// would end up above itself through.
+    SetParent { window: u64, parent: Parent },
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1718,6 +1742,8 @@ enum RequestTag {
     GetActivationToken = 0x33,
     UseActivationToken = 0x34,
     Activate = 0x35,
+    ExportWindow = 0x36,
+    SetParent = 0x37,
 }
 
 impl RequestTag {
@@ -1775,6 +1801,8 @@ impl RequestTag {
             0x33 => Self::GetActivationToken,
             0x34 => Self::UseActivationToken,
             0x35 => Self::Activate,
+            0x36 => Self::ExportWindow,
+            0x37 => Self::SetParent,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1854,6 +1882,8 @@ pub enum ResponseBody {
     /// Answer to [`RequestBody::GetActivationToken`]: sixteen bytes on the
     /// wire.
     ActivationToken(ActivationToken),
+    /// Answer to [`RequestBody::ExportWindow`]: sixteen bytes on the wire.
+    ExportedWindow(ExportedWindow),
 }
 
 /// The window a user picked ([`RequestBody::PickWindow`]).
@@ -1884,6 +1914,7 @@ enum ResponseTag {
     Clipboard = 0x07,
     Picked = 0x08,
     ActivationToken = 0x09,
+    ExportedWindow = 0x0A,
 }
 
 impl ResponseTag {
@@ -1898,6 +1929,7 @@ impl ResponseTag {
             0x07 => Self::Clipboard,
             0x08 => Self::Picked,
             0x09 => Self::ActivationToken,
+            0x0A => Self::ExportedWindow,
             _ => return None,
         })
     }
@@ -2163,6 +2195,15 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u64(out, *window);
             out.extend_from_slice(&token.to_bytes());
         }
+        RequestBody::ExportWindow { window } => {
+            out.push(RequestTag::ExportWindow as u8);
+            write_u64(out, *window);
+        }
+        RequestBody::SetParent { window, parent } => {
+            out.push(RequestTag::SetParent as u8);
+            write_u64(out, *window);
+            write_parent(out, *parent);
+        }
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2340,7 +2381,38 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
             out.push(ResponseTag::ActivationToken as u8);
             out.extend_from_slice(&token.to_bytes());
         }
+        ResponseBody::ExportedWindow(handle) => {
+            out.push(ResponseTag::ExportedWindow as u8);
+            out.extend_from_slice(&handle.to_bytes());
+        }
     }
+}
+
+/// A [`Parent`] on the wire: a byte saying which, then the window's id or the
+/// lent window's sixteen bytes.
+fn write_parent(out: &mut Vec<u8>, parent: Parent) {
+    match parent {
+        Parent::None => out.push(0),
+        Parent::Own(window) => {
+            out.push(1);
+            write_u64(out, window);
+        }
+        Parent::Exported(handle) => {
+            out.push(2);
+            out.extend_from_slice(&handle.to_bytes());
+        }
+    }
+}
+
+/// [`write_parent`]'s reading. A byte naming no kind of parent fails the
+/// frame, as an unknown tag does.
+fn read_parent(r: &mut Reader<'_>) -> Result<Parent, DecodeError> {
+    Ok(match r.read_u8()? {
+        0 => Parent::None,
+        1 => Parent::Own(r.read_u64()?),
+        2 => Parent::Exported(ExportedWindow::from_bytes(r.take_array()?)),
+        other => return Err(DecodeError::BadTag(other)),
+    })
 }
 
 // ============================================================================
@@ -2643,6 +2715,13 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             window: r.read_u64()?,
             token: ActivationToken::from_bytes(r.take_array()?),
         },
+        RequestTag::ExportWindow => RequestBody::ExportWindow {
+            window: r.read_u64()?,
+        },
+        RequestTag::SetParent => RequestBody::SetParent {
+            window: r.read_u64()?,
+            parent: read_parent(r)?,
+        },
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2827,6 +2906,9 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
         }),
         ResponseTag::ActivationToken => {
             ResponseBody::ActivationToken(ActivationToken::from_bytes(r.take_array()?))
+        }
+        ResponseTag::ExportedWindow => {
+            ResponseBody::ExportedWindow(ExportedWindow::from_bytes(r.take_array()?))
         }
     })
 }
@@ -3128,8 +3210,50 @@ mod tests {
                     token: ActivationToken::from_bytes(*b"sixteen bytes!!!"),
                 },
             ),
+            Request::new(41, RequestBody::ExportWindow { window: 12 }),
+            Request::new(
+                42,
+                RequestBody::SetParent {
+                    window: 13,
+                    parent: Parent::None,
+                },
+            ),
+            Request::new(
+                43,
+                RequestBody::SetParent {
+                    window: 13,
+                    parent: Parent::Own(u64::MAX),
+                },
+            ),
+            Request::new(
+                44,
+                RequestBody::SetParent {
+                    window: 13,
+                    parent: Parent::Exported(ExportedWindow::from_bytes([0xC3; 16])),
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// A parent of a kind this version does not know fails the frame, as an
+    /// unknown tag does: guessing would make a window belong to the wrong one.
+    #[test]
+    fn an_unknown_kind_of_parent_is_refused() {
+        let mut out = Vec::new();
+        encode_request_body(
+            &mut out,
+            &RequestBody::SetParent {
+                window: 1,
+                parent: Parent::None,
+            },
+        );
+        let at = out.len() - 1;
+        out[at] = 3;
+        let mut r = Reader::new(&out);
+        r.read_u8().unwrap();
+        r.read_u64().unwrap();
+        assert_eq!(read_parent(&mut r), Err(DecodeError::BadTag(3)));
     }
 
     /// A token travels as its sixteen bytes, nothing else: the request that
@@ -3522,8 +3646,18 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x36),
+            Some(RequestTag::ExportWindow),
+            "0x36 was taken by ExportWindow in control version 27"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x37),
+            Some(RequestTag::SetParent),
+            "0x37 was taken by SetParent in control version 27"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x38),
             None,
-            "0x36 is the next free tag"
+            "0x38 is the next free tag"
         );
     }
 
@@ -3934,6 +4068,10 @@ mod tests {
                 13,
                 ResponseBody::ActivationToken(ActivationToken::from_bytes([0x5A; 16])),
             ),
+            Response::new(
+                14,
+                ResponseBody::ExportedWindow(ExportedWindow::from_bytes([0x3C; 16])),
+            ),
         ];
         assert_eq!(round_trip_responses(&resps), resps);
     }
@@ -3948,8 +4086,13 @@ mod tests {
         );
         assert_eq!(
             ResponseTag::from_byte(0x0A),
+            Some(ResponseTag::ExportedWindow),
+            "0x0A was taken by ExportedWindow in control version 27"
+        );
+        assert_eq!(
+            ResponseTag::from_byte(0x0B),
             None,
-            "0x0A is the next free tag"
+            "0x0B is the next free tag"
         );
     }
 

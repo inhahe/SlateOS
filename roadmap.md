@@ -4814,6 +4814,19 @@ lane C's `guitk`.
   tokens on: `requests/f-c-hand-a-started-program-an-activation-token.md`,
   `requests/f-e-hand-a-started-program-an-activation-token.md`.
 
+- `[x]` `[F]` **A window can belong to another, and is kept above it** --
+  done 2026-10-10 (§1387), the window system's part of the operator's §1415
+  (the file explorer shows every program's Open and Save window, which
+  belongs to the program that asked) and lane C's
+  `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`.
+  `SetParent` with a program's own window, or with one another program lent
+  by `ExportWindow` (Wayland's xdg-foreign: a handle, never the raw id, so no
+  program can pin a window over someone else's uninvited). A window that
+  belongs to another stays above it and rises with it, opens centred over it
+  on its desktop, takes the keyboard if its parent has it and gives it back
+  to its parent on leaving, and is minimised and restored with it. Not yet:
+  keeping such windows off the taskbar (a window-list field).
+
 - `[F]` Port FreeRDP (line ~5058)
 
 `open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C

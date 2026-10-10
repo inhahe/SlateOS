@@ -212,6 +212,16 @@ impl Activations {
     }
 
     fn draw(&mut self) -> Result<ActivationToken, NoToken> {
+        self.draw_bytes().map(ActivationToken::from_bytes)
+    }
+
+    /// Sixteen unguessable bytes from the same source tokens come from: what
+    /// an exported window's handle is made of too (design-decisions 1387).
+    ///
+    /// # Errors
+    ///
+    /// [`NoToken::NoRandomness`] when no unguessable bytes can be drawn.
+    pub(crate) fn draw_bytes(&mut self) -> Result<[u8; 16], NoToken> {
         let mut bytes = [0u8; ActivationToken::LEN];
         match &mut self.source {
             TokenSource::System => {
@@ -224,7 +234,7 @@ impl Activations {
                 head.copy_from_slice(&next.to_le_bytes());
             }
         }
-        Ok(ActivationToken::from_bytes(bytes))
+        Ok(bytes)
     }
 
     /// `client` presents `token` for its next window or restore. The token is

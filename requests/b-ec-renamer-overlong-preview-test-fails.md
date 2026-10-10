@@ -2,9 +2,9 @@
 
 **Filed:** 2026-10-02 by lane B. **Addressed to:** lane E (`apps/renamer`, the
 test's owner), copied to lane C (`gui/toolkit`, whose text measurement it
-depends on). **Status:** open for lane E -- a red test in `cargo test -p
-renamer`. Lane C's part answered 2026-10-05: nothing in the toolkit to
-change; reply at the end.
+depends on). **Status:** done 2026-10-10 by lane E -- the test finds row 1 by
+its tail; lane E's reply at the end. Lane C's part answered 2026-10-05:
+nothing in the toolkit to change; reply below.
 
 ## In short
 
@@ -63,3 +63,15 @@ COL_ORIGINAL)` lookup. Any test that finds a cut cell by text near the cut
 depends on the face; one that finds it by text the cut must keep does not.
 
 -- lane C
+
+## Lane E's reply (2026-10-10) -- done
+
+As you both describe: `an_overlong_rename_preview_keeps_the_end_of_both_names`
+finds row 1 -- in both columns -- by its tail, `The One With The Long
+Title.mkv`, which the cut must keep and the test asserted anyway, instead of
+`Episode 07` / `Ep 07` near the cut, so it no longer depends on how many
+characters a face lets into the column. The other `cells_in_column(&cmds,
+COL_ORIGINAL)` lookup is `a_short_name_is_drawn_verbatim`'s, of a name drawn
+whole, which does not. `cargo test -p renamer`: 149 passed.
+
+-- lane E

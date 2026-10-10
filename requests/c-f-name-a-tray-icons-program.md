@@ -45,6 +45,15 @@ hide it and out of the overflow list to show it; and remember it across
 restarts. Icons with an empty `app_id` keep today's behaviour -- shown in
 registration order, overflowing by space.
 
+**Lane C's half is written (2026-09-29), and waits only on this.** Dropping
+an icon on the chevron hides it, dragging it out of the overflow list shows
+it where it is let go, the overflow lists hidden icons, and a label says
+what letting go will do -- tested, and shelved on lane C's local branch
+`lane-c-shelf-tray-hiding` (838f2db98) rather than merged, because without
+a name to save the choice under it would last only until the program or the
+desktop restarted. The day `app_id` reaches `TrayIcon`, lane C adds the
+saving and merges it.
+
 ## If this is never done
 
 The tray works as it does now: every program's icon is shown while there is

@@ -353,6 +353,45 @@ run_case nosuch.txt
 run_case ''
 run_case subdir
 
+# --- standard descriptors closed ------------------------------------------------
+# Upstream takes the operand with `freopen (FILE, "r", stdin)`, so the file goes
+# onto descriptor 0, and a failed `freopen` reports the `errno` of glibc closing
+# that descriptor -- `Bad file descriptor` when it was closed already, where
+# ours, opening the operand as an ordinary file, said `No such file or
+# directory`. `$1` is the closing, applied to `tsort` alone after the captures;
+# not through `run_side`, whose `diff_run` duplicates the caller's standard
+# error, which `2>&-` takes away.
+run_closed() {
+  local closing="$1"; shift
+  local side rc
+  for side in ours gnu; do
+    eval "timeout -k 2 30 env LC_ALL=C.UTF-8 PATH=\"\$bindir/\$side\" tsort \"\$@\" >\"\$DIFF_TMP/closed-\$side.out\" 2>\"\$DIFF_TMP/closed-\$side.err\" $closing"
+    rc=$?
+    printf 'rc=%s out=%s err=%s' "$rc" \
+      "$(od -An -c < "$DIFF_TMP/closed-$side.out" | tr -s ' \n' ' ')" \
+      "$(tr '\n' '|' < "$DIFF_TMP/closed-$side.err")" > "$DIFF_TMP/closed-$side.res"
+  done
+  if cmp -s "$DIFF_TMP/closed-ours.res" "$DIFF_TMP/closed-gnu.res"; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours: %s\n  gnu:  %s' "$(cat "$DIFF_TMP/closed-ours.res")" \
+    "$(cat "$DIFF_TMP/closed-gnu.res")")
+  report "tsort $* $closing"
+}
+run_closed '<&-' nosuch.txt
+run_closed '<&- >&-' nosuch.txt
+run_closed '<&- 2>&-' nosuch.txt
+run_closed '>&-' nosuch.txt
+run_closed '<&-' chain.txt
+run_closed '>&-' chain.txt
+run_closed '<&- >&-' chain.txt
+run_closed '2>&-' chain.txt
+run_closed '<&-' subdir
+run_closed '<&-' -
+run_closed '<&-'
+
 # --- getopt -------------------------------------------------------------------
 # There are no short options at all, so every short spelling is an error —
 # including `-h`, which is the one a reader would guess exists.

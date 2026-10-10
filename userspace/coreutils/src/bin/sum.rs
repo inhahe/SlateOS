@@ -34,7 +34,9 @@
 //!
 //! `scripts/sum-diff.sh`.
 
+use coreutils::diag;
 use coreutils::digest::{Fed, feed_file};
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
@@ -193,10 +195,14 @@ fn run() -> ExitCode {
             None => ok = false,
         }
     }
-    // `if (have_read_stdin && fclose (stdin) == EOF)`: a read error on stdin
-    // has already been reported by `feed_file`, and a locked Rust stdin has no
-    // separate close to fail.
-    let _ = read_stdin;
+    // `if (have_read_stdin && fclose (stdin) == EOF) error (EXIT_FAILURE,
+    // errno, _("standard input"))`. Measured, `sum <&-` says
+    // `sum: -: Bad file descriptor` for the read and then
+    // `sum: standard input: Bad file descriptor` for this.
+    if read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("sum: standard input: {}", strerror(&e));
+        ok = false;
+    }
     stdfd::close_stdout(
         "sum",
         out,

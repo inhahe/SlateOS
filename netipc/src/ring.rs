@@ -197,7 +197,15 @@ pub const OP_SHUTDOWN: u8 = 0x0B;
 /// on success — so the kernel learns the ephemeral port for `getsockname` — or a
 /// negative errno (`ERR_ADDR_IN_USE` if the port is already bound). Migration
 /// Phase 5, UDP `SOCK_DGRAM` support.
+///
+/// With [`UDP_BIND_UNBOUND`] set in `aux` it creates the socket *without* a
+/// port -- Linux's state between `socket(2)` and `bind(2)`, which a program
+/// may spend setting options and joining groups -- and completes with `0`.
+/// Such a socket sends and receives nothing. A later `OP_UDP_BIND` on the
+/// same `conn_id`, without the flag, gives it its port.
 pub const OP_UDP_BIND: u8 = 0x0C;
+/// [`OP_UDP_BIND`] `aux` flag: create the socket unbound (no local port).
+pub const UDP_BIND_UNBOUND: u64 = 1 << 16;
 /// Send one **UDP datagram** from the socket named by `conn_id` to the
 /// destination packed in `aux` (`[ip:4][port_be:2]`, see [`Sqe::pack_endpoint`]).
 /// The payload is the SQE data window (`data_off`/`data_len`). Completion
@@ -227,8 +235,63 @@ pub const OP_UDP_RECV: u8 = 0x0E;
 /// (big-endian, matching the port half of [`Sqe::pack_endpoint`]). Completion
 /// `result` semantics match [`OP_UDP_SEND`]: payload bytes sent (`≥ 0`) or a
 /// negative errno ([`ERR_MSG_SIZE`] for an oversized datagram). Migration Phase 5,
-/// AF_INET6 UDP `SOCK_DGRAM` support.
+/// `AF_INET6` UDP `SOCK_DGRAM` support.
 pub const OP_UDP_SEND6: u8 = 0x0F;
+/// Set one of a UDP socket's **multicast options**: the Linux ABI's
+/// `setsockopt` at `IPPROTO_IP`/`IPPROTO_IPV6` on a daemon-backed
+/// `SOCK_DGRAM` socket. An mDNS responder needs them (design-decisions
+/// §1532). `aux` holds the option and, for a scalar one, its value
+/// ([`Sqe::pack_udp_opt`]). A group join or leave carries the group in the
+/// data window: `[group:4][interface address:4]` for the IPv4 ones
+/// ([`UDP_MREQ4_LEN`]), the 16-byte group for the IPv6 ones
+/// ([`UDP_MREQ6_LEN`]). The kernel has already settled the interface
+/// *index* a `struct ip_mreqn` or `struct ipv6_mreq` names
+/// ([`crate::sockopt`]); an IPv4 address is the daemon's to check, as only
+/// it knows the host's.
+///
+/// The socket may be unbound ([`UDP_BIND_UNBOUND`]): Linux takes these
+/// options before `bind(2)`.
+///
+/// Completion `result` is `0`, or a negative errno: [`ERR_ADDR_IN_USE`]
+/// joining a group the socket is in already (as Linux answers),
+/// [`ERR_ADDR_NOT_AVAIL`] leaving one it is not in, [`ERR_NO_BUFS`] past the
+/// socket's or the host's group limit, [`ERR_NO_DEVICE`] joining on an
+/// interface address that is not the host's, [`ERR_INVALID`] for a group
+/// that is not multicast or a value out of range. The kernel has already
+/// turned Linux's `-1` ("the default") into the default, so a scalar value
+/// is always 0-255.
+pub const OP_UDP_SETOPT: u8 = 0x10;
+/// Read one of a UDP socket's scalar multicast options back
+/// (`getsockopt`). `aux` holds the option ([`Sqe::pack_udp_opt`], value 0).
+/// Completion `result` is the value (`≥ 0`), or [`ERR_INVALID`] for an
+/// option with no value to read (the joins and leaves).
+pub const OP_UDP_GETOPT: u8 = 0x11;
+
+/// [`OP_UDP_SETOPT`] option: join an IPv4 group (`IP_ADD_MEMBERSHIP`).
+pub const UDP_OPT_MCAST_JOIN4: u16 = 1;
+/// [`OP_UDP_SETOPT`] option: leave an IPv4 group (`IP_DROP_MEMBERSHIP`).
+pub const UDP_OPT_MCAST_LEAVE4: u16 = 2;
+/// [`OP_UDP_SETOPT`] option: join an IPv6 group (`IPV6_JOIN_GROUP`).
+pub const UDP_OPT_MCAST_JOIN6: u16 = 3;
+/// [`OP_UDP_SETOPT`] option: leave an IPv6 group (`IPV6_LEAVE_GROUP`).
+pub const UDP_OPT_MCAST_LEAVE6: u16 = 4;
+/// The TTL of the socket's IPv4 multicast sends (`IP_MULTICAST_TTL`):
+/// 0-255, default 1. 0 keeps a datagram on this machine.
+pub const UDP_OPT_MCAST_TTL: u16 = 5;
+/// Whether the socket's IPv4 multicast sends loop back to this machine's
+/// members (`IP_MULTICAST_LOOP`): 0 or 1, default 1.
+pub const UDP_OPT_MCAST_LOOP4: u16 = 6;
+/// The hop limit of the socket's IPv6 multicast sends
+/// (`IPV6_MULTICAST_HOPS`): 0-255, default 1.
+pub const UDP_OPT_MCAST_HOPS: u16 = 7;
+/// Whether the socket's IPv6 multicast sends loop back
+/// (`IPV6_MULTICAST_LOOP`): 0 or 1, default 1.
+pub const UDP_OPT_MCAST_LOOP6: u16 = 8;
+/// Length of an IPv4 join or leave's data window:
+/// `[group:4][interface address:4]`, the address `0.0.0.0` for "any".
+pub const UDP_MREQ4_LEN: usize = 8;
+/// Length of an IPv6 join or leave's data window: the 16-byte group.
+pub const UDP_MREQ6_LEN: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -334,6 +397,38 @@ pub const ERR_ADDR_IN_USE: i32 = -98;
 /// `sendto(2)` `EMSGSIZE` errno. Distinct from the other sentinels above.
 pub const ERR_MSG_SIZE: i32 = -90;
 
+/// Completion `result` sentinel: the connection has **timed out** -- a segment we
+/// sent was resent until the daemon gave up (`netproto::tcp_rtx::MAX_RETRANSMITS`
+/// unanswered resends), so the peer is presumed gone. Answered by [`OP_RECV`]
+/// with nothing buffered and by [`OP_SEND`]; [`OP_POLL`] reports [`POLL_ERR`].
+/// Numerically mirrors Linux `-ETIMEDOUT`; the kernel maps it to
+/// `KernelError::TimedOut` → the `recv(2)`/`send(2)` `ETIMEDOUT` errno.
+///
+/// Distinct from every sentinel above and, above all, from `0`: an `OP_RECV`
+/// result of `0` means the peer closed its side (EOF) and nothing else. A
+/// receive that found nothing answers [`ERR_WOULD_BLOCK`] whether it was asked
+/// not to block or its own wait ran out -- until 2026-09-26 the latter answered
+/// `0`, and a connection quiet for two seconds read as closed.
+pub const ERR_TIMED_OUT: i32 = -110;
+
+/// Completion `result` sentinel (`-EADDRNOTAVAIL`): an [`OP_UDP_SETOPT`]
+/// leave named a group the socket is not in, or an interface it did not join
+/// on.
+pub const ERR_ADDR_NOT_AVAIL: i32 = -99;
+
+/// Completion `result` sentinel (`-ENOBUFS`): an [`OP_UDP_SETOPT`] join
+/// past the socket's or the host's group limit.
+pub const ERR_NO_BUFS: i32 = -105;
+
+/// Completion `result` sentinel (`-ENODEV`): an [`OP_UDP_SETOPT`] join
+/// named an interface address that is not the host's.
+pub const ERR_NO_DEVICE: i32 = -19;
+
+/// Completion `result` sentinel (`-EINVAL`): an [`OP_UDP_SETOPT`] or
+/// [`OP_UDP_GETOPT`] the socket cannot take -- a group that is not a
+/// multicast address, a value out of range, an option with no value.
+pub const ERR_INVALID: i32 = -22;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -351,6 +446,13 @@ pub const POLL_WRITABLE: i32 = 1 << 1;
 /// `getsockopt(SO_ERROR)`. A `SYN_SENT` connection whose handshake is still in
 /// flight reports *neither* [`POLL_WRITABLE`] nor this bit (not yet ready).
 pub const POLL_ERR: i32 = 1 << 2;
+
+/// [`OP_POLL`] bit: the completion's `flags` word carries how many bytes a
+/// receive would find waiting -- the kernel's `FIONREAD` (Linux's `SIOCINQ`):
+/// a TCP connection's buffered in-order bytes, a UDP socket's next
+/// datagram's payload length, 0 for a listener. Set on every successful poll
+/// by a daemon that counts; its absence means the count is unknown, not 0.
+pub const POLL_COUNTED: i32 = 1 << 3;
 
 // ---------------------------------------------------------------------------
 // Entry structs
@@ -415,6 +517,26 @@ impl Sqe {
     pub fn unpack_endpoint(aux: u64) -> ([u8; 4], u16) {
         let b = aux.to_le_bytes();
         ([b[0], b[1], b[2], b[3]], u16::from_be_bytes([b[4], b[5]]))
+    }
+
+    /// Pack an [`OP_UDP_SETOPT`]/[`OP_UDP_GETOPT`] operand into [`Sqe::aux`]:
+    /// the option (`UDP_OPT_*`) in the low 16 bits and a scalar value in the
+    /// next 32 -- zero for the joins and leaves, whose group rides in the
+    /// data window.
+    #[must_use]
+    pub fn pack_udp_opt(option: u16, value: u32) -> u64 {
+        u64::from(option) | (u64::from(value) << 16)
+    }
+
+    /// Unpack an operand packed with [`Sqe::pack_udp_opt`]:
+    /// `(option, value)`.
+    #[must_use]
+    pub fn unpack_udp_opt(aux: u64) -> (u16, u32) {
+        let b = aux.to_le_bytes();
+        (
+            u16::from_le_bytes([b[0], b[1]]),
+            u32::from_le_bytes([b[2], b[3], b[4], b[5]]),
+        )
     }
 
     /// Build the in-band source-address header the daemon prepends to an
@@ -602,6 +724,79 @@ mod tests {
     }
 
     #[test]
+    fn a_udp_option_operand_round_trips_through_an_sqe() {
+        for (option, value) in [
+            (UDP_OPT_MCAST_TTL, 255),
+            (UDP_OPT_MCAST_LOOP4, 0),
+            (UDP_OPT_MCAST_HOPS, 1),
+            (UDP_OPT_MCAST_JOIN6, 0),
+            (u16::MAX, u32::MAX),
+        ] {
+            let sqe = Sqe {
+                op: OP_UDP_SETOPT,
+                conn_id: 7,
+                data_off: 0,
+                data_len: 0,
+                user_data: 1,
+                aux: Sqe::pack_udp_opt(option, value),
+            };
+            let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+            assert_eq!(Sqe::unpack_udp_opt(back.aux), (option, value));
+        }
+    }
+
+    #[test]
+    fn the_udp_option_codes_and_errnos_are_distinct() {
+        let options = [
+            UDP_OPT_MCAST_JOIN4,
+            UDP_OPT_MCAST_LEAVE4,
+            UDP_OPT_MCAST_JOIN6,
+            UDP_OPT_MCAST_LEAVE6,
+            UDP_OPT_MCAST_TTL,
+            UDP_OPT_MCAST_LOOP4,
+            UDP_OPT_MCAST_HOPS,
+            UDP_OPT_MCAST_LOOP6,
+        ];
+        for (i, a) in options.iter().enumerate() {
+            assert_ne!(*a, 0, "0 is no option");
+            for b in &options[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let errnos = [
+            ERR_WOULD_BLOCK,
+            ERR_IN_PROGRESS,
+            ERR_BROKEN_PIPE,
+            ERR_ADDR_IN_USE,
+            ERR_MSG_SIZE,
+            ERR_TIMED_OUT,
+            ERR_ADDR_NOT_AVAIL,
+            ERR_NO_BUFS,
+            ERR_NO_DEVICE,
+            ERR_INVALID,
+            -1,
+        ];
+        for (i, a) in errnos.iter().enumerate() {
+            assert!(*a < 0);
+            for b in &errnos[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_ne!(OP_UDP_SETOPT, OP_UDP_GETOPT);
+        const { assert!(OP_UDP_SETOPT > OP_UDP_SEND6) };
+    }
+
+    #[test]
+    fn the_unbound_flag_leaves_the_port_bits_alone() {
+        // OP_UDP_BIND's port is aux's low 16 bits: the flag must sit above
+        // them, so "unbound" can never read as a port, nor a port as it.
+        assert_eq!(UDP_BIND_UNBOUND & 0xFFFF, 0);
+        assert_ne!(UDP_BIND_UNBOUND, 0);
+        let port = u64::from(5353_u16);
+        assert_eq!((UDP_BIND_UNBOUND | port) & 0xFFFF, port);
+    }
+
+    #[test]
     fn recv_nonblock_flag_round_trips_and_is_distinct() {
         // The non-blocking flag rides in `aux`, orthogonal to the endpoint
         // packing used by OP_CONNECT, and must survive serialization.
@@ -668,8 +863,8 @@ mod tests {
         // combined mask never looks like a negative errno.
         assert_ne!(POLL_READABLE, POLL_WRITABLE);
         assert_eq!(POLL_READABLE & POLL_WRITABLE, 0);
-        assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0);
-        assert!(POLL_READABLE | POLL_WRITABLE > 0);
+        // Both positive and non-overlapping, so their union is positive too.
+        const { assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0) };
         // A daemon readiness bitmask is non-negative, unlike the -1 error / EAGAIN.
         assert_ne!(POLL_READABLE | POLL_WRITABLE, ERR_WOULD_BLOCK);
         assert_ne!(POLL_READABLE | POLL_WRITABLE, -1);
@@ -682,7 +877,13 @@ mod tests {
         let ip = [93, 184, 216, 34];
         let port = 443u16;
         let aux = Sqe::pack_endpoint(&ip, port) | CONNECT_NONBLOCK;
-        let sqe = Sqe { op: OP_CONNECT, conn_id: 3, user_data: 7, aux, ..Sqe::default() };
+        let sqe = Sqe {
+            op: OP_CONNECT,
+            conn_id: 3,
+            user_data: 7,
+            aux,
+            ..Sqe::default()
+        };
         let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
         assert_eq!(back.aux & CONNECT_NONBLOCK, CONNECT_NONBLOCK);
         // The endpoint still unpacks correctly with the flag ORed in.
@@ -696,14 +897,35 @@ mod tests {
         assert_ne!(ERR_IN_PROGRESS, -1);
         assert_ne!(ERR_IN_PROGRESS, ERR_WOULD_BLOCK);
         // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
-        assert!(POLL_ERR > 0);
+        const { assert!(POLL_ERR > 0) };
         assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
+        // POLL_COUNTED too: a reader testing any one bit must not see it, and a
+        // result carrying all four stays positive (not an errno).
+        const { assert!(POLL_COUNTED > 0) };
+        assert_eq!(POLL_COUNTED & (POLL_READABLE | POLL_WRITABLE | POLL_ERR), 0);
+        const { assert!((POLL_READABLE | POLL_WRITABLE | POLL_ERR | POLL_COUNTED) > 0) };
+    }
+
+    #[test]
+    fn a_poll_completion_carries_its_count_in_flags() {
+        // OP_POLL's count rides in the flags word, which survives the wire.
+        let c = Cqe {
+            user_data: 9,
+            result: POLL_READABLE | POLL_WRITABLE | POLL_COUNTED,
+            flags: 1460,
+        };
+        let back = Cqe::from_bytes(&c.to_bytes()).expect("a whole slot");
+        assert_eq!(back, c);
+        assert_ne!(back.result & POLL_COUNTED, 0);
+        assert_eq!(back.flags, 1460);
     }
 
     #[test]
     fn listen_accept_opcodes_round_trip_and_are_distinct() {
         // OP_LISTEN / OP_ACCEPT must not collide with any prior opcode or each other.
-        let existing = [OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL];
+        let existing = [
+            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL,
+        ];
         for other in existing {
             assert_ne!(OP_LISTEN, other, "OP_LISTEN aliases another opcode");
             assert_ne!(OP_ACCEPT, other, "OP_ACCEPT aliases another opcode");
@@ -776,8 +998,17 @@ mod tests {
     fn shutdown_opcode_is_unique_and_carries_how_in_aux() {
         // OP_SHUTDOWN must not collide with any prior opcode.
         let existing = [
-            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
-            OP_CONNECT6, OP_LOCALADDR,
+            OP_NOP,
+            OP_CONNECT,
+            OP_SEND,
+            OP_RECV,
+            OP_CLOSE,
+            OP_STOP,
+            OP_POLL,
+            OP_LISTEN,
+            OP_ACCEPT,
+            OP_CONNECT6,
+            OP_LOCALADDR,
         ];
         for other in existing {
             assert_ne!(OP_SHUTDOWN, other, "OP_SHUTDOWN aliases another opcode");
@@ -808,8 +1039,18 @@ mod tests {
         // The three UDP datagram opcodes must not collide with any stream opcode
         // or with each other.
         let existing = [
-            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
-            OP_CONNECT6, OP_LOCALADDR, OP_SHUTDOWN,
+            OP_NOP,
+            OP_CONNECT,
+            OP_SEND,
+            OP_RECV,
+            OP_CLOSE,
+            OP_STOP,
+            OP_POLL,
+            OP_LISTEN,
+            OP_ACCEPT,
+            OP_CONNECT6,
+            OP_LOCALADDR,
+            OP_SHUTDOWN,
         ];
         for op in [OP_UDP_BIND, OP_UDP_SEND, OP_UDP_RECV] {
             for other in existing {
@@ -828,6 +1069,23 @@ mod tests {
             assert_ne!(s, ERR_BROKEN_PIPE);
         }
         assert_ne!(ERR_ADDR_IN_USE, ERR_MSG_SIZE);
+    }
+
+    #[test]
+    fn timed_out_is_distinct_from_every_other_completion_code() {
+        // Above all from 0: a timed-out connection must never read as EOF.
+        for other in [
+            0,
+            -1,
+            ERR_WOULD_BLOCK,
+            ERR_IN_PROGRESS,
+            ERR_BROKEN_PIPE,
+            ERR_ADDR_IN_USE,
+            ERR_MSG_SIZE,
+        ] {
+            assert_ne!(ERR_TIMED_OUT, other);
+        }
+        const { assert!(ERR_TIMED_OUT < 0, "a completion error is negative") };
     }
 
     #[test]
@@ -863,7 +1121,11 @@ mod tests {
 
     #[test]
     fn cqe_round_trip() {
-        let cqe = Cqe { user_data: 0xAABB_CCDD_1122_3344, result: -11, flags: 0 };
+        let cqe = Cqe {
+            user_data: 0xAABB_CCDD_1122_3344,
+            result: -11,
+            flags: 0,
+        };
         let bytes = cqe.to_bytes();
         assert_eq!(bytes.len(), CQE_SIZE);
         let back = Cqe::from_bytes(&bytes).unwrap();
@@ -946,7 +1208,10 @@ mod tests {
         let (sq, cq, data) = (64u32, 64u32, 65536u32);
         assert_eq!(sqe_array_off(), HEADER_LEN);
         assert_eq!(cqe_array_off(sq), HEADER_LEN + 64 * SQE_SIZE);
-        assert_eq!(data_area_off(sq, cq), HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE);
+        assert_eq!(
+            data_area_off(sq, cq),
+            HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE
+        );
         assert_eq!(
             region_size(sq, cq, data),
             HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE + 65536
@@ -965,6 +1230,6 @@ mod tests {
             }
         }
         // Scalars fit within the first cache line.
-        assert!(OFF_DATA_LEN + 4 <= CACHE_LINE);
+        const { assert!(OFF_DATA_LEN + 4 <= CACHE_LINE) };
     }
 }

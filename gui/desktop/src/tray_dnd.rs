@@ -842,12 +842,7 @@ mod tests {
 
     /// An icon as the compositor would report it.
     fn reported(owner: u64, id: u32, glyph: &str) -> guiremote::tray::TrayIcon {
-        guiremote::tray::TrayIcon {
-            owner,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: String::new(),
-        }
+        guiremote::tray::TrayIcon::new(owner, id, glyph, "")
     }
 
     // ======================================================================

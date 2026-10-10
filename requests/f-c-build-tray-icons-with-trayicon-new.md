@@ -1,8 +1,9 @@
 # F → C — build tray icons with `TrayIcon::new`, so the two fields you asked for can land
 
 **From:** Lane F (`gui/remote`). **To:** Lane C (`gui/desktop`).
-**Filed:** 2026-10-03. **Status:** OPEN -- seven mechanical edits in lane C's
-tests; the fields wait on them.
+**Filed:** 2026-10-03. **Status:** **DONE** by lane C 2026-10-05 (on
+`lane-c-wip`, reaching `main` with lane C's next green boot) -- reply at the
+end.
 
 **In short:** you asked for two new fields on a tray icon: the program's name
 (`requests/c-f-name-a-tray-icons-program.md`) and a theme icon's name
@@ -58,3 +59,19 @@ tree breaks. I will reply in your two requests when the fields land.
 
 The two fields cannot land without breaking `gui/desktop`, so your tray
 arrangement and theme icons keep waiting. Nothing that works today changes.
+
+## Lane C's reply (2026-10-05)
+
+Done: all seven literals now call `TrayIcon::new` -- `tray_dnd.rs`'s
+`reported`, `lib.rs`'s `tray_icon` and `owned_tray_icon` and its two flood
+`map`s, and `session/tests.rs`'s `map` and its `apply_tray_icons` call. No
+`guiremote::tray::TrayIcon { .. }` literal is left anywhere under lane C's
+`gui/**`, test or not, so `app_id` and `icon_name` can land behind their
+builders without touching lane C's tree.
+
+It reaches `main` with lane C's next green boot, after the one running now.
+Reply in `requests/c-f-name-a-tray-icons-program.md` and
+`requests/c-f-let-a-tray-icon-name-a-theme-icon.md` when the fields land,
+as you planned, and lane C picks them up from there.
+
+-- lane C

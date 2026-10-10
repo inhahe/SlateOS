@@ -50,6 +50,9 @@ use std::ffi::OsString;
 use std::io::{Read, Write as _};
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// `shuf -Z; echo $?` is 1.
 const SHUF: Program = Program::new("shuf", 1);
 
@@ -611,18 +614,12 @@ mod imp {
     use super::Fatal;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
+    use coreutils::stdfd::{self, Reopen};
     use std::ffi::OsString;
     use std::fs::File;
     use std::io::{self, Read, Seek};
     use std::mem::ManuallyDrop;
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    unsafe extern "C" {
-        /// `dup2(2)`, for `freopen (outfile, "w", stdout)`: the output file
-        /// becomes descriptor 1, where standard output is written.
-        #[link_name = "dup2"]
-        fn libc_dup2(old: i32, new: i32) -> i32;
-    }
+    use std::os::fd::FromRawFd;
 
     /// Standard input, borrowed: the descriptor is the process's.
     struct Stdin(ManuallyDrop<File>);
@@ -640,14 +637,17 @@ mod imp {
         let named = operand
             .map(|w| os_bytes(w).into_owned())
             .filter(|n| n != b"-");
-        let file = match named {
-            Some(name) => File::open(os_from_bytes(&name))
-                .map(ManuallyDrop::new)
-                .map_err(|e| Fatal(format!("{}: {}", quotef(&name), strerror(&e))))?,
-            // SAFETY: descriptor 0 is standard input, open for the life of the
-            // process; it stays in the `ManuallyDrop` and is never closed here.
-            None => ManuallyDrop::new(unsafe { File::from_raw_fd(0) }),
-        };
+        if let Some(name) = named {
+            // Upstream's `freopen (name, "r", stdin)`: the file becomes
+            // descriptor 0, and a failure is reported as glibc's `freopen`
+            // leaves `errno` -- `shuf nosuch <&-` is `Bad file descriptor`.
+            stdfd::freopen(os_from_bytes(&name), Reopen::Read, 0)
+                .map_err(|e| Fatal(format!("{}: {}", quotef(&name), strerror(&e))))?;
+        }
+        // SAFETY: descriptor 0 is standard input -- or the operand `freopen`
+        // just put there -- for the life of the process; it stays in the
+        // `ManuallyDrop` and is never closed here.
+        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(0) });
         let size = input_size(&file);
         Ok((Box::new(Stdin(file)), size))
     }
@@ -665,16 +665,15 @@ mod imp {
         }
     }
 
-    /// `freopen (outfile, "w", stdout)`.
+    /// `freopen (outfile, "w", stdout)`: the file becomes descriptor 1, where
+    /// standard output is written. With standard output closed the file is
+    /// opened *as* descriptor 1, and a `dup2` of it onto itself followed by
+    /// closing the original closed the output too -- `shuf -o FILE >&-` said
+    /// `write error: Bad file descriptor` and left `FILE` empty, where GNU's
+    /// fills it. [`stdfd::freopen`] keeps that case.
     pub fn redirect_stdout(name: &[u8]) -> Result<(), Fatal> {
-        let fail = |e: &io::Error| Fatal(format!("{}: {}", quotef(name), strerror(e)));
-        let file = File::create(os_from_bytes(name)).map_err(|e| fail(&e))?;
-        // SAFETY: `file` is open and owned here; `dup2` makes descriptor 1 a
-        // second reference to it, and `file` then closes its own.
-        if unsafe { libc_dup2(file.as_raw_fd(), 1) } < 0 {
-            return Err(fail(&io::Error::last_os_error()));
-        }
-        Ok(())
+        stdfd::freopen(os_from_bytes(name), Reopen::Write, 1)
+            .map_err(|e: io::Error| Fatal(format!("{}: {}", quotef(name), strerror(&e))))
     }
 }
 

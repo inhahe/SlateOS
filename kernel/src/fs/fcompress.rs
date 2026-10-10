@@ -175,6 +175,10 @@ pub struct CompressStats {
     pub files_decompressed: u64,
     /// Files skipped (too small or incompressible).
     pub files_skipped: u64,
+    /// Files stored uncompressed because what the compressor gave did not
+    /// decompress back to them -- a compressor fault caught before it could
+    /// lose the file (see [`compress_for_write`]).
+    pub round_trip_failures: u64,
     /// Total bytes written (original).
     pub bytes_original: u64,
     /// Total bytes stored (compressed).
@@ -224,6 +228,7 @@ static STATE: Mutex<FCompressInner> = Mutex::new(FCompressInner {
         files_compressed: 0,
         files_decompressed: 0,
         files_skipped: 0,
+        round_trip_failures: 0,
         bytes_original: 0,
         bytes_stored: 0,
         bytes_read_compressed: 0,
@@ -356,6 +361,26 @@ pub fn compress_for_write(path: impl AsRef<Path>, data: &[u8]) -> Option<Vec<u8>
     // Skip if compressed size >= original (incompressible data).
     if compressed.len() >= data.len() {
         note_skipped();
+        return None;
+    }
+
+    // Keep only what decompresses back to the data. Nothing reads a compressed
+    // file until someone opens it, by which time the original is gone: until
+    // 2026-10-07 the xz and bzip2 compressors wrote streams no decoder could
+    // read past certain sizes, and every such file was lost as it was written
+    // (requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md).
+    // Those compressors are ports now; this check is for the next fault, in
+    // any codec, and costs one decompression -- the cheap direction -- per
+    // compressed write. A file that fails it is stored as it came.
+    let round_trips = matches!(decompress_data(&compressed, algo), Ok(back) if back == data);
+    if !round_trips {
+        serial_println!(
+            "[fcompress] {:?} did not decompress back to the data written to {}: stored uncompressed",
+            algo,
+            path.display()
+        );
+        let mut state = STATE.lock();
+        state.stats.round_trip_failures = state.stats.round_trip_failures.saturating_add(1);
         return None;
     }
 

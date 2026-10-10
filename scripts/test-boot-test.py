@@ -135,7 +135,7 @@ def drop_fixture(path):
     """
     for attempt in range(1, _RMTREE_ATTEMPTS + 1):
         try:
-            shutil.rmtree(path)
+            gitenv.remove_tree(path, attempts=1)
         except FileNotFoundError:
             return
         except OSError as exc:
@@ -291,7 +291,7 @@ def available_bashes(candidates=BASH_CANDIDATES):
             seen.add(view)
             found.append(candidate)
     finally:
-        shutil.rmtree(probe, ignore_errors=True)
+        gitenv.remove_tree(probe)
     return found
 
 
@@ -392,7 +392,7 @@ class ScratchRepo:
         return f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
     def close(self):
-        shutil.rmtree(self.path, ignore_errors=True)
+        gitenv.remove_tree(self.path)
 
 
 def _quote(path):
@@ -464,7 +464,7 @@ def test_the_check_reads_the_tree_under_test_not_the_callers_cwd():
                 check(f"{tag} ...and the excluded records still are not",
                       _only_records_dirty(fragment, elsewhere, bash), 0)
             finally:
-                shutil.rmtree(elsewhere, ignore_errors=True)
+                gitenv.remove_tree(elsewhere)
         finally:
             repo.close()
 
@@ -1278,17 +1278,68 @@ def _progress_harness(body):
                 "ELAPSED=0\nSTALL_LAST_GROWTH=0\n"
                 "OWN_LINES_SEEN=0\nOWN_LAST_GROWTH=0\nOWN_LAST_LINE=\"\"\n"
                 "OWN_LAST_SCAN=-100\nOWN_SCAN_EVERY=10\n"
+                "STALL_LAST_SIZE=0\nOWN_SCAN_OWED=0\n"
                 + _watchdog_line_re() + "\n"
                 + extract_shell_function("scan_own_output") + "\n\n"
                 + extract_shell_function("timeout_progress_verdict") + "\n\n"
                 + extract_shell_function("stall_wedge_message") + "\n\n"
                 + extract_shell_function("scan_own_output_throttled") + "\n\n"
                 + extract_shell_function("own_output_stalled") + "\n\n"
+                + extract_shell_function("note_serial_growth") + "\n\n"
                 + body)
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the progress record")
         return None if proc is None else proc.stdout
     finally:
         drop_fixture(tmp)
+
+
+def _death_harness(cmdline, serial_text):
+    """Run the real `kernel_is_dead` on a serial log holding `serial_text`,
+    the kernel's command line `cmdline`: "DEAD" or "ALIVE", `None` on a hang.
+    """
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "serial.txt"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(serial_text)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -uo pipefail\n"
+                f"KERNEL_CMDLINE={_sq(cmdline)}\n"
+                + extract_shell_function("keep_going_boot") + "\n\n"
+                + extract_shell_function("kernel_is_dead") + "\n\n"
+                + "if kernel_is_dead serial.txt; then echo DEAD; else echo ALIVE; fi\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the death check")
+        return None if proc is None else proc.stdout.strip()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_a_kernel_fault_is_a_death_even_when_the_boot_keeps_going():
+    """Under `selftest.keep_going=1` a self-test's FATAL is carried past and an
+    exception's is not.
+
+    Lane A's debug boot 13 (2026-10-08) halted on "FATAL: Unrecoverable kernel
+    page fault. Halting." and the harness, which under keep_going looked only
+    for panic lines, waited out the rest of its 2400 s QEMU timeout on a dead
+    kernel.
+    """
+    keep = "sched.boot_deadline_ms=2400000 selftest.keep_going=1"
+    plain = "sched.boot_deadline_ms=2400000"
+    selftest = ("FATAL: Capability system self-test failed: permission denied (-400)\n"
+                "[selftest] selftest.keep_going: carrying on past Capability system\n")
+    fault = ("EXCEPTION: Page Fault (#PF) at 0xffffffff82415684, address=0x1, error=0x0\n"
+             "FATAL: Unrecoverable kernel page fault. Halting.\n")
+    for label, cmdline, text, want in [
+        ("keep_going: a self-test's FATAL is carried past", keep, selftest, "ALIVE"),
+        ("keep_going: an unrecoverable fault after one is a death", keep,
+         selftest + fault, "DEAD"),
+        ("keep_going: a panic is a death", keep, "!!! KERNEL PANIC !!!\n", "DEAD"),
+        ("keep_going: a log with nothing fatal is alive", keep, "[boot] up\n", "ALIVE"),
+        ("without keep_going: a self-test's FATAL is a death", plain, selftest, "DEAD"),
+    ]:
+        check(label, _death_harness(cmdline, text), want)
 
 
 def _append_steps(steps):
@@ -1452,6 +1503,33 @@ def test_the_own_output_scan_is_throttled_but_no_verdict_is_stale():
         "STALL_SECS=0\nELAPSED=100000\n"
         "if own_output_stalled serial.txt; then echo STALLED; else echo LIVE; fi\n") or ""
     check("stall verdict: --stall-secs unset never stalls", off.split(), ["LIVE"])
+
+
+def test_a_log_gone_quiet_inside_the_throttle_is_still_read_within_it():
+    """rq39 (2026-10-02): the last own lines landed inside the scan's throttle
+    interval and the log then went quiet for 34 minutes. The loop scanned only
+    on growth, so those lines were first read by the timeout path, which
+    stamped them with the timeout and called the hang a budget too small.
+    The scan is owed now, and paid within OWN_SCAN_EVERY of the growth."""
+    def line(text):
+        return f"printf '%s\\n' {_sq(text)} >> serial.txt\n"
+
+    out = _progress_harness(
+        "ELAPSED=5\n" + line("[a] one") + "note_serial_growth serial.txt\n"
+        "ELAPSED=8\n" + line("[unix_socket] Running self-test...")
+        + "note_serial_growth serial.txt\n"
+        'echo "AT8 GROWTH=$OWN_LAST_GROWTH OWED=$OWN_SCAN_OWED"\n'
+        # No growth from here on: only passes of the loop.
+        "ELAPSED=15\nnote_serial_growth serial.txt\n"
+        'echo "AT15 GROWTH=$OWN_LAST_GROWTH OWED=$OWN_SCAN_OWED LINE=[$OWN_LAST_LINE]"\n'
+        "ELAPSED=2400\nnote_serial_growth serial.txt\nscan_own_output serial.txt\n"
+        "timeout_progress_verdict\n") or ""
+    check("a scan inside the interval is owed, not dropped",
+          "AT8 GROWTH=5 OWED=1" in out, True)
+    check("...and paid on a later pass with no growth, the last line read",
+          "AT15 GROWTH=15 OWED=0 LINE=[[unix_socket] Running self-test...]" in out, True)
+    check("the timeout reads the quiet as a stop, not a budget too small",
+          "STILL PRODUCING OUTPUT" in out, False)
 
 
 def test_the_qemu_priority_watcher_reads_back_and_reports_a_change():

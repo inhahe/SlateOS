@@ -128,6 +128,94 @@ pub fn signal_name_to_number(name: &[u8], rtmin: i32) -> i32 {
     super::scanf::low_i32(val.wrapping_add(offset))
 }
 
+/// `number_of_signals`: the table's length, which `-l` and `-L` count to.
+pub const NUMBER_OF_SIGNALS: i32 = 31;
+
+/// `signal_number_to_name`: the table's name for `signo` -- searched from
+/// the end, so of two names for a number the later one wins -- or `RTMIN`,
+/// `RTMIN+n`, or `0`. Only the low seven bits count, as for an exit status.
+#[must_use]
+pub fn signal_number_to_name(signo: i32, rtmin: i32) -> String {
+    let signo = signo & 0x7f;
+    if let Some((name, _)) = SIGTABLE.iter().rev().find(|&&(_, n)| n == signo) {
+        return (*name).to_owned();
+    }
+    if signo == rtmin {
+        return "RTMIN".to_owned();
+    }
+    if signo != 0 {
+        return format!("RTMIN+{}", signo.wrapping_sub(rtmin));
+    }
+    "0".to_owned()
+}
+
+/// `skill_sig_option`: the first word after the program's name that is `-`
+/// and a signal, taken out of `argv` -- and its number; or -1, `argv` as it
+/// was.
+pub fn skill_sig_option(argv: &mut Vec<Vec<u8>>, rtmin: i32) -> i32 {
+    let found = argv.iter().enumerate().skip(1).find_map(|(i, word)| {
+        let rest = word.strip_prefix(b"-")?;
+        let signo = signal_name_to_number(rest, rtmin);
+        (signo > -1).then_some((i, signo))
+    });
+    match found {
+        Some((i, signo)) => {
+            argv.remove(i);
+            signo
+        }
+        None => -1,
+    }
+}
+
+/// `unix_print_signals`: every name, separated by blanks, a new line begun
+/// once a line has passed 74 columns. What `-l` prints.
+#[must_use]
+pub fn unix_print_signals(rtmin: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut pos: usize = 0;
+    for i in 1..=NUMBER_OF_SIGNALS {
+        if i > 1 {
+            if pos > 73 {
+                pos = 0;
+                out.push(b'\n');
+            } else {
+                pos = pos.saturating_add(1);
+                out.push(b' ');
+            }
+        }
+        let name = signal_number_to_name(i, rtmin);
+        pos = pos.saturating_add(name.len());
+        out.extend_from_slice(name.as_bytes());
+    }
+    out.push(b'\n');
+    out
+}
+
+/// `pretty_print_signals`: number and name, seven to a line, each in eleven
+/// columns. What `-L` prints.
+#[must_use]
+pub fn pretty_print_signals(rtmin: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 1..=NUMBER_OF_SIGNALS {
+        let entry = format!("{i:2} {}", signal_number_to_name(i, rtmin));
+        out.extend_from_slice(entry.as_bytes());
+        if i % 7 == 0 {
+            out.push(b'\n');
+        } else {
+            // `"           " + n`: blanks to the eleventh column, none past it.
+            out.resize(
+                out.len()
+                    .saturating_add(11usize.saturating_sub(entry.len())),
+                b' ',
+            );
+        }
+    }
+    if NUMBER_OF_SIGNALS % 7 != 0 {
+        out.push(b'\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::signal_name_to_number as num;
@@ -194,5 +282,59 @@ mod tests {
         assert_eq!(num(b"HU", 34), -1);
         assert_eq!(num(b"-signal", 34), -1);
         assert_eq!(num(b"USR3", 34), -1);
+    }
+
+    #[test]
+    fn numbers_are_named_as_procps_names_them() {
+        use super::signal_number_to_name as name;
+        assert_eq!(name(9, 34), "KILL");
+        assert_eq!(name(29, 34), "POLL", "the table's name, not IO");
+        assert_eq!(name(34, 34), "RTMIN");
+        assert_eq!(name(36, 34), "RTMIN+2");
+        assert_eq!(name(0, 34), "0");
+        assert_eq!(name(0x89, 34), "KILL", "seven bits, as for an exit status");
+    }
+
+    #[test]
+    fn skill_takes_out_the_first_word_that_is_a_signal() {
+        use super::skill_sig_option;
+        let words = |w: &[&[u8]]| w.iter().map(|x| x.to_vec()).collect::<Vec<_>>();
+        let mut argv = words(&[b"skill", b"-v", b"-KILL", b"-STOP"]);
+        assert_eq!(skill_sig_option(&mut argv, 34), 9);
+        assert_eq!(argv, words(&[b"skill", b"-v", b"-STOP"]));
+        let mut none = words(&[b"skill", b"-v", b"x"]);
+        assert_eq!(skill_sig_option(&mut none, 34), -1);
+        assert_eq!(none.len(), 3);
+        let mut first = words(&[b"-KILL", b"-HUP"]);
+        assert_eq!(
+            skill_sig_option(&mut first, 34),
+            1,
+            "argv[0] is not looked at"
+        );
+    }
+
+    #[test]
+    fn the_listings_are_laid_out_as_procps_lays_them_out() {
+        let l = super::unix_print_signals(34);
+        assert!(l.starts_with(
+            b"HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM STKFLT
+CHLD"
+        ));
+        assert!(l.ends_with(
+            b" SYS
+"
+        ));
+        let t = super::pretty_print_signals(34);
+        assert!(t.starts_with(
+            b" 1 HUP      2 INT      3 QUIT     4 ILL      5 TRAP     6 ABRT     7 BUS
+"
+        ));
+        assert!(
+            t.ends_with(
+                b"31 SYS     
+"
+            ),
+            "padded, then the closing newline"
+        );
     }
 }

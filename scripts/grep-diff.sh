@@ -1351,6 +1351,38 @@ grep -l a abc >&-
 grep -o a abc >&-
 grep -r foo sub >&-
 grep a /nonexistent 2>&-
+# --help and --version end as a search does, through `close_stdout` with status
+# 2: a full disk and a closed standard output name their reason, and a reader
+# already gone kills grep by default and is `write error: Broken pipe` when the
+# signal is ignored. Ours panicked on the first and said nothing on the second
+# until 2026-10-07. The text differs (below); with standard output elsewhere,
+# only what is said and the status are compared.
+grep --help >/dev/full
+grep --help >&-
+grep --version >/dev/full
+grep --version >&-
+grep -V >/dev/full
+{ sleep 0.3; grep --help; echo "rc=$?" >&2; } | true
+(trap '' PIPE; { sleep 0.3; grep --help; echo "rc=$?" >&2; } | true)
+{ sleep 0.3; grep --version; echo "rc=$?" >&2; } | true
+(trap '' PIPE; { sleep 0.3; grep --version; echo "rc=$?" >&2; } | true)
+
+# Standard input closed, or a directory. Both name it `(standard input)` (or
+# `--label`'s name), unquoted, with status 2; but `fstat` failing ends the file
+# before its `-c` count, while a read failing does not -- `grep -c a < sub`
+# prints `0` after the error and `grep -c a <&-` prints nothing. Ours read a
+# closed descriptor as an empty file until 2026-10-03.
+grep a <&-
+grep -c a <&-
+grep -c a - <&-
+grep a - abc <&-
+grep -H --label=L a <&-
+grep -s a <&-
+grep -f - abc <&-
+grep a < sub
+grep -c a < sub
+grep -c a - < sub
+grep -H --label=L a < sub
 
 # --- POSIXLY_CORRECT: the first operand ends option parsing -------------------
 # glibc's getopt stops there while the variable is set -- to anything, the empty

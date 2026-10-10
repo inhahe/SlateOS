@@ -250,6 +250,110 @@ SLATE_LLVM_SHA256="6898f963c8e938981e6c4a302e83ec5beb4630147c7311183cf61069af163
 # shellcheck disable=SC2034
 SLATE_LLVM_TARBALL="$SLATE_ZIG_CACHE/llvm-project-$SLATE_LLVM_VERSION.src.tar.xz"
 
+# Upstream GDB, for scripts/gdb-spike/: the debugger the operator asked for
+# (design-decisions.md 1050). 18.1 is the current release. Three packagers
+# attest the tarball, each recomputed here over the download and compared in
+# full, 2026-10-07:
+#
+#   OpenEmbedded  meta/recipes-devtools/gdb/gdb.inc, beside gdb_18.1.bb:
+#                 SRC_URI[sha256sum] = the hex below.
+#   Gentoo        dev-debug/gdb/Manifest, DIST gdb-18.1.tar.xz 22158720
+#                 SHA512 e7079ad3...ab8b5a0 BLAKE2B 9cf68cd9...8f30e1d -- two
+#                 *different functions*, the stronger corroboration.
+#   Arch          packaging/packages/gdb PKGBUILD, pkgver=18.1, b2sums
+#                 9cf68cd9...8f30e1d.
+SLATE_GDB_VERSION="18.1"
+SLATE_GDB_SHA256="cd9fc3fe2b47743840e42c1592d3d87f8302eb18639c0b8b4ba0898002e2348f"
+# shellcheck disable=SC2034
+SLATE_GDB_TARBALL="$SLATE_ZIG_CACHE/gdb-$SLATE_GDB_VERSION.tar.xz"
+
+# GMP and MPFR, which GDB will not configure without (its top-level
+# configure.ac: `require_gmp=yes` for a tree with gdb/ in it, and
+# `gmplibs="-lmpfr -lgmp"`). Built by scripts/gdb-spike/ against our libc too.
+#
+# GMP 6.3.0, the .tar.xz -- which matters: OpenEmbedded pins the .tar.bz2
+# (ac28211a...) and Arch the .tar.lz (be5c908a...), different archives of the
+# same release, and neither is an attestation of the file opened here. These
+# three are, compared in full 2026-10-07:
+#   Void      srcpkgs/gmp/template, version=6.3.0, checksum= the hex below.
+#   Alpine    main/gmp/APKBUILD, pkgver=6.3.0, sha512sums e85a0dab...8f29fd2.
+#   Homebrew  Formula/g/gmp.rb, sha256 the hex below.
+SLATE_GMP_VERSION="6.3.0"
+SLATE_GMP_SHA256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+# shellcheck disable=SC2034
+SLATE_GMP_TARBALL="$SLATE_ZIG_CACHE/gmp-$SLATE_GMP_VERSION.tar.xz"
+
+# MPFR 4.2.2, compared in full 2026-10-07:
+#   OpenEmbedded  meta/recipes-support/mpfr/mpfr_4.2.2.bb, SRC_URI[sha256sum]
+#                 = the hex below.
+#   Arch          packaging/packages/mpfr PKGBUILD, b2sums 6bbf5658...d7b21ec.
+SLATE_MPFR_VERSION="4.2.2"
+SLATE_MPFR_SHA256="b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01"
+# shellcheck disable=SC2034
+SLATE_MPFR_TARBALL="$SLATE_ZIG_CACHE/mpfr-$SLATE_MPFR_VERSION.tar.xz"
+
+# Mono, for scripts/mono-spike/: the .NET runtime the operator asked for
+# (design-decisions.md 1050, "I want Mono (dotnet support for Linux) ported
+# too"). Upstream moved from Microsoft to WineHQ in 2024; 6.14.1 is its current
+# release. The tarball is 303,688,164 bytes. Three packagers attest it, each
+# recomputed here and compared in full, 2026-10-07:
+#
+#   Alpine    community/mono/APKBUILD, pkgver=6.14.1, sha512sums
+#             c16a2ecb...2e9f1b9 -- a *different function*.
+#   Fedora    rpms/mono `sources`, SHA512 (mono-6.14.1.tar.xz) = c16a2ecb...2e9f1b9.
+#   Homebrew  Formula/m/mono.rb, sha256 the hex below.
+SLATE_MONO_VERSION="6.14.1"
+SLATE_MONO_SHA256="3024c97c0bc8cbcd611c401d5f994528704108ceb31f31b28dea4783004d0820"
+# shellcheck disable=SC2034
+SLATE_MONO_TARBALL="$SLATE_ZIG_CACHE/mono-$SLATE_MONO_VERSION.tar.xz"
+
+# GCC, for scripts/gcc-spike/: the last quarter of roadmap.md's "gcc, cmake,
+# make, pkg-config via the POSIX layer", waiting only on GMP, MPFR and MPC
+# (pinned above and below). 16.2.0 is the current release; the tarball is
+# 107,200,820 bytes. Compared in full, 2026-10-07:
+#
+#   Gentoo        sys-devel/gcc/Manifest, DIST gcc-16.2.0.tar.xz 107200820
+#                 SHA512 c51c30ca...f8648d1 BLAKE2B ab3ffe16...5a98ef0 --
+#                 two *different functions*.
+#   OpenEmbedded  meta/recipes-devtools/gcc/gcc-16.2.inc, SRC_URI[sha256sum]
+#                 = the hex below.
+#   Homebrew      Formula/g/gcc.rb, sha256 the hex below.
+#
+# (Arch is no attestation here: its gcc PKGBUILD builds a git snapshot,
+# 16.2.1+r23, not this file.)
+SLATE_GCC_VERSION="16.2.0"
+SLATE_GCC_SHA256="e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+# shellcheck disable=SC2034
+SLATE_GCC_TARBALL="$SLATE_ZIG_CACHE/gcc-$SLATE_GCC_VERSION.tar.xz"
+
+# MPC 1.4.1, GCC's third mathematical library, the .tar.xz. Compared in full,
+# 2026-10-07:
+#   Gentoo  dev-libs/mpc/Manifest, DIST mpc-1.4.1.tar.xz 531992 SHA512
+#           cdfbe64e...a1305b9 BLAKE2B 793b4cf3...83acff1.
+#   Void    srcpkgs/libmpc/template, version=1.4.1, checksum= the hex below.
+#   Arch    packaging/packages/libmpc PKGBUILD, pkgver=1.4.1, sha256sums the
+#           hex below.
+SLATE_MPC_VERSION="1.4.1"
+SLATE_MPC_SHA256="91204cd32f164bd3b7c992d4a6a8ce6519511aadab30f78b6982d0bf8d73e931"
+# shellcheck disable=SC2034
+SLATE_MPC_TARBALL="$SLATE_ZIG_CACHE/mpc-$SLATE_MPC_VERSION.tar.xz"
+
+# GNU binutils, for scripts/binutils-spike/: the assembler GCC hands every
+# compile to, the linker, and the tools that read and edit object files.
+# 2.47 is the current release; the .tar.xz is 29,034,716 bytes. Recomputed
+# here and compared in full, 2026-10-07:
+#   Gentoo     sys-devel/binutils/Manifest, DIST binutils-2.47.tar.xz 29034716
+#              SHA512 3126a106...3e1d98 BLAKE2B 329cae87...0910ea -- two
+#              *different functions*.
+#   Buildroot  package/binutils/binutils.hash, sha512 3126a106...3e1d98.
+# (Homebrew is no attestation here: its formula pins the .tar.bz2,
+# 3068128c...4800e8, a different archive of the same release; Arch builds a
+# git snapshot; Void and Alpine are still at 2.44 and 2.45.1.)
+SLATE_BINUTILS_VERSION="2.47"
+SLATE_BINUTILS_SHA256="154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff"
+# shellcheck disable=SC2034
+SLATE_BINUTILS_TARBALL="$SLATE_ZIG_CACHE/binutils-$SLATE_BINUTILS_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -577,6 +681,81 @@ slate_ensure_llvm_src() {
         "$SLATE_WORK/llvm-spike")" || return 1
 }
 
+# The GDB, GMP and MPFR counterparts, for scripts/gdb-spike/.
+slate_ensure_gdb_src() {
+    # SLATE_GDB_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh (`tar xf "$SLATE_GDB_TARBALL"`). The linter
+    # cannot follow a `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
+    SLATE_GDB_TARBALL="$(slate_ensure_src gdb "$SLATE_GDB_VERSION" \
+        "$SLATE_GDB_SHA256" \
+        "https://ftp.gnu.org/gnu/gdb/gdb-$SLATE_GDB_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+slate_ensure_gmp_src() {
+    # SLATE_GMP_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_GMP_TARBALL="$(slate_ensure_src gmp "$SLATE_GMP_VERSION" \
+        "$SLATE_GMP_SHA256" \
+        "https://ftp.gnu.org/gnu/gmp/gmp-$SLATE_GMP_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+slate_ensure_mpfr_src() {
+    # SLATE_MPFR_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MPFR_TARBALL="$(slate_ensure_src mpfr "$SLATE_MPFR_VERSION" \
+        "$SLATE_MPFR_SHA256" \
+        "https://ftp.gnu.org/gnu/mpfr/mpfr-$SLATE_MPFR_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+# The Mono counterpart, for scripts/mono-spike/.
+slate_ensure_mono_src() {
+    # SLATE_MONO_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/mono-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MONO_TARBALL="$(slate_ensure_src mono "$SLATE_MONO_VERSION" \
+        "$SLATE_MONO_SHA256" \
+        "https://dl.winehq.org/mono/sources/mono/mono-$SLATE_MONO_VERSION.tar.xz" \
+        "$SLATE_WORK/mono-spike")" || return 1
+}
+
+# The GCC and MPC counterparts, for scripts/gcc-spike/.
+slate_ensure_gcc_src() {
+    # SLATE_GCC_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gcc-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_GCC_TARBALL="$(slate_ensure_src gcc "$SLATE_GCC_VERSION" \
+        "$SLATE_GCC_SHA256" \
+        "https://ftp.gnu.org/gnu/gcc/gcc-$SLATE_GCC_VERSION/gcc-$SLATE_GCC_VERSION.tar.xz" \
+        "$SLATE_WORK/gcc-spike")" || return 1
+}
+
+slate_ensure_mpc_src() {
+    # SLATE_MPC_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gcc-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MPC_TARBALL="$(slate_ensure_src mpc "$SLATE_MPC_VERSION" \
+        "$SLATE_MPC_SHA256" \
+        "https://ftp.gnu.org/gnu/mpc/mpc-$SLATE_MPC_VERSION.tar.xz" \
+        "$SLATE_WORK/gcc-spike")" || return 1
+}
+
+# The binutils counterpart, for scripts/binutils-spike/.
+slate_ensure_binutils_src() {
+    # SLATE_BINUTILS_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/binutils-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_BINUTILS_TARBALL="$(slate_ensure_src binutils "$SLATE_BINUTILS_VERSION" \
+        "$SLATE_BINUTILS_SHA256" \
+        "https://ftp.gnu.org/gnu/binutils/binutils-$SLATE_BINUTILS_VERSION.tar.xz" \
+        "$SLATE_WORK/binutils-spike")" || return 1
+}
+
 slate_make_zig_wrappers() {
     slate_ensure_zig || return 1
     if [ ! -x "$SLATE_ZIG" ]; then
@@ -636,9 +815,10 @@ slate_zig_cxx_runtime() {
 }
 
 # Write DIR/cc and DIR/c++, and set SLATE_LINK_CC and SLATE_LINK_CXX to them:
-# zig's cc and c++ for a compile, with posix/include in front of musl's headers
-# (since 2026-10-05), and zig's ld.lld ITSELF for a link, which is made against
-# SlateOS's libc.a, with zig's C++ and compiler runtimes around it.
+# zig's cc and c++ for a compile, with posix/include behind the build's own
+# include directories and in front of musl's headers (since 2026-10-05), and
+# zig's ld.lld ITSELF for a link, which is made against SlateOS's libc.a, with
+# zig's C++ and compiler runtimes around it.
 #
 #   slate_make_link_wrappers "$WORK/bin"                 # the sysroot's libc.a
 #   slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS"   # a copy of it
@@ -757,6 +937,12 @@ _slate_write_link_wrapper() {
         # links but cannot declare -- close_range, sem_clockwait -- is an
         # implicit declaration, an error since C99. -I, not -isystem: zig's
         # driver searches its own libc headers before an -isystem directory.
+        # And the LAST -I, after the call's own: -I directories are searched
+        # in the order given, all before zig's, so a build's own headers --
+        # gnulib's glob.h, stdlib.h and the rest, which reach the system's
+        # with #include_next -- stand in front of ours as they stand in front
+        # of the system's. First, as until 2026-10-05, ours hid GNU make's
+        # lib/glob.h from its lib/glob.c, which then did not compile.
         printf 'overlay=%q\n' "$SLATE_ROOT/posix/include"
         printf 'ld=(%q ld.lld)\n' "$SLATE_ZIG"
         printf 'libs=('
@@ -768,7 +954,7 @@ _slate_write_link_wrapper() {
 for a in "$@"; do
     case "$a" in
         -c|-S|-E|-r|-x*|-|-###|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*)
-            exec "$cc" -I"$overlay" "$@" ;;
+            exec "$cc" "$@" -I"$overlay" ;;
     esac
 done
 me="${0##*/}"
@@ -793,7 +979,7 @@ if [ ${#srcs[@]} -gt 0 ]; then
     n=0
     for s in "${srcs[@]}"; do
         n=$((n + 1))
-        if ! "$cc" -I"$overlay" "${cflags[@]}" -c "$s" -o "$tmp/$n.o"; then
+        if ! "$cc" "${cflags[@]}" -I"$overlay" -c "$s" -o "$tmp/$n.o"; then
             rm -rf "$tmp"
             exit 1
         fi

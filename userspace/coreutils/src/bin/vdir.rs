@@ -8,6 +8,11 @@
 use coreutils::ls::Mode;
 use std::process::ExitCode;
 
+// Before `main`, so that the descriptors `vdir` was given are recorded before
+// Rust's runtime puts `/dev/null` on a closed one; `coreutils::ls::main` puts
+// them back (`stdfd::restore`).
+coreutils::guard_std_fds!();
+
 fn main() -> ExitCode {
     coreutils::ls::main(Mode::Vdir)
 }

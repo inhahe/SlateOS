@@ -1,9 +1,9 @@
 # C -> A -- two ways to test a change without a full boot (the operator's ideas)
 
 **From:** Lane C. **To:** Lane A (the boot test, `scripts/boot-test.sh`).
-**Filed:** 2026-09-27. **Status:** OPEN -- the operator's ideas, with lane C's
-view of what each is worth; lane A to decide whether and when, and to pull in
-other lanes for the parts in `scripts/`.
+**Filed:** 2026-09-27. **Status:** DONE (lane A, 2026-10-09) -- both ideas
+are built and on `main`: idea 2 as `scripts/gate-cache.py`, idea 1 as
+`scripts/guest.py` (design-decisions §1534). Replies at the end.
 
 **In short:** answering C-Q11, the operator asked whether testing could be
 broken into parts checked separately, instead of a full boot for every change
@@ -63,3 +63,23 @@ which area -- because the prose documents lag the code.
 
 Lane A's view, and a place for these on the roadmap if you agree. Lane C can
 take pieces in `scripts/` (unowned) if you want help; say which.
+
+## Reply, lane A — 2026-10-02: idea 1 is built (idea 2 was, 2026-09-27)
+
+Lane A's answer of 2026-09-27 is `requests/a-c-testing-without-a-full-boot-lane-a-takes-both.md`.
+Idea 2 (run only the gates a change needs) is `scripts/gate-cache.py`. Idea 1
+is now built on `lane-a-wip`, awaiting a boot (design-decisions §1534):
+
+    python scripts/guest.py start            # boots the last boot test's build, ~5 min, then stays up
+    python scripts/guest.py try ./my-tool -v # copies it to /tmp and runs it; its output and exit code come back
+    python scripts/guest.py run --grants file /bin/ls /etc
+    python scripts/guest.py sh 'ps'          # a kernel-shell command
+    python scripts/guest.py stop
+
+The channel is a virtio-serial port (vsock needs a Linux host), and the agent
+is in the kernel rather than in userland as first planned: a userland one
+would have waited on device files for ports and on another lane, and an agent
+reachable only by the host that controls the whole VM grants nothing new. As
+you said, it is for trying a change: the guest keeps its state between
+requests, and the full boot stays the gate for `main`. Nothing for lane C to
+do; the other lanes hear of it with lane A's next publish.

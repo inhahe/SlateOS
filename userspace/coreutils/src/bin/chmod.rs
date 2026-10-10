@@ -73,6 +73,16 @@
 //! (`fts` with `FTS_COMFOLLOW`): the caller typed that name and can see what it
 //! is. Measured: `chmod 755 s/link` changes `s/real`.
 //!
+//! # Standard output, and the descriptors it was given
+//!
+//! `-v` and `-c` write through standard output's `Stream`, a line per
+//! upstream `printf`, and the run ends in gnulib's `close_stdout`: a full disk
+//! or a closed standard output is `chmod: write error: R`, status 1, after
+//! every file has been changed, as upstream's is. It was `println!`, which
+//! panicked on the first line a full disk refused -- aborting the walk with
+//! the rest of a `-R` tree untouched -- and passed a closed descriptor's
+//! `EBADF` as success. `scripts/chmod-diff.sh` holds all of it to GNU 9.4.
+//!
 //! Built only on unix-family targets (our x86_64-slateos presents as
 //! linux-musl, so `cfg(unix)` matches). On non-unix hosts — Windows, where
 //! `cargo test --workspace` runs — a stub `main` keeps the workspace
@@ -405,6 +415,7 @@ mod imp {
     use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::quote::{quoteaf_os, quotef_os};
+    use coreutils::stdfd::{Stream, close_stdout};
     use modechange::{Changes, adjust, from_reference};
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -434,6 +445,9 @@ mod imp {
         /// `(dev, ino)` of `/`, when `--preserve-root` and `-R` are both on.
         root_dev_ino: Option<(u64, u64)>,
         status: u8,
+        /// Standard output, as stdio's: `-v` and `-c` print to it, and
+        /// gnulib's `close_stdout` judges it at the end.
+        out: Stream,
     }
 
     impl Job {
@@ -446,26 +460,39 @@ mod imp {
             self.status = 1;
         }
 
-        fn say(&self, line: &str) {
-            println!("{line}");
+        /// One `-v`/`-c` line: upstream's `printf`, one write. A failure is
+        /// the stream's to remember and `close_stdout`'s to report -- the
+        /// walk goes on, as upstream's does, and every file is still changed.
+        fn say(&mut self, line: &str) {
+            let mut text = line.as_bytes().to_vec();
+            text.push(b'\n');
+            // A `Stream` records a failed write rather than returning one.
+            let _ = self.out.write_all(&text);
         }
     }
 
     pub fn main() -> ExitCode {
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let mut out = Stream::stdout();
         let settings = match parse_args(&args) {
             Ok(Request::Help) => {
-                print!("{}", help_text());
-                return ExitCode::SUCCESS;
+                // A line per write, as upstream's `usage` writes it in pieces.
+                for line in help_text().split_inclusive('\n') {
+                    // Recorded by the stream, reported at the close.
+                    let _ = out.write_all(line.as_bytes());
+                }
+                return close_stdout("chmod", out, ExitCode::SUCCESS);
             }
             Ok(Request::Version) => {
-                println!("chmod (SlateOS coreutils) 0.1.0");
-                return ExitCode::SUCCESS;
+                // As above.
+                let _ = out.write_all(b"chmod (SlateOS coreutils) 0.1.0\n");
+                return close_stdout("chmod", out, ExitCode::SUCCESS);
             }
             Ok(Request::Run(settings)) => *settings,
             Err(e) => {
                 diag!("chmod: {e}");
-                return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
+                let status = u8::try_from(e.status).unwrap_or(1);
+                return close_stdout("chmod", out, ExitCode::from(status));
             }
         };
 
@@ -484,7 +511,7 @@ mod imp {
                             quoteaf_os(rfile),
                             strerror(&e)
                         );
-                        return ExitCode::from(1);
+                        return close_stdout("chmod", out, ExitCode::from(1));
                     }
                 }
             }
@@ -499,7 +526,7 @@ mod imp {
                         quoteaf_os("/"),
                         strerror(&e)
                     );
-                    return ExitCode::from(1);
+                    return close_stdout("chmod", out, ExitCode::from(1));
                 }
             }
         } else {
@@ -512,6 +539,7 @@ mod imp {
             umask_value,
             root_dev_ino,
             status: 0,
+            out,
         };
 
         for file in job.settings.files.clone() {
@@ -520,11 +548,11 @@ mod imp {
             visit(&mut job, &PathBuf::from(&file), true);
         }
 
-        // A closed stdout must not pass for success when `-v` had things to say.
-        if io::stdout().flush().is_err() {
-            job.status = 1;
-        }
-        ExitCode::from(job.status)
+        // gnulib's `close_stdout`: `write error: R`, status 1, when `-v` or
+        // `-c` had lines that did not arrive -- `chmod -v 755 f >&-` included,
+        // which used to pass for success.
+        let status = job.status;
+        close_stdout("chmod", job.out, ExitCode::from(status))
     }
 
     /// Apply the mode to one path, and — under `-R`, and only for a real
@@ -546,11 +574,25 @@ mod imp {
         let meta = match meta {
             Ok(m) => m,
             Err(e) => {
-                job.fail(&format!(
-                    "cannot access {}: {}",
-                    quoteaf_os(path),
-                    strerror(&e)
-                ));
+                // `fts`'s `FTS_SLNONE`: a name the caller gave that is a
+                // symbolic link whose target does not exist -- `stat` says
+                // `ENOENT` and `lstat` finds the link. Upstream words that
+                // apart from a name that is not there at all.
+                let dangling = top_level
+                    && e.kind() == io::ErrorKind::NotFound
+                    && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+                if dangling {
+                    job.fail(&format!(
+                        "cannot operate on dangling symlink {}",
+                        quoteaf_os(path)
+                    ));
+                } else {
+                    job.fail(&format!(
+                        "cannot access {}: {}",
+                        quoteaf_os(path),
+                        strerror(&e)
+                    ));
+                }
                 if job.settings.verbosity == Verbosity::High {
                     job.say(&describe_change(path.as_os_str(), Outcome::NoStat, 0, 0));
                 }
@@ -686,12 +728,19 @@ mod imp {
     }
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
+// Before `main`, so that `stdfd::restore` still sees the descriptors `chmod`
+// was given: `chmod -v 755 f >&-` is `write error: Bad file descriptor`, as
+// it is GNU's, not a run that wrote its report into the `/dev/null` Rust's
+// runtime would have put there.
+coreutils::guard_std_fds!();
+
+/// The descriptors as given, then the funnel: a diagnostic that could not be
+/// written turns the earned status into `exit_failure`, which is what
+/// upstream's `atexit (close_stdout)` does on every exit path at once. See
 /// [`coreutils::stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
+    coreutils::stdfd::restore();
     coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 

@@ -39,6 +39,7 @@ use crate::menu::{ContextMenu, MenuAction, MenuItem};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::surface::CommandSink;
+use crate::text::scaled;
 
 /// A drop-down's height where the caller has no layout of its own: the
 /// reference's 26.
@@ -52,6 +53,14 @@ pub const FONT_SIZE: f32 = 12.5;
 const CHEVRON: f32 = 8.0;
 /// From the text's end to the chevron.
 const CHEVRON_GAP: f32 = 6.0;
+
+/// A drop-down's height at the user's text size ([`HEIGHT`] at the
+/// default, as every size here is): what a form with no layout of its own
+/// lays out from, so its text has the room it needs.
+#[must_use]
+pub fn height() -> f32 {
+    scaled(HEIGHT)
+}
 
 /// What a drop-down did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,20 +425,23 @@ impl Dropdown {
         };
         if !text.is_empty() {
             sink.emit(RenderCommand::Text {
-                x: field.x + PADDING_H,
-                y: field.y + (field.h - FONT_SIZE) / 2.0,
+                x: field.x + scaled(PADDING_H),
+                y: field.y + (field.h - scaled(FONT_SIZE)) / 2.0,
                 text: text.to_string(),
                 color: fade(ink),
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((field.w - PADDING_H * 2.0 - CHEVRON - CHEVRON_GAP).max(0.0)),
+                max_width: Some(
+                    (field.w - scaled(PADDING_H) * 2.0 - scaled(CHEVRON) - scaled(CHEVRON_GAP))
+                        .max(0.0),
+                ),
                 overflow: TextOverflow::Ellipsis,
             });
         }
         // The chevron: a V at the right, pointing the way the list opens.
-        let cx = field.right() - PADDING_H - CHEVRON / 2.0;
+        let cx = field.right() - scaled(PADDING_H) - scaled(CHEVRON) / 2.0;
         let cy = field.y + field.h / 2.0;
-        let half = CHEVRON / 2.0;
+        let half = scaled(CHEVRON) / 2.0;
         for (x1, y1, x2, y2) in [
             (cx - half, cy - half / 2.0, cx, cy + half / 2.0),
             (cx, cy + half / 2.0, cx + half, cy - half / 2.0),
@@ -466,6 +478,34 @@ mod tests {
                 .to_vec(),
             Some(2),
         )
+    }
+
+    /// **A drop-down follows the user's text size** (on this test's thread):
+    /// at twice the size its text is twice as large, and so is the height it
+    /// offers, and its list's rows -- a menu's -- grow with it.
+    #[test]
+    fn a_drop_down_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert!((height() - HEIGHT * 2.0).abs() < 0.01);
+        let d = sizes();
+        let mut drawn: Vec<RenderCommand> = Vec::new();
+        let f = Rect::new(100.0, 100.0, 440.0, height());
+        d.draw(
+            &mut drawn,
+            &Palette::for_mode(false),
+            f,
+            State::default(),
+            2.0,
+        );
+        let text: Vec<f32> = drawn
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text.len(), 1, "{drawn:?}");
+        assert!((text[0] - FONT_SIZE * 2.0).abs() < 0.01, "{text:?}");
     }
 
     /// In the bottom-right corner there is room neither below nor to the

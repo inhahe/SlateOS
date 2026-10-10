@@ -66,6 +66,27 @@
 //! which is most of them" and used it to justify keeping the hole. Measured,
 //! it is 27% of them and one line each.
 //!
+//! **Since 2026-10-05 the two answers are no role's value** (design-decisions
+//! §1470): `#10101A` and `#F0F2F6`, one step further out than Mocha's crust
+//! and Latte's base -- the same colours to the eye, a different value to this
+//! check. A declared label ink no longer lets a leftover page colour through
+//! with it.
+//!
+//! # A module's own colour may not be another theme's page colour
+//!
+//! A declaration is accepted anywhere in the window it is checked in. So a
+//! module whose own colour is *exactly* a neutral role of a built-in palette
+//! -- Mocha's `base` picked as a "near-black ink" was the usual one, in eleven
+//! of lane E's games -- would let a leftover of that palette's page pass as
+//! its own, which is the defect this module exists to catch. Both entry
+//! points therefore refuse a `derived` colour equal to a built-in palette's
+//! neutral (`crust` .. `text`, the shades a page is painted in), naming the
+//! palette and the role, unless the check would take that colour anyway: a
+//! role of the palette being checked, its ink on one, or black. A hue is not
+//! refused -- by the operator's C-Q16 answer (§1422) a game keeps Mocha's
+//! pale hues as colours of its own, so a hue coincidence is by design
+//! (`requests/e-c-palette-check-a-derived-colour-can-hide-a-leftover.md`).
+//!
 //! # Why `derived` is a parameter and not a blanket allowance
 //!
 //! [`emphasized`](guitk::palette::emphasized) and `Color::lerp` produce colours
@@ -107,6 +128,75 @@ fn colors_of(cmd: &RenderCommand) -> Vec<Color> {
         | RenderCommand::PushFont { .. }
         | RenderCommand::PopFont => Vec::new(),
     }
+}
+
+/// The roles that are shades of a palette's ground and its text: what a page
+/// is painted in, so what a leftover of another theme's page is made of.
+/// (The hues -- `red`, `mauve`, ... -- are not here: by the operator's C-Q16
+/// answer, §1422, a game keeps Mocha's pale hues as colours of its own, so a
+/// hue a module declares may coincide with a palette's by design.)
+const NEUTRAL_ROLES: [&str; 10] = [
+    "crust", "mantle", "base", "surface0", "surface1", "surface2", "overlay0", "subtext0",
+    "subtext1", "text",
+];
+
+/// Whether `a` and `b` are one colour, alpha aside: alpha is how a role
+/// becomes a panel, a wash or a hover.
+fn same_rgb(a: Color, b: Color) -> bool {
+    a.r == b.r && a.g == b.g && a.b == b.b
+}
+
+/// A colour in `derived` that is exactly a neutral role of a built-in
+/// palette -- Mocha's `base` picked as a "near-black ink" -- and that the
+/// declaration lets through: the built-in palette's name and the role's.
+///
+/// Declared, such a colour is accepted anywhere in a `p` window, so a
+/// leftover of that palette's page -- the very defect this module exists to
+/// catch -- would pass as the module's own colour. A module's own colours
+/// have to be colours no page is painted in
+/// (`requests/e-c-palette-check-a-derived-colour-can-hide-a-leftover.md`).
+/// A declaration that widens nothing is not refused: black, which the check
+/// takes at any alpha anyway (the light palette's `text` is black, by the
+/// operator's decision), and a role of `p` or the ink `p` draws text in on
+/// one -- declaring those lets nothing through that was not already.
+fn shadowed_neutral(p: &Palette, derived: &[Color]) -> Option<(Color, &'static str, &'static str)> {
+    let builtin = [
+        ("light", Palette::for_mode(true)),
+        ("dark", Palette::for_mode(false)),
+    ];
+    derived
+        .iter()
+        .filter(|&&d| !is_accounted_for(p, d, &[]))
+        .find_map(|&d| {
+            builtin.iter().find_map(|(mode, q)| {
+                q.roles()
+                    .iter()
+                    .find(|(name, r)| NEUTRAL_ROLES.contains(name) && same_rgb(*r, d))
+                    .map(|&(name, _)| (d, *mode, name))
+            })
+        })
+}
+
+/// Refuse a `derived` list that shadows a built-in palette's neutral: see
+/// [`shadowed_neutral`].
+fn assert_derived_shadows_no_neutral(p: &Palette, derived: &[Color], what: &str) {
+    let shadowed = shadowed_neutral(p, derived);
+    // An assertion, as every other refusal here is: the message is only
+    // built when it fails.
+    assert!(
+        shadowed.is_none(),
+        "{what}: {}",
+        shadowed
+            .map(|(c, mode, role)| format!(
+                "derived #{:02X}{:02X}{:02X} is the {mode} palette's `{role}`, \
+                 and declared it would hide a leftover of that palette's page -- \
+                 the defect this check exists to catch. A module's own colour \
+                 has to be one no page is painted in: a neutral of the same \
+                 lightness one step off will do.",
+                c.r, c.g, c.b
+            ))
+            .unwrap_or_default()
+    );
 }
 
 /// Whether `c` is a colour `p` can account for.
@@ -157,8 +247,12 @@ fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
 /// When a command carries a colour that is neither a role of `p`, nor black,
 /// nor listed in `derived`. The message gives the offending value, the command
 /// index and the mode, because "some colour is wrong somewhere in 300 commands"
-/// is not an actionable failure.
+/// is not an actionable failure. And when `derived` holds a built-in
+/// palette's neutral role (`base`, `crust`, `surface0`, ...) that is not one
+/// of `p`'s own roles or inks, since declaring it would let a leftover of that
+/// palette's page through.
 pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color], what: &str) {
+    assert_derived_shadows_no_neutral(p, derived, what);
     for (i, cmd) in cmds.iter().enumerate() {
         for c in colors_of(cmd) {
             assert_one(p, &format!("command {i}"), c, derived, what);
@@ -184,9 +278,11 @@ pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color],
 ///
 /// # Panics
 ///
-/// On the same condition as [`assert_drawn_from`]: a colour that is neither a
-/// role of `p`, nor black, nor listed in `derived`.
+/// On the same conditions as [`assert_drawn_from`]: a colour that is neither
+/// a role of `p`, nor black, nor listed in `derived`; or a `derived` colour
+/// that is a built-in palette's neutral.
 pub fn assert_colours_from(p: &Palette, named: &[(&str, Color)], derived: &[Color], what: &str) {
+    assert_derived_shadows_no_neutral(p, derived, what);
     for (label, c) in named {
         assert_one(p, label, *c, derived, what);
     }
@@ -402,7 +498,7 @@ mod tests {
     // are off here — as `CLAUDE.md` prescribes. Indexing a result the test has
     // just asserted the length of is the clearest way to say what is expected;
     // `.get(0).unwrap()` would panic identically with a worse message.
-    #![allow(clippy::indexing_slicing)]
+    #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
 
@@ -432,6 +528,72 @@ mod tests {
             "the sweep accepted Mocha base in a light render, so it would \
              certify an unconverted module as converted"
         );
+    }
+
+    /// **A module's own colour may not be another palette's neutral**:
+    /// declaring Mocha's `base` (as the games did for a near-black ink) lets
+    /// a leftover Mocha page through a light render, so the declaration is
+    /// refused -- naming the role -- even with nothing drawn in it; the
+    /// same colour one step off passes, and so does a declared colour that is
+    /// a role of the palette being checked.
+    #[test]
+    fn a_derived_colour_that_shadows_a_neutral_is_refused() {
+        let light = Palette::for_mode(true);
+        let dark = Palette::for_mode(false);
+        let mocha_base = Color::from_hex(0x1E1E2E);
+        let refused = std::panic::catch_unwind(|| {
+            assert_drawn_from(&light, &[], &[mocha_base], "probe");
+        });
+        let message = refused
+            .err()
+            .and_then(|e| e.downcast_ref::<String>().cloned())
+            .expect("Mocha's base, declared, passed the light check");
+        assert!(
+            message.contains("`base`") && message.contains("dark"),
+            "{message}"
+        );
+        // The named-value entry point refuses it too.
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_colours_from(&light, &[], &[mocha_base], "probe");
+            })
+            .is_err()
+        );
+        // One step off, it is the module's own.
+        assert_drawn_from(&light, &[], &[Color::from_hex(0x1E1E2F)], "probe");
+        // In the dark palette Mocha's base is a role: declared or not, fine.
+        assert_drawn_from(&dark, &[], &[mocha_base], "probe");
+        // Black is the light palette's `text`, and taken everywhere anyway:
+        // declaring it widens nothing, so it is not refused.
+        assert_drawn_from(&dark, &[], &[Color::from_hex(0x000000)], "probe");
+        // Nor are `readable_on`'s answers, which are no role's value.
+        assert_drawn_from(
+            &light,
+            &[],
+            &[guitk::palette::DARK_EXTREME, guitk::palette::LIGHT_EXTREME],
+            "probe",
+        );
+        assert_drawn_from(
+            &dark,
+            &[],
+            &[guitk::palette::DARK_EXTREME, guitk::palette::LIGHT_EXTREME],
+            "probe",
+        );
+        // A hue coincidence is by design (C-Q16): Mocha's red may be declared.
+        let (_, red) = dark.roles().into_iter().find(|(n, _)| *n == "red").unwrap();
+        assert_drawn_from(&light, &[], &[red], "probe");
+        // And every neutral of both built-in palettes is refused in the
+        // other mode unless the check takes it there anyway.
+        for (mode, p, q) in [("light", &light, &dark), ("dark", &dark, &light)] {
+            for (name, r) in q.roles() {
+                if NEUTRAL_ROLES.contains(&name) && !is_accounted_for(p, r, &[]) {
+                    assert!(
+                        shadowed_neutral(p, &[r]).is_some(),
+                        "{mode}: the other palette's {name} was not refused"
+                    );
+                }
+            }
+        }
     }
 
     /// And it must accept the palette it was given, or every module fails.

@@ -34,6 +34,9 @@ DIFF_GNU_SOURCE=9.4
 
 pass=0; fail=0; xfail=0; xpass=0
 TO_FULL=
+# Standard descriptors to close for `dircolors` alone (`<&-` and so on); reset
+# after each case.
+CLOSING=
 # The environment one case runs with; reset after each.
 CASE_ENV=(SHELL=/bin/bash TERM=xterm-256color)
 INPUT=/dev/null
@@ -62,6 +65,10 @@ compare() {
     if [ -n "$TO_FULL" ]; then
       ( cd "$fx" && timeout -k 2 30 env -i LC_ALL=C.UTF-8 "${CASE_ENV[@]}" PATH="$bindir/$side" \
           dircolors "$@" ) <"$INPUT" >/dev/full 2>"$err"
+    elif [ -n "$CLOSING" ]; then
+      # The closing comes after the captures, so it wins for `dircolors` alone.
+      ( cd "$fx" && eval "timeout -k 2 30 env -i LC_ALL=C.UTF-8 \"\${CASE_ENV[@]}\" \
+          PATH=\"\$bindir/\$side\" dircolors \"\$@\" $CLOSING" ) <"$INPUT" >"$out" 2>"$err"
     else
       ( cd "$fx" && timeout -k 2 30 env -i LC_ALL=C.UTF-8 "${CASE_ENV[@]}" PATH="$bindir/$side" \
           dircolors "$@" ) <"$INPUT" >"$out" 2>"$err"
@@ -86,11 +93,12 @@ compare() {
 }
 
 label_of() {
-  printf '[%s] dircolors %s%s' "${CASE_ENV[*]}" "$*" "${TO_FULL:+  [>/dev/full]}"
+  printf '[%s] dircolors %s%s%s' "${CASE_ENV[*]}" "$*" "${TO_FULL:+  [>/dev/full]}" \
+    "${CLOSING:+  [$CLOSING]}"
 }
 
 reset_case() {
-  TO_FULL=; CASE_ENV=(SHELL=/bin/bash TERM=xterm-256color); INPUT=/dev/null
+  TO_FULL=; CLOSING=; CASE_ENV=(SHELL=/bin/bash TERM=xterm-256color); INPUT=/dev/null
 }
 
 run_case() {
@@ -180,6 +188,21 @@ run_case missing
 run_case dir
 run_case unreadable
 run_case ''
+
+# --- standard descriptors closed -------------------------------------------------------
+# Upstream reads FILE through `freopen (FILE, "r", stdin)`: the file goes onto
+# descriptor 0, and a failed `freopen` reports the `errno` of glibc closing that
+# descriptor -- `Bad file descriptor` when it was closed already, where ours,
+# opening FILE as an ordinary file, said `No such file or directory`.
+CLOSING='<&-'; run_case missing
+CLOSING='<&- >&-'; run_case missing
+CLOSING='<&- 2>&-'; run_case missing
+CLOSING='>&-'; run_case missing
+CLOSING='<&-'; run_case global
+CLOSING='>&-'; run_case global
+CLOSING='<&- >&-'; run_case global
+CLOSING='<&-'; run_case dir
+CLOSING='<&-'; run_case -
 
 # --- the command line ---------------------------------------------------------------------
 run_case -p -b

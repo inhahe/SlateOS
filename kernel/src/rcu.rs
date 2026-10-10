@@ -324,7 +324,8 @@ pub fn synchronize() {
             // with no RCU read-side critical section active.  Skip it.
             // Without this, tickless idle CPUs (whose APIC timer is
             // stopped) would prevent grace periods from completing.
-            let idle = CPU_IDLE.get(i).is_some_and(|f| f.load(Ordering::Acquire));
+            // Sequentially consistent, pairing with `leave_idle`'s store.
+            let idle = CPU_IDLE.get(i).is_some_and(|f| f.load(Ordering::SeqCst));
             if idle {
                 continue;
             }
@@ -457,9 +458,31 @@ pub fn mark_idle() {
 ///
 /// Based on Linux `rcu_idle_exit()`.
 pub fn mark_active() {
-    let cpu = smp::current_cpu_index();
+    leave_idle(smp::current_cpu_index());
+}
+
+/// Mark CPU `cpu` -- which must be the calling CPU -- as out of idle, if it
+/// was marked idle.
+///
+/// [`mark_active`] for the scheduler's switch path, which already knows its
+/// CPU. A task switched in from an interrupt's exit while the idle task sat in
+/// `hlt` runs before the idle loop's own `mark_active`, and the loop does not
+/// run again until that task blocks: without this, the CPU would stay marked
+/// idle while it ran -- skipped by [`synchronize`] even inside a read-side
+/// critical section, and by `membarrier`'s global barrier, which uses it.
+///
+/// The store is sequentially consistent, a full barrier on x86 (`xchg`): the
+/// clear must be visible before this CPU's next load of an RCU-protected
+/// pointer, or a writer reading the flag still set would skip this CPU and
+/// free what it is about to read. A load first, so the common case -- not
+/// idle -- leaves the flag's cache line, shared with other CPUs' flags,
+/// unwritten.
+#[inline]
+pub fn leave_idle(cpu: usize) {
     if let Some(flag) = CPU_IDLE.get(cpu) {
-        flag.store(false, Ordering::Release);
+        if flag.load(Ordering::Relaxed) {
+            flag.store(false, Ordering::SeqCst);
+        }
     }
 }
 

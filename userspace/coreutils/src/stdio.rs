@@ -19,6 +19,13 @@
 //!   the next buffer. A write that exactly fills the buffer does not flush it;
 //!   the next write does. Where the buffer is under 128 bytes, glibc does not
 //!   bother keeping the writes aligned, and all of the rest goes directly.
+//! * **Line-buffered, a newline writes the buffer through itself.** A write
+//!   the buffer has room for is copied through its last newline and the
+//!   buffer written there; the rest of it is held. A write it has *no* room
+//!   for goes as above -- filling the buffer past any newline in the way --
+//!   and its remainder is written through each newline in it, a line per
+//!   `write(2)`, since `_IO_default_xsputn` feeds it to `__overflow` a byte at
+//!   a time.
 //! * **The first write finds no buffer at all**, so nothing "fits": the
 //!   buffer is allocated empty and the write goes straight to the second step.
 //!   A first write of a whole block or more therefore reaches the descriptor at
@@ -28,17 +35,33 @@
 //!   its first 4096-byte piece, not its second.
 //! * **A failed flush discards the buffer**, as `new_do_write` resets the
 //!   pointers whether or not `write(2)` succeeded, and sets the error flag
-//!   (`ferror`) until [`StdioFile::clear_error`] (`clearerr`).
+//!   (`ferror`) until [`StdioFile::clear_error`] (`clearerr`). The rest of the
+//!   write that needed it is dropped too: `fwrite` returns there.
+//!
+//! That arithmetic is [`xsputn`], and [`crate::stdfd::Stream`] -- the writer
+//! most utilities use -- runs on it as well, because its verdict depends on it
+//! as much as sed's messages do. gnulib's `close_stdout` reports a full disk
+//! with the reason (`write error: No space left on device`) when the close
+//! still had bytes to write, and without one (`write error`) when an earlier
+//! flush had already failed and nothing was left; which of the two a program
+//! ends with is decided by what glibc's buffer still holds.
 //!
 //! Reading is [`StdioReader`]: a block at a time (one byte unbuffered),
 //! `getdelim`, a one-byte look-ahead, sticky end of file, and the seek back
 //! over unread bytes that `exit` makes -- which is what decides where the
 //! *next* reader of a shared standard input starts. See its docs.
 //!
-//! What it does not reproduce: seeking by the caller, wide streams, and the
-//! line-buffered corner where a failed flush of a complete line is reported
-//! to `fwrite`'s caller as success -- a terminal that rejects writes is not a
-//! case anyone has measured.
+//! Both kinds of stream seek as `fseek` does ([`StdioFile::seek`],
+//! [`StdioReader::seek`], [`StdioReader::rewind`]): a written stream flushes
+//! first, a read one counts from the next byte it would hand out, and a
+//! standard descriptor moves for everyone who shares it -- `xxd -r` rewinds
+//! its standard input and seeks its output. [`StdioReader::tell`] is
+//! `ftell`, which `last` reads a file's length with.
+//!
+//! What it does not reproduce: wide streams, and the line-buffered corner
+//! where a failed flush of a complete line is reported to `fwrite`'s caller
+//! as success -- a terminal that rejects writes is not a case anyone has
+//! measured.
 
 use std::io;
 
@@ -186,14 +209,20 @@ impl StdioFile {
         if first {
             self.buffering = self.choose_buffering();
         }
-        match self.buffering {
-            Buffering::Unbuffered => self.write_out(data),
-            Buffering::Line(size) => self.write_line_buffered(data, size, first),
-            Buffering::Full(size) => self.write_fully_buffered(data, size, first),
+        let (size, line) = match self.buffering {
+            Buffering::Unbuffered => return self.write_out(data),
+            Buffering::Line(size) => (size, true),
+            Buffering::Full(size) => (size, false),
             // Just chosen above, so never still unallocated; `BUFSIZ` is what
             // it would have been chosen as had nothing been known.
-            Buffering::Unallocated => self.write_fully_buffered(data, BUFSIZ, first),
-        }
+            Buffering::Unallocated => (BUFSIZ, false),
+        };
+        let mut held = std::mem::take(&mut self.buf);
+        let result = xsputn(&mut held, size, first, line, data, &mut |bytes| {
+            self.write_out(bytes)
+        });
+        self.buf = held;
+        result
     }
 
     /// `fflush`: write out whatever is held.
@@ -206,14 +235,38 @@ impl StdioFile {
     ///
     /// The failed `write(2)`'s error; the buffer is discarded either way.
     pub fn flush(&mut self) -> io::Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        let held = std::mem::take(&mut self.buf);
-        let result = self.write_out(&held);
+        let mut held = std::mem::take(&mut self.buf);
+        let result = write_held(&mut held, &mut |bytes| self.write_out(bytes));
         self.buf = held;
-        self.buf.clear();
         result
+    }
+
+    /// `fseek`, then `ftell`: whatever is held written out, the descriptor
+    /// moved, and where it now is.
+    ///
+    /// glibc's `fseek` on a stream being written flushes it first and gives
+    /// up if that fails, moving nothing. It also allocates the buffer of a
+    /// stream nothing has been written to yet, so the next write is not the
+    /// "first" one of the module docs: it finds room. (glibc turns a
+    /// `SEEK_END` on a regular file into a `SEEK_SET` past its `st_size`,
+    /// which lands in the same place.)
+    ///
+    /// # Errors
+    ///
+    /// The flush's, or `lseek(2)`'s -- `ESPIPE` for a pipe or a terminal,
+    /// `EINVAL` for a position before the start.
+    pub fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        if self.buffering == Buffering::Unallocated {
+            self.buffering = self.choose_buffering();
+        }
+        self.flush()?;
+        match &mut self.sink {
+            Sink::Descriptor(fd) => stdfd::seek(*fd, to),
+            Sink::File(file) => io::Seek::seek(file, to),
+            Sink::Closed => Err(io::Error::from_raw_os_error(EBADF)),
+            #[cfg(test)]
+            Sink::Memory(_) => Err(io::Error::from_raw_os_error(ESPIPE)),
+        }
     }
 
     /// `fclose`: flush, then close the descriptor.
@@ -251,11 +304,7 @@ impl StdioFile {
             #[cfg(test)]
             Sink::Memory(_) => None,
         };
-        let size = meta
-            .as_ref()
-            .map(block_size)
-            .filter(|&b| b > 0 && b < BUFSIZ)
-            .unwrap_or(BUFSIZ);
+        let size = buffer_size(meta.as_ref());
         let tty = match &self.sink {
             Sink::Descriptor(fd) => meta.as_ref().is_some_and(is_char_device) && stdfd::is_tty(*fd),
             Sink::File(_) | Sink::Closed => false,
@@ -266,54 +315,6 @@ impl StdioFile {
             Buffering::Line(size)
         } else {
             Buffering::Full(size)
-        }
-    }
-
-    /// `_IO_new_file_xsputn` for a fully buffered stream. `first` is the write
-    /// that allocates the buffer, which finds no room in it.
-    fn write_fully_buffered(&mut self, data: &[u8], size: usize, first: bool) -> io::Result<()> {
-        let room = if first {
-            0
-        } else {
-            size.saturating_sub(self.buf.len())
-        };
-        let take = room.min(data.len());
-        let (head, rest) = data.split_at(take);
-        self.buf.extend_from_slice(head);
-        if rest.is_empty() {
-            return Ok(());
-        }
-        // The buffer is full and there is more: out it goes. (On the first
-        // write it is empty, and this writes nothing.)
-        self.flush()?;
-        // Whole buffers' worth of what is left go straight to the descriptor,
-        // keeping the writes block-aligned; the remainder starts a new buffer.
-        // A buffer under 128 bytes is not worth aligning to, and glibc sends
-        // everything.
-        let direct = if size >= 128 {
-            rest.len()
-                .saturating_sub(rest.len().checked_rem(size).unwrap_or(0))
-        } else {
-            rest.len()
-        };
-        let (whole, tail) = rest.split_at(direct);
-        if !whole.is_empty() {
-            self.write_out(whole)?;
-        }
-        self.buf.extend_from_slice(tail);
-        Ok(())
-    }
-
-    /// A line-buffered stream: held until a newline, then written through it.
-    fn write_line_buffered(&mut self, data: &[u8], size: usize, first: bool) -> io::Result<()> {
-        match data.iter().rposition(|&b| b == b'\n') {
-            Some(end) => {
-                let (through, rest) = data.split_at(end.saturating_add(1));
-                self.buf.extend_from_slice(through);
-                self.flush()?;
-                self.write_fully_buffered(rest, size, false)
-            }
-            None => self.write_fully_buffered(data, size, first),
         }
     }
 
@@ -343,6 +344,115 @@ impl StdioFile {
         }
         Ok(())
     }
+}
+
+/// glibc's `_IO_new_file_xsputn` for a stream that has a buffer, apart from
+/// where the bytes go: the one copy of the rules in the module docs, shared by
+/// [`StdioFile`] and [`crate::stdfd::Stream`] so that the two cannot drift.
+///
+/// `held` is what the stream is holding and `size` its buffer's size. `first`
+/// says nothing has been written to the stream yet, so its buffer does not
+/// exist and nothing fits in it; `line` is line buffering. `deliver` is
+/// `write(2)` until done.
+///
+/// # Errors
+///
+/// The first failed delivery's. The buffer is empty afterwards, as glibc
+/// leaves it whether or not `write(2)` succeeded, and the rest of `data` is
+/// dropped, as `fwrite` returns there.
+pub(crate) fn xsputn(
+    held: &mut Vec<u8>,
+    size: usize,
+    first: bool,
+    line: bool,
+    data: &[u8],
+    deliver: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    // What goes into the buffer before anything is written: what fits --
+    // nothing, before the buffer exists -- or, line-buffered with room for all
+    // of it, the data through its last newline, which then has to go out.
+    let room = if first {
+        0
+    } else {
+        size.saturating_sub(held.len())
+    };
+    let mut take = room.min(data.len());
+    let mut must_flush = false;
+    if line
+        && !first
+        && room >= data.len()
+        && let Some(end) = data.iter().rposition(|&b| b == b'\n')
+    {
+        take = end.saturating_add(1);
+        must_flush = true;
+    }
+    let (head, rest) = data.split_at(take);
+    held.extend_from_slice(head);
+    if rest.is_empty() && !must_flush {
+        return Ok(());
+    }
+    // The buffer is full, or ends in a newline, and goes. (Before the first
+    // write it is empty, and this writes nothing.)
+    write_held(held, deliver)?;
+    // Whole buffers' worth of what is left go straight to the descriptor,
+    // keeping the writes block-aligned. A buffer under 128 bytes is not worth
+    // aligning to, and glibc sends everything.
+    let direct = if size >= 128 {
+        rest.len()
+            .saturating_sub(rest.len().checked_rem(size).unwrap_or(0))
+    } else {
+        rest.len()
+    };
+    let (whole, mut tail) = rest.split_at(direct);
+    if !whole.is_empty() {
+        deliver(whole)?;
+    }
+    // The remainder starts the next buffer: `_IO_default_xsputn`, which for a
+    // line-buffered stream goes a byte at a time through `__overflow`, and
+    // that writes the buffer at each newline. Less than a buffer is left, so
+    // nothing else can fill it.
+    if line {
+        while let Some(end) = tail.iter().position(|&b| b == b'\n') {
+            let (through, after) = tail.split_at(end.saturating_add(1));
+            held.extend_from_slice(through);
+            write_held(held, deliver)?;
+            tail = after;
+        }
+    }
+    held.extend_from_slice(tail);
+    Ok(())
+}
+
+/// `_IO_do_write` of everything held -- `fflush` -- after which nothing is,
+/// delivered or not. Nothing held writes nothing and succeeds, whatever the
+/// descriptor is.
+///
+/// # Errors
+///
+/// The delivery's.
+pub(crate) fn write_held(
+    held: &mut Vec<u8>,
+    deliver: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    let result = deliver(held);
+    held.clear();
+    result
+}
+
+/// `_IO_file_doallocate`'s buffer size for a stream onto a file with this
+/// metadata: `st_blksize` when it is positive and below `BUFSIZ`, and `BUFSIZ`
+/// otherwise -- including when `fstat` failed, `None`. 4096 for a file on
+/// ext4, a pipe, `/dev/null` and `/dev/full` on Linux; 1024 for a terminal.
+pub(crate) fn buffer_size(meta: Option<&std::fs::Metadata>) -> usize {
+    meta.map(block_size)
+        .filter(|&b| b > 0 && b < BUFSIZ)
+        .unwrap_or(BUFSIZ)
 }
 
 // ------------------------------------------------------------------ reading
@@ -381,6 +491,8 @@ struct MemorySource {
     fail: Option<i32>,
     seekable: bool,
     reads: Vec<usize>,
+    /// What closing it answers: `None` succeeds, `Some(errno)` fails.
+    close_result: Option<i32>,
 }
 
 #[cfg(test)]
@@ -409,10 +521,31 @@ impl MemorySource {
         self.at = self.at.saturating_sub(n);
         Ok(())
     }
+
+    /// `lseek(2)` anywhere: `EINVAL` before the start, and past the end
+    /// allowed, as a regular file allows it.
+    fn seek_to(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        if !self.seekable {
+            return Err(io::Error::from_raw_os_error(ESPIPE));
+        }
+        let invalid = || io::Error::from_raw_os_error(EINVAL);
+        let base = |n: usize| i64::try_from(n).map_err(|_| invalid());
+        let target = match to {
+            io::SeekFrom::Start(n) => i64::try_from(n).map_err(|_| invalid())?,
+            io::SeekFrom::Current(d) => base(self.at)?.checked_add(d).ok_or_else(invalid)?,
+            io::SeekFrom::End(d) => base(self.data.len())?.checked_add(d).ok_or_else(invalid)?,
+        };
+        let target = usize::try_from(target).map_err(|_| invalid())?;
+        self.at = target;
+        u64::try_from(target).map_err(|_| invalid())
+    }
 }
 
 /// `ESPIPE`: what `lseek` answers on a pipe, which glibc's sync ignores.
 const ESPIPE: i32 = 29;
+
+/// `EINVAL`: what `lseek` answers for a position before the start.
+const EINVAL: i32 = 22;
 
 /// One stdio `FILE` opened for reading: glibc's `getdelim`, `getc` with
 /// `ungetc`, `feof`, `ferror`, `clearerr` and `setvbuf (_IONBF)`, and the
@@ -597,6 +730,103 @@ impl StdioReader {
         }
     }
 
+    /// `fread (out, 1, out.len (), fp)`: glibc's `_IO_file_xsgetn`. How many
+    /// bytes were read, and the error of the `read(2)` that stopped it short,
+    /// if one did (after which [`StdioReader::has_error`] is true).
+    ///
+    /// What is buffered is used first. A remainder smaller than the buffer
+    /// refills it, a block at a time; one as large or larger is read
+    /// *directly* into `out`, in a whole number of blocks (any number of
+    /// bytes, for a buffer under 128), bypassing the buffer -- so a large
+    /// `fread` takes from a shared descriptor exactly what it asked for and
+    /// leaves nothing for `exit` to give back. A direct read does not mark the
+    /// stream used, as glibc's does not orient it; and it is made even after
+    /// an end of file, which only the buffered path treats as sticky.
+    pub fn fread(&mut self, out: &mut [u8]) -> (usize, Option<io::Error>) {
+        // `_IO_doallocbuf`, before anything: the size decides the path.
+        if self.buffering == ReadBuffering::Unallocated {
+            self.buffering = ReadBuffering::Full(self.block_size());
+        }
+        let size = match self.buffering {
+            ReadBuffering::Full(n) => n,
+            ReadBuffering::Unallocated | ReadBuffering::Unbuffered => 1,
+        };
+        let mut done = 0usize;
+        while done < out.len() {
+            let want = out.len().saturating_sub(done);
+            let avail = self.buf.get(self.pos..).unwrap_or_default();
+            let take = avail.len().min(want);
+            if let (Some(dst), Some(src)) = (
+                out.get_mut(done..done.saturating_add(take)),
+                avail.get(..take),
+            ) {
+                dst.copy_from_slice(src);
+            }
+            self.pos = self.pos.saturating_add(take);
+            done = done.saturating_add(take);
+            let want = out.len().saturating_sub(done);
+            if want == 0 {
+                break;
+            }
+            if want < size {
+                match self.underflow() {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => return (done, Some(e)),
+                }
+            }
+            // Straight into the caller's buffer, keeping block alignment.
+            self.buf.clear();
+            self.pos = 0;
+            let count = if size >= 128 {
+                want.saturating_sub(want.checked_rem(size).unwrap_or(0))
+            } else {
+                want
+            };
+            let Some(dst) = out.get_mut(done..done.saturating_add(count)) else {
+                break;
+            };
+            let got = loop {
+                let r = match &mut self.source {
+                    Source::Descriptor(fd) => stdfd::read(*fd, dst),
+                    Source::File(f) => io::Read::read(f, dst),
+                    #[cfg(test)]
+                    Source::Memory(m) => m.give(dst),
+                };
+                match r {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    other => break other,
+                }
+            };
+            match got {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
+                }
+                Ok(n) => done = done.saturating_add(n),
+                Err(e) => {
+                    self.error = true;
+                    return (done, Some(e));
+                }
+            }
+        }
+        (done, None)
+    }
+
+    /// `getc`: the next byte, taken. `None` at the end of the file.
+    ///
+    /// # Errors
+    ///
+    /// As [`StdioReader::read_until`].
+    pub fn getc(&mut self) -> io::Result<Option<u8>> {
+        if !self.underflow()? {
+            return Ok(None);
+        }
+        let byte = self.buf.get(self.pos).copied();
+        self.pos = self.pos.saturating_add(1);
+        Ok(byte)
+    }
+
     /// `getc` then `ungetc`: the next byte, left where it is. `None` at the
     /// end of the file.
     ///
@@ -613,21 +843,114 @@ impl StdioReader {
     /// `rewind`: back to the start of the file, with the end of file and any
     /// error forgotten. A stream over something that cannot seek stays where
     /// it is, buffer and all, as glibc's failed seek leaves it.
+    ///
+    /// A standard descriptor moves too, as `rewind (stdin)` moves it -- and
+    /// with it the position the shell's next command starts from: measured,
+    /// `{ read -r line; xxd -r; } < dump` reverts the whole dump, the line
+    /// `read` took included.
     pub fn rewind(&mut self) {
-        let sought = match &mut self.source {
-            Source::File(f) => io::Seek::seek(f, io::SeekFrom::Start(0)).map(drop),
-            // A standard descriptor is not this stream's to move to an
-            // absolute position, and nothing asks it to be.
-            Source::Descriptor(_) => Err(io::Error::from_raw_os_error(ESPIPE)),
-            #[cfg(test)]
-            Source::Memory(m) => m.seek_back(m.at),
-        };
-        if sought.is_ok() {
-            self.buf.clear();
-            self.pos = 0;
-        }
+        // Its failure is the "cannot seek" case above, which `rewind` has no
+        // way to report.
+        drop(self.seek(io::SeekFrom::Start(0)));
         self.eof = false;
         self.error = false;
+    }
+
+    /// `fseek`, then `ftell`: the stream moved, and where it now is.
+    ///
+    /// An offset from the current position counts from the next byte the
+    /// caller would be handed, not from where the descriptor is, so what is
+    /// buffered and unread is taken off it. A seek that succeeds drops the
+    /// buffer and forgets the end of file; one that fails changes nothing.
+    ///
+    /// glibc reaches some targets by other calls -- a `SEEK_SET` to the block
+    /// boundary below and a read up to the target, a `SEEK_END` made a
+    /// `SEEK_SET` by `fstat` -- which end in the same place.
+    ///
+    /// # Errors
+    ///
+    /// `lseek(2)`'s: `ESPIPE` for a pipe or a terminal, `EINVAL` for a place
+    /// before the start, `EBADF` for a closed descriptor.
+    pub fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let to = match to {
+            io::SeekFrom::Current(delta) => {
+                let unread =
+                    i64::try_from(self.buf.len().saturating_sub(self.pos)).unwrap_or(i64::MAX);
+                io::SeekFrom::Current(
+                    delta
+                        .checked_sub(unread)
+                        .ok_or_else(|| io::Error::from_raw_os_error(EINVAL))?,
+                )
+            }
+            other => other,
+        };
+        let at = match &mut self.source {
+            Source::Descriptor(fd) => stdfd::seek(*fd, to),
+            Source::File(f) => io::Seek::seek(f, to),
+            #[cfg(test)]
+            Source::Memory(m) => m.seek_to(to),
+        }?;
+        self.buf.clear();
+        self.pos = 0;
+        self.eof = false;
+        Ok(at)
+    }
+
+    /// `ftell`: where the next byte the caller is handed comes from -- the
+    /// descriptor's position less what is buffered and unread. Nothing moves.
+    ///
+    /// # Errors
+    ///
+    /// `lseek(2)`'s: `ESPIPE` for a pipe or a terminal, `EBADF` for a closed
+    /// descriptor; and `EINVAL` where the buffer holds more than the position
+    /// accounts for, as glibc's `do_ftell` says to a negative answer.
+    pub fn tell(&mut self) -> io::Result<u64> {
+        let at = match &mut self.source {
+            Source::Descriptor(fd) => stdfd::seek(*fd, io::SeekFrom::Current(0)),
+            Source::File(f) => io::Seek::stream_position(f),
+            #[cfg(test)]
+            Source::Memory(m) => m.seek_to(io::SeekFrom::Current(0)),
+        }?;
+        let unread = u64::try_from(self.buf.len().saturating_sub(self.pos)).unwrap_or(u64::MAX);
+        at.checked_sub(unread)
+            .ok_or_else(|| io::Error::from_raw_os_error(EINVAL))
+    }
+
+    /// The file under a stream made by [`StdioReader::from_file`] --
+    /// `fileno`, for the `fstat` a caller makes of it. `None` for a standard
+    /// descriptor.
+    #[must_use]
+    pub fn file(&self) -> Option<&std::fs::File> {
+        match &self.source {
+            Source::File(f) => Some(f),
+            Source::Descriptor(_) => None,
+            #[cfg(test)]
+            Source::Memory(_) => None,
+        }
+    }
+
+    /// `fclose`: the descriptor closed -- a standard one too, as
+    /// `fclose (stdin)` closes 0 -- and `close(2)`'s failure returned.
+    ///
+    /// Nothing is given back. Only `exit` seeks a stream back over its
+    /// read-ahead ([`StdioReader::exit_sync`]); `fclose` does not, so after
+    /// `xxd -l 5` has closed a shared standard input, the next reader starts
+    /// past the whole block `xxd` read -- measured, `cat` gets nothing of a
+    /// 111-byte file.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `close(2)` reports: `EBADF` for a standard descriptor that
+    /// was closed when the program started.
+    pub fn fclose(self) -> io::Result<()> {
+        match self.source {
+            Source::Descriptor(fd) => stdfd::close_descriptor(fd),
+            Source::File(f) => stdfd::close(f),
+            #[cfg(test)]
+            Source::Memory(m) => m
+                .close_result
+                .map_or(Ok(()), |errno| Err(io::Error::from_raw_os_error(errno))),
+        }
     }
 
     /// `fclose` of a stream that opened its file: the descriptor closed, and
@@ -654,6 +977,48 @@ impl StdioReader {
         if self.used && self.buffering != ReadBuffering::Unbuffered {
             // `exit` checks nothing.
             drop(self.sync());
+        }
+    }
+
+    /// gnulib's `close_stdin`, up to its message: give the read-ahead back to
+    /// a descriptor that can seek, then `close_stream` the stream.
+    ///
+    /// `close_stream` reports a stream on which a read failed (`ferror`), and
+    /// a close that failed for any reason but `EBADF` on a stream with nothing
+    /// pending -- which for an input stream is every close. So a standard
+    /// input that was closed when the program started fails here only if
+    /// something tried to read it, which is what makes `ln -i a b <&-` say
+    /// `ln: error closing file: Bad file descriptor` and `ln a b <&-` say
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// `Err(Some(reason))` with the failing call's reason, or `Err(None)` for
+    /// a stream that had failed a read and then closed cleanly: `close_stream`
+    /// zeroes `errno` then, so upstream's message carries no reason.
+    pub fn close_stdin(mut self) -> Result<(), Option<io::Error>> {
+        // `freadahead (stdin) > 0`, and then `fseeko (stdin, 0, SEEK_CUR)`
+        // succeeding, is what `sync` asks: a descriptor that cannot seek
+        // (`ESPIPE`) keeps its bytes and is not a failure.
+        let synced = self.sync();
+        let prev_fail = self.error;
+        let closed = match self.source {
+            Source::Descriptor(fd) => stdfd::close_descriptor(fd),
+            Source::File(f) => stdfd::close(f),
+            #[cfg(test)]
+            Source::Memory(m) => m
+                .close_result
+                .map_or(Ok(()), |errno| Err(io::Error::from_raw_os_error(errno))),
+        };
+        let stream = match closed {
+            Err(e) if prev_fail || e.raw_os_error() != Some(EBADF) => Err(Some(e)),
+            Err(_) | Ok(()) if !prev_fail => Ok(()),
+            Err(_) | Ok(()) => Err(None),
+        };
+        match (stream, synced) {
+            (Err(reason), _) => Err(reason),
+            (Ok(()), Err(e)) => Err(Some(e)),
+            (Ok(()), Ok(())) => Ok(()),
         }
     }
 
@@ -710,7 +1075,7 @@ fn is_char_device(_meta: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
-    use super::{Buffering, Memory, MemorySource, Sink, Source, StdioFile, StdioReader};
+    use super::{Buffering, EBADF, Memory, MemorySource, Sink, Source, StdioFile, StdioReader};
 
     fn memory(block: usize, room: usize) -> Sink {
         Sink::Memory(Memory {
@@ -827,6 +1192,132 @@ mod tests {
         f.flush().unwrap();
     }
 
+    /// One [`super::xsputn`] onto a disk with `room` bytes free: what it
+    /// wrote, each `write(2)` as its bytes, and how it ended.
+    struct Put {
+        writes: Vec<Vec<u8>>,
+        result: std::io::Result<()>,
+    }
+
+    fn put(
+        held: &mut Vec<u8>,
+        size: usize,
+        first: bool,
+        line: bool,
+        data: &[u8],
+        room: usize,
+    ) -> Put {
+        let mut writes = Vec::new();
+        let mut room = room;
+        let result = super::xsputn(held, size, first, line, data, &mut |bytes| {
+            writes.push(bytes.to_vec());
+            if bytes.len() > room {
+                room = 0;
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            room = room.saturating_sub(bytes.len());
+            Ok(())
+        });
+        Put { writes, result }
+    }
+
+    #[test]
+    fn line_buffered_with_room_writes_through_the_last_newline() {
+        let mut held = b"ab".to_vec();
+        let p = put(&mut held, 128, false, true, b"c\nd\ne", 1000);
+        p.result.unwrap();
+        // One write, through the last newline -- not one per line.
+        assert_eq!(p.writes, vec![b"abc\nd\n".to_vec()]);
+        assert_eq!(held, b"e");
+    }
+
+    #[test]
+    fn line_buffered_without_room_fills_the_buffer_past_its_newlines() {
+        let mut held = vec![b'a'; 120];
+        let mut data = b"bb\ncc".to_vec();
+        data.extend_from_slice(&[b'x'; 300]);
+        data.extend_from_slice(b"\nyy\nz");
+        let p = put(&mut held, 128, false, true, &data, 10_000);
+        p.result.unwrap();
+        // The 8 bytes that fit fill the buffer, newline and all, and it goes;
+        // two whole blocks of the 302 left go directly; the 46 after them are
+        // written a line at a time, and what follows the last newline is held.
+        let sizes: Vec<usize> = p.writes.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![128, 256, 42, 3]);
+        assert_eq!(p.writes[3], b"yy\n");
+        assert_eq!(held, b"z");
+    }
+
+    #[test]
+    fn a_first_line_buffered_write_finds_no_room_either() {
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, true, true, b"a\nb", 1000);
+        p.result.unwrap();
+        assert_eq!(p.writes, vec![b"a\n".to_vec()]);
+        assert_eq!(held, b"b");
+    }
+
+    #[test]
+    fn a_line_that_fails_takes_the_rest_of_its_write_with_it() {
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, false, true, b"a\nb\nc", 0);
+        assert_eq!(p.result.unwrap_err().raw_os_error(), Some(28));
+        // `fwrite` stops at the failure: nothing is left for the close to
+        // write, so gnulib's verdict will have no reason to give.
+        assert_eq!(p.writes, vec![b"a\nb\n".to_vec()]);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn a_line_without_a_newline_is_held_even_when_it_fills_the_buffer() {
+        let mut held = vec![b'a'; 100];
+        let p = put(&mut held, 128, false, true, &[b'b'; 28], 1000);
+        p.result.unwrap();
+        assert!(p.writes.is_empty());
+        assert_eq!(held.len(), 128);
+        // ...until a byte needs room.
+        let p = put(&mut held, 128, false, true, b"c", 1000);
+        p.result.unwrap();
+        assert_eq!(p.writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![128]);
+        assert_eq!(held, b"c");
+    }
+
+    #[test]
+    fn a_small_line_buffer_sends_the_rest_directly() {
+        let mut held = Vec::new();
+        let mut data = b"abc\n".to_vec();
+        data.extend_from_slice(&[b'd'; 20]);
+        let p = put(&mut held, 16, false, true, &data, 1000);
+        p.result.unwrap();
+        // 16 fill the buffer and go; under 128 bytes, all 8 of the rest follow.
+        assert_eq!(
+            p.writes.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![16, 8]
+        );
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn a_whole_block_written_directly_that_fails_drops_the_remainder() {
+        // Fully buffered, the first write's whole blocks go at once; when
+        // that write fails the remainder is not kept for later.
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, true, false, &[b'a'; 300], 0);
+        assert!(p.result.is_err());
+        assert_eq!(p.writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![256]);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn the_buffer_size_is_st_blksize_below_bufsiz_and_bufsiz_otherwise() {
+        assert_eq!(super::buffer_size(None), super::BUFSIZ);
+        #[cfg(target_os = "linux")]
+        {
+            let null = std::fs::metadata("/dev/null").unwrap();
+            assert_eq!(super::buffer_size(Some(&null)), 4096);
+        }
+    }
+
     // ------------------------------------------------------------ reading
 
     /// A reader over `data`, handed out at most `chunk` bytes per `read(2)`
@@ -839,6 +1330,7 @@ mod tests {
             fail: None,
             seekable,
             reads: Vec::new(),
+            close_result: None,
         }))
     }
 
@@ -954,5 +1446,179 @@ mod tests {
         assert!(r.has_error());
         r.clear_error();
         assert!(!r.has_error());
+    }
+
+    // ------------------------------------------------------- close_stdin
+
+    /// What `close_stdin` decided.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Verdict {
+        Quiet,
+        /// A failure reported without a reason -- `errno` zeroed.
+        NoReason,
+        Reason(i32),
+    }
+
+    fn close_verdict(r: StdioReader) -> Verdict {
+        match r.close_stdin() {
+            Ok(()) => Verdict::Quiet,
+            Err(None) => Verdict::NoReason,
+            Err(Some(e)) => Verdict::Reason(e.raw_os_error().unwrap_or(0)),
+        }
+    }
+
+    #[test]
+    fn close_stdin_is_quiet_for_a_stream_that_read_cleanly() {
+        let mut r = source(b"y\nrest\n", 4, true);
+        assert_eq!(line(&mut r), b"y\n");
+        assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    #[test]
+    fn close_stdin_is_quiet_for_a_closed_descriptor_nobody_read() {
+        // `ln a b <&-`: `fclose` fails with `EBADF`, and `close_stream`
+        // excuses exactly that when nothing was pending and no read failed.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).close_result = Some(EBADF);
+        assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    #[test]
+    fn close_stdin_reports_a_read_that_failed_with_the_close_reason() {
+        // `ln -i a b <&-`: the read fails, then the close fails with `EBADF`,
+        // and that is the reason printed.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).fail = Some(EBADF);
+        mem(&mut r).close_result = Some(EBADF);
+        let mut out = Vec::new();
+        assert!(r.read_until(b'\n', &mut out).is_err());
+        assert_eq!(close_verdict(r), Verdict::Reason(EBADF));
+    }
+
+    #[test]
+    fn close_stdin_reports_a_failed_read_without_a_reason_when_the_close_worked() {
+        // `ln -i a b < dir`: `EISDIR` on the read, a clean close, and
+        // `close_stream` zeroes `errno` -- `ln: error closing file`.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).fail = Some(21);
+        let mut out = Vec::new();
+        assert!(r.read_until(b'\n', &mut out).is_err());
+        assert_eq!(close_verdict(r), Verdict::NoReason);
+    }
+
+    #[test]
+    fn close_stdin_reports_a_close_that_failed_for_another_reason() {
+        let mut r = source(b"", 4, true);
+        mem(&mut r).close_result = Some(5);
+        assert_eq!(close_verdict(r), Verdict::Reason(5));
+    }
+
+    #[test]
+    fn close_stdin_lets_a_pipe_keep_its_read_ahead() {
+        // `fseeko` fails with `ESPIPE`, so there is no flush and no failure.
+        let mut r = source(b"y\nrest\n", 8, false);
+        assert_eq!(line(&mut r), b"y\n");
+        assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    // ------------------------------------------------------------- seeking
+
+    #[test]
+    fn a_seek_from_here_counts_from_the_next_byte_not_the_descriptor() {
+        let mut r = source(b"abcdefgh", 4, true);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        // The descriptor is at 4 with "bcd" unread: +1 from the next byte is
+        // offset 2, not 5.
+        assert_eq!(r.seek(std::io::SeekFrom::Current(1)).unwrap(), 2);
+        assert_eq!(r.getc().unwrap(), Some(b'c'));
+        assert_eq!(r.seek(std::io::SeekFrom::End(-1)).unwrap(), 7);
+        assert_eq!(r.getc().unwrap(), Some(b'h'));
+        assert_eq!(r.getc().unwrap(), None);
+        // Past the end is allowed; a seek forgets the end of file.
+        assert_eq!(r.seek(std::io::SeekFrom::Start(100)).unwrap(), 100);
+        assert!(!r.at_eof());
+        assert_eq!(r.getc().unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_seek_changes_nothing() {
+        let mut r = source(b"abc", 8, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        let e = r.seek(std::io::SeekFrom::Start(0)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::ESPIPE));
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+        let mut r = source(b"abc", 8, true);
+        let e = r.seek(std::io::SeekFrom::Current(-1)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::EINVAL));
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+    }
+
+    #[test]
+    fn tell_counts_what_is_buffered_and_moves_nothing() {
+        let mut r = source(b"abcdefgh", 4, true);
+        assert_eq!(r.tell().unwrap(), 0);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        // The descriptor is at 4 with "bcd" unread.
+        assert_eq!(r.tell().unwrap(), 1);
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+        assert_eq!(r.tell().unwrap(), 2);
+        assert_eq!(r.seek(std::io::SeekFrom::End(0)).unwrap(), 8);
+        assert_eq!(r.tell().unwrap(), 8);
+        // A pipe has no position to tell.
+        let mut r = source(b"abc", 8, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        let e = r.tell().unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::ESPIPE));
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+    }
+
+    #[test]
+    fn rewind_goes_back_to_the_start_and_forgets_the_end() {
+        let mut r = source(b"ab", 8, true);
+        assert_eq!(line(&mut r), b"ab");
+        assert!(r.at_eof());
+        r.rewind();
+        assert!(!r.at_eof());
+        assert_eq!(line(&mut r), b"ab");
+        // A pipe stays where it is, and still forgets the end.
+        let mut r = source(b"ab", 1, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        r.rewind();
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+    }
+
+    #[test]
+    fn fclose_reports_the_close_and_gives_nothing_back() {
+        let mut r = source(b"abcdef", 8, true);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        assert!(r.fclose().is_ok());
+        let mut r = source(b"", 8, true);
+        mem(&mut r).close_result = Some(EBADF);
+        assert_eq!(r.fclose().unwrap_err().raw_os_error(), Some(EBADF));
+    }
+
+    #[test]
+    fn a_seek_on_a_stream_being_written_flushes_first() {
+        let mut f = disk(128, 1000);
+        f.write(b"abc").unwrap();
+        // The memory disk cannot seek, but the held bytes went out first.
+        assert!(f.seek(std::io::SeekFrom::Current(0)).is_err());
+        assert_eq!((f.pending(), writes(&f)), (0, vec![3]));
+        // A flush that fails is the seek's failure.
+        let mut f = disk(128, 0);
+        f.write(b"abc").unwrap();
+        let e = f.seek(std::io::SeekFrom::Current(0)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(28));
+    }
+
+    #[test]
+    fn a_seek_allocates_the_buffer_so_the_next_write_finds_room() {
+        let mut f = fresh(128, 1000);
+        drop(f.seek(std::io::SeekFrom::Start(0)));
+        // Not the first write any more: 300 bytes fill the buffer, which
+        // goes, then one whole block goes directly and 44 are held -- where a
+        // first write would have sent 256 in one piece.
+        f.write(&[b'a'; 300]).unwrap();
+        assert_eq!((f.pending(), writes(&f)), (44, vec![128, 128]));
     }
 }

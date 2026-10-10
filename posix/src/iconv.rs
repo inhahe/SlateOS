@@ -3337,6 +3337,64 @@ mod tests {
         open_bytes(to.as_bytes(), from.as_bytes())
     }
 
+    /// GNU make's configure probe for a working `iconv` (gettext's
+    /// `AM_ICONV`), which `scripts/make-spike/run.sh` answers `yes` for
+    /// SlateOS (`am_cv_func_iconv_works`) without running it -- its three
+    /// cases, as it runs them.
+    #[test]
+    fn make_configures_iconv_probe_passes() {
+        /// One `iconv` call over all of `input`, into `out` with `room` of it
+        /// offered: the result, and how many bytes were written.
+        fn convert(cd: IconvT, input: &[u8], out: &mut [u8], room: usize) -> (usize, usize) {
+            let mut inptr = input.as_ptr();
+            let mut inleft = input.len();
+            let start = out.as_mut_ptr();
+            let mut outptr = start;
+            let mut outleft = room;
+            // SAFETY: every pointer addresses the live buffers above, and
+            // `room` is at most `out.len()`.
+            let res = unsafe {
+                iconv(
+                    cd,
+                    &raw mut inptr,
+                    &raw mut inleft,
+                    &raw mut outptr,
+                    &raw mut outleft,
+                )
+            };
+            // SAFETY: `outptr` only moves forward within `out`.
+            let written = usize::try_from(unsafe { outptr.offset_from(start) }).unwrap();
+            (res, written)
+        }
+
+        // A character the target cannot hold is not a success (AIX 5.1's bug).
+        let cd = open("ISO8859-1", "UTF-8");
+        assert_ne!(cd, ICONV_OPEN_ERR);
+        let mut buf = [0u8; 10];
+        let (res, _) = convert(cd, &[0xE2, 0x82, 0xAC], &mut buf, 10);
+        assert_ne!(res, 0, "EURO SIGN into Latin-1");
+        assert_eq!(iconv_close(cd), 0);
+
+        // Nor is a byte ASCII has not got, if "646" opens (Solaris 10's).
+        let cd = open("ISO8859-1", "646");
+        if cd != ICONV_OPEN_ERR {
+            let (res, _) = convert(cd, &[0xB3], &mut buf, 10);
+            assert_ne!(res, 0, "0xB3 from ASCII");
+            assert_eq!(iconv_close(cd), 0);
+        }
+
+        // A character that does not fit fails, and nothing is written past
+        // the room offered (AIX 6.1-7.1's overrun).
+        let cd = open("UTF-8", "ISO-8859-1");
+        assert_ne!(cd, ICONV_OPEN_ERR);
+        let mut two = [0xDE, 0xAD];
+        let (res, written) = convert(cd, &[0xC4], &mut two, 1);
+        assert_eq!(res, usize::MAX);
+        assert!(written <= 1);
+        assert_eq!(two[1], 0xAD);
+        assert_eq!(iconv_close(cd), 0);
+    }
+
     /// Bytes from hex digits: `"fffe4100"`.
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())

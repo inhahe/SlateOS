@@ -27,7 +27,9 @@ WHY IT IS A RATCHET AND NOT A GATE
 ----------------------------------
 Thirteen modules are Linux-only as this is written and all thirteen are
 deliberate -- `ipc::epoll` has no native syscall number on purpose, because this
-system uses channels. Failing outright would block all three lanes over state
+system uses channels. (Ten, since 2026-10-02: three of the thirteen were this
+check misreading `use crate::x::{self, ...}`, and native code reached them all
+along -- see the end of `BASELINE`.) Failing outright would block all three lanes over state
 none of them created, and a gate that does that is a gate that gets bypassed.
 
 It was fourteen until 2026-09-10, when the fourteenth -- `fs::nameservice`, pinned
@@ -100,6 +102,18 @@ NATIVE_ARM = re.compile(
 LINUX_ARM = re.compile(r"nr::([A-Z0-9_]+)\s*=>\s*([a-z0-9_:]+)\s*\(")
 
 CRATE_CALL = re.compile(r"\bcrate::([a-z0-9_]+(?:::[a-z0-9_]+)+)\s*\(")
+# A function named as a value -- `name_set_gated(args, right,
+# crate::utsns::set_hostname_here)` hands the native handler's whole job to the
+# function it names. All-lowercase segments, so a type, a variant or a constant
+# (`crate::cap::ResourceType::Namespace`, `crate::utsns::ROOT_UTS`) is not
+# one; not followed by `(` (a call, counted above), `::` (a longer path) or `!`
+# (a macro). Until 2026-10-08 this was invisible, and `utsns` read as reached
+# by the Linux table alone while `SYS_HOSTNAME_SET` set its names.
+CRATE_FN_REF = re.compile(r"\bcrate::([a-z0-9_]+(?:::[a-z0-9_]+)+)\b(?!\s*[(:!])")
+# A `use` declaration, anywhere, and a `//` comment to its line's end --
+# removed before looking for function values.
+USE_STMT = re.compile(r"\buse\s+[^;{}]*(?:\{[^}]*\})?[^;{}]*;")
+LINE_COMMENT = re.compile(r"//[^\n]*")
 QUAL_CALL = re.compile(r"\b([a-z][a-z0-9_]*(?:::[a-z0-9_]+)+)\s*\(")
 USE_SIMPLE = re.compile(r"^\s*(?:pub\s+)?use\s+crate::([a-z0-9_:]+);", re.M)
 USE_GROUP = re.compile(r"^\s*(?:pub\s+)?use\s+crate::([a-z0-9_:]+)::\{([^}]*)\};", re.M)
@@ -128,27 +142,17 @@ BASELINE: dict[str, str] = {
     # module's `dup`. There are zero native SYS_*PIDFD* constants: borrowing a
     # descriptor out of another process is a Linux mechanism, and this system's
     # answer is capability transfer over a channel.
-    "drm::card_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
-    "evdev_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
-    "ipc::alsa_pcm": "reached only by pidfd_getfd's dup; no native pidfd exists",
     # --- Linux-flavoured descriptor types, deliberate -----------------------
     # Zero native syscall numbers each, on purpose: readiness and notification
     # here are channels, not descriptors you poll.
     "ipc::epoll": "no native epoll by design -- channels, not a readiness fd",
-    "ipc::eventfd": "no native eventfd by design -- channels carry wakeups",
     "ipc::inotify": "no native inotify by design -- fs watches are a service",
-    "ipc::signalfd": "no native signalfd by design -- signals are not fds here",
     "ipc::memfd": "no native memfd by design -- anonymous memory is shm + caps",
-    "ipc::pipe": "native pipes exist; only fcntl's F_GETPIPE_SZ/F_SETPIPE_SZ "
-    "and pidfd_getfd reach this module and nothing native does",
     # --- a compatibility shim over a stack native code reaches elsewhere ----
     # 46 native net handlers exist; they reach other modules. linux.rs carries
     # its own BSD-sockets layer, which is the point of a compatibility table.
     "net::socket": "linux.rs's own BSD-sockets shim; native net uses SYS_NET_*",
     "net::netstack_client": "same shim; native net reaches the stack elsewhere",
-    # --- plumbing, not a capability -----------------------------------------
-    "mm::page_table": "vmsplice/getrusage read page tables; not a capability a "
-    "native program would ask for by number",
     # --- Linux-specific thread machinery ------------------------------------
     "proc::thread_clone": "rseq, robust futex lists and prctl are Linux TLS/futex "
     "machinery with no native equivalent intended",
@@ -163,6 +167,34 @@ BASELINE: dict[str, str] = {
     # what said so, on the same change that fixed it. That is the half of a
     # ratchet nobody remembers to build: an exemption list that cannot notice
     # when its exemptions stop being true stops describing the tree.
+    #
+    # --- REMOVED 2026-10-02: three entries that were never true -------------
+    # `ipc::eventfd` ("no native eventfd by design"), `ipc::pipe` ("nothing
+    # native reaches this module") and `mm::page_table` ("not a capability a
+    # native program would ask for") were pinned on this check's own blind
+    # spot: `use_aliases` skipped the `self` in
+    # `use crate::ipc::eventfd::{self, EventFdHandle};`, so every bare
+    # `eventfd::...` call in a native handler went unresolved. Eight native
+    # SYS_EVENTFD_* syscalls, twelve SYS_PIPE_*, and SYS_MMAP and
+    # SYS_IO_RING_SETUP reach those modules. The same blind spot reported
+    # `ipc::service` as Linux-only when the slate channel calls (Linux 1000-1005)
+    # first reached it, with six native SYS_SERVICE_* syscalls wired.
+    #
+    # --- RESOLVED 2026-10-02: ipc::alsa_pcm ---------------------------------
+    # Pinned above as "reached only by pidfd_getfd's dup". The device door
+    # (SYS_DEVICE_OPEN/IOCTL/READ/WRITE/CLOSE, 1119-1123; design-decisions
+    # 1520) now drives a PCM substream natively, so the entry went stale on the
+    # change that made it so -- the ratchet working as intended.
+    #
+    # --- RESOLVED 2026-10-02: drm::card_fd, evdev_fd, ipc::signalfd ---------
+    # The first two were pinned as "reached only by pidfd_getfd's dup", the
+    # third as "no native signalfd by design". SCM_RIGHTS moved the per-kind
+    # dup and release into ipc::passed (pidfd_getfd uses it too), and a native
+    # Unix-socket receive drains its releases -- so native code reaches these
+    # modules now, through the reference-release path (a descriptor received
+    # and dropped), though still not through any way to open one. The check is
+    # module-granular, so the entries go; a native way to *create* a signalfd
+    # or open a DRM card is as absent as before.
 }
 
 
@@ -199,7 +231,15 @@ def use_aliases(src: str) -> dict[str, str]:
     for base, names in USE_GROUP.findall(src):
         for n in names.split(","):
             n = n.strip().split(" as ")[0].strip()
-            if n and n != "self":
+            if n == "self":
+                # `use crate::ipc::service::{self, ServiceListenerHandle};`
+                # names the module itself, as `service`. Skipping it hid every
+                # `service::register(...)` in a native handler, so `ipc::service`
+                # read as Linux-only the day the Linux table first reached it
+                # (2026-10-02, the slate channel calls) -- while six native
+                # service syscalls were wired.
+                out[base.split("::")[-1]] = base
+            elif n:
                 out[n] = base + "::" + n
     return out
 
@@ -216,7 +256,11 @@ def modules_reached(
     """
     body = bodies.get(entry, "")
     out: set[str] = set()
-    for path in CRATE_CALL.findall(body):
+    # A `use crate::net::socket;` inside a body, or a comment's
+    # [`crate::net::socket`], names a module, not a function value: without
+    # this, the module's parent (`net`) read as reached.
+    refs = CRATE_FN_REF.findall(USE_STMT.sub("", LINE_COMMENT.sub("", body)))
+    for path in CRATE_CALL.findall(body) + refs:
         parts = path.split("::")
         if parts[0] not in NOT_A_CAPABILITY:
             out.add("::".join(parts[:-1]))
@@ -280,6 +324,50 @@ def self_test(repo: pathlib.Path) -> int:
     """
     failures = 0
     _native, only = analyse(repo)
+
+    # The import forms a handler's module calls are resolved through. The
+    # `self` in a group is the one that was missed: it hid every native
+    # eventfd, pipe and service syscall from this check until 2026-10-02.
+    aliases = use_aliases(
+        "use crate::ipc::futex;\n"
+        "use crate::ipc::service::{self, ServiceListenerHandle};\n"
+        "use crate::ipc::channel::{Message, ChannelHandle as Ch};\n"
+    )
+    for name, want in (
+        ("futex", "ipc::futex"),
+        ("service", "ipc::service"),
+        ("ServiceListenerHandle", "ipc::service::ServiceListenerHandle"),
+        ("Message", "ipc::channel::Message"),
+        ("ChannelHandle", "ipc::channel::ChannelHandle"),
+    ):
+        if aliases.get(name) != want:
+            print(
+                f"selftest FAIL: use_aliases resolves {name!r} to "
+                f"{aliases.get(name)!r}, not {want!r}",
+                file=sys.stderr,
+            )
+            failures += 1
+
+    # A function passed as a value reaches its module as a call does; a type,
+    # a variant, a constant or a macro named by path does not.
+    for body, want in (
+        ("{ name_set_gated(args, right, crate::utsns::set_hostname_here) }", {"utsns"}),
+        ("{ f(crate::fs::nameservice::get_hostname, x) }", {"fs::nameservice"}),
+        ("{ let t = crate::cap::ResourceType::Namespace; }", set()),
+        ("{ let r = crate::utsns::ROOT_UTS; }", set()),
+        ('{ crate::serial_println!("x"); }', set()),
+        ("{ use crate::net::socket; let h = 3; }", set()),
+        ("{ use crate::ipc::{eventfd, pipe}; let h = 3; }", set()),
+        ("{\n    // a UDP socket ([`crate::net::socket`]).\n    let h = 3;\n}", set()),
+    ):
+        got = modules_reached("h", {"h": body}, {})
+        if got != want:
+            print(
+                f"selftest FAIL: modules_reached({body!r}) is {sorted(got)}, not "
+                f"{sorted(want)}",
+                file=sys.stderr,
+            )
+            failures += 1
 
     bad = calibration_failures(only)
     if bad:

@@ -1348,6 +1348,57 @@ mod gnu_logwtmp {
 pub use gnu_logwtmp::logwtmp;
 
 // ---------------------------------------------------------------------------
+// getlogin's search
+// ---------------------------------------------------------------------------
+
+/// Who is logged in on terminal `line` -- `ut_line`, the terminal's name
+/// without `/dev/` -- for [`crate::pwd::getlogin_r`]. glibc's
+/// `getlogin_r_fd0` after its `ttyname_r`: `setutent`, `getutline_r` for the
+/// line, `endutent`. So, as there, it starts the database's reading over and
+/// closes it, whatever this process was reading.
+///
+/// The name is the record's `ut_user` up to its first NUL, at most
+/// [`UT_NAMESIZE`] bytes, returned with its length. The search finds
+/// `LOGIN_PROCESS` records as well as `USER_PROCESS` ones, as glibc's does,
+/// so a terminal a `getty` holds answers its `LOGIN`.
+///
+/// # Errors
+///
+/// `ENOENT` when no login record names the line -- glibc turns
+/// `getutline_r`'s `ESRCH` into it, "the caller expects ENOENT if nothing is
+/// found" -- or else the database's own error: `ENOENT` too when there is no
+/// `utmp` at all.
+pub(crate) fn login_on_line(line: &[u8]) -> Result<([u8; UT_NAMESIZE], usize), i32> {
+    // `strncpy (line.ut_line, real_tty_path, sizeof line.ut_line)`.
+    let mut key = Utmpx::ZERO;
+    for (slot, &b) in key.ut_line.iter_mut().zip(line) {
+        *slot = b;
+    }
+    setutxent();
+    let mut buffer = Utmpx::ZERO;
+    let mut result: *mut Utmpx = core::ptr::null_mut();
+    // SAFETY: a local key, a local buffer and a local result.
+    let rc = unsafe { getutline_r(&raw const key, &raw mut buffer, &raw mut result) };
+    let answer = if rc < 0 {
+        let e = errno::get_errno();
+        Err(if e == errno::ESRCH { errno::ENOENT } else { e })
+    } else {
+        let mut name = [0u8; UT_NAMESIZE];
+        let n = buffer
+            .ut_user
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(UT_NAMESIZE);
+        for (slot, &b) in name.iter_mut().zip(buffer.ut_user.iter().take(n)) {
+            *slot = b;
+        }
+        Ok((name, n))
+    };
+    endutxent();
+    answer
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1554,6 +1605,135 @@ mod tests {
         assert!(getutxline(&line).is_null());
         assert_eq!(errno::get_errno(), errno::ESRCH);
         endutxent();
+    }
+
+    // -- getlogin's search --
+
+    #[test]
+    fn login_on_line_names_the_user_of_the_terminals_login() {
+        fresh(&[
+            entry(BOOT_TIME, b"", b"~", b"reboot"),
+            entry(DEAD_PROCESS, b"1", b"tty1", b"gone"),
+            entry(USER_PROCESS, b"2", b"pts/0", b"bob"),
+            entry(USER_PROCESS, b"1", b"tty1", b"alice"),
+        ]);
+        let (name, n) = login_on_line(b"tty1").unwrap();
+        assert_eq!(&name[..n], b"alice", "the dead record is skipped");
+        let (name, n) = login_on_line(b"pts/0").unwrap();
+        assert_eq!(&name[..n], b"bob", "each search starts the reading over");
+        assert_eq!(io::open_count(), 0, "and closes the database");
+    }
+
+    /// glibc's search takes a `getty`'s record too, and so its `LOGIN`.
+    #[test]
+    fn a_terminal_a_getty_holds_answers_its_login_record() {
+        fresh(&[entry(LOGIN_PROCESS, b"2", b"tty2", b"LOGIN")]);
+        let (name, n) = login_on_line(b"tty2").unwrap();
+        assert_eq!(&name[..n], b"LOGIN");
+    }
+
+    /// `ESRCH` from the search is glibc's `ENOENT`.
+    #[test]
+    fn no_login_on_the_line_is_enoent() {
+        fresh(&[entry(USER_PROCESS, b"1", b"tty1", b"alice")]);
+        assert_eq!(login_on_line(b"tty9"), Err(errno::ENOENT));
+        assert_eq!(io::open_count(), 0);
+    }
+
+    #[test]
+    fn no_database_is_the_open_error() {
+        endutxent();
+        assert_eq!(utmpxname(UTMPX_FILE.as_ptr()), 0);
+        io::remove_file(DB);
+        assert_eq!(login_on_line(b"tty1"), Err(errno::ENOENT));
+    }
+
+    /// A name that fills `ut_user` has no NUL; all 32 bytes are the name.
+    #[test]
+    fn a_full_user_field_is_the_whole_name() {
+        let user = [b'u'; UT_NAMESIZE];
+        fresh(&[entry(USER_PROCESS, b"1", b"tty1", &user)]);
+        assert_eq!(login_on_line(b"tty1"), Ok((user, UT_NAMESIZE)));
+    }
+
+    /// `getlogin`, end to end: standard input is the console here, so the
+    /// record that counts is the one for `console` -- `/dev/` taken off.
+    #[test]
+    fn getlogin_answers_the_login_on_standard_inputs_terminal() {
+        fresh(&[
+            entry(USER_PROCESS, b"7", b"pts/7", b"other"),
+            entry(USER_PROCESS, b"co", b"console", b"alice"),
+        ]);
+        let mut buf = [0xAAu8; 16];
+        assert_eq!(crate::pwd::getlogin_r(buf.as_mut_ptr(), buf.len()), 0);
+        assert_eq!(&buf[..6], b"alice\0");
+        let p = crate::pwd::getlogin();
+        assert!(!p.is_null());
+        // SAFETY: getlogin's own NUL-terminated buffer.
+        let s = unsafe { core::ffi::CStr::from_ptr(p.cast()) };
+        assert_eq!(s.to_bytes(), b"alice");
+    }
+
+    /// Nobody logged in on the terminal: no login name, not a constant --
+    /// the case `logname`'s "no login name" is for.
+    #[test]
+    fn getlogin_with_no_login_record_is_enoent() {
+        fresh(&[entry(USER_PROCESS, b"1", b"tty1", b"alice")]);
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            crate::pwd::getlogin_r(buf.as_mut_ptr(), buf.len()),
+            errno::ENOENT
+        );
+        errno::set_errno(0);
+        assert!(crate::pwd::getlogin().is_null());
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    /// The error comes back as the return value, POSIX's convention for
+    /// `getlogin_r`: `ERANGE` for a buffer without room for the NUL, with
+    /// `errno` set as glibc sets it; `EFAULT` for a NULL one with room.
+    #[test]
+    fn getlogin_r_returns_its_error_number() {
+        fresh(&[entry(USER_PROCESS, b"co", b"console", b"alice")]);
+        let mut buf = [0u8; 5];
+        errno::set_errno(0);
+        assert_eq!(
+            crate::pwd::getlogin_r(buf.as_mut_ptr(), 5),
+            errno::ERANGE,
+            "five bytes of name need six"
+        );
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(
+            crate::pwd::getlogin_r(core::ptr::null_mut(), 6),
+            errno::EFAULT
+        );
+        assert_eq!(
+            crate::pwd::getlogin_r(core::ptr::null_mut(), 5),
+            errno::ERANGE
+        );
+    }
+
+    /// No terminal on standard input is `ttyname_r`'s error, before the
+    /// database is opened.
+    #[test]
+    fn getlogin_with_standard_input_closed_is_ebadf() {
+        fresh(&[entry(USER_PROCESS, b"co", b"console", b"alice")]);
+        assert!(crate::fdtable::close_fd(0).is_some());
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            crate::pwd::getlogin_r(buf.as_mut_ptr(), buf.len()),
+            errno::EBADF
+        );
+    }
+
+    /// `strncpy` into `ut_line`: a longer terminal name is compared on its
+    /// first 32 bytes, as glibc compares it.
+    #[test]
+    fn a_long_terminal_name_is_compared_on_its_first_32_bytes() {
+        let long = [b'p'; 40];
+        fresh(&[entry(USER_PROCESS, b"1", &long[..UT_LINESIZE], b"carol")]);
+        let (name, n) = login_on_line(&long).unwrap();
+        assert_eq!(&name[..n], b"carol");
     }
 
     // -- Writing --

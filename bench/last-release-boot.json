@@ -1,7 +1,7 @@
 {
-    "sha": "1dfd7d9a2",
-    "date": "2026-10-01T13:39:53+00:00",
+    "sha": "dee69534d",
+    "date": "2026-10-09T09:24:12+00:00",
     "boot_number": null,
     "baselined_failures": [],
-    "note": "Set from release boot 1dfd7d9a2 (2026-10-01T13:39:53Z, lane B): BOOT_OK after 188s, release/none on QEMU TCG, clean tree, every gate green and no self-test failed. 1dfd7d9a2 is lane-b with origin/main ad07cdc73 merged (929ed25a8): lane B's design-decisions 1045 triage, the one character-width table (1042), the getconf port and the notices manifests; 084fc8324 is its history row. PRUNED, per the rule the previous note set: 'CPython interactive REPL over a pty (ring 3)' PASSED in this boot ('6*7 evaluated to 42: OK'), so it is no longer baselined and the list is empty -- a boot with any failure at all is not covered by this marker and must not advance it. The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes 75a054730 (2026-09-27)."
+    "note": "Set from release boot dee69534d (2026-10-09T09:24:12Z, lane A): BOOT_OK, release/none on QEMU TCG, QEMU 322 s of a 4314 s run (gates 2851 s, build 1108 s), clean tree, every gate green and no self-test failed. dee69534d is lane-a at d8ac7f1d5 (origin/main 7043395f0 merged in 71b38b1e3; lane B's five new scripts given owner rows; the two rows for scripts not yet in the tree reverted) plus dee69534d itself: boot-test.sh refuses an unknown flag. That fix is why this boot exists twice: the first attempt was launched with `--release`, which boot-test.sh then silently ignored, and ran a 54-minute debug boot (e9f15c8d3's predecessor row, 2af9b6444). e9f15c8d3 is this boot's history row. Run because the pre-push release-staleness gate counted 276 kernel-touching commits since 7b70dd3cb (threshold 100). The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes 7b70dd3cb (2026-10-06)."
 }

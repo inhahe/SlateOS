@@ -33,8 +33,10 @@
 //!
 //! ## Integration
 //!
-//! Works with `appregistry` for `tray_icon` / `start_hidden` flags,
-//! and with `notifcenter` for badge/notification counts.
+//! Works with `notifcenter` for badge/notification counts. A program's own
+//! wish to start in the tray, or to have a tray icon, is not known here: the
+//! list of installed programs is userspace's (`gui/programs`, design-decisions
+//! 1425), so without a user override the answer is no.
 
 #![allow(dead_code)]
 
@@ -135,7 +137,7 @@ pub struct TrayMenuItem {
 pub struct TrayIcon {
     /// Unique icon ID (typically app ID).
     pub id: String,
-    /// Application ID from appregistry.
+    /// Application ID: a desktop entry's id, from userspace's program list (`gui/programs`).
     pub app_id: String,
     /// Display tooltip.
     pub tooltip: String,
@@ -397,35 +399,33 @@ pub fn list_overrides() -> Vec<(String, TrayOverride)> {
         .collect()
 }
 
-/// Check whether an app should start in tray based on override + appregistry.
+/// Check whether an app should start in the tray, by the user's override.
+///
+/// With no override the answer is no: the program's own preference lives in
+/// its desktop entry, in userspace (see the module doc). The kernel's old
+/// program registry said no for every program it held, so this is what it
+/// always answered.
 pub fn should_start_in_tray(app_id: &str) -> bool {
     let tray = TRAY.lock();
     match tray.overrides.get(app_id) {
-        Some(TrayOverride::AlwaysStartInTray) => true,
-        Some(TrayOverride::AlwaysStartInTaskbar) => false,
-        Some(TrayOverride::NoTrayIcon) => false,
-        Some(TrayOverride::TrayOnly) => true,
-        Some(TrayOverride::Default) | None => {
-            // Check appregistry for start_hidden flag.
-            drop(tray);
-            super::appregistry::get(app_id).is_some_and(|app| app.start_hidden)
-        }
+        Some(TrayOverride::AlwaysStartInTray | TrayOverride::TrayOnly) => true,
+        Some(
+            TrayOverride::AlwaysStartInTaskbar | TrayOverride::NoTrayIcon | TrayOverride::Default,
+        )
+        | None => false,
     }
 }
 
-/// Check whether an app should have a tray icon at all.
+/// Check whether an app should have a tray icon at all, by the user's
+/// override; with none, no (as `should_start_in_tray`).
 pub fn should_have_tray_icon(app_id: &str) -> bool {
     let tray = TRAY.lock();
     match tray.overrides.get(app_id) {
-        Some(TrayOverride::NoTrayIcon) => false,
-        Some(TrayOverride::AlwaysStartInTaskbar) => false,
-        Some(TrayOverride::AlwaysStartInTray) => true,
-        Some(TrayOverride::TrayOnly) => true,
-        Some(TrayOverride::Default) | None => {
-            // Check appregistry for tray_icon flag.
-            drop(tray);
-            super::appregistry::get(app_id).is_some_and(|app| app.tray_icon)
-        }
+        Some(TrayOverride::AlwaysStartInTray | TrayOverride::TrayOnly) => true,
+        Some(
+            TrayOverride::NoTrayIcon | TrayOverride::AlwaysStartInTaskbar | TrayOverride::Default,
+        )
+        | None => false,
     }
 }
 
@@ -569,6 +569,14 @@ fn self_test_inner() -> KernelResult<()> {
 
         set_override("test.app", TrayOverride::NoTrayIcon)?;
         assert!(!should_have_tray_icon("test.app"));
+
+        // No override, or `Default`: no, for both -- the program's own
+        // preference is in userspace (the module doc).
+        assert!(!should_start_in_tray("test.unset"));
+        assert!(!should_have_tray_icon("test.unset"));
+        set_override("test.default", TrayOverride::Default)?;
+        assert!(!should_start_in_tray("test.default"));
+        assert!(!should_have_tray_icon("test.default"));
 
         // With NoTrayIcon override, adding icon should fail.
         let result = add_icon(TrayIcon {

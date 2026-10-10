@@ -53,6 +53,7 @@
 //! | '\0' | Regular file  | Full (pre-POSIX compat) |
 //! | '5'  | Directory     | Full    |
 //! | '2'  | Symlink       | Read (link target preserved) |
+//! | '6'  | FIFO (named pipe) | Full: no data, the mode kept |
 //!
 //! ## References
 //!
@@ -110,6 +111,9 @@ pub enum EntryKind {
     Directory,
     /// Symbolic link ('2').
     Symlink,
+    /// Named pipe, a FIFO ('6'): a node with no data, whose mode is all
+    /// there is to keep.
+    Fifo,
     /// Other/unknown type flag.
     Other(u8),
 }
@@ -121,6 +125,7 @@ impl EntryKind {
             b'0' | 0 => Self::File,
             b'5' => Self::Directory,
             b'2' => Self::Symlink,
+            b'6' => Self::Fifo,
             other => Self::Other(other),
         }
     }
@@ -131,6 +136,7 @@ impl EntryKind {
             Self::File => b'0',
             Self::Directory => b'5',
             Self::Symlink => b'2',
+            Self::Fifo => b'6',
             Self::Other(b) => b,
         }
     }
@@ -675,6 +681,33 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         serial_println!("[tar]   multi-entry round-trip OK (dir + file + symlink)");
+    }
+
+    // --- Test 2b: a named pipe -- typeflag '6', no data, the mode kept ---
+    {
+        let entries = vec![TarWriteEntry {
+            name: PathBuf::from("run/fifo"),
+            data: Vec::new(),
+            kind: EntryKind::Fifo,
+            link_target: PathBuf::new(),
+            mode: 0o640,
+            uid: 0,
+            gid: 0,
+            mtime: 1700000000,
+        }];
+        let archive = create(&entries);
+        if archive.get(156) != Some(&b'6') {
+            return Err(KernelError::CorruptedData);
+        }
+        let parsed = parse(&archive)?;
+        let ok = matches!(parsed.as_slice(), [e] if e.kind == EntryKind::Fifo
+            && e.size == 0
+            && e.mode == 0o640
+            && e.name.as_path() == Path::new("run/fifo"));
+        if !ok {
+            return Err(KernelError::CorruptedData);
+        }
+        serial_println!("[tar]   named pipe round-trip OK (typeflag '6')");
     }
 
     // --- Test 3: empty archive ---

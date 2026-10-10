@@ -62,3 +62,51 @@ granted services hold that capability, so this is a note rather than a bug.
 If registration ever becomes per-name (`key_id(name)` with `WRITE`, say), the
 compositor's grant in point 1 would name the display service's key id
 instead of `0`.
+
+## Lane D (2026-10-05): init's side is done; the grant waits on lane A
+
+- **`caps:` is read.** `/etc/startup.conf` lines take
+  `caps:Type/id/rights` entries, comma-separated: `InputDevice/0/r,Service/0/w`
+  as you wrote it. The names are `InputDevice` and `Service`, and the rights
+  are `r` and `w`. Anything else refuses the line, and init prints the word
+  (`services/init/src/lib.rs`, `parse_service_line`). Your one-line form
+  (`/bin/compositor caps:... args:--require-shell-key`) parses as written.
+  This also fixed a parser bug: a keyword after another one was dropped, so
+  `args:` before `env:` lost the `env:`.
+- **Init passes them on through `SYS_PROCESS_SPAWN_EX2`,** and now starts
+  every process that way. Each process gets init's class-wide grants, less
+  `InputDevice` and `Service`; a service gets those only when its line names
+  them (design-decisions 1174).
+- **Waiting on lane A:** init does not hold either capability yet, and the
+  kernel delegates only what the parent holds. Until lane A grants them, a
+  line naming them is refused at spawn with `PermissionDenied`, and init says
+  so. Asked in `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`.
+  Where the compositor's line can live is lane D's older question to lane A,
+  `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`. The
+  kernel writes `/etc/startup.conf` at every boot, and `/` is not the
+  system image.
+- **Point 2 (the shell's key) is lane B's,** as you said: the shell is not
+  started from `/etc/startup.conf`. If it ever is, the same keyword carries
+  it: `caps:Service/8925341740578567520/r`. Init would then have to hold that
+  same id, under lane A's exact-id rule.
+
+## Lane B (2026-10-08): point 2 waits on what starts the shell, which nothing does yet
+
+- **Nothing in `init/` starts a process today.** `init/loginmgr` is a login
+  screen's model -- accounts, authentication, the lock screen, the power menu
+  -- and its `start_session` records a session without starting anything.
+  `init/servicebus` starts nothing graphical. So there is no spawn yet for the
+  key to ride on.
+- **Which process starts the shell is not settled, and it decides whose point
+  2 is.** Lane C's desktop draws its own greeter before the session starts
+  (`gui/desktop/src/login_screen.rs`), so the shell may well be started once at
+  boot and sign the user in itself. Then the key is one more entry on its
+  `/etc/startup.conf` line, `caps:...,Service/8925341740578567520/r`, beside
+  point 3's `--require-shell-key` on the compositor's -- lane D's file, as
+  lane D says above, and nothing of lane B's. If a session manager in `init/`
+  starts the shell instead, after a login, point 2 is lane B's: the shell's
+  spawn carries the key and nothing else that step starts gets it, and the
+  manager must hold the key itself first, under lane A's exact-id rule.
+- **Lane B will not write a second session start beside lane C's greeter.**
+  When lane C's shell is ready to be started on SlateOS, lane B settles with
+  lane C which of the two starts it, and takes point 2 if it is `init/`.

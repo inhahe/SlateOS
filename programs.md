@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**462 programs; 305 on the image, 6 carried inside the kernel.**
+**500 programs; 341 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 297
+## Userland utilities and services (`userspace/`, lane B) -- 315
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -44,9 +44,10 @@ two disagree.
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
-| `chpasswd` | Batch password change (chpasswd/passwd) | yes |  |  |
+| `chpasswd` | Set many passwords at once, from standard input. | yes |  |  |
 | `chroot` | Run a command with its root directory changed. | yes | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. | yes | `coreutils` |  |
+| `clear` | `clear`: ncurses 6.4's (`progs/clear.c`, 20240113), ported. | yes | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
 | `column` | Columnate lists, or lay input out as a table. | yes |  |  |
 | `comm` | Compare two sorted files line by line. | yes | `coreutils` |  |
@@ -111,18 +112,19 @@ two disagree.
 | `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
 | `hardlink` | File deduplication utility. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
-| `hexdump` | Hexadecimal File Dumper | yes |  | `xxd` |
+| `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
 | `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname`, `domainname`, `nisdomainname`, `ypdomainname` |
 | `hostnamectl` | Query and set the system hostname and related settings. | yes |  |  |
 | `htop` | Interactive Process Viewer | yes |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. | yes |  |  |
 | `hwinfo` | Hardware information utility: `hwinfo`, a comprehensive hardware inventory. | yes |  |  |
-| `iconv` | Character encoding conversion utility. | yes |  |  |
+| `iconv` | Convert text from one character encoding to another. | yes |  |  |
 | `id` | Print user and group information for each specified USER, or (when USER is omitted) for the current process. | yes | `coreutils` |  |
 | `ifconfig` | Classic network interface configuration utility. | yes |  |  |
 | `indexer` | Background File Indexer | yes |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) | yes |  |  |
+| `infocmp` | `infocmp`: ncurses 6.4's (`progs/infocmp.c`, 20240113), ported. | yes | `coreutils` |  |
 | `inotifywait` | Filesystem event monitoring utility. | yes | `inotify` | `inotifywatch` |
 | `install` | Copy files and set their attributes. | yes | `coreutils` |  |
 | `iostat` | I/O Statistics Utility | yes |  |  |
@@ -135,7 +137,9 @@ two disagree.
 | `jq` | Slate OS JSON processor | yes |  |  |
 | `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
 | `kill` | Process Termination Utility | yes |  | `killall` |
-| `last` | Login Records Viewer (`last` / `lastb` / `lastlog`) | yes |  | `lastb`, `lastlog` |
+| `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
+| `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
+| `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
 | `ldd` | Shared Library Dependency Lister | yes |  |  |
 | `less` | Terminal Pager | yes |  |  |
@@ -150,7 +154,7 @@ two disagree.
 | `logind` | Session manager (logind/loginctl) | yes |  |  |
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
-| `look` | Display lines beginning with a given string for Slate OS | yes |  |  |
+| `look` | Display lines beginning with a given string: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `losetup` | Loop device management utility: `losetup`, to set up and control loop devices. | yes |  |  |
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) | yes |  | `cancel`, `lpq`, `lpr`, `lprm`, `lpstat` |
 | `ls` | List directory contents. | yes | `coreutils` |  |
@@ -168,6 +172,7 @@ two disagree.
 | `make` | Build automation tool |  |  |  |
 | `man` | Manual Page Viewer | yes |  |  |
 | `md5sum` | Print or check MD5 (128-bit) checksums. | yes | `coreutils` |  |
+| `mesg` | Control write access of other users to your terminal: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `mkdir` | Make directories. | yes | `coreutils` |  |
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems | yes |  |  |
@@ -198,13 +203,15 @@ two disagree.
 | `osh` | The Oils shell command-line entry point. | yes | `oils` |  |
 | `passwd` | Password Management Utility | yes |  |  |
 | `paste` | Write corresponding lines of several files side by side. | yes | `coreutils` |  |
-| `patch` | Apply a diff file to originals. | yes | `coreutils` |  |
+| `patch` | Apply a diff to the files it names: GNU patch 2.7.6 as Ubuntu ships it, ported. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. | yes | `coreutils` |  |
 | `pgrep` | Look up processes by name and other attributes. | yes | `coreutils` |  |
+| `pidof` | Find the processes running a program: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `ping` | ICMP Ping Utility | yes |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. | yes | `coreutils` |  |
 | `pkg` | Slate OS package manager. | yes |  |  |
 | `pkill` | Signal processes chosen by name and other attributes. | yes | `coreutils` |  |
+| `pmap` | Report the memory map of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `polkit` | PolicyKit Authorization Framework | yes |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. | yes | `coreutils` |  |
@@ -212,10 +219,11 @@ two disagree.
 | `printf` | Format and print data. | yes | `coreutils` |  |
 | `prlimit` | Get and set process resource limits. | yes |  |  |
 | `ps` | Report a snapshot of the current processes. | yes | `coreutils` |  |
-| `pstree` | Process tree display utilities. | yes |  |  |
+| `pstree` | Display a tree of processes: psmisc 23.7's, ported. | yes | `coreutils` |  |
 | `ptx` | Produce a permuted index of file contents. | yes | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). | yes |  |  |
 | `pwd` | Print the full filename of the current working directory. | yes | `coreutils` |  |
+| `pwdx` | Print the working directory of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `readelf` | ELF Binary Inspector | yes |  |  |
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |
@@ -243,7 +251,9 @@ two disagree.
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. | yes |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. | yes | `coreutils` |  |
 | `shuf` | Write a random permutation of the input lines. | yes | `coreutils` |  |
+| `skill` | Send a signal to the processes an expression picks. | yes | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
+| `snice` | Set the nice value of the processes an expression picks. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |
 | `ss` | Socket statistics (ss/sockstat) | yes |  | `sockstat` |
@@ -260,10 +270,12 @@ two disagree.
 | `swapoff` | Disable devices and files for paging and swapping. | yes | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. | yes |  |  |
 | `sync` | Synchronize cached writes to persistent storage. | yes | `coreutils` |  |
-| `sysctl` | View and Modify Kernel Parameters | yes |  |  |
+| `sysctl` | Read and write kernel parameters at run time: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
+| `systemd-cat` | `systemd-cat`: systemd 255's (`src/journal/cat.c`), ported. | yes | `coreutils` |  |
+| `tabs` | `tabs`: ncurses 6.4's (`progs/tabs.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tac` | Write each file to standard output, last record first. | yes | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |
@@ -271,15 +283,19 @@ two disagree.
 | `tee` | Copy standard input to each FILE, and also to standard output. | yes | `coreutils` |  |
 | `telnet` | `Slate OS` Telnet Client | yes |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
+| `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
+| `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
+| `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
 | `top` | Interactive Process Monitor | yes |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
-| `tput` | Terminal capability tools | yes |  | `clear`, `reset`, `tset` |
+| `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |
 | `tr` | Translate, squeeze, and/or delete bytes. | yes | `coreutils` |  |
 | `traceroute` | Network Traceroute Utility | yes |  |  |
 | `true` | Do nothing, successfully. | yes | `coreutils` |  |
 | `truncate` | Shrink or extend the size of a file to the specified size. | yes | `coreutils` |  |
+| `tset` | `tset`, and `reset`: ncurses 6.4's (`progs/tset.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tsort` | Order a set of items so that every recorded "before" holds. | yes | `coreutils` |  |
 | `tty` | Print the file name of the terminal connected to standard input. | yes | `coreutils` |  |
 | `udevd` | Device Manager Daemon (udevd / udevadm) | yes |  |  |
@@ -299,9 +315,9 @@ two disagree.
 | `vdir` | List directory contents in the long format. | yes | `coreutils` |  |
 | `vi` | Modal terminal text editor for SlateOS. | yes |  |  |
 | `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
-| `vmstat` | Virtual Memory Statistics Utility | yes |  |  |
+| `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
-| `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
+| `wall` | Write a message to all users: util-linux 2.39.3's, ported, with Ubuntu's fix for CVE-2024-28085. | yes | `coreutils` |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility | yes |  |  |
@@ -311,8 +327,10 @@ two disagree.
 | `whois` | WHOIS Lookup Utility | yes |  |  |
 | `wipefs` | Wipe signatures from a device. | yes |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
+| `write` | Send a message to another user: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
 | `xdg-open` | XDG File Association Tools | yes | `xdg` | `xdg-mime`, `mimeopen` |
+| `xxd` | Make a hex dump, or turn one back into binary: vim 9.1.0016's, ported. | yes | `coreutils` |  |
 | `yacc` | LALR(1) parser generator | yes |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |
 | `zip` | Zip/unzip archive utility. | yes |  | `unzip` |
@@ -468,7 +486,7 @@ two disagree.
 | `worldclock` | World Clock — multi-timezone clock display with analog/digital views. |  |  |  |
 | `yahtzee` | The dice game, in a window. |  |  |  |
 
-## Desktop, toolkit and graphics (`gui/`, lane C, F) -- 6
+## Desktop, toolkit and graphics (`gui/`, lane C, F) -- 7
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -478,12 +496,14 @@ two disagree.
 | `desktop` | The desktop shell. |  |  |  |
 | `desktop-demo` | The desktop shell's demonstration binary. |  | `desktop` |  |
 | `notifications` | Notification Daemon |  |  |  |
+| `themecheck` | Check a theme's folder before it is installed or shared. |  | `appearance` |  |
 
-## System services (`services/`, lane D) -- 7
+## System services (`services/`, lane D) -- 8
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
 | `backupd` | `backupd`'s loop: the clock, the user database, each run's identity and output. |  |  |  |
+| `dyndns` | Keeps dynamic-DNS hostnames pointed at this network's address, and asks the router for the port forwards this computer wants. |  |  |  |
 | `hello` | Hello world — a minimal userspace program. | in the kernel |  |  |
 | `httpget` | A minimal **Linux-ABI** ring-3 HTTP client. | in the kernel |  |  |
 | `init` | Userspace init process — the first process spawned by the kernel. | in the kernel |  |  |
@@ -497,7 +517,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/`, the rootfs recipe's) -- 10
+## Ported programs (`scripts/`, the rootfs recipe's) -- 28
 
 Programs that are no cargo target, each built by its own scripts and
 staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
@@ -507,13 +527,31 @@ when it has been built on the machine that makes it.
 
 | Program | What it does | On image | Built by | Other names |
 |---|---|---|---|---|
+| `addr2line` | GNU addr2line 2.47: a code address to the source file and line it came from. | yes | `scripts/binutils-spike/` |  |
+| `as` | GNU as 2.47, the assembler: assembly source to an object file. | yes | `scripts/binutils-spike/` |  |
 | `bash` | GNU bash 5.2, the shell. | yes | `scripts/bash-spike/` |  |
+| `c++filt` | GNU c++filt 2.47: turns mangled C++ symbol names back into C++. | yes | `scripts/binutils-spike/` |  |
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
+| `elfedit` | GNU elfedit 2.47: edits the header of an ELF file. | yes | `scripts/binutils-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
 | `fastpy` | fastpy, which compiles a Python program into a native SlateOS program. | yes | `scripts/fastpy-slateos-bundle.py` |  |
+| `gdbserver` | GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. | yes | `scripts/gdb-spike/` |  |
+| `gnu-ar` | GNU ar 2.47: makes, edits and lists static libraries. | yes | `scripts/binutils-spike/` |  |
+| `gnu-gdb` | GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. | yes | `scripts/gdb-spike/` |  |
+| `gnu-objdump` | GNU objdump 2.47: disassembles object files and describes their contents. | yes | `scripts/binutils-spike/` |  |
+| `gnu-ranlib` | GNU ranlib 2.47: writes a static library's symbol index. | yes | `scripts/binutils-spike/` |  |
+| `gnu-readelf` | GNU readelf 2.47: describes the contents of an ELF file. | yes | `scripts/binutils-spike/` |  |
+| `gnu-strings` | GNU strings 2.47: prints the runs of text in a file. | yes | `scripts/binutils-spike/` |  |
+| `gnu-strip` | GNU strip 2.47: removes symbols and debugging information from object files. | yes | `scripts/binutils-spike/` |  |
+| `ld.bfd` | GNU ld 2.47, the GNU linker. | yes | `scripts/binutils-spike/` |  |
 | `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
 | `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |
+| `mono` | Mono 6.14.1, the .NET runtime: runs .NET programs, JIT-compiled. | yes | `scripts/mono-spike/` |  |
+| `nm` | GNU nm 2.47: lists the symbols in object files. | yes | `scripts/binutils-spike/` |  |
+| `objcopy` | GNU objcopy 2.47: copies an object file, converting or editing it on the way. | yes | `scripts/binutils-spike/` |  |
+| `oils-for-unix` | Oils 0.38.0: OSH, which runs bash scripts, and YSH, its newer language. | yes | `scripts/oils-spike/` | `ysh` |
 | `opt` | LLVM 20.1.8's IR optimizer. | yes | `scripts/llvm-spike/` |  |
 | `pkgconf` | pkgconf 2.3.0: the compiler and linker flags an installed library needs. | yes | `scripts/pkgconf-spike/` | `pkg-config` |
 | `python3` | CPython 3.12.3, the Python interpreter. | yes | `scripts/cpython-spike/` |  |
+| `size` | GNU size 2.47: the sizes of an object file's sections. | yes | `scripts/binutils-spike/` |  |

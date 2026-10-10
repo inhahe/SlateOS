@@ -26,11 +26,11 @@
 pub mod button;
 pub mod canvas;
 pub mod checkbox;
+pub mod clipboard;
 pub mod codeedit;
 pub mod codeview;
 pub mod color;
 pub mod colorpicker;
-pub mod context_ext;
 pub mod date;
 pub mod datetime;
 pub mod dialog;
@@ -39,6 +39,7 @@ pub mod disabled;
 pub mod dnd;
 pub mod dock;
 pub mod dropdown;
+pub mod editmenu;
 pub mod event;
 pub mod field;
 pub mod filetypes;
@@ -62,6 +63,7 @@ pub mod probe;
 pub mod radio;
 pub mod ratio;
 pub mod render;
+pub mod ribbon;
 pub mod surface;
 /// Random numbers — see [`randrange`] for the whole story.
 ///
@@ -77,6 +79,7 @@ pub mod row_strip;
 pub mod scaling;
 pub mod scroll_window;
 pub mod scrollbar;
+pub mod secretinput;
 pub mod shortcut;
 pub mod slider;
 pub mod splitter;

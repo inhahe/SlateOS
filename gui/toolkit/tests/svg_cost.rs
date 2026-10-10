@@ -1,0 +1,154 @@
+//! Drawing an icon stays cheap enough for a desktop that draws dozens of them.
+//!
+//! Every icon the shell shows is an SVG drawn by `guitk::svg` -- the start
+//! menu's, the taskbar's, a folder of files in the file manager -- at login,
+//! at every theme change, and whenever one is asked for at a new size. The
+//! renderer learned gradients, `<use>`, clip paths, viewport clipping and
+//! masks on 2026-10-01, and patterns on 2026-10-05, each of which puts work on
+//! every pixel it covers: a gradient colour per pixel, a mask byte per pixel
+//! per clip, a mask's content drawn a second time, a pattern's tile drawn and
+//! read at every pixel. This measures the six shapes of icon that work
+//! produces, at a taskbar's size and a large one.
+//!
+//! # What it cost when it was written
+//!
+//! A debug build on a developer machine busy with a boot test, 2026-10-01,
+//! microseconds a draw:
+//!
+//! | icon | at 48 px | at 256 px |
+//! |---|---|---|
+//! | flat colours | 1 196 | 20 470 |
+//! | gradients | 1 418 | 34 475 |
+//! | clipped | 2 126 | 43 269 |
+//! | reused | 1 666 | 21 269 |
+//! | masked (measured with masks, later the same day) | 2 444 | 56 312 |
+//! | patterned (measured with patterns, 2026-10-05) | 2 934 | 81 668 |
+//!
+//! # Why the ceilings are where they are
+//!
+//! Twenty times the measured figure, as `gui/appearance`'s
+//! `resolve_cost.rs` sets its own, for the same reasons: this is wall-clock
+//! on a loaded developer machine in a debug build, and the regressions worth
+//! catching are orders of magnitude -- a mask rebuilt per shape instead of per
+//! clip, a gradient's stops searched per pixel per stop, a `<use>` expanded
+//! afresh each time it is drawn. The measurement is the fastest of many
+//! short runs (see `per_draw`), since load can only push a sample up and a
+//! short run can escape it altogether.
+// A benchmark divides and asserts on the result; the defensive lints that
+// forbid that in production code are off here, as `CLAUDE.md` prescribes for
+// test code.
+#![allow(clippy::arithmetic_side_effects, clippy::panic, clippy::unwrap_used)]
+
+use guitk::svg::SvgDocument;
+use std::time::Instant;
+
+/// Microseconds to draw `svg` at `size` by `size`: `runs` runs of `per_run`
+/// draws each, after one draw to warm up, and the fastest run's figure.
+///
+/// For the reasons `gui/appearance`'s `resolve_cost.rs` gives at its own
+/// `per_call`: load can only push a sample up, so the smallest is the one the
+/// host touched least; and a run short enough to fit inside one of the
+/// scheduler's time slices can finish untouched however busy the machine is,
+/// where three long runs can each be slowed from start to end -- which is
+/// what failed that test on 2026-10-05. A draw at 48 pixels takes a
+/// millisecond or three, so a run there is two draws; one at 256 takes tens
+/// of milliseconds, so a run is a single draw, the shortest there can be.
+fn per_draw(svg: &str, size: u32, runs: u32, per_run: u32) -> f64 {
+    let doc = SvgDocument::parse(svg).unwrap();
+    std::hint::black_box(doc.render(size, size));
+    (0..runs)
+        .map(|_| {
+            let start = Instant::now();
+            for _ in 0..per_run {
+                std::hint::black_box(doc.render(size, size));
+            }
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(per_run)
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// A folder icon as icon themes draw one: a dozen paths, flat colours.
+const FLAT: &str = r##"<svg viewBox="0 0 48 48"><path d="M4 10 h14 l4 4 h22 v28 h-40 z" fill="#3a6ea5"/>
+<path d="M4 16 h40 v26 h-40 z" fill="#5b8fd1"/><path d="M8 20 h32 v2 h-32 z" fill="#8bb3e3"/>
+<circle cx="24" cy="30" r="6" fill="#ffffff" opacity="0.4"/><rect x="10" y="36" width="28" height="2" rx="1" fill="#2b5280"/>
+<path d="M6 12 q2 -2 4 0 t4 0" stroke="#1d3c60" fill="none"/><ellipse cx="24" cy="44" rx="18" ry="2" fill="#000" opacity="0.2"/>
+<path d="M12 24 l4 4 l8 -8" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/>
+<polygon points="30,24 36,24 33,30" fill="#d4e4f7"/><polyline points="14,32 20,34 26,32" stroke="#fff" fill="none"/>
+<line x1="8" y1="40" x2="40" y2="40" stroke="#1d3c60"/><rect x="18" y="8" width="12" height="4" fill="#2b5280"/></svg>"##;
+
+/// The same icon shaded with gradients, linear and radial, as full-colour
+/// themes draw theirs.
+const GRADIENTS: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<linearGradient id="back" x2="0" y2="1"><stop stop-color="#3a6ea5"/><stop offset="1" stop-color="#1d3c60"/></linearGradient>
+<linearGradient id="front" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#8bb3e3"/><stop offset="0.5" stop-color="#5b8fd1"/><stop offset="1" stop-color="#3a6ea5"/></linearGradient>
+<radialGradient id="glow" fx="0.3" fy="0.3"><stop stop-color="#fff" stop-opacity="0.8"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+</defs><path d="M4 10 h14 l4 4 h22 v28 h-40 z" fill="url(#back)"/>
+<path d="M4 16 h40 v26 h-40 z" fill="url(#front)" stroke="url(#back)"/>
+<circle cx="24" cy="30" r="12" fill="url(#glow)"/><rect x="10" y="36" width="28" height="4" rx="2" fill="url(#back)"/></svg>"##;
+
+/// Shapes cut by clip paths, both units, one clip inside another.
+const CLIPPED: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<clipPath id="round"><circle cx="24" cy="24" r="20"/></clipPath>
+<clipPath id="half" clipPathUnits="objectBoundingBox"><rect width="1" height="0.5"/></clipPath>
+</defs><g clip-path="url(#round)"><rect width="48" height="48" fill="#3a6ea5"/>
+<rect y="24" width="48" height="24" fill="#5b8fd1" clip-path="url(#half)"/>
+<path d="M0 30 q24 -12 48 0 v18 h-48 z" fill="#8bb3e3"/></g></svg>"##;
+
+/// A symbol drawn twenty times by `<use>`, each in a viewport of its own.
+const REUSED: &str = r##"<svg viewBox="0 0 48 48"><symbol id="dot" viewBox="0 0 10 10">
+<circle cx="5" cy="5" r="4" fill="#3a6ea5"/><circle cx="5" cy="5" r="2" fill="#fff"/></symbol>
+<use href="#dot" x="0" y="0" width="9" height="9"/><use href="#dot" x="10" y="0" width="9" height="9"/>
+<use href="#dot" x="20" y="0" width="9" height="9"/><use href="#dot" x="30" y="0" width="9" height="9"/>
+<use href="#dot" x="0" y="10" width="9" height="9"/><use href="#dot" x="10" y="10" width="9" height="9"/>
+<use href="#dot" x="20" y="10" width="9" height="9"/><use href="#dot" x="30" y="10" width="9" height="9"/>
+<use href="#dot" x="0" y="20" width="9" height="9"/><use href="#dot" x="10" y="20" width="9" height="9"/>
+<use href="#dot" x="20" y="20" width="9" height="9"/><use href="#dot" x="30" y="20" width="9" height="9"/>
+<use href="#dot" x="0" y="30" width="9" height="9"/><use href="#dot" x="10" y="30" width="9" height="9"/>
+<use href="#dot" x="20" y="30" width="9" height="9"/><use href="#dot" x="30" y="30" width="9" height="9"/>
+<use href="#dot" x="38" y="38" width="9" height="9"/><use href="#dot" x="38" y="0" width="9" height="9"/>
+<use href="#dot" x="0" y="38" width="9" height="9"/><use href="#dot" x="19" y="38" width="9" height="9"/></svg>"##;
+
+/// A group faded through a gradient mask, as glossy icons draw their shine:
+/// its content drawn once into a scratch surface and once through the mask.
+const MASKED: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<linearGradient id="fade" x2="0" y2="1"><stop stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
+<mask id="shine"><rect width="48" height="48" fill="url(#fade)"/></mask></defs>
+<rect width="48" height="48" rx="8" fill="#3a6ea5"/>
+<g mask="url(#shine)"><ellipse cx="24" cy="12" rx="20" ry="10" fill="#fff"/><path d="M4 10 h40 v6 h-40 z" fill="#8bb3e3"/></g></svg>"##;
+
+/// A transparency checkerboard behind a picture, as image editors' icons draw
+/// one: a pattern's tile drawn once and read at every pixel it paints.
+const PATTERNED: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<pattern id="checks" patternUnits="userSpaceOnUse" width="8" height="8">
+<rect width="8" height="8" fill="#fff"/><rect width="4" height="4" fill="#ccc"/><rect x="4" y="4" width="4" height="4" fill="#ccc"/></pattern></defs>
+<rect x="2" y="2" width="44" height="44" rx="4" fill="url(#checks)"/>
+<circle cx="24" cy="24" r="12" fill="#3a6ea5" opacity="0.8"/></svg>"##;
+
+/// **Drawing an icon stays cheap**: each shape of icon, at a taskbar's 48
+/// pixels and at 256, under its ceiling.
+#[test]
+fn drawing_an_icon_stays_cheap() {
+    // Ceilings in microseconds: twenty times what was measured.
+    let cases: [(&str, &str, u32, u32, u32, f64); 12] = [
+        ("patterned", PATTERNED, 48, 30, 2, 60_000.0),
+        ("patterned", PATTERNED, 256, 15, 1, 1_650_000.0),
+        ("masked", MASKED, 48, 30, 2, 50_000.0),
+        ("masked", MASKED, 256, 15, 1, 1_100_000.0),
+        ("flat", FLAT, 48, 30, 2, 25_000.0),
+        ("flat", FLAT, 256, 15, 1, 400_000.0),
+        ("gradients", GRADIENTS, 48, 30, 2, 30_000.0),
+        ("gradients", GRADIENTS, 256, 15, 1, 700_000.0),
+        ("clipped", CLIPPED, 48, 30, 2, 45_000.0),
+        ("clipped", CLIPPED, 256, 15, 1, 900_000.0),
+        ("reused", REUSED, 48, 30, 2, 35_000.0),
+        ("reused", REUSED, 256, 15, 1, 450_000.0),
+    ];
+    for (name, svg, size, runs, per_run, ceiling) in cases {
+        let us = per_draw(svg, size, runs, per_run);
+        println!("{name} at {size}: {us:.0} us (ceiling {ceiling:.0})");
+        assert!(
+            us < ceiling,
+            "{name} at {size}: {us:.0} us, over {ceiling:.0}"
+        );
+    }
+}

@@ -305,7 +305,9 @@ fn run_main() -> ExitCode {
         Request::Run(settings, first, second) => (settings, first, second),
     };
 
-    let mut stdin = io::stdin().lock();
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    // upstream's `comm - f <&-` is `comm: -: Bad file descriptor`.
+    let mut stdin = BufReader::new(stdfd::RawStdin);
 
     let outcome = compare_files(&first, &second, &mut stdin, &settings, &mut out);
 
@@ -426,7 +428,13 @@ impl Column {
         let slot = if name == "-" {
             Slot::Stdin
         } else {
-            let file = File::open(name).map_err(|e| Trouble::Input(name.clone(), e))?;
+            // `fopen` is gnulib's `fopen_safer` here (`stdio--.h`), which
+            // never returns descriptor 0, 1 or 2: with standard input closed,
+            // a plain open would land on descriptor 0 and `comm f -` would
+            // compare `f` with itself.
+            let file = File::open(name)
+                .and_then(stdfd::fd_safer)
+                .map_err(|e| Trouble::Input(name.clone(), e))?;
             Slot::Stream(Box::new(BufReader::new(file)))
         };
         let mut column = Self {

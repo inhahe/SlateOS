@@ -172,6 +172,218 @@ Two measured examples:
   `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
   Nothing to port.
 
+* **`vmstat`** — **RETIRED 2026-10-08, the day the pair came into being.**
+  `coreutils/src/bin/vmstat.rs` arrived that day as a port of procps-ng
+  4.0.4's `vmstat.c` over its library; `userspace/vmstat` had been written
+  from the manual. Same harness, same cases, same fixture machines
+  (`scripts/vmstat-diff.sh`, whose worlds change between readings so the
+  interval lines are compared too):
+
+      coreutils vmstat    191 passed,   0 differed,  7 differ on purpose
+      userspace/vmstat      2 passed, 189 differed,  7 differ on purpose
+
+  The standalone's two passes are `vmstat -Z 2>&-` and `vmstat 0 2>&-`:
+  standard error closed, so neither side can print its complaint and both
+  exit 1 -- agreement with nothing in it to compare.
+
+  **What the loser knew that the winner did not: nothing.** Its one option
+  procps lacks, `--json`, is an invention -- procps answers `unrecognized
+  option '--json'`, measured. The rest of its surface was procps' options,
+  rendered its own way: `-S k` and `-S K` swapped (procps' `k` is 1000 and
+  `K` 1024, measured on the reference: 33626984 k against 32838852 K of one
+  `MemTotal`), the first line's context switches divided by seconds of uptime
+  where procps divides them by CPU ticks, `cache` without `SReclaimable`, and
+  no `-p`, `-y`, `-V` or `-h`. It also sat in `argv-utf8-baseline.txt` as
+  `argv-as-string`. Nothing to port.
+
+* **`sysctl`** — **RETIRED 2026-10-08, the same way and the same day.**
+  `coreutils/src/bin/sysctl.rs` is procps-ng 4.0.4's `sysctl.c` and the
+  `procio.c` it reads and writes through; `userspace/sysctl` was written from
+  the manual. `scripts/sysctl-diff.sh`, which runs both over a fixture
+  `/proc/sys` and fixture configuration directories and compares what each
+  left in the files as well as what each printed:
+
+      coreutils sysctl    138 passed,   0 differed,  2 differ on purpose
+      userspace/sysctl      6 passed, 132 differed,  2 differ on purpose
+
+  Its six passes are the three plainest reads (`kernel.hostname`,
+  `kernel/hostname`, `-n kernel.hostname`) and three runs with standard
+  error closed or full. **What the loser knew that the winner did not:
+  nothing procps has.** It searched `/sys/kernel` when `/proc/sys` lacked a
+  key, which procps never does; it had `--search` (procps' `-r` is a regular
+  expression, not a substring) and `--values-only`, and took a bare `help`;
+  its `-q` meant "print no names" where procps' means "say nothing about a
+  write", and its `-w` took the key and value as two words. It had no `-N`,
+  `-b`, `-e`, `-r`, `-f`, `--system`, `--dry-run` or `--deprecated`. It also
+  sat in `argv-utf8-baseline.txt` as `argv-as-string`. Nothing to port.
+
+* **`hexdump`** — **RETIRED 2026-10-08, with `xxd` beside it.**
+  `coreutils/src/bin/hexdump.rs` is util-linux 2.39.3's `hexdump.c` and its
+  three `hexdump-*.c`; `coreutils/src/bin/xxd.rs` is vim 9.1.0016's `xxd.c`.
+  `userspace/hexdump`, written from the manuals, was both -- `xxd` by its
+  `argv[0]`, through the manifest alias `xxd = hexdump`. Each harness was run
+  over the standalone too, as `xxd` under that name:
+
+      coreutils hexdump     275 passed,   0 differed,  2 differ on purpose
+      userspace/hexdump      30 passed, 245 differed,  2 differ on purpose
+      coreutils xxd         949 passed,   0 differed,  4 differ on purpose
+      userspace/hexdump     163 passed, 786 differed,  4 differ on purpose
+
+  As `hexdump`, its passes are `-C` on a single file, alone or with standard
+  output or error closed: `-C` was its *default*, where util-linux's is the
+  two-byte hex dump, so a bare `hexdump FILE` differed on every fixture, and
+  it had no `-e` or `-f` at all -- 103 of the 245. As `xxd`, it agreed where
+  its layout happened to coincide with upstream's (a sixteen-byte file, an
+  empty one, some `-c` widths) and where a revert had nothing to write; 248
+  of the differences are `-r` cases, 83 are `-R`, 70 are `-i` and 57 are
+  `-s`. It took options after its operands, ignored an output operand
+  (`xxd -r dump out` wrote to standard output and left `out` alone, so it
+  could not patch a file, which is what `-r` is for), and had none of
+  `-a -b -C -d -e -E -n -o -R -u -v`. **What the loser knew that the winner
+  did not:** `--json`, an invention. Nothing to port.
+
+* **`look`** — **RETIRED 2026-10-08, the same way.** `coreutils/src/bin/look.rs`
+  is util-linux 2.39.3's `misc-utils/look.c`; `userspace/look` was written
+  from the manual. `scripts/look-diff.sh` searches word lists sorted as a
+  dictionary and as bytes, unsorted ones and awkward ones, with every
+  option:
+
+      coreutils look       1229 passed,   0 differed,  2 differ on purpose
+      userspace/look        595 passed, 634 differed,  2 differ on purpose
+
+  Most of the 634 are one defect: the standalone read its file as UTF-8 and
+  refused any file holding a byte that was not -- `look: words: stream did
+  not contain valid UTF-8`, status 2 -- so every search of a list with one
+  Latin-1 word in it failed outright. The rest: no `-a` and no `$WORDLIST`;
+  `-t` cut *before* its character, where upstream keeps it, and cut every
+  line the same way, where upstream cuts only the string (read from its
+  source -- the UTF-8 refusal hid every `-t` case); an empty file searched
+  as empty, silently, where upstream's `mmap` says `Invalid argument`; and a
+  directory `Is a directory (os error 21)`, status 2, where upstream's says
+  `No such device`, status 1. **What the loser knew that the winner did
+  not:** nothing. Nothing to port.
+
+* **`last`** — **RETIRED 2026-10-08, with `lastlog` beside it.**
+  `coreutils/src/bin/last.rs` is util-linux 2.39.3's `login-utils/last.c`
+  (and `lastb`, by its `argv[0]`); `coreutils/src/bin/lastlog.rs` is
+  shadow-utils 4.13's `src/lastlog.c`. `userspace/last`, written from the
+  manuals, was all three by its `argv[0]`, through the manifest aliases
+  `lastb = last` and `lastlog = last`. Each harness was run over the
+  standalone too -- as `lastlog` under that name:
+
+      coreutils last        511 passed,   0 differed,  3 differ on purpose
+      userspace/last         12 passed, 497 differed,  3 differ on purpose, 2 hung
+      coreutils lastlog     177 passed,   0 differed,  0 differ on purpose
+      userspace/last          1 passed, 176 differed,  0 differ on purpose
+
+  As `last`, it listed the file oldest first where upstream reads it
+  backwards and lists the newest first; wrote every logout with its date,
+  where the short format has only `HH:MM`; listed ghost entries (a login with
+  no user) as logins, ran the `-n` limit over the wrong end, and wrote user
+  and host names as they are -- so a host holding an escape sequence reached
+  the terminal, where upstream's `fputs_careful` writes `*[`. It had no
+  `--time-format`, `-s`, `-t` or `-p` and no long option at all; a second
+  `-f` replaced the first instead of adding a file; and it read `/dev/zero`
+  forever (the hangs: one or two, by how long a run takes to time out).
+  Its twelve passes are listings that select nothing -- a name or a tty no
+  record has -- and three runs with standard output or error closed. As
+  `lastlog`,
+  it had no `-R` -- every chrooted case stopped at `unknown option: -R` -- its
+  host column was 16 wide where upstream's is 42, and it listed only
+  accounts with a record, where upstream lists every account and says
+  `**Never logged in**`. **What the loser knew that the winner did not:**
+  nothing util-linux or shadow-utils has. Nothing to port.
+
+* **`wall`** — **RETIRED 2026-10-08, with `write` and `mesg` beside it.**
+  `coreutils/src/bin/wall.rs`, `write.rs` and `mesg.rs` are util-linux
+  2.39.3's `term-utils/wall.c` (with Ubuntu's fix for CVE-2024-28085, which
+  escapes a command-line message too), `write.c` and `mesg.c`.
+  `userspace/wall`, written from the manuals, was all three by its `argv[0]`,
+  though only `wall` reached the image: no alias named the other two.
+  `scripts/wall-diff.sh` runs both sides in a user and mount namespace over a
+  fixture utmp and fixture terminals, and compares what each wrote into them:
+
+      coreutils wall/write/mesg   240 passed,   0 differed,  3 differ on purpose
+      userspace/wall               27 passed, 213 differed,  3 differ on purpose
+
+  It read who was logged in from `/var/run/utmp.txt`, a text file of its own
+  that nothing writes, and then wrote to every `/dev/pts/*` and `/dev/tty0`
+  to `tty11` that existed, logged in or not; it named the sender from
+  `/etc/users.yaml` and refused to send at all when it found nobody there
+  (`cannot determine who you are ...; refusing`) -- every `wall` case here. It
+  had no `-t`, wrapped nothing, and wrote a message's escape sequences to every
+  screen as they were. As `write`, it looked the recipient up in the same text
+  file, so every user was `not logged in`; as `mesg`, `y` set only the group's
+  write bit where Ubuntu's sets the others' too, `n` exited 0 where upstream
+  exits 1, and a `chmod` that failed went unreported. Its passes are `mesg`
+  asked a question (`is y`, `is n`) or told `y` on a terminal that already
+  had both bits, `write` to a user nobody is, and one `--help` with standard
+  output closed. **What the loser knew that the winner
+  did not:** refusing an anonymous broadcast. Upstream sends one as
+  `<someone>` after a warning, and that stands: the banner then says plainly
+  that the sender is unknown. Nothing to port.
+
+* **`pstree`** — **RETIRED 2026-10-08.** `coreutils/src/bin/pstree.rs` is
+  psmisc 23.7's `src/pstree.c`, its terminal handling through
+  `userspace/terminfo` (ncurses 6.4's, ported for it). `userspace/pstree`,
+  written from the manuals, called itself a multi-personality binary --
+  `pstree` and "a `pgrep` variant with a tree view" -- though only `pstree`
+  reached the image. `scripts/pstree-diff.sh` runs each case in a fresh pid
+  namespace over a tree a fixture builds one process at a time, so both sides
+  see the same pids:
+
+      coreutils pstree      629 passed,   0 differed,  2 differ on purpose
+      userspace/pstree        8 passed, 621 differed,  2 differ on purpose
+
+  It put every child on a line of its own -- `├──` and four columns a level,
+  in Unicode even through a pipe -- where upstream runs a chain along one line
+  (`python3---alpha---worker`) and draws ASCII off a terminal; it compacted
+  leaves but dropped whatever hung under a compacted subtree (`2*[group]`,
+  its `leaf` gone), went on compacting under `-p`, which upstream's `-p`
+  turns off, and showed no threads at all. It had none of `-s`, `-g`, `-S`,
+  `-N`, `-t`, `-T`, `-Z`, `-G`, `-U` or `-C` (`pstree: unknown option: -s`);
+  a user operand drew the tree of one process of the user's where upstream
+  draws every top-most one; and a user nobody is was `pstree: user
+  'nosuchuser' not found` where upstream says `No such user name:
+  nosuchuser`. Its eight passes are two processes with no children drawn
+  alone -- `pstree 7` and `pstree 9`, with and without `-p`, one line either
+  way -- and four runs whose standard output was closed or full, where
+  nothing written is seen. **What the loser knew that the winner did
+  not:** `-k` (`--show-kernel`), kernel threads hidden unless asked for.
+  psmisc has no such option and hides nothing. Nothing to port.
+
+* **`tput`** — **RETIRED 2026-10-08.** `coreutils/src/bin/tput.rs`,
+  `clear.rs` and `tset.rs` are ncurses 6.4's `progs/tput.c`, `clear.c` and
+  `tset.c` (with `tabs.c` beside them, new), sharing `coreutils::ncurses` --
+  `tty_settings.c`, `reset_cmd.c`, `clear_cmd.c` -- over `userspace/terminfo`.
+  `userspace/tput`, written from the manuals, was `tput`, `clear`, `reset`
+  and `tset` by its `argv[0]`, through the manifest aliases. Measured by
+  `scripts/tput-diff.sh` on its `tput`, `clear` and `tset` cases (before
+  `tabs` joined it), each side on a pseudo-terminal of its own:
+
+      coreutils tput/clear/tset   957 passed,   0 differed,  9 differ on purpose
+      userspace/tput              120 passed, 836 differed,  9 differ on purpose, 1 never ended
+
+  It read no terminfo database: it carried a table of its own for five
+  terminals (`xterm`, `vt100`, `linux`, `dumb` and `slateos`), so every
+  other name was its idea of an xterm and every crafted entry the harness
+  compiles was refused, and even the five were wrong where they mattered --
+  `sgr0` `\E[0m` where xterm's is `\E(B\E[m`, `clear` without the
+  scrollback's `E3`, a `longname` of its own invention with a newline after
+  it. A boolean it did not list, `bw` among them, was an unknown
+  capability, and an unknown capability exited 1 where ncurses exits 4.
+  As `tset` and `reset` it took no options at all -- `tset -q` was
+  `invalid option -- 'q'` -- and sent a hard reset of its own (`\Ec`, the
+  screen cleared, the cursor shown) and then `Terminal reset to sane
+  state.`, where ncurses sends the terminal's own init or reset strings
+  and reports the erase, interrupt and kill characters it changed. As
+  `init` it was plain `tput`, so `init -S` sat waiting on the terminal for
+  commands -- the case that never ended -- where ncurses refuses `-S` from
+  its other names. Its 120 passes are capabilities its table happened to
+  hold as the database does, `cols`, `colors`, `bold` and `el` on the
+  xterms among them. **What the loser knew that the winner did not:**
+  nothing that ships.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

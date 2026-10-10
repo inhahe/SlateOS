@@ -132,11 +132,24 @@ def parse_passed(output):
     return passed
 
 
-def run_tests(crate, timeout):
-    """`cargo test -p <crate>`. Returns (ok, summary)."""
+def run_tests(crate, timeout, manifest=None):
+    """`cargo test -p <crate>`, or for a crate the workspace excludes,
+    `cargo test --manifest-path <its Cargo.toml>`. Returns (ok, summary).
+
+    `-p` names workspace members only: for `services/init` it answers "did
+    not match any packages", and until 2026-10-05 that read as `RED init 0
+    passed` -- the crate's tests never ran, and its drive-root writes were
+    never looked for. The excluded crate shares the canonical target
+    directory, as push gate 46 (check-excluded-crate-tests.py) runs it,
+    rather than growing a build tree of its own.
+    """
     runner = os.path.join(ROOT, "scripts", "run-timeout.py")
-    cmd = [sys.executable, runner, str(timeout), "cargo", "test",
-           "-p", crate, "--target", TARGET]
+    cmd = [sys.executable, runner, str(timeout), "cargo", "test"]
+    if manifest:
+        cmd += ["--manifest-path", manifest, "--target", TARGET,
+                "--target-dir", os.path.join(ROOT, "target")]
+    else:
+        cmd += ["-p", crate, "--target", TARGET]
     try:
         proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                               errors="replace")
@@ -223,11 +236,30 @@ def workspace_crates():
     return sorted(p["name"] for p in meta.get("packages", []))
 
 
+def manifest_of(name, workspace):
+    """The `Cargo.toml` to test package `name` by, when the workspace does not
+    hold it -- every `services/*` crate -- or None: a workspace member, which
+    `-p` names, or no crate under this gate's trees at all."""
+    if name in workspace:
+        return None
+    for root in SOURCE_ROOTS:
+        try:
+            subs = sorted(os.listdir(os.path.join(ROOT, root)))
+        except OSError:
+            continue
+        for sub in subs:
+            if package_of(root + "/" + sub) == name:
+                return os.path.join(ROOT, root, sub, "Cargo.toml")
+    return None
+
+
 def check(crates, timeout, confirm=True):
     findings = []
+    workspace = set(workspace_crates())
     for crate in crates:
+        manifest = manifest_of(crate, workspace) if workspace else None
         before = snapshot()
-        ok, summary = run_tests(crate, timeout)
+        ok, summary = run_tests(crate, timeout, manifest)
         after = snapshot()
         gained = sorted(after - before)
         status = "ok " if ok else "RED"
@@ -267,7 +299,7 @@ def check(crates, timeout, confirm=True):
                       + " -- confirming without it", file=sys.stderr)
 
         before2 = snapshot()
-        run_tests(crate, timeout)
+        run_tests(crate, timeout, manifest)
         after2 = snapshot()
         again = sorted(after2 - before2)
         if again:
@@ -361,6 +393,19 @@ def selftest():
        "a path in no crate selects no crate, which is a pass and not a refusal")
     ck(CANARIES and all(c in set(workspace_crates() or CANARIES) for c in CANARIES),
        "the canary crates must exist: " + repr(CANARIES))
+    # A crate the workspace excludes is tested by its own manifest: `-p` cannot
+    # name it, which reported `RED init 0 passed` -- nothing run, nothing
+    # checked -- until 2026-10-05. A member keeps `-p`.
+    ws = set(workspace_crates())
+    if ws:
+        m = manifest_of("init", ws)
+        ck(m is not None and m.replace(os.sep, "/").endswith("services/init/Cargo.toml"),
+           "services/init, which the workspace excludes, must be tested by its "
+           "manifest, got " + repr(m))
+        ck(manifest_of("udevd", ws) is None,
+           "a workspace member must keep `-p`")
+        ck(manifest_of("no-such-crate-anywhere", ws) is None,
+           "a name no crate has must not invent a manifest")
 
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0
@@ -409,7 +454,8 @@ def main():
     elif args.crates:
         crates = args.crates
         known = set(workspace_crates())
-        unknown = [c for c in crates if known and c not in known]
+        unknown = [c for c in crates
+                   if known and c not in known and manifest_of(c, known) is None]
         if unknown:
             # A name that matches no package is a typo, and a typo that
             # silently tested nothing would report a clean tree.

@@ -73,6 +73,11 @@ use randrange::{RandomSource, SecretSource, SystemRandom};
 #[cfg(test)]
 use randrange::SeededRng;
 
+// Which stored target a URL is about used to be decided here, by a copy that
+// knew three schemes, compared wildcards and parent domains case-sensitively,
+// and took `user@host` for a host. The service's library has the one copy.
+use credentials::matching::{MatchPriority, match_url};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -663,89 +668,6 @@ pub fn estimate_password_strength(password: &str) -> PasswordStrength {
     } else {
         PasswordStrength::VeryStrong
     }
-}
-
-// ---------------------------------------------------------------------------
-// URL Matching for Autofill
-// ---------------------------------------------------------------------------
-
-/// Priority level for URL matching (higher = better match).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MatchPriority {
-    /// No match at all.
-    None,
-    /// Wildcard subdomain match (*.example.com).
-    Wildcard,
-    /// Parent domain match (target is parent of query domain).
-    ParentDomain,
-    /// Exact domain match.
-    ExactDomain,
-    /// Exact domain + path prefix match.
-    ExactWithPath,
-}
-
-/// Extract the domain from a URL string (strips scheme, port, path).
-fn extract_domain(url: &str) -> &str {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .or_else(|| url.strip_prefix("ftp://"))
-        .unwrap_or(url);
-
-    // Take everything before the first '/' or ':'
-    let end = without_scheme
-        .find('/')
-        .or_else(|| without_scheme.find(':'))
-        .unwrap_or(without_scheme.len());
-
-    &without_scheme[..end]
-}
-
-/// Extract the path from a URL (everything after the domain).
-fn extract_path(url: &str) -> &str {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .or_else(|| url.strip_prefix("ftp://"))
-        .unwrap_or(url);
-
-    match without_scheme.find('/') {
-        Some(idx) => &without_scheme[idx..],
-        None => "/",
-    }
-}
-
-/// Determine how well a stored credential target matches a query URL.
-pub fn match_url(credential_target: &str, query_url: &str) -> MatchPriority {
-    let target_domain = extract_domain(credential_target);
-    let query_domain = extract_domain(query_url);
-
-    // Check for wildcard pattern (*.example.com)
-    if let Some(wildcard_base) = target_domain.strip_prefix("*.") {
-        if query_domain == wildcard_base || query_domain.ends_with(&format!(".{wildcard_base}")) {
-            return MatchPriority::Wildcard;
-        }
-        return MatchPriority::None;
-    }
-
-    // Check exact domain match
-    if target_domain.eq_ignore_ascii_case(query_domain) {
-        // Check if target has a path prefix that also matches
-        let target_path = extract_path(credential_target);
-        let query_path = extract_path(query_url);
-
-        if target_path != "/" && query_path.starts_with(target_path) {
-            return MatchPriority::ExactWithPath;
-        }
-        return MatchPriority::ExactDomain;
-    }
-
-    // Check if query domain is a subdomain of the target domain
-    if query_domain.ends_with(&format!(".{target_domain}")) {
-        return MatchPriority::ParentDomain;
-    }
-
-    MatchPriority::None
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,40 +2369,8 @@ mod tests {
         assert_eq!(results[0].name, "Personal Email");
     }
 
-    // -- URL matching tests --
-
-    #[test]
-    fn test_url_match_exact_domain() {
-        let priority = match_url("github.com", "https://github.com/login");
-        assert_eq!(priority, MatchPriority::ExactDomain);
-    }
-
-    #[test]
-    fn test_url_match_with_path() {
-        let priority = match_url(
-            "https://example.com/app",
-            "https://example.com/app/settings",
-        );
-        assert_eq!(priority, MatchPriority::ExactWithPath);
-    }
-
-    #[test]
-    fn test_url_match_wildcard() {
-        let priority = match_url("*.example.com", "https://login.example.com/auth");
-        assert_eq!(priority, MatchPriority::Wildcard);
-    }
-
-    #[test]
-    fn test_url_match_parent_domain() {
-        let priority = match_url("example.com", "https://sub.example.com/page");
-        assert_eq!(priority, MatchPriority::ParentDomain);
-    }
-
-    #[test]
-    fn test_url_no_match() {
-        let priority = match_url("github.com", "https://gitlab.com/repo");
-        assert_eq!(priority, MatchPriority::None);
-    }
+    // URL matching is the library's (`credentials::matching`), and tested
+    // there.
 
     // -- Password generator tests --
 

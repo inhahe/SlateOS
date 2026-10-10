@@ -341,7 +341,12 @@ pub fn execute_action(menu: &ContextMenu, item_id: u64) -> KernelResult<String> 
 // ---------------------------------------------------------------------------
 
 /// Built-in items for a single file.
-fn file_builtin_items(path: &Path) -> Vec<MenuItem> {
+///
+/// The same for every file. Items for one kind of file ("Edit" for text, "Set
+/// as wallpaper" for a picture) come from extensions, registered by the
+/// programs that know those kinds: the kernel keeps no list of file types
+/// (design-decisions 1425).
+fn file_builtin_items(_path: &Path) -> Vec<MenuItem> {
     let mut items = vec![
         // Open.
         make_item("Open", "", "open", 10),
@@ -360,15 +365,6 @@ fn file_builtin_items(path: &Path) -> Vec<MenuItem> {
         // Checksum (per properties module).
         make_item("Copy path", "", "copypath", 300),
     ];
-
-    // Check if we can add file-type-specific items.
-    let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
-    if mime.starts_with("text/") {
-        items.push(make_item("Edit", "", "edit", 15));
-    }
-    if mime.starts_with("image/") {
-        items.push(make_item("Set as wallpaper", "", "wallpaper", 310));
-    }
 
     items.push(make_separator_at(900));
     items.push(make_item("Properties", "Alt+Enter", "properties", 999));
@@ -744,9 +740,9 @@ pub fn self_test() -> KernelResult<()> {
         // The glob still matches: the pattern is UTF-8 but the name is
         // compared as bytes.
         assert!(menu.items.iter().any(|i| i.label == "Edit Image"));
-        // And so does the built-in image item, which comes from
-        // `mime::detect` on the same bytes.
-        assert!(menu.items.iter().any(|i| i.label == "Set as wallpaper"));
+        // The built-in items are the same for every file: no kind-specific
+        // item appears without an extension that adds it.
+        assert!(!menu.items.iter().any(|i| i.label == "Set as wallpaper"));
 
         // A non-UTF-8 name with the wrong extension must not match.
         let q = Path::new(&b"/doc_\xFF.txt"[..]);

@@ -1,5 +1,11 @@
 ## §377 — A broken pipe stays quiet in `stdfd`, and `SIGPIPE` stays masked, because the target has no signal to restore
 
+> **Superseded 2026-10-07 by §1060.** The target raises `SIGPIPE` now
+> (lane D's §1176), which removes the one reason given below for rejecting
+> option A, and `stdfd::restore` puts the inherited disposition back.
+> `stdfd::reader_gone` keeps this entry's convention only for a program
+> that has not yet been given the guard, and for the Windows host.
+
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
 

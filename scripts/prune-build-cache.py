@@ -470,6 +470,36 @@ def find_profiles(target_dir):
     return found
 
 
+#: How often a fingerprint's rename is tried, and how long apart, before the
+#: unit counts as in use. Windows refuses to rename a directory while anything
+#: holds a handle inside it, and the indexer and Defender open just-written
+#: files for a few milliseconds: one refusal is not evidence of a build. It
+#: was taken as one, which made `test-prune-build-cache.py` fail 2 of 22 once
+#: under load (2026-10-02) and makes a real prune skip units no build holds.
+RENAME_ATTEMPTS = 5
+RENAME_BACKOFF_S = 0.05
+
+
+def _rename_patiently(src, dst, rename=None, backoff=RENAME_BACKOFF_S):
+    """`os.rename` (or `rename`, for the self-test), tried again on a refusal,
+    up to `RENAME_ATTEMPTS` times.
+
+    A file that is not there is not retried: it is gone, not held. Raises the
+    last refusal, which is then a unit really in use.
+    """
+    rename = os.rename if rename is None else rename
+    for attempt in range(1, RENAME_ATTEMPTS + 1):
+        try:
+            rename(src, dst)
+            return
+        except FileNotFoundError:
+            raise
+        except OSError:
+            if attempt == RENAME_ATTEMPTS:
+                raise
+            time.sleep(backoff)
+
+
 def prune(candidates, staging, verbose):
     """Remove `candidates`, newest-safe order, skipping anything in use.
 
@@ -482,7 +512,7 @@ def prune(candidates, staging, verbose):
     for i, cand in enumerate(candidates):
         dest = os.path.join(staging, f"{i:07d}")
         try:
-            os.rename(cand.fingerprint, dest)
+            _rename_patiently(cand.fingerprint, dest)
         except OSError as exc:
             # In use, or gone since the scan.  Either way: leave the artifacts
             # alone, because a unit with artifacts but no fingerprint is the
@@ -720,6 +750,41 @@ def self_test():
             not broken,
             f"no surviving fingerprint lost its artifacts (orphaned: {broken})",
         )
+
+    # A fingerprint's rename refused for a moment -- a handle Windows' indexer
+    # or Defender holds briefly -- is a unit taken, not one in use; refused on
+    # every try, it is in use; not there, it is not waited for.
+    def refusing(times, error=PermissionError):
+        calls = []
+
+        def rename(src, dst):
+            calls.append((src, dst))
+            if len(calls) <= times:
+                raise error(13, "held")
+
+        return rename, calls
+
+    rename, calls = refusing(2)
+    try:
+        _rename_patiently("a", "b", rename=rename, backoff=0)
+        moved = True
+    except OSError:
+        moved = False
+    check(moved and len(calls) == 3, "a rename refused twice is tried again and taken")
+    rename, calls = refusing(RENAME_ATTEMPTS)
+    try:
+        _rename_patiently("a", "b", rename=rename, backoff=0)
+        held = False
+    except PermissionError:
+        held = True
+    check(held and len(calls) == RENAME_ATTEMPTS, "refused every time, it is in use")
+    rename, calls = refusing(1, FileNotFoundError)
+    try:
+        _rename_patiently("a", "b", rename=rename, backoff=0)
+        gone = False
+    except FileNotFoundError:
+        gone = True
+    check(gone and len(calls) == 1, "a fingerprint that is gone is not waited for")
 
     print(f"self-test: {len(checks)} check(s), {len(fails)} failure(s)")
     return len(checks), len(fails)

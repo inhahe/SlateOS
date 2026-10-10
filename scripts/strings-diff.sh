@@ -113,6 +113,14 @@ compare() {
   if [ "$stdin" = "-" ]; then
     run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
     run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "$stdin" = "<&-" ]; then
+    # Standard input closed.
+    run_side ours "$@" <&- >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" <&- >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "${stdin#<}" != "$stdin" ]; then
+    # Standard input redirected from a path -- a directory, whose reads fail.
+    run_side ours "$@" <"${stdin#<}" >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" <"${stdin#<}" >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
     printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -251,6 +259,14 @@ run_case plain.txt nosuch.bin lengths.bin
 run_stdin 'hello world\0second\0'
 run_stdin 'abc\0abcd\0' -n 4
 run_stdin ''
+# Standard input that cannot be read: binutils reads it with `getc` and never
+# asks `ferror`, so a failed read is simply the end of the input -- nothing is
+# printed and the status is 0, for a closed descriptor and a directory alike.
+# Ours reported the directory as `Is a directory` until 2026-10-03.
+compare '<&-'; report "strings <&-"
+compare '<.'; report "strings < dir"
+compare '<&-' -a; report "strings -a <&-"
+compare '<.' -n 2; report "strings -n 2 < dir"
 xfail_case "our usage text, not the GNU project's -- it names the options this build refuses where GNU lists its supported targets" -
 
 # --- the output separator ---------------------------------------------------------------------------------

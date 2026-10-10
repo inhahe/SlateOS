@@ -1,0 +1,8 @@
+[package]
+name = "msgframe"
+version = "0.1.0"
+edition = "2024"
+description = "Small messages framed with their length and read field by field, every field bounded -- the wire format of SlateOS's small services"
+
+[lints]
+workspace = true

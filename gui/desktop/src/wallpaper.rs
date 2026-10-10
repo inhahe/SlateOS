@@ -638,6 +638,11 @@ pub struct WallpaperConfig {
     pub slideshow_shuffle: bool,
     /// Image fitting mode.
     pub fit: ImageFit,
+    /// Which part of a picture that overflows the screen shows, and where
+    /// one smaller sits: fractions across and down
+    /// (`AppearanceSettings::wallpaper_position`), applied when it is drawn,
+    /// as the fit is.
+    pub position: (f32, f32),
     /// Dynamic theme palette.
     pub dynamic_theme: DynamicTheme,
 }
@@ -656,6 +661,7 @@ impl Default for WallpaperConfig {
             slideshow_interval_secs: 300,
             slideshow_shuffle: false,
             fit: ImageFit::Fill,
+            position: (0.5, 0.5),
             dynamic_theme: DynamicTheme::default(),
         }
     }
@@ -802,6 +808,14 @@ impl WallpaperManager {
     /// photograph six times.
     pub fn set_fit(&mut self, fit: ImageFit) {
         self.config.fit = fit;
+    }
+
+    /// Show another part of a picture that overflows the screen -- or move
+    /// one smaller -- as fractions across and down. Applied when the
+    /// wallpaper is drawn, as [`set_fit`](Self::set_fit)'s fit is, so moving
+    /// it needs no new pixels.
+    pub fn set_position(&mut self, position: (f32, f32)) {
+        self.config.position = position;
     }
 
     pub fn set_slideshow(&mut self, directory: &Path, interval_secs: u64, shuffle: bool) {
@@ -1125,8 +1139,14 @@ impl WallpaperManager {
         // handed. Nothing is drawn until a picture is up: an image id the
         // compositor holds no pixels for draws nothing, silently.
         if let Some((id, iw_src, ih_src)) = self.shown_picture() {
-            let (ix, iy, iw, ih) =
-                compute_image_rect(width, height, iw_src, ih_src, self.config.fit);
+            let (ix, iy, iw, ih) = compute_image_rect(
+                width,
+                height,
+                iw_src,
+                ih_src,
+                self.config.fit,
+                self.config.position,
+            );
             cmds.push(RenderCommand::Image {
                 x: ix,
                 y: iy,
@@ -1336,6 +1356,8 @@ impl WallpaperManager {
             slideshow_interval_secs: slideshow_interval.unwrap_or(300),
             slideshow_shuffle: slideshow_shuffle.unwrap_or(false),
             fit: fit.unwrap_or(ImageFit::Fill),
+            // The appearance settings' to say, not this file's.
+            position: (0.5, 0.5),
             dynamic_theme,
         })
     }
@@ -1470,37 +1492,30 @@ pub(crate) fn compute_image_rect(
     image_w: f32,
     image_h: f32,
     fit: ImageFit,
+    position: (f32, f32),
 ) -> (f32, f32, f32, f32) {
     if display_w <= 0.0 || display_h <= 0.0 || image_w <= 0.0 || image_h <= 0.0 {
         return (0.0, 0.0, display_w, display_h);
     }
 
+    // The scaling fits are the toolkit's arithmetic, centred and free to
+    // enlarge: one implementation of a picture in a box for the desktop, the
+    // login screen and every application's image view.
+    let fitted = |scale| {
+        let r = guitk::layout::fit_image(
+            guitk::layout::Size::new(image_w, image_h),
+            guitk::frame::Rect::new(0.0, 0.0, display_w, display_h),
+            scale,
+            true,
+            position,
+        );
+        (r.x, r.y, r.w, r.h)
+    };
     match fit {
-        ImageFit::Stretch => (0.0, 0.0, display_w, display_h),
-
-        ImageFit::Fill => {
-            let scale = (display_w / image_w).max(display_h / image_h);
-            let w = image_w * scale;
-            let h = image_h * scale;
-            let x = (display_w - w) / 2.0;
-            let y = (display_h - h) / 2.0;
-            (x, y, w, h)
-        }
-
-        ImageFit::Fit => {
-            let scale = (display_w / image_w).min(display_h / image_h);
-            let w = image_w * scale;
-            let h = image_h * scale;
-            let x = (display_w - w) / 2.0;
-            let y = (display_h - h) / 2.0;
-            (x, y, w, h)
-        }
-
-        ImageFit::Center => {
-            let x = (display_w - image_w) / 2.0;
-            let y = (display_h - image_h) / 2.0;
-            (x, y, image_w, image_h)
-        }
+        ImageFit::Stretch => fitted(guitk::layout::ImageScale::Stretch),
+        ImageFit::Fill => fitted(guitk::layout::ImageScale::Cover),
+        ImageFit::Fit => fitted(guitk::layout::ImageScale::Contain),
+        ImageFit::Center => fitted(guitk::layout::ImageScale::Natural),
 
         ImageFit::Tile => {
             // For tile mode, we position the first tile at the origin.
@@ -3212,9 +3227,45 @@ mod tests {
     // compute_image_rect
     // ------------------------------------------------------------------
 
+    /// A picture placed with its middle at the screen's middle: the default
+    /// position.
+    const MIDDLE: (f32, f32) = (0.5, 0.5);
+
+    /// **The position chooses which part of a filling picture shows** --
+    /// `design.txt`'s "let the user scroll the image up/down or right/left
+    /// to center it on the desktop how they want" -- and where a fitted one
+    /// smaller than the screen sits; a stretched one has nowhere to move.
+    #[test]
+    fn image_rect_position_moves_the_picture() {
+        // 3000x1000 filling 1920x1080: 3240 wide, so 1320 overflows.
+        let (x, ..) =
+            compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fill, (0.0, 0.5));
+        assert!(x.abs() < 0.01, "the left edge shows: {x}");
+        let (x, _, w, _) =
+            compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fill, (1.0, 0.5));
+        assert!((x + w - 1920.0).abs() < 0.01, "the right edge shows");
+        // Fitted, 1920x640: room left down, so it sits at the top.
+        let (_, y, ..) =
+            compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fit, (0.5, 0.0));
+        assert!(y.abs() < 0.01);
+        // Stretched, it is the screen wherever it is put.
+        assert_eq!(
+            compute_image_rect(
+                1920.0,
+                1080.0,
+                3000.0,
+                1000.0,
+                ImageFit::Stretch,
+                (0.0, 1.0)
+            ),
+            (0.0, 0.0, 1920.0, 1080.0)
+        );
+    }
+
     #[test]
     fn image_rect_stretch() {
-        let (x, y, w, h) = compute_image_rect(1920.0, 1080.0, 800.0, 600.0, ImageFit::Stretch);
+        let (x, y, w, h) =
+            compute_image_rect(1920.0, 1080.0, 800.0, 600.0, ImageFit::Stretch, MIDDLE);
         assert!((x).abs() < f32::EPSILON);
         assert!((y).abs() < f32::EPSILON);
         assert!((w - 1920.0).abs() < f32::EPSILON);
@@ -3223,7 +3274,8 @@ mod tests {
 
     #[test]
     fn image_rect_center() {
-        let (x, y, w, h) = compute_image_rect(1920.0, 1080.0, 800.0, 600.0, ImageFit::Center);
+        let (x, y, w, h) =
+            compute_image_rect(1920.0, 1080.0, 800.0, 600.0, ImageFit::Center, MIDDLE);
         assert!((x - 560.0).abs() < f32::EPSILON); // (1920-800)/2
         assert!((y - 240.0).abs() < f32::EPSILON); // (1080-600)/2
         assert!((w - 800.0).abs() < f32::EPSILON);
@@ -3233,7 +3285,8 @@ mod tests {
     #[test]
     fn image_rect_fill_wider_image() {
         // Image wider than display: scale by height, crop width.
-        let (x, _y, w, h) = compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fill);
+        let (x, _y, w, h) =
+            compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fill, MIDDLE);
         // Scale = max(1920/3000, 1080/1000) = max(0.64, 1.08) = 1.08
         let expected_scale = 1080.0 / 1000.0;
         assert!((h - 1000.0 * expected_scale).abs() < 1.0);
@@ -3245,7 +3298,8 @@ mod tests {
     #[test]
     fn image_rect_fit_wider_image() {
         // Image wider than display: scale by width, letterbox vertically.
-        let (_x, y, w, h) = compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fit);
+        let (_x, y, w, h) =
+            compute_image_rect(1920.0, 1080.0, 3000.0, 1000.0, ImageFit::Fit, MIDDLE);
         // Scale = min(1920/3000, 1080/1000) = min(0.64, 1.08) = 0.64
         let expected_scale = 1920.0 / 3000.0;
         assert!((w - 3000.0 * expected_scale).abs() < 1.0);
@@ -3256,7 +3310,7 @@ mod tests {
 
     #[test]
     fn image_rect_zero_dimensions() {
-        let (x, y, w, h) = compute_image_rect(0.0, 0.0, 100.0, 100.0, ImageFit::Fill);
+        let (x, y, w, h) = compute_image_rect(0.0, 0.0, 100.0, 100.0, ImageFit::Fill, MIDDLE);
         assert!((x).abs() < f32::EPSILON);
         assert!((y).abs() < f32::EPSILON);
         assert!((w).abs() < f32::EPSILON);

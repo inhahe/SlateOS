@@ -1,0 +1,15 @@
+[package]
+name = "svcconn"
+version = "0.1.0"
+edition = "2024"
+description = "Connecting to SlateOS's named services and reading their framed messages, for the small services built on msgframe"
+
+[dependencies]
+# The transport: a SlateOS channel to a named service, through the same
+# `Transport` the display protocol uses.
+guiremote = { path = "../remote" }
+# The frames read off it.
+msgframe = { path = "../msgframe" }
+
+[lints]
+workspace = true

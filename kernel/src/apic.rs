@@ -711,6 +711,29 @@ pub unsafe fn send_sipi(apic_id: u8, vector: u8) {
     wait_icr_idle();
 }
 
+/// Send an NMI to every CPU but this one (the "all excluding self"
+/// shorthand). An NMI is taken whatever the target's interrupt flag, so it
+/// reaches a CPU spinning with interrupts off; what it then does is the NMI
+/// handler's to decide (`idt::handle_nmi`).
+///
+/// # Safety
+///
+/// APIC must be initialized, and every target's NMI handler must expect this
+/// NMI: today only a restart's stop does (`kexec::park_if_restarting`).
+pub unsafe fn send_nmi_all_excluding_self() {
+    wait_icr_idle();
+
+    // ICR low: NMI delivery (100 in bits 10:8), edge, physical, all excluding
+    // self (bits 19:18 = 11). The vector field is ignored for an NMI.
+    // = 0x000C_0400
+    // SAFETY: Valid APIC register write, triggers the IPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, 0x000C_0400);
+    }
+
+    wait_icr_idle();
+}
+
 /// Send a fixed-mode IPI with the given vector to all CPUs except self.
 ///
 /// Uses the "all excluding self" shorthand destination (ICR bits 19:18 = 11)
@@ -740,28 +763,38 @@ pub unsafe fn send_ipi_all_excluding_self(vector: u8) {
 /// wake-ups such as reschedule IPIs (only wake the CPU that has new
 /// work, not all CPUs).
 ///
+/// The destination and the command are two register writes, so they are
+/// made with interrupts off: an interrupt between them whose handler sent an
+/// IPI of its own (a wake from a timer) left its destination in ICR_HIGH, and
+/// the second write then sent this IPI there instead -- harmless for a
+/// reschedule, which the right CPU picks up at its next tick, but a lost
+/// acknowledgement and a hung initiator for a barrier (`cpusync`). Linux
+/// sends with interrupts off for the same reason.
+///
 /// # Safety
 ///
 /// APIC must be initialized.  The vector must have a valid ISR in the IDT.
 /// Must not send to the current CPU (self-IPI has a different mechanism
 /// and could cause re-entrancy issues in ISR context).
 pub unsafe fn send_fixed_ipi(apic_id: u8, vector: u8) {
-    wait_icr_idle();
+    crate::cpu::without_interrupts(|| {
+        wait_icr_idle();
 
-    // ICR high: destination APIC ID in bits [31:24].
-    // SAFETY: Valid APIC register write.
-    unsafe {
-        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
-    }
+        // ICR high: destination APIC ID in bits [31:24].
+        // SAFETY: Valid APIC register write.
+        unsafe {
+            apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+        }
 
-    // ICR low: fixed delivery (000), physical dest, edge trigger.
-    // Bits 19:18 = 00 (no shorthand — use specific destination).
-    // SAFETY: Valid APIC register write, triggers the IPI.
-    unsafe {
-        apic_write(APIC_ICR_LOW, u32::from(vector));
-    }
+        // ICR low: fixed delivery (000), physical dest, edge trigger.
+        // Bits 19:18 = 00 (no shorthand — use specific destination).
+        // SAFETY: Valid APIC register write, triggers the IPI.
+        unsafe {
+            apic_write(APIC_ICR_LOW, u32::from(vector));
+        }
 
-    wait_icr_idle();
+        wait_icr_idle();
+    });
 }
 
 /// Reschedule IPI vector.
@@ -805,6 +838,34 @@ pub unsafe fn stop_timer() {
             LVT_MASKED | TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR),
         );
     }
+    if let Some(flag) = TIMER_STOPPED.get(crate::smp::current_cpu_index()) {
+        flag.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Per CPU: its LAPIC timer is masked ([`stop_timer`]) -- an application
+/// processor in tickless idle -- and not yet restarted ([`restart_timer`]).
+///
+/// Read by the scheduler, which restarts the timer before it runs anything
+/// but the idle task on such a CPU (`sched::schedule_inner`): a task must
+/// never run without the tick that time-slices it. Until 2026-10-09 only the
+/// AP idle loop restarted it, after its `hlt`, so a switch made any other way
+/// -- from an interrupt's exit, past the idle loop -- left the task running
+/// with no tick: never preempted, and starving every task queued behind it
+/// on that CPU (a two-CPU boot's ring benchmark took its whole four-minute
+/// deadline for two probes). Read too by the soft-lockup watchdogs, for which
+/// a CPU with its timer stopped in idle is quiet, not locked up.
+static TIMER_STOPPED: [core::sync::atomic::AtomicBool; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::smp::MAX_CPUS];
+
+/// Whether CPU `cpu`'s LAPIC timer is stopped ([`stop_timer`]) and not yet
+/// restarted ([`restart_timer`]): tickless idle. `false` for an index past
+/// the table.
+#[must_use]
+pub fn timer_stopped_on(cpu: usize) -> bool {
+    TIMER_STOPPED
+        .get(cpu)
+        .is_some_and(|f| f.load(core::sync::atomic::Ordering::Acquire))
 }
 
 /// Restart the APIC timer on the current CPU (leaving tickless idle).
@@ -832,6 +893,9 @@ pub unsafe fn restart_timer() {
         // Restart the countdown from the calibrated 10 ms value.
         // Writing initial_count restarts the counter from this value.
         apic_write(APIC_TIMER_INITIAL, count);
+    }
+    if let Some(flag) = TIMER_STOPPED.get(crate::smp::current_cpu_index()) {
+        flag.store(false, core::sync::atomic::Ordering::Release);
     }
 }
 

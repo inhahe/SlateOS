@@ -518,32 +518,22 @@ impl MockAp {
     }
 
     fn on_eapol(&mut self, from: MacAddr, eapol_frame: &[u8]) -> KernelResult<ApStep> {
-        let body = eapol::body(eapol_frame).ok_or(KernelError::InvalidArgument)?;
         // The MIC length is not carried in the frame — it is a property of the
         // negotiated AKM, and the parser has to be told which. This AP offers
         // PSK only, so it is always the default 16.
-        let key = eapol::KeyFrame::parse(body, eapol::MIC_LEN_DEFAULT)
-            .ok_or(KernelError::InvalidArgument)?;
-
-        // The two halves of `net80211`'s EAPOL API take *different* slices, and
-        // the difference is invisible at the call site because both are `&[u8]`:
-        // `KeyFrame::parse` takes the body, while everything MIC-related indexes
-        // with `eapol::MIC_OFFSET`, which is documented as an offset "from the
-        // start of the EAPOL frame (that is, including the 4-octet EAPOL
-        // header)". Handing the body to `verify_mic` shifts every hashed range
-        // by 4 octets, and the only symptom is a MIC that never verifies —
-        // indistinguishable from a wrong passphrase. This AP shipped with
-        // exactly that bug; `frame` exists so the distinction has a name.
         //
-        // Trimmed to the length the header declares rather than passed whole:
-        // an EAPOL frame rides inside an 802.11 data frame, so the buffer may
-        // carry padding past the body, and the sender's MIC did not cover it.
-        let frame_len = eapol::HEADER_LEN
-            .checked_add(body.len())
+        // `parse_frame` takes the frame as it arrived and hands back, with the
+        // key frame, the exact octets the MIC covers: the frame trimmed to the
+        // length its header declares, since an EAPOL frame rides inside an
+        // 802.11 data frame and the buffer may carry padding the sender did
+        // not hash. This AP used to cut out the body, parse that, and rebuild
+        // the MIC range by hand -- and shipped once with the range 4 octets
+        // off, the header's worth, so that every MIC failed to verify exactly
+        // as a wrong passphrase would. There is no range to rebuild now.
+        let parsed = eapol::KeyFrame::parse_frame(eapol_frame, eapol::MIC_LEN_DEFAULT)
             .ok_or(KernelError::InvalidArgument)?;
-        let frame = eapol_frame
-            .get(..frame_len)
-            .ok_or(KernelError::InvalidArgument)?;
+        let key = parsed.key;
+        let frame = parsed.hashed;
 
         match self.phase {
             ApPhase::FourWayM2 => {

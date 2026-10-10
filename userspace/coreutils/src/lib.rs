@@ -470,6 +470,9 @@
 //! - [`interval`] — a time interval, `strtod` and an `s`/`m`/`h`/`d` suffix:
 //!   `sleep`'s operands and `timeout`'s durations, which upstream copies
 //!   between the two files.
+//! - [`killall5`] — sysvinit's `killall5` and `pidof`, one program that is
+//!   either by the name it is started under; `bin/killall5.rs` and
+//!   `bin/pidof.rs` both run it.
 //! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
@@ -504,6 +507,9 @@
 //!   signal that ended its command, and coreutils' `operand2sig.c`, for
 //!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
 //!   report from inside a signal handler.
+//! - [`skill`] — procps-ng's `skill` and `snice`, one program that is either
+//!   by the name it is started under; `bin/skill.rs` and `bin/snice.rs` both
+//!   run it.
 //! - [`utmp`] — gnulib's `readutmp`: which login records `who`, `users` and
 //!   `pinky` are given, the boot entry made up when a Linux utmp has none, and
 //!   the readings of a record's fields the three share.
@@ -522,6 +528,7 @@ pub use ::cprintf::{bignat, cfmt, extfloat};
 pub mod canon;
 pub mod chowncore;
 pub mod cksum;
+pub mod cleanup;
 pub mod copy;
 pub mod digest;
 pub mod dirfd;
@@ -539,10 +546,13 @@ pub mod grouplist;
 pub mod hardlink;
 pub mod human;
 pub mod interval;
+pub mod killall5;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;
 pub mod mkdirp;
+pub mod ncurses;
+pub mod nproc;
 pub mod overwrite;
 pub mod parse_datetime;
 pub mod pathname;
@@ -562,6 +572,7 @@ pub mod remove;
 pub mod rename;
 pub mod setfields;
 pub mod sig2str;
+pub mod skill;
 // Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
 // it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
 // whose `--more-help` runs `$PAGER`) runs its pager the same way.

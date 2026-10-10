@@ -13,6 +13,15 @@
 //! not POSIX scheduling policies.  These stubs allow programs that
 //! query or set scheduling parameters to link and run.
 //!
+//! Every thread is `SCHED_OTHER` at priority 0 as these functions report
+//! it, and asking for the other ordinary policies changes nothing that
+//! could be seen.  A real-time policy (`SCHED_FIFO`, `SCHED_RR`) is `EPERM`:
+//! the scheduler has no real-time class to put a thread in -- its levels all
+//! belong to `nice` -- so the answer is the one a program without the right
+//! gets on Linux, which audio servers handle by running without it
+//! (`requests/d-a-real-time-scheduling-has-no-class-to-run-in.md`).  Until
+//! 2026-10-06 a permitted caller was told 0 and nothing changed.
+//!
 //! Functions: `sched_getscheduler`, `sched_setscheduler`,
 //! `sched_getparam`, `sched_setparam`, `sched_get_priority_min`,
 //! `sched_get_priority_max`, `sched_rr_get_interval`.
@@ -159,11 +168,17 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 ///      `kernel/src/proc/pcb.rs`, and both seed `RLIMIT_RTPRIO` to 0, so
 ///      writing the whole predicate changes nothing at cold start and starts
 ///      honouring a raised limit.
+///   8. A real-time policy that step 7 permits is `EPERM` all the same: the
+///      scheduler has no real-time class to put the thread in -- its levels
+///      all belong to `nice` -- so the honest answer is the one a program
+///      without the right gets on Linux, which audio servers already handle
+///      by running without it
+///      (`requests/d-a-real-time-scheduling-has-no-class-to-run-in.md`).
+///      Until 2026-10-06 it was 0, and nothing changed.  When the kernel has
+///      the class, a permitted caller gets it here.
 ///
-/// After validation we have no real scheduler hookup, so we report
-/// success without altering any task state.  Tests that wanted a
-/// silent accept for an arbitrary policy must now pass a recognised
-/// `SCHED_*` constant.
+/// The ordinary policies (`SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE`) at
+/// priority 0 are accepted: every thread here runs as one of them already.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32 {
     if policy < 0 || param.is_null() || pid < 0 {
@@ -195,38 +210,50 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Phase 170 / §314.  Linux's __sched_setscheduler runs this after
-    // argument validation and before any scheduler state mutation.
-    //
-    //   if (rt_policy(policy)) {
-    //       unsigned long rlim_rtprio = task_rlimit(p, RLIMIT_RTPRIO);
-    //       if (policy != p->policy && !rlim_rtprio)        goto req_priv;
-    //       if (attr->sched_priority > p->rt_priority &&
-    //           attr->sched_priority > rlim_rtprio)         goto req_priv;
-    //   }
-    //   if (dl_policy(policy))                              goto req_priv;
-    //   ...
-    //   req_priv: if (!capable(CAP_SYS_NICE)) return -EPERM;
-    //
-    // Our task is always SCHED_OTHER with rt_priority 0, so `policy !=
-    // p->policy` holds for every RT switch and `p->rt_priority` is 0.  Both
-    // RT clauses therefore reduce to: the capability is required unless the
-    // limit is non-zero *and* covers the requested priority.  (The
-    // `dl_policy` arm is unreachable from this call: step 6 refused it.)
-    let needs_cap = if matches!(policy, SCHED_FIFO | SCHED_RR) {
-        let rlim_rtprio = current_rtprio_limit();
-        // `prio` passed the [lo, hi] range check above and every RT policy's
-        // `lo` is 1, so it is strictly positive here — `unsigned_abs` is an
-        // exact widening, not a sign-losing cast.
-        rlim_rtprio == 0 || u64::from(prio.unsigned_abs()) > rlim_rtprio
-    } else {
-        false
-    };
-    if needs_cap && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
+    // Steps 7 and 8: permitted or not ([`rt_permitted`]), there is no
+    // real-time class to grant yet, so either way the answer is EPERM.
+    if matches!(policy, SCHED_FIFO | SCHED_RR) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
     0
+}
+
+/// Step 7 of [`sched_setscheduler`]: whether the caller may switch to a
+/// real-time policy at `prio` (Phase 170 / §314).  Linux's
+/// `__sched_setscheduler` runs this after argument validation and before any
+/// scheduler state mutation:
+///
+/// ```text
+///   if (rt_policy(policy)) {
+///       unsigned long rlim_rtprio = task_rlimit(p, RLIMIT_RTPRIO);
+///       if (policy != p->policy && !rlim_rtprio)        goto req_priv;
+///       if (attr->sched_priority > p->rt_priority &&
+///           attr->sched_priority > rlim_rtprio)         goto req_priv;
+///   }
+///   ...
+///   req_priv: if (!capable(CAP_SYS_NICE)) return -EPERM;
+/// ```
+///
+/// Every task here is `SCHED_OTHER` with `rt_priority` 0, so `policy !=
+/// p->policy` holds for every real-time switch and `p->rt_priority` is 0.
+/// Both clauses therefore reduce to: the capability is required unless the
+/// limit is non-zero *and* covers the requested priority.
+///
+/// Nothing calls it yet -- step 8 refuses every real-time policy, the
+/// scheduler having no real-time class -- and it is kept, with its tests, so
+/// that the call which grants one is right the day it exists
+/// (`requests/d-a-real-time-scheduling-has-no-class-to-run-in.md`).  It was
+/// the gate itself until 2026-10-06, when a permitted caller got 0.
+// Unused outside the tests until the kernel has a real-time class; see above.
+#[cfg_attr(not(test), allow(dead_code))]
+fn rt_permitted(prio: i32) -> bool {
+    let rlim_rtprio = current_rtprio_limit();
+    // `prio` passed the [lo, hi] range check and every real-time policy's
+    // `lo` is 1, so it is strictly positive here -- `unsigned_abs` is an
+    // exact widening, not a sign-losing cast.
+    let covered = rlim_rtprio != 0 && u64::from(prio.unsigned_abs()) <= rlim_rtprio;
+    covered || crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
 }
 
 /// The calling process's `RLIMIT_RTPRIO` soft limit — the highest
@@ -247,6 +274,9 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
 /// for an RT policy a zero limit merely falls back to `CAP_SYS_NICE`, which
 /// is where the decision sat until today.  Neither default is "the safe
 /// one" in the abstract — they are the two different no-change defaults.
+// Read only by `rt_permitted`, which nothing calls until the kernel has a
+// real-time class.
+#[cfg_attr(not(test), allow(dead_code))]
 fn current_rtprio_limit() -> u64 {
     let mut rl = crate::resource::Rlimit {
         rlim_cur: 0,
@@ -795,13 +825,20 @@ mod tests {
 
     // -- sched_setscheduler --
 
+    /// A real-time policy is `EPERM`, whoever asks: the scheduler has no
+    /// real-time class to put the thread in.  It said 0 until 2026-10-06,
+    /// and nothing changed.
     #[test]
-    fn test_sched_setscheduler_succeeds() {
+    fn test_sched_setscheduler_real_time_has_no_class() {
         let param = SchedParam {
             sched_priority: 50,
             ..SchedParam::default()
         };
-        assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), 0);
+        for policy in [SCHED_FIFO, SCHED_RR, SCHED_RR | SCHED_RESET_ON_FORK] {
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, policy, &raw const param), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM, "{policy:#x}");
+        }
     }
 
     /// `do_sched_setscheduler` tests `!param` before it copies: `EINVAL`,
@@ -1211,12 +1248,16 @@ mod tests {
         assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const param), 0);
         assert_eq!(sched_setscheduler(0, SCHED_BATCH, &raw const param), 0);
         assert_eq!(sched_setscheduler(0, SCHED_IDLE, &raw const param), 0);
+        // Recognised, so not EINVAL: EPERM, there being no real-time class.
         let rt = SchedParam {
             sched_priority: 50,
             ..SchedParam::default()
         };
-        assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const rt), 0);
-        assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const rt), 0);
+        for policy in [SCHED_FIFO, SCHED_RR] {
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, policy, &raw const rt), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
     }
 
     // -- SchedParam layout --
@@ -1429,7 +1470,9 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_rr_priority_boundaries_ok() {
-        // 1 and 99 are inclusive bounds for SCHED_RR/SCHED_FIFO.
+        // 1 and 99 are inclusive bounds for SCHED_RR/SCHED_FIFO: they pass
+        // the range check (not EINVAL) and meet the missing real-time class
+        // (EPERM).
         let lo = SchedParam {
             sched_priority: 1,
             ..SchedParam::default()
@@ -1438,8 +1481,11 @@ mod tests {
             sched_priority: 99,
             ..SchedParam::default()
         };
-        assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const lo), 0);
-        assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const hi), 0);
+        for p in [&lo, &hi] {
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::from_ref(p)), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
     }
 
     // ---- Per-error class: sched_setparam priority out of range ----
@@ -1672,8 +1718,7 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_workflow_each_policy_valid_priority() {
-        // For each recognised policy, the lowest and highest in-range
-        // priorities must succeed.
+        // For each ordinary policy, its one priority succeeds.
         for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE] {
             // Range [0, 0] → only 0.
             let param = SchedParam {
@@ -1682,6 +1727,8 @@ mod tests {
             };
             assert_eq!(sched_setscheduler(0, p, &raw const param), 0);
         }
+        // Each real-time priority in range passes validation -- not EINVAL
+        // -- and meets the missing real-time class: EPERM.
         for &p in &[SCHED_FIFO, SCHED_RR] {
             // Range [1, 99] — try both bounds and a midpoint.
             for &pri in &[1, 50, 99] {
@@ -1689,7 +1736,9 @@ mod tests {
                     sched_priority: pri,
                     ..Default::default()
                 };
-                assert_eq!(sched_setscheduler(0, p, &raw const param), 0);
+                errno::set_errno(0);
+                assert_eq!(sched_setscheduler(0, p, &raw const param), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
             }
         }
     }
@@ -2106,10 +2155,12 @@ mod tests {
 
         // -- Workflow -----------------------------------------------------
 
-        /// Audio-server-style workflow: under default caps, switch
-        /// to SCHED_FIFO @ 80 (succeeds); drop CAP_SYS_NICE; further
-        /// attempt to set SCHED_RR @ 50 (EPERM); falling back to
-        /// SCHED_OTHER still works.
+        /// Audio-server-style workflow: under default caps, ask for
+        /// SCHED_FIFO @ 80 -- permitted, and refused with EPERM while the
+        /// scheduler has no real-time class (until 2026-10-06 it said 0 and
+        /// changed nothing); drop CAP_SYS_NICE; SCHED_RR @ 50 is not even
+        /// permitted (EPERM); falling back to SCHED_OTHER still works,
+        /// which is what such a server does after either refusal.
         #[test]
         fn test_sched_setscheduler_phase170_workflow_rt_then_drop_then_fallback() {
             let _g = CapGuard::snapshot();
@@ -2117,9 +2168,12 @@ mod tests {
                 sched_priority: 80,
                 ..SchedParam::default()
             };
+            assert!(rt_permitted(80), "the capability permits it");
             errno::set_errno(0);
-            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
             drop_cap_sys_nice();
+            assert!(!rt_permitted(50));
             let p_rr = SchedParam {
                 sched_priority: 50,
                 ..SchedParam::default()
@@ -2156,8 +2210,9 @@ mod tests {
 
         // -- Recovery -----------------------------------------------------
 
-        /// After EPERM, restoring CAP_SYS_NICE lets the same call
-        /// succeed — dynamic cap evaluation.
+        /// After EPERM, restoring CAP_SYS_NICE permits the same request
+        /// again — dynamic cap evaluation.  Permitted, it is refused all the
+        /// same while the scheduler has no real-time class.
         #[test]
         fn test_sched_setscheduler_phase170_recovery_restore_cap() {
             let _g = CapGuard::snapshot();
@@ -2166,6 +2221,7 @@ mod tests {
                 sched_priority: 25,
                 ..SchedParam::default()
             };
+            assert!(!rt_permitted(25));
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2187,14 +2243,17 @@ mod tests {
                 },
             ];
             assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
+            assert!(rt_permitted(25), "permitted again");
             errno::set_errno(0);
-            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), 0,);
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
+            assert_eq!(errno::get_errno(), errno::EPERM, "no real-time class");
         }
 
         // -- Sentinel -----------------------------------------------------
 
-        /// With CAP_SYS_NICE held, SCHED_FIFO/RR/DEADLINE all
-        /// succeed.  Confirms the privileged path is preserved.
+        /// With CAP_SYS_NICE held, SCHED_FIFO/RR are permitted -- and
+        /// refused, there being no real-time class -- and DEADLINE is
+        /// EINVAL.  Confirms the privileged path's rule is preserved.
         #[test]
         fn test_sched_setscheduler_phase170_sentinel_with_cap_rt_ok() {
             let _g = CapGuard::snapshot();
@@ -2205,8 +2264,12 @@ mod tests {
                 sched_priority: 50,
                 ..SchedParam::default()
             };
-            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
-            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p_rt), 0,);
+            assert!(rt_permitted(50));
+            for policy in [SCHED_FIFO, SCHED_RR] {
+                errno::set_errno(0);
+                assert_eq!(sched_setscheduler(0, policy, &raw const p_rt), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
             let p_dl = SchedParam {
                 sched_priority: 0,
                 ..SchedParam::default()
@@ -2302,35 +2365,39 @@ mod tests {
 
         /// A raised `RLIMIT_RTPRIO` permits an RT switch *without*
         /// `CAP_SYS_NICE` — the arm the old capability-only gate omitted.
+        /// Permitted, and refused all the same while the scheduler has no
+        /// real-time class (step 8).
         #[test]
         fn test_sched_setscheduler_rtprio_rlimit_permits_without_the_capability() {
             let _g = CapGuard::snapshot();
             set_rtprio_limit(50);
             drop_cap_sys_nice();
+            assert!(
+                rt_permitted(50),
+                "sched_priority 50 is within RLIMIT_RTPRIO 50, so Linux permits \
+                 it with no capability at all",
+            );
             let p = SchedParam {
                 sched_priority: 50,
                 ..SchedParam::default()
             };
-            errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p),
-                0,
-                "sched_priority 50 is within RLIMIT_RTPRIO 50, so Linux permits \
-                 it with no capability at all",
-            );
             // The same ceiling covers SCHED_RR: the rule is per-priority,
-            // not per-policy.
-            errno::set_errno(0);
-            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p), 0);
+            // not per-policy -- and there is no class for either.
+            for policy in [SCHED_FIFO, SCHED_RR] {
+                errno::set_errno(0);
+                assert_eq!(sched_setscheduler(0, policy, &raw const p), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM, "no real-time class");
+            }
         }
 
-        /// One step above the ceiling is still `EPERM` — the rlimit is a
+        /// One step above the ceiling is not permitted — the rlimit is a
         /// ceiling, not a blanket exemption.
         #[test]
         fn test_sched_setscheduler_priority_above_the_rtprio_rlimit_is_still_eperm() {
             let _g = CapGuard::snapshot();
             set_rtprio_limit(50);
             drop_cap_sys_nice();
+            assert!(!rt_permitted(51));
             let p = SchedParam {
                 sched_priority: 51,
                 ..SchedParam::default()
@@ -2383,6 +2450,7 @@ mod tests {
             );
             drop_cap_sys_nice();
             // Even priority 1 — the lowest an RT policy accepts — is denied.
+            assert!(!rt_permitted(1));
             let p = SchedParam {
                 sched_priority: 1,
                 ..SchedParam::default()

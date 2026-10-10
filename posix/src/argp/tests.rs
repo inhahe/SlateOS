@@ -687,14 +687,15 @@ fn run_scenario(sc: &Scenario, specs: &[Spec], built: &Built) -> Vec<String> {
     let has_hook = sc.globs.iter().any(|(k, _)| k == "hook");
     let full = c"/usr/bin/prog";
     let short = c"prog";
-    // SAFETY: plain writes of the C variables, the scenarios taking turns.
+    // SAFETY: plain writes of the C variables (the program's names are this
+    // thread's own), the scenarios taking turns.
     let saved = unsafe {
         let saved = (
-            (&raw const crate::crt::__progname_full).read(),
-            (&raw const crate::crt::__progname).read(),
+            crate::crt::progname_full_slot().read(),
+            crate::crt::progname_slot().read(),
         );
-        (&raw mut crate::crt::__progname_full).write(full.as_ptr().cast());
-        (&raw mut crate::crt::__progname).write(short.as_ptr().cast());
+        crate::crt::progname_full_slot().write(full.as_ptr().cast());
+        crate::crt::progname_slot().write(short.as_ptr().cast());
         (&raw mut argp_program_version).write(ptr_of(version.as_ref()));
         (&raw mut argp_program_version_hook).write(if has_hook { Some(hook) } else { None });
         (&raw mut argp_program_bug_address).write(ptr_of(bug.as_ref()));
@@ -764,8 +765,8 @@ fn run_scenario(sc: &Scenario, specs: &[Spec], built: &Built) -> Vec<String> {
     });
     // SAFETY: as above.
     unsafe {
-        (&raw mut crate::crt::__progname_full).write(saved.0);
-        (&raw mut crate::crt::__progname).write(saved.1);
+        crate::crt::progname_full_slot().write(saved.0);
+        crate::crt::progname_slot().write(saved.1);
         (&raw mut argp_program_version).write(core::ptr::null());
         (&raw mut argp_program_version_hook).write(None);
         (&raw mut argp_program_bug_address).write(core::ptr::null());

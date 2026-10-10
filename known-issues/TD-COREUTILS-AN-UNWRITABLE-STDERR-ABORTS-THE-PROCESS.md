@@ -216,9 +216,118 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Thirty-four programs still lack it: `bc chmod chown cmp cp csplit cut
-date df dir du ed expr find install kill ln ls mktemp more mv od patch shuf stat
-tac tail tee tr uniq vdir awk hostname sort`. (`uname`, `id`, `env`, `readlink`,
+all. Five programs still lack it: `ed hostname kill more patch`.
+`find` was converted on 2026-10-08, with its output rebuilt on stdio's
+terms: each sink a buffered `Stream` as upstream's `FILE *` is, `-print`
+unchecked, `-printf` checked call by call (`find: 'standard output':
+REASON`, once per failed buffer), `-ls` checked field by field and fatal
+at `list_file`'s stage (`Failed to write output (at stage 275)`), an
+`-fprint` file closed and checked at the end (fatal), `fflush (stdout)`
+checked after that, and `close_stdout` last; `find-diff.sh` holds
+twenty-three descriptor cases, all agreeing with findutils 4.9.0.
+`df` was converted on 2026-10-08: its help and version had gone out by
+`print!`, which panics on a failed write, and its table through Rust's
+`Stdout` with a failure turned into status 1 and nothing said; it is
+gnulib's `close_stdout` now, measured by `df-diff.sh`'s descriptor cases.
+`bc` the same day, to what Ubuntu's bc does, which is not GNU's: Debian's
+`05_notice_read_write_errors.diff` checks each value, string and diagnostic
+as it is written and ends the run at the first failure (`dc: could not
+write output file: REASON`, sic), leaves `--help` and `--version`
+unchecked, and a closed standard input is the scanner's `read() in flex
+scanner failed`; `bc-diff.sh` holds twenty descriptor cases.
+That list is now
+pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
+a program is added without the guard, when one is converted without being
+taken off the list, and when a program has only one half of it. Two had
+exactly that until 2026-10-07: `ps` expanded the macro and never called
+`restore`, and `chown` called `restore` without the macro. Both were
+silent successes with their standard output closed. Both are fixed, and
+`ps` also reports a lost diagnostic, as procps' `close_stdout` does.
+Since 2026-10-07 the guard also puts `SIGPIPE` back (design-decisions §1060),
+so each of these is also still the old exception there: a reader leaving
+ends it quietly with status 0 or the status it had earned, where GNU's dies
+of the signal with 141. (`awk` was converted on 2026-10-07 as gawk 5.2.1
+starts -- `init_fds`, then `SIGPIPE` ignored and handled: standard output's
+reader going is `die_via_sigpipe`, 141 whatever the disposition, a command's
+is `fatal: print to "CMD" failed: Broken pipe` -- with glibc's buffer for
+standard output and for redirections, so a full disk is met at the record
+gawk's message names, and with no `close_stderr` funnel, since a lost
+diagnostic never changes gawk's status; 691 rows agree with `gawk --posix`.
+`du`, `date` and `csplit` were converted on
+2026-10-07, each with its closed-standard-input fix: `du` flushes after every
+row, as upstream's `print_size` does, so a full disk's `write error` comes
+with no reason; `date` keeps one stdio buffer for the run, so the same failure
+comes with one.
+`tail` was converted on 2026-10-07, its output
+moved onto `stdio::StdioFile` with upstream's two ways of writing it -- file
+data through `xwrite_stdout`, which ends the run at its first failure, and
+the banners through `printf`, whose failure waits for `close_stdout` -- and
+every diagnostic flushing standard output first, as `error()` does, which
+decides whether the last word is `write error` with a reason or without one.
+Under `-f` it watches a piped standard output as upstream's
+`check_output_alive` does, and dies of `SIGPIPE` when the reader goes. The
+conversion took upstream's routes for reading a file with it, which fixed
+three bugs on the way: files in `/proc` said `error reading ...: Invalid
+argument`, `tail -n0 -f` began by printing an unterminated last line, and
+`printf x | tail -f` never ended. `tail-diff.sh` gained the cases.
+`stat` followed the same day: `-` is descriptor 0 as given (`cannot stat
+standard input: Bad file descriptor` where it described the `/dev/null`
+Rust's runtime had put there), its output goes through standard output's
+`Stream` to `close_stdout` (it was a locked `io::stdout()`, which answers a
+closed descriptor's `EBADF` with success, so `stat f >&-` exited 0), and it
+is written a call at a time where GNU's makes one -- a `putchar` per literal
+byte, a `printf` per directive -- so that a full disk leaves the same
+sentence, and a warning lands after the output before it.
+`chmod` followed, with the first harness it has had (`chmod-diff.sh`, every
+case comparing the tree left behind as well as the words): its `-v` and `-c`
+lines were `println!`, which panicked on the first one a full disk refused --
+status 101, with the rest of a `-R` tree never visited -- and a closed
+standard output was a quiet success. They go through standard output's
+`Stream` now, a write per upstream `printf`, to `close_stdout`, and a dangling
+symbolic link named on the command line is `cannot operate on dangling
+symlink`, as `fts` makes upstream say, where it was `cannot access`.
+`install` followed: its run already went through standard output's `Stream`
+to `close_stdout`, so it was the guard and its help and version, which were
+`print!`/`println!`. `install-diff.sh` gained the descriptor cases -- standard
+output closed, input closed, error full and closed, beside the full disk it
+had -- and agrees on all of them (213 rows, 2 differing on purpose). The
+guard is safe here for an ordering reason worth knowing: `-v`'s line is
+written before each copy opens its files, so no file of `install`'s holds
+descriptor 1 when it is written; see
+`TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER` for why that is luck
+rather than structure.
+`ls`, `dir` and `vdir` followed together, being one program built three
+times: the guard in each wrapper, `stdfd::restore` in `coreutils::ls::main`,
+and the listing moved off Rust's own `Stdout` -- which calls a closed
+descriptor's `EBADF` success, so `ls t >&-` had exited 0 -- onto standard
+output's `Stream`, judged at the end by `close_stdout` with `ls`'s failure
+status, 2. `Out::flush` now only hands its bytes to the stream: the stream
+writes them out before anything goes to standard error, which is
+`error()`'s `fflush`, and leaving the rest to the close is what makes `ls
+>/dev/full` say `write error: No space left on device` with its reason, as
+GNU's does. `ls-diff.sh` gained the descriptor cases.
+`cmp` was converted on 2026-10-07 with diffutils'
+`xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
+on purpose. `sort` was converted on 2026-10-03, its output moved onto
+`stdio::StdioFile` so that a failure is upstream's `write failed` or `fflush
+failed` -- whichever glibc's buffer makes it -- followed by `close_stdout`'s
+`write error`; 32 of 35 descriptor rows agree, the rest `--help`'s text.
+`od`, `tee`, `tr` and `uniq` were converted on 2026-10-03 with their
+closed-standard-input fixes, each measured with every standard descriptor
+closed and full: 73 of 85 rows agree with GNU, the rest `--help`'s text.
+`cut` was converted on 2026-10-03 with its
+closed-standard-input fix: 27 of 30 rows agree with GNU, the other three
+being `--help`'s text. `expr`, `mktemp`, `tac` and `shuf` were converted
+on 2026-10-03: 82 of 85 rows agree with GNU, the other three being `expr
+--help`'s own text. Two needed more than the guard once it let them see a
+closed standard input: `tac` made its temporary file with a plain open, which
+then landed on descriptor 0 and was read back as the input -- upstream's
+`mkstemp` is gnulib's safer one, so it now goes through `stdfd::fd_safer`;
+and `shuf nosuch <&-` names `EBADF`, glibc `freopen`'s leftover `errno`.
+`cp`, `mv` and `ln` were
+converted on 2026-10-03 together with upstream's `close_stdin`, which all
+three register -- see `B-PROMPTS-READ-STANDARD-INPUT-UNLIKE-STDIO`: 121 of 130
+rows agree with GNU and the other nine are `--help`'s text. `uname`, `id`, `env`, `readlink`,
 `realpath`, `mkdir`, `rmdir`, `mkfifo` and `touch` were converted on
 2026-10-03, each measured against GNU coreutils 9.4 with standard output
 closed and full, standard error closed and full, and standard input closed:

@@ -35,10 +35,10 @@ use guitk::text;
 //    the thing that most needs not to follow the accent: blue means volume and
 //    yellow means brightness, and two readings told apart by hue stop being
 //    two readings the moment one accent claims both. This is module 22's meter
-//    rule (`widgets.rs`), and it is the deliberate counterpart to module 23's
-//    (`sound_settings.rs`), where the volume bar *does* take the accent —
-//    because there you can drag it. One rule stated twice: the accent marks
-//    what you can move, not what you are being told.
+//    rule (`widgets.rs`), and it is the deliberate counterpart to a volume
+//    slider on a settings page, which *does* take the accent -- because there
+//    you can drag it (`guitk::slider`). One rule stated twice: the accent
+//    marks what you can move, not what you are being told.
 //
 // 3. **Ink drawn on a coloured fill is derived, never named.** The tick inside
 //    an enabled checkbox is `readable_on(p.green)` and the Preview button's
@@ -3634,8 +3634,8 @@ mod tests {
     /// Volume and brightness are a category pair, and a pair told apart by
     /// hue stops being a pair the moment one colour claims both.
     ///
-    /// This is the deliberate counterpart to `sound_settings.rs`, where the
-    /// volume bar *does* take the accent — because there you can drag it.
+    /// This is the deliberate counterpart to a volume slider on a settings
+    /// page, which *does* take the accent -- because there you can drag it.
     #[test]
     fn volume_and_brightness_stay_a_pair_you_can_tell_apart() {
         for light in [false, true] {

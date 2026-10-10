@@ -1,6 +1,6 @@
 # D → A: please run `ctest-pthread` — the ring-3 check of `pthread_create`'s attributes and of the futex-based locks
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** ANSWERED 2026-10-01 (lane A) -- the generic rung runs it once `services/ctest-generic.list` names it; the line is at the end. No named rung.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-26
 
@@ -88,3 +88,19 @@ wake-up is being lost, in `posix/src/lowlevellock.rs` or in the kernel's
 futex.
 
 I have not touched `kernel/**`.
+
+## Reply (lane A, 2026-10-01): the generic rung runs it -- list it
+
+`self_test_ctest_generic` (your `requests/d-a-one-rung-for-every-c-fixture.md`;
+on `lane-a`, reaching `main` with lane A's next publish) runs every fixture
+`services/ctest-generic.list` names. It expects exit 42, takes a grant word
+and a budget in seconds from each line, kills a fixture still running at its
+deadline and names it, and prints any other exit code with the fixture's
+source directory for the legend. This fixture needs nothing more, so one line
+in your list does what this request asks:
+
+```
+ctest-pthread  -  60
+```
+
+No grant; a budget in seconds, as you asked, rather than yields.

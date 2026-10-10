@@ -1,0 +1,31 @@
+{
+ "issue_without_status": [
+  "td-c-context-menu-extensions-are-implemented-twice-and-reached-neither-time",
+  "td-c-fifteen-private-clipboards-and-a-service-nobody-talks-to",
+  "td-c-four-notification-behaviours-have-a-settings-model-and-no-implementation",
+  "td-c-three-launcher-entries-name-a-program-that-cannot-exist",
+  "td-c-three-test-modules-hand-roll-the-accent-list-that-a-helper-already-returns"
+ ],
+ "lowercase_marker": [],
+ "decision_files": [
+  "design-decisions/0875-the-desktop-s-clock-settings-get-a-file-and-its-zone-is-the-machine-s-unless-the.md",
+  "design-decisions/1447-notifications-pop-up-from-the-shell-beside-the-pane-that-holds-them.md",
+  "design-decisions/1448-programs-add-to-a-file-s-right-click-menu-with-kde-s-service-menu-files-on-or-of.md",
+  "design-decisions/1449-a-file-opens-in-its-kind-s-default-when-nobody-chose-and-open-with-offers-every.md",
+  "design-decisions/1450-a-notification-s-right-click-menu-turns-its-program-off-from-the-pane-or-its-pop.md",
+  "design-decisions/1451-the-start-menu-s-search-finds-what-a-program-can-do-not-only-the-program.md",
+  "design-decisions/1452-a-photo-frame-on-the-desktop-shows-the-pictures-folder-a-picture-every-half-minu.md",
+  "design-decisions/1453-a-ribbon-in-the-toolkit-tabs-of-grouped-commands-deliberately-not-office-s.md",
+  "design-decisions/1454-a-right-click-on-a-text-field-offers-what-its-keys-do-cut-copy-paste.md",
+  "design-decisions/1455-the-toolkit-lays-out-as-css-flexbox-and-grid-do-over-sizes.md",
+  "design-decisions/1456-window-frames-are-a-theme-axis-the-title-bar-its-buttons-the-border-the-shadow.md",
+  "design-decisions/1457-a-wallpaper-that-overflows-the-screen-is-moved-in-place-on-the-desktop.md",
+  "design-decisions/1458-tz-is-read-in-glibc-s-order-a-zoneinfo-file-before-a-rule-of-the-same-name.md",
+  "design-decisions/1459-cursor-themes-are-the-ones-every-linux-desktop-uses-xcursor-files-found-by-name.md",
+  "design-decisions/1460-the-taskbar-s-glass-and-spacing-are-a-theme-axis-how-see-through-it-is-stays-the.md",
+  "design-decisions/1461-the-shell-s-own-dialogs-wear-the-theme-s-window-frame-starting-with-the-run-box.md",
+  "design-decisions/1462-what-an-svg-file-may-make-the-toolkit-s-renderer-do-and-how-a-clip-path-s-shapes.md"
+ ],
+ "deferred_without_trigger": [],
+ "todo_done_paragraphs": []
+}

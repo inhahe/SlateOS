@@ -201,9 +201,14 @@ fn members_of(text: &[u8]) -> impl Iterator<Item = &[u8]> {
 fn read_include(path: &[u8]) -> Option<nss_files::Text> {
     let mut name = [0u8; PATH_MAX];
     name.get_mut(..path.len())?.copy_from_slice(path);
-    match nss_files::read_path(name.get(..=path.len())?) {
+    let saved = errno::get_errno();
+    let read = nss_files::read_path(name.get(..=path.len())?);
+    // Missing, or unreadable: glibc's reading ignores the member, and the
+    // `errno` its `fopen` left goes unseen -- glibc's answers keep the
+    // caller's.
+    errno::set_errno(saved);
+    match read {
         Ok(Db::Text(t)) => Some(t),
-        // Missing, or unreadable: glibc's reading ignores the member.
         _ => None,
     }
 }

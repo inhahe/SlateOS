@@ -40,12 +40,15 @@ pub enum Kind {
     Human,
     /// `-M`: month names.
     Month,
+    /// `-R`: a salted MD5 of the key, which shuffles the lines and keeps
+    /// equal keys together.
+    Random,
     /// `-V`: version numbers.
     Version,
 }
 
 /// Every ordering a key named -- GNU's separate `numeric`, `general_numeric`,
-/// `human_numeric`, `month` and `version` flags.
+/// `human_numeric`, `month`, `random` and `version` flags.
 ///
 /// [`KeySpec::kind`] holds the one the comparison uses. This holds all of them,
 /// because naming two is an error that is only *reported* once the whole
@@ -58,6 +61,7 @@ pub struct Named {
     pub general: bool,
     pub human: bool,
     pub month: bool,
+    pub random: bool,
     pub version: bool,
 }
 
@@ -85,6 +89,9 @@ pub struct KeySpec {
     pub ignore: Option<Ignore>,
     pub fold: bool,
     pub reverse: bool,
+    /// Written in the obsolete `+POS1 [-POS2]` form -- upstream's
+    /// `traditional_used`, which `--debug` warns about.
+    pub traditional: bool,
 }
 
 impl KeySpec {
@@ -134,9 +141,12 @@ impl KeySpec {
     /// and the letters inside a `-k` spec all arrive here.
     ///
     /// The first one named is the one compared by; every one is recorded, so a
-    /// second can be refused later with both in the message.
+    /// second can be refused later with both in the message. The exception is
+    /// `-R` beside `-V`, the one pair [`check_compatibility`] lets through
+    /// (they share a slot): upstream's `keycompare` tries `random` before
+    /// `version`, so `-VR` shuffles just as `-RV` does.
     pub fn name(&mut self, kind: Kind) {
-        if self.kind == Kind::Default {
+        if self.kind == Kind::Default || (kind == Kind::Random && self.kind == Kind::Version) {
             self.kind = kind;
         }
         match kind {
@@ -145,6 +155,7 @@ impl KeySpec {
             Kind::General => self.named.general = true,
             Kind::Human => self.named.human = true,
             Kind::Month => self.named.month = true,
+            Kind::Random => self.named.random = true,
             Kind::Version => self.named.version = true,
         }
     }
@@ -177,7 +188,7 @@ impl KeySpec {
 
     /// Where the key starts: past `sword` fields, past blanks if `b`, plus
     /// `schar` characters.
-    fn begfield(&self, line: &[u8], tab: Option<u8>) -> usize {
+    pub fn begfield(&self, line: &[u8], tab: Option<u8>) -> usize {
         let lim = line.len();
         let mut ptr = 0usize;
         let mut sword = self.sword.unwrap_or(0);
@@ -194,7 +205,7 @@ impl KeySpec {
     }
 
     /// Where the key ends.
-    fn limfield(&self, line: &[u8], tab: Option<u8>) -> usize {
+    pub fn limfield(&self, line: &[u8], tab: Option<u8>) -> usize {
         let lim = line.len();
         let mut ptr = 0usize;
         let echar = self.echar;
@@ -228,17 +239,35 @@ impl KeySpec {
         ptr
     }
 
-    /// Compare two lines under this key alone.
-    pub fn compare(&self, a: &[u8], b: &[u8], tab: Option<u8>) -> Ordering {
+    /// Compare two lines under this key alone. `salted` is the MD5 state `-R`
+    /// hashes each key after -- see [`order::random`].
+    ///
+    /// Every ordering but the default one sees the key as upstream's
+    /// `keycompare` hands it over: copied, with the characters `-d` or `-i`
+    /// ignore dropped and the rest translated by `-f` ([`order::filtered`]).
+    /// So `-hf` reads `1m` as a mebi-number, its `m` made the unit `M`; `-Vd`
+    /// compares versions with the punctuation gone; and `-Rf` hashes `a` and
+    /// `A` alike and keeps them together.
+    pub fn compare(&self, a: &[u8], b: &[u8], tab: Option<u8>, salted: &md5::Md5) -> Ordering {
         let ka = self.extract(a, tab);
         let kb = self.extract(b, tab);
-        let diff = match self.kind {
-            Kind::Default => order::default_order(ka, kb, self.ignore, self.fold),
-            Kind::Numeric => order::numeric(ka, kb),
-            Kind::General => order::general(ka, kb),
-            Kind::Human => order::human(ka, kb),
-            Kind::Month => order::month(ka, kb),
-            Kind::Version => order::version(ka, kb),
+        let diff = if self.kind == Kind::Default {
+            order::default_order(ka, kb, self.ignore, self.fold)
+        } else {
+            let fa = order::filtered(ka, self.ignore, self.fold);
+            let fb = order::filtered(kb, self.ignore, self.fold);
+            let (fa, fb) = (fa.as_ref(), fb.as_ref());
+            match self.kind {
+                // Taken by the branch above, which compares without copying;
+                // on the copies it is this, which is what that branch computes.
+                Kind::Default => fa.cmp(fb),
+                Kind::Numeric => order::numeric(fa, fb),
+                Kind::General => order::general(fa, fb),
+                Kind::Human => order::human(fa, fb),
+                Kind::Month => order::month(fa, fb),
+                Kind::Random => order::random(fa, fb, salted),
+                Kind::Version => order::version(fa, fb),
+            }
         };
         if self.reverse { diff.reverse() } else { diff }
     }
@@ -307,6 +336,14 @@ pub fn parse_key(spec: &[u8]) -> Result<KeySpec, String> {
         rest = after;
     }
 
+    // Upstream's `if (! (key->sword || key->schar)) key->sword = SIZE_MAX;`:
+    // a key that starts at the first character of the first field starts at
+    // the line, which is not quite the same thing -- a line-start key skips
+    // its blanks no further than its end -- and is what `--debug` reports.
+    if key.sword == Some(0) && key.schar == 0 {
+        key.sword = None;
+    }
+
     rest = set_ordering(rest, &mut key, Blanks::Start);
 
     if rest.first() == Some(&b',') {
@@ -357,6 +394,7 @@ pub fn parse_obsolete_start(spec: &[u8]) -> Option<KeySpec> {
         key.sword = None;
     }
     let rest = set_ordering(rest, &mut key, Blanks::Start);
+    key.traditional = true;
     if rest.is_empty() { Some(key) } else { None }
 }
 
@@ -427,6 +465,7 @@ pub fn set_ordering<'a>(s: &'a [u8], key: &mut KeySpec, blanks: Blanks) -> &'a [
             b'h' => key.name(Kind::Human),
             b'M' => key.name(Kind::Month),
             b'n' => key.name(Kind::Numeric),
+            b'R' => key.name(Kind::Random),
             b'V' => key.name(Kind::Version),
             b'r' => key.reverse = true,
             _ => break,
@@ -447,12 +486,12 @@ pub fn set_ordering<'a>(s: &'a [u8], key: &mut KeySpec, blanks: Blanks) -> &'a [
 /// since those keys name an ordering of their own and inherit nothing. And
 /// `sort -k1nM -k0` reports the zero field, which parsing reaches first.
 ///
-/// Numeric, general-numeric, human and month count one each. Version and the
-/// ignore options (`-d`, `-i`) share a single slot, which is why `-k1Vd` is
-/// accepted and `-k1nd` is not; upstream counts `-R` there too, which is
-/// refused as unimplemented before this runs. The message lists the key's
-/// options in upstream's order with `b` and `r` left out -- `-dMn`, `-fin` --
-/// so `f` is printed although it is never what makes a key incompatible.
+/// Numeric, general-numeric, human and month count one each. Version, random
+/// and the ignore options (`-d`, `-i`) share a single slot, which is why
+/// `-k1Vd` and `-k1RV` are accepted and `-k1nd` and `-k1nR` are not. The
+/// message lists the key's options in upstream's order with `b` and `r` left
+/// out -- `-dMn`, `-fin`, `-nR` -- so `f` is printed although it is never what
+/// makes a key incompatible.
 ///
 /// # Errors
 ///
@@ -465,7 +504,7 @@ pub fn check_compatibility(keys: &[KeySpec]) -> Result<(), String> {
             n.general,
             n.human,
             n.month,
-            n.version || key.ignore.is_some(),
+            n.version || n.random || key.ignore.is_some(),
         ];
         if slots.iter().filter(|&&set| set).count() <= 1 {
             continue;
@@ -478,6 +517,7 @@ pub fn check_compatibility(keys: &[KeySpec]) -> Result<(), String> {
             (key.ignore == Some(Ignore::NonPrinting), 'i'),
             (n.month, 'M'),
             (n.numeric, 'n'),
+            (n.random, 'R'),
             (n.version, 'V'),
         ];
         let opts: String = letters
@@ -681,5 +721,50 @@ mod tests {
         // A key that names one keeps it.
         let key = parse_key(b"2,2V").unwrap();
         assert!(key.has_ordering());
+    }
+
+    #[test]
+    fn random_outranks_version_whichever_is_named_first() {
+        // Upstream's `keycompare` tries `random` before `version`.
+        assert_eq!(parse_key(b"1VR").unwrap().kind, Kind::Random);
+        assert_eq!(parse_key(b"1RV").unwrap().kind, Kind::Random);
+        assert_eq!(parse_key(b"1R").unwrap().kind, Kind::Random);
+    }
+
+    #[test]
+    fn random_shares_the_version_and_ignore_slot() {
+        for ok in ["1RV", "1Rd", "1Ri", "1Rf", "1Rb"] {
+            let key = parse_key(ok.as_bytes()).unwrap();
+            assert!(check_compatibility(&[key]).is_ok(), "{ok}");
+        }
+        for (spec, message) in [
+            ("1nR", "options '-nR' are incompatible"),
+            ("1MR", "options '-MR' are incompatible"),
+            ("1Rh", "options '-hR' are incompatible"),
+            ("1RgV", "options '-gRV' are incompatible"),
+        ] {
+            let key = parse_key(spec.as_bytes()).unwrap();
+            assert_eq!(check_compatibility(&[key]).unwrap_err(), message, "{spec}");
+        }
+    }
+
+    #[test]
+    fn an_ordering_other_than_the_default_sees_the_key_translated() {
+        let salted = md5::Md5::new();
+        // `-hf`: the `m` is folded to the unit `M`, so `1m` is a mebi-number;
+        // without `f`, `m` is no unit and `1m` is one.
+        let folded = parse_key(b"1hf").unwrap();
+        assert_eq!(
+            folded.compare(b"1m", b"2K", None, &salted),
+            Ordering::Greater
+        );
+        let plain = parse_key(b"1h").unwrap();
+        assert_eq!(plain.compare(b"1m", b"2K", None, &salted), Ordering::Less);
+        // `-Vd`: the punctuation goes before the version is read.
+        let dict = parse_key(b"1Vd").unwrap();
+        assert_eq!(
+            dict.compare(b"v1-2", b"v12", None, &salted),
+            Ordering::Equal
+        );
     }
 }

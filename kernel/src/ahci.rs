@@ -158,8 +158,9 @@ const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 /// WRITE DMA EXT (48-bit LBA).
 const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 /// FLUSH CACHE EXT (for fsync/sync).
-#[allow(dead_code)]
 const ATA_CMD_FLUSH_EXT: u8 = 0xEA;
+/// FLUSH CACHE, for a drive without the EXT form.
+const ATA_CMD_FLUSH: u8 = 0xE7;
 
 // ---------------------------------------------------------------------------
 // FIS (Frame Information Structure) types
@@ -244,6 +245,12 @@ struct AhciPort {
     model: String,
     /// Serial number from IDENTIFY DEVICE.
     serial: String,
+    /// The drive's volatile write cache is on (IDENTIFY word 85, bit 5):
+    /// what it has completed may still be only in its memory until flushed.
+    write_cache: bool,
+    /// The drive takes FLUSH CACHE EXT (IDENTIFY word 83, bit 13); without
+    /// it, FLUSH CACHE.
+    flush_ext: bool,
 }
 
 /// An AHCI disk device implementing the BlockDevice trait.
@@ -530,6 +537,11 @@ impl AhciPort {
         // Words 10-19: Serial number (20 ASCII chars, byte-swapped pairs).
         self.serial = Self::ata_string_from_words(words, 10, 19);
 
+        // Word 85 bit 5: the volatile write cache is enabled. Word 83 bit 13:
+        // FLUSH CACHE EXT is supported (ACS-3 7.12.6.41).
+        self.write_cache = words.get(85).is_some_and(|w| w & (1 << 5) != 0);
+        self.flush_ext = words.get(83).is_some_and(|w| w & (1 << 13) != 0);
+
         // Free the identify data frame.
         // SAFETY: We're done with the frame; it was allocated for temporary use.
         unsafe {
@@ -696,6 +708,35 @@ impl AhciPort {
     }
 }
 
+impl AhciPort {
+    /// Write the drive's cache out: FLUSH CACHE EXT (or FLUSH CACHE), a
+    /// non-data command. Every write it has completed is durable once this
+    /// returns `Ok`; a drive with its write cache off has nothing to do.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn flush_impl(&mut self) -> KernelResult<()> {
+        if !self.write_cache {
+            return Ok(());
+        }
+        let slot = self
+            .find_free_slot()
+            .ok_or(KernelError::ResourceExhausted)?;
+        let ct_slot_base = self.ct_virt + (slot as usize) * 256;
+        // SAFETY: within our allocated DMA memory (one 256-byte table a slot).
+        unsafe {
+            core::ptr::write_bytes(ct_slot_base as *mut u8, 0, 256);
+        }
+        let command = if self.flush_ext {
+            ATA_CMD_FLUSH_EXT
+        } else {
+            ATA_CMD_FLUSH
+        };
+        self.build_h2d_fis(slot, command, 0, 0, 0);
+        // No data: no PRD entries.
+        self.setup_cmd_header(slot, 5, false, 0);
+        self.issue_command(slot)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BlockDevice implementation for AhciDevice
 // ---------------------------------------------------------------------------
@@ -703,6 +744,10 @@ impl AhciPort {
 impl BlockDevice for AhciDevice {
     fn info(&self) -> BlockDeviceInfo {
         self.info.clone()
+    }
+
+    fn flush(&mut self) -> KernelResult<()> {
+        self.port.lock().flush_impl()
     }
 
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
@@ -858,6 +903,8 @@ fn init_port(abar_virt: usize, port_num: u32, hhdm: u64) -> KernelResult<AhciPor
         sector_count: 0,
         model: String::new(),
         serial: String::new(),
+        write_cache: false,
+        flush_ext: false,
     };
 
     port.stop_cmd()?;
@@ -1003,6 +1050,9 @@ pub fn init(hhdm_offset: u64) {
         unsafe {
             mmio_write32(abar_virt + HBA_IS, u32::MAX);
         }
+
+        // The controller is in AHCI mode under this driver, disks or not.
+        crate::pci::bind_driver(ctrl.address, "ahci");
 
         // Scan each implemented port.
         for port_num in 0..MAX_PORTS as u32 {

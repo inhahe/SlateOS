@@ -88,7 +88,7 @@
 
 use coreutils::diag;
 use coreutils::getopt;
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use std::io::Write as _;
 use std::process::ExitCode;
 
@@ -96,14 +96,14 @@ use bignum::BigInt;
 use coreutils::quote::quote;
 use ere::ch::{Ch, chars};
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// An operand, an operator, and a result: all bytes.
 type Str = Vec<u8>;
 
-/// The one line printed beside a diagnostic, where a wall of text would bury
-/// the error that caused it.
-const USAGE: &str = "usage: expr EXPRESSION";
-
-/// What `--help` prints, which is a different job from [`USAGE`]: nobody types
+/// What `--help` prints. A missing operand gets GNU's one-line referral to it
+/// instead (`Try 'expr --help' for more information.`): nobody types
 /// `--help` by accident, and expr's entire interface *is* its operator table —
 /// a program whose help says only `expr EXPRESSION` has told the reader
 /// nothing they did not already know. Shaped like `sed`'s, not copied from
@@ -190,15 +190,20 @@ fn standard_option(arg: &[u8]) -> Option<&'static str> {
         .map(|(resolved, ())| resolved)
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)` after
+/// `initialize_exit_failure (EXPR_FAILURE)`, which checks standard output and
+/// then standard error on every exit path at once -- an output or a
+/// diagnostic that did not arrive is status 3, measured: `expr 1 + 2 >&-` is
+/// `expr: write error: Bad file descriptor`, and `expr 1 / 0 2>&-` is 3 where
+/// it would have been 2. See [`stdfd::close_stdout_with`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 3)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout_with("expr", out, earned, 3)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let raw: Vec<Str> = std::env::args_os().skip(1).map(|a| arg_bytes(&a)).collect();
 
     // `--help` and `--version` are recognised only as the whole command line,
@@ -206,12 +211,13 @@ fn run_main() -> ExitCode {
     // two strings that happen to look like options, and answers 1.
     if let [only] = raw.as_slice() {
         match standard_option(only) {
+            // The stream records a failure for the funnel; it never returns one.
             Some("help") => {
-                println!("{HELP}");
+                let _ = writeln!(out, "{HELP}");
                 return ExitCode::SUCCESS;
             }
             Some("version") => {
-                println!("expr (SlateOS coreutils)");
+                let _ = writeln!(out, "expr (SlateOS coreutils)");
                 return ExitCode::SUCCESS;
             }
             _ => {}
@@ -225,9 +231,11 @@ fn run_main() -> ExitCode {
         _ => &raw,
     };
 
+    // GNU's `usage (EXPR_INVALID)`: the referral, not the synopsis. Measured;
+    // this printed `usage: expr EXPRESSION` until 2026-10-03.
     if args.is_empty() {
         diag!("expr: missing operand");
-        diag!("{USAGE}");
+        diag!("Try 'expr --help' for more information.");
         return ExitCode::from(2);
     }
 
@@ -243,15 +251,10 @@ fn run_main() -> ExitCode {
         ));
     }
 
-    let mut out = std::io::stdout().lock();
-    if out
-        .write_all(&value)
-        .and_then(|()| out.write_all(b"\n"))
-        .is_err()
-    {
-        // Nothing left to say it on; GNU's exit 3 is "an error occurred".
-        return ExitCode::from(3);
-    }
+    // A failure to write is the funnel's to report, as `expr: write error`
+    // and status 3.
+    let _ = out.write_all(&value);
+    let _ = out.write_all(b"\n");
     // The value *is* the status: a shell writes `if expr "$a" '<' "$b"`.
     ExitCode::from(u8::from(is_null(&value)))
 }

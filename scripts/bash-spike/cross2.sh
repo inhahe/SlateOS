@@ -11,8 +11,8 @@ set -x
 SPIKE="$SLATE_SPIKE"
 # Lane-keyed: cross2.sh writes this tree and slatelink.sh reads it, so two lanes
 # sharing one bash-cross directory would relink one lane's objects into the
-# other's shipped bash-slateos.elf. Keep this name in step with cross3.sh and
-# slatelink.sh, which must agree on it.
+# other's shipped bash-slateos.elf. Keep this name in step with slatelink.sh,
+# which must agree on it.
 #
 # Under $SLATE_WORK, not /tmp: WSL wipes /tmp on every restart, which silently
 # broke the automatic relink in create-ext4-rootfs.sh (see worktree.sh).
@@ -51,7 +51,19 @@ mkdir -p "$BUILD"
 tar xzf "$SLATE_BASH_TARBALL" -C "$BUILD" --strip-components=1 || exit 1
 cd "$BUILD" || exit 1
 
-export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
+# Configured against SlateOS's libc, not zig's musl: CC is scripts/lib/
+# worktree.sh's link wrapper, so configure's link tests are answered by our
+# libc.a -- arc4random, which ours has and musl has not, is found, and with it
+# $SRANDOM's source -- and its compiles see posix/include, which declares what
+# ours has beyond musl (argz.h). Until 2026-10-05 CC was zig's cc, so every
+# link test asked musl (known-issues/D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL.md).
+# The build's own link of bash goes through the wrapper too, so `make` leaves
+# a SlateOS bash; slatelink.sh is what relinks and stages it.
+SPIKE_LIBS="$SLATE_TMP/bash-sysroot"
+mkdir -p "$SPIKE_LIBS" || exit 1
+cp "$SLATE_SYSROOT/libc.a" "$SLATE_SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$BUILD/.slate-link" "$SPIKE_LIBS" || exit 1
+export CC="$SLATE_LINK_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 # --disable-readline drops termcap (9 of the 23 unresolved symbols); a spike only
 # needs `bash -c` and script execution to prove the port is real.
 #
@@ -105,15 +117,54 @@ export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 echo "CROSS_CONFIGURE_EXIT=$?"
 tail -15 cross-configure.log
 
+# bash 5.2's configure has an inverted test: when the C library HAS a usable
+# strtoimax it *adds* lib/sh/strtoimax.c to LIBOBJS (BASH_FUNC_STRTOIMAX's
+# `if test $bash_cv_func_strtoimax = yes; then AC_LIBOBJ(strtoimax)`). So
+# libsh.a carries a strtoimax of its own, which is linked ahead of the C
+# library's -- a duplicate definition against musl, which keeps strtoimax in
+# strtol's object, and bash's copy in place of ours against our libc.a. It is
+# dropped from libsh.a here, between configure and the first make. Not by
+# answering bash_cv_func_strtoimax=no: the macro then skips its own checks,
+# and config.h loses HAVE_STRTOIMAX and HAVE_DECL_STRTOIMAX, which are true.
+# (This was cross3.sh, run after a first make had failed; folded in
+# 2026-10-05.)
+sed -i 's|\${LIBOBJDIR}strtoimax\$U\.o||' lib/sh/Makefile
+grep -n '^LIBOBJS' lib/sh/Makefile
+
 make -j8 >cross-make.log 2>&1
 echo "CROSS_MAKE_EXIT=$?"
 tail -25 cross-make.log
 
-if [ -x "$BUILD/bash" ]; then
+if [ -x "$BUILD/bash" ] && readelf -n "$BUILD/bash" | grep SlateOS >/dev/null; then
   file "$BUILD/bash"
   ls -l "$BUILD/bash"
   echo "CROSS_BASH_BUILT"
-  cp "$BUILD/bash" "$SPIKE/bash-musl.elf"
 else
   echo "NO_CROSS_BINARY"
+  exit 1
+fi
+
+# A copy that runs on Linux: the same objects linked against zig's musl, for
+# taking a measurement of this build's bash under WSL (runbash.sh) -- how
+# `lastpipe`'s statuses were found wrong. musl has not got arc4random, which
+# the objects now call, so musl-shim.c stands in for it there, and only
+# there: the SlateOS link above and slatelink.sh never see it.
+# The lists are make's own expansions of its link line's variables, so this
+# links exactly what the build linked into bash.
+make_var() {
+    printf 'slate-print-%%:\n\t@echo $($*)\n' \
+        | make -s --no-print-directory -f Makefile -f - "slate-print-$1"
+}
+# shellcheck disable=SC2046  # word splitting is what builds the lists
+"$SLATE_CC" -static -o bash-musl $(make_var OBJECTS) \
+    "$SLATE_ROOT/scripts/bash-spike/musl-shim.c" \
+    $(make_var BUILTINS_LDFLAGS) $(make_var LIBRARY_LDFLAGS) $(make_var LIBS) \
+    >musl-link.log 2>&1
+echo "MUSL_LINK_EXIT=$?"
+if [ -x bash-musl ] && ./bash-musl -c 'echo "$SRANDOM" | grep -q "^[0-9][0-9]*$"'; then
+  cp bash-musl "$SPIKE/bash-musl.elf"
+  echo "MUSL_BASH_BUILT"
+else
+  echo "NO_MUSL_BINARY -- see $BUILD/musl-link.log"
+  exit 1
 fi

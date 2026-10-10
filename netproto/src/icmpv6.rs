@@ -32,6 +32,14 @@ pub const TYPE_ROUTER_ADVERTISEMENT: u8 = 134;
 pub const TYPE_NEIGHBOR_SOLICITATION: u8 = 135;
 /// ICMPv6 type: Neighbor Advertisement (RFC 4861 §4.4).
 pub const TYPE_NEIGHBOR_ADVERTISEMENT: u8 = 136;
+/// ICMPv6 type: Echo Request (RFC 4443 §4.1).
+pub const TYPE_ECHO_REQUEST: u8 = 128;
+/// ICMPv6 type: Echo Reply (RFC 4443 §4.2).
+pub const TYPE_ECHO_REPLY: u8 = 129;
+/// The IPv6 hop limit every Neighbor Discovery message is sent with, and
+/// must arrive with: a lower one has crossed a router, so did not come from
+/// this link (RFC 4861 §7.1.1).
+pub const NDP_HOP_LIMIT: u8 = 255;
 
 /// NDP option: Source Link-Layer Address (RFC 4861 §4.6.1).
 pub const OPT_SOURCE_LINK_ADDR: u8 = 1;
@@ -300,12 +308,148 @@ pub fn parse_neighbor_advertisement(
     })
 }
 
+/// How to answer a Neighbor Solicitation from `src` (the IPv6 source of
+/// the solicitation) asking about `ns.target`, for a host whose address is
+/// `me`: the advertisement's destination and flags (RFC 4861 §7.2.4), or
+/// `None` when the solicitation is about another address. A solicitation
+/// from the unspecified address is another node's duplicate-address check
+/// on our address; it is answered to all-nodes, unsolicited, so the checker
+/// sees the address is taken. Either way Override is set: the address is
+/// ours.
+#[must_use]
+pub fn answer_solicitation(
+    src: &Ipv6Addr,
+    ns: &NeighborMessage,
+    me: &Ipv6Addr,
+) -> Option<(Ipv6Addr, u8)> {
+    if ns.target != *me {
+        return None;
+    }
+    if *src == UNSPECIFIED {
+        Some((ALL_NODES_LINK_LOCAL, NA_FLAG_OVERRIDE))
+    } else {
+        Some((*src, NA_FLAG_SOLICITED | NA_FLAG_OVERRIDE))
+    }
+}
+
+/// Whether `msg` is an Echo Request whose checksum verifies against
+/// `src`/`dst`.
+#[must_use]
+pub fn is_echo_request(msg: &[u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> bool {
+    msg.len() >= 8 && msg[0] == TYPE_ECHO_REQUEST && msg[1] == 0 && verify_checksum(src, dst, msg)
+}
+
+/// Write the Echo Reply to the Echo Request `request` into `out`: the same
+/// identifier, sequence number and data, checksummed for a reply from `src`
+/// to `dst` (RFC 4443 §4.2). Returns its length, or `None` when `out` is too
+/// small or `request` is shorter than an echo header.
+#[must_use]
+pub fn write_echo_reply(
+    out: &mut [u8],
+    src: &Ipv6Addr,
+    dst: &Ipv6Addr,
+    request: &[u8],
+) -> Option<usize> {
+    if request.len() < 8 {
+        return None;
+    }
+    let reply = out.get_mut(..request.len())?;
+    reply.copy_from_slice(request);
+    reply[0] = TYPE_ECHO_REPLY;
+    reply[1] = 0;
+    reply[2] = 0;
+    reply[3] = 0;
+    let csum = checksum(src, dst, reply);
+    reply[2..4].copy_from_slice(&csum.to_be_bytes());
+    Some(request.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MAC_A: MacAddr = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
     const MAC_B: MacAddr = [0x52, 0x54, 0x00, 0xAB, 0xCD, 0xEF];
+
+    #[test]
+    fn a_solicitation_for_us_is_answered_solicited_and_overriding() {
+        let me = link_local_from_mac(&MAC_A);
+        let peer = link_local_from_mac(&MAC_B);
+        let mut buf = [0u8; 64];
+        let n = write_neighbor_solicitation(
+            &mut buf,
+            &peer,
+            &solicited_node_multicast(&me),
+            &me,
+            &MAC_B,
+        )
+        .unwrap();
+        let ns =
+            parse_neighbor_solicitation(&buf[..n], &peer, &solicited_node_multicast(&me)).unwrap();
+        assert_eq!(
+            answer_solicitation(&peer, &ns, &me),
+            Some((peer, NA_FLAG_SOLICITED | NA_FLAG_OVERRIDE))
+        );
+        // About someone else: not ours to answer.
+        assert_eq!(answer_solicitation(&peer, &ns, &peer), None);
+    }
+
+    #[test]
+    fn a_duplicate_address_check_on_our_address_is_answered_to_all_nodes() {
+        let me = link_local_from_mac(&MAC_A);
+        let ns = NeighborMessage {
+            target: me,
+            flags: 0,
+            link_addr: None,
+        };
+        assert_eq!(
+            answer_solicitation(&UNSPECIFIED, &ns, &me),
+            Some((ALL_NODES_LINK_LOCAL, NA_FLAG_OVERRIDE))
+        );
+    }
+
+    #[test]
+    fn an_echo_reply_mirrors_the_request_and_verifies() {
+        let me = link_local_from_mac(&MAC_A);
+        let peer = link_local_from_mac(&MAC_B);
+        // Echo request: type 128, id 0x1234, seq 7, data "ping".
+        let mut req = [
+            TYPE_ECHO_REQUEST,
+            0,
+            0,
+            0,
+            0x12,
+            0x34,
+            0,
+            7,
+            b'p',
+            b'i',
+            b'n',
+            b'g',
+        ];
+        let c = checksum(&peer, &me, &req);
+        req[2..4].copy_from_slice(&c.to_be_bytes());
+        assert!(is_echo_request(&req, &peer, &me));
+        // The pseudo-header sums the two addresses, so swapping them changes
+        // nothing; a different address does.
+        let stranger = link_local_from_mac(&[0x02, 0, 0, 0, 0, 1]);
+        assert!(
+            !is_echo_request(&req, &stranger, &me),
+            "checksum binds the addresses"
+        );
+        let mut out = [0u8; 32];
+        let n = write_echo_reply(&mut out, &me, &peer, &req).unwrap();
+        assert_eq!(n, req.len());
+        assert_eq!(out[0], TYPE_ECHO_REPLY);
+        assert_eq!(&out[4..n], &req[4..]);
+        assert!(verify_checksum(&me, &peer, &out[..n]));
+        assert!(
+            !is_echo_request(&out[..n], &me, &peer),
+            "a reply is not a request"
+        );
+        assert!(write_echo_reply(&mut [0u8; 4], &me, &peer, &req).is_none());
+        assert!(write_echo_reply(&mut out, &me, &peer, &req[..7]).is_none());
+    }
 
     #[test]
     fn solicited_node_copies_low_24_bits() {

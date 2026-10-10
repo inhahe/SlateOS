@@ -10,7 +10,7 @@ symbol missing and none duplicated (2026-10-01).**
 | compile | 37 objects, about 90 s; one translation unit (`oils_for_unix.mycpp.cc`) is most of it |
 | undefined symbols | **0** |
 | duplicate symbols | **0** |
-| binary | static `ET_EXEC`, 19,503,016 bytes; 3,952,264 with `--strip-debug` |
+| binary | static `ET_EXEC`, 19,503,016 bytes; 3,952,264 with `--strip-debug` (2026-10-05, through the link wrapper: 18,890,648 and 4,020,952) |
 | unwind tables | `PT_GNU_EH_FRAME` present |
 
 This is the first step of design-decisions.md §1043 (the operator's): the
@@ -30,9 +30,23 @@ bash scripts/oils-spike/run.sh
 
 It fetches the release into `$SLATE_WORK` (durable, per worktree -- see
 `scripts/lib/worktree.sh`), checks its hash, builds in
-`$SLATE_WORK/oils-spike`, and stages the stripped binary as
-`build/spike/oils-for-unix-slateos.elf`, the shelf the rootfs recipe stages
-spike artifacts from.
+`$SLATE_WORK/oils-spike`, and then runs `slatelink.sh`, which links the objects
+against SlateOS's `libc.a`, checks the result -- nothing undefined, nothing
+duplicated, `PT_GNU_EH_FRAME`, the SlateOS ABI note -- and stages the stripped
+binary as `build/spike/oils-for-unix-slateos.elf`, the shelf the rootfs recipe
+stages spike artifacts from.
+
+`slatelink.sh` alone is the seconds-long half: the rootfs recipe runs it
+whenever the artifact is older than `libc.a`, as it relinks bash and CPython,
+and refuses to stage a binary older than the library it links. The link goes
+through `slate_make_link_wrappers` -- zig's `ld.lld` with exactly its inputs --
+not zig's `c++` driver with `-nostdlib`, which put zig's musl `libc.a` behind
+every link until 2026-10-05, where it would have supplied whatever ours lacks
+(`known-issues-resolved/D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC.md`).
+
+**On the image** as `/bin/oils-for-unix`, and `/bin/ysh` as a hard link to it
+(it picks its language from the name it was run by). Not yet as `/bin/osh`,
+which is the Rust OSH's until the switch, nor as `/bin/sh`.
 
 ## What it took
 
@@ -65,8 +79,9 @@ globs do not match. Only the SlateOS link has both halves agreeing.
 - **No line editing.** Built `--without-readline`: SlateOS has no GNU
   readline, so the prompt reads plain lines, with no editing or history. A
   readline port (and the terminal library under it) closes that.
-- **Running it.** Staging, and a boot rung that runs OSH and YSH on the
-  machine, come next (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`).
+- **Running it.** It is staged (2026-10-05); a boot rung that runs OSH and
+  YSH on the machine is lane A's, next
+  (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`).
 - **The spec tests on SlateOS**, then making it `/bin/osh`, the default `sh`
   and the login shell (`init/`, and lane D's recipe), with the Rust OSH
   renamed and kept.

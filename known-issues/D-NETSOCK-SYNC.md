@@ -337,7 +337,10 @@ Phase 5 progresses:
   receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
   is lossy); and it inherits the daemon's single-active-phase RX-demux limitation
   (`D-NETSTACK-RX-DEMUX`) — the `udp_pump` drops interleaved TCP frames while
-  draining, same as the TCP pump.
+  draining, same as the TCP pump. *(Update 2026-09-27, lane A, which owns
+  `services/netstack` since the six-lane split: fixed on lane-a, awaiting a
+  boot. One `pump` now reads each frame once and routes TCP and UDP alike, over
+  daemon-wide tables — A-Q15's increment 2.)*
 - **`recvfrom` source-address out-params now populated (parity fix).**
   `recvfrom`'s `src_addr`/`addrlen` (arg4/arg5) are filled with the connected
   peer's endpoint on a successful receive, matching Linux for a connected stream
@@ -349,7 +352,9 @@ Phase 5 progresses:
   non-blocking transfer (→ `EAGAIN` on a full send window / empty receive)
   regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
   `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
-  never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
+  never raise `SIGPIPE`; a broken pipe returns `EPIPE`) -- in the Linux ABI. The
+  native C library raises it since 2026-10-06 (design-decisions §1176); the
+  Linux ABI's half is `requests/d-a-linux-programs-never-get-sigpipe.md`. Remaining gaps: other
   `MSG_*` flags (`MSG_OOB`, `MSG_TRUNC`) are still ignored. (For a **datagram**
   socket, `recvfrom` now reports the *real* per-datagram source address — see the
   `SOCK_DGRAM` bullet above — via `dispatch_dgram_recvfrom`; the connected-stream

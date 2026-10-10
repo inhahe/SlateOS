@@ -226,20 +226,19 @@ pub struct Style {
     // Background
     pub background: Color,
 
-    // Foreground (text color)
-    pub foreground: Color,
+    /// The text's colour; `None` -- the default -- is the palette's, so a
+    /// widget follows the user's theme unless its program says otherwise.
+    /// It defaulted to black, which in a dark theme drew text a user could
+    /// not read.
+    pub foreground: Option<Color>,
 
     /// What a selection inside this widget is painted in, and what selected
-    /// text is drawn in over it.
-    ///
-    /// Defaults here for the same reason `foreground` defaults to black: a
-    /// `Style` is a complete description and a caller that has the user's
-    /// palette overwrites it. The defaults are the Windows selection blue
-    /// this toolkit shipped before 838, kept so a caller that sets neither
-    /// looks exactly as it did.
-    pub selection_bg: Color,
+    /// text is drawn in over it; `None` -- the default -- is the palette's
+    /// accent and the ink that reads on it. They defaulted to the Windows
+    /// selection blue, whatever the user's accent.
+    pub selection_bg: Option<Color>,
     /// See [`selection_bg`](Self::selection_bg).
-    pub selection_fg: Color,
+    pub selection_fg: Option<Color>,
 
     /// How wide to draw a text caret, in pixels.
     ///
@@ -286,9 +285,9 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             background: Color::TRANSPARENT,
-            foreground: Color::BLACK,
-            selection_bg: Color::from_hex(0x0078D7),
-            selection_fg: Color::WHITE,
+            foreground: None,
+            selection_bg: None,
+            selection_fg: None,
             caret_width: crate::textedit::CARET_WIDTH,
             padding: Edges::ZERO,
             margin: Edges::ZERO,

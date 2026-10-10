@@ -1,6 +1,6 @@
 //! Making, replacing and waiting for processes, the process group they run
 //! in, and the root and credentials they run with: `fork`, `execvp`,
-//! `waitpid`, `setpgid`, `prctl (PR_SET_DUMPABLE)`, `_exit`, `chroot`,
+//! `waitpid`, `setpgid`, `setsid`, `prctl (PR_SET_DUMPABLE)`, `_exit`, `chroot`,
 //! `setgroups`, `setgid` and `setuid`. The last four are what GNU `chroot`
 //! changes before it becomes its command.
 //!
@@ -29,6 +29,11 @@ const WNOHANG: i32 = 1;
 /// `prctl`'s option for whether this process may leave a core image.
 #[cfg(any(unix, test))]
 const PR_SET_DUMPABLE: i32 = 4;
+/// `mlockall`'s flags: what is mapped now, and what will be.
+#[cfg(any(unix, test))]
+const MCL_CURRENT: i32 = 1;
+#[cfg(any(unix, test))]
+const MCL_FUTURE: i32 = 2;
 
 /// The library's symbols, declared once. `waitpid` and `_exit` are declared
 /// exactly as `pty` declares them, so that one symbol is not declared two ways
@@ -51,7 +56,11 @@ mod sys {
         pub fn setuid(uid: u32) -> i32;
         pub fn getpgrp() -> i32;
         pub fn getsid(pid: i32) -> i32;
+        pub fn setsid() -> i32;
         pub fn pidfd_open(pid: i32, flags: u32) -> i32;
+        pub fn getuid() -> u32;
+        pub fn geteuid() -> u32;
+        pub fn mlockall(flags: i32) -> i32;
     }
 }
 
@@ -222,6 +231,40 @@ fn wait_nohang_one(pid: i32) -> Result<Option<WaitStatus>, i32> {
 
 #[cfg(not(unix))]
 fn wait_nohang_one(_pid: i32) -> Result<Option<WaitStatus>, i32> {
+    Err(ENOSYS)
+}
+
+/// Wait for the child `pid` to finish, and reap it: `waitpid (pid, &status,
+/// 0)`.
+///
+/// One child only, as [`wait_nohang`] is, and for its reason.
+///
+/// # Errors
+///
+/// `EINVAL` when `pid` does not name a single process, `ECHILD` when it is not
+/// an unreaped child of this one, `EINTR` when a signal's handler ran first --
+/// the caller's to retry -- and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait(pid: i32) -> Result<WaitStatus, i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    wait_one(pid)
+}
+
+#[cfg(unix)]
+fn wait_one(pid: i32) -> Result<WaitStatus, i32> {
+    let mut status = 0i32;
+    // SAFETY: `status` is a live `int` that the call writes at most once.
+    let rc = unsafe { sys::waitpid(pid, &raw mut status, 0) };
+    if rc > 0 {
+        Ok(WaitStatus(status))
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_one(_pid: i32) -> Result<WaitStatus, i32> {
     Err(ENOSYS)
 }
 
@@ -426,6 +469,34 @@ fn session_of_one(_pid: i32) -> Result<i32, i32> {
     Err(ENOSYS)
 }
 
+/// Make this process the leader of a new session, and of a new process group
+/// in it, with no controlling terminal: `setsid`. Returns the new session's
+/// id, which is this process's.
+///
+/// What a process does to stand apart from the terminal and the job it was
+/// started in -- `systemd-cat`'s helper, which must outlive a Ctrl-C at that
+/// terminal for as long as the command it serves does.
+///
+/// # Errors
+///
+/// `EPERM` when this process already leads a process group (a group leader
+/// cannot leave its group); [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn start_session() -> Result<i32, i32> {
+    start_session_one()
+}
+
+#[cfg(unix)]
+fn start_session_one() -> Result<i32, i32> {
+    // SAFETY: no arguments; the call changes only this process's session.
+    let sid = unsafe { sys::setsid() };
+    if sid < 0 { Err(last_errno()) } else { Ok(sid) }
+}
+
+#[cfg(not(unix))]
+fn start_session_one() -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
 /// A descriptor that refers to process `pid` itself rather than to its
 /// number, and becomes readable when the process exits: `pidfd_open`.
 ///
@@ -469,6 +540,71 @@ pub fn exit_immediately(status: i32) -> ! {
     unsafe { sys::_exit(status) }
 }
 
+/// The user this process was started as: `getuid`. `u32::MAX` -- C's
+/// `(uid_t) -1`, no user -- off Unix, where there are no users to be.
+#[must_use]
+pub fn getuid() -> u32 {
+    getuid_one()
+}
+
+#[cfg(unix)]
+fn getuid_one() -> u32 {
+    // SAFETY: no arguments; the call reads the process's credentials only.
+    unsafe { sys::getuid() }
+}
+
+#[cfg(not(unix))]
+fn getuid_one() -> u32 {
+    u32::MAX
+}
+
+/// The user this process acts as: `geteuid`. `u32::MAX` off Unix, as for
+/// [`getuid`].
+#[must_use]
+pub fn geteuid() -> u32 {
+    geteuid_one()
+}
+
+#[cfg(unix)]
+fn geteuid_one() -> u32 {
+    // SAFETY: no arguments; the call reads the process's credentials only.
+    unsafe { sys::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn geteuid_one() -> u32 {
+    u32::MAX
+}
+
+/// Keep every page this process has, and every one it will have, in memory:
+/// `mlockall (MCL_CURRENT | MCL_FUTURE)`.
+///
+/// For a program that must not wait on paging while it has stopped
+/// everything else -- `killall5`. Every later allocation is locked too, and
+/// fails once the lock limit is reached, so it is for a program that knows
+/// how much it will allocate.
+///
+/// # Errors
+///
+/// `EPERM` without the right to lock that much (`CAP_IPC_LOCK`, or
+/// `RLIMIT_MEMLOCK`), `ENOMEM`, `EAGAIN`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn lock_all_memory() -> Result<(), i32> {
+    lock_all_memory_one()
+}
+
+#[cfg(unix)]
+fn lock_all_memory_one() -> Result<(), i32> {
+    // SAFETY: a flags word; the call changes how the process's pages are
+    // kept and reads no memory of ours.
+    let rc = unsafe { sys::mlockall(MCL_CURRENT | MCL_FUTURE) };
+    if rc < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+#[cfg(not(unix))]
+fn lock_all_memory_one() -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -486,6 +622,21 @@ mod tests {
     fn the_numbers_are_the_librarys() {
         assert_eq!(WNOHANG, posix::process::WNOHANG);
         assert_eq!(PR_SET_DUMPABLE, posix::sys_prctl::PR_SET_DUMPABLE);
+        assert_eq!(MCL_CURRENT, posix::mman::MCL_CURRENT);
+        assert_eq!(MCL_FUTURE, posix::mman::MCL_FUTURE);
+    }
+
+    /// The real and effective user are the ones `/proc/self` is owned by, in
+    /// a process that is no set-user program. (`lock_all_memory` has no test
+    /// here: it would lock every later allocation of the whole test run.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_users_are_the_processs() {
+        extern crate std;
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata("/proc/self").unwrap().uid();
+        assert_eq!(getuid(), owner);
+        assert_eq!(geteuid(), owner);
     }
 
     /// A status word reads the way the C macros read it -- compared with
@@ -561,6 +712,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn credentials_and_root_are_refused_as_the_library_refuses_them() {
+        extern crate std;
+
         assert_eq!(
             change_root(c"/nonexistent/libcall-test"),
             Err(crate::ENOENT)
@@ -570,7 +723,9 @@ mod tests {
         // Too many groups: `EPERM` for a caller without the privilege, which
         // the kernel checks first, `EINVAL` for one with it. Neither changes
         // anything.
-        let too_many = [0u32; 65537];
+        // On the heap: 256 KiB is more than a test thread's stack should
+        // be asked to hold.
+        let too_many = std::vec![0u32; 65537];
         let refused = set_groups(&too_many);
         assert!(
             refused == Err(posix::errno::EPERM) || refused == Err(posix::errno::EINVAL),

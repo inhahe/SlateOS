@@ -99,7 +99,7 @@
 //! 3. **The terminal width comes from `COLUMNS`, defaulting to 80.** There is no
 //!    `TIOCGWINSZ` in this build (the same limitation `ls` documents), so `-c
 //!    auto` and the automatic three-across fit use the environment.
-//! 4. **The calendar is rendered into a `String` and written once.** Upstream
+//! 4. **The calendar is rendered into a buffer and written once.** Upstream
 //!    streams to `stdout`. The difference is observable only in how a
 //!    mid-calendar `EPIPE` is reported, and writing once is what lets
 //!    `stdfd::close_stdout` report it the way every other binary here does.
@@ -109,20 +109,29 @@
 //! 6. **`_NL_TIME_WEEK_1STDAY` is not consulted.** Upstream asks the locale
 //!    whether the week starts on Sunday or Monday; the C locale answers Sunday,
 //!    which is what this hardcodes. `-m` and `--iso` are the way to change it.
-//! 7. **The `workday` and `weekend` colour sequences are omitted.** Upstream
-//!    defines the names but their built-in values are empty strings, so only
-//!    `today` and `weeknumber` (both reverse video) ever emit anything.
+//!
+//! # Colour
+//!
+//! Whether to colour, and with what, is util-linux's `lib/colors.c` through
+//! the `ulcolors` crate, as in every util-linux port here: `--color` after one
+//! leading `=`, a terminal whose terminfo entry has colours, the
+//! `terminal-colors.d` files, and a scheme file's sequences for the five names
+//! `cal.c` asks for -- `today` and `weeknumber` (reverse video unless the
+//! scheme says otherwise), and `header`, `workday` and `weekend` (nothing
+//! unless it does). The calendar is rendered as bytes, since a scheme file's
+//! sequences need not be text.
 
 use std::ffi::{OsStr, OsString};
-use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coreutils::getopt::{Error, Opt, Program, Report, Takes};
-use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
+use coreutils::quote::{escape_unprintable, os_bytes, quoteaf, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
-use ulstrutils::{NumErr, c_isspace, parse_size, scan_integer, ul_strtos64, ul_strtou64};
+use ulcolors::{ColorMode, Colors};
+use ulstrutils::{NumErr, parse_size, ul_strtos64, ul_strtou64};
+use ultimeutils::{USEC_PER_SEC, parse_timestamp};
 
 // ------------------------------------------------------------- the tables ---
 
@@ -205,10 +214,49 @@ const COLUMNS_MAX_THREE: i64 = -1;
 /// `-c auto`: use as many months per row as the terminal can hold.
 const COLUMNS_AUTO: i64 = -2;
 
-/// Reverse video, which is `cal.c`'s built-in value for both `today` and
-/// `weeknumber`. The other three colour names it defines default to `""`.
-const HIGHLIGHT: &str = "\x1b[7m";
-const RESET: &str = "\x1b[0m";
+/// The colour sequences `cal` writes, by `cal.c`'s scheme names: `today` and
+/// `weeknumber` default to reverse video, and `header`, `workday` and
+/// `weekend` to nothing, unless a `terminal-colors.d` scheme file says
+/// otherwise -- `cal_get_color_sequence` for each, resolved once.
+///
+/// All empty when `colors_init` decided against colour: upstream's lookups
+/// then return `NULL`, which every caller treats as nothing to write.
+#[derive(Clone, Debug, Default)]
+struct CalColors {
+    /// `colors_init`'s verdict.
+    wanted: bool,
+    today: Vec<u8>,
+    weeknumber: Vec<u8>,
+    header: Vec<u8>,
+    workday: Vec<u8>,
+    weekend: Vec<u8>,
+}
+
+impl CalColors {
+    /// Each sequence as `color_scheme_get_sequence (name, dflt)` returns it.
+    fn resolve(colors: &mut Colors) -> Self {
+        let wanted = colors.wanted();
+        let mut get = |name: &[u8], dflt: &[u8]| {
+            colors
+                .scheme_get_sequence(name, Some(dflt))
+                .unwrap_or_default()
+        };
+        Self {
+            wanted,
+            today: get(b"today", ulcolors::REVERSE),
+            weeknumber: get(b"weeknumber", ulcolors::REVERSE),
+            header: get(b"header", b""),
+            workday: get(b"workday", b""),
+            weekend: get(b"weekend", b""),
+        }
+    }
+}
+
+/// `cal_get_color_disable_sequence`: the reset that closes `seq`, or nothing
+/// after an empty one.
+fn end_of(seq: &[u8]) -> &'static [u8] {
+    if seq.is_empty() { b"" } else { ulcolors::RESET }
+}
 
 /// `cal.c`'s `days_in_month[2][13]`, Julian and Gregorian sharing one table
 /// because they differ only in which years are leap.
@@ -242,14 +290,6 @@ const ABBR_MONTH: [&str; MONTHS_IN_YEAR] = [
 /// these truncated to width 2 by [`center`], not a separate table.
 const ABDAY: [&str; DAYS_IN_WEEK] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ColorMode {
-    Undef,
-    Auto,
-    Never,
-    Always,
-}
-
 /// What the operands asked for. `year` is `i32` because upstream's is, and the
 /// `INT32_MAX` rejection below is only meaningful at that width.
 #[derive(Clone, Copy, Debug, Default)]
@@ -281,9 +321,11 @@ struct Ctl {
     header_hint: bool,
     header_year: bool,
     vertical: bool,
-    colors: bool,
+    /// What `colors_init` decided, and the sequences it leads to; set by
+    /// [`apply_colors`] once the options are read.
+    colors: CalColors,
     /// `day_headings`, built once by `headers_init`.
-    day_headings: String,
+    day_headings: Vec<u8>,
 }
 
 impl Default for Ctl {
@@ -304,8 +346,8 @@ impl Default for Ctl {
             header_hint: false,
             header_year: false,
             vertical: false,
-            colors: false,
-            day_headings: String::new(),
+            colors: CalColors::default(),
+            day_headings: Vec::new(),
         }
     }
 }
@@ -519,55 +561,6 @@ fn week_to_day(ctl: &Ctl) -> i32 {
     if yday <= 0 { 1 } else { yday }
 }
 
-/// A broken-down local time, in the shape `strptime` fills in and `mktime`
-/// reads. Fields are allowed out of range — `mktime` normalises them, which is
-/// how `cal 2024-02-31` resolves to March.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BrokenDown {
-    year: i64,
-    /// 1..=12 nominally, but `tomorrow`/`yesterday` and `strptime` may leave it
-    /// outside that range for `mktime` to normalise.
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: i64,
-    /// Filled in by [`mktime`]; `-1` until then.
-    wday: i32,
-}
-
-/// glibc's `mktime` ([`localtime::Zone::mktime`]) on `cal`'s own
-/// [`BrokenDown`], with `tm_isdst` -1 as util-linux's `parse_timestamp` sets
-/// it -- so a skipped or repeated hour resolves as it does upstream, from the
-/// same process-wide offset guess. `None` where `mktime` fails, and where a
-/// field does not fit the `int` it is in C.
-///
-/// The normalised fields are written back, as `mktime` writes them, so the
-/// weekday check in `parse_timestamp` sees the resolved date rather than the
-/// one that was typed.
-fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> Option<i64> {
-    let mut stm = localtime::StructTm {
-        tm_sec: i32::try_from(tm.second).ok()?,
-        tm_min: i32::try_from(tm.minute).ok()?,
-        tm_hour: i32::try_from(tm.hour).ok()?,
-        tm_mday: i32::try_from(tm.day).ok()?,
-        tm_mon: i32::try_from(tm.month.checked_sub(1)?).ok()?,
-        tm_year: i32::try_from(tm.year.checked_sub(1900)?).ok()?,
-        tm_wday: -1,
-        tm_isdst: -1,
-        ..localtime::StructTm::default()
-    };
-    let t = zone.mktime(&mut stm)?;
-    tm.year = i64::from(stm.tm_year).saturating_add(1900);
-    tm.month = i64::from(stm.tm_mon).saturating_add(1);
-    tm.day = i64::from(stm.tm_mday);
-    tm.hour = i64::from(stm.tm_hour);
-    tm.minute = i64::from(stm.tm_min);
-    tm.second = i64::from(stm.tm_sec);
-    tm.wday = stm.tm_wday;
-    Some(t)
-}
-
 // ------------------------------------------------------- numbers, as C's ---
 
 /// Every diagnostic here is `errx`/`err` with `EXIT_FAILURE` and no referral to
@@ -648,17 +641,12 @@ fn parse_reform_year(arg: &OsStr) -> Result<i32, Error> {
 
 /// `colormode_or_err`. An absent value means `auto`; an empty one is an error,
 /// because `colormode_from_string` rejects `""` before it reaches the table.
+///
+/// util-linux's takes one leading `=` off first -- `--color==never` is
+/// `never` -- and quotes what is left, `=` gone, when it names no mode.
 fn colormode_or_err(arg: &OsStr) -> Result<ColorMode, Error> {
-    let bytes = os_bytes(arg);
-    if bytes.eq_ignore_ascii_case(b"auto") {
-        Ok(ColorMode::Auto)
-    } else if bytes.eq_ignore_ascii_case(b"never") {
-        Ok(ColorMode::Never)
-    } else if bytes.eq_ignore_ascii_case(b"always") {
-        Ok(ColorMode::Always)
-    } else {
-        Err(fail(format!("unsupported color mode: {}", quoteaf_os(arg))))
-    }
+    ulcolors::colormode_or_err(&os_bytes(arg))
+        .map_err(|bad| fail(format!("unsupported color mode: {}", quoteaf(&bad))))
 }
 
 /// `isdigit_string`: non-empty, and every byte an ASCII digit.
@@ -669,445 +657,6 @@ fn colormode_or_err(arg: &OsStr) -> Result<ColorMode, Error> {
 /// so it goes to the timestamp parser and is refused there.
 fn isdigit_string(s: &[u8]) -> bool {
     !s.is_empty() && s.iter().all(u8::is_ascii_digit)
-}
-
-// ------------------------------------------------ timestamps, as C's again ---
-
-const USEC_PER_SEC: u64 = 1_000_000;
-const USEC_PER_MSEC: u64 = 1_000;
-const USEC_PER_MINUTE: u64 = 60 * USEC_PER_SEC;
-const USEC_PER_HOUR: u64 = 60 * USEC_PER_MINUTE;
-const USEC_PER_DAY: u64 = 24 * USEC_PER_HOUR;
-const USEC_PER_WEEK: u64 = 7 * USEC_PER_DAY;
-/// A "month" is a *mean* month — 30.4375 days — not a calendar one, so
-/// `cal +1month` in a 31-day month can land in the month after next.
-const USEC_PER_MONTH: u64 = 2_629_800 * USEC_PER_SEC;
-/// Likewise a mean Julian year, 365.25 days.
-const USEC_PER_YEAR: u64 = 31_557_600 * USEC_PER_SEC;
-
-/// `lib/timeutils.c`'s `WHITESPACE`, which is **not** `isspace` — no vertical
-/// tab and no form feed.
-const TIMEUTILS_WHITESPACE: &[u8] = b" \t\n\r";
-
-/// `parse_sec`'s suffix table, in its order, which is what makes `m` a minute
-/// and `ms` a millisecond: `months` and `month` are tried before `msec`, `ms`
-/// and `m`, and `min`/`minute` before all of them.
-const SEC_TABLE: &[(&str, u64)] = &[
-    ("seconds", USEC_PER_SEC),
-    ("second", USEC_PER_SEC),
-    ("sec", USEC_PER_SEC),
-    ("s", USEC_PER_SEC),
-    ("minutes", USEC_PER_MINUTE),
-    ("minute", USEC_PER_MINUTE),
-    ("min", USEC_PER_MINUTE),
-    ("months", USEC_PER_MONTH),
-    ("month", USEC_PER_MONTH),
-    ("msec", USEC_PER_MSEC),
-    ("ms", USEC_PER_MSEC),
-    ("m", USEC_PER_MINUTE),
-    ("hours", USEC_PER_HOUR),
-    ("hour", USEC_PER_HOUR),
-    ("hr", USEC_PER_HOUR),
-    ("h", USEC_PER_HOUR),
-    ("days", USEC_PER_DAY),
-    ("day", USEC_PER_DAY),
-    ("d", USEC_PER_DAY),
-    ("weeks", USEC_PER_WEEK),
-    ("week", USEC_PER_WEEK),
-    ("w", USEC_PER_WEEK),
-    ("years", USEC_PER_YEAR),
-    ("year", USEC_PER_YEAR),
-    ("y", USEC_PER_YEAR),
-    ("usec", 1),
-    ("us", 1),
-    // The empty suffix is last, so a bare number is seconds.
-    ("", USEC_PER_SEC),
-];
-
-/// `parse_sec`: `+90min`, `2 days`, `1h30m`, `1.5w`.
-///
-/// Several terms may be concatenated and are summed. Returns micro-seconds, or
-/// `None` for anything the C returns a negative errno for — `cal` treats every
-/// failure the same way, so the distinction between `EINVAL` and `ERANGE` is
-/// not carried.
-fn parse_sec(t: &[u8]) -> Option<u64> {
-    let mut r: u64 = 0;
-    let mut something = false;
-    let mut p = 0usize;
-
-    loop {
-        while t.get(p).is_some_and(|c| TIMEUTILS_WHITESPACE.contains(c)) {
-            p = p.saturating_add(1);
-        }
-        if p >= t.len() {
-            return if something { Some(r) } else { None };
-        }
-
-        // `strtoll(p, &e, 10)`, whose sign is accepted and then refused.
-        let scanned = scan_integer(t.get(p..).unwrap_or_default(), 10);
-        let (l, mut e) = match &scanned {
-            Some(sc) => {
-                if sc.saturated {
-                    return None; // ERANGE
-                }
-                if sc.negative && sc.magnitude != 0 {
-                    return None; // ERANGE
-                }
-                (u64::try_from(sc.magnitude).ok()?, p.saturating_add(sc.end))
-            }
-            None => (0u64, p),
-        };
-
-        let mut z: u64 = 0;
-        let mut n = 0usize;
-        if t.get(e) == Some(&b'.') {
-            let b = e.saturating_add(1);
-            let frac = scan_integer(t.get(b..).unwrap_or_default(), 10)?;
-            if frac.saturated || frac.negative {
-                return None;
-            }
-            z = u64::try_from(frac.magnitude).ok()?;
-            e = b.saturating_add(frac.end);
-            n = e.saturating_sub(b);
-        } else if e == p {
-            return None; // no digits and no decimal point
-        }
-
-        while t.get(e).is_some_and(|c| TIMEUTILS_WHITESPACE.contains(c)) {
-            e = e.saturating_add(1);
-        }
-
-        let mut matched = false;
-        for (suffix, usec) in SEC_TABLE {
-            if !t
-                .get(e..)
-                .unwrap_or_default()
-                .starts_with(suffix.as_bytes())
-            {
-                continue;
-            }
-            let mut k = z.saturating_mul(*usec);
-            for _ in 0..n {
-                k /= 10;
-            }
-            r = r.saturating_add(l.saturating_mul(*usec)).saturating_add(k);
-            p = e.saturating_add(suffix.len());
-            something = true;
-            matched = true;
-            break;
-        }
-        if !matched {
-            return None;
-        }
-    }
-}
-
-/// `parse_subseconds`: the `.12` of `2012-09-22 16:34:22.12`, or the `,5` of an
-/// ISO-8601 one. A bare `.` is accepted and worth nothing.
-fn parse_subseconds(t: &[u8]) -> Option<u64> {
-    if t.first() != Some(&b'.') && t.first() != Some(&b',') {
-        return None;
-    }
-    let mut ret: u64 = 0;
-    let mut factor: u64 = USEC_PER_SEC / 10;
-    for &c in t.get(1..).unwrap_or_default() {
-        if !c.is_ascii_digit() || factor < 1 {
-            return None;
-        }
-        ret = ret.saturating_add(u64::from(c.saturating_sub(b'0')).saturating_mul(factor));
-        factor /= 10;
-    }
-    Some(ret)
-}
-
-/// glibc's `get_number` macro: skip *spaces* (not all whitespace), then read at
-/// most `n` digits, stopping early once another digit could not fit under `to`.
-fn get_number(s: &[u8], rp: &mut usize, from: i64, to: i64, n: u32) -> Option<i64> {
-    while s.get(*rp) == Some(&b' ') {
-        *rp = (*rp).saturating_add(1);
-    }
-    if !s.get(*rp).is_some_and(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut val: i64 = 0;
-    let mut left = n;
-    loop {
-        let d = i64::from(s.get(*rp)?.wrapping_sub(b'0'));
-        val = val.checked_mul(10)?.checked_add(d)?;
-        *rp = (*rp).saturating_add(1);
-        left = left.saturating_sub(1);
-        if !(left > 0
-            && val.checked_mul(10).is_some_and(|v| v <= to)
-            && s.get(*rp).is_some_and(u8::is_ascii_digit))
-        {
-            break;
-        }
-    }
-    if val < from || val > to {
-        return None;
-    }
-    Some(val)
-}
-
-/// The subset of `strptime` `parse_timestamp` uses: `%y %Y %m %d %H %M %S %s`,
-/// literal bytes, and whitespace in the format matching any run of whitespace
-/// in the input — including none.
-///
-/// Returns the index one past the last byte consumed, which is what C's
-/// `endptr` return says, and `None` where C returns `NULL`.
-fn strptime(s: &[u8], fmt: &str, tm: &mut BrokenDown, zone: &localtime::Zone) -> Option<usize> {
-    let fmt = fmt.as_bytes();
-    let mut rp = 0usize;
-    let mut fi = 0usize;
-
-    while fi < fmt.len() {
-        let Some(&fc) = fmt.get(fi) else {
-            break;
-        };
-        if c_isspace(fc) {
-            while s.get(rp).is_some_and(|c| c_isspace(*c)) {
-                rp = rp.saturating_add(1);
-            }
-            fi = fi.saturating_add(1);
-            continue;
-        }
-        if fc != b'%' {
-            if s.get(rp) != Some(&fc) {
-                return None;
-            }
-            rp = rp.saturating_add(1);
-            fi = fi.saturating_add(1);
-            continue;
-        }
-        fi = fi.saturating_add(1);
-        let spec = *fmt.get(fi)?;
-        fi = fi.saturating_add(1);
-
-        if spec == b's' {
-            // Seconds since the epoch. Deliberately *not* `get_number`: the
-            // value may be far larger than any field, and no sign is accepted,
-            // which is why `cal @-1` is refused.
-            if !s.get(rp).is_some_and(u8::is_ascii_digit) {
-                return None;
-            }
-            let mut secs: i64 = 0;
-            while let Some(&c) = s.get(rp) {
-                if !c.is_ascii_digit() {
-                    break;
-                }
-                secs = secs
-                    .saturating_mul(10)
-                    .saturating_add(i64::from(c.saturating_sub(b'0')));
-                rp = rp.saturating_add(1);
-            }
-            *tm = broken_down(zone, secs);
-            continue;
-        }
-
-        let (from, to, digits) = match spec {
-            b'Y' => (0i64, 9999i64, 4u32),
-            b'y' => (0, 99, 2),
-            b'm' => (1, 12, 2),
-            b'd' => (1, 31, 2),
-            b'H' => (0, 23, 2),
-            b'M' => (0, 59, 2),
-            // 61, for the two leap seconds POSIX once allowed.
-            b'S' => (0, 61, 2),
-            _ => return None,
-        };
-        let val = get_number(s, &mut rp, from, to, digits)?;
-        match spec {
-            b'Y' => tm.year = val,
-            // "The Year 2000: The Millennium Rollover" paper's rule, which glibc
-            // follows: 69..99 is the twentieth century, 00..68 the twenty-first.
-            b'y' => {
-                tm.year = if val >= 69 {
-                    val.saturating_add(1900)
-                } else {
-                    val.saturating_add(2000)
-                }
-            }
-            b'm' => tm.month = val,
-            b'd' => tm.day = val,
-            b'H' => tm.hour = val,
-            b'M' => tm.minute = val,
-            b'S' => tm.second = val,
-            _ => return None,
-        }
-    }
-    Some(rp)
-}
-
-/// `localtime_r` into the shape [`strptime`] and [`mktime`] share.
-fn broken_down(zone: &localtime::Zone, t: i64) -> BrokenDown {
-    let tm = zone.local(t, 0);
-    BrokenDown {
-        year: tm.year,
-        month: i64::from(tm.month),
-        day: i64::from(tm.day),
-        hour: i64::from(tm.hour),
-        minute: i64::from(tm.minute),
-        second: i64::from(tm.second),
-        wday: i32::try_from(tm.wday).unwrap_or(0),
-    }
-}
-
-/// What a format does to the fields it did not set.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum After {
-    /// Leave them — the format set everything it was going to.
-    Keep,
-    /// A date and an hour and minute: seconds become zero.
-    ZeroSec,
-    /// A bare date: the whole time becomes midnight.
-    ZeroTime,
-}
-
-/// `parse_timestamp`'s format list, in its order, with the two things the C
-/// expresses by repetition: what to zero afterwards, and whether the format is
-/// one of the four marked `!` in `timeutils.c`'s comment — the ones that also
-/// accept up to six digits of subsecond granularity.
-///
-/// The order matters at one point in particular: `%y-%m-%d …` is tried *before*
-/// `%Y-%m-%d …`, so `24-02-15` is 2024 rather than the year 24.
-const TIMESTAMP_FORMATS: &[(&str, After, bool)] = &[
-    ("%y-%m-%d %H:%M:%S", After::Keep, true),
-    ("%Y-%m-%d %H:%M:%S", After::Keep, true),
-    ("%Y-%m-%dT%H:%M:%S", After::Keep, true),
-    ("%y-%m-%d %H:%M", After::ZeroSec, false),
-    ("%Y-%m-%d %H:%M", After::ZeroSec, false),
-    ("%y-%m-%d", After::ZeroTime, false),
-    ("%Y-%m-%d", After::ZeroTime, false),
-    ("%H:%M:%S", After::Keep, true),
-    ("%H:%M", After::ZeroSec, false),
-    ("%Y%m%d%H%M%S", After::Keep, true),
-];
-
-/// `parse_timestamp`'s weekday table, in its order: each full name immediately
-/// before its abbreviation, so `Sunday 2024-02-18` and `Sun 2024-02-18` both
-/// resolve and `Sundae` resolves to neither.
-const DAY_NR: &[(&str, i32)] = &[
-    ("Sunday", 0),
-    ("Sun", 0),
-    ("Monday", 1),
-    ("Mon", 1),
-    ("Tuesday", 2),
-    ("Tue", 2),
-    ("Wednesday", 3),
-    ("Wed", 3),
-    ("Thursday", 4),
-    ("Thu", 4),
-    ("Friday", 5),
-    ("Fri", 5),
-    ("Saturday", 6),
-    ("Sat", 6),
-];
-
-fn starts_with_no_case(s: &[u8], prefix: &str) -> bool {
-    let p = prefix.as_bytes();
-    s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p))
-}
-
-/// `parse_timestamp_reference`: everything `cal <timestamp>` accepts.
-///
-/// The result is micro-seconds in util-linux's `usec_t`, which is **unsigned**.
-/// A date before 1970 therefore comes back as an enormous positive number
-/// rather than a negative one, and `cal` divides it by a million and asks
-/// `localtime` about the result — so `cal 1960-01-01` names a year in the far
-/// future. That is upstream's arithmetic, wrapping and all, and it is
-/// reproduced rather than corrected.
-fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u64> {
-    let mut tm = broken_down(zone, reference);
-    let mut plus: u64 = 0;
-    let mut minus: u64 = 0;
-    let mut ret: u64 = 0;
-    let mut weekday: i32 = -1;
-
-    if t == b"now" {
-        // Nothing to adjust.
-    } else if t == b"today" {
-        tm.second = 0;
-        tm.minute = 0;
-        tm.hour = 0;
-    } else if t == b"yesterday" {
-        tm.day = tm.day.saturating_sub(1);
-        tm.second = 0;
-        tm.minute = 0;
-        tm.hour = 0;
-    } else if t == b"tomorrow" {
-        tm.day = tm.day.saturating_add(1);
-        tm.second = 0;
-        tm.minute = 0;
-        tm.hour = 0;
-    } else if t.first() == Some(&b'+') {
-        plus = parse_sec(t.get(1..)?)?;
-    } else if t.first() == Some(&b'-') {
-        minus = parse_sec(t.get(1..)?)?;
-    } else if t.first() == Some(&b'@') {
-        let k = strptime(t.get(1..)?, "%s", &mut tm, zone)?;
-        let rest = t.get(1usize.saturating_add(k)..)?;
-        if !rest.is_empty() {
-            ret = parse_subseconds(rest)?;
-        }
-    } else if t.ends_with(b" ago") {
-        minus = parse_sec(t.len().checked_sub(4).and_then(|n| t.get(..n))?)?;
-    } else {
-        let mut s = t;
-        for (name, nr) in DAY_NR {
-            if !starts_with_no_case(s, name) {
-                continue;
-            }
-            if s.get(name.len()) != Some(&b' ') {
-                continue;
-            }
-            weekday = *nr;
-            s = s.get(name.len().saturating_add(1)..).unwrap_or_default();
-            break;
-        }
-
-        let copy = tm;
-        let mut matched = false;
-        for (fmt, after, subsec) in TIMESTAMP_FORMATS {
-            tm = copy;
-            let Some(k) = strptime(s, fmt, &mut tm, zone) else {
-                continue;
-            };
-            let Some(rest) = s.get(k..) else {
-                continue;
-            };
-            if rest.is_empty() {
-                match after {
-                    After::Keep => {}
-                    After::ZeroSec => tm.second = 0,
-                    After::ZeroTime => {
-                        tm.second = 0;
-                        tm.minute = 0;
-                        tm.hour = 0;
-                    }
-                }
-                matched = true;
-                break;
-            }
-            if *subsec && let Some(sub) = parse_subseconds(rest) {
-                ret = sub;
-                matched = true;
-                break;
-            }
-        }
-        if !matched {
-            return None;
-        }
-    }
-
-    // `if (x == (time_t) -1) return -EINVAL;` -- which refuses the second
-    // before the epoch along with a failure, as upstream's does.
-    let x = mktime(zone, &mut tm).filter(|&x| x != -1)?;
-    if weekday >= 0 && tm.wday != weekday {
-        return None;
-    }
-    ret = ret.wrapping_add((x as u64).wrapping_mul(USEC_PER_SEC));
-    ret = ret.wrapping_add(plus);
-    Some(ret.saturating_sub(minus))
 }
 
 /// `monthname_to_number`: full names first, then abbreviations, both matched
@@ -1137,28 +686,15 @@ const DECEMBER: i32 = 12;
 const WEEK_LINES: usize = MAXDAYS / DAYS_IN_WEEK;
 
 /// `printf("%*s", n, "")`.
-fn pad(out: &mut String, n: usize) {
+fn pad(out: &mut Vec<u8>, n: usize) {
     for _ in 0..n {
-        out.push(' ');
+        out.push(b' ');
     }
 }
 
 /// `printf("%*d", width, value)`.
-///
-/// The `Result` is dropped because `impl fmt::Write for String` has no failure
-/// mode: its only `Err` path is an allocation failure, which aborts instead.
-fn num(out: &mut String, value: i32, width: usize) {
-    let _ = write!(out, "{value:>width$}");
-}
-
-/// A colour escape, or nothing when colouring is off.
-///
-/// Upstream's `cal_get_color_sequence` returns `""` when `colors_init` decided
-/// against colour, and the surrounding `printf` widths are chosen so that the
-/// layout does not depend on the sequence being present. That holds here too,
-/// so this only ever adds or removes zero-width bytes.
-fn seq(ctl: &Ctl, escape: &'static str) -> &'static str {
-    if ctl.colors { escape } else { "" }
+fn num(out: &mut Vec<u8>, value: i32, width: usize) {
+    out.extend_from_slice(format!("{value:>width$}").as_bytes());
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1184,7 +720,7 @@ const FMT_ST_CHARS: usize = 300;
 /// whatever survived. `cal -c 1K -y 2024` asks for a year heading 23549 columns
 /// wide and gets a line of 299 spaces: the "2024" it was centring sits far
 /// past the end of the buffer and is never written at all. Measured.
-fn mbsalign(out: &mut String, s: &str, width: usize, align: Align, dest_size: usize) {
+fn mbsalign(out: &mut Vec<u8>, s: &str, width: usize, align: Align, dest_size: usize) {
     let shown = if s.len() > width {
         s.get(..width).unwrap_or(s)
     } else {
@@ -1208,7 +744,7 @@ fn mbsalign(out: &mut String, s: &str, width: usize, align: Align, dest_size: us
     let n = shown.len().min(room);
     // Unreachable on a non-ASCII cut, as above; declining to write is the safe
     // answer if the assumption is ever broken.
-    out.push_str(shown.get(..n).unwrap_or(""));
+    out.extend_from_slice(shown.get(..n).unwrap_or("").as_bytes());
     room = room.saturating_sub(n);
 
     pad(out, end.min(room));
@@ -1219,7 +755,7 @@ fn mbsalign(out: &mut String, s: &str, width: usize, align: Align, dest_size: us
 ///
 /// The `separate` spaces come from a second `printf` and so are *not* subject
 /// to the buffer limit above.
-fn center(out: &mut String, s: &str, width: usize, separate: usize) {
+fn center(out: &mut Vec<u8>, s: &str, width: usize, separate: usize) {
     mbsalign(out, s, width, Align::Center, FMT_ST_CHARS);
     if separate != 0 {
         pad(out, separate);
@@ -1227,7 +763,7 @@ fn center(out: &mut String, s: &str, width: usize, separate: usize) {
 }
 
 /// `cal.c`'s `left`, the same with the padding all on the right.
-fn left(out: &mut String, s: &str, width: usize, separate: usize) {
+fn left(out: &mut Vec<u8>, s: &str, width: usize, separate: usize) {
     mbsalign(out, s, width, Align::Left, FMT_ST_CHARS);
     if separate != 0 {
         pad(out, separate);
@@ -1266,10 +802,10 @@ fn headers_init(ctl: &mut Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
 
     let year_len = format!("{:04}", ctl.req.year).len();
 
-    let mut dh = String::new();
+    let mut dh: Vec<u8> = Vec::new();
     for (i, name) in weekdays.iter().enumerate() {
         if i != 0 {
-            dh.push(' ');
+            dh.push(b' ');
         }
         // Upstream's guard against overrunning a 133-byte buffer. The widest
         // heading row `cal` can build is 4*7 - 1 = 27 bytes, so this never
@@ -1376,16 +912,21 @@ fn cal_fill_month(month: &mut CalMonth, ctl: &Ctl) {
 
 /// `cal.c`'s `cal_output_header`: one or two title lines, then the day-of-week
 /// headings.
-fn cal_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
+fn cal_output_header(out: &mut Vec<u8>, months: &[CalMonth], ctl: &Ctl) {
     let last = months.len().saturating_sub(1);
     let gutter = |k: usize| if k == last { 0 } else { ctl.gutter_width };
+
+    // `cal_enable_color (CAL_COLOR_HEADER)`: nothing, unless a scheme file
+    // names a `header` -- and then everything up to the end of the day
+    // headings is in it.
+    out.extend_from_slice(&ctl.colors.header);
 
     if ctl.header_hint || ctl.header_year {
         for (k, m) in months.iter().enumerate() {
             center(out, month_name(m.month), ctl.week_width, gutter(k));
         }
         if !ctl.header_year {
-            out.push('\n');
+            out.push(b'\n');
             for (k, m) in months.iter().enumerate() {
                 center(out, &format!("{:04}", m.year), ctl.week_width, gutter(k));
             }
@@ -1396,7 +937,7 @@ fn cal_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
             center(out, &title, ctl.week_width, gutter(k));
         }
     }
-    out.push('\n');
+    out.push(b'\n');
 
     for k in 0..months.len() {
         if ctl.weektype != WEEK_NUM_DISABLED {
@@ -1411,12 +952,14 @@ fn cal_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
                 },
             );
         }
-        out.push_str(&ctl.day_headings);
+        out.extend_from_slice(&ctl.day_headings);
         if k != last {
             pad(out, ctl.gutter_width);
         }
     }
-    out.push('\n');
+    // `cal_disable_color (CAL_COLOR_HEADER)`, before the newline.
+    out.extend_from_slice(end_of(&ctl.colors.header));
+    out.push(b'\n');
 }
 
 /// The day the request asked to highlight, expressed as this month's own day
@@ -1439,9 +982,13 @@ fn highlighted_day(m: &CalMonth, ctl: &Ctl) -> i32 {
 
 /// `cal.c`'s `cal_output_months`: six rows of days, however few of them are
 /// occupied.
-fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
+fn cal_output_months(out: &mut Vec<u8>, months: &[CalMonth], ctl: &Ctl) {
     let narrow = if ctl.julian { 3 } else { 2 };
     let last = months.len().saturating_sub(1);
+    let c = &ctl.colors;
+    // The first workday's column in a week row: Monday, which is the second
+    // column when the week starts on Sunday. Five workdays from there.
+    let firstwork = if ctl.weekstart == SUNDAY { 1 } else { 0 };
 
     for week_line in 0..WEEK_LINES {
         for (k, m) in months.iter().enumerate() {
@@ -1451,9 +998,9 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
                 let w = m.weeks.get(week_line).copied().unwrap_or(SPACE);
                 if 0 < w {
                     if u32::try_from(w).is_ok_and(|w| ctl.weektype & WEEK_NUM_MASK == w) {
-                        out.push_str(seq(ctl, HIGHLIGHT));
+                        out.extend_from_slice(&c.weeknumber);
                         num(out, w, 2);
-                        out.push_str(seq(ctl, RESET));
+                        out.extend_from_slice(end_of(&c.weeknumber));
                     } else {
                         num(out, w, 2);
                     }
@@ -1467,23 +1014,29 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
                 ctl.day_width.saturating_sub(1)
             };
 
-            for d in DAYS_IN_WEEK.saturating_mul(week_line)
-                ..DAYS_IN_WEEK
-                    .saturating_mul(week_line)
-                    .saturating_add(DAYS_IN_WEEK)
-            {
+            let row = DAYS_IN_WEEK.saturating_mul(week_line);
+            for d in row..row.saturating_add(DAYS_IN_WEEK) {
+                let col = d.saturating_sub(row);
+                let workday = col >= firstwork && col <= firstwork.saturating_add(4);
+                let (open, close) = if workday {
+                    (&c.workday, end_of(&c.workday))
+                } else {
+                    (&c.weekend, end_of(&c.weekend))
+                };
                 let day = m.days.get(d).copied().unwrap_or(SPACE);
                 if 0 < day {
+                    out.extend_from_slice(open);
                     if reqday == day {
                         // The escape goes between the padding and the number so
                         // that only the number is reversed.
                         pad(out, skip.saturating_sub(narrow));
-                        out.push_str(seq(ctl, HIGHLIGHT));
+                        out.extend_from_slice(&c.today);
                         num(out, day, narrow);
-                        out.push_str(seq(ctl, RESET));
+                        out.extend_from_slice(end_of(&c.today));
                     } else {
                         num(out, day, skip);
                     }
+                    out.extend_from_slice(close);
                 } else {
                     pad(out, skip);
                 }
@@ -1495,7 +1048,7 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
                 pad(out, ctl.gutter_width);
             }
         }
-        out.push('\n');
+        out.push(b'\n');
     }
 }
 
@@ -1504,7 +1057,7 @@ fn cal_output_months(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
 /// The gutter is appended after *every* month including the last, which leaves
 /// trailing spaces the horizontal header does not. That is upstream's
 /// behaviour, byte for byte, and is reproduced deliberately.
-fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
+fn cal_vert_output_header(out: &mut Vec<u8>, months: &[CalMonth], ctl: &Ctl) {
     let month_width = ctl.day_width.saturating_mul(WEEK_LINES);
 
     // Room for the weekday labels down the left edge.
@@ -1515,7 +1068,7 @@ fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
             left(out, month_name(m.month), month_width, ctl.gutter_width);
         }
         if !ctl.header_year {
-            out.push('\n');
+            out.push(b'\n');
             pad(out, ctl.day_width.saturating_add(1));
             for m in months {
                 left(
@@ -1532,7 +1085,7 @@ fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
             left(out, &title, month_width, ctl.gutter_width);
         }
     }
-    out.push('\n');
+    out.push(b'\n');
 }
 
 /// `cal.c`'s `cal_vert_output_months`: seven rows, one per weekday.
@@ -1547,7 +1100,7 @@ fn cal_vert_output_header(out: &mut String, months: &[CalMonth], ctl: &Ctl) {
 /// neighbours. That is an upstream bug; it is reproduced so that the two
 /// programs agree byte for byte.
 fn cal_vert_output_months(
-    out: &mut String,
+    out: &mut Vec<u8>,
     months: &[CalMonth],
     ctl: &Ctl,
     weekdays: &[&str; DAYS_IN_WEEK],
@@ -1569,9 +1122,9 @@ fn cal_vert_output_months(
                 if 0 < day {
                     if reqday == day {
                         pad(out, skip.saturating_sub(narrow));
-                        out.push_str(seq(ctl, HIGHLIGHT));
+                        out.extend_from_slice(&ctl.colors.today);
                         num(out, day, narrow);
-                        out.push_str(seq(ctl, RESET));
+                        out.extend_from_slice(end_of(&ctl.colors.today));
                     } else {
                         num(out, day, skip);
                     }
@@ -1583,7 +1136,7 @@ fn cal_vert_output_months(
                 pad(out, ctl.gutter_width);
             }
         }
-        out.push('\n');
+        out.push(b'\n');
     }
 
     if ctl.weektype == WEEK_NUM_DISABLED {
@@ -1596,9 +1149,9 @@ fn cal_vert_output_months(
             let w = m.weeks.get(week).copied().unwrap_or(SPACE);
             if 0 < w {
                 if u32::try_from(w).is_ok_and(|w| ctl.weektype & WEEK_NUM_MASK == w) {
-                    out.push_str(seq(ctl, HIGHLIGHT));
+                    out.extend_from_slice(&ctl.colors.weeknumber);
                     num(out, w, skip.saturating_sub(narrow));
-                    out.push_str(seq(ctl, RESET));
+                    out.extend_from_slice(end_of(&ctl.colors.weeknumber));
                 } else {
                     num(out, w, skip);
                 }
@@ -1610,11 +1163,11 @@ fn cal_vert_output_months(
             pad(out, ctl.gutter_width);
         }
     }
-    out.push('\n');
+    out.push(b'\n');
 }
 
 /// `cal.c`'s `monthly`: emit `num_months` months, `months_in_row` at a time.
-fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
+fn monthly(out: &mut Vec<u8>, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
     let mut month = if ctl.req.start_month != 0 {
         ctl.req.start_month
     } else {
@@ -1680,7 +1233,7 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
         if ctl.vertical {
             if i > 0 {
                 // A blank line between rows of months.
-                out.push('\n');
+                out.push(b'\n');
             }
             cal_vert_output_header(out, &ms, ctl);
             cal_vert_output_months(out, &ms, ctl, weekdays);
@@ -1693,7 +1246,7 @@ fn monthly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
 }
 
 /// `cal.c`'s `yearly`: the year number over a centred block of months.
-fn yearly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
+fn yearly(out: &mut Vec<u8>, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
     let in_row = usize::try_from(ctl.months_in_row).unwrap_or(0);
     // `saturating_sub` where upstream has `(size_t)months_in_row - 1`: at zero
     // months per row that expression is `SIZE_MAX`, which `main` prevents but
@@ -1704,7 +1257,7 @@ fn yearly(out: &mut String, ctl: &Ctl, weekdays: &[&str; DAYS_IN_WEEK]) {
 
     if ctl.header_year {
         center(out, &format!("{:04}", ctl.req.year), year_width, 0);
-        out.push_str("\n\n");
+        out.extend_from_slice(b"\n\n");
     }
     monthly(out, ctl, weekdays);
 }
@@ -1891,7 +1444,9 @@ enum Action {
     Help,
     Version,
     Calendar {
-        ctl: Ctl,
+        /// Boxed: the control block, with its colour sequences, dwarfs the
+        /// other two answers.
+        ctl: Box<Ctl>,
         /// `yflag || Yflag`: whether `yearly` or `monthly` does the printing.
         whole_year: bool,
     },
@@ -2169,19 +1724,9 @@ fn build(
     let weekdays = weekdays_init(&ctl);
     headers_init(&mut ctl, &weekdays);
 
-    ctl.colors = match ctl.colormode {
-        ColorMode::Always => true,
-        ColorMode::Never => false,
-        // `UL_COLORMODE_UNDEF` behaves as `auto`: `colors_init` resolves it the
-        // same way once there is no `terminal-colors.d` to consult.
-        ColorMode::Auto | ColorMode::Undef => term.is_tty,
-    };
-    if !ctl.colors {
-        // With nothing to highlight *with*, upstream removes the two things it
-        // would have highlighted rather than emitting bare escapes.
-        ctl.req.day = 0;
-        ctl.weektype &= !WEEK_NUM_MASK;
-    }
+    // `colors_init` comes here upstream, and is [`apply_colors`], called once
+    // this returns: nothing below can fail or looks at its verdict, and it
+    // reads the terminal and `terminal-colors.d`, which this function does not.
 
     if yflag || twelve {
         ctl.gutter_width = 3;
@@ -2240,15 +1785,29 @@ fn build(
     }
 
     Ok(Action::Calendar {
-        ctl,
+        ctl: Box::new(ctl),
         whole_year: yflag || twelve,
     })
 }
 
-/// The calendar itself, as one string.
-fn render(ctl: &Ctl, whole_year: bool) -> String {
+/// `colors_init (ctl.colormode, "cal")`'s verdict, and what `cal` does with
+/// it: the sequences it will write, and -- when the answer is no colour --
+/// the two things it would have highlighted removed outright, so that
+/// `cal --week=35 8 2026` into a pipe marks neither the day nor the week
+/// rather than printing them unmarked.
+fn apply_colors(ctl: &mut Ctl, colors: CalColors) {
+    if !colors.wanted {
+        ctl.req.day = 0;
+        ctl.weektype &= !WEEK_NUM_MASK;
+    }
+    ctl.colors = colors;
+}
+
+/// The calendar itself, as the bytes it is written as -- a scheme file's
+/// colour sequences need not be text.
+fn render(ctl: &Ctl, whole_year: bool) -> Vec<u8> {
     let weekdays = weekdays_init(ctl);
-    let mut out = String::new();
+    let mut out = Vec::new();
     if whole_year {
         yearly(&mut out, ctl, &weekdays);
     } else {
@@ -2309,11 +1868,18 @@ fn run_main() -> ExitCode {
 
     let mut out = Stream::stdout();
     let text = match action {
-        Action::Help => help_text(),
-        Action::Version => version_text(),
-        Action::Calendar { ctl, whole_year } => render(&ctl, whole_year),
+        Action::Help => help_text().into_bytes(),
+        Action::Version => version_text().into_bytes(),
+        Action::Calendar {
+            mut ctl,
+            whole_year,
+        } => {
+            let mut colors = Colors::init(ctl.colormode, b"cal", term.is_tty);
+            apply_colors(&mut ctl, CalColors::resolve(&mut colors));
+            render(&ctl, whole_year)
+        }
     };
-    let _ = out.write_all(text.as_bytes());
+    let _ = out.write_all(&text);
 
     stdfd::close_stdout("cal", out, ExitCode::SUCCESS)
 }
@@ -2734,12 +2300,55 @@ mod tests {
         list.iter().map(OsString::from).collect()
     }
 
+    /// A terminal `cal` may colour, as `colors_init` judges one: `TERM` names
+    /// an entry -- in a terminfo directory made for the test -- that has eight
+    /// colours, and there is no `terminal-colors.d` anywhere. The directory
+    /// is returned with the environment so that it outlives the run.
+    fn colour_terminal() -> (scratchdir::ScratchDir, ulcolors::Env) {
+        let dir = scratchdir::ScratchDir::new("cal-terminfo");
+        let sub = dir.path("x");
+        std::fs::create_dir_all(&sub).unwrap();
+        // The classic compiled format: six header words, the names, no
+        // booleans, then fourteen numbers -- `colors` is the fourteenth.
+        let names = b"xterm-test|a test terminal\0";
+        let mut entry = Vec::new();
+        for w in [0o432u16, names.len() as u16, 0, 14, 0, 0] {
+            entry.extend_from_slice(&w.to_le_bytes());
+        }
+        entry.extend_from_slice(names);
+        if entry.len() % 2 == 1 {
+            entry.push(0);
+        }
+        for k in 0..14 {
+            let v: i16 = if k == 13 { 8 } else { -1 };
+            entry.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(sub.join("xterm-test"), entry).unwrap();
+        let env = ulcolors::Env {
+            term: Some(b"xterm-test".to_vec()),
+            terminfo: Some(os_bytes(dir.dir().as_os_str()).into_owned()),
+            system_dir: dir.path("no-terminal-colors.d"),
+            ..ulcolors::Env::default()
+        };
+        (dir, env)
+    }
+
+    /// `build`, then what `run_main` does with a calendar: `colors_init`,
+    /// here against [`colour_terminal`], and the rendering.
     fn act(list: &[&str], term: Terminal) -> Result<String, Error> {
         let zone = localtime::Zone::utc();
         Ok(match build(&argv(list), &zone, NOW, term)? {
             Action::Help => help_text(),
             Action::Version => version_text(),
-            Action::Calendar { ctl, whole_year } => render(&ctl, whole_year),
+            Action::Calendar {
+                mut ctl,
+                whole_year,
+            } => {
+                let (_dir, env) = colour_terminal();
+                let mut colors = Colors::init_with(ctl.colormode, b"cal", term.is_tty, env);
+                apply_colors(&mut ctl, CalColors::resolve(&mut colors));
+                String::from_utf8(render(&ctl, whole_year)).unwrap()
+            }
         })
     }
 
@@ -2760,10 +2369,115 @@ mod tests {
     fn control(list: &[&str], term: Terminal) -> Ctl {
         let zone = localtime::Zone::utc();
         match build(&argv(list), &zone, NOW, term) {
-            Ok(Action::Calendar { ctl, .. }) => ctl,
+            Ok(Action::Calendar { mut ctl, .. }) => {
+                let (_dir, env) = colour_terminal();
+                let mut colors = Colors::init_with(ctl.colormode, b"cal", term.is_tty, env);
+                apply_colors(&mut ctl, CalColors::resolve(&mut colors));
+                *ctl
+            }
             Ok(_) => panic!("cal {list:?} asked for help, not a calendar"),
             Err(e) => panic!("cal {list:?} was rejected: {}", e.message()),
         }
+    }
+
+    /// [`act`] on a colour terminal whose `terminal-colors.d` holds
+    /// `cal.scheme` with `scheme` in it.
+    fn act_with_scheme(list: &[&str], scheme: &[u8]) -> String {
+        let zone = localtime::Zone::utc();
+        let Ok(Action::Calendar {
+            mut ctl,
+            whole_year,
+        }) = build(&argv(list), &zone, NOW, TTY)
+        else {
+            panic!("cal {list:?} is not a calendar");
+        };
+        let (dir, mut env) = colour_terminal();
+        let colours = dir.path("config").join("terminal-colors.d");
+        std::fs::create_dir_all(&colours).unwrap();
+        std::fs::write(colours.join("cal.scheme"), scheme).unwrap();
+        env.xdg_config_home = Some(os_bytes(dir.path("config").as_os_str()).into_owned());
+        let mut colors = Colors::init_with(ctl.colormode, b"cal", true, env);
+        apply_colors(&mut ctl, CalColors::resolve(&mut colors));
+        String::from_utf8(render(&ctl, whole_year)).unwrap()
+    }
+
+    #[test]
+    fn a_scheme_file_colours_the_header_the_workdays_the_weekend_and_today() {
+        let out = act_with_scheme(
+            &["8", "2026"],
+            b"header 1;34\nworkday 32\nweekend 31\ntoday 4\n",
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        // The header: from the title to the end of the day headings.
+        assert_eq!(lines[0], "\x1b[1;34m     August 2026    ");
+        assert_eq!(lines[1], "Su Mo Tu We Th Fr Sa\x1b[0m");
+        // The first week: six empty cells (2 + 5 * 3 columns, no colour), then
+        // Saturday the 1st, a weekend day, its padding inside the colour.
+        assert_eq!(lines[2], "                 \x1b[31m  1\x1b[0m");
+        // A whole week: the weekend, five workdays, the weekend.
+        assert_eq!(
+            lines[3],
+            "\x1b[31m 2\x1b[0m\x1b[32m  3\x1b[0m\x1b[32m  4\x1b[0m\x1b[32m  5\x1b[0m\
+             \x1b[32m  6\x1b[0m\x1b[32m  7\x1b[0m\x1b[31m  8\x1b[0m"
+        );
+        // Today, 27 August 2026, a Thursday: the workday around the padding,
+        // the scheme's `today` around the number alone.
+        assert!(
+            lines[6].contains("\x1b[32m \x1b[4m27\x1b[0m\x1b[0m"),
+            "{:?}",
+            lines[6]
+        );
+        // Monday first: the workdays move with it.
+        let monday = act_with_scheme(&["-m", "8", "2026"], b"workday 32\nweekend 31\n");
+        let week = monday.lines().nth(3).unwrap();
+        assert!(week.starts_with("\x1b[32m 3\x1b[0m"), "{week:?}");
+        assert!(week.ends_with("\x1b[31m  9\x1b[0m"), "{week:?}");
+    }
+
+    #[test]
+    fn without_a_scheme_only_today_and_the_week_are_marked() {
+        let out = act_with_scheme(&["--week=35", "8", "2026"], b"# nothing\n");
+        assert_eq!(
+            out,
+            act(&["--color=always", "--week=35", "8", "2026"], PIPE).unwrap()
+        );
+        assert!(out.contains("\x1b[7m35\x1b[0m"), "{out:?}");
+        assert!(out.contains("\x1b[7m27\x1b[0m"), "{out:?}");
+    }
+
+    #[test]
+    fn the_colour_mode_loses_one_leading_equals_sign() {
+        assert_eq!(
+            act(&["--color==never", "8", "2026"], TTY).unwrap(),
+            ok(&["8", "2026"])
+        );
+        assert_eq!(
+            rejected(&["--color==x", "8", "2026"]).message(),
+            "unsupported color mode: 'x'"
+        );
+    }
+
+    #[test]
+    fn a_terminal_without_colours_is_not_coloured() {
+        let zone = localtime::Zone::utc();
+        let Ok(Action::Calendar {
+            mut ctl,
+            whole_year,
+        }) = build(&argv(&["8", "2026"]), &zone, NOW, TTY)
+        else {
+            panic!("not a calendar");
+        };
+        // `TERM` names nothing in any terminfo directory.
+        let env = ulcolors::Env {
+            term: Some(b"no-such-terminal".to_vec()),
+            ..ulcolors::Env::default()
+        };
+        let mut colors = Colors::init_with(ctl.colormode, b"cal", true, env);
+        apply_colors(&mut ctl, CalColors::resolve(&mut colors));
+        assert_eq!(
+            String::from_utf8(render(&ctl, whole_year)).unwrap(),
+            ok(&["8", "2026"])
+        );
     }
 
     #[test]
@@ -3006,47 +2720,6 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_are_read_the_way_parse_timestamp_reads_them() {
-        let utc = localtime::Zone::utc();
-        let at = |s: &[u8]| parse_timestamp(&utc, NOW, s);
-        let secs = |t: i64| Some(u64::try_from(t).expect("positive") * USEC_PER_SEC);
-
-        assert_eq!(at(b"2024-02-15"), secs(1_707_955_200));
-        assert_eq!(at(b"24-02-15"), secs(1_707_955_200));
-        // The subsecond part is kept, not rounded away: `parse_subseconds`
-        // accumulates into the same `usec_t` the seconds land in.
-        assert_eq!(
-            at(b"2024-02-15 10:00:00.123"),
-            Some(1_707_991_200 * USEC_PER_SEC + 123_000)
-        );
-        assert_eq!(
-            at(b"2024-02-15T10:00:00,5"),
-            Some(1_707_991_200 * USEC_PER_SEC + 500_000)
-        );
-        assert_eq!(at(b"Sat 2024-02-17"), secs(1_708_128_000));
-        assert_eq!(at(b"@0"), Some(0));
-        assert_eq!(at(b"@1"), Some(USEC_PER_SEC));
-        assert_eq!(at(b"now"), secs(NOW));
-        assert_eq!(at(b"+1day"), secs(NOW + 86_400));
-        assert_eq!(at(b"2 days ago"), secs(NOW - 2 * 86_400));
-        // `mktime` normalises, so the 31st of February is the 2nd of March.
-        assert_eq!(at(b"2024-02-31"), secs(1_709_337_600));
-
-        // Rejected: a negative epoch, a bare sign, the wrong case, a trailing
-        // space, an impossible month, and a weekday that contradicts the date.
-        assert_eq!(at(b"@-1"), None);
-        assert_eq!(at(b"@"), None);
-        assert_eq!(at(b"@abc"), None);
-        assert_eq!(at(b"+"), None);
-        assert_eq!(at(b"NOW"), None);
-        assert_eq!(at(b"now "), None);
-        assert_eq!(at(b"2024-13-01"), None);
-        assert_eq!(at(b"99:99"), None);
-        assert_eq!(at(b"Mon 2024-02-17"), None);
-        assert_eq!(at(b"abc"), None);
-    }
-
-    #[test]
     fn a_month_name_is_matched_in_full_or_at_its_c_locale_abbreviation() {
         assert_eq!(monthname_to_number(b"Sep"), Some(9));
         assert_eq!(monthname_to_number(b"SEPTEMBER"), Some(9));
@@ -3062,30 +2735,30 @@ mod tests {
 
     #[test]
     fn centring_puts_the_odd_space_on_the_left() {
-        let mut s = String::new();
+        let mut s = Vec::new();
         center(&mut s, "ab", 7, 0);
-        assert_eq!(s, "   ab  ");
+        assert_eq!(s, b"   ab  ");
 
         s.clear();
         center(&mut s, "ab", 6, 0);
-        assert_eq!(s, "  ab  ");
+        assert_eq!(s, b"  ab  ");
 
         // The gutter comes from a second `printf` and is appended after.
         s.clear();
         center(&mut s, "ab", 6, 2);
-        assert_eq!(s, "  ab    ");
+        assert_eq!(s, b"  ab    ");
 
         // Too long for the field: truncated, with no padding at all.
         s.clear();
         center(&mut s, "abcdef", 3, 0);
-        assert_eq!(s, "abc");
+        assert_eq!(s, b"abc");
     }
 
     #[test]
     fn left_alignment_puts_every_space_after() {
-        let mut s = String::new();
+        let mut s = Vec::new();
         left(&mut s, "Su", 6, 1);
-        assert_eq!(s, "Su     ");
+        assert_eq!(s, b"Su     ");
     }
 
     #[test]
@@ -3094,10 +2767,10 @@ mod tests {
         // upstream's `char lineout[FMT_ST_CHARS]` holds 299 of them plus a NUL.
         // All 299 are leading padding, so the year never appears — which is the
         // first line of that golden, and is why `mbsalign` takes a buffer size.
-        let mut s = String::new();
+        let mut s = Vec::new();
         center(&mut s, "2024", 23_549, 0);
         assert_eq!(s.len(), FMT_ST_CHARS - 1);
-        assert!(s.bytes().all(|b| b == b' '));
+        assert!(s.iter().all(|&b| b == b' '));
     }
 
     #[test]

@@ -87,15 +87,16 @@ pub mod autologin;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;
-pub mod context_ext;
 pub mod datetime_settings;
 pub mod device_settings;
+pub mod dialog_frame;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
 /// Test-only, like `appearance`'s `palette_check`: it exists to check the other modules'
 /// render output, and a release build has nothing to check.
 #[cfg(test)]
 pub mod draw_check;
+pub mod event_sounds;
 pub mod file_drop;
 pub mod focus_assist;
 pub mod hotkeys;
@@ -108,6 +109,7 @@ pub mod login_screen;
 pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
+pub mod notif_history;
 pub mod notif_pane;
 pub mod osd;
 pub mod overview;
@@ -123,11 +125,11 @@ pub mod session;
 pub mod session_mgr;
 pub mod shortcut_editor;
 pub mod snap;
-pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
 pub mod taskbar;
 pub mod taskbar_autohide;
+pub mod toasts;
 pub mod touchpad;
 pub mod tray_dnd;
 pub mod update_settings;
@@ -138,9 +140,23 @@ pub mod window_peek;
 pub mod window_rules;
 
 #[cfg(test)]
+mod field_menu_tests;
+#[cfg(test)]
 mod note_tests;
 #[cfg(test)]
+mod notification_menu_tests;
+#[cfg(test)]
+mod open_with_tests;
+#[cfg(test)]
+mod photo_frame_tests;
+#[cfg(test)]
 mod pointer_tests;
+#[cfg(test)]
+mod service_menu_tests;
+#[cfg(test)]
+mod tray_window_tests;
+#[cfg(test)]
+mod wallpaper_move_tests;
 
 use appearance::config;
 use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
@@ -194,6 +210,15 @@ const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
 /// The file the programs pinned to the start menu live in.
 const START_MENU_CONFIG_NAME: &str = "startmenu";
+
+/// The file the Run box's history lives in.
+const RUN_HISTORY_CONFIG_NAME: &str = "runbox";
+
+/// Marks the Run box's history as percent-encoded (design-decisions §426):
+/// an entry is a command line as bytes, and may name a file whose name is
+/// not text. A file without the marker -- one written by hand -- is read as
+/// it stands.
+const RUN_HISTORY_ENCODING: &str = "percent";
 
 /// The programs on the taskbar of a desktop that has never saved its pins:
 /// the kernel's `fs::pinnedapps` defaults, carried when the program lists
@@ -361,22 +386,10 @@ const START_ORB_GLOW_BLUR: f32 = 18.0;
 const START_ORB_GLOW_ALPHA: u8 = 230;
 /// The start picture's share of the orb's width.
 const START_ORB_PICTURE_SHARE: f32 = 0.55;
-/// Gap between the start button and the first taskbar tile: the Aero
-/// reference's `padding: 0 6px` on its row of tiles.
-const TASKBAR_BUTTON_START_GAP: f32 = 6.0;
-/// Gap between adjacent tiles: the reference's `gap: 1px`. They nearly touch,
-/// as the reference's do; a window's tile has an edge of its own, so two never
-/// run together.
-const TASKBAR_BUTTON_GAP: f32 = 1.0;
-/// Gap between the last pinned tile and the first window's, with the divider
-/// in it: `design.txt` asks for "a small space and a divider between the two
-/// sections". The reference's: the row's gap, 7 of margin, the 1-pixel
-/// divider, 9 of margin and the row's gap again. Only while both sections
-/// have tiles.
-const TASKBAR_SECTION_GAP: f32 = 19.0;
-/// From the last pinned tile's edge to the divider: the row's gap and the 7
-/// of margin before it.
-const TASKBAR_DIVIDER_OFFSET: f32 = 8.0;
+// The gaps between the tiles -- after the start button, between two tiles,
+// between the pinned programs and the windows -- are the theme's
+// `taskbar-panel` spacing (`appearance::panel::PanelStyle`), whose built-in
+// values are the reference's and say where each comes from.
 /// How tall the divider is: the reference's 30, in its 40-pixel bar.
 const TASKBAR_DIVIDER_HEIGHT: f32 = 30.0;
 /// How strongly the divider between the sections is drawn: the bar's own
@@ -444,6 +457,16 @@ const TASKBAR_TILE_HIGHLIGHT_LIT: u8 = 179;
 const TASKBAR_TILE_GLOW: u8 = 128;
 /// How far a lit tile's glow reaches: the reference's 11.
 const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
+/// The owner the shell's own tray entries -- one for each window minimised to
+/// the tray -- go by.
+///
+/// No program's icon is owned by 0: the compositor names an icon's owner by
+/// the connection it came over, numbers its connections from 1 and keeps 0
+/// for "no client" (its server's `next_client_id`). So a key owned by 0 can
+/// only be the shell's, and a click on it is the shell's to answer rather
+/// than a program's to hear.
+pub const SHELL_TRAY_OWNER: u64 = 0;
+
 /// Narrowest the system tray gets, however little is in it.
 ///
 /// The tray's real width is *measured* — see
@@ -542,6 +565,11 @@ const TASKBAR_ICON: f32 = 20.0;
 /// The side of the tray's chevron, in logical pixels: smaller than the icons
 /// it stands beside, as it is a way to them rather than one of them.
 const TRAY_CHEVRON_ICON: f32 = 16.0;
+
+/// The side of a window's picture in the tray, in logical pixels: the tray's
+/// small size rather than the taskbar button's, as a window minimised there
+/// is one of the small things beside the clock and not a button on the bar.
+const TRAY_WINDOW_ICON: f32 = 16.0;
 
 /// A press on a tray icon, in flight.
 struct TrayDrag {
@@ -747,10 +775,10 @@ const POWER_MENU_TEXT_INSET: f32 = 14.0;
 /// line and the chooser is a list with a sidebar, a path bar and four columns.
 /// Sized so that the name column still has room after the sidebar takes its
 /// fixed share, rather than by matching anything else on the desktop.
-const RUN_BROWSER_WIDTH: f32 = 640.0;
+const CHOOSER_WIDTH: f32 = 640.0;
 /// How tall the chooser is drawn. Enough rows to scan a `/bin` without
 /// scrolling being the only way to see anything.
-const RUN_BROWSER_HEIGHT: f32 = 440.0;
+const CHOOSER_HEIGHT: f32 = 440.0;
 
 // --- Drop shadows ----------------------------------------------------------
 
@@ -1133,6 +1161,45 @@ struct WindowPress {
     was_focused: bool,
 }
 
+/// What the shell's file chooser was put up for, and so where its answer
+/// goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChooserFor {
+    /// The Run box's Browse: the program chosen goes into its command line.
+    RunBox,
+    /// "Choose folder…" on a photo frame's menu: the folder chosen is the one
+    /// that frame shows from then on.
+    FrameFolder(widgets::WidgetInstanceId),
+}
+
+/// The text field of the shell's own that a field menu was opened on --
+/// a right-click there, offering Cut, Copy, Paste and the rest
+/// (`guitk::editmenu`). Captured with the menu, as the pin menu captures
+/// its row: what the menu was opened on is what its rows act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The Run box's command line.
+    RunBox,
+    /// The start menu's search.
+    StartSearch,
+    /// A note's writing area -- the note open for writing.
+    Note(widgets::WidgetInstanceId),
+    /// An icon's name being edited in place.
+    Rename,
+}
+
+/// The wallpaper being moved -- "Move wallpaper" on the desktop's menu:
+/// `design.txt`'s "let the user scroll the image up/down or right/left to
+/// center it on the desktop how they want".
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WallpaperMove {
+    /// Where the picture was when the move began: what Escape puts back.
+    before: (f32, f32),
+    /// A drag under way: where the pointer was pressed, and where the
+    /// picture was then.
+    drag: Option<((f32, f32), (f32, f32))>,
+}
+
 /// A start-menu row pressed and perhaps being dragged.
 struct StartDrag {
     /// The press and its drag threshold, keyed by the program's path -- the
@@ -1141,6 +1208,14 @@ struct StartDrag {
     /// The program's name, as the start menu shows it: what a pin or a
     /// desktop shortcut made from it is called.
     name: String,
+    /// For a row that is one of a program's actions ([`StartRow::Action`]):
+    /// what a click on it starts. `None` for a program's row.
+    ///
+    /// Such a row is not carried: a drag of it lets go of nothing, since an
+    /// action is not a thing to pin or to put on the desktop -- a pin made
+    /// from "Display settings" would be a pin of Settings under the page's
+    /// name.
+    action: Option<hotkeys::Launch>,
 }
 
 /// What one taskbar button stands for.
@@ -1192,6 +1267,11 @@ pub struct ManagedWindow {
     /// window docked to the edge might want no button but must still be
     /// reachable by keyboard, and a background helper the reverse.
     pub skip_alt_tab: bool,
+    /// Whether a window rule asked for this window to go to the system tray
+    /// when it is minimised, rather than keep its taskbar button
+    /// ([`in_tray`](Self::in_tray)). Carried across lists for the reason
+    /// [`skip_taskbar`](Self::skip_taskbar) is.
+    pub to_tray: bool,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -1244,6 +1324,16 @@ impl ManagedWindow {
     #[must_use]
     pub fn on_glass(&self) -> bool {
         self.mapped && self.state != WindowState::Minimized
+    }
+
+    /// Whether the window is put away **in the system tray**: minimised, and
+    /// a rule says it goes there ([`to_tray`](Self::to_tray)). Such a window
+    /// has a tray entry in place of its taskbar button, and is out of the
+    /// Alt+Tab switcher -- it is reached from the tray, as a program that
+    /// minimises to the tray is on every desktop.
+    #[must_use]
+    pub fn in_tray(&self) -> bool {
+        self.to_tray && self.mapped && self.state == WindowState::Minimized
     }
 }
 
@@ -1490,6 +1580,17 @@ pub enum StartRow<'a> {
         /// and so set in under the folder's row.
         in_folder: bool,
     },
+    /// One of a program's actions -- a row of its jump list -- found by a
+    /// search: Settings' "Display settings", which opens Settings on its
+    /// Display page. Only among a search's results. A click or Enter starts
+    /// the action, as choosing it from the jump list does; it is not carried
+    /// anywhere, since an action is not a thing to pin.
+    Action {
+        /// The program whose action it is.
+        entry: &'a AppEntry,
+        /// The action.
+        action: &'a desktopentry::Action,
+    },
     /// A folder of the applications tree.
     Folder {
         /// Which.
@@ -1530,6 +1631,10 @@ pub enum ShellAction {
     /// `Launch`: a program the user *pointed at* may have no UTF-8 spelling,
     /// and a lossy one would name a different program or none.
     Launch(hotkeys::Launch),
+    /// Start several programs, in this order -- an item of a file's
+    /// right-click menu chosen for three files, whose command takes one file
+    /// at a time. Implies [`Consumed`](Self::Consumed).
+    LaunchAll(Vec<hotkeys::Launch>),
     /// Ask the compositor to act on a window the shell does not own. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -1575,6 +1680,33 @@ impl ShellAction {
     pub const fn changed(&self) -> bool {
         !matches!(self, Self::Pass)
     }
+}
+
+/// The service-menu items of the open icon menu (design-decisions §1448).
+///
+/// Each item is kept by name -- its menu's file name and its own id -- not by
+/// reference: the menus may be read again while the menu is open, and a name
+/// looked up when the item is chosen finds the menu as it is then, or
+/// nothing.
+#[derive(Clone, Debug, Default)]
+struct ServiceOffer {
+    /// By `id - MENU_SERVICE_BASE`: the menu and item an id runs, or `None`
+    /// for a submenu's own row.
+    items: Vec<Option<(std::ffi::OsString, String)>>,
+    /// The files and folders the menu was opened on.
+    targets: Vec<servicemenus::Target>,
+}
+
+/// The "Open with" rows of the open icon menu: each row's program, by the
+/// path that is its identity in the shell's list
+/// (`launcher::AppEntry::executable_path`) -- looked up again when chosen,
+/// for the reason [`ServiceOffer`] keeps names -- and the files and folders
+/// the menu was opened on.
+#[derive(Clone, Debug, Default)]
+struct OpenWithOffer {
+    /// By `id - MENU_OPEN_WITH_BASE`.
+    programs: Vec<String>,
+    files: Vec<PathBuf>,
 }
 
 /// Something the shell wants done to a window it does not own.
@@ -1908,7 +2040,18 @@ pub struct DesktopShell {
     /// the keyboard and one chosen in a panel cannot disagree, and the choice
     /// survives a restart the way a user expects.
     pub input_methods: input_method::InputMethodManager,
-    /// The icons other programs have put in the tray.
+    /// Every icon in the tray: [`program_tray_icons`](Self::program_tray_icons),
+    /// then an entry of the shell's own for each window minimised to the tray
+    /// ([`ManagedWindow::in_tray`]) -- owned by [`SHELL_TRAY_OWNER`], which
+    /// no program is.
+    ///
+    /// One list, so that the tray's arrangement, its overflow, its dragging
+    /// and its tooltips treat a window's entry as they treat any icon, with
+    /// nothing to keep in step; only a click on one, and its picture, differ
+    /// ([`click_tray_icon`](Self::click_tray_icon)).
+    tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The icons other programs have put in the tray, as the compositor
+    /// last reported them.
     ///
     /// Held rather than derived: they come from the compositor over `TRAY`
     /// frames, which is the only place they exist. The shell does not own them
@@ -1919,7 +2062,13 @@ pub struct DesktopShell {
     /// Order is the compositor's (registration order) and is kept as given: a
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
-    tray_icons: Vec<guiremote::tray::TrayIcon>,
+    program_tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The id each window's tray entry goes by, from the first time it went
+    /// to the tray until it closes -- so its entry is the same icon to the
+    /// tray's arrangement each time.
+    window_tray_ids: BTreeMap<WindowId, u32>,
+    /// The id the next window to go to the tray is given.
+    next_window_tray_id: u32,
     /// What on the taskbar the pointer is resting on -- a tray icon or a tile
     /// -- and the tooltip naming it.
     ///
@@ -1989,6 +2138,24 @@ pub struct DesktopShell {
     /// The taskbar's own menu -- a right-click on the bar between its tiles
     /// and its tray -- when it is open: the bar's options.
     taskbar_menu: Option<guitk::menu::ContextMenu>,
+    /// A notification's menu -- a right-click on its card in the pane, or on
+    /// its toast -- when it is open, and the program it was opened for.
+    ///
+    /// The program is captured with the menu, as the pin menu captures its
+    /// row: what the menu said it was about is what its rows act on.
+    notification_menu: Option<(guitk::menu::ContextMenu, String)>,
+    /// A text field's menu -- a right-click on the Run box's command line,
+    /// the start menu's search, a note's writing area or an icon's name
+    /// being edited -- when it is open, and the field it was opened on: what
+    /// the field's keys do, for the pointer (`guitk::editmenu`).
+    field_menu: Option<(guitk::menu::ContextMenu, MenuField)>,
+    /// How far the wallpaper's picture can move across and down the screen:
+    /// the screen's size less the picture's as it is drawn, negative where it
+    /// overflows; `None` when no picture is up or it fills the screen
+    /// exactly. The session, which draws the wallpaper, keeps it current.
+    pub wallpaper_room: Option<(f32, f32)>,
+    /// The wallpaper being moved, while it is. See [`WallpaperMove`].
+    wallpaper_move: Option<WallpaperMove>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -2148,6 +2315,25 @@ pub struct DesktopShell {
     /// the reason `menu_widget` is: by the time an item is chosen the pointer
     /// is over the menu, not the icon.
     menu_icon: Option<icons::IconId>,
+    /// What programs add to a file's right-click menu (`servicemenus`,
+    /// design-decisions §1448): every service menu found, as the session
+    /// last read the directories they are installed in.
+    service_menus: servicemenus::Scan,
+    /// Which of them the user turned on or off: `context-menus.yaml`, read
+    /// through [`service_watch`](Self::service_watch).
+    service_choices: servicemenus::Choices,
+    /// `context-menus.yaml`, which the Settings application's page writes.
+    service_watch: config::Watcher,
+    /// `window-rules.yaml`, the user's window rules: read into
+    /// [`rules`](Self::rules) by [`poll_window_rules`](Self::poll_window_rules)
+    /// at the start of the session and whenever it changes after.
+    rules_watch: config::Watcher,
+    /// The open icon menu's service-menu items and the files it was opened
+    /// on. See [`ServiceOffer`].
+    service_offer: ServiceOffer,
+    /// The open icon menu's "Open with" rows and the files it was opened on.
+    /// See [`OpenWithOffer`].
+    open_with_offer: Option<OpenWithOffer>,
     /// The widget being dragged, and where inside it the pointer took hold.
     ///
     /// The offset is what stops a drag snapping the widget's corner to the
@@ -2210,6 +2396,11 @@ pub struct DesktopShell {
     /// edited from here. `focus_assist::app_overrides` is the copy the
     /// decision is made against; this is the copy that can be written back.
     notif: notifsettings::NotifFile,
+    /// The pane's [`revision`](notif_pane::NotificationPane::revision) the
+    /// notification history was last written at (`notif_history`); `None`
+    /// where it must be written whatever the pane says -- the retention
+    /// changed, so what is kept on disk may no longer be what it allows.
+    notif_history_saved: Option<u64>,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -2256,6 +2447,11 @@ pub struct DesktopShell {
     /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
     /// open flag. See `design-decisions.md` §493.
     pub notifications: notif_pane::NotificationPane,
+    /// The notifications popping up as they arrive, beside the pane that
+    /// holds them: [`notify`](Self::notify) files a notification in the pane
+    /// and shows it here (design-decisions §1447). Placed against the screen
+    /// and the taskbar on use (`sync_toast_place`), like the overlays.
+    pub toasts: toasts::ToastStack,
     /// Whether — and how much — notifications are being silenced right now.
     ///
     /// The single truth for Do Not Disturb. The pane's two quick-setting
@@ -2323,6 +2519,10 @@ pub struct DesktopShell {
     /// Timed off `osd_clock_ms` rather than off the wall
     /// clock; see that field for why the difference does not matter here.
     pub osd: osd::OsdManager,
+    /// The shell's sounds: what plays for a notification, a volume change, a
+    /// screenshot -- and the events asked for, for the tests to read. See
+    /// [`event_sounds`].
+    pub event_sounds: event_sounds::EventSounds,
     /// Milliseconds of animation time the shell has been told about, and the
     /// only clock [`show_osd`](Self::show_osd) consults.
     ///
@@ -2360,7 +2560,13 @@ pub struct DesktopShell {
     /// report one until this surface existed, which is what
     /// [`HotkeyOutcome::launches`] is for.
     pub run_dialog: run_dialog::RunDialog,
-    /// The file chooser the Run box's Browse button puts up, while it is up.
+    /// Whether the Run box ran something since its history was last written
+    /// ([`save_run_history`](Self::save_run_history)).
+    run_history_dirty: bool,
+    /// The shell's file chooser, while it is up: put up by the Run box's
+    /// Browse button, or by "Choose folder…" on a photo frame's menu --
+    /// [`chooser_for`](Self::chooser_for) says which, and so where its answer
+    /// goes.
     ///
     /// Modal over the Run box in exactly the way the Run box is modal over the
     /// desktop, and by the same two mechanisms: it is offered every press
@@ -2375,22 +2581,24 @@ pub struct DesktopShell {
     /// box itself: a chooser holds a directory listing, and a shell that kept
     /// one for the lifetime of the session would keep a listing of a directory
     /// nobody is looking at, going staler by the hour.
-    run_browser: Option<guitk::dialog::FileDialog>,
+    chooser: Option<guitk::dialog::FileDialog>,
+    /// What the chooser was put up for: where its answer goes.
+    chooser_for: ChooserFor,
     /// The directory the chooser has actually been given a listing for.
     ///
     /// The shell reads no files — that is what keeps every test in this module
     /// runnable with no filesystem, and it is the same split
     /// [`wallpaper::WallpaperManager`] uses, where the shell names a picture
     /// and the session reads it. So the chooser's listing arrives from outside:
-    /// [`run_browser_wants`](Self::run_browser_wants) reports a directory whose
+    /// [`chooser_wants`](Self::chooser_wants) reports a directory whose
     /// listing has not been delivered yet, and
-    /// [`set_run_browser_entries`](Self::set_run_browser_entries) delivers it.
+    /// [`set_chooser_entries`](Self::set_chooser_entries) delivers it.
     ///
     /// Held as "what was last delivered" and compared against the chooser's
     /// current directory, rather than as a "needs listing" flag that navigation
     /// would have to remember to set. A flag can be forgotten by a new
     /// navigation path; a comparison cannot go stale.
-    run_browser_listed: Option<PathBuf>,
+    chooser_listed: Option<PathBuf>,
     /// The window rules, and the state of the ones that have fired.
     ///
     /// Consulted from exactly one place —
@@ -2407,6 +2615,11 @@ pub struct DesktopShell {
     /// It could not have been wired sooner — its two program criteria were a
     /// process name and a window class, neither of which existed anywhere in
     /// this system. See `design-decisions.md` §569.
+    ///
+    /// The rules are the user's, from `window-rules.yaml`
+    /// (`windowrules::file`), once [`poll_window_rules`](Self::poll_window_rules)
+    /// has read it -- and the built-in defaults before that, and for a user
+    /// whose file says nothing about rules.
     pub rules: window_rules::WindowRulesManager,
 
     /// Which chord does what.
@@ -2661,11 +2874,18 @@ impl DesktopShell {
             // `load_input_settings`; this is only the list.
             input_methods: input_method::InputMethodManager::with_builtins(),
             tray_icons: Vec::new(),
+            program_tray_icons: Vec::new(),
+            window_tray_ids: BTreeMap::new(),
+            next_window_tray_id: 1,
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
             tray_overflow_menu: None,
             pin_menu: None,
             taskbar_menu: None,
+            notification_menu: None,
+            field_menu: None,
+            wallpaper_room: None,
+            wallpaper_move: None,
             pin_drag: None,
             pin_drag_off_bar: false,
             start_drag: None,
@@ -2702,6 +2922,7 @@ impl DesktopShell {
             desktop_menu: ContextMenu::new(Self::desktop_menu_items(
                 AppearanceSettings::default().icon_size,
                 icons::ArrangementMode::default(),
+                false,
             )),
             // 40 is the `taskbar_height` two lines below; both are the
             // literal because this is the initialiser that establishes it.
@@ -2710,6 +2931,12 @@ impl DesktopShell {
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             menu_icon: None,
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::Choices::default(),
+            service_watch: config::Watcher::new(servicemenus::CONFIG_NAME),
+            rules_watch: config::Watcher::new(windowrules::file::CONFIG_NAME),
+            service_offer: ServiceOffer::default(),
+            open_with_offer: None,
             widget_drag: None,
             user_name: String::new(),
             icon_registry: IconRegistry::default(),
@@ -2723,11 +2950,14 @@ impl DesktopShell {
             taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
             schedule_snooze: None,
             notif: notifsettings::NotifFile::new(),
+            // Nothing written yet; nothing to write until something changes.
+            notif_history_saved: Some(0),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             system_zone: Tz::utc(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
+            toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
@@ -2740,14 +2970,17 @@ impl DesktopShell {
             // itself on the whole display rather than on the work area, because
             // it is a heads-up overlay and may sit over the taskbar.
             osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
+            event_sounds: event_sounds::EventSounds::new(),
             osd_clock_ms: 0,
             // Not positioned here. `set_position` needs a screen size, and this
             // one would go stale the moment the display changed; the dialog is
             // centred on the screen it is opened on instead, in
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
-            run_browser: None,
-            run_browser_listed: None,
+            run_history_dirty: false,
+            chooser: None,
+            chooser_for: ChooserFor::RunBox,
+            chooser_listed: None,
             rules: window_rules::WindowRulesManager::new(),
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
@@ -2807,6 +3040,25 @@ impl DesktopShell {
     /// read. It is one line, and it is here rather than at the call sites so
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
+        // The user's font families, and how glyphs are rasterized, in *this*
+        // process -- first, before anything below measures text. The
+        // compositor draws the desktop's text in the families the settings
+        // name (it installs them in its own cache), and the desktop lays that
+        // text out by measuring it here. Until this the shell never applied
+        // them, so with any family but the default it measured every label in
+        // the default face and had it drawn in the user's: a wider face ran
+        // the taskbar's labels past their tiles, a narrower one was cut where
+        // it fitted, and centred text sat off centre. Every application
+        // applies them the same way (`oswindow`'s `hand_over`). Through
+        // `fonts_in_use`, the one answer every process is to draw from, so
+        // that a chosen font theme reaches the shell the moment it reaches
+        // the compositor (design-decisions §1472).
+        //
+        // The outcome is not acted on: a family this machine does not have
+        // leaves the working face in place -- in the compositor too, which
+        // looks in the same font directories -- and the Settings font page is
+        // where that is said.
+        let _ = appearance.fonts_in_use().apply();
         self.theme = DesktopTheme::from_settings(&appearance);
         // How things move, to every animator the shell owns: the animation
         // theme at the user's speed (design-decisions §1446). Pushed from here
@@ -2814,6 +3066,7 @@ impl DesktopShell {
         // slide in progress lands where it was going.
         let motion = guitk::palette::PaletteSource::motion(&appearance);
         self.notifications.set_motion(motion);
+        self.toasts.set_motion(motion);
         self.osd.set_motion(motion);
         if motion.is_still() {
             self.overview.end_fade();
@@ -2835,6 +3088,13 @@ impl DesktopShell {
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The run box's frame: the theme's window frame, at the interface's
+        // scale (`dialog_frame`, design-decisions §1461).
+        self.run_dialog
+            .set_frame(dialog_frame::DialogFrame::from_settings(
+                &appearance,
+                appearance.scale_factor(),
+            ));
         // The focus width with it, to the fields that draw a focus mark
         // (`guitk::field`), for the same reason.
         self.run_dialog
@@ -2909,6 +3169,44 @@ impl DesktopShell {
         }
     }
 
+    /// Put back the notifications kept from before the desktop started --
+    /// those the user's retention keeps (`notif_history`) -- with no toast
+    /// for any of them: they are history, not news. After
+    /// [`load_notification_rules`](Self::load_notification_rules), which
+    /// says how long that is.
+    pub fn load_notification_history(&mut self) {
+        let kept = notif_history::load(Self::unix_now(), self.notif.settings.history);
+        self.notifications.restore(kept);
+        self.notif_history_saved = Some(self.notifications.revision());
+    }
+
+    /// Whether the notifications changed since the history was last written,
+    /// or the retention did ([`save_notification_history`](Self::save_notification_history)).
+    #[must_use]
+    pub fn notification_history_dirty(&self) -> bool {
+        self.notif_history_saved != Some(self.notifications.revision())
+    }
+
+    /// Write the notifications as the history kept on disk -- those the
+    /// user's retention keeps; none but the file's header where it keeps
+    /// none.
+    ///
+    /// Counted as written before the write is tried: a failure is reported
+    /// by the caller once, and tried again at the next change rather than at
+    /// every pump.
+    ///
+    /// # Errors
+    ///
+    /// The write's own.
+    pub fn save_notification_history(&mut self) -> std::io::Result<()> {
+        self.notif_history_saved = Some(self.notifications.revision());
+        notif_history::store(
+            self.notifications.notifications(),
+            Self::unix_now(),
+            self.notif.settings.history,
+        )
+    }
+
     /// Re-read the rules if the file changed, and say whether they differ.
     ///
     /// Answers on the *settings*, not on the file, for the reason
@@ -2939,6 +3237,11 @@ impl DesktopShell {
         }
         if quiet_changed {
             self.focus.set_quiet_hours(&file.settings.quiet_hours);
+        }
+        // A shorter retention -- or none -- is to be honoured on disk now, not
+        // at the next notification: written again whatever the pane says.
+        if file.settings.history != self.notif.settings.history {
+            self.notif_history_saved = None;
         }
         let changed = apps_changed || quiet_changed;
         // Adopted either way: the document is what a later save splices into,
@@ -3413,14 +3716,18 @@ impl DesktopShell {
         // once enough windows were open: 108 px into it with thirty-one.
         #[allow(clippy::cast_precision_loss)]
         let between = slots.len().saturating_sub(1) as f32;
-        let gaps = self.scale(TASKBAR_BUTTON_START_GAP)
-            + between * self.scale(TASKBAR_BUTTON_GAP)
+        // The gaps are the theme's (`taskbar-panel`'s spacing).
+        let panel = self.appearance.panel();
+        let tile_gap = self.scale(f32::from(panel.tile_gap));
+        let start_gap = self.scale(f32::from(panel.start_gap));
+        let gaps = start_gap
+            + between * tile_gap
             + self.section_gap_extra()
             + self.scale(TRAY_RESERVE_GAP);
         let available =
             (bar.w - self.scale(START_BUTTON_WIDTH) - self.tray_width() - gaps).max(0.0);
         let pins = self.taskbar.pinned_apps().len();
-        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + self.scale(TASKBAR_BUTTON_START_GAP);
+        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + start_gap;
         let mut tiles = Vec::with_capacity(slots.len());
         for (index, width) in fit_tiles(&wanted, &shrinks, height, available)
             .into_iter()
@@ -3430,7 +3737,7 @@ impl DesktopShell {
                 x += self.section_gap_extra();
             }
             tiles.push(Rect::new(x, top, width, height));
-            x += width + self.scale(TASKBAR_BUTTON_GAP);
+            x += width + tile_gap;
         }
         tiles
     }
@@ -3442,7 +3749,9 @@ impl DesktopShell {
         let pins = self.taskbar.pinned_apps().len();
         let running = self.taskbar_slots().len().saturating_sub(pins);
         if pins > 0 && running > 0 {
-            self.scale(TASKBAR_SECTION_GAP - TASKBAR_BUTTON_GAP)
+            let panel = self.appearance.panel();
+            let extra = panel.section_gap_drawn().saturating_sub(panel.tile_gap);
+            self.scale(f32::from(extra))
         } else {
             0.0
         }
@@ -3463,9 +3772,10 @@ impl DesktopShell {
     }
 
     /// The line between the pinned tiles and the windows', where the
-    /// reference draws it -- `TASKBAR_DIVIDER_OFFSET` past the last pin, as
-    /// tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the bar -- or `None`
-    /// unless both sections have tiles.
+    /// reference draws it -- the panel's
+    /// [`divider_offset`](appearance::panel::PanelStyle::divider_offset) past
+    /// the last pin, as tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the
+    /// bar -- or `None` unless both sections have tiles.
     #[must_use]
     pub fn taskbar_divider_rect(&self) -> Option<Rect> {
         let pins = self.taskbar.pinned_apps().len();
@@ -3478,7 +3788,7 @@ impl DesktopShell {
         let thickness = self.scale(1.0).max(1.0);
         let height = self.scale(TASKBAR_DIVIDER_HEIGHT).min(last_pin.h);
         Some(Rect::new(
-            last_pin.x + last_pin.w + self.scale(TASKBAR_DIVIDER_OFFSET),
+            last_pin.x + last_pin.w + self.scale(self.appearance.panel().divider_offset()),
             bar.y + (bar.h - height) / 2.0,
             thickness,
             height,
@@ -3978,14 +4288,15 @@ impl DesktopShell {
     }
 
     /// The programs on the start menu's rows, top to bottom: the rows of
-    /// [`Self::start_menu_rows`] that are programs, without the folders.
+    /// [`Self::start_menu_rows`] that are programs -- not the folders, and
+    /// not the programs' actions a search finds.
     #[must_use]
     pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
         self.start_menu_rows()
             .into_iter()
             .filter_map(|row| match row {
                 StartRow::Program { entry, .. } => Some(entry),
-                StartRow::Folder { .. } | StartRow::Section(_) => None,
+                StartRow::Action { .. } | StartRow::Folder { .. } | StartRow::Section(_) => None,
             })
             .collect()
     }
@@ -3996,23 +4307,19 @@ impl DesktopShell {
     /// it, each followed by its programs when it is open. A section with
     /// nothing in it has no heading, and "All apps" is headed only when
     /// another section stands above it. While something is typed, what the
-    /// search finds instead, and no folders or headings.
+    /// search finds instead -- programs and their actions, best first
+    /// (`start_search_rows`) -- and no folders or headings.
     ///
     /// A program is in the folder its entry's first main category names
     /// (`desktopentry::menu::Category::of`), and appears there even when it
     /// is pinned as well, as a pin is a shortcut rather than a move.
     #[must_use]
     pub fn start_menu_rows(&self) -> Vec<StartRow<'_>> {
-        let found = self.start_menu_programs();
-        if !self.start_query.text().trim().is_empty() {
-            return found
-                .into_iter()
-                .map(|entry| StartRow::Program {
-                    entry,
-                    in_folder: false,
-                })
-                .collect();
+        let query = self.start_query.text().trim();
+        if !query.is_empty() {
+            return self.start_search_rows(query);
         }
+        let found = self.start_menu_programs();
         let pins = self.start_pins.len().min(found.len());
         let (pinned, listed) = found.split_at(pins);
         // Recently used, as the list knows each program -- one no longer
@@ -4118,32 +4425,57 @@ impl DesktopShell {
     /// the power menu's own list at the foot of the menu, not programs in the
     /// database, and mixing them in would put "Shut down" one mis-click away
     /// from "Screenshot".
-    ///
-    /// While something is typed in the search field, only the programs it
-    /// finds, best first and each once -- a pinned program is also in the
-    /// list below, and a search that found it twice would say so twice.
-    /// Ranked by the launcher's own rule (`launcher::search_score`); ties
-    /// keep menu order.
     fn start_menu_programs(&self) -> Vec<&AppEntry> {
-        let listed = self.start_pins.iter().chain(
-            self.apps
-                .iter()
-                .filter(|app| matches!(app.category, Category::Application | Category::Setting)),
-        );
-        let query = self.start_query.text().trim();
-        if query.is_empty() {
-            return listed.collect();
-        }
+        self.start_pins
+            .iter()
+            .chain(
+                self.apps.iter().filter(|app| {
+                    matches!(app.category, Category::Application | Category::Setting)
+                }),
+            )
+            .collect()
+    }
+
+    /// What a search for `query` finds, best first: the programs it finds by
+    /// name, description or keyword (`launcher::search_score`), and the
+    /// actions of theirs -- the rows of a program's jump list -- it finds by
+    /// name (`launcher::action_search_score`), ranked together. Ties keep the
+    /// menu's order, a program before its actions.
+    ///
+    /// Each program once, and its actions once: a pinned program is also in
+    /// the list below, and a search that found it twice would say so twice.
+    ///
+    /// Actions are found so that a search lands where it asks to go:
+    /// "display" finds Settings, and above it Settings' "Display settings",
+    /// which opens Settings on the page -- what the start menu's own "Display
+    /// Settings" row did until 2026-09-17 by naming a program that could not
+    /// exist (known-issues
+    /// `TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST`).
+    fn start_search_rows(&self, query: &str) -> Vec<StartRow<'_>> {
         let mut seen = std::collections::BTreeSet::new();
-        let mut found: Vec<(u32, usize, &AppEntry)> = listed
-            .filter(|entry| seen.insert(entry.executable_path.as_str()))
-            .enumerate()
-            .filter_map(|(order, entry)| {
-                launcher::search_score(query, entry).map(|score| (score, order, entry))
-            })
-            .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        found.into_iter().map(|(_, _, entry)| entry).collect()
+        let mut found: Vec<(u32, StartRow<'_>)> = Vec::new();
+        for entry in self.start_menu_programs() {
+            if !seen.insert(entry.executable_path.as_str()) {
+                continue;
+            }
+            if let Some(score) = launcher::search_score(query, entry) {
+                found.push((
+                    score,
+                    StartRow::Program {
+                        entry,
+                        in_folder: false,
+                    },
+                ));
+            }
+            for (_, action) in entry.jump_list() {
+                if let Some(score) = launcher::action_search_score(query, action) {
+                    found.push((score, StartRow::Action { entry, action }));
+                }
+            }
+        }
+        // A stable sort, so equal scores keep the order they were found in.
+        found.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        found.into_iter().map(|(_, row)| row).collect()
     }
 
     /// How many of the rows at the top of the start menu are its pinned
@@ -4408,6 +4740,57 @@ impl DesktopShell {
     /// clearing the flag.
     pub fn take_start_menu_dirty(&mut self) -> bool {
         core::mem::take(&mut self.start_menu_dirty)
+    }
+
+    /// Read the Run box's history back from `runbox.yaml` -- oldest first,
+    /// each entry the bytes of a command line, percent-encoded where the
+    /// file says it is (§426) -- so Up finds yesterday's commands.
+    pub fn load_run_history(&mut self) {
+        let doc = config::load(RUN_HISTORY_CONFIG_NAME);
+        let Some(entries) = doc.get_seq(&["history"]) else {
+            return;
+        };
+        let encoded = doc
+            .get_str(&["encoding"])
+            .is_some_and(|v| v.trim() == RUN_HISTORY_ENCODING);
+        let history = entries
+            .iter()
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                if encoded {
+                    pathcodec::os_string_from_bytes(pathcodec::decode_bytes(entry))
+                } else {
+                    std::ffi::OsString::from(entry)
+                }
+            })
+            .collect();
+        self.run_dialog.load_history(history);
+    }
+
+    /// Whether the Run box's history needs writing, clearing the flag.
+    pub fn take_run_history_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.run_history_dirty)
+    }
+
+    /// Write the Run box's history to `runbox.yaml`, its entries' bytes
+    /// percent-encoded so a command naming a file whose name is not text
+    /// comes back as it ran.
+    ///
+    /// # Errors
+    ///
+    /// The write's own error. The history still holds for this session.
+    pub fn save_run_history(&self) -> std::io::Result<()> {
+        let mut doc = config::load(RUN_HISTORY_CONFIG_NAME);
+        let entries: Vec<String> = self
+            .run_dialog
+            .history()
+            .iter()
+            .map(|entry| pathcodec::encode_bytes(entry.as_encoded_bytes()))
+            .collect();
+        let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+        doc.set_str(&["encoding"], RUN_HISTORY_ENCODING);
+        doc.set_seq(&["history"], &entries);
+        config::store(RUN_HISTORY_CONFIG_NAME, &doc)
     }
 
     /// Write the programs pinned to the start menu, and the ones recently
@@ -4680,9 +5063,22 @@ impl DesktopShell {
         Hit::Desktop
     }
 
-    /// Handle a pointer event.
+    /// Handle a pointer event made with no modifier key held -- see
+    /// [`handle_mouse_with`](Self::handle_mouse_with).
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        self.handle_mouse_with(event, guitk::event::Modifiers::NONE)
+    }
+
+    /// Handle a pointer event, made with `modifiers` held.
     ///
     /// Returns what the caller should do with it — see [`ShellAction`].
+    ///
+    /// The modifiers are the compositor's, stamped on the event when it was
+    /// handled (`oswindow::EventLoop::modifiers`): the desktop's surface
+    /// rarely has the keyboard, so a Ctrl pressed before a click goes to
+    /// whichever window does, and the shell could not know it from keys of
+    /// its own. Ctrl+click on an icon adds it to the selection, and a rubber
+    /// band dragged with Ctrl held adds what it reaches.
     ///
     /// The drain is here, wrapping the whole of the handling, rather than on
     /// the branch that forwards to the pane. *Every* path out of this function
@@ -4694,8 +5090,12 @@ impl DesktopShell {
     /// is the more common of the two.
     ///
     /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
-    pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
-        let action = self.handle_mouse_inner(event);
+    pub fn handle_mouse_with(
+        &mut self,
+        event: &MouseEvent,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
+        let action = self.handle_mouse_inner(event, modifiers);
         self.settle_switch();
         match (action, self.apply_pane_events()) {
             // A click on a notification card that names a program. The pane
@@ -4710,17 +5110,53 @@ impl DesktopShell {
         }
     }
 
-    fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
-        // A rename under way owns the presses on its own field -- they place
-        // the caret -- and any other press keeps the new name before it does
-        // whatever it does, as a click away does on every desktop. First,
-        // before the menus: a right-click that opens a menu is a click away
-        // too, and the name must not be left half-typed under it.
+    fn handle_mouse_inner(
+        &mut self,
+        event: &MouseEvent,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
+        // A text field's menu first of all, ahead of even the rename and the
+        // note below: it is opened over the field it is about, and a press on
+        // one of its rows must not first put that field down -- keep the
+        // name, close the note -- and leave the row nothing to act on. A
+        // press anywhere else closes it and is spent doing so, as every
+        // menu's is; the Run box or start menu it was opened in stays.
+        if self.field_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.field_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                        // Come to rest on a greyed row: its reason waits
+                        // out the tooltip delay, a deadline the session
+                        // must be told of to wake for.
+                        self.hover_changed |= menu.due_in(self.osd_clock_ms).is_some();
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_field_menu(event.x, event.y),
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // The wallpaper being moved owns the pointer: the picture is what it
+        // is about, wherever the press lands on the desktop.
+        if self.wallpaper_move.is_some() {
+            return self.wallpaper_move_mouse(event);
+        }
+        // A rename under way owns the presses on its own field -- a left
+        // press places the caret, a right one offers the field's menu -- and
+        // any other press keeps the new name before it does whatever it does,
+        // as a click away does on every desktop. First, before the menus: a
+        // right-click that opens a menu is a click away too, and the name
+        // must not be left half-typed under it.
         if self.icons.renaming().is_some()
             && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
         {
             if self.icons.rename_field_contains(event.x, event.y) {
-                self.icons.rename_click(event.x);
+                if let MouseEventKind::Press(MouseButton::Right) = event.kind {
+                    self.open_field_menu(MenuField::Rename, event.x, event.y);
+                } else {
+                    self.icons.rename_click(event.x);
+                }
                 return ShellAction::Consumed;
             }
             self.icons_dirty |= self.icons.commit_rename();
@@ -4765,9 +5201,10 @@ impl DesktopShell {
                             self.desktop_menu.hide();
                             // An icon's Open starts a program; every other
                             // item has already done its work.
-                            if let ShellAction::Launch(launch) = self.activate_desktop_menu_item(id)
+                            let action = self.activate_desktop_menu_item(id);
+                            if matches!(action, ShellAction::Launch(_) | ShellAction::LaunchAll(_))
                             {
-                                return ShellAction::Launch(launch);
+                                return action;
                             }
                         }
                         // A press that named no item: on the panel's own
@@ -4804,6 +5241,21 @@ impl DesktopShell {
                     self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // A notification's menu, on the pin menu's terms below -- and ahead of
+        // the pane's scrim further down, which would otherwise take every
+        // press meant for a menu opened over the pane.
+        if self.notification_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.notification_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_notification_menu(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -4905,7 +5357,7 @@ impl DesktopShell {
                     self.drag_tray_icon_to(event.x, event.y);
                     return ShellAction::Consumed;
                 }
-                MouseEventKind::Release(_) => return self.finish_tray_press(),
+                MouseEventKind::Release(_) => return self.finish_tray_press(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -4938,6 +5390,23 @@ impl DesktopShell {
         {
             return ShellAction::Consumed;
         }
+        // A right-click on a note's writing area offers what its keys do --
+        // Cut, Copy, Paste -- with the widget's own rows below them. A note
+        // not yet open opens, its caret where the press landed, as a left
+        // press would open it; one already open keeps its caret and its
+        // selection, which are what the rows act on. Its title bar is still
+        // the widget's, and offers the widget menu below.
+        if let MouseEventKind::Press(MouseButton::Right) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+            && let Some(note) = self.widgets.note_body_at(event.x, event.y)
+        {
+            if self.widgets.writing_note() != Some(note) {
+                self.widgets.note_press(event.x, event.y, 1);
+            }
+            self.open_field_menu(MenuField::Note(note), event.x, event.y);
+            return ShellAction::Consumed;
+        }
         // A right-click on bare desktop opens it. Checked here rather than at
         // the bottom with the other background presses because the menu must
         // not be opened by a right-click that landed on the taskbar or a
@@ -4960,8 +5429,8 @@ impl DesktopShell {
         // retype, while dismissing the chooser costs them the navigation that
         // got them to the directory they are looking at. Escape is the way out,
         // and the Cancel button is the visible one.
-        if self.run_browser.is_some() {
-            let (x, y, width, height) = self.run_browser_rect();
+        if self.chooser.is_some() {
+            let (x, y, width, height) = self.chooser_rect();
             // The chooser lays itself out from its own origin — see
             // `FileDialog::frame` — so the event has to arrive in its space or
             // the clicks land somewhere other than the ink.
@@ -4970,9 +5439,9 @@ impl DesktopShell {
                 y: event.y - y,
                 kind: event.kind.clone(),
             };
-            if let Some(dialog) = self.run_browser.as_mut() {
+            if let Some(dialog) = self.chooser.as_mut() {
                 let action = dialog.handle_mouse(&local, width, height);
-                self.apply_run_browser_action(action);
+                self.apply_chooser_action(action);
             }
             return ShellAction::Consumed;
         }
@@ -4990,6 +5459,14 @@ impl DesktopShell {
         // taskbar keep lighting under the cursor, which is what a user moving
         // the mouse *towards* the box sees.
         if self.run_dialog.is_visible() {
+            // A right-click on the command line offers what its keys do, over
+            // the box, which stays: the menu is about its line.
+            if let MouseEventKind::Press(MouseButton::Right) = event.kind
+                && self.run_dialog.field_rect().contains(event.x, event.y)
+            {
+                self.open_field_menu(MenuField::RunBox, event.x, event.y);
+                return ShellAction::Consumed;
+            }
             let handled = self.run_dialog.handle_mouse_event(event);
             // `next()` rather than a loop, and nothing is thrown away by it: one
             // press reaches at most one button, and only the OK button executes,
@@ -5047,9 +5524,11 @@ impl DesktopShell {
             // double-click-to-maximize was the only such gesture and belonged
             // to the compositor's title bar. An icon ends it: one click selects
             // it and two open it, which is the whole of what an icon is for.
-            MouseEventKind::Press(button) => self.handle_press(event.x, event.y, button),
+            MouseEventKind::Press(button) => {
+                self.handle_press_with(event.x, event.y, button, modifiers)
+            }
             MouseEventKind::DoubleClick(button) => {
-                self.handle_icon_activate(event.x, event.y, button)
+                self.handle_icon_activate(event.x, event.y, button, modifiers)
             }
             MouseEventKind::Scroll { dy, .. } => self.handle_scroll(event.x, event.y, dy),
             // A release belongs to whoever took the press, so chrome swallows
@@ -5128,7 +5607,10 @@ impl DesktopShell {
                 // area still belongs to it -- that is what makes dragging an
                 // icon to the far edge of the screen work at all.
                 if self.icons.is_interacting() {
-                    self.icons.handle_mouse_move(event.x, event.y, false);
+                    // Ctrl held as a rubber band moves adds what it reaches to
+                    // the selection rather than replacing it.
+                    self.icons
+                        .handle_mouse_move(event.x, event.y, modifiers.ctrl);
                     return ShellAction::Consumed;
                 }
                 // The overview covers the screen, so while it is up nothing
@@ -5281,15 +5763,26 @@ impl DesktopShell {
     }
 
     /// How long until the tooltip the pointer is resting on appears, in
-    /// milliseconds of the overlay clock -- `None` when none is waiting to.
+    /// milliseconds of the overlay clock -- a tile's name, or why the row
+    /// of a text field's menu it rests on is greyed -- `None` when none is
+    /// waiting to.
     ///
     /// For the session, which sleeps while nothing moves: the delay is a
     /// deadline nothing else wakes the loop for.
     #[must_use]
     pub fn tooltip_due_in(&self) -> Option<u64> {
-        self.tooltip
+        let tile = self
+            .tooltip
             .as_ref()
-            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms))
+            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms));
+        let reason = self
+            .field_menu
+            .as_ref()
+            .and_then(|(menu, _)| menu.due_in(self.osd_clock_ms));
+        match (tile, reason) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether what the pointer rests on has changed since this was last
@@ -5350,7 +5843,9 @@ impl DesktopShell {
     #[must_use]
     pub fn render_carry(&self) -> Option<RenderTree> {
         let (name, at) = if let Some(drag) = self.start_drag.as_ref() {
-            if !drag.source.is_dragging() {
+            // An action's row is carried nowhere, so nothing follows the
+            // pointer to say where it would go.
+            if !drag.source.is_dragging() || drag.action.is_some() {
                 return None;
             }
             (drag.name.clone(), self.carry_at)
@@ -5467,7 +5962,23 @@ impl DesktopShell {
         )
     }
 
+    /// [`handle_press_with`](Self::handle_press_with), with no modifier key
+    /// held: the tests' shorthand. Every press the shell is handed comes with
+    /// the modifiers held at the time (`handle_mouse_with`), so nothing else
+    /// calls it -- and kept outside the tests it was dead code.
+    #[cfg(test)]
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        self.handle_press_with(x, y, button, guitk::event::Modifiers::NONE)
+    }
+
+    /// A press at `(x, y)` with `button`, made with `modifiers` held.
+    fn handle_press_with(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
         // Before `hit_test`, and before everything: the overview covers the
         // whole screen, so a press while it is up landed on it whatever the
         // taskbar geometry says. Asking `hit_test` first would let a press over
@@ -5560,6 +6071,12 @@ impl DesktopShell {
         // the desktop cannot name (see `program_for_app_id`).
         if button == MouseButton::Right {
             match hit {
+                // The search field, which is part of the menu's panel: what
+                // its keys do, over the menu, which stays.
+                Hit::StartMenuPanel if self.start_search_rect().contains(x, y) => {
+                    self.open_field_menu(MenuField::StartSearch, x, y);
+                    return ShellAction::Consumed;
+                }
                 Hit::StartMenuEntry(index) => {
                     // A folder's row names no program, and `open_pin_menu`
                     // opens nothing for a target that names none.
@@ -5633,8 +6150,27 @@ impl DesktopShell {
                         let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
                         let mut source = tray_dnd::DragSource::default();
                         source.on_press(exec, x, y);
-                        self.start_drag = Some(StartDrag { source, name });
+                        self.start_drag = Some(StartDrag {
+                            source,
+                            name,
+                            action: None,
+                        });
                         self.carry_at = (x, y);
+                    }
+                    // Held the same way, so a press that slides off the row
+                    // is not a click -- and let go, it starts the action
+                    // rather than the program (`finish_start_press`).
+                    Some(StartRow::Action { entry, action }) => {
+                        if let Some(launch) = entry.launch_action(&action.id) {
+                            let mut source = tray_dnd::DragSource::default();
+                            source.on_press(entry.executable_path.clone(), x, y);
+                            self.start_drag = Some(StartDrag {
+                                source,
+                                name: action.name.clone(),
+                                action: Some(launch),
+                            });
+                            self.carry_at = (x, y);
+                        }
                     }
                     // A folder is not carried anywhere: the press opens or
                     // closes it, as a tree's node does.
@@ -5745,8 +6281,9 @@ impl DesktopShell {
             // overwrite.
             Hit::Desktop => {
                 let before = self.icons.selected_ids();
+                // Ctrl+click adds an icon to the selection, or takes it out.
                 self.icons
-                    .handle_mouse_down(x, y, icon_button(button), false);
+                    .handle_mouse_down(x, y, icon_button(button), modifiers.ctrl);
                 if self.icons.selected_ids() == before {
                     // Nothing the user can see changed -- a press on empty
                     // desktop with nothing selected. Still `Pass`, which is the
@@ -6054,14 +6591,15 @@ impl DesktopShell {
             let carried = self
                 .windows
                 .get(&id)
-                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));
-            let (icon_id, mut skip_taskbar, mut skip_alt_tab) =
-                carried.unwrap_or((0, false, false));
+                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab, w.to_tray));
+            let (icon_id, mut skip_taskbar, mut skip_alt_tab, mut to_tray) =
+                carried.unwrap_or((0, false, false, false));
 
             if carried.is_none() {
                 let actions = self.rules.evaluate(&info.title, &info.app_id);
                 skip_taskbar = actions.skip_taskbar.unwrap_or(false);
                 skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
+                to_tray = actions.to_tray.unwrap_or(false);
                 requests.extend(Self::rule_requests(
                     id,
                     info,
@@ -6098,6 +6636,7 @@ impl DesktopShell {
                     app_id: info.app_id.clone(),
                     skip_taskbar,
                     skip_alt_tab,
+                    to_tray,
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -6137,6 +6676,9 @@ impl DesktopShell {
         }
 
         self.windows = kept;
+        // A window minimised to the tray has an entry there, and one restored
+        // or gone has none: from this list, as the taskbar's buttons are.
+        self.sync_window_tray();
         // Every window gone, of an ending waiting for them: it is to be
         // carried out, by the session (`take_ending_action`).
         if self.ending.is_some() && self.windows.is_empty() {
@@ -6206,20 +6748,19 @@ impl DesktopShell {
 
     /// Turn the actions a rule matched into asks the compositor understands.
     ///
-    /// Five of [`RuleActions`](window_rules::RuleActions)'s seventeen fields
-    /// have somewhere to go. Two of those — `skip_taskbar` and `skip_alt_tab` —
-    /// are the shell's own business and are handled by the caller; the three
-    /// here need the compositor.
+    /// Sixteen of [`RuleActions`](window_rules::RuleActions)'s eighteen
+    /// fields have somewhere to go. Three of those — `skip_taskbar`,
+    /// `skip_alt_tab` and `to_tray` — are the shell's own business and are
+    /// handled by the caller; the thirteen here need the compositor, each
+    /// through a request only a shell may send about another program's window
+    /// (`ShellMove`, `ShellSetOpacity`, `ShellSetWindowPolicy` and the rest).
     ///
-    /// The twelve that are missing are missing on purpose, not by oversight.
-    /// `position` and `size` are the loudest: the control protocol's `Move` and
-    /// `Resize` resolve against the *sender's own* window, so the shell cannot
-    /// use them on somebody else's, and placement is the compositor's to decide
-    /// (§506) — the shell is not even told the display bounds. `always_on_top`,
-    /// `opacity`, `no_decorations`, `prevent_close` and the rest have no
-    /// request at all. They are stored, exported and shown, and doing nothing
-    /// visible is a better failure than a shell that moves windows to the
-    /// wrong place. See `known-issues.md`
+    /// The two that are missing are missing on purpose, not by oversight.
+    /// `target_monitor` waits on the compositor modelling more than one
+    /// display, and `no_decorations` on a request to take a frame away -- a
+    /// window's decorations are its own program's choice, made when it is
+    /// created. They are stored and shown, and doing nothing visible is a
+    /// better failure than a guess. See `known-issues.md`
     /// `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
     fn rule_requests(
         id: WindowId,
@@ -6382,7 +6923,8 @@ impl DesktopShell {
     /// [`ManagedWindow::on_glass`].
     #[must_use]
     pub fn taskbar_windows(&self) -> Vec<&ManagedWindow> {
-        self.listed_windows(|w| !w.skip_taskbar)
+        // A window in the tray has its entry there instead.
+        self.listed_windows(|w| !w.skip_taskbar && !w.in_tray())
     }
 
     /// The windows Alt+Tab cycles through, most recently used first: the
@@ -6408,7 +6950,7 @@ impl DesktopShell {
     /// on to the window used before last.
     #[must_use]
     pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
-        let mut windows = self.listed_windows(|w| !w.skip_alt_tab);
+        let mut windows = self.listed_windows(|w| !w.skip_alt_tab && !w.in_tray());
         windows.reverse();
         windows
     }
@@ -6803,6 +7345,55 @@ impl DesktopShell {
             }
         }
 
+        // A text field's menu, on the pin menu's terms below. Ahead of the
+        // start menu and the Run box, which it may be open over: Escape
+        // closes the menu and leaves them, as a press outside the menu does.
+        if self.field_menu.is_some() {
+            let chosen = self
+                .field_menu
+                .as_mut()
+                .map(|(menu, field)| (menu.handle_key(key), *field));
+            match chosen {
+                Some((Some(MenuAction::Selected(id)), field)) => {
+                    self.field_menu = None;
+                    match self.activate_field_menu_item(id, field) {
+                        ShellAction::Launch(launch) => return HotkeyOutcome::start(vec![launch]),
+                        ShellAction::LaunchAll(launches) => return HotkeyOutcome::start(launches),
+                        _ => {}
+                    }
+                }
+                Some((Some(MenuAction::Closed), _)) => self.field_menu = None,
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
+        // The wallpaper being moved owns the keyboard, as every mode here
+        // does: the arrows move it, Enter keeps it, Escape puts it back.
+        if self.wallpaper_move.is_some() {
+            return self.wallpaper_move_key(key);
+        }
+        // A notification's menu, on the pin menu's terms below. Ahead of the
+        // pane, which it may be open over: Escape closes the menu and leaves
+        // the pane, as a press outside the menu does.
+        if self.notification_menu.is_some() {
+            let chosen = self
+                .notification_menu
+                .as_mut()
+                .map(|(menu, app)| (menu.handle_key(key), app.clone()));
+            match chosen {
+                Some((Some(MenuAction::Selected(id)), app)) => {
+                    self.close_notification_menu();
+                    if let ShellAction::Launch(launch) =
+                        self.activate_notification_menu_item(id, &app)
+                    {
+                        return HotkeyOutcome::start(vec![launch]);
+                    }
+                }
+                Some((Some(MenuAction::Closed), _)) => self.close_notification_menu(),
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
         // The taskbar's menu, on the pin menu's terms just below.
         if self.taskbar_menu.is_some() {
             match self.taskbar_menu.as_mut().map(|menu| menu.handle_key(key)) {
@@ -6877,6 +7468,7 @@ impl DesktopShell {
                     self.desktop_menu.hide();
                     match self.activate_desktop_menu_item(id) {
                         ShellAction::Launch(launch) => HotkeyOutcome::start(vec![launch]),
+                        ShellAction::LaunchAll(launches) => HotkeyOutcome::start(launches),
                         _ => HotkeyOutcome::consumed(),
                     }
                 }
@@ -6919,8 +7511,8 @@ impl DesktopShell {
         // Note that Super+R is *not* special-cased through here the way it is in
         // `key_on_run_dialog`: while a chooser is up, the box the chord toggles
         // is not the surface the user is looking at.
-        if self.run_browser.is_some() {
-            return self.key_on_run_browser(key);
+        if self.chooser.is_some() {
+            return self.key_on_chooser(key);
         }
 
         if self.run_dialog.is_visible() {
@@ -7123,6 +7715,16 @@ impl DesktopShell {
         {
             self.toggle_start_folder(folder);
             return HotkeyOutcome::consumed();
+        }
+        // One of a program's actions, found by a search: started, as a click
+        // on its row starts it -- so "display" and Enter opens the page.
+        let action = row.and_then(|row| match self.start_menu_rows().get(row).copied() {
+            Some(StartRow::Action { entry, action }) => entry.launch_action(&action.id),
+            _ => None,
+        });
+        if let Some(launch) = action {
+            self.close_start_menu();
+            return HotkeyOutcome::start(vec![launch]);
         }
         let chosen = row.and_then(|row| {
             self.start_program_at(row)
@@ -7650,6 +8252,7 @@ impl DesktopShell {
         Some(hotkeys::Launch {
             program: PathBuf::from(program),
             args: words.collect(),
+            dir: None,
         })
     }
 
@@ -7705,7 +8308,7 @@ impl DesktopShell {
     /// executed something.
     ///
     /// [`Browse`](run_dialog::RunDialogEvent::Browse) puts the file chooser up
-    /// — see [`run_browser`](Self::run_browser). It asks for a *picker*, whose
+    /// — see [`chooser`](Self::chooser). It asks for a *picker*, whose
     /// answer goes back into the command box; starting the file explorer
     /// instead would be the tempting substitute and is the wrong one, because
     /// the user would get a window they did not ask for and an empty command
@@ -7719,8 +8322,12 @@ impl DesktopShell {
         let mut launches = Vec::new();
         for event in self.run_dialog.drain_events() {
             match event {
-                run_dialog::RunDialogEvent::Execute(request) => launches.push(request),
-                run_dialog::RunDialogEvent::Browse => self.open_run_browser(),
+                // Run, so put in the history -- which is to be written.
+                run_dialog::RunDialogEvent::Execute(request) => {
+                    self.run_history_dirty = true;
+                    launches.push(request);
+                }
+                run_dialog::RunDialogEvent::Browse => self.open_run_box_chooser(),
                 // No answer needed — the dialog has already hidden itself by the
                 // time it reports these — but they must still be drained, or the
                 // buffer grows by one on every dismissal. That is the whole
@@ -7740,45 +8347,62 @@ impl DesktopShell {
     ///
     /// The chooser arrives with no entries in it. It cannot arrive with any:
     /// listing a directory is a filesystem read and this module performs none.
-    /// The first [`run_browser_wants`](Self::run_browser_wants) after this
+    /// The first [`chooser_wants`](Self::chooser_wants) after this
     /// reports the directory, and the host answers. A host that never answers
     /// gets an empty chooser rather than a wrong one, which is the right way
     /// round for a shell whose tests all run with no filesystem at all.
-    fn open_run_browser(&mut self) {
+    fn open_run_box_chooser(&mut self) {
         let start = self.run_dialog.browse_start();
-        self.run_browser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
-        self.run_browser_listed = None;
+        self.chooser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
+        self.chooser_listed = None;
+        self.chooser_for = ChooserFor::RunBox;
+    }
+
+    /// Put the chooser up to pick the folder the photo frame `frame` shows:
+    /// in its folder mode (`FileDialog::select_folder`), opened on the folder
+    /// the frame shows now -- the one chosen for it, or the user's Pictures.
+    fn open_frame_folder_chooser(&mut self, frame: widgets::WidgetInstanceId) {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let start = self
+            .widgets
+            .frame_folder(frame)
+            .or_else(|| Self::photo_frame_folder(home.as_deref()))
+            .or(home)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.chooser = Some(guitk::dialog::FileDialog::select_folder().with_initial_path(&start));
+        self.chooser_listed = None;
+        self.chooser_for = ChooserFor::FrameFolder(frame);
     }
 
     /// Take the chooser down, whether it was cancelled or answered.
-    fn close_run_browser(&mut self) {
-        self.run_browser = None;
-        self.run_browser_listed = None;
+    fn close_chooser(&mut self) {
+        self.chooser = None;
+        self.chooser_listed = None;
     }
 
     /// Whether the Run box's file chooser is on screen.
     #[must_use]
-    pub fn run_browser_open(&self) -> bool {
-        self.run_browser.is_some()
+    pub fn chooser_open(&self) -> bool {
+        self.chooser.is_some()
     }
 
     /// The directory the chooser is showing and has not been given a listing
     /// for, if there is one.
     ///
     /// The read half of the split described on
-    /// `run_browser_listed`: a host that draws this
+    /// `chooser_listed`: a host that draws this
     /// shell should call this before each paint and answer any `Some` with
-    /// [`set_run_browser_entries`](Self::set_run_browser_entries), the way it
+    /// [`set_chooser_entries`](Self::set_chooser_entries), the way it
     /// already answers [`WallpaperManager::current_image_path`] with pixels.
     ///
     /// [`WallpaperManager::current_image_path`]: wallpaper::WallpaperManager::current_image_path
     #[must_use]
-    pub fn run_browser_wants(&self) -> Option<&Path> {
-        let path = self.run_browser.as_ref()?.current_path();
-        (self.run_browser_listed.as_deref() != Some(path)).then_some(path)
+    pub fn chooser_wants(&self) -> Option<&Path> {
+        let path = self.chooser.as_ref()?.current_path();
+        (self.chooser_listed.as_deref() != Some(path)).then_some(path)
     }
 
-    /// Answer [`run_browser_wants`](Self::run_browser_wants) with a listing.
+    /// Answer [`chooser_wants`](Self::chooser_wants) with a listing.
     ///
     /// The entries are recorded as belonging to whatever directory the chooser
     /// is showing *now*, not to whatever it was showing when they were read.
@@ -7789,15 +8413,15 @@ impl DesktopShell {
     ///
     /// Silently ignored when no chooser is up. A listing that arrives after the
     /// user cancelled is not an error; it is a read that was already in flight.
-    pub fn set_run_browser_entries(&mut self, entries: Vec<guitk::dialog::DirEntry>) {
-        let Some(dialog) = self.run_browser.as_mut() else {
+    pub fn set_chooser_entries(&mut self, entries: Vec<guitk::dialog::DirEntry>) {
+        let Some(dialog) = self.chooser.as_mut() else {
             return;
         };
-        self.run_browser_listed = Some(dialog.current_path().to_path_buf());
+        self.chooser_listed = Some(dialog.current_path().to_path_buf());
         dialog.set_entries(entries);
     }
 
-    /// Answer [`run_browser_wants`](Self::run_browser_wants) with "there is no
+    /// Answer [`chooser_wants`](Self::chooser_wants) with "there is no
     /// folder there".
     ///
     /// The chooser goes back to where it was (`FileDialog::refuse_navigation`)
@@ -7805,14 +8429,14 @@ impl DesktopShell {
     /// it stops wanting anything. The folder it opened on has nowhere to go
     /// back to, and is shown empty, once, rather than asked about again on
     /// every paint.
-    pub fn refuse_run_browser_path(&mut self) {
-        let Some(dialog) = self.run_browser.as_mut() else {
+    pub fn refuse_chooser_path(&mut self) {
+        let Some(dialog) = self.chooser.as_mut() else {
             return;
         };
         let refused = dialog.current_path().to_path_buf();
         dialog.refuse_navigation();
         if dialog.current_path() == refused {
-            self.run_browser_listed = Some(refused);
+            self.chooser_listed = Some(refused);
             dialog.set_entries(Vec::new());
         }
     }
@@ -7821,15 +8445,15 @@ impl DesktopShell {
     /// asked since the last call.
     ///
     /// The filesystem half is the session's, as the listing's is; answered
-    /// with [`set_run_browser_completions`](Self::set_run_browser_completions).
-    pub fn take_run_browser_completion_request(&mut self) -> Option<String> {
-        self.run_browser.as_mut()?.take_completion_request()
+    /// with [`set_chooser_completions`](Self::set_chooser_completions).
+    pub fn take_chooser_completion_request(&mut self) -> Option<String> {
+        self.chooser.as_mut()?.take_completion_request()
     }
 
-    /// Answer [`take_run_browser_completion_request`](Self::take_run_browser_completion_request)
+    /// Answer [`take_chooser_completion_request`](Self::take_chooser_completion_request)
     /// with the names in that folder. Ignored when no chooser is up.
-    pub fn set_run_browser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
-        if let Some(dialog) = self.run_browser.as_mut() {
+    pub fn set_chooser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
+        if let Some(dialog) = self.chooser.as_mut() {
             dialog.set_completions(items);
         }
     }
@@ -7847,28 +8471,28 @@ impl DesktopShell {
         clippy::cast_precision_loss,
         reason = "screen dimensions are far inside f32's exact-integer range"
     )]
-    fn run_browser_rect(&self) -> (f32, f32, f32, f32) {
+    fn chooser_rect(&self) -> (f32, f32, f32, f32) {
         let screen_w = self.screen_width as f32;
         let screen_h = self.screen_height as f32;
         // Clamped down to the screen, then the origin clamped up to zero: a
         // chooser wider than the display would otherwise be centred by placing
         // its left edge off the left side, where the sidebar and the `^` button
         // are the half that gets cut.
-        let width = RUN_BROWSER_WIDTH.min(screen_w);
-        let height = RUN_BROWSER_HEIGHT.min(screen_h);
+        let width = CHOOSER_WIDTH.min(screen_w);
+        let height = CHOOSER_HEIGHT.min(screen_h);
         let x = ((screen_w - width) / 2.0).max(0.0);
         let y = ((screen_h - height) / 2.0).max(0.0);
         (x, y, width, height)
     }
 
     /// One press while the chooser is up.
-    fn key_on_run_browser(&mut self, key: &KeyEvent) -> HotkeyOutcome {
-        let (_, _, _, height) = self.run_browser_rect();
-        let action = match self.run_browser.as_mut() {
+    fn key_on_chooser(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let (_, _, _, height) = self.chooser_rect();
+        let action = match self.chooser.as_mut() {
             Some(dialog) => dialog.handle_event(key, height),
             None => return HotkeyOutcome::default(),
         };
-        self.apply_run_browser_action(action);
+        self.apply_chooser_action(action);
         // Consumed unconditionally. The chooser is modal, so a press it had no
         // meaning for is still not the desktop's — and certainly not the Run
         // box's, which is directly underneath and would otherwise be typed into
@@ -7877,9 +8501,9 @@ impl DesktopShell {
     }
 
     /// What the chooser did in answer to an event.
-    fn apply_run_browser_action(&mut self, action: guitk::dialog::DialogAction) {
+    fn apply_chooser_action(&mut self, action: guitk::dialog::DialogAction) {
         match action {
-            // A navigation needs nothing done here: `run_browser_wants`
+            // A navigation needs nothing done here: `chooser_wants`
             // compares the chooser's directory against the last one delivered,
             // so the new directory is already reported as wanting a listing.
             guitk::dialog::DialogAction::None | guitk::dialog::DialogAction::NavigatedTo(_) => {}
@@ -7888,12 +8512,19 @@ impl DesktopShell {
             // spelling is the program that starts — see
             // `RunDialog::set_command_path`.
             guitk::dialog::DialogAction::Selected(path) => {
-                self.run_dialog.set_command_path(&path);
-                self.close_run_browser();
+                match self.chooser_for {
+                    ChooserFor::RunBox => self.run_dialog.set_command_path(&path),
+                    // Kept with the layout, which is written because it
+                    // changed -- as a widget moved is.
+                    ChooserFor::FrameFolder(frame) => {
+                        self.widgets_dirty |= self.widgets.set_frame_folder(frame, &path);
+                    }
+                }
+                self.close_chooser();
             }
             // The box is left exactly as it was, text and all. A Browse that
             // cleared what the user had typed is a Browse nobody uses twice.
-            guitk::dialog::DialogAction::Cancelled => self.close_run_browser(),
+            guitk::dialog::DialogAction::Cancelled => self.close_chooser(),
         }
     }
 
@@ -8077,20 +8708,34 @@ impl DesktopShell {
                     // the half that depends on *which letters* cannot be fixed
                     // by any constant.
                     //
-                    // `text_in` also marks the cut with `…`, so a truncated
-                    // title is distinguishable from a short one — a silently
-                    // clipped one is not, and a window called "Save changes to
+                    // Cut the way the theme cuts window titles
+                    // (`window-decorations` -> `title-bar.overflow`, the
+                    // same vocabulary for both, as `design.txt` asks): at the
+                    // end with a `…` by default, so a truncated title is
+                    // distinguishable from a short one -- a silently clipped
+                    // one is not, and a window called "Save changes to
                     // report.docx?" reading as "Save changes to rep" is a
-                    // different sentence. The whole of it is the tile's
-                    // tooltip.
-                    tree.text_in(
-                        title_x,
-                        tile.y + (tile.h - title_size).max(0.0) / 2.0,
-                        room,
+                    // different sentence -- or keeping the tail, for titles
+                    // that end in the file name. The whole of it is the
+                    // tile's tooltip.
+                    let weight = guitk::render::FontWeightHint::Regular;
+                    let (label, overflow) = text::fit_line(
                         &window.title,
-                        self.theme.taskbar_fg,
+                        room,
                         title_size,
+                        weight,
+                        self.appearance.decorations().title_overflow,
                     );
+                    tree.push(guitk::render::RenderCommand::Text {
+                        x: title_x,
+                        y: tile.y + (tile.h - title_size).max(0.0) / 2.0,
+                        text: label,
+                        color: self.theme.taskbar_fg,
+                        font_size: title_size,
+                        font_weight: weight,
+                        max_width: Some(room.max(0.0)),
+                        overflow,
+                    });
                 }
             }
         }
@@ -8233,6 +8878,20 @@ impl DesktopShell {
             } else {
                 self.theme.taskbar_fg
             };
+            // A window minimised to the tray shows its program's picture, as
+            // its taskbar button did: the glyph is only the title's first
+            // letter, which tells two windows apart less well than the
+            // picture tells two programs apart.
+            if icon.owner == SHELL_TRAY_OWNER
+                && let Some(window) = self.window_of_tray_entry(icon.id)
+            {
+                let px = self.icon_px(TRAY_WINDOW_ICON);
+                #[allow(clippy::cast_precision_loss)]
+                let side = px as f32;
+                let program = self.program_for_app_id(&window.app_id);
+                image_centred(&mut tree, *rect, side, self.picture_of(program, px, color));
+                continue;
+            }
             tree.text(
                 rect.x,
                 tray_text_y,
@@ -8913,8 +9572,9 @@ impl DesktopShell {
     }
 
     /// One row of the start menu's list, in `rect`: a program's picture and
-    /// name -- set in when it is inside a folder -- a folder's chevron,
-    /// picture and name, or a section's heading.
+    /// name -- set in when it is inside a folder -- a program's action's
+    /// picture and name, followed by its program's, dimmer; a folder's
+    /// chevron, picture and name; or a section's heading.
     fn render_start_row(&self, tree: &mut RenderTree, rect: Rect, item: StartRow<'_>) {
         let fg = self.theme.start_menu_fg;
         let size = self.font_size(TextRole::Item);
@@ -8923,6 +9583,9 @@ impl DesktopShell {
         let side = px as f32;
         let icon_y = rect.y + (rect.h - side).max(0.0) / 2.0;
         let text_y = rect.y + (rect.h - size).max(0.0) / 2.0;
+        // The program an action's row is of, named after the action: "New
+        // window" is a different row for each program that has one.
+        let mut program = None;
         let (icon_x, image_id, name) = match item {
             // No picture and no name of a thing to start: a heading of its own.
             StartRow::Section(section) => {
@@ -8937,6 +9600,24 @@ impl DesktopShell {
                 };
                 let x = rect.x + self.scale(START_ROW_ICON_X) + indent;
                 (x, self.program_icon(entry, px, fg), entry.name.as_str())
+            }
+            // The action's own picture when its entry names one, as its jump
+            // list draws it -- the generic program's when the theme has no
+            // such picture, as for a program's own -- and its program's when
+            // it names none.
+            StartRow::Action { entry, action } => {
+                let x = rect.x + self.scale(START_ROW_ICON_X);
+                let image_id = match &action.icon {
+                    Some(icon) => self.icon_registry.icon_or(
+                        icon.clone(),
+                        launcher::GENERIC_PROGRAM_ICON,
+                        px,
+                        fg,
+                    ),
+                    None => self.program_icon(entry, px, fg),
+                };
+                program = Some(entry.name.as_str());
+                (x, image_id, action.name.as_str())
             }
             StartRow::Folder { folder, open } => {
                 let chevron = Rect::new(
@@ -8967,14 +9648,25 @@ impl DesktopShell {
             image_id,
         });
         let text_x = icon_x + side + self.scale(START_ROW_ICON_GAP);
-        tree.text_in(
-            text_x,
-            text_y,
-            (rect.x + rect.w - text_x - self.scale(START_ROW_ICON_X)).max(0.0),
-            name,
-            fg,
-            size,
-        );
+        let right = rect.x + rect.w - self.scale(START_ROW_ICON_X);
+        tree.text_in(text_x, text_y, (right - text_x).max(0.0), name, fg, size);
+        // After the name, in the headings' dimmer ink, in what room is left:
+        // cut short before the action's own name is.
+        if let Some(program) = program {
+            let after = text_x
+                + text::measure(name, size, guitk::render::FontWeightHint::Regular)
+                + self.scale(START_ROW_ICON_GAP);
+            if after < right {
+                tree.text_in(
+                    after,
+                    text_y,
+                    right - after,
+                    program,
+                    with_alpha(fg, START_SECTION_ALPHA),
+                    size,
+                );
+            }
+        }
     }
 
     /// The image id of a program's picture, `px` square in `color`: its
@@ -9013,7 +9705,9 @@ impl DesktopShell {
             )
         } else {
             (
-                with_alpha(Color::WHITE, TASKBAR_TILE_GLASS),
+                // Faint glass, at the panel's gloss: none on a flat one.
+                self.glossed(Color::WHITE, TASKBAR_TILE_GLASS)
+                    .unwrap_or(Color::TRANSPARENT),
                 TASKBAR_TILE_EDGE,
                 TASKBAR_TILE_HIGHLIGHT,
             )
@@ -9070,33 +9764,36 @@ impl DesktopShell {
     /// theme's colour, since the renderer draws no gradients. The reference's
     /// shadow cast *above* the bar is not drawn: the bar's surface ends at its
     /// edge.
+    ///
+    /// Each at the theme's taskbar-panel gloss, so a flat theme's bar is its
+    /// colour alone.
     fn draw_taskbar_glass(&self, tree: &mut RenderTree, bar: Rect) {
         let line = self.scale(1.0).max(1.0);
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
-            with_alpha(Color::BLACK, TASKBAR_FOOT_SHADE),
-        );
-        fill(
-            tree,
-            Rect::new(
-                bar.x,
-                bar.y + 2.0 * line,
-                bar.w,
-                self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
-            ),
-            with_alpha(Color::WHITE, TASKBAR_TOP_GLOW),
-        );
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y + line, bar.w, line),
-            with_alpha(Color::WHITE, TASKBAR_INNER_LIGHT),
-        );
-        fill(
-            tree,
-            Rect::new(bar.x, bar.y, bar.w, line),
-            with_alpha(Color::WHITE, TASKBAR_EDGE_LIGHT),
-        );
+        if let Some(shade) = self.glossed(Color::BLACK, TASKBAR_FOOT_SHADE) {
+            fill(
+                tree,
+                Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
+                shade,
+            );
+        }
+        if let Some(glow) = self.glossed(Color::WHITE, TASKBAR_TOP_GLOW) {
+            fill(
+                tree,
+                Rect::new(
+                    bar.x,
+                    bar.y + 2.0 * line,
+                    bar.w,
+                    self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
+                ),
+                glow,
+            );
+        }
+        if let Some(inner) = self.glossed(Color::WHITE, TASKBAR_INNER_LIGHT) {
+            fill(tree, Rect::new(bar.x, bar.y + line, bar.w, line), inner);
+        }
+        if let Some(edge) = self.glossed(Color::WHITE, TASKBAR_EDGE_LIGHT) {
+            fill(tree, Rect::new(bar.x, bar.y, bar.w, line), edge);
+        }
     }
 
     /// The start button, as the reference's orb (`aero-orb`): a round button
@@ -9193,41 +9890,46 @@ impl DesktopShell {
                 CornerRadii::all(d * h.min(w) / 2.0),
             )
         };
+        // All three, and the line inside its edge, are the panel's glass: at
+        // its gloss, and not drawn at all on a flat panel. The rings and the
+        // shadow are the orb's edge and stay.
         let (shade, shade_radii) = pill(0.2, 0.62, 0.6, 0.32);
-        fill_round(
-            tree,
-            shade,
-            with_alpha(Color::BLACK, START_ORB_SHADE_ALPHA),
-            shade_radii,
-        );
+        if let Some(color) = self.glossed(Color::BLACK, START_ORB_SHADE_ALPHA) {
+            fill_round(tree, shade, color, shade_radii);
+        }
         let (skirt, skirt_radii) = pill(0.12, 0.05, 0.76, 0.5);
-        fill_round(
-            tree,
-            skirt,
-            with_alpha(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA),
-            skirt_radii,
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA) {
+            fill_round(tree, skirt, color, skirt_radii);
+        }
         let (cap, cap_radii) = pill(0.2, 0.06, 0.6, 0.3);
-        fill_round(
-            tree,
-            cap,
-            with_alpha(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA),
-            cap_radii,
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA) {
+            fill_round(tree, cap, color, cap_radii);
+        }
         // And the line just inside its edge.
         let inner = self.scale(1.0).max(1.0);
-        stroke_round(
-            tree,
-            Rect::new(
-                orb.x + inner / 2.0,
-                orb.y + inner / 2.0,
-                (d - inner).max(0.0),
-                (d - inner).max(0.0),
-            ),
-            with_alpha(Color::WHITE, START_ORB_INNER_ALPHA),
-            inner,
-            CornerRadii::all((d - inner).max(0.0) / 2.0),
-        );
+        if let Some(color) = self.glossed(Color::WHITE, START_ORB_INNER_ALPHA) {
+            stroke_round(
+                tree,
+                Rect::new(
+                    orb.x + inner / 2.0,
+                    orb.y + inner / 2.0,
+                    (d - inner).max(0.0),
+                    (d - inner).max(0.0),
+                ),
+                color,
+                inner,
+                CornerRadii::all((d - inner).max(0.0) / 2.0),
+            );
+        }
+    }
+
+    /// `color` at `alpha` -- one of the reference's strengths of light or
+    /// shade -- as the theme's taskbar panel finishes it
+    /// ([`PanelStyle::glossed`](appearance::panel::PanelStyle::glossed)), or
+    /// `None` where the panel's gloss leaves nothing of it to draw.
+    fn glossed(&self, color: Color, alpha: u8) -> Option<Color> {
+        let alpha = self.appearance.panel().glossed(alpha);
+        (alpha > 0).then(|| with_alpha(color, alpha))
     }
 
     /// The glass every drawn tile is made of: `body`, brighter across its top
@@ -9244,26 +9946,36 @@ impl DesktopShell {
         edge: u8,
         highlight: u8,
     ) {
-        fill_round(tree, tile, body, radii);
-        fill_round(
-            tree,
-            Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
-            with_alpha(Color::WHITE, TASKBAR_TILE_SHEEN),
-            CornerRadii::top(radii.top_left),
-        );
+        // A body made entirely of glass -- a window's tile behind -- is not
+        // there at all on a flat panel.
+        if body.a > 0 {
+            fill_round(tree, tile, body, radii);
+        }
+        // The sheen and the highlight are the glass: at the panel's gloss.
+        if let Some(sheen) = self.glossed(Color::WHITE, TASKBAR_TILE_SHEEN) {
+            fill_round(
+                tree,
+                Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
+                sheen,
+                CornerRadii::top(radii.top_left),
+            );
+        }
         let line = self.scale(1.0).max(1.0);
         // Inside the edge, and clear of the rounded corners it would cut.
         let inset = radii.top_left.max(line);
-        fill(
-            tree,
-            Rect::new(
-                tile.x + inset,
-                tile.y + line,
-                (tile.w - 2.0 * inset).max(0.0),
-                line,
-            ),
-            with_alpha(Color::WHITE, highlight),
-        );
+        if let Some(highlight) = self.glossed(Color::WHITE, highlight) {
+            fill(
+                tree,
+                Rect::new(
+                    tile.x + inset,
+                    tile.y + line,
+                    (tile.w - 2.0 * inset).max(0.0),
+                    line,
+                ),
+                highlight,
+            );
+        }
+        // The edge is the tile's own, glass or none: a flat tile is its edge.
         stroke_round(
             tree,
             tile,
@@ -9934,8 +10646,10 @@ impl DesktopShell {
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH)) + self.show_desktop_rect().w
     }
 
-    /// The icons other programs have put in the tray, as the compositor
-    /// reported them.
+    /// Every icon in the tray: those other programs have put there, as the
+    /// compositor reported them, then the shell's own entry for each window
+    /// minimised to the tray -- owned by [`SHELL_TRAY_OWNER`], titled with
+    /// the window's title, its glyph the title's first letter.
     ///
     /// **This is not the order they are drawn in** -- see
     /// [`ordered_tray_icons`](Self::ordered_tray_icons). This is the raw
@@ -9990,16 +10704,81 @@ impl DesktopShell {
     /// because a shell that repainted on every frame it received would repaint
     /// on reconnection for a list identical to the one it already had.
     pub fn apply_tray_icons(&mut self, icons: Vec<guiremote::tray::TrayIcon>) -> bool {
-        if self.tray_icons == icons {
+        if self.program_tray_icons == icons {
             return false;
         }
-        // Fold before storing, so the arrangement sees both lists and can tell
-        // a program that relabelled its icon from one that just registered.
-        // The answer is discarded: reaching here already means the membership
-        // or a glyph changed, so the tray repaints either way.
-        self.tray_arrangement.sync(&icons);
-        self.tray_icons = icons;
+        self.program_tray_icons = icons;
+        self.rebuild_tray();
         true
+    }
+
+    /// Give each window minimised to the tray an entry there, and take the
+    /// entries of those restored or gone away -- from the window list just
+    /// adopted, which repaints the bar whatever this changes.
+    fn sync_window_tray(&mut self) {
+        // A window keeps its entry's id until it closes.
+        let windows = &self.windows;
+        self.window_tray_ids
+            .retain(|id, _| windows.contains_key(id));
+        let joining: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.in_tray() && !self.window_tray_ids.contains_key(&w.id))
+            .map(|w| w.id)
+            .collect();
+        for id in joining {
+            // The next id no window holds, and never 0. Some id is free: there
+            // are fewer windows than ids.
+            let mut entry = self.next_window_tray_id;
+            while entry == 0 || self.window_tray_ids.values().any(|&held| held == entry) {
+                entry = entry.wrapping_add(1);
+            }
+            self.next_window_tray_id = entry.wrapping_add(1);
+            self.window_tray_ids.insert(id, entry);
+        }
+        self.rebuild_tray();
+    }
+
+    /// Store the tray's whole list -- the programs' icons, then the windows'
+    /// entries -- folding it into the arrangement first, so the arrangement
+    /// sees both lists and can tell a program that relabelled its icon from
+    /// one that just registered.
+    ///
+    /// The list's order is only where a new icon joins the arrangement: an
+    /// entry already in it keeps its place there, so an entry that went to
+    /// the tray later joins after the ones before it.
+    fn rebuild_tray(&mut self) {
+        let entries = self
+            .windows
+            .values()
+            .filter(|w| w.in_tray())
+            .filter_map(|w| Some((*self.window_tray_ids.get(&w.id)?, w)));
+        let mut icons = self.program_tray_icons.clone();
+        icons.extend(entries.map(|(entry, w)| {
+            // The glyph is what a row in the overflow list shows when it has
+            // no title, and what stands in where the program's picture is not
+            // known: the title's first letter.
+            let glyph = w
+                .title
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map_or_else(|| "\u{25A3}".to_string(), |c| c.to_uppercase().collect());
+            guiremote::tray::TrayIcon::new(SHELL_TRAY_OWNER, entry, glyph, w.title.clone())
+        }));
+        if icons == self.tray_icons {
+            return;
+        }
+        // Whether the arrangement changed is not asked: the callers repaint
+        // on any change to the list, which this is.
+        let _rearranged = self.tray_arrangement.sync(&icons);
+        self.tray_icons = icons;
+    }
+
+    /// The window whose tray entry has `entry` for its id, if it is still
+    /// in the tray.
+    fn window_of_tray_entry(&self, entry: u32) -> Option<&ManagedWindow> {
+        let (&id, _) = self.window_tray_ids.iter().find(|&(_, &e)| e == entry)?;
+        self.windows.get(&id).filter(|w| w.in_tray())
     }
 
     /// Open the list of icons the bar had no room for.
@@ -10024,6 +10803,17 @@ impl DesktopShell {
         let mut items = Vec::with_capacity(hidden.len());
         for (index, icon) in hidden.iter().enumerate() {
             keys.push(tray_dnd::TrayIconKey::of(icon));
+            // A window minimised to the tray is shown by its program's
+            // picture, as it is on the bar; a program's icon by its glyph.
+            let picture = if icon.owner == SHELL_TRAY_OWNER {
+                self.window_of_tray_entry(icon.id).map(|window| {
+                    self.program_for_app_id(&window.app_id)
+                        .and_then(|program| program.icon.clone())
+                        .unwrap_or_else(|| launcher::GENERIC_PROGRAM_ICON.to_owned())
+                })
+            } else {
+                None
+            };
             items.push(guitk::menu::MenuItem::Action {
                 // The row's position, resolved against `keys` rather than
                 // against the live tray -- see the field's documentation.
@@ -10036,7 +10826,7 @@ impl DesktopShell {
                     icon.tooltip.clone()
                 },
                 shortcut: None,
-                icon: Some(icon.glyph.clone()),
+                icon: Some(picture.unwrap_or_else(|| icon.glyph.clone())),
                 enabled: true,
                 checked: None,
             });
@@ -10086,21 +10876,23 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        // An action with no command line is started by D-Bus, which this
-        // system does not have, so it is not offered.
+        // What the program's jump list offers -- an action with no command
+        // line is started by D-Bus, which this system does not have -- the
+        // same ones a search offers (`AppEntry::jump_list`).
         let mut items: Vec<guitk::menu::MenuItem> = self
             .program_of(target)
             .map(|app| {
-                app.actions
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, a)| a.exec.is_some())
-                    .map(|(index, a)| {
-                        action(
-                            Self::MENU_JUMP_LIST_BASE
-                                .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-                            a.name.clone(),
-                        )
+                app.jump_list()
+                    .map(|(index, a)| guitk::menu::MenuItem::Action {
+                        id: Self::MENU_JUMP_LIST_BASE
+                            .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                        label: a.name.clone(),
+                        shortcut: None,
+                        // The action's own picture, as its desktop entry names
+                        // it.
+                        icon: a.icon.clone(),
+                        enabled: true,
+                        checked: None,
                     })
                     .collect()
             })
@@ -10378,9 +11170,442 @@ impl DesktopShell {
     pub fn render_taskbar_menu(&self) -> Option<RenderTree> {
         let menu = self.taskbar_menu.as_ref()?;
         let mut tree = RenderTree::new();
-        tree.commands
-            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        tree.commands.extend(self.render_menu(menu));
         Some(tree)
+    }
+
+    /// A notification's menu's switch: turn its program's notifications
+    /// off, or back on.
+    const MENU_NOTIFY_SWITCH: MenuItemId = 1;
+
+    /// A notification's menu's way to the Settings app's Notifications page.
+    const MENU_NOTIFY_SETTINGS: MenuItemId = 2;
+
+    /// Whether the user has turned off notifications from `app`: its rule is
+    /// `Silent`, which is what the Settings app's switch for a program writes
+    /// and what [`focus_assist`] reads.
+    fn notifications_off_for(&self, app: &str) -> bool {
+        self.notif.settings.rule_for(app).importance == notifsettings::Importance::Silent
+    }
+
+    /// Open a notification's menu at `(x, y)`: what can be done about `app`,
+    /// the program it came from -- `design.txt`'s "option for any
+    /// notification to not show notifications from that application again".
+    ///
+    /// Two rows. The first turns the program's notifications off -- makes it
+    /// `Silent`, as the Settings app's switch for it does -- or, for a
+    /// program already off, back on: a silenced program's notifications are
+    /// still filed in the pane, so there is a card to ask from, and the row
+    /// says what choosing it will do. The second opens the Settings app on
+    /// its Notifications page, where the rest of the program's rule is.
+    ///
+    /// **From the pane** the menu opens over it and the pane stays: turning
+    /// one program off is part of going through the list, not the end of it.
+    /// Nothing else can be open then -- the pane takes every press but the
+    /// bar's, and a press on the bar closes it -- so nothing is dismissed.
+    ///
+    /// **From a toast** it closes whatever else was open, as every menu
+    /// does, and opens *beside* the stack: ending where the toasts' surface
+    /// begins, at the pointer's height. That surface is above the menus'
+    /// (§1447, "a toast pops up over an open menu"), so a menu opened under
+    /// the pointer would be drawn under the toast it was opened from. And
+    /// the toasts hold while it is up, as they do under the pointer: the
+    /// pointer has gone from the toast to its menu, and the toast the menu is
+    /// about must not leave while the menu is read.
+    fn open_notification_menu(&mut self, app: String, x: f32, y: f32, from_toast: bool) {
+        let switch = if self.notifications_off_for(&app) {
+            format!("Turn on notifications from {app}")
+        } else {
+            format!("Turn off notifications from {app}")
+        };
+        let row = |id, label: String| guitk::menu::MenuItem::Action {
+            id,
+            label,
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        let mut menu = guitk::menu::ContextMenu::new(vec![
+            row(Self::MENU_NOTIFY_SWITCH, switch),
+            row(
+                Self::MENU_NOTIFY_SETTINGS,
+                "Notification settings".to_owned(),
+            ),
+        ]);
+        let x = if from_toast {
+            self.dismiss_popups();
+            let beside = self.toast_extent().map_or(x, |stack| stack.x);
+            (beside - menu.width()).max(0.0)
+        } else {
+            x
+        };
+        menu.show(x, y, self.viewport());
+        self.notification_menu = Some((menu, app));
+        self.toasts.hold_for_menu(from_toast);
+    }
+
+    /// Close a notification's menu, letting go of the toasts it held. The one
+    /// way it closes -- a row chosen, a press elsewhere, Escape, another
+    /// popup opening -- so that none of them can leave the toasts held with
+    /// no menu up, which would keep them on screen until the next menu.
+    fn close_notification_menu(&mut self) {
+        self.notification_menu = None;
+        self.toasts.hold_for_menu(false);
+    }
+
+    /// A press while a notification's menu is open: a row takes its action,
+    /// and a press anywhere else closes the menu, as every menu's does.
+    fn click_notification_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .notification_menu
+            .as_mut()
+            .and_then(|(menu, app)| menu.handle_click(x, y).map(|id| (id, app.clone())));
+        self.close_notification_menu();
+        match chosen {
+            Some((id, app)) => self.activate_notification_menu_item(id, &app),
+            None => ShellAction::Consumed,
+        }
+    }
+
+    /// One row of a notification's menu, chosen by click or by key.
+    ///
+    /// Turning a program off takes its toasts away at once -- the user has
+    /// just said not to be shown them -- and leaves its cards in the pane,
+    /// which is where they are turned back on from. Opening Settings closes
+    /// the pane: the window it opens is what the user asked to see, and the
+    /// pane's scrim would dim it.
+    fn activate_notification_menu_item(&mut self, id: MenuItemId, app: &str) -> ShellAction {
+        match id {
+            Self::MENU_NOTIFY_SWITCH => {
+                let turning_off = !self.notifications_off_for(app);
+                self.apply_app_notification_setting(
+                    app,
+                    notif_pane::AppSettingKind::Enabled,
+                    notif_pane::SettingValue::Bool(!turning_off),
+                );
+                if turning_off {
+                    self.toasts.forget_app(app);
+                }
+                ShellAction::Consumed
+            }
+            Self::MENU_NOTIFY_SETTINGS => {
+                self.notifications.hide();
+                ShellAction::Launch(launcher::settings_page(launcher::NOTIFICATIONS_PAGE))
+            }
+            _ => ShellAction::Consumed,
+        }
+    }
+
+    /// A notification's menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_notification_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.notification_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.render_menu(menu));
+        Some(tree)
+    }
+
+    /// Pixels the wallpaper moves for an arrow key, or a notch of the wheel.
+    const WALLPAPER_NUDGE: f32 = 24.0;
+
+    /// Begin moving the wallpaper: the pointer drags the picture, the wheel
+    /// and the arrow keys move it, Enter keeps where it is and Escape puts it
+    /// back -- `design.txt`'s "let the user scroll the image up/down or
+    /// right/left to center it on the desktop how they want". Answers
+    /// whether it began: a picture that fills the screen exactly has nowhere
+    /// to go.
+    fn begin_wallpaper_move(&mut self) -> bool {
+        if self.wallpaper_room.is_none() {
+            return false;
+        }
+        self.dismiss_popups();
+        self.wallpaper_move = Some(WallpaperMove {
+            before: self.appearance.wallpaper_position,
+            drag: None,
+        });
+        true
+    }
+
+    /// Whether the wallpaper is being moved.
+    #[must_use]
+    pub fn moving_wallpaper(&self) -> bool {
+        self.wallpaper_move.is_some()
+    }
+
+    /// Put the picture `(dx, dy)` pixels from where it was at `from`: as
+    /// fractions of the room it has on each axis (the room is negative where
+    /// it overflows, so a drag to the right shows more of its left), held to
+    /// 0..=1. An axis with no room does not move.
+    fn shift_wallpaper(&mut self, from: (f32, f32), dx: f32, dy: f32) {
+        let Some((room_x, room_y)) = self.wallpaper_room else {
+            return;
+        };
+        let step = |at: f32, d: f32, room: f32| {
+            if room.abs() < 0.5 {
+                at
+            } else {
+                (at + d / room).clamp(0.0, 1.0)
+            }
+        };
+        self.appearance.wallpaper_position = (step(from.0, dx, room_x), step(from.1, dy, room_y));
+    }
+
+    /// End moving the wallpaper: where it is now kept -- written to
+    /// `appearance.yaml`, the file the Settings app edits too -- or put back
+    /// where it was.
+    fn end_wallpaper_move(&mut self, keep: bool) {
+        let Some(moving) = self.wallpaper_move.take() else {
+            return;
+        };
+        if !keep {
+            self.appearance.wallpaper_position = moving.before;
+        } else if self.appearance.wallpaper_position != moving.before {
+            // Load, modify, save, and a failed write reported with the
+            // picture moved anyway, for the reasons `toggle_night_light`
+            // gives.
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.wallpaper_position = self.appearance.wallpaper_position;
+            if let Err(err) = file.save() {
+                eprintln!("desktop: could not save appearance.yaml: {err}");
+            }
+        }
+    }
+
+    /// A pointer event while the wallpaper is being moved: a press on the
+    /// desktop takes hold of the picture and the pointer drags it; the wheel
+    /// moves it (Shift across); a press on the taskbar keeps it where it is
+    /// and ends the move.
+    fn wallpaper_move_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        let at = self.appearance.wallpaper_position;
+        match event.kind {
+            MouseEventKind::Press(_) if self.taskbar_rect().contains(event.x, event.y) => {
+                self.end_wallpaper_move(true);
+            }
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(moving) = self.wallpaper_move.as_mut() {
+                    moving.drag = Some(((event.x, event.y), at));
+                }
+            }
+            MouseEventKind::Move => {
+                if let Some(((x0, y0), from)) = self.wallpaper_move.and_then(|m| m.drag) {
+                    self.shift_wallpaper(from, event.x - x0, event.y - y0);
+                }
+            }
+            MouseEventKind::Release(_) => {
+                if let Some(moving) = self.wallpaper_move.as_mut() {
+                    moving.drag = None;
+                }
+            }
+            MouseEventKind::Scroll { dx, dy } => {
+                self.shift_wallpaper(at, dx * Self::WALLPAPER_NUDGE, dy * Self::WALLPAPER_NUDGE);
+            }
+            _ => {}
+        }
+        ShellAction::Consumed
+    }
+
+    /// A key while the wallpaper is being moved: the arrows move it, Enter
+    /// keeps it, Escape puts it back; every other key goes no further.
+    fn wallpaper_move_key(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let at = self.appearance.wallpaper_position;
+        let n = Self::WALLPAPER_NUDGE;
+        match key.key {
+            Key::Escape => self.end_wallpaper_move(false),
+            Key::Enter => self.end_wallpaper_move(true),
+            Key::Left => self.shift_wallpaper(at, -n, 0.0),
+            Key::Right => self.shift_wallpaper(at, n, 0.0),
+            Key::Up => self.shift_wallpaper(at, 0.0, -n),
+            Key::Down => self.shift_wallpaper(at, 0.0, n),
+            _ => {}
+        }
+        HotkeyOutcome::consumed()
+    }
+
+    /// What the screen says while the wallpaper is being moved -- how to move
+    /// it and how to finish -- on a card at the top of the screen; `None`
+    /// when it is not being moved.
+    #[must_use]
+    pub fn render_wallpaper_move(&self) -> Option<RenderTree> {
+        self.wallpaper_move?;
+        let p = Palette::from_settings(&self.appearance);
+        let size = self.font_size(TextRole::Body);
+        let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
+        let pad = self.scale(14.0);
+        let lines = [
+            (
+                "Move the wallpaper",
+                guitk::render::FontWeightHint::Bold,
+                p.text,
+            ),
+            (
+                "Drag the picture, or use the arrow keys, to choose the part that shows.",
+                guitk::render::FontWeightHint::Regular,
+                p.text,
+            ),
+            (
+                "Enter keeps it here -- Esc puts it back.",
+                guitk::render::FontWeightHint::Regular,
+                p.subtext0,
+            ),
+        ];
+        let wide = lines
+            .iter()
+            .map(|(words, weight, _)| text::measure(words, size, *weight))
+            .fold(0.0_f32, f32::max);
+        #[allow(clippy::cast_precision_loss, reason = "three lines")]
+        let tall = line * lines.len() as f32;
+        let (w, h) = (wide + pad * 2.0, tall + pad * 2.0);
+        #[allow(clippy::cast_precision_loss, reason = "a screen's width")]
+        let x = ((self.screen_width as f32 - w) / 2.0).max(0.0);
+        let y = self.scale(24.0);
+        let mut tree = RenderTree::new();
+        let radius = CornerRadii::all(self.scale(8.0));
+        tree.push(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.surface0,
+            corner_radii: radius,
+        });
+        tree.push(guitk::render::RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.accent,
+            line_width: 1.0,
+            corner_radii: radius,
+        });
+        for (i, (words, weight, color)) in lines.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss, reason = "three lines")]
+            let row = i as f32;
+            tree.push(guitk::render::RenderCommand::Text {
+                x: x + pad,
+                y: y + pad + row * line,
+                text: (*words).to_owned(),
+                color: *color,
+                font_size: size,
+                font_weight: *weight,
+                max_width: Some(wide),
+                overflow: guitk::render::TextOverflow::Ellipsis,
+            });
+        }
+        Some(tree)
+    }
+
+    /// Open a text field's menu at `(x, y)`, over the field it is about:
+    /// what the field's keys do (`guitk::editmenu`), each row dimmed when it
+    /// would do nothing -- and on a note the widget's own rows below them,
+    /// since a right-click on a note offered removing it before it offered
+    /// anything else, and still should.
+    ///
+    /// Unlike every other menu here it does not dismiss the popups: the Run
+    /// box and the start menu are what the field is in, and closing them to
+    /// show a menu about their own field would leave the menu about nothing.
+    /// The other *menus* close, as they do whenever a menu opens. None can be
+    /// open when a press gets here -- each takes every press while it is up
+    /// -- but that is their rule, and this does not lean on it.
+    ///
+    /// Nothing opens over a field with nothing to offer: a note or a rename
+    /// that went before the press arrived.
+    fn open_field_menu(&mut self, field: MenuField, x: f32, y: f32) {
+        let menu = match field {
+            MenuField::RunBox => Some(self.run_dialog.edit_menu()),
+            MenuField::StartSearch => Some(self.start_query.edit_menu()),
+            MenuField::Note(_) => self.widgets.note_edit_menu(),
+            MenuField::Rename => self.icons.rename_edit_menu(),
+        };
+        let Some(mut menu) = menu else {
+            return;
+        };
+        if matches!(field, MenuField::Note(_)) {
+            // A note is never a photo frame.
+            menu.extend(std::iter::once(MenuItem::Separator).chain(Self::widget_menu_items(false)));
+        }
+        self.desktop_menu.hide();
+        self.tray_overflow_menu = None;
+        self.pin_menu = None;
+        self.taskbar_menu = None;
+        self.close_notification_menu();
+        menu.show(x, y, self.viewport());
+        self.field_menu = Some((menu, field));
+    }
+
+    /// A press while a text field's menu is open: a row takes its action, and
+    /// a press anywhere else closes the menu, as every menu's does.
+    fn click_field_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .field_menu
+            .as_mut()
+            .and_then(|(menu, field)| menu.handle_click(x, y).map(|id| (id, *field)));
+        self.field_menu = None;
+        match chosen {
+            Some((id, field)) => self.activate_field_menu_item(id, field),
+            None => ShellAction::Consumed,
+        }
+    }
+
+    /// One row of a text field's menu, chosen by click or by key. An edit row
+    /// does to the field what its key would, with what follows a change
+    /// there: the Run box's suggestions and the start menu's list follow its
+    /// text, and a note's change is saved with the layout, as a typed one is.
+    /// A note's widget rows are the widget menu's.
+    fn activate_field_menu_item(&mut self, id: MenuItemId, field: MenuField) -> ShellAction {
+        match field {
+            MenuField::RunBox => {
+                // Whether the row was the line's is not asked: every row of
+                // the menu was, and the box redraws either way.
+                let _edited = self.run_dialog.edit_command(id);
+            }
+            MenuField::StartSearch => {
+                if self.start_query.edit_command(id) == KeyEdit::Changed {
+                    self.search_changed();
+                }
+            }
+            MenuField::Note(note) => {
+                if guitk::editmenu::EditCommand::from_id(id).is_none() {
+                    // "Remove this widget", "Remove all widgets": about the
+                    // note, as the widget menu's rows are about its widget.
+                    self.menu_widget = Some(note);
+                    return self.activate_desktop_menu_item(id);
+                }
+                if self.widgets.note_edit_command(id) == widgets::NoteKey::Changed {
+                    self.widgets_dirty = true;
+                }
+            }
+            MenuField::Rename => {
+                // Whether one was under way is not asked: the menu closed
+                // with it, and the name is kept when the rename ends.
+                let _edited = self.icons.rename_edit_command(id);
+            }
+        }
+        ShellAction::Consumed
+    }
+
+    /// A text field's menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_field_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.field_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.render_menu(menu));
+        Some(tree)
+    }
+
+    /// `menu`'s draw commands, each row's picture found in the icon theme
+    /// and drawn in the menu's text colour (`TD-C-MENU-ROWS-DRAW-NO-ICONS`,
+    /// fixed): a jump list's action, an item a program added to a file's
+    /// menu.
+    ///
+    /// A name the theme does not have is asked for all the same and drawn
+    /// as nothing -- the upload finds nothing to send, once -- which leaves
+    /// the row's picture column empty and its label in line.
+    fn render_menu(&self, menu: &ContextMenu) -> Vec<guitk::render::RenderCommand> {
+        let palette = Palette::from_settings(&self.appearance);
+        menu.render_with_icons(&palette, &|name, px| {
+            Some(self.icon_registry.icon(name.to_owned(), px, palette.text))
+        })
     }
 
     /// The pin menu's draw commands, empty when it is closed.
@@ -10388,8 +11613,7 @@ impl DesktopShell {
     pub fn render_pin_menu(&self) -> Option<RenderTree> {
         let (menu, _) = self.pin_menu.as_ref()?;
         let mut tree = RenderTree::new();
-        tree.commands
-            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        tree.commands.extend(self.render_menu(menu));
         Some(tree)
     }
 
@@ -10431,6 +11655,12 @@ impl DesktopShell {
             .any(|icon| tray_dnd::TrayIconKey::of(icon) == key)
         {
             return None;
+        }
+        // A window minimised to the tray comes back, as a click on its icon
+        // would bring it.
+        if key.owner == SHELL_TRAY_OWNER {
+            let window = self.window_of_tray_entry(key.id)?.id;
+            return Some(ShellRequest::window(window, ShellControlAction::Activate));
         }
         Some(ShellRequest::ClickTrayIcon {
             owner: key.owner,
@@ -10669,7 +11899,8 @@ impl DesktopShell {
     /// Let go of a pressed start-menu row: a click starts the program; a drag
     /// carries it to wherever it was let go -- the taskbar pins it at the gap
     /// nearest the pointer, the desktop gets a shortcut to it there -- and
-    /// dropping it back on the menu asks for nothing.
+    /// dropping it back on the menu asks for nothing. A program's action,
+    /// found by a search, is started by a click and carried nowhere.
     fn finish_start_press(&mut self, x: f32, y: f32) -> ShellAction {
         let Some(mut drag) = self.start_drag.take() else {
             return ShellAction::Consumed;
@@ -10677,6 +11908,13 @@ impl DesktopShell {
         let exec = drag.source.pressed_key();
         // Read before `on_release`, which resets the source.
         let was_drag = drag.source.on_release();
+        if let Some(launch) = drag.action {
+            if was_drag {
+                return ShellAction::Consumed;
+            }
+            self.close_start_menu();
+            return ShellAction::Launch(launch);
+        }
         let Some(exec) = exec else {
             return ShellAction::Consumed;
         };
@@ -10811,9 +12049,9 @@ impl DesktopShell {
             .unwrap_or(count)
     }
 
-    /// Release a pressed tray icon: either a reorder just ended, or the
-    /// program that owns the icon is about to hear about a click.
-    fn finish_tray_press(&mut self) -> ShellAction {
+    /// Release a pressed tray icon at `(x, y)`: either a reorder just ended,
+    /// or the icon was clicked -- see [`click_tray_icon`](Self::click_tray_icon).
+    fn finish_tray_press(&mut self, x: f32, y: f32) -> ShellAction {
         let Some(mut drag) = self.tray_drag.take() else {
             return ShellAction::Consumed;
         };
@@ -10827,6 +12065,24 @@ impl DesktopShell {
         let Some(key) = key else {
             return ShellAction::Consumed;
         };
+        self.click_tray_icon(key, drag.button, x, y)
+    }
+
+    /// A click with `button` on the tray icon `key`, the pointer at `(x, y)`.
+    ///
+    /// A program's icon is that program's: it hears of the click, and what
+    /// it means is its own to decide. One of the shell's -- a window minimised
+    /// to the tray ([`SHELL_TRAY_OWNER`]) -- is answered here, the way the
+    /// window's taskbar button would be: the primary button brings the window
+    /// back, the secondary opens the window's menu at the pointer, and the
+    /// others do nothing, as they do on the button.
+    fn click_tray_icon(
+        &mut self,
+        key: tray_dnd::TrayIconKey,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    ) -> ShellAction {
         // Named by key rather than by slot, because the slot may have changed
         // under the pointer -- another program registering an icon reorders
         // nothing, but a program *departing* does, and a click that resolved a
@@ -10838,11 +12094,28 @@ impl DesktopShell {
         {
             return ShellAction::Consumed;
         }
-        ShellAction::Control(ShellRequest::ClickTrayIcon {
-            owner: key.owner,
-            id: key.id,
-            button: drag.button,
-        })
+        if key.owner != SHELL_TRAY_OWNER {
+            return ShellAction::Control(ShellRequest::ClickTrayIcon {
+                owner: key.owner,
+                id: key.id,
+                button,
+            });
+        }
+        let Some(window) = self.window_of_tray_entry(key.id).map(|w| w.id) else {
+            return ShellAction::Consumed;
+        };
+        match button {
+            // `Activate`, not `Restore`, for the reason the taskbar button
+            // gives: a window minimised while maximised comes back maximised.
+            MouseButton::Left => {
+                ShellAction::Control(ShellRequest::window(window, ShellControlAction::Activate))
+            }
+            MouseButton::Right => {
+                self.open_pin_menu(PinTarget::Window(window), x, y);
+                ShellAction::Consumed
+            }
+            _ => ShellAction::Consumed,
+        }
     }
 
     /// Which gap between icons the pointer is nearest, `0..=len`.
@@ -11213,6 +12486,10 @@ impl DesktopShell {
         // The pane's scrim dims the whole screen behind it, so a card left open
         // under it would be a card the user cannot read.
         self.shortcut_card_open = false;
+        // And the toasts go at once: what they show is in the pane, in front
+        // of the user, and a toast left over the pane's edge would cover a
+        // card of its own notification.
+        self.toasts.clear();
         self.notifications.show();
     }
 
@@ -11318,7 +12595,129 @@ impl DesktopShell {
             self.focus.record_suppressed();
             notif.silent = true;
         }
-        self.notifications.push_notification(notif)
+        // Its program's rule in the Notifications settings: whether it pops
+        // up, and whether it sounds.
+        let rule = self.notif.settings.rule_for(&notif.app_name);
+        // Popped up as it arrives -- unless silenced, which is exactly "do
+        // not show me"; unless its program's banner is off, which asks for
+        // the list alone; or unless the pane is open, where it is in front
+        // of the user already. The toast carries the id the pane files it
+        // under, so opening one marks the other read.
+        let pop_up =
+            (!notif.silent && rule.banner && !self.notifications.pane_state().is_visible())
+                .then(|| notif.clone());
+        // Heard as it arrives -- unless focus assist silenced it, or its
+        // program's rule turns its sound off. Not tied to the toast: the
+        // rule's sound and banner are separate switches, and a sound with no
+        // banner (hear it now, read it later) is a choice a user can make.
+        // Nor to the pane being shut: a card added to a list the user is
+        // reading is easily missed.
+        if !notif.silent
+            && rule.sound
+            && let Some(name) = event_sounds::for_notification(notif.priority)
+        {
+            self.event_sounds.sound(&self.appearance, name);
+        }
+        let id = self.notifications.push_notification(notif);
+        if let Some(mut shown) = pop_up {
+            shown.id = id;
+            self.toasts.show(&shown);
+        }
+        id
+    }
+
+    /// Put the toasts against the right edge of the screen, above the
+    /// taskbar. Pull-on-use, as [`sync_osd_screen`](Self::sync_osd_screen)
+    /// is and for its reason: the screen's size and the bar's thickness are
+    /// public fields anything may change.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn sync_toast_place(&mut self) {
+        let floor = self.taskbar_rect().y;
+        self.toasts.place(self.screen_width as f32, floor);
+    }
+
+    /// Advance the toasts by one frame's worth of time: their slides, their
+    /// settling, and their time on screen.
+    pub fn advance_toasts(&mut self, dt_ms: u64) {
+        self.sync_toast_place();
+        self.toasts.tick(dt_ms);
+    }
+
+    /// Where the toasts need to be drawn, in screen coordinates -- the surface
+    /// the session shows them on is this -- or `None` when none is showing.
+    pub fn toast_extent(&mut self) -> Option<Rect> {
+        self.sync_toast_place();
+        self.toasts.extent()
+    }
+
+    /// Draw the toasts, in screen coordinates, if any are showing.
+    #[must_use]
+    pub fn render_toasts(&self) -> Option<RenderTree> {
+        if !self.toasts.is_showing() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(
+            self.toasts
+                .render(&Palette::from_settings(&self.appearance)),
+        );
+        Some(tree)
+    }
+
+    /// A pointer event on the toasts' surface, in screen coordinates.
+    ///
+    /// A press on a toast opens its notification -- marks it read in the pane
+    /// and, when it names a program, asks for that program, as a press on its
+    /// card in the pane does -- and a press on its close button just closes
+    /// it, leaving the notification unread in the pane. Either way the toast
+    /// goes. A right-click on a toast opens its program's menu beside the
+    /// stack (`open_notification_menu`), and the toast stays. A press
+    /// between toasts is the stack's surface and nothing else's, and is
+    /// consumed.
+    pub fn handle_toast_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        self.sync_toast_place();
+        // A press while a toast's menu is up is a press outside the menu --
+        // the menu is beside the stack, never on it -- and closes it, as a
+        // press outside any menu does, doing nothing else: the toast under
+        // it is not opened by the press that dismissed its menu.
+        if self.notification_menu.is_some()
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.close_notification_menu();
+            return ShellAction::Consumed;
+        }
+        self.toasts.handle_mouse(event);
+        let mut launch = None;
+        for event in self.toasts.take_events() {
+            match event {
+                toasts::ToastEvent::Opened(id) => {
+                    self.notifications.mark_read(id);
+                    launch = self
+                        .notifications
+                        .notifications()
+                        .iter()
+                        .find(|n| n.id == id)
+                        .and_then(|n| n.action.clone())
+                        .or(launch);
+                }
+                toasts::ToastEvent::Closed(_) => {}
+                toasts::ToastEvent::MenuAsked { app, x, y } => {
+                    self.open_notification_menu(app, x, y, true);
+                }
+            }
+        }
+        match launch {
+            // `PathBuf::from` at the edge, for `handle_mouse`'s reason: a
+            // notification's program comes from its sender as text.
+            Some(path) => ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(path))),
+            None => ShellAction::Consumed,
+        }
     }
 
     /// Push the focus manager's mode back onto the pane's two switches.
@@ -11399,6 +12798,7 @@ impl DesktopShell {
                 // program the notification points at. A card with no action is
                 // a message, and reading it is the whole of the interaction.
                 NotifPaneEvent::NotificationClicked(id) => {
+                    self.toasts.forget(id);
                     // Last one wins, which is the same rule the mouse path
                     // already follows: one press produces at most one click
                     // event, so a second can only come from a drain that was
@@ -11420,14 +12820,19 @@ impl DesktopShell {
                     setting,
                     value,
                 } => self.apply_app_notification_setting(&app, setting, value),
+                // A right-click on a card: its program's menu, over the pane.
+                NotifPaneEvent::MenuAsked { app, x, y } => {
+                    self.open_notification_menu(app, x, y, false);
+                }
                 // The other three are already done by the time they are
                 // reported: the card is gone, the list is empty, the pane is
                 // closing. They are drained so the buffer stays bounded, and
                 // matched by name so that adding a variant is a compile error
                 // here rather than a silent no-op.
-                NotifPaneEvent::NotificationDismissed(_)
-                | NotifPaneEvent::ClearAll
-                | NotifPaneEvent::Closed => {}
+                // Its toast, if it has one, goes with it.
+                NotifPaneEvent::NotificationDismissed(id) => self.toasts.forget(id),
+                NotifPaneEvent::ClearAll => self.toasts.clear(),
+                NotifPaneEvent::Closed => {}
             }
         }
         launch
@@ -11550,6 +12955,9 @@ impl DesktopShell {
     const MENU_ALIGN_TO_GRID: u64 = 7;
     const MENU_SORT_BY_NAME: u64 = 8;
     const MENU_ADD_NOTE: u64 = 9;
+    const MENU_ADD_PHOTO_FRAME: u64 = 10;
+    const MENU_FRAME_FOLDER: u64 = 11;
+    const MENU_MOVE_WALLPAPER: u64 = 12;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // An icon's own menu, opened by a right-click on the icon.
@@ -11563,6 +12971,16 @@ impl DesktopShell {
     /// own, far from the rest, so a size added to the setting cannot land on
     /// an id something else already has.
     const MENU_ICON_SIZE_BASE: u64 = 200;
+    /// The first of an icon menu's service-menu rows (design-decisions
+    /// §1448): the `n`-th item or submenu is this plus `n`. A block of its
+    /// own, far above every fixed id, so no number of rows reaches one.
+    const MENU_SERVICE_BASE: u64 = 10_000;
+    /// An icon menu's "Open with" submenu.
+    const MENU_OPEN_WITH_SUBMENU: u64 = 4_999;
+    /// The first of its rows: the `n`-th program is this plus `n`, below
+    /// [`MENU_SERVICE_BASE`](Self::MENU_SERVICE_BASE), which bounds the
+    /// block.
+    const MENU_OPEN_WITH_BASE: u64 = 5_000;
 
     /// The View submenu's words for an icon size.
     ///
@@ -11594,6 +13012,7 @@ impl DesktopShell {
     fn desktop_menu_items(
         icon_size: appearance::IconSize,
         arrangement: icons::ArrangementMode,
+        can_move_wallpaper: bool,
     ) -> Vec<MenuItem> {
         let item = |id: u64, label: &str, checked: Option<bool>| MenuItem::Action {
             id,
@@ -11625,7 +13044,7 @@ impl DesktopShell {
             "Align icons to grid",
             Some(arrangement.aligns_to_grid()),
         ));
-        vec![
+        let mut items = vec![
             MenuItem::Submenu {
                 id: Self::MENU_VIEW_SUBMENU,
                 label: "View".to_string(),
@@ -11635,6 +13054,14 @@ impl DesktopShell {
             },
             item(Self::MENU_SORT_BY_NAME, "Sort by name", None),
             MenuItem::Separator,
+        ];
+        // Only where there is somewhere to move it: a picture that overflows
+        // the screen, or leaves room beside it.
+        if can_move_wallpaper {
+            items.push(item(Self::MENU_MOVE_WALLPAPER, "Move wallpaper", None));
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             MenuItem::Submenu {
                 id: Self::MENU_ADD_WIDGET_SUBMENU,
                 label: "Add widget".to_string(),
@@ -11645,11 +13072,13 @@ impl DesktopShell {
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
                     item(Self::MENU_ADD_NOTE, "Note", None),
+                    item(Self::MENU_ADD_PHOTO_FRAME, "Photo frame", None),
                 ],
             },
             MenuItem::Separator,
             item(Self::MENU_REMOVE_WIDGETS, "Remove all widgets", None),
-        ]
+        ]);
+        items
     }
 
     /// The items for a right-click on the icon `id`.
@@ -11705,6 +13134,355 @@ impl DesktopShell {
         items
     }
 
+    /// Put what programs add to a file's right-click menu into an icon's
+    /// menu, after Open (design-decisions §1448): the service menus on for
+    /// the selected files and folders, laid out as KDE's file manager lays
+    /// them out (`servicemenus::Scan::rows`). Nothing when a selected icon is
+    /// not a file or folder -- This PC, the Recycle Bin -- since no service
+    /// menu is for those.
+    fn offer_service_menus(&mut self, items: &mut Vec<MenuItem>) {
+        let Some(targets) = self.service_targets() else {
+            return;
+        };
+        let rows = self.service_menus.rows(&self.service_choices, &targets);
+        if rows.is_empty() {
+            return;
+        }
+        let mut offer = Vec::new();
+        let built = Self::service_menu_items(&rows, &mut offer);
+        // After the menu's first group -- Open, and Open with -- set off by a
+        // line; the icon's own line follows them.
+        let at = items
+            .iter()
+            .take_while(|item| !matches!(item, MenuItem::Separator))
+            .count();
+        items.splice(at..at, core::iter::once(MenuItem::Separator).chain(built));
+        self.service_offer = ServiceOffer {
+            items: offer,
+            targets,
+        };
+    }
+
+    /// The files and folders an icon menu is about: every selected icon's,
+    /// each as the file system says it is now. `None` when one of them is not
+    /// a file or folder.
+    fn service_targets(&self) -> Option<Vec<servicemenus::Target>> {
+        Some(
+            self.selected_paths()?
+                .iter()
+                .map(|path| Self::service_target(path))
+                .collect(),
+        )
+    }
+
+    /// The paths of the selected icons, when every one of them is a file or
+    /// folder -- `None` when one is This PC, the Recycle Bin or another that
+    /// names no path.
+    fn selected_paths(&self) -> Option<Vec<PathBuf>> {
+        self.icons
+            .selected_ids()
+            .into_iter()
+            .map(|id| match &self.icons.get_icon(id)?.action {
+                icons::IconAction::OpenPath(path) => Some(path.clone()),
+                icons::IconAction::LaunchSystem(_) | icons::IconAction::Custom(_) => None,
+            })
+            .collect()
+    }
+
+    /// Put an "Open with" submenu into an icon's menu, after Open: every
+    /// program on this machine's list that opens each selected file or
+    /// folder (`AppEntry::opens`), the one Open would start first -- the
+    /// user's choice for the kind, else SlateOS's default for it -- then the
+    /// rest by name, each with its picture. Nothing when no program opens
+    /// them all, when the only one is Open's own -- a folder's file manager
+    /// -- or when a selected icon is not a file or folder.
+    fn offer_open_with(&mut self, items: &mut Vec<MenuItem>) {
+        let Some(files) = self.selected_paths() else {
+            return;
+        };
+        let kinds: Vec<launcher::FileKind> = files
+            .iter()
+            .map(|path| launcher::FileKind::of(path, path.is_dir()))
+            .collect();
+        let mut apps: Vec<&AppEntry> = self
+            .apps
+            .iter()
+            .filter(|app| kinds.iter().all(|kind| app.opens(kind)))
+            .collect();
+        if apps.is_empty() {
+            return;
+        }
+        apps.sort_by_key(|app| app.name.to_lowercase());
+        let opens_first = files.first().and_then(|file| self.program_opening(file));
+        if let Some(first) = &opens_first
+            && let Some(at) = apps.iter().position(|app| app.executable_path == *first)
+        {
+            let app = apps.remove(at);
+            apps.insert(0, app);
+        }
+        // A list holding only what Open already does offers nothing.
+        if let [only] = apps.as_slice()
+            && opens_first.as_deref() == Some(only.executable_path.as_str())
+        {
+            return;
+        }
+        let rows = apps
+            .iter()
+            .zip(Self::MENU_OPEN_WITH_BASE..)
+            .map(|(app, id)| MenuItem::Action {
+                id,
+                label: app.name.clone(),
+                shortcut: None,
+                icon: Some(
+                    app.icon
+                        .clone()
+                        .unwrap_or_else(|| launcher::GENERIC_PROGRAM_ICON.to_owned()),
+                ),
+                enabled: true,
+                checked: None,
+            })
+            .collect();
+        let programs = apps.iter().map(|app| app.executable_path.clone()).collect();
+        let at = items.len().min(1);
+        items.insert(
+            at,
+            MenuItem::Submenu {
+                id: Self::MENU_OPEN_WITH_SUBMENU,
+                label: "Open with".to_string(),
+                icon: None,
+                enabled: true,
+                children: rows,
+            },
+        );
+        self.open_with_offer = Some(OpenWithOffer { programs, files });
+    }
+
+    /// The program Open starts `file` with, by the path that is its
+    /// identity: the user's choice for its kind, else SlateOS's default for
+    /// it.
+    fn program_opening(&self, file: &Path) -> Option<String> {
+        let chosen = file
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| {
+                associations::program_for(&config::load(associations::CONFIG_NAME), ext)
+            });
+        chosen.or_else(|| {
+            self.default_program_for(&launcher::FileKind::of(file, file.is_dir()))
+                .map(|app| app.executable_path.clone())
+        })
+    }
+
+    /// SlateOS's default program for `kind` (`programs::default_for`), if
+    /// it is on this machine's list -- and, for a kind of text with no
+    /// default of its own, plain text's.
+    fn default_program_for(&self, kind: &launcher::FileKind) -> Option<&AppEntry> {
+        let id = programs::default_for(&kind.mime).or_else(|| {
+            kind.text
+                .then(|| programs::default_for("text/plain"))
+                .flatten()
+        })?;
+        self.apps
+            .iter()
+            .find(|app| app.desktop_id.as_deref() == Some(id))
+    }
+
+    /// Start a program an icon menu's "Open with" row names, on the files
+    /// the menu was opened on. `None` for an id that is not one of the rows.
+    fn activate_open_with_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        if !(Self::MENU_OPEN_WITH_BASE..Self::MENU_SERVICE_BASE).contains(&id) {
+            return None;
+        }
+        let index = usize::try_from(id.checked_sub(Self::MENU_OPEN_WITH_BASE)?).ok()?;
+        let offer = self.open_with_offer.take();
+        self.menu_icon = None;
+        // A menu no longer open, or a program gone from the list since.
+        let Some(offer) = offer else {
+            return Some(ShellAction::Pass);
+        };
+        let Some(program) = offer.programs.get(index) else {
+            return Some(ShellAction::Pass);
+        };
+        let Some(app) = self.apps.iter().find(|app| app.executable_path == *program) else {
+            return Some(ShellAction::Pass);
+        };
+        let files: Vec<&Path> = offer.files.iter().map(PathBuf::as_path).collect();
+        Some(Self::launch_each(app.launch_opening(&files)))
+    }
+
+    /// What starting `launches` is: nothing, one program, or several.
+    fn launch_each(mut launches: Vec<hotkeys::Launch>) -> ShellAction {
+        if launches.len() > 1 {
+            ShellAction::LaunchAll(launches)
+        } else {
+            launches
+                .pop()
+                .map_or(ShellAction::Pass, ShellAction::Launch)
+        }
+    }
+
+    /// `path` as a service menu sees it: its kind by its extension, and
+    /// `text/plain` too when that kind is text -- a shell script is offered
+    /// what a text file is.
+    fn service_target(path: &Path) -> servicemenus::Target {
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let kind = guitk::filetypes::detect_from_extension(extension);
+        let mut target = servicemenus::Target::at(path, kind.mime_type);
+        if kind.is_text && !target.is_dir && target.mime != "text/plain" {
+            target.inherits.push(String::from("text/plain"));
+        }
+        target
+    }
+
+    /// The menu rows for `rows`, numbered from [`MENU_SERVICE_BASE`] in
+    /// order, each item's menu and id recorded in `offer` at its number.
+    ///
+    /// [`MENU_SERVICE_BASE`]: Self::MENU_SERVICE_BASE
+    fn service_menu_items(
+        rows: &[servicemenus::Row<'_>],
+        offer: &mut Vec<Option<(std::ffi::OsString, String)>>,
+    ) -> Vec<MenuItem> {
+        let mut built = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::MENU_SERVICE_BASE
+                .saturating_add(u64::try_from(offer.len()).unwrap_or(u64::MAX));
+            built.push(match row {
+                servicemenus::Row::Separator => MenuItem::Separator,
+                servicemenus::Row::Item { menu, action } => {
+                    offer.push(Some((menu.id.clone(), action.id.clone())));
+                    MenuItem::Action {
+                        id,
+                        label: action.name.clone(),
+                        shortcut: None,
+                        icon: action.icon.clone(),
+                        enabled: true,
+                        checked: None,
+                    }
+                }
+                servicemenus::Row::Submenu { label, icon, rows } => {
+                    offer.push(None);
+                    MenuItem::Submenu {
+                        id,
+                        label: label.clone(),
+                        icon: icon.clone(),
+                        enabled: true,
+                        children: Self::service_menu_items(rows, offer),
+                    }
+                }
+            });
+        }
+        built
+    }
+
+    /// Run an icon menu's service-menu item, if `id` is one: its command for
+    /// the files the menu was opened on, one program per file where the
+    /// command takes one at a time, each started in its file's folder.
+    /// `None` for an id that is not one of them.
+    fn activate_service_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        let index = usize::try_from(id.checked_sub(Self::MENU_SERVICE_BASE)?).ok()?;
+        let offer = core::mem::take(&mut self.service_offer);
+        self.menu_icon = None;
+        // A submenu's own row, or an id from a menu no longer open.
+        let Some(Some((menu_id, action_id))) = offer.items.get(index) else {
+            return Some(ShellAction::Pass);
+        };
+        // Looked up by name: the menus may have been read again since this
+        // one opened, and a menu gone since has nothing left to run.
+        let Some((menu, action)) = self.service_menus.find(menu_id, action_id) else {
+            return Some(ShellAction::Pass);
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let outcome = action
+            .runs(&offer.targets, menu, home.as_deref())
+            .map_err(|error| (action.name.clone(), menu.path.clone(), error));
+        match outcome {
+            Ok(runs) => {
+                let launches: Vec<hotkeys::Launch> = runs
+                    .into_iter()
+                    .filter_map(|run| {
+                        let mut argv = run.argv.into_iter();
+                        Some(hotkeys::Launch {
+                            program: PathBuf::from(argv.next()?),
+                            args: argv.collect(),
+                            dir: run.dir,
+                        })
+                    })
+                    .collect();
+                Some(Self::launch_each(launches))
+            }
+            Err((name, path, error)) => {
+                // The id is discarded: this is a message, not something to
+                // update.
+                let _ = self.notify(notif_pane::Notification {
+                    id: 0,
+                    app_name: "Desktop".to_string(),
+                    title: format!("Cannot run {name}"),
+                    body: format!("{}: {error}", pathcodec::display_os(path.as_os_str())),
+                    timestamp: Self::unix_now(),
+                    priority: notif_pane::NotifPriority::Normal,
+                    read: false,
+                    action: None,
+                    silent: false,
+                });
+                Some(ShellAction::Consumed)
+            }
+        }
+    }
+
+    /// Adopt the service menus the session read (design-decisions §1448):
+    /// what an icon's right-click menu offers from its next opening.
+    pub fn set_service_menus(&mut self, scan: servicemenus::Scan) {
+        self.service_menus = scan;
+    }
+
+    /// Read `context-menus.yaml` if it changed since the last look -- or for
+    /// the first time -- and say whether the choices in it did.
+    ///
+    /// Answers on the choices, not on the file, as
+    /// [`poll_notification_rules`](Self::poll_notification_rules) does: a
+    /// comment added changes nothing a menu shows.
+    pub fn poll_service_choices(&mut self) -> bool {
+        let Some(doc) = self.service_watch.poll() else {
+            return false;
+        };
+        let choices = servicemenus::Choices::read_from(&doc);
+        let changed = choices != self.service_choices;
+        self.service_choices = choices;
+        changed
+    }
+
+    /// Read `window-rules.yaml` if it changed since the last look -- or for
+    /// the first time -- and hold the rules it says from the next window on.
+    ///
+    /// A file that says nothing about rules, or no file at all, is the
+    /// defaults (`windowrules::default_rules`). Windows already open stay as
+    /// they are: a rule is applied to a window as it arrives, in
+    /// [`apply_window_list`](Self::apply_window_list). A rule read again
+    /// unchanged keeps what it has done -- its count, and a once-rule's being
+    /// used -- as
+    /// [`replace_rules`](window_rules::WindowRulesManager::replace_rules)
+    /// says.
+    ///
+    /// Answers `None` when the file had not changed, and otherwise the rules
+    /// it has that cannot be read, each with why: they are not applied
+    /// (`windowrules::file` says why a rule is left out whole), and the caller
+    /// is the one to tell the user -- the session does, with
+    /// [`window_rules::problems_notice`].
+    pub fn poll_window_rules(&mut self) -> Option<Vec<windowrules::file::Problem>> {
+        let doc = self.rules_watch.poll()?;
+        let (rules, problems) = match windowrules::file::read(&doc) {
+            Some(loaded) => (loaded.rules, loaded.problems),
+            None => (windowrules::default_rules(), Vec::new()),
+        };
+        // Nothing is dropped for the cap: `read` stops at `MAX_RULES` and
+        // reports the rest as problems, and there are fewer defaults than that.
+        let _ = self.rules.replace_rules(rules);
+        Some(problems)
+    }
+
     /// The program an icon starts, as the taskbar spells one, if it is a
     /// program: an executable that the icon opens by path. A folder or a
     /// document is not something a taskbar button can start.
@@ -11721,8 +13499,9 @@ impl DesktopShell {
         }
     }
 
-    /// The items for a right-click *on a widget*.
-    fn widget_menu_items() -> Vec<MenuItem> {
+    /// The items for a right-click *on a widget*: removing it, or every
+    /// widget -- and, on a photo frame, choosing the folder it shows.
+    fn widget_menu_items(photo_frame: bool) -> Vec<MenuItem> {
         let add = |id: u64, label: &str| MenuItem::Action {
             id,
             label: label.to_string(),
@@ -11731,11 +13510,17 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        vec![
+        let mut items = Vec::new();
+        if photo_frame {
+            items.push(add(Self::MENU_FRAME_FOLDER, "Choose folder…"));
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             add(Self::MENU_REMOVE_ONE_WIDGET, "Remove this widget"),
             MenuItem::Separator,
             add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
-        ]
+        ]);
+        items
     }
 
     /// Whether the widget layout needs writing, clearing the flag.
@@ -12040,6 +13825,8 @@ impl DesktopShell {
     /// on screen at once have no rule about which the next click belongs to.
     pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
         self.dismiss_popups();
+        self.service_offer = ServiceOffer::default();
+        self.open_with_offer = None;
         self.menu_widget = self.widgets.hit_test(x, y);
         // Widgets are drawn over the icons, so a widget under the pointer is
         // what was clicked even when an icon lies beneath it.
@@ -12048,8 +13835,12 @@ impl DesktopShell {
         } else {
             self.icons.icon_at(x, y)
         };
-        let items = if self.menu_widget.is_some() {
-            Self::widget_menu_items()
+        let items = if let Some(widget) = self.menu_widget {
+            let photo_frame = self
+                .widgets
+                .get(widget)
+                .is_some_and(|w| matches!(w.kind, WidgetKind::PhotoFrame));
+            Self::widget_menu_items(photo_frame)
         } else if let Some(id) = self.menu_icon {
             // A right-click on an icon that is not selected selects it alone,
             // as a left click would: the menu is about what is selected, and
@@ -12058,9 +13849,16 @@ impl DesktopShell {
             if !self.icons.selected_ids().contains(&id) {
                 self.icons.select_single(id);
             }
-            self.icon_menu_items(id)
+            let mut items = self.icon_menu_items(id);
+            self.offer_open_with(&mut items);
+            self.offer_service_menus(&mut items);
+            items
         } else {
-            Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
+            Self::desktop_menu_items(
+                self.appearance.icon_size,
+                self.icons.arrangement(),
+                self.wallpaper_room.is_some(),
+            )
         };
         self.desktop_menu = ContextMenu::new(items);
         self.desktop_menu.show(x, y, self.viewport());
@@ -12115,6 +13913,31 @@ impl DesktopShell {
     /// [`Launch`](ShellAction::Launch) is what to start.
     /// [`ShellAction::changed`] is the old `bool`.
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
+        if let Some(action) = self.activate_open_with_item(id) {
+            return action;
+        }
+        if id == Self::MENU_MOVE_WALLPAPER {
+            return if self.begin_wallpaper_move() {
+                ShellAction::Consumed
+            } else {
+                ShellAction::Pass
+            };
+        }
+        // "Choose folder" puts the chooser up and changes nothing yet: the
+        // layout is written when a folder is chosen, not when one is asked for.
+        if id == Self::MENU_FRAME_FOLDER {
+            return match self.menu_widget.take() {
+                Some(frame) => {
+                    self.open_frame_folder_chooser(frame);
+                    ShellAction::Consumed
+                }
+                // The frame went while the menu was open.
+                None => ShellAction::Pass,
+            };
+        }
+        if let Some(action) = self.activate_service_item(id) {
+            return action;
+        }
         if let Some(action) = self.activate_icon_context_item(id) {
             return action;
         }
@@ -12244,6 +14067,7 @@ impl DesktopShell {
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
             Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
+            Self::MENU_ADD_PHOTO_FRAME => Some(WidgetKind::PhotoFrame),
             Self::MENU_REMOVE_ONE_WIDGET => {
                 // `menu_widget` rather than a fresh hit test: see the field.
                 return self
@@ -12284,10 +14108,7 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands.extend(
-            self.desktop_menu
-                .render(&Palette::from_settings(&self.appearance)),
-        );
+        tree.commands.extend(self.render_menu(&self.desktop_menu));
         Some(tree)
     }
 
@@ -12317,6 +14138,16 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             &self.live_readings(),
         )
+    }
+
+    /// The folder the desktop's photo frames show: the user's Pictures -- the
+    /// folder the start menu's Pictures place opens, from the same
+    /// definition, so the two cannot come to name different folders. `None`
+    /// with no home to find it in, when a frame has nothing to show.
+    #[must_use]
+    pub fn photo_frame_folder(home: Option<&Path>) -> Option<PathBuf> {
+        let sub = StartShortcut::Pictures.folder()?;
+        Some(home?.join(sub))
     }
 
     /// The icon layer's draw commands.
@@ -12370,9 +14201,15 @@ impl DesktopShell {
     /// [`handle_press`](Self::handle_press), which is what the two used to
     /// share unconditionally: every other surface this shell draws still treats
     /// a second click as another first one.
-    fn handle_icon_activate(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+    fn handle_icon_activate(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
         if !matches!(self.hit_test(x, y), Hit::Desktop) || button != MouseButton::Left {
-            return self.handle_press(x, y, button);
+            return self.handle_press_with(x, y, button, modifiers);
         }
         match self.icons.handle_double_click(x, y) {
             icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
@@ -12493,6 +14330,7 @@ impl DesktopShell {
                 ShellAction::Launch(hotkeys::Launch {
                     program: PathBuf::from(launcher::FILE_MANAGER),
                     args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                    dir: None,
                 })
             }
             // A destination this build does not know -- a layout written by a
@@ -12556,6 +14394,13 @@ impl DesktopShell {
         if is_executable(&meta) {
             return ShellAction::Launch(hotkeys::Launch::program(path));
         }
+        // Nobody chose a program for this kind: the one SlateOS opens it with
+        // until someone does -- the default `gui/associations` stands in
+        // front of (`programs`, design-decisions §1425) -- through its own
+        // command line.
+        if let Some(app) = self.default_program_for(&launcher::FileKind::of(path, false)) {
+            return Self::launch_each(app.launch_opening(&[path]));
+        }
         self.say_cannot_open(
             label,
             "Nothing is set to open files of this kind. Choose a program for it \
@@ -12604,6 +14449,9 @@ impl DesktopShell {
             || self.tray_overflow_menu.is_some()
             || self.pin_menu.is_some()
             || self.taskbar_menu.is_some()
+            || self.notification_menu.is_some()
+            || self.field_menu.is_some()
+            || self.wallpaper_move.is_some()
             || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
@@ -12612,6 +14460,9 @@ impl DesktopShell {
             || self.snap.is_overlay_visible()
             || self.overview.visible
             || self.run_dialog.is_visible()
+            // The chooser on its own, when a photo frame put it up rather
+            // than the Run box: Escape must still reach it.
+            || self.chooser.is_some()
             || self.shortcut_card_open
     }
 
@@ -12626,6 +14477,11 @@ impl DesktopShell {
         self.tray_overflow_menu = None;
         self.pin_menu = None;
         self.taskbar_menu = None;
+        self.close_notification_menu();
+        self.field_menu = None;
+        // A wallpaper being moved is kept where it is: whatever dismissed it
+        // -- another popup opening -- is not the user taking the move back.
+        self.end_wallpaper_move(true);
         // The list, not the wait: dismissing the popups -- opening a menu,
         // say -- is not the user changing their mind about shutting down.
         if self.ending_listing() {
@@ -12666,7 +14522,7 @@ impl DesktopShell {
         // `Browse`, so draining first and closing second is what guarantees a
         // Browse the user asked for a moment before the box was dismissed does
         // not leave a chooser standing over a box that is no longer there.
-        self.close_run_browser();
+        self.close_chooser();
         any
     }
 
@@ -12722,6 +14578,11 @@ impl DesktopShell {
     /// forty of its callers.
     pub fn show_osd(&mut self, kind: osd::OsdKind) {
         self.sync_osd_screen();
+        // Heard as it is shown: a volume's new level, a screenshot's shutter
+        // -- the events `event_sounds::for_osd` gives a sound.
+        if let Some(name) = event_sounds::for_osd(&kind) {
+            self.event_sounds.sound(&self.appearance, name);
+        }
         self.osd.show(kind, self.osd_clock_ms);
     }
 
@@ -12741,6 +14602,13 @@ impl DesktopShell {
             let was = tip.is_visible();
             tip.tick(self.osd_clock_ms);
             self.hover_changed |= tip.is_visible() != was;
+        }
+        // And why a greyed row of a text field's menu is greyed, which waits
+        // out the same delay (`ContextMenu::tick`): the first tick after the
+        // pointer came to rest starts the wait -- the frame step re-arms its
+        // wake-up for the deadline that gives -- and a later one shows it.
+        if let Some((menu, _)) = self.field_menu.as_mut() {
+            self.hover_changed |= menu.tick(self.osd_clock_ms);
         }
     }
 
@@ -12816,14 +14684,14 @@ impl DesktopShell {
     /// `Vec`, which is a fact nothing outside this file could see.
     ///
     /// Translated rather than laid out in place: [`FileDialog::frame`] draws
-    /// from its own origin, and `run_browser_rect` is the one place that says
+    /// from its own origin, and `chooser_rect` is the one place that says
     /// where that origin is on screen.
     ///
     /// [`FileDialog::frame`]: guitk::dialog::FileDialog::frame
     #[must_use]
-    pub fn render_run_browser(&self) -> Option<RenderTree> {
-        let dialog = self.run_browser.as_ref()?;
-        let (x, y, width, height) = self.run_browser_rect();
+    pub fn render_chooser(&self) -> Option<RenderTree> {
+        let dialog = self.chooser.as_ref()?;
+        let (x, y, width, height) = self.chooser_rect();
         let mut tree = RenderTree::new();
         tree.translate(x, y);
         tree.commands.extend(dialog.render(
@@ -13494,6 +15362,29 @@ mod theme_tests {
 
         assert_eq!(dark.len(), light.len());
         assert_ne!(format!("{dark:?}"), format!("{light:?}"));
+    }
+
+    /// The shell installs the user's fonts in its own process, as every
+    /// application does: it lays out the text the compositor draws by
+    /// measuring it here, and measuring in a face other than the one drawn
+    /// puts labels past their tiles and off centre.
+    ///
+    /// Observed through how glyphs are rasterized -- the one part of the font
+    /// state a test can change without changing the face every other test in
+    /// this binary measures with. The toolkit starts unhinted, the settings'
+    /// default is hinted, and nothing in this binary but `set_appearance`
+    /// applies them; nor does anything here set hinting off, so the answer
+    /// cannot depend on which test ran first.
+    #[test]
+    fn set_appearance_installs_the_fonts_in_this_process() {
+        let mut shell = DesktopShell::new(800, 600);
+        let s = settings();
+        assert!(s.fonts.hinting, "the test needs settings that hint");
+        shell.set_appearance(s);
+        assert!(
+            guitk::text::rendering().hinting,
+            "the settings' fonts were not applied in the shell's process"
+        );
     }
 }
 
@@ -17125,12 +19016,7 @@ mod overview_wiring_tests {
     }
 
     fn tray_icon(id: u32, glyph: &str, tooltip: &str) -> guiremote::tray::TrayIcon {
-        guiremote::tray::TrayIcon {
-            owner: 99,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: tooltip.to_string(),
-        }
+        guiremote::tray::TrayIcon::new(99, id, glyph, tooltip)
     }
 
     /// An icon a program registered is drawn in the taskbar.
@@ -17186,12 +19072,7 @@ mod overview_wiring_tests {
 
     /// A tray icon for `owner`, so two programs can be told apart.
     fn owned_tray_icon(owner: u64, id: u32, glyph: &str) -> guiremote::tray::TrayIcon {
-        guiremote::tray::TrayIcon {
-            owner,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: format!("program {owner} icon {id}"),
-        }
+        guiremote::tray::TrayIcon::new(owner, id, glyph, format!("program {owner} icon {id}"))
     }
 
     /// A flood of tray icons cannot take the taskbar away from the user.
@@ -17743,6 +19624,44 @@ mod overview_wiring_tests {
                 notifsettings::Importance::Silent,
                 "the choice was applied in memory and never written"
             );
+        });
+    }
+
+    /// **A program whose banner is off goes to the list alone**: nothing pops
+    /// up for it, the pane keeps it, and another program's still pops up.
+    ///
+    /// The pane's "Banner" switch was written to `notifications.yaml`, shown
+    /// on the program's card, and read by nothing -- every notification
+    /// popped up whatever it said.
+    #[test]
+    fn a_program_with_its_banner_off_pops_up_nothing() {
+        appearance::config::testing::with_scratch_config("shell-pane-banner", |_root| {
+            let mut s = shell();
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Banner,
+                notif_pane::SettingValue::Bool(false),
+            );
+            let chat = s.notify(notif(1, "Chat"));
+            assert!(
+                s.toasts.ids().is_empty(),
+                "Chat popped up with its banner off"
+            );
+            assert!(
+                s.notifications.notifications().iter().any(|n| n.id == chat),
+                "the list lost it"
+            );
+            let mail = s.notify(notif(2, "Mail"));
+            assert_eq!(s.toasts.ids(), [mail], "another program's did not pop up");
+
+            // And the switch back on lets Chat's next one up.
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Banner,
+                notif_pane::SettingValue::Bool(true),
+            );
+            let again = s.notify(notif(3, "Chat"));
+            assert!(s.toasts.ids().contains(&again));
         });
     }
 
@@ -18910,8 +20829,97 @@ mod run_box_wiring_tests {
             [crate::hotkeys::Launch {
                 program: PathBuf::from("terminal"),
                 args: vec!["--title".into(), "two words".into()],
+                dir: None,
             }]
         );
+    }
+
+    /// **The Run box's history outlives the desktop**: a command run marks
+    /// it to be written, and a desktop started again finds it under Up
+    /// (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
+    #[test]
+    fn the_run_box_history_outlives_the_desktop() {
+        appearance::config::testing::with_scratch_config("run-box-history", |_root| {
+            let mut s = shell();
+            assert!(!s.take_run_history_dirty(), "nothing has run");
+            drop(s.handle_hotkey(&super_r()));
+            drop(run_line(&mut s, "terminal --title \"a: b\" # c"));
+            assert!(s.take_run_history_dirty(), "a run is to be written");
+            assert!(!s.take_run_history_dirty(), "and once");
+            s.save_run_history().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(
+                restarted.run_dialog.history(),
+                [std::ffi::OsString::from("terminal --title \"a: b\" # c")]
+            );
+        });
+    }
+
+    /// **Every kind of command line comes back as it was** -- the ones YAML
+    /// would read as something else, the ones `pathcodec` escapes, and
+    /// one that looks like an escape already.
+    #[test]
+    fn every_kind_of_command_line_comes_back_as_it_was() {
+        appearance::config::testing::with_scratch_config("run-box-history-lines", |_root| {
+            let lines = [
+                "ls -la",
+                "echo \"a: b\" # c",
+                "'quoted'",
+                "- dash",
+                "[x] {y}",
+                "100%",
+                "%41",
+                "null",
+                "true",
+                "123",
+                " spaced ",
+                "caf\u{e9}",
+                "tab\there",
+            ]
+            .map(std::ffi::OsString::from);
+            let mut s = shell();
+            s.run_dialog.load_history(lines.to_vec());
+            s.save_run_history().expect("saved");
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(restarted.run_dialog.history(), lines);
+        });
+    }
+
+    /// **A command naming a file whose name is not text comes back as it
+    /// ran**, byte for byte. Only where a name can be any bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_line_that_is_not_text_comes_back() {
+        use std::os::unix::ffi::OsStringExt;
+        appearance::config::testing::with_scratch_config("run-box-history-bytes", |_root| {
+            let line = std::ffi::OsString::from_vec(b"/usr/bin/view caf\xe9.png".to_vec());
+            let mut s = shell();
+            s.run_dialog.load_history(vec![line.clone()]);
+            s.save_run_history().expect("saved");
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(restarted.run_dialog.history(), [line]);
+        });
+    }
+
+    /// **A history written by hand, without the encoding's marker, is read
+    /// as it stands**, a `%` and all.
+    #[test]
+    fn a_run_history_written_by_hand_is_read_as_it_stands() {
+        appearance::config::testing::with_scratch_config("run-box-history-hand", |_root| {
+            let path = appearance::config::path_for("runbox").expect("a path");
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("made");
+            std::fs::write(&path, "history:\n  - ls\n  - caf%41\n  - ls\n").expect("written");
+            let mut s = shell();
+            s.load_run_history();
+            assert_eq!(
+                s.run_dialog.history(),
+                ["caf%41", "ls"].map(std::ffi::OsString::from)
+            );
+        });
     }
 
     /// **A Run box line that cannot start brings the box back**, on the line
@@ -19497,15 +21505,15 @@ mod run_box_wiring_tests {
     fn browse_showing(s: &mut DesktopShell, name: std::ffi::OsString) {
         let (x, y) = button_centre(s, "Browse...");
         assert_eq!(press(s, x, y), ShellAction::Consumed);
-        assert!(s.run_browser_open(), "Browse put no chooser up");
+        assert!(s.chooser_open(), "Browse put no chooser up");
         let wanted = s
-            .run_browser_wants()
+            .chooser_wants()
             .expect("the chooser asked for no listing")
             .to_path_buf();
         assert_eq!(wanted, PathBuf::from("/"), "an empty box browses the root");
-        s.set_run_browser_entries(listing(name));
+        s.set_chooser_entries(listing(name));
         assert!(
-            s.run_browser_wants().is_none(),
+            s.chooser_wants().is_none(),
             "the chooser asked again for a listing it had just been given"
         );
     }
@@ -19513,7 +21521,7 @@ mod run_box_wiring_tests {
     /// The button used to do nothing at all: it reported an intent the shell
     /// dropped on the floor, because a chooser needs directory entries and this
     /// module reads no files. It still reads no files — the listing arrives
-    /// through `set_run_browser_entries` — but the chooser is now real. See
+    /// through `set_chooser_entries` — but the chooser is now real. See
     /// known-issues.md → `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
     #[test]
     fn the_browse_button_puts_a_chooser_up_and_leaves_the_box_under_it() {
@@ -19526,7 +21534,7 @@ mod run_box_wiring_tests {
             "raising a chooser threw the typed command away"
         );
         assert!(
-            s.render_run_browser().is_some(),
+            s.render_chooser().is_some(),
             "a chooser that is up draws nothing"
         );
     }
@@ -19550,10 +21558,7 @@ mod run_box_wiring_tests {
             ShellAction::Consumed,
             "a press past the chooser fell through to whatever is underneath"
         );
-        assert!(
-            s.run_browser_open(),
-            "a press past the chooser took it down"
-        );
+        assert!(s.chooser_open(), "a press past the chooser took it down");
         assert!(
             s.run_dialog.is_visible(),
             "a press past the chooser took the box down with it"
@@ -19580,10 +21585,7 @@ mod run_box_wiring_tests {
                 .is_empty(),
             "choosing a file in the chooser started it, instead of naming it"
         );
-        assert!(
-            !s.run_browser_open(),
-            "the chooser stayed up after choosing"
-        );
+        assert!(!s.chooser_open(), "the chooser stayed up after choosing");
 
         let mut expected = std::ffi::OsString::from("/");
         expected.push(&name);
@@ -19648,7 +21650,7 @@ mod run_box_wiring_tests {
             s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE))
                 .consumed
         );
-        assert!(!s.run_browser_open(), "Escape left the chooser up");
+        assert!(!s.chooser_open(), "Escape left the chooser up");
         assert!(
             s.run_dialog.is_visible(),
             "Escape closed the box as well as the chooser"
@@ -19674,7 +21676,7 @@ mod run_box_wiring_tests {
         browse_showing(&mut s, std::ffi::OsString::from("hello"));
 
         assert!(s.handle_hotkey(&typed('x')).consumed);
-        assert!(s.run_browser_open(), "a letter dismissed the chooser");
+        assert!(s.chooser_open(), "a letter dismissed the chooser");
         let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
@@ -19696,7 +21698,7 @@ mod run_box_wiring_tests {
         let (x, y) = button_centre(&s, "Browse...");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
         assert_eq!(
-            s.run_browser_wants(),
+            s.chooser_wants(),
             Some(Path::new("/usr/bin")),
             "the chooser opened somewhere other than where the command points"
         );
@@ -19716,15 +21718,12 @@ mod run_box_wiring_tests {
         for ch in "no".chars() {
             assert!(s.handle_hotkey(&typed(ch)).consumed);
         }
-        assert_eq!(
-            s.take_run_browser_completion_request().as_deref(),
-            Some("/")
-        );
-        s.set_run_browser_completions(vec![guitk::pathbar::CompletionItem {
+        assert_eq!(s.take_chooser_completion_request().as_deref(), Some("/"));
+        s.set_chooser_completions(vec![guitk::pathbar::CompletionItem {
             name: "notes".to_string(),
             is_directory: true,
         }]);
-        let dialog = s.run_browser.as_ref().expect("the chooser is up");
+        let dialog = s.chooser.as_ref().expect("the chooser is up");
         assert_eq!(
             dialog.address().completions().len(),
             1,
@@ -19735,14 +21734,14 @@ mod run_box_wiring_tests {
             s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
                 .consumed
         );
-        assert_eq!(s.run_browser_wants(), Some(Path::new("/no")));
-        s.refuse_run_browser_path();
+        assert_eq!(s.chooser_wants(), Some(Path::new("/no")));
+        s.refuse_chooser_path();
         assert_eq!(
-            s.run_browser_wants(),
+            s.chooser_wants(),
             None,
             "a refused folder is asked about again"
         );
-        let dialog = s.run_browser.as_ref().expect("refusing closed the chooser");
+        let dialog = s.chooser.as_ref().expect("refusing closed the chooser");
         assert_eq!(dialog.current_path(), Path::new("/"));
         assert_eq!(dialog.address().typed_text(), Some("/no"));
         assert_eq!(
@@ -19762,10 +21761,10 @@ mod run_box_wiring_tests {
         let _ = type_command(&mut s, "/nowhere/term");
         let (x, y) = button_centre(&s, "Browse...");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
-        assert_eq!(s.run_browser_wants(), Some(Path::new("/nowhere")));
-        s.refuse_run_browser_path();
-        assert_eq!(s.run_browser_wants(), None);
-        assert!(s.run_browser_open());
+        assert_eq!(s.chooser_wants(), Some(Path::new("/nowhere")));
+        s.refuse_chooser_path();
+        assert_eq!(s.chooser_wants(), None);
+        assert!(s.chooser_open());
     }
 
     /// Dismissing the box takes the chooser with it. A chooser standing over a
@@ -19777,7 +21776,7 @@ mod run_box_wiring_tests {
         s.toggle_run_dialog();
         browse_showing(&mut s, std::ffi::OsString::from("hello"));
         s.dismiss_popups();
-        assert!(!s.run_browser_open(), "the chooser outlived the box");
+        assert!(!s.chooser_open(), "the chooser outlived the box");
         assert!(!s.run_dialog.is_visible());
     }
 
@@ -20726,6 +22725,31 @@ mod run_box_wiring_tests {
             tray_strings(&shell).contains(&after),
             "the taskbar still names the old layout after a switch"
         );
+    }
+
+    /// **The run box wears the frame the appearance gives it**: the shell
+    /// hands the box the theme's window frame with the rest of the
+    /// appearance, so a theme whose title bars are 20 taller puts the box's
+    /// field 20 lower inside it.
+    #[test]
+    fn the_run_box_wears_the_appearances_frame() {
+        let mut shell = shell();
+        let offset = |shell: &DesktopShell| {
+            let (_, top) = shell.run_dialog.position();
+            shell.run_dialog.field_rect().y - top
+        };
+        let before = offset(&shell);
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tall",
+            appearance::decorations::DecorationStyle {
+                title_height: 50,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        shell.set_appearance(settings);
+        let after = offset(&shell);
+        assert!((after - before - 20.0).abs() < 0.01, "{before} -> {after}");
     }
 }
 
@@ -21726,6 +23750,42 @@ mod taskbar_pin_tests {
         );
     }
 
+    /// **A title too long for its tile is cut the way the theme cuts window
+    /// titles**: at the end with a mark by default, or keeping its tail --
+    /// the file name at the end of "… - notes/final.txt" -- under a theme
+    /// whose `title-bar.overflow` says so.
+    #[test]
+    fn a_long_title_is_cut_the_way_the_theme_cuts_titles() {
+        use guitk::render::RenderCommand;
+        let title = "Editor - /home/user/projects/report/notes/final.txt";
+        let drawn = |shell: &DesktopShell| {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, .. } if text.contains('…') => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("the title is cut")
+        };
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", title)]));
+        let end = drawn(&shell);
+        assert!(end.ends_with('…') && end.starts_with("Editor"), "{end}");
+
+        shell.appearance.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tails",
+            appearance::decorations::DecorationStyle {
+                title_overflow: guitk::text::Overflow::KeepTail,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        let tail = drawn(&shell);
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with("final.txt"), "{tail}");
+    }
+
     /// **A window's tile is no wider than the reference's 160**, however long
     /// its title, when the bar has room for more.
     #[test]
@@ -21848,11 +23908,9 @@ mod taskbar_pin_tests {
             let divider = shell
                 .taskbar_divider_rect()
                 .expect("two sections, one divider");
+            // The built-in panel's divider: the reference's 8 past the pin.
             assert!(
-                (divider.x
-                    - (layout[0].x + layout[0].w + shell.scale(super::TASKBAR_DIVIDER_OFFSET)))
-                .abs()
-                    < 0.01,
+                (divider.x - (layout[0].x + layout[0].w + shell.scale(8.0))).abs() < 0.01,
                 "{divider:?} after {:?}",
                 layout[0]
             );
@@ -22552,6 +24610,147 @@ mod taskbar_pin_tests {
         }
     }
 
+    /// The panel `style`, chosen for `shell`'s taskbar.
+    fn wear(shell: &mut DesktopShell, style: appearance::panel::PanelStyle) {
+        shell.appearance.panel_theme = appearance::themes::PanelTheme::from_style("test", style);
+    }
+
+    /// **A flat theme's bar wears none of the glass**: at a taskbar-panel
+    /// gloss of 0 the bar is its colour alone -- no lines of light, no glow,
+    /// no shade -- a window's tile is its edge without the sheen, the
+    /// highlight or the faint glass, and the orb keeps its rings without its
+    /// gloss. Half the gloss is half of every strength.
+    #[test]
+    fn a_flat_themes_bar_wears_no_glass() {
+        use guitk::render::RenderCommand;
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "one")]));
+        let bar = s.taskbar_rect();
+        let orb = s.start_orb_rect();
+        let tile = s.taskbar_button_rect(0);
+        // What of the glass is drawn: fills as wide as the bar besides the
+        // bar itself, fills over a tile besides its body, and fills inside
+        // the orb besides its body.
+        let glass = |s: &DesktopShell| {
+            let mut found = (0, 0, 0, 0);
+            for c in &s.render_taskbar().commands {
+                match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => {
+                        let (x, y, w, h) = (*x, *y, *width, *height);
+                        if (w - bar.w).abs() < 0.01 && (h - bar.h).abs() > 0.01 {
+                            found.0 += 1;
+                        }
+                        let inside = |r: super::Rect| {
+                            x >= r.x && y >= r.y && x + w <= r.x + r.w && y + h <= r.y + r.h
+                        };
+                        if inside(tile) && (w, h) != (tile.w, tile.h) {
+                            found.1 += 1;
+                        }
+                        if inside(orb) && (w, h) != (orb.w, orb.h) {
+                            found.2 += 1;
+                        }
+                    }
+                    RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h) => {
+                        found.3 += 1;
+                    }
+                    _ => {}
+                }
+            }
+            found
+        };
+        // The reference's: four bands across the bar, the tile's sheen and
+        // highlight over its glass, the orb's shade, skirt and cap -- and the
+        // tile's edge.
+        assert_eq!(glass(&s), (4, 2, 3, 1));
+        wear(
+            &mut s,
+            appearance::panel::PanelStyle {
+                gloss: 0,
+                ..appearance::panel::PanelStyle::AERO
+            },
+        );
+        assert_eq!(glass(&s), (0, 0, 0, 1), "a flat bar still wears glass");
+        // The tile behind is not filled at all: its glass was all it had.
+        let tree = s.render_taskbar();
+        assert!(
+            !tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, width, height, .. }
+                    if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h))),
+            "the flat tile is filled"
+        );
+        // Half the gloss: the line of light along the top at half its alpha.
+        wear(
+            &mut s,
+            appearance::panel::PanelStyle {
+                gloss: 50,
+                ..appearance::panel::PanelStyle::AERO
+            },
+        );
+        let edge = super::with_alpha(guitk::color::Color::WHITE, 58);
+        assert!(
+            s.render_taskbar().commands.iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (bar.x, bar.y, bar.w, 1.0) && *color == edge)),
+            "the line of light is not at half its strength"
+        );
+    }
+
+    /// **The tiles are as far apart as the theme spaces them**: after the
+    /// start button, between two tiles, and between the pinned programs and
+    /// the windows -- with the divider eight nineteenths of the way across
+    /// that gap, wherever the gap is.
+    #[test]
+    fn the_tiles_are_spaced_as_the_theme_says() {
+        with_scratch_config("shell-panel-spacing", |_root| {
+            let mut s = shell();
+            s.pin_app(super::launcher::TERMINAL, "Terminal");
+            s.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "", "one"), window_of(2, "", "two")],
+            ));
+            wear(
+                &mut s,
+                appearance::panel::PanelStyle {
+                    gloss: 100,
+                    tile_gap: 6,
+                    start_gap: 12,
+                    section_gap: 31,
+                },
+            );
+            let bar = s.taskbar_rect();
+            let tiles = s.taskbar_layout();
+            assert_eq!(tiles.len(), 3);
+            let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+            assert!(
+                close(
+                    tiles[0].x,
+                    bar.x + s.scale(super::START_BUTTON_WIDTH) + s.scale(12.0)
+                ),
+                "{:?}",
+                tiles[0]
+            );
+            assert!(close(tiles[1].x - (tiles[0].x + tiles[0].w), s.scale(31.0)));
+            assert!(close(tiles[2].x - (tiles[1].x + tiles[1].w), s.scale(6.0)));
+            let divider = s.taskbar_divider_rect().expect("two sections");
+            assert!(close(
+                divider.x,
+                tiles[0].x + tiles[0].w + s.scale(31.0 * 8.0 / 19.0)
+            ));
+        });
+    }
+
     /// **The tray's chevron and clock name themselves**: the chevron as the
     /// reference's `title` does, the clock by the whole date -- and not over
     /// the calendar the clock has opened, which says it already.
@@ -22559,12 +24758,7 @@ mod taskbar_pin_tests {
     fn the_chevron_and_the_clock_name_themselves() {
         let mut s = DesktopShell::new(1024, 768);
         let flood: Vec<_> = (1..=80)
-            .map(|id| guiremote::tray::TrayIcon {
-                owner: 99,
-                id,
-                glyph: "X".to_string(),
-                tooltip: "x".to_string(),
-            })
+            .map(|id| guiremote::tray::TrayIcon::new(99, id, "X", "x"))
             .collect();
         s.apply_tray_icons(flood);
         let chevron = s.tray_overflow_rect().expect("overflowing");
@@ -22601,12 +24795,7 @@ mod taskbar_pin_tests {
         use guitk::render::RenderCommand;
         let mut s = DesktopShell::new(1024, 768);
         let flood: Vec<_> = (1..=80)
-            .map(|id| guiremote::tray::TrayIcon {
-                owner: 99,
-                id,
-                glyph: "X".to_string(),
-                tooltip: "x".to_string(),
-            })
+            .map(|id| guiremote::tray::TrayIcon::new(99, id, "X", "x"))
             .collect();
         s.apply_tray_icons(flood);
         let lights = |s: &DesktopShell| -> Vec<(super::Rect, u8)> {
@@ -23326,7 +25515,7 @@ mod view_menu_tests {
 
     /// The View submenu's items, as `(label, ticked)`.
     fn view_items(size: IconSize, mode: Mode) -> Vec<(String, bool)> {
-        let items = DesktopShell::desktop_menu_items(size, mode);
+        let items = DesktopShell::desktop_menu_items(size, mode, false);
         let Some(MenuItem::Submenu { children, .. }) = items
             .iter()
             .find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "View"))
@@ -23365,8 +25554,12 @@ mod view_menu_tests {
         for size in IconSize::ALL {
             for mode in Mode::ALL {
                 let mut all = Vec::new();
-                ids(&DesktopShell::desktop_menu_items(*size, mode), &mut all);
-                ids(&DesktopShell::widget_menu_items(), &mut all);
+                // With the wallpaper's item, so its id is checked too.
+                ids(
+                    &DesktopShell::desktop_menu_items(*size, mode, true),
+                    &mut all,
+                );
+                ids(&DesktopShell::widget_menu_items(true), &mut all);
                 // The widget menu repeats "Remove all widgets" on purpose --
                 // the same item, so the same id -- and nothing else.
                 let remove_all = all
@@ -23396,7 +25589,7 @@ mod view_menu_tests {
         }
         let mut all = Vec::new();
         ids(
-            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid),
+            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid, false),
             &mut all,
         );
         let named: Vec<IconSize> = all
@@ -25782,7 +27975,8 @@ mod start_search_tests {
     }
 
     /// The rows as `[Folder]` (`[Folder +]` when closed) for a folder,
-    /// `"  name"` for a program in one and `"name"` for one at the top level.
+    /// `"  name"` for a program in one and `"name"` for one at the top level,
+    /// and `"action ~ program"` for a program's action a search found.
     fn tree(shell: &DesktopShell) -> Vec<String> {
         shell
             .start_menu_rows()
@@ -25793,6 +27987,9 @@ mod start_search_tests {
                 }
                 crate::StartRow::Program { entry, in_folder } => {
                     format!("{}{}", if *in_folder { "  " } else { "" }, entry.name)
+                }
+                crate::StartRow::Action { entry, action } => {
+                    format!("{} ~ {}", action.name, entry.name)
                 }
                 crate::StartRow::Section(section) => format!("# {}", section.label()),
             })
@@ -26182,6 +28379,32 @@ mod start_search_tests {
         assert_eq!(pin_menu_labels(&shell)[0], "Pin to taskbar");
     }
 
+    /// **A jump list row shows its action's picture**, as the action's
+    /// desktop entry names it, found in the icon theme like every other.
+    #[test]
+    fn a_jump_list_row_shows_its_actions_picture() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\n\
+             Actions=new;\n[Desktop Action new]\nName=New Drawing\nIcon=document-new\n\
+             Exec=sketch --new\n",
+        )]));
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        let tree = shell.render_pin_menu().expect("the menu is open");
+        let pictured: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Image { image_id, .. } => shell
+                    .icon_request(*image_id)
+                    .map(|request| request.name.into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictured, ["document-new"]);
+    }
+
     /// **A row of the jump list starts the program as that action says**, and
     /// the start menu gets out of the way -- by click and by key.
     #[test]
@@ -26437,6 +28660,7 @@ mod start_search_tests {
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from(program),
             args: args.iter().map(std::ffi::OsString::from).collect(),
+            dir: None,
         }
     }
 
@@ -26696,6 +28920,200 @@ mod start_search_tests {
             .count();
         assert_eq!(hits, 1);
         assert_eq!(shell.start_pins_listed(), 0);
+    }
+
+    // ---- a search finds what a program can do ----
+
+    /// **A search finds a program's action, above the program it finds by
+    /// a keyword**: "display" is Settings' "Display settings" by name and
+    /// Settings only by keyword, so the page comes first. The action is not
+    /// a program: [`DesktopShell::start_menu_entries`] lists the programs
+    /// alone.
+    #[test]
+    fn a_search_finds_a_programs_action_before_the_program() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let rows = tree(&shell);
+        assert_eq!(rows[0], "Display settings ~ Settings", "{rows:?}");
+        assert!(rows.iter().any(|r| r == "Settings"), "{rows:?}");
+        assert!(
+            names(&shell).iter().all(|n| n != "Display settings"),
+            "an action was listed as a program"
+        );
+        assert_eq!(
+            names(&shell).iter().filter(|n| *n == "Settings").count(),
+            1,
+            "an action's program was listed again for it"
+        );
+    }
+
+    /// **Enter starts the action found first** -- the page, as its jump
+    /// list opens it -- and the menu closes.
+    #[test]
+    fn enter_starts_the_action_a_search_found() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(
+            outcome.launches,
+            [super::launcher::settings_page("display")]
+        );
+        assert!(!shell.start_menu_open);
+    }
+
+    /// **A click on an action's row starts it; a drag of it carries
+    /// nothing**: no label follows the pointer, letting go over the taskbar
+    /// pins nothing, and the menu stays up.
+    #[test]
+    fn an_actions_row_is_clicked_and_never_carried() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let row_centre = |shell: &DesktopShell| {
+            let r = shell.start_menu_row_rect(0);
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        let mut clicked = shell();
+        type_text(&mut clicked, "display");
+        let at = row_centre(&clicked);
+        assert_eq!(
+            click_row(&mut clicked, at),
+            [
+                super::ShellAction::Consumed,
+                super::ShellAction::Launch(super::launcher::settings_page("display"))
+            ]
+        );
+        assert!(!clicked.start_menu_open);
+
+        let mut dragged = shell();
+        type_text(&mut dragged, "display");
+        let at = row_centre(&dragged);
+        let pins = dragged.taskbar.pinned_apps().len();
+        let bar = dragged.taskbar_rect();
+        let over = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+        let event = |(x, y): (f32, f32), kind| MouseEvent { x, y, kind };
+        drop(dragged.handle_mouse(&event(at, MouseEventKind::Press(MouseButton::Left))));
+        drop(dragged.handle_mouse(&event(over, MouseEventKind::Move)));
+        assert!(
+            dragged.render_carry().is_none(),
+            "a label says where an action would go"
+        );
+        assert_eq!(
+            dragged.handle_mouse(&event(over, MouseEventKind::Release(MouseButton::Left))),
+            super::ShellAction::Consumed
+        );
+        assert_eq!(
+            dragged.taskbar.pinned_apps().len(),
+            pins,
+            "an action was pinned"
+        );
+        assert!(
+            dragged.start_menu_open,
+            "a drag that went nowhere closed the menu"
+        );
+    }
+
+    /// **A search offers what the jump list offers, once**: an action with
+    /// no command line -- started by D-Bus, which this system does not
+    /// have -- is not found, and a pinned program's actions are found once.
+    #[test]
+    fn a_search_offers_what_the_jump_list_offers_once() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let exec = shell
+            .apps
+            .iter()
+            .find(|app| app.name == "Sketchpad")
+            .expect("installed")
+            .executable_path
+            .clone();
+        shell.pin_to_start(&exec);
+
+        type_text(&mut shell, "Blank");
+        let found = tree(&shell);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|r| *r == "Blank Canvas ~ Sketchpad")
+                .count(),
+            1,
+            "{found:?}"
+        );
+
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        type_text(&mut shell, "D-Bus");
+        assert!(
+            tree(&shell).iter().all(|r| !r.starts_with("Only by D-Bus")),
+            "{:?}",
+            tree(&shell)
+        );
+    }
+
+    /// **An action's row draws its name, then its program's, dimmer** --
+    /// "New window" is a different row for each program that has one -- and
+    /// its program's picture when it has none of its own.
+    #[test]
+    fn an_actions_row_names_its_program() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let tree = shell.render_start_menu().expect("open");
+        // Each piece of text with where it starts and in what ink. The
+        // program's name is found on the action's own line: the menu's right
+        // column has a "Settings" of its own, further right.
+        let texts: Vec<(&str, f32, f32, guitk::color::Color)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    text, x, y, color, ..
+                } => Some((text.as_str(), *x, *y, *color)),
+                _ => None,
+            })
+            .collect();
+        let (_, action_x, action_y, action_ink) = *texts
+            .iter()
+            .find(|(t, ..)| *t == "Display settings")
+            .expect("the action's name");
+        let (_, program_x, _, program_ink) = *texts
+            .iter()
+            .filter(|(t, x, y, _)| *t == "Settings" && *x > action_x && (*y - action_y).abs() < 0.5)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("its program's name, after it on its line");
+        assert!(program_x > action_x);
+        assert!(
+            program_ink.a < action_ink.a,
+            "the program's name is not dimmer than the action's"
+        );
+        // The picture on the action's own row: the menu's right column has a
+        // picture for Settings of its own.
+        let row = shell.start_menu_row_rect(0);
+        let pictures: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Image { image_id, x, y, .. }
+                    if row.contains(*x, *y) =>
+                {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .map(|request| request.name.into_owned())
+            .collect();
+        assert_eq!(pictures, ["preferences-system"]);
+    }
+
+    /// **A right-click on an action's row opens nothing**: the pin menu is a
+    /// program's, and an action is not one to pin.
+    #[test]
+    fn a_right_click_on_an_actions_row_opens_nothing() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let r = shell.start_menu_row_rect(0);
+        shell.handle_press(
+            r.x + r.w / 2.0,
+            r.y + r.h / 2.0,
+            guitk::event::MouseButton::Right,
+        );
+        assert!(shell.render_pin_menu().is_none());
     }
 
     /// A chord with Super is still the desktop's with the menu up: the Super

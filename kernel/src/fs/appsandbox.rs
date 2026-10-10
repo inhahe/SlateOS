@@ -19,7 +19,6 @@
 //!   → appsandbox::grant_permission() / revoke_permission()
 //!
 //! Integration:
-//!   → appregistry (app metadata)
 //!   → credentials (privilege escalation)
 //!   → policy (system-wide security policy)
 //!   → syslog (access violation logging)

@@ -20,7 +20,10 @@
 //!
 //! Host tests read each database from a per-thread hook instead -- as text,
 //! as missing, or as an error ([`set_test_text`], [`set_test_error`]) --
-//! since the host has no filesystem behind `open`.
+//! since the host has no filesystem behind `open`. A missing or unreadable
+//! one leaves `errno` as the failed `open` would (`ENOENT`, or the error):
+//! until 2026-10-06 the hooks left it alone, which hid callers that leak an
+//! `open`'s `errno` where glibc's keep the caller's.
 
 use crate::errno;
 
@@ -148,8 +151,16 @@ pub(crate) fn read(which: Which) -> Result<Db, i32> {
             .unwrap_or(TestDb::Missing)
         {
             TestDb::Text(bytes) => Text::copy_of(bytes).map(Db::Text).ok_or(errno::ENOMEM),
-            TestDb::Missing => Ok(Db::Missing),
-            TestDb::Error(e) => Err(e),
+            // `errno` as `read_file`'s failed `open` leaves it, so that what
+            // the tests see of it is what the target's callers see.
+            TestDb::Missing => {
+                errno::set_errno(errno::ENOENT);
+                Ok(Db::Missing)
+            }
+            TestDb::Error(e) => {
+                errno::set_errno(e);
+                Err(e)
+            }
         }
     }
     #[cfg(not(test))]
@@ -170,7 +181,11 @@ pub(crate) fn read_path(path: &[u8]) -> Result<Db, i32> {
         let files = unsafe { &*test_files() };
         match files.iter().flatten().find(|(p, _)| *p == name) {
             Some((_, text)) => Text::copy_of(text).map(Db::Text).ok_or(errno::ENOMEM),
-            None => Ok(Db::Missing),
+            // As above: the `errno` a failed `open` leaves.
+            None => {
+                errno::set_errno(errno::ENOENT);
+                Ok(Db::Missing)
+            }
         }
     }
     #[cfg(not(test))]
@@ -718,12 +733,20 @@ impl Cursor {
     /// (`set*ent`/`end*ent`).
     pub(crate) const CLOSED: Self = Self { open: None, at: 0 };
 
+    /// The database, opened for an enumeration -- with `errno` as it was
+    /// before, whatever the open did: glibc's `_nss_files_getXXent_r` saves
+    /// it around the `internal_setent` it makes when nothing is open, so a
+    /// missing or unreadable file ends the enumeration and leaves the
+    /// caller's `errno` alone.
     fn open(which: Which) -> Opened {
-        match read(which) {
+        let saved = errno::get_errno();
+        let opened = match read(which) {
             Ok(Db::Text(t)) => Opened::File(t),
             Ok(Db::Missing) => Opened::Builtin,
             Err(_) => Opened::Unreadable,
-        }
+        };
+        errno::set_errno(saved);
+        opened
     }
 }
 

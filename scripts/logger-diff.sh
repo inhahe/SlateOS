@@ -458,5 +458,51 @@ for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
   redir_case "$how" --no-act -s -f /dev/null hello
 done
 
+# --- the default tag is the real uid's name, not getlogin ()'s -----------------
+# util-linux 2.39.3's xgetlogin asks getpwuid (getuid ()) and nothing else.
+# getlogin () would name whoever utmp says logged in on the terminal on
+# standard input -- after `su`, the user who typed it. So: a terminal, a
+# utmp entry saying `daemon` logged in on it (bound over /run/utmp in a user
+# and mount namespace), and logger run as the namespace's root. The tag must
+# be `root`. Skipped where such namespaces are refused.
+if unshare -Urm true 2>/dev/null; then
+  ptylogin=$DIFF_TMP/ptylogin.py
+  cat >"$ptylogin" <<'PY'
+import os, struct, subprocess, sys
+utmp, user = sys.argv[1:3]
+cmd = sys.argv[3:]
+master, slave = os.openpty()
+line = os.ttyname(slave)[len("/dev/"):].encode()
+with open(utmp, "wb") as f:
+    f.write(struct.pack("<hxxi32s4s32s256shhiii16s20x", 7, os.getpid(), line, b"",
+                        user.encode(), b"", 0, 0, 0, 1700000000, 0, b""))
+p = subprocess.Popen(['unshare', '-Urm', 'sh', '-c',
+                      'mount --bind "$1" /run/utmp || exit 99; shift; exec "$@"',
+                      '_', utmp] + cmd, stdin=slave)
+os.close(slave)
+rc = p.wait()
+os.close(master)
+sys.exit(rc)
+PY
+  for who in daemon root nosuch; do
+    o_err=$(diff_run env LC_ALL=C.UTF-8 PATH="$bindir/ours:$PATH" timeout -k 2 20 \
+      python3 "$ptylogin" "$DIFF_TMP/utmp-ours" "$who" logger --no-act -s hello 2>&1 >/dev/null)
+    o_rc=$?
+    g_err=$(diff_run env LC_ALL=C.UTF-8 PATH="$bindir/gnu:$PATH" timeout -k 2 20 \
+      python3 "$ptylogin" "$DIFF_TMP/utmp-gnu" "$who" logger --no-act -s hello 2>&1 >/dev/null)
+    g_rc=$?
+    REPORT=$(printf '  ours (rc=%s): %s\n  gnu  (rc=%s): %s' "$o_rc" "$o_err" "$g_rc" "$g_err")
+    if [ "$o_rc" = 99 ] || [ "$g_rc" = 99 ] || [ "$o_rc" = 124 ] || [ "$g_rc" = 124 ]; then
+      AGREED=broken
+    elif [ "$(printf '%s\n' "$o_err" | normalize)" = "$(printf '%s\n' "$g_err" | normalize)" ] \
+         && [ "$o_rc" = "$g_rc" ] && printf '%s' "$g_err" | grep -q ' root: hello$'; then
+      AGREED=yes
+    else
+      AGREED=no
+    fi
+    report "terminal that utmp says $who logged in on: logger --no-act -s hello"
+  done
+fi
+
 echo "logger-diff: $pass passed ($xfail of them expected differences), $fail failed, $broken broken"
 [ "$fail" -eq 0 ] && [ "$broken" -eq 0 ]

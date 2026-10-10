@@ -1,5 +1,7 @@
 ### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A — ✅ FIXED 2026-08-16 by lane A (`SYS_PROCESS_GET_RUSAGE = 1064`, commit `c9bc34347`)
 
+**Correction 2026-10-06 (lane D): "FIXED" above was the kernel's half alone.** The libc half -- `getrusage` calling `SYS_PROCESS_GET_RUSAGE` -- was never done, so for seven more weeks every native program went on reading the machine's system and interrupt time as its own, exactly as described below. It is done now: `posix/src/resource.rs::getrusage` reads the kernel's per-process, per-thread and reaped-children accounting through one converter shared with `wait4` (`rusage_from_counters`), and `services/ctest-rusage` is the ring-3 check that two processes reading at once disagree. The lesson is the entry's own: a status line closed on one half of a two-lane fix stops anyone looking for the other half.
+
 **In short:** a program can ask the OS "how much CPU have I used?". On our own
 ABI it gets an answer, the answer looks entirely plausible, and it is **the
 whole machine's** CPU time rather than the asking program's. Every process gets

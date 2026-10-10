@@ -951,6 +951,42 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::legacy::Prof,
+        "struct prof",
+        "sys/profil.h",
+        pr_base,
+        pr_size,
+        pr_off,
+        pr_scale
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_mount::MountAttr,
+        "struct mount_attr",
+        "sys/mount.h",
+        attr_set,
+        attr_clr,
+        propagation,
+        userns_fd
+    );
+    // Its thirteen one-bit fields are `bits` here, which C cannot take the
+    // offset of; the size, and `user` after them, place them.
+    abi!(
+        out,
+        hdrs,
+        crate::printf_h::PrintfInfo,
+        "struct printf_info",
+        "printf.h",
+        prec,
+        width,
+        spec,
+        user,
+        pad
+    );
+    abi!(
+        out,
+        hdrs,
         crate::aliases::Aliasent,
         "struct aliasent",
         "aliases.h",

@@ -107,6 +107,7 @@ HOOK = os.path.join(HERE, "hooks", "pre-push")
 
 sys.path.insert(0, HERE)
 import gitenv  # noqa: E402
+import suite_pool  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -280,20 +281,10 @@ def _run_selftest_against_a_victim(checker, names):
     return proc, before, after
 
 
-def test_no_gated_selftest_can_damage_the_repository_it_runs_from():
-    """The 2026-08-29 and 2026-09-04 incidents, as a test, for every gate.
-
-    A hook's environment is not approximated: the variables carry the values
-    git itself sets, because the entire failure is that they outrank `cwd` and
-    `-C`.
-    """
-    gates = discover_gated_selftests()
-    for gate, rel in gates:
-        if rel is None:
-            continue  # already reported by the discovery test
-        checker = os.path.join(REPO_ROOT, rel)
-        if not os.path.exists(checker):
-            continue
+def _gate_case(gate, checker):
+    """One gate's case: its self-test under every hook environment, in turn,
+    each over a victim of its own."""
+    def case(_tmp):
         for label, names in _HOOK_ENVIRONMENTS:
             proc, before, after = _run_selftest_against_a_victim(
                 checker, names)
@@ -308,6 +299,34 @@ def test_no_gated_selftest_can_damage_the_repository_it_runs_from():
             for key in sorted(before):
                 check(f"[{gate}] {label}: left {key} alone",
                       after[key], before[key])
+    return case
+
+
+def test_no_gated_selftest_can_damage_the_repository_it_runs_from():
+    """The 2026-08-29 and 2026-09-04 incidents, as a test, for every gate.
+
+    A hook's environment is not approximated: the variables carry the values
+    git itself sets, because the entire failure is that they outrank `cwd` and
+    `-C`.
+
+    The gates are taken a few at a time (``scripts/suite_pool.py``, as the
+    other tooling suites are; ``SUITE_JOBS=1`` restores the plain loop). Each
+    run builds its own victim in its own temp directory, so no two can
+    observe each other; one gate's three environments still run in turn,
+    since a self-test may write a fixed temp path of its own
+    (``_selftest_skips_fixture.rs``). One at a time this was the largest item
+    in a boot's gate phase (rq44: 1157 s), nearly all of it git processes
+    starting.
+    """
+    cases = []
+    for gate, rel in discover_gated_selftests():
+        if rel is None:
+            continue  # already reported by the discovery test
+        checker = os.path.join(REPO_ROOT, rel)
+        if not os.path.exists(checker):
+            continue
+        cases.append((None, _gate_case(gate, checker)))
+    suite_pool.run(cases)
 
 
 # --------------------------------------------------------------------------

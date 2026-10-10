@@ -4,11 +4,12 @@
 //! that lets users type a command to execute. Supports text editing, command
 //! history, fuzzy autocomplete, and path resolution.
 //!
-//! The history lives in memory for the life of the shell and is **not** written
-//! anywhere. It used to claim persistence, on the strength of a `history_path`
-//! field that nothing ever read; the field is gone. Persisting it would need
-//! the same shape as the file chooser's listing — the shell performs no
-//! filesystem I/O of its own — and is tracked in known-issues.md.
+//! The history is kept across sessions by the shell, not here: this module
+//! holds it and does no filesystem I/O. `DesktopShell::load_run_history`
+//! hands it what `runbox.yaml` holds at start, and the session writes it back
+//! (`DesktopShell::save_run_history`) whenever the box has run something --
+//! each entry's bytes, percent-encoded (design-decisions §426), so a command
+//! naming a file whose name is not text comes back as it ran.
 //!
 //! # Usage from the desktop shell
 //!
@@ -36,12 +37,14 @@
 //! }
 //! ```
 
+use crate::dialog_frame::{DialogFrame, FrameLayout};
 use appearance::Palette;
 use appearance::Surface;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::scaled;
 // The field's state, and no longer a copy of it. This type lived here, private,
 // until 2026-09-17; twenty-two files in the tree hand-roll typing because they
 // could not reach it, and the bidirectional caret it carries is the reason a
@@ -87,17 +90,31 @@ use std::path::{Path, PathBuf};
 // Constants
 // ============================================================================
 
-const DIALOG_WIDTH: f32 = 450.0;
-const DIALOG_HEIGHT: f32 = 180.0;
-const DIALOG_RADIUS: f32 = 8.0;
+// The box is the theme's window frame (`dialog_frame`) around this content,
+// so the frame's title bar and border are added to these, not part of them:
+// under the built-in frame -- a 30-pixel bar, a 1-pixel border -- the whole
+// box is 450 by 180, as it was before it wore one.
+/// The content's width, inside the frame.
+const CONTENT_WIDTH: f32 = 448.0;
+/// The content's height, under the frame's title bar.
+const CONTENT_HEIGHT: f32 = 148.0;
+/// The title on the frame's bar.
+const TITLE: &str = "Run";
 const PADDING: f32 = 16.0;
-const TITLE_HEIGHT: f32 = 32.0;
 const INPUT_HEIGHT: f32 = 28.0;
-const INPUT_Y_OFFSET: f32 = 100.0;
+/// The instruction's top, from the content's.
+const INSTRUCTION_Y: f32 = 21.0;
+/// The command field's top, from the content's.
+const INPUT_Y: f32 = 69.0;
 const BUTTON_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 75.0;
 const BUTTON_SPACING: f32 = 8.0;
-const TITLE_FONT_SIZE: f32 = 14.0;
+/// The column the "Open:" label takes before the field.
+const OPEN_LABEL_WIDTH: f32 = 40.0;
+/// The size of the line saying a command does not exist, under the field.
+const ERROR_FONT_SIZE: f32 = 11.0;
+/// From the field's bottom to the error line, or to the suggestions under it.
+const UNDER_FIELD_GAP: f32 = 2.0;
 const BODY_FONT_SIZE: f32 = 12.0;
 const INPUT_FONT_SIZE: f32 = 13.0;
 const AUTOCOMPLETE_ROW_HEIGHT: f32 = 26.0;
@@ -316,6 +333,11 @@ pub struct RunDialog {
     events: Vec<RunDialogEvent>,
     /// Which button is hovered.
     hovered_button: Option<ButtonId>,
+    /// Whether the pointer is on the frame's close button.
+    close_hovered: bool,
+    /// The frame the box wears: the theme's window frame
+    /// ([`DialogFrame`]), set by the shell from the appearance settings.
+    frame: DialogFrame,
     /// Dialog X position (centered on screen, set by caller or default).
     dialog_x: f32,
     /// Dialog Y position.
@@ -346,6 +368,48 @@ impl RunDialog {
         self.focus_ring = width;
     }
 
+    /// Wear `frame`: the theme's window frame, from the appearance settings.
+    ///
+    /// The box keeps its top-left corner; its size is the frame around its
+    /// content, so a theme with a taller title bar makes a taller box.
+    pub fn set_frame(&mut self, frame: DialogFrame) {
+        self.frame = frame;
+    }
+
+    /// Where the box and its parts are: the frame around the content, with
+    /// its top-left corner at the dialog's position.
+    fn layout(&self) -> FrameLayout {
+        let (width, height) = self
+            .frame
+            .outer_size(scaled(CONTENT_WIDTH), scaled(CONTENT_HEIGHT));
+        self.frame.layout(guitk::frame::Rect::new(
+            self.dialog_x,
+            self.dialog_y,
+            width,
+            height,
+        ))
+    }
+
+    /// Where the button `id` is: OK at the content's bottom right, Cancel and
+    /// Browse to its left. Shared by drawing and clicking, so the two cannot
+    /// disagree.
+    fn button_rect(content: guitk::frame::Rect, id: ButtonId) -> guitk::frame::Rect {
+        let from_right = match id {
+            ButtonId::Ok => 1.0,
+            ButtonId::Cancel => 2.0,
+            ButtonId::Browse => 3.0,
+        };
+        guitk::frame::Rect::new(
+            content.x + content.w
+                - scaled(PADDING)
+                - scaled(BUTTON_WIDTH) * from_right
+                - scaled(BUTTON_SPACING) * (from_right - 1.0),
+            content.y + content.h - scaled(PADDING) - scaled(BUTTON_HEIGHT),
+            scaled(BUTTON_WIDTH),
+            scaled(BUTTON_HEIGHT),
+        )
+    }
+
     /// Create a new Run dialog (initially hidden).
     pub fn new() -> Self {
         Self {
@@ -364,6 +428,8 @@ impl RunDialog {
             error_message: None,
             events: Vec::new(),
             hovered_button: None,
+            close_hovered: false,
+            frame: DialogFrame::default(),
             // Default to centered-ish position; caller should reposition.
             dialog_x: 200.0,
             dialog_y: 150.0,
@@ -454,10 +520,10 @@ impl RunDialog {
 
     /// Put the dialog in the middle of a screen of this size.
     ///
-    /// Here rather than at the caller so that `DIALOG_WIDTH` and
-    /// `DIALOG_HEIGHT` can stay private: a caller that had to be told the box's
-    /// size in order to centre it would be a caller that could be told a stale
-    /// one, and the layout constants are this module's business.
+    /// Here rather than at the caller so that the box's size -- its content's
+    /// and its frame's -- can stay private: a caller that had to be told the
+    /// box's size in order to centre it would be a caller that could be told
+    /// a stale one, and the layout is this module's business.
     ///
     /// Clamped at zero on both axes. A screen narrower than the box is not a
     /// real display, but it is a plausible *test* and a plausible transient
@@ -465,8 +531,11 @@ impl RunDialog {
     /// left edge off-screen — where the title bar cannot be reached and the
     /// buttons are the half that gets cut.
     pub fn centre_on(&mut self, screen_width: f32, screen_height: f32) {
-        self.dialog_x = ((screen_width - DIALOG_WIDTH) / 2.0).max(0.0);
-        self.dialog_y = ((screen_height - DIALOG_HEIGHT) / 2.0).max(0.0);
+        let (width, height) = self
+            .frame
+            .outer_size(scaled(CONTENT_WIDTH), scaled(CONTENT_HEIGHT));
+        self.dialog_x = ((screen_width - width) / 2.0).max(0.0);
+        self.dialog_y = ((screen_height - height) / 2.0).max(0.0);
     }
 
     /// Where the dialog's top-left corner currently is.
@@ -538,13 +607,21 @@ impl RunDialog {
         self.trim_history();
     }
 
-    /// Load a history read from somewhere else.
+    /// Load a history read from somewhere else -- oldest first, as bytes,
+    /// for the reason [`add_to_history`](Self::add_to_history) takes them.
     ///
-    /// Nothing calls this yet — the history is not persisted (see the module
-    /// documentation) — but whatever eventually does must hand over bytes, for
-    /// the reason [`add_to_history`](Self::add_to_history) takes them.
+    /// A file edited by hand may say a command twice: it is kept once, where
+    /// it was run last, as running it again would have left it. Only the
+    /// newest few hundred entries are looked at, so a file of millions costs
+    /// no more than one of fifty.
     pub fn load_history(&mut self, commands: Vec<OsString>) {
-        self.history = commands;
+        let newest = commands.len().saturating_sub(MAX_HISTORY.saturating_mul(4));
+        let mut history: Vec<OsString> = Vec::with_capacity(MAX_HISTORY);
+        for command in commands.into_iter().skip(newest) {
+            history.retain(|h| *h != command);
+            history.push(command);
+        }
+        self.history = history;
         self.trim_history();
     }
 
@@ -635,13 +712,19 @@ impl RunDialog {
 
             // Cursor movement
             Key::Left => {
-                self.input
-                    .move_cursor_left(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
+                self.input.move_cursor_left(
+                    shift,
+                    scaled(INPUT_FONT_SIZE),
+                    FontWeightHint::Regular,
+                );
             }
 
             Key::Right => {
-                self.input
-                    .move_cursor_right(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
+                self.input.move_cursor_right(
+                    shift,
+                    scaled(INPUT_FONT_SIZE),
+                    FontWeightHint::Regular,
+                );
             }
 
             // The page keys are the list's: the suggestions while they show,
@@ -697,18 +780,68 @@ impl RunDialog {
         EventResult::Consumed
     }
 
+    /// The command line as it stands, for the shell's tests.
+    #[cfg(test)]
+    pub(crate) fn line(&self) -> &str {
+        self.input.text()
+    }
+
+    /// Where the command field is on screen: where it is drawn, and where a
+    /// right-click offers the field's menu (`guitk::editmenu`).
+    #[must_use]
+    pub fn field_rect(&self) -> guitk::frame::Rect {
+        let content = self.layout().content;
+        guitk::frame::Rect::new(
+            content.x + scaled(PADDING) + scaled(OPEN_LABEL_WIDTH),
+            content.y + scaled(INPUT_Y),
+            scaled(CONTENT_WIDTH) - scaled(PADDING) * 2.0 - scaled(OPEN_LABEL_WIDTH),
+            scaled(INPUT_HEIGHT),
+        )
+    }
+
+    /// Where what hangs under the field starts -- the error line, the
+    /// suggestions: the one answer the drawing and a click both read, so a
+    /// click on a suggestion lands on the row drawn at any text size.
+    fn under_field_y(&self) -> f32 {
+        let field = self.field_rect();
+        field.y + field.h + scaled(UNDER_FIELD_GAP)
+    }
+
+    /// The command field's right-click menu: Cut, Copy, Paste, Delete and
+    /// Select all, each dimmed when it would do nothing and saying why while
+    /// the pointer rests on it.
+    #[must_use]
+    pub fn edit_menu(&self) -> guitk::menu::ContextMenu {
+        self.input.edit_menu()
+    }
+
+    /// Do what a row of [`edit_menu`](Self::edit_menu) says, as the key that
+    /// does the same would: a change brings new suggestions and takes away
+    /// the last complaint, as typing does. Answers whether the row was one of
+    /// the field's.
+    pub fn edit_command(&mut self, id: guitk::menu::MenuItemId) -> bool {
+        match self.input.edit_command(id) {
+            guitk::textinput::KeyEdit::Unhandled => false,
+            guitk::textinput::KeyEdit::Handled => true,
+            guitk::textinput::KeyEdit::Changed => {
+                self.update_suggestions();
+                self.error_message = None;
+                true
+            }
+        }
+    }
+
     /// Handle a mouse event. Returns `EventResult::Consumed` if the dialog handled it.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
         if !self.visible {
             return EventResult::Ignored;
         }
 
-        // Transform mouse coordinates to dialog-local space.
-        let local_x = event.x - self.dialog_x;
-        let local_y = event.y - self.dialog_y;
+        let layout = self.layout();
+        let (x, y) = (event.x, event.y);
 
         // Check if click is outside dialog bounds — dismiss.
-        if local_x < 0.0 || local_y < 0.0 || local_x > DIALOG_WIDTH || local_y > DIALOG_HEIGHT {
+        if !layout.outer.contains(x, y) {
             if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
                 self.events.push(RunDialogEvent::Cancel);
                 self.hide();
@@ -717,29 +850,22 @@ impl RunDialog {
             return EventResult::Ignored;
         }
 
-        // Button hit detection.
-        let button_y = DIALOG_HEIGHT - PADDING - BUTTON_HEIGHT;
-        let ok_x = DIALOG_WIDTH - PADDING - BUTTON_WIDTH;
-        let cancel_x = ok_x - BUTTON_SPACING - BUTTON_WIDTH;
-        let browse_x = cancel_x - BUTTON_SPACING - BUTTON_WIDTH;
+        // The frame's close button does what Cancel and Escape do.
+        let on_close = layout.is_close(x, y);
 
-        let hit_button = if local_y >= button_y && local_y <= button_y + BUTTON_HEIGHT {
-            if local_x >= ok_x && local_x <= ok_x + BUTTON_WIDTH {
-                Some(ButtonId::Ok)
-            } else if local_x >= cancel_x && local_x <= cancel_x + BUTTON_WIDTH {
-                Some(ButtonId::Cancel)
-            } else if local_x >= browse_x && local_x <= browse_x + BUTTON_WIDTH {
-                Some(ButtonId::Browse)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Button hit detection.
+        let hit_button = [ButtonId::Ok, ButtonId::Cancel, ButtonId::Browse]
+            .into_iter()
+            .find(|&id| Self::button_rect(layout.content, id).contains(x, y));
 
         match &event.kind {
             MouseEventKind::Move => {
                 self.hovered_button = hit_button;
+                self.close_hovered = on_close;
+            }
+            MouseEventKind::Press(MouseButton::Left) if on_close => {
+                self.events.push(RunDialogEvent::Cancel);
+                self.hide();
             }
             MouseEventKind::Press(MouseButton::Left) => {
                 match hit_button {
@@ -754,10 +880,11 @@ impl RunDialog {
                     None => {
                         // Check autocomplete dropdown clicks.
                         if self.show_autocomplete {
-                            let dropdown_y = INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0;
-                            let rel_y = local_y - dropdown_y;
-                            if rel_y >= 0.0 && local_x >= PADDING + 40.0 {
-                                let idx = (rel_y / AUTOCOMPLETE_ROW_HEIGHT) as usize;
+                            let field = self.field_rect();
+                            let dropdown_y = self.under_field_y();
+                            let rel_y = y - dropdown_y;
+                            if rel_y >= 0.0 && x >= field.x {
+                                let idx = (rel_y / scaled(AUTOCOMPLETE_ROW_HEIGHT)) as usize;
                                 if idx < self.suggestions.len() {
                                     self.suggestion_index = Some(idx);
                                     self.accept_suggestion();
@@ -783,86 +910,45 @@ impl RunDialog {
             return Vec::new();
         }
 
-        let mut cmds = Vec::with_capacity(32);
-        let x = self.dialog_x;
-        let y = self.dialog_y;
-
-        // Box shadow for elevation.
-        cmds.push(RenderCommand::BoxShadow {
-            x,
-            y,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT,
-            offset_x: 0.0,
-            offset_y: 4.0,
-            blur: 16.0,
-            spread: 2.0,
-            color: p.shadow(),
-            corner_radii: CornerRadii::all(DIALOG_RADIUS),
-        });
-
-        // Dialog background.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT,
-            color: p.base,
-            corner_radii: CornerRadii::all(DIALOG_RADIUS),
-        });
-
-        // Border.
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT,
-            color: p.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(DIALOG_RADIUS),
-        });
-
-        // Title bar area.
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + PADDING,
-            text: "Run".to_string(),
-            color: p.text,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // The frame: the theme's window frame round the content -- its
+        // shadow, the body, the title bar with the title and the close
+        // button, the border.
+        let layout = self.layout();
+        let mut cmds = self.frame.render(&layout, TITLE, p, self.close_hovered);
+        let content = layout.content;
+        let (x, y) = (content.x, content.y);
 
         // Instruction text.
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + TITLE_HEIGHT + PADDING + 4.0,
+            x: x + scaled(PADDING),
+            y: y + scaled(INSTRUCTION_Y),
             text: "Type the name of a program, folder, or document, and the \
                    OS will open it for you."
                 .to_string(),
             color: p.subtext0,
-            font_size: BODY_FONT_SIZE,
+            font_size: scaled(BODY_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(DIALOG_WIDTH - PADDING * 2.0),
+            max_width: Some(scaled(CONTENT_WIDTH) - scaled(PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // "Open:" label.
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + INPUT_Y_OFFSET + 6.0,
+            x: x + scaled(PADDING),
+            y: y + scaled(INPUT_Y) + scaled(6.0),
             text: "Open:".to_string(),
             color: p.text,
-            font_size: BODY_FONT_SIZE,
+            font_size: scaled(BODY_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
-        // Input field background.
-        let input_x = x + PADDING + 40.0;
-        let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
+        // Input field background: where a right-click offers the field's
+        // menu, from the one answer to where the field is.
+        let field = self.field_rect();
+        let input_x = field.x;
+        let input_w = field.w;
 
         // The toolkit's field (`guitk::field`), in the theme's shape: it has
         // the keyboard whenever the box is up, and a command that does not
@@ -870,7 +956,7 @@ impl RunDialog {
         guitk::field::draw(
             &mut cmds,
             p,
-            guitk::frame::Rect::new(input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT),
+            field,
             guitk::field::State {
                 focused: true,
                 invalid: self.error_message.is_some(),
@@ -887,13 +973,13 @@ impl RunDialog {
             // that one of them isn't, so it tolerates a bad offset the same
             // way `selected_text` already does rather than panicking mid-frame.
             let text_before_start = self.input.text().get(..start).unwrap_or("");
-            let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
-            let sel_width = text::width(self.input.selected_text(), INPUT_FONT_SIZE);
+            let start_px = text::width(text_before_start, scaled(INPUT_FONT_SIZE));
+            let sel_width = text::width(self.input.selected_text(), scaled(INPUT_FONT_SIZE));
             cmds.push(RenderCommand::FillRect {
-                x: input_x + 4.0 + start_px,
-                y: y + INPUT_Y_OFFSET + 3.0,
+                x: input_x + scaled(4.0) + start_px,
+                y: y + scaled(INPUT_Y) + scaled(3.0),
                 width: sel_width,
-                height: INPUT_HEIGHT - 6.0,
+                height: scaled(INPUT_HEIGHT) - scaled(6.0),
                 color: p.accent,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -901,13 +987,13 @@ impl RunDialog {
 
         // Input text.
         cmds.push(RenderCommand::Text {
-            x: input_x + 4.0,
-            y: y + INPUT_Y_OFFSET + 7.0,
+            x: input_x + scaled(4.0),
+            y: y + scaled(INPUT_Y) + scaled(7.0),
             text: self.input.text().to_string(),
             color: p.text,
-            font_size: INPUT_FONT_SIZE,
+            font_size: scaled(INPUT_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(input_w - 8.0),
+            max_width: Some(input_w - scaled(8.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -925,16 +1011,16 @@ impl RunDialog {
         let cursor_px = text::caret_x(
             self.input.text(),
             self.input.cursor(),
-            INPUT_FONT_SIZE,
+            scaled(INPUT_FONT_SIZE),
             FontWeightHint::Regular,
         );
-        let caret_top = y + INPUT_Y_OFFSET + 4.0;
+        let caret_top = y + scaled(INPUT_Y) + scaled(4.0);
         let mut caret = guitk::render::RenderTree::new();
         guitk::textedit::push_caret(
             &mut caret,
-            input_x + 4.0 + cursor_px,
+            input_x + scaled(4.0) + cursor_px,
             caret_top,
-            INPUT_HEIGHT - 8.0,
+            scaled(INPUT_HEIGHT) - scaled(8.0),
             p.text,
             self.caret_width,
         );
@@ -944,10 +1030,10 @@ impl RunDialog {
         if let Some(ref err) = self.error_message {
             cmds.push(RenderCommand::Text {
                 x: input_x,
-                y: y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0,
+                y: self.under_field_y(),
                 text: err.clone(),
                 color: p.ink(p.red),
-                font_size: 11.0,
+                font_size: scaled(ERROR_FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w),
                 overflow: TextOverflow::Ellipsis,
@@ -957,8 +1043,8 @@ impl RunDialog {
         // Autocomplete dropdown.
         if self.show_autocomplete && !self.suggestions.is_empty() {
             let dropdown_x = input_x;
-            let dropdown_y = y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0;
-            let dropdown_h = self.suggestions.len() as f32 * AUTOCOMPLETE_ROW_HEIGHT;
+            let dropdown_y = self.under_field_y();
+            let dropdown_h = self.suggestions.len() as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
 
             let mut paint = p.surface_paint(Surface::Panel);
             paint.border = Some(paint.border.unwrap_or(p.surface1));
@@ -973,7 +1059,7 @@ impl RunDialog {
             );
 
             for (i, suggestion) in self.suggestions.iter().enumerate() {
-                let row_y = dropdown_y + i as f32 * AUTOCOMPLETE_ROW_HEIGHT;
+                let row_y = dropdown_y + i as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
                 let is_selected = self.suggestion_index == Some(i);
 
                 if is_selected {
@@ -982,54 +1068,40 @@ impl RunDialog {
                         dropdown_x + 1.0,
                         row_y,
                         input_w - 2.0,
-                        AUTOCOMPLETE_ROW_HEIGHT,
+                        scaled(AUTOCOMPLETE_ROW_HEIGHT),
                         0.0,
                         Surface::Selected,
                     );
                 }
 
                 cmds.push(RenderCommand::Text {
-                    x: dropdown_x + 8.0,
-                    y: row_y + 6.0,
+                    x: dropdown_x + scaled(8.0),
+                    y: row_y + scaled(6.0),
                     text: suggestion.text.clone(),
                     color: if is_selected { p.ink(p.accent) } else { p.text },
-                    font_size: INPUT_FONT_SIZE,
+                    font_size: scaled(INPUT_FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(input_w - 16.0),
+                    max_width: Some(input_w - scaled(16.0)),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
         }
 
         // Buttons row.
-        let button_y = y + DIALOG_HEIGHT - PADDING - BUTTON_HEIGHT;
-        self.render_button(
-            p,
-            &mut cmds,
-            "OK",
-            x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH,
-            button_y,
-            ButtonId::Ok,
-            true,
-        );
-        self.render_button(
-            p,
-            &mut cmds,
-            "Cancel",
-            x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 2.0 - BUTTON_SPACING,
-            button_y,
-            ButtonId::Cancel,
-            false,
-        );
-        self.render_button(
-            p,
-            &mut cmds,
-            "Browse...",
-            x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 3.0 - BUTTON_SPACING * 2.0,
-            button_y,
-            ButtonId::Browse,
-            false,
-        );
+        for (label, id, primary) in [
+            ("OK", ButtonId::Ok, true),
+            ("Cancel", ButtonId::Cancel, false),
+            ("Browse...", ButtonId::Browse, false),
+        ] {
+            self.render_button(
+                p,
+                &mut cmds,
+                label,
+                Self::button_rect(content, id),
+                id,
+                primary,
+            );
+        }
 
         cmds
     }
@@ -1043,8 +1115,7 @@ impl RunDialog {
         p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         label: &str,
-        bx: f32,
-        by: f32,
+        rect: guitk::frame::Rect,
         id: ButtonId,
         primary: bool,
     ) {
@@ -1059,7 +1130,7 @@ impl RunDialog {
         guitk::button::draw(
             cmds,
             p,
-            (bx, by, BUTTON_WIDTH, BUTTON_HEIGHT),
+            (rect.x, rect.y, rect.w, rect.h),
             label,
             kind,
             guitk::button::State {
@@ -1524,6 +1595,40 @@ mod tests {
         assert!(input.text().is_char_boundary(input.cursor().byte()));
     }
 
+    /// **The Run box follows the user's text size** (on this test's thread,
+    /// as the desktop's `set_appearance` sets it on its own): at twice the
+    /// size its instruction, its field and its buttons are twice as large --
+    /// the box laid out round the larger text, not the text spilling out of
+    /// the old box.
+    #[test]
+    fn the_run_box_follows_the_text_size() {
+        let p = Palette::for_mode(false);
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        let field = dialog.field_rect();
+
+        guitk::text::set_base_size(guitk::text::DEFAULT_SIZE * 2.0);
+        let mut big = RunDialog::new();
+        big.show();
+        let big_field = big.field_rect();
+        assert!((big_field.h - field.h * 2.0).abs() < 0.01, "{big_field:?}");
+        assert!((big_field.w - field.w * 2.0).abs() < 0.01, "{big_field:?}");
+        let sizes: Vec<f32> = big
+            .render(&p)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        for wanted in [BODY_FONT_SIZE, guitk::button::FONT_SIZE] {
+            assert!(
+                sizes.iter().any(|size| (size - wanted * 2.0).abs() < 0.01),
+                "{wanted}: {sizes:?}"
+            );
+        }
+    }
+
     /// Where the dialog *draws* its caret, in the order it drew it.
     fn drawn_caret_x(dialog: &RunDialog, p: &Palette) -> f32 {
         dialog
@@ -1631,6 +1736,23 @@ mod tests {
     // ====================================================================
     // History cycling tests
     // ====================================================================
+
+    /// **A history read back keeps each command once, where it ran last**,
+    /// as running it again would have left it -- and of a file of thousands,
+    /// the newest fifty.
+    #[test]
+    fn a_loaded_history_keeps_each_command_once_where_it_ran_last() {
+        let mut dialog = RunDialog::new();
+        dialog.load_history(["ls", "pwd", "ls", "cat"].map(OsString::from).to_vec());
+        assert_eq!(dialog.history(), ["pwd", "ls", "cat"].map(OsString::from));
+        let many: Vec<OsString> = (0..10_000)
+            .map(|i| OsString::from(format!("cmd{i}")))
+            .collect();
+        dialog.load_history(many);
+        assert_eq!(dialog.history().len(), MAX_HISTORY);
+        assert_eq!(dialog.history().first(), Some(&OsString::from("cmd9950")));
+        assert_eq!(dialog.history().last(), Some(&OsString::from("cmd9999")));
+    }
 
     #[test]
     fn test_history_cycling() {
@@ -2273,5 +2395,155 @@ mod tests {
         let event = make_key(Key::Tab, false, false, None);
         dialog.handle_key_event(&event);
         assert_eq!(dialog.input.text(), "calculator");
+    }
+
+    // ====================================================================
+    // The field's right-click menu
+    // ====================================================================
+
+    /// **The field's menu does what its keys do, and a change made from it
+    /// is a change as a typed one is**: Paste brings suggestions for what it
+    /// put in and takes the last complaint away; Copy changes nothing and
+    /// keeps the complaint; a row that is none of the field's is not taken.
+    #[test]
+    fn the_fields_menu_edits_as_typing_does() {
+        use guitk::editmenu::EditCommand;
+        let mut dialog = RunDialog::new();
+        dialog.show_failed(OsStr::new("nonexistent"), "not found".to_owned());
+        assert!(dialog.error_message.is_some());
+        guitk::clipboard::set_text("term");
+        dialog.input.select_all();
+
+        assert!(dialog.edit_command(EditCommand::Paste.id()));
+        assert_eq!(dialog.input.text(), "term");
+        assert!(
+            dialog.error_message.is_none(),
+            "a paste left the complaint about the old line up"
+        );
+        assert!(
+            dialog.suggestions.iter().any(|s| s.text == "terminal"),
+            "a paste brought no suggestions for what it put in"
+        );
+
+        dialog.error_message = Some("not found".to_owned());
+        dialog.input.select_all();
+        assert!(dialog.edit_command(EditCommand::Copy.id()));
+        assert_eq!(guitk::clipboard::text(), "term");
+        assert!(
+            dialog.error_message.is_some(),
+            "a copy changed nothing, and took the complaint away"
+        );
+
+        assert!(!dialog.edit_command(1));
+        assert_eq!(dialog.input.text(), "term");
+    }
+
+    /// **The field is drawn where `field_rect` says**, which is where a
+    /// right-click offers its menu: the line typed is drawn inside it, and
+    /// the "Open:" label beside it and the buttons below are not.
+    #[test]
+    fn the_field_is_drawn_where_its_menu_is_offered() {
+        let mut dialog = RunDialog::new();
+        dialog.set_position(100.0, 50.0);
+        dialog.show();
+        dialog.input.set_text("terminal");
+        let field = dialog.field_rect();
+        let drawn = dialog.render(&Palette::for_mode(false));
+        let at = |wanted: &str| {
+            drawn
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == wanted => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{wanted:?} is not drawn"))
+        };
+        let (tx, ty) = at("terminal");
+        assert!(
+            field.contains(tx + 1.0, ty + 1.0),
+            "the line is drawn outside the field"
+        );
+        let (lx, ly) = at("Open:");
+        assert!(
+            !field.contains(lx + 1.0, ly + 1.0),
+            "the label is inside the field"
+        );
+        let (bx, by) = at("OK");
+        assert!(
+            !field.contains(bx + 1.0, by + 1.0),
+            "a button is inside the field"
+        );
+        // Inside the box, and as tall as the field is drawn.
+        let content = dialog.layout().content;
+        assert!(field.x > content.x && field.y > content.y);
+        assert!(field.x + field.w < content.x + content.w);
+        assert!((field.h - INPUT_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    /// **The box wears the theme's window frame**: under the built-in frame
+    /// it is the size it always was, its title is on the frame's bar, and the
+    /// frame's close button lights under the pointer and cancels as Cancel
+    /// does.
+    #[test]
+    fn the_box_wears_the_themes_frame() {
+        let mut dialog = RunDialog::new();
+        dialog.set_position(100.0, 50.0);
+        dialog.show();
+        let layout = dialog.layout();
+        assert_eq!((layout.outer.w, layout.outer.h), (450.0, 180.0));
+        let drawn = dialog.render(&Palette::for_mode(false));
+        assert!(
+            drawn.iter().any(|c| matches!(c,
+                RenderCommand::Text { text, y, .. } if text == TITLE && *y < layout.content.y)),
+            "the title is not on the bar"
+        );
+        let close = layout.close().expect("the box can be closed");
+        let at = |kind| MouseEvent {
+            x: close.x + 2.0,
+            y: close.y + 2.0,
+            kind,
+        };
+        let palette = Palette::for_mode(false);
+        let unlit = dialog.render(&palette);
+        dialog.handle_mouse_event(&at(MouseEventKind::Move));
+        assert!(dialog.close_hovered, "the close button is not lit");
+        // And drawn lit: the frame draws it otherwise.
+        assert_ne!(
+            dialog.render(&palette),
+            unlit,
+            "the lit close button is drawn as the unlit one"
+        );
+        assert_eq!(
+            dialog.handle_mouse_event(&at(MouseEventKind::Press(MouseButton::Left))),
+            EventResult::Consumed
+        );
+        assert!(!dialog.is_visible());
+        // As Cancel does: cancelled, and closed.
+        assert_eq!(
+            dialog.drain_events(),
+            [RunDialogEvent::Cancel, RunDialogEvent::Closed]
+        );
+    }
+
+    /// **A theme's taller title bar makes a taller box**, centred as a whole,
+    /// its content -- the field with it -- under the bar.
+    #[test]
+    fn a_taller_title_bar_makes_a_taller_box() {
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tall",
+            appearance::decorations::DecorationStyle {
+                title_height: 50,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        let mut dialog = RunDialog::new();
+        dialog.set_frame(DialogFrame::from_settings(&settings, 1.0));
+        dialog.centre_on(1000.0, 800.0);
+        let layout = dialog.layout();
+        assert_eq!((layout.outer.w, layout.outer.h), (450.0, 200.0));
+        assert_eq!(dialog.position(), (275.0, 300.0));
+        assert!((layout.content.y - (300.0 + 1.0 + 50.0)).abs() < f32::EPSILON);
+        assert!((dialog.field_rect().y - (layout.content.y + INPUT_Y)).abs() < f32::EPSILON);
     }
 }

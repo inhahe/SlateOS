@@ -237,12 +237,22 @@ fn run_main() -> ExitCode {
     }
 
     let mut ok = true;
+    let mut have_read_stdin = false;
 
     for name in &files {
+        have_read_stdin |= name == "-";
         match fold_file(name, &settings, &mut out) {
             Ok(file_ok) => ok &= file_ok,
             Err(trouble) => return trouble.report(),
         }
+    }
+
+    // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) error
+    // (EXIT_FAILURE, errno, "-")`: measured, `fold <&-` says
+    // `fold: -: Bad file descriptor` twice, once for the read and once here.
+    if have_read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("fold: -: {}", strerror(&e));
+        ok = false;
     }
 
     // Buffered output has to reach the OS before success can be claimed; a
@@ -401,7 +411,8 @@ impl<'a> Folder<'a> {
 /// *write* failure ends the run, because there is nowhere left to put the rest.
 fn fold_file<W: Write>(name: &OsString, settings: &Settings, out: &mut W) -> Result<bool, Trouble> {
     let opened: io::Result<Box<dyn BufRead>> = if name == "-" {
-        Ok(Box::new(BufReader::new(io::stdin())))
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        Ok(Box::new(BufReader::new(stdfd::RawStdin)))
     } else {
         File::open(name).map(|f| Box::new(BufReader::new(f)) as Box<dyn BufRead>)
     };

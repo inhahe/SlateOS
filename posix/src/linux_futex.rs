@@ -7,7 +7,7 @@
 use crate::errno;
 use crate::interrupt::{Mark, Restart};
 use crate::stat::Timespec;
-use crate::syscall::{SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAKE, syscall1, syscall2};
+use crate::syscall::{SYS_FUTEX_WAKE, syscall2};
 
 // ---------------------------------------------------------------------------
 // Futex operations
@@ -112,11 +112,13 @@ const fn cmd_has_timeout(cmd: i32) -> bool {
 /// When a wait's time runs out: never (`None`), or at an instant on a clock.
 ///
 /// `FUTEX_WAIT`'s timeout is relative, and becomes the instant it comes to
-/// on `CLOCK_MONOTONIC`; `FUTEX_WAIT_BITSET`'s is absolute, on
-/// `CLOCK_MONOTONIC`, or on `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME`
-/// (`futex_init_timeout`).  An instant either way, as Linux keeps it for a
-/// restart (`restart->futex.time`): a wait restarted after a signal ends when
-/// the first would have.
+/// on `CLOCK_MONOTONIC`; `FUTEX_LOCK_PI`'s is absolute on `CLOCK_REALTIME`
+/// (`do_futex` sets `FLAGS_CLOCKRT` for it); `FUTEX_WAIT_BITSET`'s and
+/// `FUTEX_LOCK_PI2`'s are absolute, on `CLOCK_MONOTONIC`, or on
+/// `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (`futex_init_timeout`).  An
+/// instant either way, as Linux keeps it for a restart
+/// (`restart->futex.time`): a wait restarted after a signal ends when the
+/// first would have.
 fn deadline(
     cmd: i32,
     realtime: bool,
@@ -130,7 +132,7 @@ fn deadline(
         let clock = crate::time::CLOCK_MONOTONIC;
         return Some((clock, crate::lowlevellock::after(&now(clock), ns)));
     }
-    let clock = if realtime {
+    let clock = if realtime || cmd == FUTEX_LOCK_PI {
         crate::time::CLOCK_REALTIME
     } else {
         crate::time::CLOCK_MONOTONIC
@@ -172,7 +174,18 @@ fn check_uaddr(uaddr: *mut u32) -> Result<(), i32> {
 ///   `park` on this system spun instead of sleeping.
 /// - `FUTEX_WAKE` / `FUTEX_WAKE_BITSET`: wake up to `val` waiters; the
 ///   number woken.
-/// - `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI`: PI-mutex acquire/release; 0.
+/// - `FUTEX_LOCK_PI` / `FUTEX_LOCK_PI2`: take the priority-inheritance futex
+///   at `uaddr`, sleeping while another thread holds it and lending it this
+///   one's priority; 0, `EDEADLK` when the caller holds it, `ETIMEDOUT` once
+///   the deadline passes -- absolute, on `CLOCK_REALTIME` for `LOCK_PI`, on
+///   `CLOCK_MONOTONIC` (or with the flag `CLOCK_REALTIME`) for `LOCK_PI2`.
+///   Until 2026-10-06 the timeout was judged and then ignored, and
+///   `LOCK_PI2` was `ENOSYS`.
+/// - `FUTEX_TRYLOCK_PI`: the same without sleeping -- `EAGAIN` while another
+///   thread holds it; a word a dead owner left is taken (`ENOSYS` until
+///   2026-10-06).
+/// - `FUTEX_UNLOCK_PI`: release it, handing it to the highest-priority
+///   sleeper; `EPERM` when the caller does not hold it.
 /// - Anything else: `ENOSYS`, without looking at `uaddr` -- `do_futex`'s
 ///   default arm (Phase 130: a feature probe with a NULL placeholder must see
 ///   "not supported", not "bad pointer").
@@ -301,29 +314,59 @@ fn futex_inner(
                 Ok(ret)
             }
         }
-        FUTEX_LOCK_PI => {
-            check_uaddr(uaddr)?;
-            let ret = syscall1(SYS_FUTEX_LOCK_PI, uaddr as u64);
-            if ret < 0 {
-                Err(errno::errno_for(ret))
-            } else {
-                Ok(0)
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
+            let word = pi_word(uaddr)?;
+            let until = deadline(cmd, realtime, ts.as_ref(), crate::lowlevellock::now_on);
+            match crate::lowlevellock::futex_lock_pi_until(
+                word,
+                until.as_ref().map(|(c, t)| (*c, t)),
+            ) {
+                0 => Ok(0),
+                e => Err(errno::errno_for(e)),
+            }
+        }
+        FUTEX_TRYLOCK_PI => {
+            let word = pi_word(uaddr)?;
+            // The kernel's own trylock takes only a word that is 0; one try
+            // of the lock also takes a dead owner's, as Linux's does.
+            loop {
+                match crate::lowlevellock::futex_lock_pi(word, Some(0)) {
+                    0 => return Ok(0),
+                    // Held by another thread: Linux's `EWOULDBLOCK`.
+                    errno::native::TIMED_OUT => return Err(errno::EAGAIN),
+                    // A try that never sleeps is not interrupted; were it,
+                    // it would be tried again, as Linux restarts it.
+                    errno::native::INTERRUPTED => {}
+                    e => return Err(errno::errno_for(e)),
+                }
             }
         }
         FUTEX_UNLOCK_PI => {
-            check_uaddr(uaddr)?;
-            let ret = syscall1(SYS_FUTEX_UNLOCK_PI, uaddr as u64);
-            if ret < 0 {
-                Err(errno::errno_for(ret))
-            } else {
-                Ok(0)
+            let word = pi_word(uaddr)?;
+            match crate::lowlevellock::futex_unlock_pi(word) {
+                0 => Ok(0),
+                // The kernel's "not the owner" is Linux's `EPERM`.
+                errno::native::INVALID_ARGUMENT => Err(errno::EPERM),
+                e => Err(errno::errno_for(e)),
             }
         }
-        // Linux has REQUEUE, CMP_REQUEUE, WAKE_OP, TRYLOCK_PI, LOCK_PI2 and
-        // the requeue-PI pair; the kernel here has none of them yet.  Like
-        // `do_futex`'s default arm, this answers without reading `uaddr`.
+        // Linux has REQUEUE, CMP_REQUEUE, WAKE_OP and the requeue-PI pair.
+        // The kernel's requeue (`SYS_FUTEX_REQUEUE`) answers woken and
+        // requeued together, where `FUTEX_REQUEUE` answers the woken alone,
+        // and has no compare for `CMP_REQUEUE`; its requeue-PI pair has no
+        // caller here.  Like `do_futex`'s default arm, this answers without
+        // reading `uaddr`.
         _ => Err(errno::ENOSYS),
     }
+}
+
+/// The PI futex word at `uaddr`, once [`check_uaddr`] has passed it.
+fn pi_word<'a>(uaddr: *mut u32) -> Result<&'a core::sync::atomic::AtomicI32, i32> {
+    check_uaddr(uaddr)?;
+    // SAFETY: non-null and four-byte aligned (`check_uaddr`); the caller's
+    // contract makes it a futex word, live for the call.  `AtomicI32` has
+    // `u32`'s size and alignment.
+    Ok(unsafe { core::sync::atomic::AtomicI32::from_ptr(uaddr.cast::<i32>()) })
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +485,8 @@ mod tests {
             FUTEX_WAIT_BITSET,
             FUTEX_WAKE,
             FUTEX_LOCK_PI,
+            FUTEX_LOCK_PI2,
+            FUTEX_TRYLOCK_PI,
             FUTEX_UNLOCK_PI,
         ] {
             assert_eq!(
@@ -454,6 +499,8 @@ mod tests {
             FUTEX_WAIT,
             FUTEX_WAIT_BITSET,
             FUTEX_LOCK_PI,
+            FUTEX_LOCK_PI2,
+            FUTEX_TRYLOCK_PI,
             FUTEX_UNLOCK_PI,
             FUTEX_WAKE,
         ] {
@@ -533,6 +580,132 @@ mod tests {
             at(FUTEX_WAIT_BITSET, true, Some(&ts(11, 0))),
             Some((crate::time::CLOCK_REALTIME, 11, 0))
         );
+        // LOCK_PI's is absolute on CLOCK_REALTIME, flag or not; LOCK_PI2's
+        // as WAIT_BITSET's.
+        assert_eq!(
+            at(FUTEX_LOCK_PI, false, Some(&ts(12, 3))),
+            Some((crate::time::CLOCK_REALTIME, 12, 3))
+        );
+        assert_eq!(
+            at(FUTEX_LOCK_PI2, false, Some(&ts(12, 3))),
+            Some((mono, 12, 3))
+        );
+        assert_eq!(
+            at(FUTEX_LOCK_PI2, true, Some(&ts(12, 3))),
+            Some((crate::time::CLOCK_REALTIME, 12, 3))
+        );
+    }
+
+    /// The PI commands on the word, as Linux answers them.
+    #[test]
+    fn test_pi_commands() {
+        use crate::lowlevellock::{FUTEX_OWNER_DIED, pi_owner};
+        let me = pi_owner(crate::pthread::current_tid());
+        let mut word = 0u32;
+        let private = FUTEX_PRIVATE_FLAG;
+
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI | private, 0, None, 0),
+            (0, 0)
+        );
+        assert_eq!(word, me, "the owner's id");
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI, 0, None, 0),
+            (-1, errno::EDEADLK)
+        );
+        assert_eq!(
+            call(&raw mut word, FUTEX_TRYLOCK_PI, 0, None, 0),
+            (-1, errno::EDEADLK)
+        );
+        assert_eq!(
+            call(&raw mut word, FUTEX_UNLOCK_PI | private, 0, None, 0),
+            (0, 0)
+        );
+        assert_eq!(word, 0);
+        assert_eq!(
+            call(&raw mut word, FUTEX_UNLOCK_PI, 0, None, 0),
+            (-1, errno::EPERM),
+            "not held"
+        );
+
+        assert_eq!(call(&raw mut word, FUTEX_TRYLOCK_PI, 0, None, 0), (0, 0));
+        assert_eq!(word, me);
+        assert_eq!(call(&raw mut word, FUTEX_UNLOCK_PI, 0, None, 0), (0, 0));
+
+        // Another thread's: busy, and not this thread's to give back.
+        let other = me ^ 0x100;
+        word = other;
+        assert_eq!(
+            call(&raw mut word, FUTEX_TRYLOCK_PI, 0, None, 0),
+            (-1, errno::EAGAIN)
+        );
+        assert_eq!(
+            call(&raw mut word, FUTEX_UNLOCK_PI, 0, None, 0),
+            (-1, errno::EPERM)
+        );
+        // A deadline already passed: one try, then ETIMEDOUT -- LOCK_PI's
+        // on CLOCK_REALTIME, LOCK_PI2's on CLOCK_MONOTONIC.
+        let past = ts(0, 1);
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI, 0, Some(&past), 0),
+            (-1, errno::ETIMEDOUT)
+        );
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI2, 0, Some(&past), 0),
+            (-1, errno::ETIMEDOUT)
+        );
+        // One 30 ms off is waited for.
+        let start = std::time::Instant::now();
+        let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
+        let soon = crate::lowlevellock::after(&now, 30_000_000);
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI2, 0, Some(&soon), 0),
+            (-1, errno::ETIMEDOUT)
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(25));
+        assert_eq!(word, other, "untouched");
+
+        // A dead owner's word is free: taken, the flag kept.
+        word = FUTEX_OWNER_DIED;
+        assert_eq!(call(&raw mut word, FUTEX_TRYLOCK_PI, 0, None, 0), (0, 0));
+        assert_eq!(word, me | FUTEX_OWNER_DIED);
+        assert_eq!(call(&raw mut word, FUTEX_UNLOCK_PI, 0, None, 0), (0, 0));
+        word = FUTEX_OWNER_DIED;
+        let far = crate::lowlevellock::after(&now, 60_000_000_000);
+        assert_eq!(
+            call(&raw mut word, FUTEX_LOCK_PI2, 0, Some(&far), 0),
+            (0, 0)
+        );
+        assert_eq!(word, me | FUTEX_OWNER_DIED);
+        assert_eq!(call(&raw mut word, FUTEX_UNLOCK_PI, 0, None, 0), (0, 0));
+        assert_eq!(word, 0);
+    }
+
+    /// A PI lock with a deadline is taken when its holder gives it back in
+    /// time.
+    #[test]
+    fn test_pi_lock_waits_for_the_holder() {
+        let word = std::boxed::Box::into_raw(std::boxed::Box::new(0u32));
+        let shared = word as usize;
+        assert_eq!(call(word, FUTEX_LOCK_PI, 0, None, 0), (0, 0));
+        let waiter = std::thread::spawn(move || {
+            let w = shared as *mut u32;
+            let now = crate::lowlevellock::now_on(crate::time::CLOCK_REALTIME);
+            let later = crate::lowlevellock::after(&now, 60_000_000_000);
+            let got = call(w, FUTEX_LOCK_PI, 0, Some(&later), 0);
+            let mine = crate::lowlevellock::pi_owner(crate::pthread::current_tid());
+            // SAFETY: the word outlives both threads.
+            let held = unsafe { *w } == mine;
+            let back = call(w, FUTEX_UNLOCK_PI, 0, None, 0);
+            (got, held, back)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(call(word, FUTEX_UNLOCK_PI, 0, None, 0), (0, 0));
+        assert_eq!(waiter.join().unwrap(), ((0, 0), true, (0, 0)));
+        // SAFETY: the waiter has been joined; the word is this thread's alone.
+        assert_eq!(unsafe { *word }, 0);
+        // SAFETY: made above; nothing refers to it now.
+        drop(unsafe { std::boxed::Box::from_raw(word) });
     }
 
     fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
@@ -642,9 +815,8 @@ mod tests {
             FUTEX_REQUEUE,
             FUTEX_CMP_REQUEUE,
             FUTEX_WAKE_OP,
-            FUTEX_TRYLOCK_PI,
+            FUTEX_WAIT_REQUEUE_PI,
             FUTEX_CMP_REQUEUE_PI,
-            FUTEX_LOCK_PI2,
             14,
             99,
             -1,

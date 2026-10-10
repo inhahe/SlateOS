@@ -209,12 +209,21 @@ pub fn dup(handle: MemFdHandle) -> KernelResult<MemFdHandle> {
 /// Drop one reference to a memfd handle.  Removes the entry when the
 /// refcount reaches 0.
 pub fn close(handle: MemFdHandle) {
-    let mut table = MEMFD_TABLE.lock();
-    if let Some(mf) = table.get_mut(&handle.id()) {
-        mf.refcount = mf.refcount.saturating_sub(1);
-        if mf.refcount == 0 {
-            table.remove(&handle.id());
+    let destroyed = {
+        let mut table = MEMFD_TABLE.lock();
+        match table.get_mut(&handle.id()) {
+            Some(mf) => {
+                mf.refcount = mf.refcount.saturating_sub(1);
+                mf.refcount == 0 && table.remove(&handle.id()).is_some()
+            }
+            None => false,
         }
+    };
+    // A memfd is one open file description, so its final close ends its
+    // OFD record locks (`F_OFD_SETLK`), as `fs::handle::close` ends a
+    // file's. After the table lock: nothing is taken under it.
+    if destroyed {
+        crate::fs::reclock::release_memfd_ofd(handle.id());
     }
 }
 
@@ -248,6 +257,24 @@ pub fn name(handle: MemFdHandle) -> KernelResult<Vec<u8>> {
     let table = MEMFD_TABLE.lock();
     let mf = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
     Ok(mf.name.clone())
+}
+
+/// A copy of all the memfd's data, whatever its offset: the image an exec
+/// of it loads (`execveat(fd, "", ..., AT_EMPTY_PATH)`, glibc's `fexecve`),
+/// as runc and systemd exec a binary they wrote into one.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a closed handle; `OutOfMemory` when the copy cannot
+/// be allocated.
+pub fn contents(handle: MemFdHandle) -> KernelResult<Vec<u8>> {
+    let table = MEMFD_TABLE.lock();
+    let mf = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(mf.data.len())
+        .map_err(|_| KernelError::OutOfMemory)?;
+    out.extend_from_slice(&mf.data);
+    Ok(out)
 }
 
 /// Read up to `buf.len()` bytes starting at the current offset.  Returns

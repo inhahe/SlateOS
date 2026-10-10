@@ -65,10 +65,12 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Reopen};
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 use std::process::ExitCode;
 
 /// `uniq` exits 1 on a bad command line — measured, not assumed; the utilities
@@ -282,16 +284,14 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args, Env::from_process()) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("uniq (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1.
+        Ok(Request::Help) => say(help_text().as_bytes()),
+        Ok(Request::Version) => say(b"uniq (SlateOS coreutils) 0.1.0\n"),
         Ok(Request::Run(options, input, output)) => run(&options, &input, &output),
         Err(e) => {
             // Only the first line carries the `uniq: ` prefix, and the referral
@@ -300,6 +300,14 @@ fn run_main() -> ExitCode {
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("uniq", out, ExitCode::SUCCESS)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names
@@ -1036,33 +1044,34 @@ fn uniq_stream<R: BufRead, W: Write>(
 }
 
 fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
-    // Input is opened first, so a bad input name leaves the output file
-    // untouched rather than truncating it and then failing.
-    let source: Box<dyn Read> = if input == OsStr::new("-") {
-        Box::new(io::stdin())
-    } else {
-        match File::open(input) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("uniq: {}: {}", quotef_os(input), strerror(&e));
-                return ExitCode::from(1);
-            }
-        }
-    };
-    let sink: Box<dyn Write> = if output == OsStr::new("-") {
-        Box::new(io::stdout())
-    } else {
-        match File::create(output) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("uniq: {}: {}", quotef_os(output), strerror(&e));
-                return ExitCode::from(1);
-            }
-        }
-    };
+    // Upstream's `freopen (infile, "r", stdin)` and then `freopen (outfile,
+    // "w", stdout)`: each file is put on the stream's own descriptor, and the
+    // input goes first, so a bad input name leaves the output file untouched
+    // rather than truncating it and then failing. Opened as ordinary files
+    // instead, they landed wherever a descriptor was free -- `uniq f OUT >&-`
+    // put `f` on descriptor 1, then closed it in reporting a failure to create
+    // `OUT`, and the standard library aborted the process over the descriptor
+    // it had lost. A failure is reported with the `errno` glibc's `freopen`
+    // leaves: `uniq nosuch <&-` is `uniq: nosuch: Bad file descriptor`.
+    if input != OsStr::new("-")
+        && let Err(e) = stdfd::freopen(input, Reopen::Read, 0)
+    {
+        diag!("uniq: {}: {}", quotef_os(input), strerror(&e));
+        return ExitCode::from(1);
+    }
+    if output != OsStr::new("-")
+        && let Err(e) = stdfd::freopen(output, Reopen::Write, 1)
+    {
+        diag!("uniq: {}: {}", quotef_os(output), strerror(&e));
+        return ExitCode::from(1);
+    }
 
-    let mut reader = Reader::new(BufReader::with_capacity(64 * 1024, source));
-    let mut out = BufWriter::with_capacity(64 * 1024, sink);
+    // Descriptors 0 and 1 themselves. `io::stdin()` reads a closed one as
+    // empty, where upstream's `uniq <&-` is `uniq: error reading '-': Bad file
+    // descriptor`; `io::stdout()` answers a closed one's `EBADF` with success,
+    // where upstream's `uniq f >&-` is a write error.
+    let mut reader = Reader::new(BufReader::with_capacity(64 * 1024, stdfd::RawStdin));
+    let mut out = BufWriter::with_capacity(64 * 1024, stdfd::RawStdout);
 
     if let Err(e) = uniq_stream(&mut reader, &mut out, options) {
         return write_failure(&e);
@@ -1078,15 +1087,29 @@ fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
         diag!("uniq: error reading {}: {}", quoteaf_os(input), strerror(e));
         return ExitCode::from(1);
     }
+    // Upstream's `if (ferror (stdin) || fclose (stdin) != 0) error
+    // (EXIT_FAILURE, errno, _("error reading %s"), …)`: the input -- standard
+    // input, or the file `freopen`ed onto it -- is closed, and a failure to
+    // close it is the same complaint as a failure to read it.
+    drop(reader);
+    if let Err(e) = stdfd::close_stdin() {
+        diag!(
+            "uniq: error reading {}: {}",
+            quoteaf_os(input),
+            strerror(&e)
+        );
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
 }
 
 /// A failed write. GNU dies of `SIGPIPE` when the reader goes away, printing
-/// nothing; Rust masks that signal, so the same situation arrives as `EPIPE`
-/// and has to be recognised and kept quiet. Any other write failure is
-/// upstream's `write_error()`.
+/// nothing, and so does this since `stdfd::restore` put the signal back; an
+/// `EPIPE` is quiet only where it could not (see `stdfd::reader_gone`). Any
+/// other write failure -- `EPIPE` included, with `SIGPIPE` inherited ignored --
+/// is upstream's `write_error()`.
 fn write_failure(e: &io::Error) -> ExitCode {
-    if e.kind() == ErrorKind::BrokenPipe {
+    if stdfd::reader_gone(e) {
         return ExitCode::SUCCESS;
     }
     diag!("uniq: write error: {}", strerror(e));

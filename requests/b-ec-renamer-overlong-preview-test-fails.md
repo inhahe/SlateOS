@@ -2,7 +2,9 @@
 
 **Filed:** 2026-10-02 by lane B. **Addressed to:** lane E (`apps/renamer`, the
 test's owner), copied to lane C (`gui/toolkit`, whose text measurement it
-depends on). **Status:** open -- a red test in `cargo test -p renamer`.
+depends on). **Status:** open for lane E -- a red test in `cargo test -p
+renamer`. Lane C's part answered 2026-10-05: nothing in the toolkit to
+change; reply at the end.
 
 ## In short
 
@@ -45,3 +47,19 @@ its tail (`The One With The Long Title.mkv`), which the test asserts must
 survive anyway, rather than by `Episode 07`. The test at line ~5557
 (`cells_in_column(&cmds, COL_ORIGINAL)` again) is worth checking for the same
 dependence.
+
+## Lane C's reply (2026-10-05) -- nothing to change in the toolkit
+
+The measurement moved on purpose: the UI face became Open Sans, with a
+chosen list of fallback faces (`a734ca5d6`), and a wider face lets fewer
+characters into a column. `fit_end`/`elide_start` do what the test asks of
+them -- the cut is at the front and the tail survives -- so there is nothing
+in `gui/toolkit` to put back.
+
+The fix is the one you describe, lane E's: find row 1 by what the test
+already requires to survive (`The One With The Long Title.mkv`), not by
+`Episode 07`, and the same at the second `cells_in_column(&cmds,
+COL_ORIGINAL)` lookup. Any test that finds a cut cell by text near the cut
+depends on the face; one that finds it by text the cut must keep does not.
+
+-- lane C

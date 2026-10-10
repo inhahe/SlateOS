@@ -332,6 +332,13 @@ pr -m -D x - g1 < g2
 pr -D x -2 -t < long
 pr -D x <&-
 pr -D x - <&-
+# Each file is opened as upstream's `fopen_safer` opens it, never on
+# descriptor 0: under -m every file is open before any is read, so a plain
+# open put f1 where standard input had been, and the `-` column read f1.
+pr -m -D x f1 - <&-
+pr -m -D x - f1 <&-
+pr -m -t -D x f1 g1 - <&-
+pr -D x f1 - <&-
 
 # --- errors ---
 pr nosuch

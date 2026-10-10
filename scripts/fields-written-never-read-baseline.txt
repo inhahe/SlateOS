@@ -42,7 +42,9 @@
 #     device for an app records the choice and nothing acts on it. Deferred
 #     only because design-decisions 815 moves this whole panel into
 #     `apps/settings`, and fixing the copy that is about to be deleted is
-#     work done twice. The port must not carry it over.
+#     work done twice. The port must not carry it over. DELETED 2026-10-05
+#     with the whole module, which nothing in the desktop used
+#     (design-decisions 1477).
 #   apps/netmanager/src/main.rs:diagnostics_running -- TRIAGED 2026-09-14, and
 #     it is not a drawing bug. `run_diagnostics` sets it true, builds six
 #     canned results, and sets it false again before returning, so no renderer
@@ -170,7 +172,8 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #     recorded and never shown, so a program that fails at every boot looks
 #     the same as one that ran a second ago.
 #   sound_settings:output_device_id, volume_override -- per-app audio
-#     routing and volume, recorded and never applied.
+#     routing and volume, recorded and never applied. DELETED 2026-10-05
+#     with the module.
 #   lib.rs:shortcut_message -- FIXED 2026-09-14. It is drawn on the shortcut
 #     card now. Kept here for the reason: the whole of the shortcut editor's
 #     feedback was composed and drawn nowhere, so rebinding a key was silent
@@ -191,8 +194,6 @@ gui/desktop/src/bluetooth.rs:discoverable
 #   that has to be refreshed by hand is the stale half of a pair waiting
 #   to happen, and this gate finds them because the cache is what nobody
 #   reads. Fix in both cases is a deletion, keeping the live computation.
-gui/desktop/src/sound_settings.rs:volume_override
-gui/desktop/src/sound_settings.rs:output_device_id
 gui/desktop/src/startup_settings.rs:last_run_at
 # FIXED 2026-09-14 -- the dragged glyph is drawn at alpha 110. Kept for the
 # reasoning:

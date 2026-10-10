@@ -955,25 +955,143 @@ diff_ours_example() {
 #
 # The check is the invariant a successful `cargo build` establishes: cargo's
 # freshness for a path dependency is mtime-based, so any source file newer than
-# the binary is a file the build should have reacted to and did not. One
-# `cargo clean -p` and one retry, then refuse -- running anyway is how the
-# false green happens.
+# the artifact built from it is a file the build should have reacted to and did
+# not. One `cargo clean -p` and one retry, then refuse -- running anyway is how
+# the false green happens.
 #
-# Scanned: `userspace/` (this package and every path dependency it has) plus
-# the crates it reaches outside it. `target` directories are pruned, since a
-# build's own `*.rs` output is always newer than the binary and always
-# irrelevant.
-diff_fresh_roots() {
-  for diff_r in "$root/userspace" "$root/sha2" "$root/tzrules"; do
-    [ -d "$diff_r" ] && printf '%s\n' "$diff_r"
-  done
+# ## Which sources: the ones each artifact was built from
+#
+# Each artifact's own dependency file, which the build writes beside it, lists
+# them: cargo's `<bin>.d` beside a binary (absolute paths, and every path
+# dependency's sources as well as the binary's own), and rustc's
+# `<crate>-<hash>.d` beside a library's `.rlib` (paths relative to the
+# workspace root, which is `$root`). Both are make rules.
+#
+# Until 2026-10-08 the list was every `*.rs` under `userspace/`, `sha2/` and
+# `tzrules/`, handed to `find` as an unquoted `$(diff_fresh_roots)` -- under a
+# root that, like every worktree on this machine, sits in "visual studio
+# projects". The roots split at the spaces, `find` was asked for
+# "/mnt/e/visual", "studio" and "projects/...", and with its errors sent to
+# /dev/null it found nothing, every run: the check described above had never
+# once looked at a source. Quoting the roots would not have been enough. The
+# library would then have been compared with every binary's source and every
+# other package's, none of which it is built from, and any edit anywhere would
+# have cost a clean rebuild.
+#
+# ## Which clock: WSL's runs ahead of the files'
+#
+# The two stamps compared come from two clocks. The sources sit on the Windows
+# drive, and Windows stamps them; the artifacts sit in `$target_dir`, inside
+# WSL, and WSL's clock stamps those -- and it drifts ahead of the host's. On
+# 2026-10-08 it ran 5 s ahead, and 6.6 s eleven minutes later. Cargo's own
+# freshness is the same comparison, so an edit made within that lead of a
+# build *starting* reads as older than the build that missed it, and cargo
+# keeps the stale artifact: `pr-diff.sh`, run with a change stashed and again
+# a few seconds after it was restored, compared one stale binary twice and
+# reported the change as making no difference. So a source is late when it is
+# newer than the artifact's stamp less the lead and a second of slack
+# (`diff_measure_clock_lead`). An edit made in the seconds before a build can
+# cost one needless clean rebuild that way; the alternative is a false green.
+#
+# That is also a candidate cause of the 2026-08-24 stale library above: a
+# library replayed from cache while the binaries relinked is what an edit
+# inside the lead window produces.
+#
+# A lead that *shrinks* -- WSL's clock set right -- cannot be allowed for:
+# artifacts stamped under the old lead stay "newer" than edits made in the
+# window after them. After correcting the clock, clear the caches once
+# (`rm -rf ~/.cache/slateos-diff-target`; they are rebuilt on demand).
+
+# How many seconds WSL's clock runs ahead of the stamps files under $root are
+# given: 0 when it does not, or when that cannot be measured. Measured by
+# creating a file in `$root/target` -- ignored by git, and present in every
+# worktree that has built anything -- and reading back its stamp. WSL's time is
+# taken *before* the file exists, so this underestimates by the write's own
+# latency, which the second of slack covers; below half a second it is 0.
+diff_measure_clock_lead() {
+  local diff_now diff_probe diff_stamp
+  mkdir -p "$root/target" 2>/dev/null || { echo 0; return 0; }
+  diff_now=$(date +%s.%N)
+  diff_probe=$(mktemp "$root/target/.diff-wsl-clock.XXXXXX" 2>/dev/null) || {
+    echo 0
+    return 0
+  }
+  diff_stamp=$(stat -c %.9Y "$diff_probe" 2>/dev/null)
+  rm -f "$diff_probe"
+  [ -n "$diff_stamp" ] || { echo 0; return 0; }
+  awk -v n="$diff_now" -v s="$diff_stamp" \
+    'BEGIN { d = n - s; if (d < 0.5) print 0; else printf "%.1f\n", d }'
 }
 
-# The first source file newer than $1, or nothing.
-diff_newer_than() {
-  # shellcheck disable=SC2046
-  find $(diff_fresh_roots) -name target -prune -o \
-       -name '*.rs' -newer "$1" -print -quit 2>/dev/null
+# The sources dependency file $1 lists, one per line: the prerequisites of its
+# first rule, with make's escaped spaces restored and a relative path taken
+# from $root. Both builds write each rule on a single line.
+diff_dep_sources() {
+  awk -v root="$root" 'NR == 1 {
+    gsub(/\\ /, "\001")
+    if (!sub(/^[^ ]*: */, "")) exit
+    n = split($0, w, " ")
+    for (i = 1; i <= n; i++) {
+      if (w[i] == "") continue
+      gsub(/\001/, " ", w[i])
+      if (substr(w[i], 1, 1) != "/") w[i] = root "/" w[i]
+      print w[i]
+    }
+    exit
+  }' "$1"
+}
+
+# `SOURCE|NOTE` for a source artifact $1 was built from (by dependency file $2)
+# that is late for it -- newer than it outright, with an empty note, or only
+# once WSL's lead is allowed for, with a note saying so -- or nothing. A listed
+# file that no longer exists is not counted: a deleted source is an edit the
+# build has already reacted to, or will on its retry.
+#
+# The lead is allowed for only on files under `$root`, which Windows stamps. A
+# file the build generated -- `file`'s `OUT_DIR/magic.mgc`, which its binary
+# carries -- sits in `$target_dir` beside the artifact, stamped by WSL's own
+# clock, so for it only "newer" is late. Until 2026-10-08 the lead applied to
+# every source, and `file-diff.sh` refused every run: the binary is linked a
+# second after the database is written, inside any lead of more than that, so
+# it read as older than its own input even after the clean rebuild that should
+# have settled it.
+diff_late_source() {
+  local diff_art
+  diff_art=$(stat -c %.9Y "$1" 2>/dev/null) || return 0
+  diff_dep_sources "$2" | xargs -d '\n' -r stat -c '%.9Y %n' 2>/dev/null \
+    | awk -v a="$diff_art" -v l="${diff_clock_lead:-0}" -v r="$root/" '
+      {
+        n = $1
+        p = substr($0, index($0, " ") + 1)
+        if (n > a) { if (hard == "") hard = p; next }
+        if (substr(p, 1, length(r)) != r) next
+        if (l > 0 && n > a - l - 1 && soft == "") soft = p
+      }
+      END {
+        if (hard != "") printf "%s|\n", hard
+        else if (soft != "")
+          printf "%s|, once a WSL clock lead of %s s over the files is allowed for\n", soft, l
+      }'
+}
+
+# The package whose manifest is nearest above file $1, by its `[package]`
+# name -- or nothing, when the nearest manifest is the workspace's own.
+diff_owner_package() {
+  local diff_d=$1
+  while :; do
+    diff_d=${diff_d%/*}
+    [ -n "$diff_d" ] || return 0
+    if [ -f "$diff_d/Cargo.toml" ]; then
+      awk '
+        /^[ \t]*\[/ { diff_in = ($0 ~ /^[ \t]*\[package\]/); next }
+        diff_in && /^[ \t]*name[ \t]*=/ {
+          sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t]*(#.*)?$/, ""); gsub(/["'\'']/, "")
+          print; exit
+        }
+      ' "$diff_d/Cargo.toml"
+      return 0
+    fi
+  done
 }
 
 # The manifest for package $1, or nothing.
@@ -1052,25 +1170,49 @@ diff_lib_artifact() {
   printf '%s\n' "${diff_found#* }"
 }
 
-# Print `SUBJECT|COMPLAINT` and succeed if $1 is stale; fail silently if not.
+# rustc's dependency file for the library artifact $1: `<crate>-<hash>.d`
+# beside `lib<crate>-<hash>.rlib`, in the `deps/` layout and the `build/` one
+# alike.
+diff_lib_depfile() {
+  local diff_base
+  diff_base=${1##*/}
+  diff_base=${diff_base#lib}
+  printf '%s/%s.d\n' "${1%/*}" "${diff_base%.rlib}"
+}
+
+# Print `SUBJECT|COMPLAINT|SOURCE` and succeed if artifact $1 is stale against
+# dependency file $2; fail silently if not. SOURCE is the late source, or empty
+# when the complaint is not about one.
 #
-# The right-hand side is a whole predicate rather than just the offending
-# filename, because there are now four ways to be stale and only one of them is
+# The middle is a whole predicate rather than just the offending filename,
+# because there are several ways to be stale and only one of them is
 # "something is newer than this". `diff_assert_fresh` prints it verbatim.
-diff_stale_one() {
+diff_stale_against() {
   local diff_late
-  if [ ! -f "$1" ]; then
-    printf '%s|was not produced by the build at all\n' "$1"
+  if [ ! -f "$2" ]; then
+    printf '%s|has no dependency file (%s) to be checked against|\n' "$1" "$2"
     return 0
   fi
-  diff_late=$(diff_newer_than "$1")
+  diff_late=$(diff_late_source "$1" "$2")
   [ -z "$diff_late" ] && return 1
-  printf '%s|is older than %s\n' "$1" "$diff_late"
+  printf '%s|is older than %s%s|%s\n' "$1" "${diff_late%%|*}" "${diff_late#*|}" \
+    "${diff_late%%|*}"
   return 0
 }
 
-# `SUBJECT|COMPLAINT` for the first stale artifact, or nothing.
-# An artifact the build did not produce at all counts as stale.
+# `diff_stale_against` for a binary or an example, whose dependency file is
+# cargo's `<name>.d` beside it -- and stale outright when it was never built.
+diff_stale_one() {
+  if [ ! -f "$1" ]; then
+    printf '%s|was not produced by the build at all|\n' "$1"
+    return 0
+  fi
+  diff_stale_against "$1" "$1.d"
+}
+
+# `SUBJECT|COMPLAINT|SOURCE` for the first stale artifact, or nothing (see
+# `diff_stale_against`). An artifact the build did not produce at all counts as
+# stale.
 #
 # ## The library is checked first, and that is the point
 #
@@ -1089,27 +1231,23 @@ diff_stale_one() {
 # says when it was linked and nothing about how old the code inside it is. So
 # the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
-  local diff_b diff_bin diff_late diff_lib diff_p diff_rc
+  local diff_b diff_bin diff_lib diff_p diff_rc
   for diff_p in $DIFF_PKG; do
     diff_lib=$(diff_lib_artifact "$diff_p")
     diff_rc=$?
     if [ "$diff_rc" = 2 ]; then
-      printf '%s|%s\n' "the package \`$diff_p\`" \
+      printf '%s|%s|\n' "the package \`$diff_p\`" \
         "has no Cargo.toml anywhere under $root -- is DIFF_PKG right?"
       return 0
     fi
     if [ "$diff_rc" != 0 ]; then
-      printf '%s|%s\n' "\`$diff_p\`'s library" \
+      printf '%s|%s|\n' "\`$diff_p\`'s library" \
         "is declared in its Cargo.toml, but the build produced no .rlib for it"
       return 0
     fi
     # Empty: the package has no library, so there is nothing here to be stale.
     [ -z "$diff_lib" ] && continue
-    diff_late=$(diff_newer_than "$diff_lib")
-    if [ -n "$diff_late" ]; then
-      printf '%s|%s\n' "$diff_lib" "is older than $diff_late"
-      return 0
-    fi
+    diff_stale_against "$diff_lib" "$(diff_lib_depfile "$diff_lib")" && return 0
   done
   for diff_b in $DIFF_BINS; do
     diff_bin=$(diff_ours "$diff_b")
@@ -1123,13 +1261,24 @@ diff_first_stale() {
 }
 
 diff_assert_fresh() {
-  local diff_stale
+  local diff_complaint diff_owner diff_rest diff_stale
+  # Global, so that the `$(...)` subshells below see it.
+  diff_clock_lead=$(diff_measure_clock_lead)
   diff_stale=$(diff_first_stale)
   [ -z "$diff_stale" ] && return 0
 
+  diff_rest=${diff_stale#*|}
+  diff_complaint=${diff_rest%|*}
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
-  for diff_p in $DIFF_PKG; do
+  echo "  $diff_complaint -- the build cache is stale. Cleaning." >&2
+  # The package that owns the late source is cleaned too: when it is a path
+  # dependency rather than the subject, cleaning the subject alone relinks the
+  # binaries against the same stale library, and the second look below -- at
+  # binaries stamped after the source -- would pass them.
+  diff_owner=
+  [ -n "${diff_rest##*|}" ] && diff_owner=$(diff_owner_package "${diff_rest##*|}")
+  case " $DIFF_PKG " in *" $diff_owner "*) diff_owner= ;; esac
+  for diff_p in $DIFF_PKG $diff_owner; do
     ( cd "$root" && cargo clean -p "$diff_p" \
         --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
   done
@@ -1139,8 +1288,9 @@ diff_assert_fresh() {
 
   diff_stale=$(diff_first_stale)
   [ -z "$diff_stale" ] && return 0
+  diff_rest=${diff_stale#*|}
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  STILL ${diff_stale#*|}, after a clean rebuild." >&2
+  echo "  STILL ${diff_rest%|*}, after a clean rebuild." >&2
   echo "  Refusing to run: the comparison would be against a binary nobody built." >&2
   return 1
 }

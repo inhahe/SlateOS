@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gitenv  # noqa: E402
 import msysbash  # noqa: E402  (the bash boot-test.sh runs under; see run_fn)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,7 +66,7 @@ def _remove_patiently(path: Path) -> None:
         if delay:
             time.sleep(delay)
         try:
-            shutil.rmtree(path)
+            gitenv.remove_tree(path, attempts=1)
             return
         except FileNotFoundError:
             return

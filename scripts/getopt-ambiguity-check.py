@@ -569,6 +569,23 @@ def find_runner() -> tuple[list[str] | None, str]:
 POSSIBILITY_RE = re.compile(r"'--([^']*)'")
 
 
+def in_scratch(command: str) -> str:
+    """`command`, run by the probe's bash in a directory of its own that is
+    removed afterwards, whatever the utility left in it.
+
+    The directory is there so that a utility which writes something -- one
+    probed with `--help` might -- writes it nowhere that matters. Until
+    2026-10-05 the probes `exec`ed the utility from `cd "$(mktemp -d)"`, and
+    with bash replaced there was nothing left to remove the directory: one
+    empty `tmp.*` in WSL's `/tmp` per utility probed, per run, hundreds a day
+    (known-issues D-WSL-TMP-GATHERS-EMPTY-DIRECTORIES). The probe's exit status
+    is not read (`run_probe`), so keeping bash to clean up changes nothing
+    else.
+    """
+    return ('export LC_ALL=C.UTF-8; d=$(mktemp -d) || exit 1; cd "$d" || exit 1; '
+            f'{command}; cd /; rm -rf "$d"')
+
+
 def gnu_table(runner: list[str], util: str) -> list[str] | None:
     """GNU's own long-option names, in declaration order, or ``None``.
 
@@ -580,8 +597,7 @@ def gnu_table(runner: list[str], util: str) -> list[str] | None:
     """
     out = run_probe(
         runner,
-        'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
-        'exec timeout 5 "$1" --=x 2>&1 </dev/null',
+        in_scratch('timeout 5 "$1" --=x 2>&1 </dev/null'),
         [util],
         60,
         f"`{util} --=x`",
@@ -619,8 +635,7 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
     """
     out = run_probe(
         runner,
-        'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
-        'exec timeout 5 "$1" --help 2>&1 </dev/null',
+        in_scratch('timeout 5 "$1" --help 2>&1 </dev/null'),
         [util],
         60,
         f"`{util} --help`",
@@ -850,7 +865,7 @@ for p in "$@"; do
         *)                       echo "$p resolves" ;;
     esac
 done
-cd /; rmdir "$d" 2>/dev/null || true
+cd /; rm -rf "$d"
 """
     # A timeout raises GnuUnreachable from run_probe. It used to return {} --
     # "unmeasured rather than half-measured", which was right about half

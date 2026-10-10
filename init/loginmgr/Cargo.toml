@@ -23,5 +23,10 @@ authlib = { path = "../../userspace/authlib" }
 guitk = { path = "../../gui/toolkit" }
 userdb = { path = "../../userspace/userdb" }
 
+[dev-dependencies]
+# A database of the tests' own, for the ones that check this program against
+# the file rather than against the list it loaded.
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

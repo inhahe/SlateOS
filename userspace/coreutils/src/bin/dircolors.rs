@@ -492,8 +492,8 @@ fn main() -> std::process::ExitCode {
 fn run() -> std::process::ExitCode {
     use coreutils::diag;
     use coreutils::errmsg::strerror;
-    use coreutils::stdfd::{self, Stream};
-    use std::io::{BufRead, BufReader, Read, Write};
+    use coreutils::stdfd::{self, Reopen, Stream};
+    use std::io::{BufRead, BufReader, Write};
     use std::process::ExitCode;
 
     stdfd::restore();
@@ -517,7 +517,16 @@ fn run() -> std::process::ExitCode {
             return stdfd::close_stdout("dircolors", out, ExitCode::SUCCESS);
         }
         Request::PrintDatabase => {
-            let _ = out.write_all(DATABASE);
+            // Upstream's `puts` per line, not one write of the whole text:
+            // what is still buffered when the stream is closed decides
+            // whether a full disk is reported with its reason. Measured,
+            // `dircolors -p >/dev/full` is `write error: No space left on
+            // device`; a single 5481-byte write drained everything at once
+            // and left only the reason-less `write error`.
+            for line in DATABASE.split_inclusive(|&b| b == b'\n') {
+                // Deliberately unread: `close_stdout` reports a failed write.
+                let _ = out.write_all(line);
+            }
             return stdfd::close_stdout("dircolors", out, ExitCode::SUCCESS);
         }
         Request::Run {
@@ -569,23 +578,24 @@ fn run() -> std::process::ExitCode {
         }
         Some(name) => {
             let name_b = name_bytes.as_deref().unwrap_or_default();
-            // `freopen` for a name, the standard input for `-`.
-            let reader: Box<dyn Read> = if name_b == b"-" {
-                Box::new(std::io::stdin())
-            } else {
-                match std::fs::File::open(name) {
-                    Ok(f) => Box::new(f),
-                    Err(e) => {
-                        diag!(
-                            "dircolors: {}: {}",
-                            coreutils::quote::quotef(name_b),
-                            strerror(&e)
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                }
-            };
-            let mut reader = BufReader::new(reader);
+            // `freopen (filename, "r", stdin)` for a name, the standard input
+            // for `-`: either way upstream reads `stdin`, and then `fclose`s it
+            // below. The name's file goes onto descriptor 0 itself, and a
+            // failure is reported with the `errno` glibc's `freopen` leaves:
+            // `dircolors nosuch <&-` is `dircolors: nosuch: Bad file
+            // descriptor` (see `stdfd::freopen`).
+            if name_b != b"-"
+                && let Err(e) = stdfd::freopen(name, Reopen::Read, 0)
+            {
+                diag!(
+                    "dircolors: {}: {}",
+                    coreutils::quote::quotef(name_b),
+                    strerror(&e)
+                );
+                return ExitCode::FAILURE;
+            }
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+            let mut reader = BufReader::new(stdfd::RawStdin);
             let mut line = Vec::new();
             loop {
                 line.clear();
@@ -608,6 +618,24 @@ fn run() -> std::process::ExitCode {
                         break;
                     }
                 }
+            }
+            drop(reader);
+            // What the parse still had to say comes first: upstream prints it
+            // inside `dc_parse_stream`, before the close.
+            for message in parser.diags.drain(..) {
+                diag!("dircolors: {message}");
+            }
+            // `if (fclose (stdin) != 0) { error (0, errno, "%s", quotef
+            // (filename)); return false; }`. Measured, `dircolors - <&-` says
+            // `dircolors: -: read error: Bad file descriptor` and then
+            // `dircolors: -: Bad file descriptor` for this.
+            if let Err(e) = stdfd::close_stdin() {
+                diag!(
+                    "dircolors: {}: {}",
+                    coreutils::quote::quotef(name_b),
+                    strerror(&e)
+                );
+                parser.ok = false;
             }
         }
     }

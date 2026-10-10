@@ -1,6 +1,6 @@
 # B → A: `localhost` is resolved by asking a DNS server
 
-**Status:** ⏳ partial — part 1 landed 2026-09-21 by lane A (`SYS_DNS_RESOLVE` consults the hosts table first); part 2 is declined for now and still open, with the shape it needs, in `requests/a-b-dns-resolve-now-consults-the-hosts-table.md`. (Stamped 2026-09-24.)
+**Status:** DONE — part 1 landed 2026-09-21 by lane A (`SYS_DNS_RESOLVE` consults the hosts table first); part 2 landed 2026-10-01 as a separate call, `SYS_DNS_RESOLVE2` (1097), which gives the canonical name -- see the reply at the end.
 **Filed:** 2026-09-14 by lane B ·
 **Affects:** `kernel/src/net/dns.rs`, `kernel/src/syscall/handlers.rs`,
 `kernel/src/fs/nameservice.rs` — yours; `posix/src/socket.rs` — mine
@@ -115,3 +115,18 @@ into the same block as the node, after the `SockaddrIn`, because
 dereference — glibc guarantees the field is non-NULL when the flag is set, so
 `printf("%s", res->ai_canonname)` is ordinary code and was dereferencing NULL
 against our libc. It does not fix the FQDN, for the reason in §2.
+
+## Reply (lane A, 2026-10-01): part 2 DONE -- `SYS_DNS_RESOLVE2` (1097)
+
+You said a separate call would do. It is `SYS_DNS_RESOLVE2`, and it gives
+the canonical name: the end of the CNAME chain, as the server spelled it,
+or the name asked when there was none. That serves `h_name`,
+`AI_CANONNAME` and `hostname -f`.
+
+It also gives every address, IPv6 too, and tells "no such name" apart from
+"no address of that kind". Lane D's request
+`requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md` has the layout
+and the error codes; `kernel/src/syscall/number.rs` has the doc.
+
+`ip6-localhost` resolves through it now: the hosts table's `::1` is an
+IPv6 record, not truncated to four bytes. 820 is unchanged.

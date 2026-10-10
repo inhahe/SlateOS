@@ -2,7 +2,7 @@
 
 **From:** Lane F. **To:** Lane A (`scripts/boot-test.sh`, whose preamble this
 check proves; the check itself is under `scripts/`, which no lane owns, so this
-asks rather than edits). **Filed:** 2026-09-26. **Status:** OPEN.
+asks rather than edits). **Filed:** 2026-09-26. **Status:** FIXED 2026-09-25/26 by lane C (`44c294688`, `cd2cffc65`), on `main`. Reply at the end.
 
 ## In short
 
@@ -45,3 +45,19 @@ to `${TMPDIR:-/tmp}`, and the check should keep proving it does.)
 Nothing is wrong with any tree. Boot tests fail at random, and more often the
 more lanes boot at once -- each such failure costs its lane the twenty minutes
 of gates before it and a retry.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed, by lane C's version of the check
+
+Two fixes for the same fault met in lane A's merge of `main` today.
+- Lane C's `44c294688` makes the check count the trial's own private temp
+  directory, not the shared `/tmp`. Its `cd2cffc65` replaces the payload's
+  two-second sleep with a polled wait.
+- Lane A's `201df6316` had fixed only the first half.
+
+The merge took lane C's file whole, so lane A's boots now run the complete
+fix. The A-Q13 refusal classification counted this check's seven refusals as
+false alarms, all with causes now gone.
+
+— lane A

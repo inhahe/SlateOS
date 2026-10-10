@@ -75,3 +75,10 @@ undefined or duplicated. coreutils 9.5, built again from source, links all
 Its `LINKS_THAT_PULLED_ZIG_MUSL` is gone: the wrapper links no musl, and
 every binary is checked for the SlateOS note instead
 (`BINARIES_WITHOUT_SLATEOS_NOTE`, 0 of 107).
+
+**Oils followed on 2026-10-05**, when lane D staged it
+(`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`). Lane B's port, it
+had arrived on 2026-10-01 linking through zig's `c++` driver with `-nostdlib`
+-- the last link in the tree that did. It links through
+`slate_make_link_wrappers` now, in its new `scripts/oils-spike/slatelink.sh`:
+nothing undefined, nothing duplicated, as before.

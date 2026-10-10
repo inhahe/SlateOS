@@ -1554,7 +1554,7 @@ fn format_pts_name(id: u32, out: &mut [u8; PTS_NAME_MAX]) -> usize {
 /// rather than computing `handle >> 1`: the handle encoding is the kernel's
 /// business, and syscall 551 exists precisely so that libc need not depend
 /// on it.
-fn slave_id_of(handle: u64) -> Option<u32> {
+pub(crate) fn slave_id_of(handle: u64) -> Option<u32> {
     let ret = crate::syscall::syscall1(crate::syscall::SYS_PTY_SLAVE_ID, handle);
     if errno::translate(ret) < 0 {
         return None;

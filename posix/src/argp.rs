@@ -322,7 +322,7 @@ fn exit_now(status: i32) -> ! {
 /// `program_invocation_short_name`, which messages use without a state.
 fn short_program_name() -> *mut u8 {
     // SAFETY: a plain read of the word `__libc_start_main` set.
-    unsafe { (&raw const crate::crt::__progname).read().cast_mut() }
+    unsafe { crate::crt::progname_slot().read().cast_mut() }
 }
 
 /// A C string's bytes, without its NUL: `(null)` for NULL, as `%s` prints it.

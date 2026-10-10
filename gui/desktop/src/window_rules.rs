@@ -1,6 +1,12 @@
-//! Window Rules Engine
+//! Window rules in the desktop shell: the settings panel, and the rules
+//! themselves under the names the shell has always used.
 //!
-//! Allows users to define rules that automatically apply window behavior
+//! The rules, the engine that applies them and the file they are kept in
+//! live in their own crate, `windowrules`, so that Settings can read and
+//! write `window-rules.yaml` without linking the shell. What stays here is
+//! the panel that draws them and the re-export below.
+//!
+//! A user defines rules that automatically apply window behavior
 //! when a window first appears. Rules match by window title or by the program
 //! the window belongs to (its [`app_id`](crate::ManagedWindow::app_id)), and
 //! can express:
@@ -11,6 +17,7 @@
 //! - Start minimized / maximized / fullscreen
 //! - Opacity / transparency
 //! - Skip taskbar / skip alt-tab
+//! - Minimise to the system tray (and, with start minimized, start there)
 //! - Force-assign to specific monitor
 //! - Custom title bar visibility
 //!
@@ -19,25 +26,17 @@
 //!
 //! # What the shell can actually carry out today
 //!
-//! Five of [`RuleActions`]'s seventeen fields reach the compositor:
-//! `skip_taskbar` and `skip_alt_tab` (which are shell-side decisions and need
-//! no protocol at all), `initial_state` when it is `Minimized` or `Maximized`,
-//! `snap_zone`, and `desktop`. The other twelve have **no channel** — the
-//! control protocol's geometry requests (`Move`, `Resize`, `SetOpacity`,
-//! `SetFullscreen`) all resolve against the *sender's own* window, so the shell
-//! cannot use them on a window belonging to someone else, and nothing on the
-//! wire expresses "always on top" or "cannot be closed" at all.
-//!
-//! The unreachable ones are stored, exported, displayed and then ignored rather
-//! than faked. Faking `position` in particular would mean the shell choosing
-//! where a window goes, which is the compositor's job (§506) — and the shell is
-//! never told the display bounds, so it could not choose correctly if it
-//! wanted to. See `known-issues.md`
+//! Sixteen of [`RuleActions`]'s eighteen fields: `skip_taskbar`,
+//! `skip_alt_tab` and `to_tray` in the shell itself, and the rest through
+//! requests only a shell may send about another program's window -- see
+//! `DesktopShell::rule_requests`. The two that do nothing yet are
+//! `target_monitor`, which waits on the compositor modelling more than one
+//! display, and `no_decorations`, which waits on a request to take a frame
+//! away. They are stored and shown rather than faked. See `known-issues.md`
 //! `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
 
 use appearance::{Edge, Palette, Surface, readable_on};
 use guitk::color::Color;
-use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -91,775 +90,51 @@ const SUMMARY_INSET: f32 = 86.0;
 //   in known-issues.md rather than designed away here, because converting a
 //   module and redesigning it at the same time makes both unreviewable.
 
-// ============================================================================
-// Rule matching criteria
-// ============================================================================
+pub use windowrules::{
+    EvalMode, InitialState, MatchCriteria, PositionSpec, RuleActions, RuleId, SizeSpec, WindowRule,
+    WindowRulesManager,
+};
 
-/// How a rule matches against window properties.
+/// What to tell the user about rules in their file that cannot be read: a
+/// notice's title and body, or `None` when there is nothing to tell.
 ///
-/// # Why there is one program criterion and not two
+/// # A rule that cannot be read is said, not skipped in silence
 ///
-/// This had a `ProcessName` and a `WindowClass`, matched against two separate
-/// strings the caller was expected to supply. Neither existed anywhere: a
-/// window on this desktop carries a title, a pid and — since the app-id work —
-/// an id its program declares, and nothing on the wire has ever carried a
-/// "class". The two variants were X11's duality (`WM_CLASS`'s instance and
-/// class) transplanted into a system that does not have it, and they were the
-/// reason every default rule below was unmatchable.
-///
-/// So both collapse into [`AppId`](Self::AppId), which matches the one
-/// identifier a window actually has. That is the Wayland model, and it is the
-/// honest one here: there is exactly one answer to "which program is this?",
-/// so there is exactly one criterion for it.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MatchCriteria {
-    /// Match window title exactly.
-    TitleExact(String),
-    /// Match if window title contains this substring (case-insensitive).
-    TitleContains(String),
-    /// Match the program the window belongs to (case-insensitive).
-    ///
-    /// The window's [`app_id`](crate::ManagedWindow::app_id) — conventionally
-    /// the executable's file stem, lower-cased. A window that named no program
-    /// has an empty id and matches **nothing**: a rule about an unnamed program
-    /// would otherwise be a rule about all of them, which is the one reading no
-    /// user could intend.
-    AppId(String),
-    /// Match any window (used for global defaults).
-    Any,
-}
-
-impl MatchCriteria {
-    /// Test whether a window matches this criterion.
-    #[must_use]
-    pub fn matches(&self, title: &str, app_id: &str) -> bool {
-        match self {
-            Self::TitleExact(t) => title == t,
-            Self::TitleContains(sub) => {
-                let lower_title = title.to_lowercase();
-                let lower_sub = sub.to_lowercase();
-                lower_title.contains(&lower_sub)
-            }
-            // The empty check is not redundant with the comparison: a *rule*
-            // written with an empty id would otherwise match every window that
-            // declined to name itself, which is a rule the settings panel lets
-            // you write by pressing Save with the value box untouched.
-            Self::AppId(name) => {
-                !app_id.is_empty() && !name.is_empty() && app_id.eq_ignore_ascii_case(name)
-            }
-            Self::Any => true,
-        }
-    }
-
-    /// Human-readable description of this criterion.
-    #[must_use]
-    pub fn description(&self) -> String {
-        match self {
-            Self::TitleExact(t) => format!("Title = \"{t}\""),
-            Self::TitleContains(s) => format!("Title contains \"{s}\""),
-            Self::AppId(n) => format!("App: {n}"),
-            Self::Any => "Any window".to_string(),
-        }
-    }
-}
-
-// ============================================================================
-// Rule actions
-// ============================================================================
-
-/// Position specification for a window rule.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PositionSpec {
-    /// Absolute pixel coordinates from top-left of primary monitor.
-    Absolute { x: i32, y: i32 },
-    /// Center on the specified monitor (0-based index).
-    CenterOnMonitor(u32),
-    /// Percentage of screen dimensions (0.0-1.0 for x, y).
-    Percentage { x_pct: f32, y_pct: f32 },
-    /// Remember last position for this window.
-    RememberLast,
-}
-
-/// Size specification for a window rule.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SizeSpec {
-    /// Exact pixel dimensions.
-    Exact { width: u32, height: u32 },
-    /// Percentage of screen dimensions.
-    Percentage { w_pct: f32, h_pct: f32 },
-    /// Remember last size.
-    RememberLast,
-}
-
-/// Initial window state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InitialState {
-    Normal,
-    Minimized,
-    Maximized,
-    Fullscreen,
-}
-
-/// Declare [`RuleActions`]'s fields once, and derive from that list every
-/// traversal of them.
-///
-/// The three traversals — construct-all-empty, merge, and count-the-set-ones —
-/// were previously written out by hand, seventeen fields each, fifty-one lines
-/// of `if other.x.is_some() { self.x = other.x; }`. They agreed, but only
-/// because someone checked: adding an eighteenth action and forgetting one of
-/// the three lists gives a rule setting that saves, loads, displays, and is
-/// silently dropped when two rules are merged. The macro makes that class of
-/// bug unrepresentable — there is one list, and it is the struct definition.
-macro_rules! rule_actions {
-    ($( $(#[$doc:meta])* $name:ident : $ty:ty ),+ $(,)?) => {
-        /// Actions to apply when a rule matches.
-        ///
-        /// Every field is optional, and `None` means "this rule expresses no
-        /// opinion" rather than "off" — which is what lets several rules be
-        /// merged without a rule that says nothing about opacity resetting the
-        /// opacity a higher-priority rule asked for.
-        #[derive(Clone, Debug)]
-        pub struct RuleActions {
-            $( $(#[$doc])* pub $name: Option<$ty>, )+
-        }
-
-        impl RuleActions {
-            /// Create empty actions (no overrides).
-            #[must_use]
-            pub const fn new() -> Self {
-                Self { $( $name: None, )+ }
-            }
-
-            /// Merge another set of actions on top of this one.
-            ///
-            /// `other`'s values win wherever it sets one; fields it leaves
-            /// unset keep whatever this side had. Callers layering several
-            /// rules therefore have to apply them in *increasing* order of
-            /// authority, so the one that should win is merged last.
-            pub fn merge(&mut self, other: &Self) {
-                $( if other.$name.is_some() { self.$name = other.$name; } )+
-            }
-
-            /// Count how many actions are actively set.
-            #[must_use]
-            pub fn active_count(&self) -> usize {
-                [ $( self.$name.is_some(), )+ ]
-                    .into_iter()
-                    .filter(|set| *set)
-                    .count()
-            }
-        }
+/// Settings writes only rules it can read, so what meets this is a hand edit
+/// -- and a typo in a hand edit that quietly does nothing is the failure that
+/// most needs a voice. The session says it on every read that finds it, the
+/// first of the session included, so a problem left in the file is said again
+/// each session rather than once and never again. Each problem goes to the
+/// error stream as well, which has every one where the notice lists a few.
+#[must_use]
+pub fn problems_notice(problems: &[windowrules::file::Problem]) -> Option<(String, String)> {
+    /// More than this are counted rather than listed: a notice is read at a
+    /// glance, and a toast shows three lines of it.
+    const LISTED: usize = 3;
+    let title = match problems {
+        [] => return None,
+        [one] if one.rule.is_empty() => "No window rule is applied".to_owned(),
+        [_] => "A window rule is not applied".to_owned(),
+        many => format!("{} window rules are not applied", many.len()),
     };
-}
-
-rule_actions! {
-    /// Override initial position.
-    position: PositionSpec,
-    /// Override initial size.
-    size: SizeSpec,
-    /// Assign to a specific virtual desktop (0-based).
-    desktop: u32,
-    /// Force always-on-top.
-    always_on_top: bool,
-    /// Force always-on-bottom (desktop-level).
-    always_on_bottom: bool,
-    /// Initial window state override.
-    initial_state: InitialState,
-    /// Custom opacity (0.0 = invisible, 1.0 = fully opaque).
-    opacity: f32,
-    /// Hide from taskbar.
-    skip_taskbar: bool,
-    /// Hide from Alt+Tab switcher.
-    skip_alt_tab: bool,
-    /// Force to specific monitor (0-based index).
-    target_monitor: u32,
-    /// Disable window decorations (title bar).
-    no_decorations: bool,
-    /// Minimum size constraint.
-    min_size: (u32, u32),
-    /// Maximum size constraint.
-    max_size: (u32, u32),
-    /// Prevent the window from being closed by the user.
-    prevent_close: bool,
-    /// Prevent the window from being moved.
-    prevent_move: bool,
-    /// Prevent the window from being resized.
-    prevent_resize: bool,
-    /// Snap the window into a zone on arrival.
-    ///
-    /// The number is a slot index across *all* the presets at once — what
-    /// `guiremote::zones::SnapSlot::index` returns, and what
-    /// `SnapSlot::from_index` reads back — not a zone within a preset, because
-    /// a rule has to name the layout as well as the cell. Anything from
-    /// `SnapSlot::COUNT` up names no slot and is dropped.
-    snap_zone: u32,
-}
-
-impl Default for RuleActions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// Window Rule
-// ============================================================================
-
-/// Identifier for a window rule.
-///
-/// 64 bits rather than 32 so that the sequence handing these out cannot run
-/// out — see [`guitk::idseq`] for why that is a design choice and not an
-/// arbitrary width.
-pub type RuleId = u64;
-
-/// A window rule: a match criterion plus the actions to take.
-#[derive(Clone, Debug)]
-pub struct WindowRule {
-    /// Unique rule identifier.
-    pub id: RuleId,
-    /// Human-readable name for this rule.
-    pub name: String,
-    /// Match criterion.
-    pub criteria: MatchCriteria,
-    /// Actions to apply.
-    pub actions: RuleActions,
-    /// Priority (higher = evaluated first).
-    pub priority: i32,
-    /// Whether this rule is currently enabled.
-    pub enabled: bool,
-    /// Whether this is a one-shot rule (removed after first match).
-    pub one_shot: bool,
-    /// How many times this rule has been applied.
-    pub match_count: u64,
-}
-
-impl WindowRule {
-    /// Create a new rule with the given name and criterion.
-    pub fn new(id: RuleId, name: &str, criteria: MatchCriteria) -> Self {
-        Self {
-            id,
-            name: name.to_string(),
-            criteria,
-            actions: RuleActions::new(),
-            priority: 0,
-            enabled: true,
-            one_shot: false,
-            match_count: 0,
-        }
-    }
-
-    /// Check if this rule matches a window.
-    #[must_use]
-    pub fn matches(&self, title: &str, app_id: &str) -> bool {
-        self.enabled && self.criteria.matches(title, app_id)
-    }
-}
-
-// ============================================================================
-// Remembered window state
-// ============================================================================
-
-/// Remembered position/size for "RememberLast" specs.
-#[derive(Clone, Debug)]
-struct RememberedState {
-    /// Key: the app id, lower-cased. Never empty — see `remember_state`.
-    key: String,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    /// Last updated timestamp (monotonic counter).
-    last_updated: u64,
-}
-
-// ============================================================================
-// Rule evaluation mode
-// ============================================================================
-
-/// How to evaluate multiple matching rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EvalMode {
-    /// First matching rule wins (highest priority).
-    FirstMatch,
-    /// All matching rules are merged (highest priority overrides).
-    MergeAll,
-}
-
-// ============================================================================
-// Window Rules Manager
-// ============================================================================
-
-/// Maximum number of rules allowed.
-const MAX_RULES: usize = 256;
-
-/// Maximum remembered window states.
-const MAX_REMEMBERED: usize = 128;
-
-/// Manages window rules and their evaluation.
-pub struct WindowRulesManager {
-    rules: Vec<WindowRule>,
-    ids: IdSeq<RuleId>,
-    eval_mode: EvalMode,
-    /// Remembered positions for RememberLast.
-    remembered: Vec<RememberedState>,
-    /// Monotonic counter for remembered state timestamps.
-    timestamp_counter: u64,
-}
-
-impl WindowRulesManager {
-    /// Create a new manager with default rules.
-    pub fn new() -> Self {
-        let mut mgr = Self {
-            rules: Vec::new(),
-            ids: IdSeq::new(),
-            eval_mode: EvalMode::FirstMatch,
-            remembered: Vec::new(),
-            timestamp_counter: 0,
-        };
-        mgr.add_default_rules();
-        mgr
-    }
-
-    /// Add sensible default rules.
-    fn add_default_rules(&mut self) {
-        // Terminal windows: remember last position and size
-        let mut terminal_rule = WindowRule::new(
-            self.alloc_id(),
-            "Terminal: remember position",
-            MatchCriteria::AppId("terminal".to_string()),
-        );
-        terminal_rule.actions.position = Some(PositionSpec::RememberLast);
-        terminal_rule.actions.size = Some(SizeSpec::RememberLast);
-        terminal_rule.priority = 10;
-        self.rules.push(terminal_rule);
-
-        // Settings: always center on primary monitor
-        let mut settings_rule = WindowRule::new(
-            self.alloc_id(),
-            "Settings: center on primary",
-            MatchCriteria::AppId("settings".to_string()),
-        );
-        settings_rule.actions.position = Some(PositionSpec::CenterOnMonitor(0));
-        settings_rule.priority = 10;
-        self.rules.push(settings_rule);
-
-        // The shell's own surfaces are not applications.
-        //
-        // This replaces a "Dialogs: no resize" default keyed on the window
-        // class, which nothing could ever match: there was no class on the
-        // wire, and a dialog is not a program, so there is no app id that
-        // means "a dialog" either. The compositor knows dialogs by `Layer`,
-        // which this engine does not match on.
-        //
-        // What stands here instead is a rule that can both match and be
-        // carried out. `apply_window_list` already drops everything outside
-        // `Layer::Normal`, so today it is belt and braces — but the shell's
-        // four surfaces all say `slateos-shell`, and if any of them ever
-        // moved into the normal layer the taskbar would sprout a button
-        // labelled "Taskbar" and Alt+Tab would offer to switch to the
-        // wallpaper.
-        let mut chrome_rule = WindowRule::new(
-            self.alloc_id(),
-            "Shell chrome: not an application",
-            MatchCriteria::AppId("slateos-shell".to_string()),
-        );
-        chrome_rule.actions.skip_taskbar = Some(true);
-        chrome_rule.actions.skip_alt_tab = Some(true);
-        chrome_rule.priority = 100;
-        self.rules.push(chrome_rule);
-    }
-
-    /// Allocate the next unique rule ID.
-    fn alloc_id(&mut self) -> RuleId {
-        self.ids.issue_infallible()
-    }
-
-    /// Set the evaluation mode.
-    pub fn set_eval_mode(&mut self, mode: EvalMode) {
-        self.eval_mode = mode;
-    }
-
-    /// Get the current evaluation mode.
-    pub fn eval_mode(&self) -> EvalMode {
-        self.eval_mode
-    }
-
-    /// Add a new rule. Returns the rule ID, or None if at capacity.
-    pub fn add_rule(&mut self, mut rule: WindowRule) -> Option<RuleId> {
-        if self.rules.len() >= MAX_RULES {
-            return None;
-        }
-        let id = self.alloc_id();
-        rule.id = id;
-        self.rules.push(rule);
-        Some(id)
-    }
-
-    /// Remove a rule by ID. Returns true if found.
-    pub fn remove_rule(&mut self, id: RuleId) -> bool {
-        let before = self.rules.len();
-        self.rules.retain(|r| r.id != id);
-        self.rules.len() < before
-    }
-
-    /// Enable or disable a rule by ID.
-    pub fn set_enabled(&mut self, id: RuleId, enabled: bool) -> bool {
-        if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
-            r.enabled = enabled;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get all rules (sorted by priority, highest first).
-    pub fn rules(&self) -> Vec<&WindowRule> {
-        let mut sorted: Vec<&WindowRule> = self.rules.iter().collect();
-        sorted.sort_by_key(|r| std::cmp::Reverse(r.priority));
-        sorted
-    }
-
-    /// Get a rule by ID.
-    pub fn rule_by_id(&self, id: RuleId) -> Option<&WindowRule> {
-        self.rules.iter().find(|r| r.id == id)
-    }
-
-    /// Get a mutable rule by ID.
-    pub fn rule_by_id_mut(&mut self, id: RuleId) -> Option<&mut WindowRule> {
-        self.rules.iter_mut().find(|r| r.id == id)
-    }
-
-    /// Evaluate rules for a window and return the merged actions.
-    ///
-    /// In [`FirstMatch`](EvalMode::FirstMatch) mode only the highest-priority
-    /// matching rule applies. In [`MergeAll`](EvalMode::MergeAll) every
-    /// matching rule contributes, and where two of them set the same action
-    /// **the higher-priority one wins**.
-    ///
-    /// That last sentence is a fix, not a description: this merged the matches
-    /// from highest priority downwards, and `RuleActions::merge` lets the
-    /// incoming side win, so each contested field was handed to the *lowest*-
-    /// priority rule that mentioned it — the exact inverse of what the
-    /// priority field exists to express. The old test passed because its two
-    /// rules set disjoint fields, so nothing was ever contested; its comment
-    /// ("high-priority values override where both set") described the intent
-    /// the code did not implement.
-    ///
-    /// # Call this once per window, when the window arrives
-    ///
-    /// It takes `&mut self` because it is not a pure query: it counts each
-    /// firing on the rule, and it *deletes* one-shot rules. Calling it for
-    /// every window of every window list — the shape the shell's other
-    /// projections have — would destroy every one-shot rule on the first frame
-    /// after it was written, and would re-apply `initial_state` to a window
-    /// each time the compositor said anything about it, so a window the user
-    /// un-maximised would snap back within the frame.
-    pub fn evaluate(&mut self, title: &str, app_id: &str) -> RuleActions {
-        // Highest priority first. `sort_by_key` is stable, so rules of equal
-        // priority keep the order they were added in — the same tie-break the
-        // settings list shows.
-        let mut matched: Vec<&WindowRule> = self
-            .rules
-            .iter()
-            .filter(|r| r.matches(title, app_id))
-            .collect();
-        matched.sort_by_key(|r| std::cmp::Reverse(r.priority));
-        if self.eval_mode == EvalMode::FirstMatch {
-            matched.truncate(1);
-        }
-
-        // Applied in *ascending* priority, so the highest-priority rule merges
-        // last and its values are the ones that survive.
-        let mut result = RuleActions::new();
-        for rule in matched.iter().rev() {
-            result.merge(&rule.actions);
-        }
-
-        // Which rules fired, and which of those asked to be forgotten after
-        // firing. Collected as ids because the updates below need `self`
-        // mutably, and an index would go stale the moment a one-shot rule is
-        // removed.
-        let fired: Vec<RuleId> = matched.iter().map(|r| r.id).collect();
-        let one_shot: Vec<RuleId> = matched
-            .iter()
-            .filter(|r| r.one_shot)
-            .map(|r| r.id)
-            .collect();
-
-        for id in fired {
-            if let Some(rule) = self.rules.iter_mut().find(|r| r.id == id) {
-                rule.match_count = rule.match_count.saturating_add(1);
-            }
-        }
-        for id in one_shot {
-            self.remove_rule(id);
-        }
-
-        self.resolve_remembered(&mut result, app_id);
-
-        result
-    }
-
-    /// Resolve RememberLast position/size from stored state.
-    ///
-    /// Keyed on the app id alone. It used to fall back to the window class when
-    /// the process name was empty, which meant an unnamed window inherited the
-    /// remembered geometry of every other unnamed window — one shared entry
-    /// under the empty key. An empty id now resolves to nothing, so a window
-    /// that declines to name itself simply gets no remembered geometry.
-    fn resolve_remembered(&self, actions: &mut RuleActions, app_id: &str) {
-        let key = app_id.to_lowercase();
-
-        if let Some(PositionSpec::RememberLast) = actions.position {
-            if let Some(state) = self.remembered.iter().find(|s| s.key == key) {
-                actions.position = Some(PositionSpec::Absolute {
-                    x: state.x,
-                    y: state.y,
-                });
+    let mut lines: Vec<String> = problems
+        .iter()
+        .take(LISTED)
+        .map(|problem| {
+            if problem.rule.is_empty() {
+                problem.what.clone()
             } else {
-                // No remembered state; fall back to no override.
-                actions.position = None;
+                // Debug-quoted, as `Problem`'s own text has it, so a name with
+                // a hidden character in it shows the character.
+                format!("{:?}: {}", problem.rule, problem.what)
             }
-        }
-
-        if let Some(SizeSpec::RememberLast) = actions.size {
-            if let Some(state) = self.remembered.iter().find(|s| s.key == key) {
-                actions.size = Some(SizeSpec::Exact {
-                    width: state.width,
-                    height: state.height,
-                });
-            } else {
-                actions.size = None;
-            }
-        }
+        })
+        .collect();
+    let unlisted = problems.len().saturating_sub(LISTED);
+    if unlisted > 0 {
+        lines.push(format!("and {unlisted} more"));
     }
-
-    /// Record a window's current position/size for "RememberLast" rules.
-    pub fn remember_state(&mut self, app_id: &str, x: i32, y: i32, width: u32, height: u32) {
-        let key = app_id.to_lowercase();
-
-        // A window that named no program is not remembered at all. The empty
-        // key is not a program — every anonymous window on the desktop would
-        // share one entry and overwrite each other's geometry in turn.
-        if key.is_empty() {
-            return;
-        }
-
-        self.timestamp_counter = self.timestamp_counter.saturating_add(1);
-
-        // Update existing entry or create new one.
-        if let Some(state) = self.remembered.iter_mut().find(|s| s.key == key) {
-            state.x = x;
-            state.y = y;
-            state.width = width;
-            state.height = height;
-            state.last_updated = self.timestamp_counter;
-        } else {
-            // Evict oldest if at capacity.
-            if self.remembered.len() >= MAX_REMEMBERED {
-                let oldest_idx = self
-                    .remembered
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, s)| s.last_updated)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.remembered.swap_remove(oldest_idx);
-            }
-            self.remembered.push(RememberedState {
-                key,
-                x,
-                y,
-                width,
-                height,
-                last_updated: self.timestamp_counter,
-            });
-        }
-    }
-
-    /// Get the number of active (enabled) rules.
-    pub fn active_rule_count(&self) -> usize {
-        self.rules.iter().filter(|r| r.enabled).count()
-    }
-
-    /// Get total rules count.
-    pub fn total_rule_count(&self) -> usize {
-        self.rules.len()
-    }
-
-    /// Move a rule's priority up (increase by 1).
-    pub fn increase_priority(&mut self, id: RuleId) -> bool {
-        if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
-            r.priority = r.priority.saturating_add(1);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Move a rule's priority down (decrease by 1).
-    pub fn decrease_priority(&mut self, id: RuleId) -> bool {
-        if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
-            r.priority = r.priority.saturating_sub(1);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Duplicate a rule with a new ID.
-    pub fn duplicate_rule(&mut self, id: RuleId) -> Option<RuleId> {
-        let rule = self.rules.iter().find(|r| r.id == id)?.clone();
-        let new_id = self.alloc_id();
-        let mut new_rule = rule;
-        new_rule.id = new_id;
-        new_rule.name = format!("{} (copy)", new_rule.name);
-        new_rule.match_count = 0;
-        if self.rules.len() < MAX_RULES {
-            self.rules.push(new_rule);
-            Some(new_id)
-        } else {
-            None
-        }
-    }
-
-    /// Export rules to a config string format.
-    pub fn export_config(&self) -> String {
-        let mut out = String::from("# Window Rules Configuration\n");
-        for rule in &self.rules {
-            out.push_str(&format!(
-                "rule|{}|{}|{}|{}|{}\n",
-                rule.id,
-                rule.name,
-                rule.priority,
-                if rule.enabled { "on" } else { "off" },
-                match &rule.criteria {
-                    MatchCriteria::TitleExact(t) => format!("title_exact:{t}"),
-                    MatchCriteria::TitleContains(s) => format!("title_contains:{s}"),
-                    MatchCriteria::AppId(n) => format!("app:{n}"),
-                    MatchCriteria::Any => "any".to_string(),
-                },
-            ));
-            // Export actions.
-            if let Some(ref pos) = rule.actions.position {
-                match pos {
-                    PositionSpec::Absolute { x, y } => {
-                        out.push_str(&format!("  position|abs|{}|{}\n", x, y));
-                    }
-                    PositionSpec::CenterOnMonitor(m) => {
-                        out.push_str(&format!("  position|center|{}\n", m));
-                    }
-                    PositionSpec::Percentage { x_pct, y_pct } => {
-                        out.push_str(&format!("  position|pct|{}|{}\n", x_pct, y_pct));
-                    }
-                    PositionSpec::RememberLast => {
-                        out.push_str("  position|remember\n");
-                    }
-                }
-            }
-            if let Some(ref sz) = rule.actions.size {
-                match sz {
-                    SizeSpec::Exact { width, height } => {
-                        out.push_str(&format!("  size|exact|{}|{}\n", width, height));
-                    }
-                    SizeSpec::Percentage { w_pct, h_pct } => {
-                        out.push_str(&format!("  size|pct|{}|{}\n", w_pct, h_pct));
-                    }
-                    SizeSpec::RememberLast => {
-                        out.push_str("  size|remember\n");
-                    }
-                }
-            }
-            if let Some(d) = rule.actions.desktop {
-                out.push_str(&format!("  desktop|{}\n", d));
-            }
-            if let Some(aot) = rule.actions.always_on_top {
-                out.push_str(&format!("  always_on_top|{}\n", aot));
-            }
-            if let Some(state) = rule.actions.initial_state {
-                let s = match state {
-                    InitialState::Normal => "normal",
-                    InitialState::Minimized => "minimized",
-                    InitialState::Maximized => "maximized",
-                    InitialState::Fullscreen => "fullscreen",
-                };
-                out.push_str(&format!("  initial_state|{}\n", s));
-            }
-            if let Some(op) = rule.actions.opacity {
-                out.push_str(&format!("  opacity|{}\n", op));
-            }
-            if let Some(true) = rule.actions.skip_taskbar {
-                out.push_str("  skip_taskbar|true\n");
-            }
-            if let Some(true) = rule.actions.skip_alt_tab {
-                out.push_str("  skip_alt_tab|true\n");
-            }
-            if let Some(true) = rule.actions.no_decorations {
-                out.push_str("  no_decorations|true\n");
-            }
-            if let Some(true) = rule.actions.prevent_close {
-                out.push_str("  prevent_close|true\n");
-            }
-            if let Some(true) = rule.actions.prevent_move {
-                out.push_str("  prevent_move|true\n");
-            }
-            if let Some(true) = rule.actions.prevent_resize {
-                out.push_str("  prevent_resize|true\n");
-            }
-        }
-        out
-    }
-
-    /// Parse a single rule from a config line (pipe-delimited).
-    /// Returns None on malformed input.
-    pub fn parse_rule_line(line: &str) -> Option<WindowRule> {
-        // Taking the fields off the iterator with `?` is the same test as the
-        // `parts.len() < 5` this replaces, except that the length check and
-        // the accesses it licenses are now one expression instead of two —
-        // so no later edit can add a sixth mandatory field and leave the
-        // check saying five.
-        let mut parts = line.split('|');
-        if parts.next()? != "rule" {
-            return None;
-        }
-        let id: RuleId = parts.next()?.parse().ok()?;
-        let name = parts.next()?.to_string();
-        let priority: i32 = parts.next()?.parse().ok()?;
-        let enabled = parts.next()? == "on";
-        // A *missing* criterion is `Any` — that is the documented shape of a
-        // four-field line. A criterion that is present and unrecognised is a
-        // refusal, not an `Any`: silently widening `app:firefox` (misspelt, or
-        // written by a newer version) into "every window on the desktop" would
-        // apply that rule's actions to everything the user opens, and a rule
-        // that says `prevent_close` would then be a desktop whose windows
-        // cannot be closed.
-        let criteria = match parts.next() {
-            None => MatchCriteria::Any,
-            Some("any") => MatchCriteria::Any,
-            Some(spec) => {
-                if let Some(rest) = spec.strip_prefix("title_exact:") {
-                    MatchCriteria::TitleExact(rest.to_string())
-                } else if let Some(rest) = spec.strip_prefix("title_contains:") {
-                    MatchCriteria::TitleContains(rest.to_string())
-                } else if let Some(rest) = spec.strip_prefix("app:") {
-                    MatchCriteria::AppId(rest.to_string())
-                } else {
-                    return None;
-                }
-            }
-        };
-
-        let mut rule = WindowRule::new(id, &name, criteria);
-        rule.priority = priority;
-        rule.enabled = enabled;
-        Some(rule)
-    }
-}
-
-impl Default for WindowRulesManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    Some((title, lines.join("\n")))
 }
 
 // ============================================================================
@@ -1193,7 +468,7 @@ impl RulesSettingsUI {
             }
 
             // Second row: action summary.
-            let summary = action_summary(&rule.actions);
+            let summary = rule.actions.summary();
             if !summary.is_empty() {
                 cmds.push(RenderCommand::Text {
                     x: x + 78.0,
@@ -1452,57 +727,6 @@ impl Default for RulesSettingsUI {
 // `text::elide`, which measures against the actual column width. See
 // known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 
-/// Build a human-readable summary of a rule's actions.
-fn action_summary(actions: &RuleActions) -> String {
-    let mut parts = Vec::new();
-    if actions.position.is_some() {
-        parts.push("position");
-    }
-    if actions.size.is_some() {
-        parts.push("size");
-    }
-    if actions.desktop.is_some() {
-        parts.push("desktop");
-    }
-    if actions.always_on_top == Some(true) {
-        parts.push("on-top");
-    }
-    if actions.always_on_bottom == Some(true) {
-        parts.push("on-bottom");
-    }
-    if actions.initial_state.is_some() {
-        parts.push("initial-state");
-    }
-    if actions.opacity.is_some() {
-        parts.push("opacity");
-    }
-    if actions.skip_taskbar == Some(true) {
-        parts.push("skip-taskbar");
-    }
-    if actions.skip_alt_tab == Some(true) {
-        parts.push("skip-alt-tab");
-    }
-    if actions.target_monitor.is_some() {
-        parts.push("monitor");
-    }
-    if actions.no_decorations == Some(true) {
-        parts.push("no-decor");
-    }
-    if actions.prevent_close == Some(true) {
-        parts.push("no-close");
-    }
-    if actions.prevent_move == Some(true) {
-        parts.push("no-move");
-    }
-    if actions.prevent_resize == Some(true) {
-        parts.push("no-resize");
-    }
-    if actions.snap_zone.is_some() {
-        parts.push("snap");
-    }
-    parts.join(", ")
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1523,514 +747,77 @@ mod tests {
     use super::*;
     use appearance::palette_check;
 
-    // --- MatchCriteria tests ---
-
-    #[test]
-    fn test_title_exact_match() {
-        let c = MatchCriteria::TitleExact("Firefox".to_string());
-        assert!(c.matches("Firefox", ""));
-        assert!(!c.matches("firefox", ""));
-        assert!(!c.matches("Firefox Browser", ""));
-    }
-
-    #[test]
-    fn test_title_contains_case_insensitive() {
-        let c = MatchCriteria::TitleContains("fire".to_string());
-        assert!(c.matches("Firefox", ""));
-        assert!(c.matches("FIREFOX", ""));
-        assert!(c.matches("On Fire!", ""));
-        assert!(!c.matches("Chrome", ""));
-    }
-
-    #[test]
-    fn test_app_id_match() {
-        let c = MatchCriteria::AppId("terminal".to_string());
-        assert!(c.matches("", "terminal"));
-        assert!(c.matches("", "TERMINAL"));
-        assert!(c.matches("", "Terminal"));
-        assert!(!c.matches("", "term"));
-    }
-
-    /// A window that declines to name its program matches no app rule, and a
-    /// rule that names no program matches no window.
+    /// The palette the tests that predate the conversion render against.
     ///
-    /// Both halves are the same mistake seen from opposite ends: an unnamed
-    /// program is not *every* program. The second half is reachable from the
-    /// settings panel — pressing Save with the value box untouched writes a
-    /// rule whose id is the empty string — and if that rule matched every
-    /// anonymous window, one stray click would apply it to half the desktop.
-    #[test]
-    fn nothing_is_matched_by_the_absence_of_a_name() {
-        let named = MatchCriteria::AppId("terminal".to_string());
-        assert!(
-            !named.matches("Terminal", ""),
-            "an unnamed window is not every program"
-        );
-
-        let unnamed = MatchCriteria::AppId(String::new());
-        assert!(
-            !unnamed.matches("Terminal", "terminal"),
-            "an unnamed rule names no program"
-        );
-        assert!(
-            !unnamed.matches("", ""),
-            "least of all when neither is named"
-        );
+    /// Dark, because those tests were written when this module could only be
+    /// dark and they assert about geometry and text rather than colour. The
+    /// colour tests below build their own palettes.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
     }
 
-    /// The title is a different question, and must not answer this one.
+    /// A rule set that reaches every branch of the row painter.
     ///
-    /// A title says *which document*; an app id says *which program*. A rule
-    /// about the program must not fire because the words happened to appear in
-    /// the window's caption.
-    #[test]
-    fn an_app_rule_does_not_read_the_title() {
-        let c = MatchCriteria::AppId("editor".to_string());
-        assert!(!c.matches("editor", "notepad"));
-        assert!(c.matches("editor", "editor"));
+    /// The colour of a rule row is a function of the *rule*, not of the UI
+    /// state, so a sweep driven only by `RulesSettingsUI` fields would render
+    /// perhaps half the hues in the module and call the other half converted
+    /// without ever drawing them. These five rules between them take all three
+    /// steps of the priority ladder, both sides of `enabled`, both sides of
+    /// "has any actions", the one-shot badge and a non-empty action summary.
+    fn every_branch_rule_set() -> WindowRulesManager {
+        let mut mgr = WindowRulesManager::empty();
+
+        // Priority above 50: red. Has actions: green. Non-empty summary.
+        let mut hot = WindowRule::new(0, "hot", MatchCriteria::TitleExact("A".to_string()));
+        hot.priority = 99;
+        hot.actions.always_on_top = Some(true);
+        hot.match_count = 7;
+        assert!(mgr.add_rule(hot).is_some());
+
+        // Priority above 10: yellow. One-shot: the peach badge.
+        let mut warm = WindowRule::new(0, "warm", MatchCriteria::TitleContains("b".to_string()));
+        warm.priority = 20;
+        warm.one_shot = true;
+        assert!(mgr.add_rule(warm).is_some());
+
+        // Low priority: subtext1. No actions: overlay0, and no summary line.
+        let mut cool = WindowRule::new(0, "cool", MatchCriteria::AppId("c".to_string()));
+        cool.priority = 1;
+        assert!(mgr.add_rule(cool).is_some());
+
+        // Disabled: an overlay0 name and the red OFF badge.
+        let mut off = WindowRule::new(0, "off", MatchCriteria::AppId("d".to_string()));
+        off.enabled = false;
+        assert!(mgr.add_rule(off).is_some());
+
+        let mut any = WindowRule::new(0, "any", MatchCriteria::Any);
+        any.actions.opacity = Some(0.5);
+        any.actions.skip_taskbar = Some(true);
+        assert!(mgr.add_rule(any).is_some());
+
+        mgr
     }
 
-    #[test]
-    fn test_any_matches_everything() {
-        let c = MatchCriteria::Any;
-        assert!(c.matches("anything", "any"));
-        assert!(c.matches("", ""));
+    fn no_rules() -> WindowRulesManager {
+        WindowRulesManager::empty()
     }
 
-    #[test]
-    fn test_criteria_description() {
-        assert_eq!(
-            MatchCriteria::TitleExact("foo".to_string()).description(),
-            "Title = \"foo\""
-        );
-        assert_eq!(
-            MatchCriteria::AppId("bar".to_string()).description(),
-            "App: bar"
-        );
-        assert_eq!(MatchCriteria::Any.description(), "Any window");
-    }
-
-    // --- RuleActions tests ---
-
-    #[test]
-    fn test_empty_actions() {
-        let a = RuleActions::new();
-        assert_eq!(a.active_count(), 0);
-    }
-
-    #[test]
-    fn test_actions_count() {
-        let mut a = RuleActions::new();
-        a.position = Some(PositionSpec::CenterOnMonitor(0));
-        a.always_on_top = Some(true);
-        a.opacity = Some(0.8);
-        assert_eq!(a.active_count(), 3);
-    }
-
-    #[test]
-    fn test_actions_merge() {
-        let mut base = RuleActions::new();
-        base.position = Some(PositionSpec::CenterOnMonitor(0));
-        base.opacity = Some(0.5);
-
-        let mut overlay = RuleActions::new();
-        overlay.opacity = Some(0.9);
-        overlay.always_on_top = Some(true);
-
-        base.merge(&overlay);
-        assert_eq!(base.opacity, Some(0.9)); // overridden
-        assert_eq!(base.always_on_top, Some(true)); // added
-        assert!(base.position.is_some()); // preserved
-    }
-
-    #[test]
-    fn test_merge_does_not_clear() {
-        let mut base = RuleActions::new();
-        base.desktop = Some(2);
-        let empty = RuleActions::new();
-        base.merge(&empty);
-        assert_eq!(base.desktop, Some(2)); // Not cleared by empty merge
-    }
-
-    // --- WindowRule tests ---
-
-    #[test]
-    fn test_rule_matches_when_enabled() {
-        let r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
-        assert!(r.matches("", "vim"));
-    }
-
-    #[test]
-    fn test_rule_does_not_match_when_disabled() {
-        let mut r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
-        r.enabled = false;
-        assert!(!r.matches("", "vim"));
-    }
-
-    // --- WindowRulesManager tests ---
-
-    #[test]
-    fn test_manager_default_rules() {
-        let mgr = WindowRulesManager::new();
-        assert!(mgr.total_rule_count() >= 3);
-        assert_eq!(mgr.active_rule_count(), mgr.total_rule_count());
-    }
-
-    #[test]
-    fn test_add_rule() {
-        let mut mgr = WindowRulesManager::new();
-        let initial = mgr.total_rule_count();
-        let rule = WindowRule::new(0, "new rule", MatchCriteria::Any);
-        let id = mgr.add_rule(rule);
-        assert!(id.is_some());
-        assert_eq!(mgr.total_rule_count(), initial + 1);
-    }
-
-    #[test]
-    fn test_remove_rule() {
-        let mut mgr = WindowRulesManager::new();
-        let rule = WindowRule::new(0, "temp", MatchCriteria::Any);
-        let id = mgr.add_rule(rule).unwrap();
-        let before = mgr.total_rule_count();
-        assert!(mgr.remove_rule(id));
-        assert_eq!(mgr.total_rule_count(), before - 1);
-    }
-
-    #[test]
-    fn test_remove_nonexistent() {
-        let mut mgr = WindowRulesManager::new();
-        assert!(!mgr.remove_rule(9999));
-    }
-
-    #[test]
-    fn test_enable_disable() {
-        let mut mgr = WindowRulesManager::new();
-        let rule = WindowRule::new(0, "toggle", MatchCriteria::Any);
-        let id = mgr.add_rule(rule).unwrap();
-        assert!(mgr.set_enabled(id, false));
-        assert!(!mgr.rule_by_id(id).unwrap().enabled);
-        assert!(mgr.set_enabled(id, true));
-        assert!(mgr.rule_by_id(id).unwrap().enabled);
-    }
-
-    #[test]
-    fn test_evaluate_first_match() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::FirstMatch);
-
-        let mut r1 = WindowRule::new(0, "high", MatchCriteria::Any);
-        r1.priority = 100;
-        r1.actions.opacity = Some(0.5);
-        mgr.add_rule(r1);
-
-        let mut r2 = WindowRule::new(0, "low", MatchCriteria::Any);
-        r2.priority = 1;
-        r2.actions.opacity = Some(0.9);
-        r2.actions.always_on_top = Some(true);
-        mgr.add_rule(r2);
-
-        let result = mgr.evaluate("any", "any");
-        // First match (highest priority) wins.
-        assert_eq!(result.opacity, Some(0.5));
-        assert_eq!(result.always_on_top, None); // low-priority rule not applied
-    }
-
-    #[test]
-    fn test_evaluate_merge_all() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::MergeAll);
-
-        let mut r1 = WindowRule::new(0, "high", MatchCriteria::Any);
-        r1.priority = 100;
-        r1.actions.opacity = Some(0.5);
-        mgr.add_rule(r1);
-
-        let mut r2 = WindowRule::new(0, "low", MatchCriteria::Any);
-        r2.priority = 1;
-        r2.actions.always_on_top = Some(true);
-        mgr.add_rule(r2);
-
-        let result = mgr.evaluate("any", "any");
-        // Both rules contribute. The two set disjoint fields, so this says
-        // nothing about who wins a contested one — see
-        // `the_higher_priority_rule_wins_a_field_both_rules_set` for that.
-        assert_eq!(result.opacity, Some(0.5));
-        assert_eq!(result.always_on_top, Some(true));
-    }
-
-    #[test]
-    fn test_evaluate_no_match() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        let mut r = WindowRule::new(0, "specific", MatchCriteria::AppId("firefox".to_string()));
-        r.actions.opacity = Some(0.5);
-        mgr.add_rule(r);
-
-        let result = mgr.evaluate("", "chrome");
-        assert_eq!(result.active_count(), 0);
-    }
-
-    #[test]
-    fn test_one_shot_removal() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        let mut r = WindowRule::new(0, "once", MatchCriteria::Any);
-        r.one_shot = true;
-        r.actions.always_on_top = Some(true);
-        let id = mgr.add_rule(r).unwrap();
-
-        let result = mgr.evaluate("x", "y");
-        assert_eq!(result.always_on_top, Some(true));
-
-        // Rule should be removed after one-shot.
-        assert!(mgr.rule_by_id(id).is_none());
-        assert_eq!(mgr.total_rule_count(), 0);
-    }
-
-    #[test]
-    fn test_match_count_incremented() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        let r = WindowRule::new(0, "counter", MatchCriteria::Any);
-        let id = mgr.add_rule(r).unwrap();
-
-        mgr.evaluate("x", "y");
-        mgr.evaluate("a", "b");
-
-        assert_eq!(mgr.rule_by_id(id).unwrap().match_count, 2);
-    }
-
-    #[test]
-    fn test_remember_state() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("terminal", 100, 200, 800, 600);
-
-        // Create a rule that uses RememberLast.
-        mgr.rules.clear();
-        let mut r = WindowRule::new(0, "term", MatchCriteria::AppId("terminal".to_string()));
-        r.actions.position = Some(PositionSpec::RememberLast);
-        r.actions.size = Some(SizeSpec::RememberLast);
-        mgr.add_rule(r);
-
-        let result = mgr.evaluate("", "terminal");
-        assert_eq!(
-            result.position,
-            Some(PositionSpec::Absolute { x: 100, y: 200 })
-        );
-        assert_eq!(
-            result.size,
-            Some(SizeSpec::Exact {
-                width: 800,
-                height: 600
-            })
-        );
-    }
-
-    #[test]
-    fn test_remember_state_updates() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("vim", 10, 20, 100, 100);
-        mgr.remember_state("vim", 50, 60, 200, 300);
-
-        mgr.rules.clear();
-        let mut r = WindowRule::new(0, "vim", MatchCriteria::AppId("vim".to_string()));
-        r.actions.position = Some(PositionSpec::RememberLast);
-        mgr.add_rule(r);
-
-        let result = mgr.evaluate("", "vim");
-        assert_eq!(
-            result.position,
-            Some(PositionSpec::Absolute { x: 50, y: 60 })
-        );
-    }
-
-    #[test]
-    fn test_remember_no_state_returns_none() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        let mut r = WindowRule::new(0, "unknown", MatchCriteria::AppId("unknown".to_string()));
-        r.actions.position = Some(PositionSpec::RememberLast);
-        mgr.add_rule(r);
-
-        let result = mgr.evaluate("", "unknown");
-        assert_eq!(result.position, None); // No remembered state, cleared to None
-    }
-
-    #[test]
-    fn test_remember_eviction() {
-        let mut mgr = WindowRulesManager::new();
-        // Fill to capacity.
-        for i in 0..MAX_REMEMBERED {
-            mgr.remember_state(&format!("app{i}"), 0, 0, 100, 100);
+    fn wound_ui(
+        tab: RulesSettingsTab,
+        criteria_type: usize,
+        filled: bool,
+        selected_rule_idx: usize,
+    ) -> RulesSettingsUI {
+        let mut ui = RulesSettingsUI::new();
+        ui.active_tab = tab;
+        ui.editing_criteria_type = criteria_type;
+        ui.selected_rule_idx = selected_rule_idx;
+        if filled {
+            ui.editing_name = "a rule".to_string();
+            ui.editing_criteria_value = "firefox".to_string();
+            ui.editing_priority = 42;
         }
-        // One more should evict the oldest.
-        mgr.remember_state("newest", 999, 999, 999, 999);
-        assert!(mgr.remembered.len() <= MAX_REMEMBERED);
-    }
-
-    #[test]
-    fn test_priority_change() {
-        let mut mgr = WindowRulesManager::new();
-        let r = WindowRule::new(0, "pr", MatchCriteria::Any);
-        let id = mgr.add_rule(r).unwrap();
-
-        assert!(mgr.increase_priority(id));
-        assert_eq!(mgr.rule_by_id(id).unwrap().priority, 1);
-
-        assert!(mgr.decrease_priority(id));
-        assert_eq!(mgr.rule_by_id(id).unwrap().priority, 0);
-    }
-
-    #[test]
-    fn test_duplicate_rule() {
-        let mut mgr = WindowRulesManager::new();
-        let mut r = WindowRule::new(0, "original", MatchCriteria::Any);
-        r.actions.opacity = Some(0.7);
-        r.match_count = 42;
-        let id = mgr.add_rule(r).unwrap();
-
-        let dup_id = mgr.duplicate_rule(id).unwrap();
-        let dup = mgr.rule_by_id(dup_id).unwrap();
-        assert_eq!(dup.name, "original (copy)");
-        assert_eq!(dup.actions.opacity, Some(0.7));
-        assert_eq!(dup.match_count, 0); // Reset
-    }
-
-    #[test]
-    fn test_export_config() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        let mut r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
-        r.priority = 10;
-        r.enabled = true;
-        r.actions.always_on_top = Some(true);
-        r.id = 1;
-        mgr.rules.push(r);
-
-        let config = mgr.export_config();
-        assert!(config.contains("rule|1|test|10|on|app:vim"));
-        assert!(config.contains("always_on_top|true"));
-    }
-
-    #[test]
-    fn test_parse_rule_line() {
-        let line = "rule|5|My Rule|20|on|app:firefox";
-        let rule = WindowRulesManager::parse_rule_line(line).unwrap();
-        assert_eq!(rule.id, 5);
-        assert_eq!(rule.name, "My Rule");
-        assert_eq!(rule.priority, 20);
-        assert!(rule.enabled);
-        assert_eq!(rule.criteria, MatchCriteria::AppId("firefox".to_string()));
-    }
-
-    /// A criterion the parser does not know is a refusal, not a shrug.
-    ///
-    /// It used to fall through to `Any`, which turns a rule the reader wrote
-    /// about *one* program — perhaps written by a newer build, perhaps a typo —
-    /// into a rule about *every* window. A rule that silently widens is worse
-    /// than a rule that does not load: the config file still says `process:vim`
-    /// while every window on the desktop is being made always-on-top.
-    #[test]
-    fn a_criterion_the_parser_does_not_know_is_refused_not_widened() {
-        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|process:vim").is_none());
-        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|class:dialog").is_none());
-        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|nonsense").is_none());
-        // An *absent* criterion is still the documented default, because the
-        // five mandatory fields are the whole of the required line.
-        assert_eq!(
-            WindowRulesManager::parse_rule_line("rule|5|R|20|on")
-                .unwrap()
-                .criteria,
-            MatchCriteria::Any
-        );
-    }
-
-    /// A rule survives the round trip through the config file.
-    ///
-    /// Export and parse are written in two different places, and the only
-    /// thing keeping their spelling of a criterion in step is this test.
-    #[test]
-    fn a_rule_written_out_reads_back_as_itself() {
-        for criteria in [
-            MatchCriteria::TitleExact("Untitled 1".to_string()),
-            MatchCriteria::TitleContains("diff".to_string()),
-            MatchCriteria::AppId("slateos-editor".to_string()),
-            MatchCriteria::Any,
-        ] {
-            let mut mgr = WindowRulesManager::new();
-            mgr.rules.clear();
-            let mut r = WindowRule::new(7, "round trip", criteria.clone());
-            r.priority = 3;
-            r.id = 7;
-            mgr.rules.push(r);
-
-            let config = mgr.export_config();
-            let line = config
-                .lines()
-                .find(|l| l.starts_with("rule|"))
-                .expect("the rule should have been written");
-            let back = WindowRulesManager::parse_rule_line(line)
-                .expect("what we wrote should be what we can read");
-            assert_eq!(back.criteria, criteria, "line was {line}");
-            assert_eq!(back.name, "round trip");
-            assert_eq!(back.priority, 3);
-        }
-    }
-
-    #[test]
-    fn test_parse_rule_line_invalid() {
-        assert!(WindowRulesManager::parse_rule_line("").is_none());
-        assert!(WindowRulesManager::parse_rule_line("not|a|valid|line").is_none());
-        assert!(WindowRulesManager::parse_rule_line("rule|abc|name|0|on").is_none()); // bad id
-    }
-
-    #[test]
-    fn test_rules_sorted_by_priority() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-
-        let mut r1 = WindowRule::new(0, "low", MatchCriteria::Any);
-        r1.priority = 1;
-        mgr.add_rule(r1);
-
-        let mut r2 = WindowRule::new(0, "high", MatchCriteria::Any);
-        r2.priority = 100;
-        mgr.add_rule(r2);
-
-        let mut r3 = WindowRule::new(0, "mid", MatchCriteria::Any);
-        r3.priority = 50;
-        mgr.add_rule(r3);
-
-        let sorted = mgr.rules();
-        assert_eq!(sorted[0].name, "high");
-        assert_eq!(sorted[1].name, "mid");
-        assert_eq!(sorted[2].name, "low");
-    }
-
-    #[test]
-    fn test_eval_mode_switch() {
-        let mut mgr = WindowRulesManager::new();
-        assert_eq!(mgr.eval_mode(), EvalMode::FirstMatch);
-        mgr.set_eval_mode(EvalMode::MergeAll);
-        assert_eq!(mgr.eval_mode(), EvalMode::MergeAll);
-    }
-
-    #[test]
-    fn test_remember_empty_key_ignored() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("", 100, 200, 800, 600);
-        assert!(mgr.remembered.is_empty());
-    }
-
-    #[test]
-    fn test_rule_by_id_mut() {
-        let mut mgr = WindowRulesManager::new();
-        let r = WindowRule::new(0, "mutable", MatchCriteria::Any);
-        let id = mgr.add_rule(r).unwrap();
-        mgr.rule_by_id_mut(id).unwrap().name = "changed".to_string();
-        assert_eq!(mgr.rule_by_id(id).unwrap().name, "changed");
+        ui
     }
 
     #[test]
@@ -2095,30 +882,6 @@ mod tests {
     }
 
     #[test]
-    fn test_action_summary() {
-        let mut a = RuleActions::new();
-        assert_eq!(action_summary(&a), "");
-        a.always_on_top = Some(true);
-        a.opacity = Some(0.5);
-        let s = action_summary(&a);
-        assert!(s.contains("on-top"));
-        assert!(s.contains("opacity"));
-    }
-
-    #[test]
-    fn test_max_rules_cap() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        for i in 0..MAX_RULES {
-            let r = WindowRule::new(0, &format!("rule{}", i), MatchCriteria::Any);
-            assert!(mgr.add_rule(r).is_some());
-        }
-        // One more should fail.
-        let r = WindowRule::new(0, "overflow", MatchCriteria::Any);
-        assert!(mgr.add_rule(r).is_none());
-    }
-
-    #[test]
     fn test_ui_creation() {
         let ui = RulesSettingsUI::new();
         assert_eq!(ui.active_tab, RulesSettingsTab::RuleList);
@@ -2152,253 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn test_position_spec_variants() {
-        let abs = PositionSpec::Absolute { x: 100, y: 200 };
-        let center = PositionSpec::CenterOnMonitor(1);
-        let pct = PositionSpec::Percentage {
-            x_pct: 0.5,
-            y_pct: 0.5,
-        };
-        let rem = PositionSpec::RememberLast;
-        // Just ensure they're distinct.
-        assert_ne!(abs, center);
-        assert_ne!(pct, rem);
-    }
-
-    #[test]
-    fn test_size_spec_variants() {
-        let exact = SizeSpec::Exact {
-            width: 800,
-            height: 600,
-        };
-        let pct = SizeSpec::Percentage {
-            w_pct: 0.5,
-            h_pct: 0.5,
-        };
-        let rem = SizeSpec::RememberLast;
-        assert_ne!(exact, pct);
-        assert_ne!(pct, rem);
-    }
-
-    #[test]
-    fn test_initial_state_variants() {
-        assert_ne!(InitialState::Normal, InitialState::Maximized);
-        assert_ne!(InitialState::Minimized, InitialState::Fullscreen);
-    }
-
-    #[test]
-    fn test_default_trait_impls() {
-        let _ = RuleActions::default();
-        let _ = WindowRulesManager::default();
-        let _ = RulesSettingsUI::default();
-    }
-
-    // -- evaluate: priority ------------------------------------------------
-
-    #[test]
-    fn the_higher_priority_rule_wins_a_field_both_rules_set() {
-        // This is the case the old merge test left untested, and the case the
-        // old implementation got backwards: it merged from the top of the
-        // priority order downwards, and `merge` lets the incoming side win, so
-        // the *last* rule merged — the least important one — decided every
-        // field the two disagreed about.
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::MergeAll);
-
-        let mut low = WindowRule::new(0, "low", MatchCriteria::Any);
-        low.priority = 1;
-        low.actions.opacity = Some(0.9);
-        low.actions.desktop = Some(7);
-        mgr.add_rule(low);
-
-        let mut high = WindowRule::new(0, "high", MatchCriteria::Any);
-        high.priority = 100;
-        high.actions.opacity = Some(0.5);
-        mgr.add_rule(high);
-
-        let result = mgr.evaluate("any", "any");
-        assert_eq!(result.opacity, Some(0.5), "the priority-100 rule must win");
-        // A field only the low-priority rule mentions still applies: `None`
-        // means "no opinion", not "off".
-        assert_eq!(result.desktop, Some(7));
-    }
-
-    #[test]
-    fn priority_order_does_not_depend_on_the_order_rules_were_added() {
-        // Same two rules, added the other way round. A merge that happened to
-        // read as "last one added wins" would pass one of these and fail the
-        // other.
-        for high_first in [true, false] {
-            let mut mgr = WindowRulesManager::new();
-            mgr.rules.clear();
-            mgr.set_eval_mode(EvalMode::MergeAll);
-
-            let mut low = WindowRule::new(0, "low", MatchCriteria::Any);
-            low.priority = 1;
-            low.actions.desktop = Some(1);
-            let mut high = WindowRule::new(0, "high", MatchCriteria::Any);
-            high.priority = 100;
-            high.actions.desktop = Some(100);
-
-            if high_first {
-                mgr.add_rule(high);
-                mgr.add_rule(low);
-            } else {
-                mgr.add_rule(low);
-                mgr.add_rule(high);
-            }
-            assert_eq!(mgr.evaluate("a", "b").desktop, Some(100));
-        }
-    }
-
-    #[test]
-    fn the_two_modes_break_a_priority_tie_the_same_way() {
-        // Equal priorities are ordered by insertion, so the earlier-added rule
-        // sorts first — which is the rule `FirstMatch` picks, and the rule the
-        // settings list shows at the top. `MergeAll` therefore has to let that
-        // same rule win a contested field, or the two modes would disagree
-        // about which of two identical-priority rules is the authoritative
-        // one, and the list would be showing the wrong order for one of them.
-        for mode in [EvalMode::FirstMatch, EvalMode::MergeAll] {
-            let mut mgr = WindowRulesManager::new();
-            mgr.rules.clear();
-            mgr.set_eval_mode(mode);
-
-            let mut first = WindowRule::new(0, "first", MatchCriteria::Any);
-            first.actions.desktop = Some(1);
-            mgr.add_rule(first);
-            let mut second = WindowRule::new(0, "second", MatchCriteria::Any);
-            second.actions.desktop = Some(2);
-            mgr.add_rule(second);
-
-            assert_eq!(
-                mgr.evaluate("a", "b").desktop,
-                Some(1),
-                "{mode:?} should defer to the earlier-added rule"
-            );
-            assert_eq!(
-                mgr.rules().first().map(|r| r.name.clone()),
-                Some("first".to_string()),
-                "and the settings list should show it first"
-            );
-        }
-    }
-
-    #[test]
-    fn first_match_counts_only_the_rule_that_fired() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::FirstMatch);
-
-        let mut high = WindowRule::new(0, "high", MatchCriteria::Any);
-        high.priority = 100;
-        let high_id = mgr.add_rule(high).unwrap();
-        let mut low = WindowRule::new(0, "low", MatchCriteria::Any);
-        low.priority = 1;
-        let low_id = mgr.add_rule(low).unwrap();
-
-        mgr.evaluate("a", "b");
-        assert_eq!(mgr.rule_by_id(high_id).unwrap().match_count, 1);
-        assert_eq!(
-            mgr.rule_by_id(low_id).unwrap().match_count,
-            0,
-            "a rule that never applied has not been hit"
-        );
-    }
-
-    #[test]
-    fn merge_all_counts_every_rule_that_applied() {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::MergeAll);
-        let a = mgr
-            .add_rule(WindowRule::new(0, "a", MatchCriteria::Any))
-            .unwrap();
-        let b = mgr
-            .add_rule(WindowRule::new(0, "b", MatchCriteria::Any))
-            .unwrap();
-
-        mgr.evaluate("x", "y");
-        assert_eq!(mgr.rule_by_id(a).unwrap().match_count, 1);
-        assert_eq!(mgr.rule_by_id(b).unwrap().match_count, 1);
-    }
-
-    #[test]
-    fn a_one_shot_rule_that_did_not_apply_survives_first_match() {
-        // In FirstMatch mode only the winner fires, so a lower-priority
-        // one-shot rule must still be there next time.
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr.set_eval_mode(EvalMode::FirstMatch);
-
-        let mut high = WindowRule::new(0, "high", MatchCriteria::Any);
-        high.priority = 100;
-        mgr.add_rule(high);
-        let mut once = WindowRule::new(0, "once", MatchCriteria::Any);
-        once.priority = 1;
-        once.one_shot = true;
-        let once_id = mgr.add_rule(once).unwrap();
-
-        mgr.evaluate("a", "b");
-        assert!(mgr.rule_by_id(once_id).is_some());
-    }
-
-    // -- RuleActions -------------------------------------------------------
-
-    #[test]
-    fn every_action_field_takes_part_in_merge_and_in_the_count() {
-        // The point of generating the three traversals from one field list is
-        // that they cannot drift apart. This checks the property directly: set
-        // every field on one side, merge into an empty one, and the count must
-        // come back equal — which it cannot if `merge` skips a field the
-        // struct declares.
-        let mut all = RuleActions::new();
-        all.position = Some(PositionSpec::CenterOnMonitor(0));
-        all.size = Some(SizeSpec::Exact {
-            width: 800,
-            height: 600,
-        });
-        all.desktop = Some(1);
-        all.always_on_top = Some(true);
-        all.always_on_bottom = Some(true);
-        all.initial_state = Some(InitialState::Normal);
-        all.opacity = Some(0.5);
-        all.skip_taskbar = Some(true);
-        all.skip_alt_tab = Some(true);
-        all.target_monitor = Some(1);
-        all.no_decorations = Some(true);
-        all.min_size = Some((1, 1));
-        all.max_size = Some((2, 2));
-        all.prevent_close = Some(true);
-        all.prevent_move = Some(true);
-        all.prevent_resize = Some(true);
-        all.snap_zone = Some(1);
-
-        let declared = all.active_count();
-        assert!(declared >= 17, "every declared field should be set here");
-
-        let mut empty = RuleActions::new();
-        assert_eq!(empty.active_count(), 0);
-        empty.merge(&all);
-        assert_eq!(
-            empty.active_count(),
-            declared,
-            "a field the struct declares but merge does not copy"
-        );
-    }
-
-    #[test]
-    fn merging_an_empty_set_of_actions_clears_nothing() {
-        let mut actions = RuleActions::new();
-        actions.opacity = Some(0.25);
-        actions.merge(&RuleActions::new());
-        assert_eq!(actions.opacity, Some(0.25));
-    }
-
-    // -- rule list rendering -----------------------------------------------
-
-    #[test]
     fn scrolling_past_the_end_of_a_shrunken_rule_list_shows_the_last_page() {
         // `scroll_offset` is public and nothing clamps it, so a list that
         // shrinks under a scrolled view leaves it pointing past the end. That
@@ -2411,8 +927,7 @@ mod tests {
         // This test was previously named "renders nothing" but only asserted
         // that *something* drew, so it would have passed either way. It now
         // names the row it expects to see.
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
+        let mut mgr = WindowRulesManager::empty();
         mgr.add_rule(WindowRule::new(0, "only", MatchCriteria::Any));
 
         let mut ui = RulesSettingsUI::new();
@@ -2426,92 +941,6 @@ mod tests {
             )),
             "the one surviving rule should be pulled back into view"
         );
-    }
-
-    #[test]
-    fn parse_rule_line_needs_all_five_mandatory_fields() {
-        assert!(WindowRulesManager::parse_rule_line("rule|1|name|0").is_none());
-        assert!(WindowRulesManager::parse_rule_line("rule|1|name|0|on").is_some());
-        assert!(WindowRulesManager::parse_rule_line("notarule|1|name|0|on").is_none());
-        assert!(WindowRulesManager::parse_rule_line("").is_none());
-    }
-
-    // -- colour ------------------------------------------------------------
-
-    /// The palette the tests that predate the conversion render against.
-    ///
-    /// Dark, because those tests were written when this module could only be
-    /// dark and they assert about geometry and text rather than colour. The
-    /// colour tests below build their own palettes.
-    fn test_palette() -> Palette {
-        Palette::for_mode(false)
-    }
-
-    /// A rule set that reaches every branch of the row painter.
-    ///
-    /// The colour of a rule row is a function of the *rule*, not of the UI
-    /// state, so a sweep driven only by `RulesSettingsUI` fields would render
-    /// perhaps half the hues in the module and call the other half converted
-    /// without ever drawing them. These five rules between them take all three
-    /// steps of the priority ladder, both sides of `enabled`, both sides of
-    /// "has any actions", the one-shot badge and a non-empty action summary.
-    fn every_branch_rule_set() -> WindowRulesManager {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-
-        // Priority above 50: red. Has actions: green. Non-empty summary.
-        let mut hot = WindowRule::new(0, "hot", MatchCriteria::TitleExact("A".to_string()));
-        hot.priority = 99;
-        hot.actions.always_on_top = Some(true);
-        hot.match_count = 7;
-        assert!(mgr.add_rule(hot).is_some());
-
-        // Priority above 10: yellow. One-shot: the peach badge.
-        let mut warm = WindowRule::new(0, "warm", MatchCriteria::TitleContains("b".to_string()));
-        warm.priority = 20;
-        warm.one_shot = true;
-        assert!(mgr.add_rule(warm).is_some());
-
-        // Low priority: subtext1. No actions: overlay0, and no summary line.
-        let mut cool = WindowRule::new(0, "cool", MatchCriteria::AppId("c".to_string()));
-        cool.priority = 1;
-        assert!(mgr.add_rule(cool).is_some());
-
-        // Disabled: an overlay0 name and the red OFF badge.
-        let mut off = WindowRule::new(0, "off", MatchCriteria::AppId("d".to_string()));
-        off.enabled = false;
-        assert!(mgr.add_rule(off).is_some());
-
-        let mut any = WindowRule::new(0, "any", MatchCriteria::Any);
-        any.actions.opacity = Some(0.5);
-        any.actions.skip_taskbar = Some(true);
-        assert!(mgr.add_rule(any).is_some());
-
-        mgr
-    }
-
-    fn no_rules() -> WindowRulesManager {
-        let mut mgr = WindowRulesManager::new();
-        mgr.rules.clear();
-        mgr
-    }
-
-    fn wound_ui(
-        tab: RulesSettingsTab,
-        criteria_type: usize,
-        filled: bool,
-        selected_rule_idx: usize,
-    ) -> RulesSettingsUI {
-        let mut ui = RulesSettingsUI::new();
-        ui.active_tab = tab;
-        ui.editing_criteria_type = criteria_type;
-        ui.selected_rule_idx = selected_rule_idx;
-        if filled {
-            ui.editing_name = "a rule".to_string();
-            ui.editing_criteria_value = "firefox".to_string();
-            ui.editing_priority = 42;
-        }
-        ui
     }
 
     /// Every colour the panel paints is a role on the palette it was handed.
@@ -2707,5 +1136,57 @@ mod tests {
             "the selected match-type chip is a selection and must follow the \
              accent"
         );
+    }
+
+    #[test]
+    fn the_panel_has_a_default() {
+        let ui = RulesSettingsUI::default();
+        assert_eq!(ui.active_tab, RulesSettingsTab::RuleList);
+    }
+
+    /// **What a notice says about rules that cannot be read**: nothing for
+    /// none; the rule's name and why for one; for many, how many, the first
+    /// three and how many more; and the file's own trouble when it is the
+    /// rules as a whole.
+    #[test]
+    fn a_notice_names_the_rules_that_cannot_be_read() {
+        use windowrules::file::Problem;
+        let problem = |rule: &str| Problem {
+            rule: rule.to_owned(),
+            what: format!("{rule} is wrong"),
+        };
+        assert_eq!(problems_notice(&[]), None);
+
+        let (title, body) = problems_notice(&[problem("typo")]).unwrap();
+        assert_eq!(title, "A window rule is not applied");
+        assert_eq!(body, "\"typo\": typo is wrong");
+
+        let whole = Problem {
+            rule: String::new(),
+            what: "`rules` holds rules".to_owned(),
+        };
+        let (title, body) = problems_notice(&[whole]).unwrap();
+        assert_eq!(title, "No window rule is applied");
+        assert_eq!(body, "`rules` holds rules");
+
+        let five: Vec<Problem> = ["a", "b", "c", "d", "e"].map(problem).into();
+        let (title, body) = problems_notice(&five).unwrap();
+        assert_eq!(title, "5 window rules are not applied");
+        assert_eq!(
+            body.lines().collect::<Vec<_>>(),
+            [
+                "\"a\": a is wrong",
+                "\"b\": b is wrong",
+                "\"c\": c is wrong",
+                "and 2 more"
+            ]
+        );
+        // Three are listed whole, with nothing left to count.
+        let (title, body) = problems_notice(&five[..3]).unwrap();
+        assert_eq!(title, "3 window rules are not applied");
+        assert_eq!(body.lines().count(), 3);
+        // A hidden character in a name is shown, not drawn as nothing.
+        let (_, body) = problems_notice(&[problem("a\u{200b}b")]).unwrap();
+        assert!(body.starts_with("\"a\\u{200b}b\""), "{body}");
     }
 }

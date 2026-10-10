@@ -33,6 +33,15 @@ use crate::{Error, PlaneView};
 /// The colour space of the pictures [`argb_to_yuv420`] makes, as an
 /// encoder's key frames declare it ([`crate::EncoderConfig::color_space`]):
 /// libvpx's `VPX_CS_BT_601`.
+///
+/// That says the weights, which is what a reader of the bitstream alone
+/// needs not to guess BT.709's. It cannot say that the pixels were sRGB's:
+/// VP9 has no field for primaries or a curve, and Chrome reads this space
+/// as SMPTE 170M's primaries and curve, which it converts to the screen's.
+/// A caller whose viewer reads colour as Chrome does says the pictures'
+/// colour in its container -- H.273's matrix 6, primaries 1, transfer 13,
+/// the studio range -- as the compositor's scene stream does
+/// (`guiremote::scene::VIDEO_VP9_COLOUR`, design-decisions §1383).
 pub const COLOR_SPACE: u8 = 1;
 
 /// A 4:2:0 picture of 8-bit samples: luma `width` x `height`, chroma half

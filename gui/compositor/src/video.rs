@@ -60,8 +60,10 @@ impl VideoStream {
         let config = EncoderConfig {
             timebase: (1, 1000),
             // What `argb_to_yuv420` converts with, said in every key frame,
-            // so that no viewer guesses -- players guess BT.709 for a window
-            // 1280 wide or more, which would shift its colours.
+            // so that no reader of the stream alone guesses -- players guess
+            // BT.709 for a window 1280 wide or more, which would shift its
+            // colours. That the pixels are sRGB's the stream cannot say; the
+            // scene protocol says it (`VIDEO_VP9_COLOUR`, §1383).
             color_space: vp9::rgb::COLOR_SPACE,
             ..EncoderConfig::realtime(width, height, video_kbps(width, height))
         };

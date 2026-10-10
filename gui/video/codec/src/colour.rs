@@ -269,11 +269,17 @@ impl ColourHint {
         }
     }
 
-    /// What H.273's code points say as a bitstream carries them -- AV1's
-    /// sequence header, every part given, unspecified where unknown:
-    /// unspecified and reserved values nothing, and the colour whole where
-    /// every part is a code Chrome names.
-    fn cicp(matrix: u16, primaries: u16, transfer: u16, full_range: bool) -> Self {
+    /// What H.273's code points say where every part is given and
+    /// "unspecified" is a code -- AV1's sequence header, an MP4's `colr`
+    /// box, or a caller's own container (`guiremote::scene`'s
+    /// `VIDEO_VP9_COLOUR`): unspecified and reserved values say nothing, and
+    /// the colour is whole where every part is a code Chrome names.
+    ///
+    /// A caller whose container says a stream's colour passes this to
+    /// [`crate::Decoder::new`], which weighs it against the bitstream's as
+    /// Chrome's decoder for the codec does: for VP8 and VP9 this first.
+    #[must_use]
+    pub fn cicp(matrix: u16, primaries: u16, transfer: u16, full_range: bool) -> Self {
         let matrix = said(matrix, true);
         let primaries = said(primaries, false);
         let transfer = said(transfer, false);

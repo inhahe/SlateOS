@@ -1,4 +1,4 @@
-## 1366. A tray icon names its program and a theme icon; the program's name is declared once
+## 1382. A tray icon names its program and a theme icon; the program's name is declared once
 
 **Date:** 2026-10-05
 **Lane:** F

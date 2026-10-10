@@ -84,7 +84,8 @@ Built with `TrayIcon::new(..).with_app_id(..)`; your code reads the field.
   (`MAX_TOOLTIP_BYTES`); past its share a new icon is refused with a
   `ResponseBody::Error`, where it used to be refused silently with `Ok`.
 
-`design-decisions/1366-...` records the shape and the alternatives.
+`design-decisions/1382-...` records the shape and the alternatives (first
+numbered 1366, which another lane F decision reached `main` with first).
 
 **When it reaches `main`:** after your `TrayIcon::new` change does. The new
 fields break the struct literals that change removes, so lane F holds them

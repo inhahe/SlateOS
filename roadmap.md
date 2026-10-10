@@ -4743,7 +4743,7 @@ lane C's `guitk`.
     stays the per-connection number.
 
 - `[x]` `[F]` **A program's tray icon names a theme icon and its program** --
-  done 2026-10-05 (`design-decisions/1366-...`), for lane C's
+  done 2026-10-05 (`design-decisions/1382-...`), for lane C's
   `requests/c-f-let-a-tray-icon-name-a-theme-icon.md` and
   `requests/c-f-name-a-tray-icons-program.md`. A tray icon was one character,
   and the pictures a tray most wants are emoji no font here draws; it now

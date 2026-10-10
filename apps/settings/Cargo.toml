@@ -32,6 +32,9 @@ textline = { path = "../textline" }
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
 appearance = { path = "../../gui/appearance" }
+# The desktop's player, for the Sound page's previews: a sound chosen there is
+# heard as the desktop will play it, decoded and converted by the same code.
+sound = { path = "../../gui/sound" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.

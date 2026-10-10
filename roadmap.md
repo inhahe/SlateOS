@@ -3453,6 +3453,13 @@ word; text inside them that says "lane C" is history.
     **done 2026-10-10**: `apps/credvault`, the vault's model and its file
     format moved out of the password manager into a library both build on,
     so the service reads the vault with the very code that writes it;
+  - ~~the System Sounds section on Settings' Sound page
+    (`c-e-a-sounds-page-for-the-sounds-axis.md`)~~ **done 2026-10-10**: on
+    or off, a volume, the sound theme -- every one installed, other
+    desktops' too -- and each event's sound (the theme's, none, or a file of
+    the user's), each heard as it is chosen; heard on SlateOS once the C
+    library reaches the sound device (lane D's half of
+    `e-ad-no-application-can-reach-the-sound-device.md`);
   - `[-]` a disabled control says why while the pointer rests on it
     (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
     (every dimmed button and unusable row), thirteen games through

@@ -3743,6 +3743,7 @@ dependencies = [
  "recyclebin",
  "scratchdir",
  "settingsfile",
+ "sound",
  "textline",
  "yamldoc",
 ]

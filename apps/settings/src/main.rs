@@ -824,6 +824,20 @@ pub struct SettingsState {
     bundled_picture_cards: Vec<PictureCard>,
     /// Those pictures drawn small, decoded on a thread of their own.
     thumbs: thumbs::Thumbs,
+    /// The sound themes installed, read on entering the Sound page.
+    sound_themes: Vec<appearance::sounds::SoundThemeInfo>,
+    /// Where sound themes are looked for: `None` is the standard places
+    /// (`appearance::sounds::available`); a test points it at scratch ones,
+    /// so the page lists no theme of the machine running it.
+    sound_roots: Option<Vec<PathBuf>>,
+    /// The sound last played as a preview, and at what volume: what a test
+    /// reads, since the sound itself is heard only where there is a sound
+    /// device, and only from the real program ([`Self::play_previews`]).
+    previewed: Option<(sound::Sound, f32)>,
+    /// Whether a preview is played as well as recorded. `main` sets it, so a
+    /// test run plays nothing on the machine running it -- the desktop's
+    /// rule too (`event_sounds::allow_playback`).
+    play_previews: bool,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -944,6 +958,11 @@ impl DropdownLayout {
 pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
+    /// Which sound theme the desktop's sounds come from: `theme.sounds`.
+    SoundTheme,
+    /// What the `n`-th of `appearance::sounds::SHELL_EVENTS` plays: the
+    /// theme's sound, none, or a file of the user's.
+    EventSound(usize),
     /// How long notifications are kept, also across restarts
     /// (`notifsettings::HistoryRetention`, design-decisions §1468).
     NotifHistory,
@@ -1055,7 +1074,8 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 32] = [
+    pub const FIXED: [Self; 33] = [
+        Self::SoundTheme,
         Self::WallpaperSource,
         Self::QuietStart,
         Self::QuietEnd,
@@ -1586,6 +1606,10 @@ impl SettingsState {
         if page == SettingsPage::Themes {
             self.refresh_themes();
         }
+        // The sound themes, read on entry as the themes are.
+        if page == SettingsPage::Sound {
+            self.refresh_sound_themes();
+        }
         // The themes with pictures, and theirs, read on entry as the themes
         // page reads them.
         if page == SettingsPage::Wallpaper {
@@ -1666,6 +1690,129 @@ impl SettingsState {
             _ => self.appearance.settings.wallpaper.clone(),
         };
         self.open_picture_dialog(PickerPurpose::LoginImage, start.as_deref());
+    }
+
+    /// Read the sound themes installed, where the page looks for them.
+    fn refresh_sound_themes(&mut self) {
+        self.sound_themes = match &self.sound_roots {
+            Some(roots) => appearance::sounds::available_in(roots),
+            None => appearance::sounds::available(),
+        };
+    }
+
+    /// The sound theme `id`, from where the page looks for themes.
+    fn sound_theme_named(&self, id: &std::ffi::OsStr) -> appearance::sounds::SoundTheme {
+        match &self.sound_roots {
+            Some(roots) => {
+                appearance::sounds::SoundTheme::named(id, self.theme_dirs.clone(), roots.clone())
+            }
+            None => appearance::sounds::SoundTheme::load(id),
+        }
+    }
+
+    /// Which of [`EVENT_SOUND_CHOICES`] the `n`-th event has now.
+    fn event_sound_choice(&self, index: usize) -> usize {
+        let name = appearance::sounds::SHELL_EVENTS.get(index).map(|e| e.name);
+        match name.and_then(|name| self.appearance.settings.sounds.events.get(name)) {
+            None => 0,
+            Some(appearance::EventSound::Off) => 1,
+            Some(appearance::EventSound::File(_)) => 2,
+        }
+    }
+
+    /// What the `n`-th event's row shows it plays: the theme's sound, none,
+    /// or the user's own file by its name.
+    fn event_sound_shown(&self, index: usize) -> String {
+        let name = appearance::sounds::SHELL_EVENTS.get(index).map(|e| e.name);
+        match name.and_then(|name| self.appearance.settings.sounds.events.get(name)) {
+            None => EVENT_SOUND_CHOICES[0].to_owned(),
+            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[1].to_owned(),
+            Some(appearance::EventSound::File(path)) => {
+                let file = path.file_name().map_or_else(
+                    || path.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                format!("Your own: {file}")
+            }
+        }
+    }
+
+    /// Choice `choice` of [`EVENT_SOUND_CHOICES`] for the `n`-th event: the
+    /// theme's (the user's own forgotten), none, or a file -- chosen in the
+    /// picker, so a cancelled picker leaves the event as it was.
+    fn choose_event_sound(&mut self, index: usize, choice: usize) {
+        let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) else {
+            return;
+        };
+        let events = &mut self.appearance.settings.sounds.events;
+        match choice {
+            0 => {
+                events.remove(event.name);
+                self.preview_event(event.name);
+            }
+            1 => {
+                events.insert(event.name.to_owned(), appearance::EventSound::Off);
+            }
+            2 => self.open_sound_dialog(index),
+            _ => {}
+        }
+    }
+
+    /// Play the sound the event `name` makes now -- the user's own, or the
+    /// theme's -- as [`Self::preview`] does.
+    fn preview_event(&mut self, name: &str) {
+        let choice = self.appearance.settings.sound_for(name);
+        self.preview(&choice);
+    }
+
+    /// Play `choice` once, at the volume the desktop plays at: a sound is
+    /// heard as it is chosen, which is design.txt's "previewable". Silence
+    /// plays nothing. Turned into a sound as the desktop turns it
+    /// (`gui/desktop/src/event_sounds.rs`, `EventSounds::sound`), so what is
+    /// heard here is what will be heard there.
+    fn preview(&mut self, choice: &appearance::sounds::SoundChoice) {
+        let sound = match choice {
+            appearance::sounds::SoundChoice::File(path) => sound::Sound::File(path.clone()),
+            appearance::sounds::SoundChoice::BuiltIn(event) => {
+                match sound::BuiltIn::for_event(event) {
+                    Some(builtin) => sound::Sound::BuiltIn(builtin),
+                    None => return,
+                }
+            }
+            appearance::sounds::SoundChoice::Silent => return,
+        };
+        let volume = self.appearance.settings.sounds.volume;
+        self.previewed = Some((sound.clone(), volume));
+        if self.play_previews {
+            // Busy, no sound device, no thread: each means the preview is
+            // not heard, which the page cannot mend and the choice does not
+            // hang on -- the setting is saved either way.
+            let _unheard = sound::play(sound, volume);
+        }
+    }
+
+    /// The picker, for a sound of the user's own for the `n`-th event: the
+    /// kinds the desktop's player reads, opened where the event's own file
+    /// is if it has one.
+    fn open_sound_dialog(&mut self, index: usize) {
+        let near = appearance::sounds::SHELL_EVENTS
+            .get(index)
+            .and_then(|e| self.appearance.settings.sounds.events.get(e.name))
+            .and_then(|choice| match choice {
+                appearance::EventSound::File(path) => {
+                    path.parent().map(std::path::Path::to_path_buf)
+                }
+                appearance::EventSound::Off => None,
+            });
+        let start = near
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open()
+            .with_initial_path(start)
+            .with_filter("Sounds", &["*.oga", "*.ogg", "*.wav"]);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = PickerPurpose::EventSound(index);
+        self.dialog = Some(dialog);
     }
 
     /// The picture picker, wherever its answer is going to land.
@@ -1806,6 +1953,16 @@ impl SettingsState {
                     }
                     PickerPurpose::DayWallpaper => self.set_scheduled_picture(true, path),
                     PickerPurpose::NightWallpaper => self.set_scheduled_picture(false, path),
+                    PickerPurpose::EventSound(index) => {
+                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) {
+                            self.appearance
+                                .settings
+                                .sounds
+                                .events
+                                .insert(event.name.to_owned(), appearance::EventSound::File(path));
+                            self.preview_event(event.name);
+                        }
+                    }
                 }
             }
             DialogAction::Cancelled => self.dialog = None,
@@ -2175,6 +2332,10 @@ impl SettingsState {
             bundled_picture_cards: Vec::new(),
             // No thread yet: one starts when the first picture is asked for.
             thumbs: thumbs::Thumbs::new(),
+            sound_themes: Vec::new(),
+            sound_roots: None,
+            previewed: None,
+            play_previews: false,
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -2506,6 +2667,10 @@ fn render_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &s
     fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, pal.crust, 13.0);
 }
+
+/// What an event's sound can be, in the order its list offers them: the
+/// sound theme's, none, or a file of the user's own (chosen in the picker).
+const EVENT_SOUND_CHOICES: [&str; 3] = ["The theme's", "Off", "A file of my own..."];
 
 /// Where the calendar is: the desktop starts programs by their path under
 /// `/usr/bin` (`gui/desktop/src/launcher.rs`).
@@ -2936,6 +3101,8 @@ const BUTTON_ROW_INSET_Y: f32 = 6.0;
 enum ToggleId {
     NightLight,
     AutoLogin,
+    /// Whether the desktop makes sounds at all: `sounds.enabled`.
+    SystemSounds,
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
@@ -3189,6 +3356,8 @@ enum SliderId {
     /// How long the pointer has between two clicks for them to be one
     /// double click, in milliseconds.
     DoubleClickMs,
+    /// How loud the desktop's sounds are, 0 to 1: `sounds.volume`.
+    SoundVolume,
 }
 
 impl SliderId {
@@ -3200,11 +3369,12 @@ impl SliderId {
     /// a test walks it to check each one is draggable, the way
     /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 4] = [
+    const FIXED: [Self; 5] = [
         Self::NightLightTemperature,
         Self::NarratorRate,
         Self::TextSize,
         Self::DoubleClickMs,
+        Self::SoundVolume,
     ];
 
     /// The lowest and highest value this slider can hold, in the units the
@@ -3222,7 +3392,7 @@ impl SliderId {
     /// hide settings the file can hold.
     fn range(self) -> (f32, f32) {
         match self {
-            Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
+            Self::NightLightTemperature | Self::NarratorRate | Self::SoundVolume => (0.0, 1.0),
             Self::TextSize => (50.0, 250.0),
             #[allow(clippy::cast_precision_loss)]
             Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
@@ -3240,6 +3410,9 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
             Self::TextSize => Some(format!("{whole}%")),
+            // Stored as a fraction, shown as the percentage people read
+            // volumes in.
+            Self::SoundVolume => Some(format!("{}%", round_u16(value * 100.0))),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
             // the direction of. The ends are labelled Fast and Slow by the page.
@@ -3425,6 +3598,9 @@ enum PickerPurpose {
     DayWallpaper,
     /// The picture up from the evening, by time of day.
     NightWallpaper,
+    /// A sound of the user's own for the `n`-th of
+    /// `appearance::sounds::SHELL_EVENTS`.
+    EventSound(usize),
 }
 
 /// What a click on a page landed on.
@@ -4638,7 +4814,14 @@ impl SettingsState {
 
     // --- Sound page ---
 
-    /// The Sound page: the shape of the settings, and none of them usable.
+    /// The Sound page: the desktop's own sounds, which are real, and the shape
+    /// of the device settings, which are not yet.
+    ///
+    /// **The System Sounds section is real** (2026-10-10,
+    /// `requests/c-e-a-sounds-page-for-the-sounds-axis.md`): the desktop
+    /// chooses its sounds by what it sets, so its controls are live
+    /// ([`Self::build_system_sounds`]). The rest of this comment is about the
+    /// device sections, which still have nothing behind them.
     ///
     /// Until 2026-09-14 this page offered an output device chooser, a volume
     /// slider, a mute switch, an input device chooser, an input volume slider,
@@ -4670,7 +4853,8 @@ impl SettingsState {
     ///
     /// Each row gets its real control when audio gets a consumer, and not
     /// before -- the same rule the Mouse page states, applied to a page that
-    /// had not been following it.
+    /// had not been following it. The System Sounds section is the first that
+    /// got one.
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
         s.section("Output");
         s.note(
@@ -4707,16 +4891,63 @@ impl SettingsState {
         );
         s.gap();
 
-        s.section("System Sounds");
-        s.unavailable_row(
-            "Enable System Sounds",
-            "Unavailable",
-            "This system cannot play sound yet, so it has no sounds to turn on.",
-        );
-        s.gap();
+        self.build_system_sounds(s);
 
         s.section("Per-Application Volume");
         s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
+    }
+
+    /// The System Sounds section: whether the desktop makes sounds, how
+    /// loud, from which sound theme, and each event's own sound -- the
+    /// `sounds` settings in `appearance.yaml`, which the desktop chooses by
+    /// (design-decisions §1477). Saved and obeyed now, heard the day a
+    /// program can reach the sound device; the note says so.
+    ///
+    /// A sound is heard as it is chosen -- design.txt's sound dropdown is
+    /// "previewable" ([`Self::preview`]): an event's sound when it is set, a
+    /// theme's notification when the theme is, and the volume's own sound
+    /// when the volume's handle is let go, at the volume it was let go at.
+    ///
+    /// With sounds off, the rest is not offered: a volume or a theme for
+    /// sounds that do not play is a control whose every setting does the
+    /// same nothing, as the Night Light's warmth is with the light off.
+    fn build_system_sounds<S: PageSink>(&self, s: &mut S) {
+        s.section("System Sounds");
+        s.note(
+            "The desktop's sounds -- a notification, a screenshot, a device -- are saved here and followed, and are heard the day a program can reach the sound device.",
+            28.0,
+        );
+        let sounds = &self.appearance.settings.sounds;
+        s.toggle_row("System sounds", ToggleId::SystemSounds, sounds.enabled);
+        if !sounds.enabled {
+            s.gap();
+            return;
+        }
+        self.slider(s, "Volume", SliderId::SoundVolume);
+        let theme = self
+            .sound_themes
+            .iter()
+            .find(|t| t.id.as_os_str() == self.appearance.settings.sound_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.sound_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Sound theme", DropdownId::SoundTheme, &theme);
+        s.gap();
+
+        s.section("Sounds For");
+        for (index, event) in appearance::sounds::SHELL_EVENTS.iter().enumerate() {
+            s.dropdown_row(
+                event.label,
+                DropdownId::EventSound(index),
+                &self.event_sound_shown(index),
+            );
+        }
+        s.gap();
     }
 
     /// The Background page: where the desktop's background comes from
@@ -6910,6 +7141,23 @@ impl SettingsState {
                 let (values, at) = kind.options(&limits);
                 (values.into_iter().map(|v| kind.label(v)).collect(), at)
             }
+            DropdownId::SoundTheme => {
+                let current = self.appearance.settings.sound_theme.id();
+                let items = self.sound_themes.iter().map(|t| t.name.clone()).collect();
+                let at = self
+                    .sound_themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == current)
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::EventSound(index) => {
+                let items = EVENT_SOUND_CHOICES
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect();
+                (items, self.event_sound_choice(index))
+            }
             DropdownId::NotifImportance(index) => {
                 let items: Vec<String> = notifsettings::Importance::ALL
                     .iter()
@@ -7727,13 +7975,19 @@ impl SettingsState {
             // Releasing outside is the ordinary way to finish a slider gesture,
             // so this must not be conditional on the pointer still being over
             // the track.
-            MouseEventKind::Release(MouseButton::Left) => {
-                if self.dragging.take().is_some() {
+            MouseEventKind::Release(MouseButton::Left) => match self.dragging.take() {
+                Some(slider) => {
+                    // How loud the desktop's sounds now are, heard when the
+                    // handle is let go: the sound a volume change makes, as
+                    // the desktop makes it. Not on every step of the drag,
+                    // which would be a stutter of overlapping sounds.
+                    if slider == SliderId::SoundVolume {
+                        self.preview_event("audio-volume-change");
+                    }
                     EventResult::Consumed
-                } else {
-                    EventResult::Ignored
                 }
-            }
+                None => EventResult::Ignored,
+            },
             // Only the sign of `dy` is used, not its magnitude:
             // `dy` is in notches; `wheel::rows` turns it into whole items and
             // banks the fraction. What was here read only the *sign* of `dy`,
@@ -8031,6 +8285,7 @@ impl SettingsState {
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
             SliderId::DoubleClickMs => self.input.settings.mouse.double_click_ms as f32,
+            SliderId::SoundVolume => self.appearance.settings.sounds.volume,
         }
     }
 
@@ -8072,6 +8327,7 @@ impl SettingsState {
                 self.appearance.settings.night_light_strength = value;
             }
             SliderId::NarratorRate => self.narrator_rate = value,
+            SliderId::SoundVolume => self.appearance.settings.sounds.volume = value,
             SliderId::TextSize => self.text_size_percent = round_u16(value),
             // Through the model's setter, not by assignment: the clamp belongs
             // to whoever owns the file, and this way a track that ever grew
@@ -8096,6 +8352,7 @@ impl SettingsState {
             ToggleId::RotationShuffle => &mut self.appearance.settings.wallpaper_shuffle,
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
+            ToggleId::SystemSounds => &mut self.appearance.settings.sounds.enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::ClockSeconds => &mut self.datetime.settings.show_seconds,
@@ -8405,6 +8662,19 @@ impl SettingsState {
                 }
             }
             DropdownId::BinDrive(drive, kind) => self.set_bin_drive_limit(drive, kind, index),
+            DropdownId::SoundTheme => {
+                if let Some(id) = self.sound_themes.get(index).map(|t| t.id.clone()) {
+                    self.appearance.settings.sound_theme = self.sound_theme_named(&id);
+                    // How the theme sounds: its own notification -- the
+                    // event heard most -- whatever the user has set in its
+                    // place, since it is the theme being chosen.
+                    if let Some(first) = appearance::sounds::SHELL_EVENTS.first() {
+                        let choice = self.appearance.settings.sound_theme.sound(first.name);
+                        self.preview(&choice);
+                    }
+                }
+            }
+            DropdownId::EventSound(event) => self.choose_event_sound(event, index),
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
@@ -9047,6 +9317,9 @@ fn main() -> ExitCode {
         }
     };
     let mut state = SettingsState::new();
+    // A sound chosen on the Sound page is heard from the real program; a
+    // test's state records it and plays nothing.
+    state.play_previews = true;
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
     state.load_appearance();
@@ -13818,7 +14091,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(values.len(), 6, "the Sound page's six rows are not drawn");
+        assert_eq!(values.len(), 5, "the Sound page's five rows are not drawn");
         let mut reasons = Vec::new();
         for (x, y) in values {
             rest_at(&mut state, x, y);
@@ -13832,7 +14105,7 @@ mod tests {
         }
         reasons.sort();
         reasons.dedup();
-        assert_eq!(reasons.len(), 6, "two rows give one reason: {reasons:?}");
+        assert_eq!(reasons.len(), 5, "two rows give one reason: {reasons:?}");
     }
 
     /// **The reason goes with the pointer**: moved onto a control that can
@@ -13994,6 +14267,300 @@ mod tests {
             rest_at(&mut state, cx + 2.0, cy);
             assert_eq!(asks_to_wake_in(&state), None, "a reason waits under {what}");
         }
+    }
+
+    // --- The System Sounds section ----------------------------------------------
+
+    /// A scratch folder of sound themes: Chimes, with sounds of its own.
+    fn scratch_sound_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-sound-themes");
+        let chimes = dir.dir().join("chimes");
+        std::fs::create_dir_all(chimes.join("stereo")).expect("theme folder");
+        std::fs::write(
+            chimes.join("index.theme"),
+            "[Sound Theme]\nName=Chimes\nDirectories=stereo\n\n[stereo]\nOutputProfile=stereo\n",
+        )
+        .expect("index.theme");
+        dir
+    }
+
+    /// The Sound page over `dir`'s sound themes, and no other.
+    fn sound_page(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.load_appearance();
+        state.sound_roots = Some(vec![dir.dir().to_path_buf()]);
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: dir.dir().join("no-themes"),
+        };
+        state.current_category = SettingsCategory::System;
+        state.go_to_page(SettingsPage::Sound);
+        state
+    }
+
+    /// **The desktop's sounds are chosen on the Sound page and reach the
+    /// file** the desktop reads them from: on or off, how loud, the sound
+    /// theme, and each event's own -- the theme's, none, or a file of the
+    /// user's, chosen in the picker. The section was "Enable System Sounds --
+    /// Unavailable" while nothing read it; the desktop does now.
+    #[test]
+    fn the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file() {
+        settingsfile::testing::with_scratch_config("settings-system-sounds", |_| {
+            let dir = scratch_sound_themes();
+            let mut state = sound_page(&dir);
+            let saved = || appearance::AppearanceFile::load().settings;
+
+            press_on(&mut state, RowHit::Toggle(ToggleId::SystemSounds));
+            assert!(
+                !saved().sounds.enabled,
+                "turning the sounds off was not written"
+            );
+            press_on(&mut state, RowHit::Toggle(ToggleId::SystemSounds));
+            assert!(
+                saved().sounds.enabled,
+                "turning them on again was not written"
+            );
+
+            // The volume, at the far end of its track.
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::SoundVolume))
+                .expect("the page draws the volume");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            }));
+            assert!(
+                (saved().sounds.volume - 1.0).abs() < 0.01,
+                "the volume was not written: {}",
+                saved().sounds.volume
+            );
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == "100%"),
+                "the volume's readout does not say how loud"
+            );
+
+            // The theme, from the list of those installed: the list opens on
+            // the one in use, and the row names the one chosen.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            let layout = state.dropdown_layout().expect("the list opened");
+            assert_eq!(
+                layout.selected, 0,
+                "the list does not open on the theme in use"
+            );
+            let at = state
+                .sound_themes
+                .iter()
+                .position(|t| t.name == "Chimes")
+                .expect("the scratch theme is offered");
+            assert_ne!(at, 0, "the built-in theme is not first");
+            press_dropdown_item(&mut state, at);
+            assert_eq!(saved().sound_theme.id(), std::ffi::OsStr::new("chimes"));
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == "Chimes"),
+                "the row does not name the theme chosen"
+            );
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                at,
+                "the list does not open on the theme chosen"
+            );
+            state.open_dropdown = None;
+
+            // An event: none, then the theme's again -- each kept, shown on
+            // the event's row, and the one its list opens on.
+            let notification = appearance::sounds::SHELL_EVENTS[0].name;
+            assert_eq!(state.event_sound_shown(0), "The theme's");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 1);
+            assert_eq!(
+                saved().sounds.events.get(notification),
+                Some(&appearance::EventSound::Off)
+            );
+            assert_eq!(state.event_sound_shown(0), "Off");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                1,
+                "the list does not open on Off"
+            );
+            press_dropdown_item(&mut state, 0);
+            assert_eq!(saved().sounds.events.get(notification), None);
+            assert_eq!(state.event_sound_shown(0), "The theme's");
+
+            // Another event, a file of my own: chosen in the picker, for that
+            // event and no other.
+            let shot = appearance::sounds::SHELL_EVENTS
+                .iter()
+                .position(|e| e.name == "screen-capture")
+                .expect("a screenshot has a sound");
+            let screenshot = appearance::sounds::SHELL_EVENTS[shot].name;
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(shot)));
+            press_dropdown_item(&mut state, 2);
+            assert!(state.dialog.is_some(), "a file of my own put no picker up");
+            assert_eq!(state.picker_is_for, PickerPurpose::EventSound(shot));
+            let ding = dir.dir().join("ding.oga");
+            state.apply_dialog_answer(DialogAction::Selected(ding.clone()));
+            state.save_appearance();
+            assert_eq!(
+                saved().sounds.events.get(screenshot),
+                Some(&appearance::EventSound::File(ding))
+            );
+            assert_eq!(
+                saved().sounds.events.get(notification),
+                None,
+                "the file went to another event as well"
+            );
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t == "Your own: ding.oga"),
+                "the row does not say which file plays"
+            );
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(shot)));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                2,
+                "the list does not open on the user's own"
+            );
+        });
+    }
+
+    /// **With the sounds off, the rest of the section is not offered**: a
+    /// volume, a theme or an event's sound for sounds that do not play would
+    /// be controls whose every setting does the same nothing.
+    #[test]
+    fn with_system_sounds_off_the_rest_of_the_section_is_not_offered() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        state.appearance.settings.sounds.enabled = false;
+        let offered: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert_eq!(offered, vec![RowHit::Toggle(ToggleId::SystemSounds)]);
+
+        state.appearance.settings.sounds.enabled = true;
+        let offered: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert!(offered.contains(&RowHit::Slider(SliderId::SoundVolume)));
+        assert!(offered.contains(&RowHit::Dropdown(DropdownId::SoundTheme)));
+        for index in 0..appearance::sounds::SHELL_EVENTS.len() {
+            assert!(
+                offered.contains(&RowHit::Dropdown(DropdownId::EventSound(index))),
+                "{} has no row",
+                appearance::sounds::SHELL_EVENTS[index].label
+            );
+        }
+    }
+
+    /// **A sound is heard as it is chosen** -- design.txt's sound dropdown is
+    /// "previewable": a theme's notification when the theme is chosen, an
+    /// event's sound when it is set, the user's file when the picker answers,
+    /// and the volume's own sound when its handle is let go, at the volume it
+    /// was let go at. "Off" plays nothing; and a test's state records what it
+    /// would play without playing it aloud.
+    #[test]
+    fn a_sound_is_heard_as_it_is_chosen() {
+        settingsfile::testing::with_scratch_config("settings-sound-previews", |_| {
+            let dir = scratch_sound_themes();
+            let chime = dir
+                .dir()
+                .join("chimes")
+                .join("stereo")
+                .join("message-new-instant.oga");
+            std::fs::write(&chime, b"OggS").expect("the theme's notification");
+            let mut state = sound_page(&dir);
+            assert!(!state.play_previews, "a test's state would play aloud");
+            state.appearance.settings.sounds.volume = 0.25;
+            state.appearance.settings.sounds.events.insert(
+                appearance::sounds::SHELL_EVENTS[0].name.to_owned(),
+                appearance::EventSound::File(dir.dir().join("mine.oga")),
+            );
+
+            // A theme: how its own notification sounds, whatever the user
+            // has set in its place.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            let at = state
+                .sound_themes
+                .iter()
+                .position(|t| t.name == "Chimes")
+                .expect("the scratch theme is offered");
+            press_dropdown_item(&mut state, at);
+            assert_eq!(
+                state.previewed,
+                Some((sound::Sound::File(chime.clone()), 0.25)),
+                "choosing a theme did not play its notification"
+            );
+
+            // Off plays nothing; the theme's again plays the theme's.
+            state.previewed = None;
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 1);
+            assert_eq!(state.previewed, None, "silence was played");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 0);
+            assert_eq!(
+                state.previewed,
+                Some((sound::Sound::File(chime), 0.25)),
+                "the theme's sound, chosen again, was not played"
+            );
+
+            // A file of the user's own, when the picker answers.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 2);
+            let ding = dir.dir().join("ding.oga");
+            state.apply_dialog_answer(DialogAction::Selected(ding.clone()));
+            assert_eq!(
+                state.previewed,
+                Some((sound::Sound::File(ding), 0.25)),
+                "the file chosen was not played"
+            );
+
+            // The volume, when its handle is let go -- not while it moves.
+            state.previewed = None;
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::SoundVolume))
+                .expect("the page draws the volume");
+            for kind in [
+                MouseEventKind::Press(MouseButton::Left),
+                MouseEventKind::Move,
+            ] {
+                state.handle_event(&Event::Mouse(MouseEvent {
+                    x: track_x + SLIDER_WIDTH / 2.0,
+                    y: track_y + 2.0,
+                    kind,
+                }));
+                assert_eq!(
+                    state.previewed, None,
+                    "the volume sounded before it was let go"
+                );
+            }
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH / 2.0,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            }));
+            let volume = state.appearance.settings.sounds.volume;
+            assert!((volume - 0.5).abs() < 0.01, "the volume is {volume}");
+            // The scratch theme has no volume sound and no freedesktop theme
+            // to fall back on, so the built-in one plays.
+            let tick = sound::BuiltIn::for_event("audio-volume-change")
+                .expect("a built-in sound for a volume change");
+            assert_eq!(
+                state.previewed,
+                Some((sound::Sound::BuiltIn(tick), volume)),
+                "letting the volume go did not play the volume's sound at it"
+            );
+        });
     }
 
     // --- Notes wrap to their column --------------------------------------------
@@ -14478,14 +15045,29 @@ mod tests {
     /// It also fails the day somebody adds a working control here, which is
     /// correct -- that is the day the page stops being unavailable, and the
     /// doc comment on `build_sound_page` stops being true.
+    ///
+    /// Since 2026-10-10 the System Sounds section has controls -- the desktop
+    /// reads them (`the_system_sounds_are_chosen_on_the_sound_page_and_reach_
+    /// the_file`) -- so the claim narrows to the devices, the input and the
+    /// per-program volumes, which still reach nothing.
     #[test]
-    fn the_sound_page_offers_nothing_to_click() {
+    fn the_sound_devices_offer_nothing_to_click() {
         let state = fully_expanded(SettingsPage::Sound);
-        let bands = hit_bands(&state);
-        let named: Vec<RowHit> = bands.iter().map(|(what, _)| *what).collect();
+        let stray: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .filter(|what| {
+                !matches!(
+                    what,
+                    RowHit::Toggle(ToggleId::SystemSounds)
+                        | RowHit::Slider(SliderId::SoundVolume)
+                        | RowHit::Dropdown(DropdownId::SoundTheme | DropdownId::EventSound(_))
+                )
+            })
+            .collect();
         assert!(
-            bands.is_empty(),
-            "audio reaches nothing, so the page must offer nothing: {named:?}"
+            stray.is_empty(),
+            "the devices reach nothing, so they must offer nothing: {stray:?}"
         );
     }
 
@@ -14621,6 +15203,10 @@ mod tests {
             y: cy,
             kind: MouseEventKind::Release(MouseButton::Left),
         }));
+        assert_eq!(
+            state.previewed, None,
+            "letting go of a slider that is not the sounds' volume played a sound"
+        );
         state.handle_event(&Event::Mouse(MouseEvent {
             x: track_x,
             y: cy,

@@ -1386,6 +1386,234 @@ MUTATIONS += [
     ),
 ]
 
+
+# The System Sounds section (2026-10-10, requests/c-e-a-sounds-page-for-the-
+# sounds-axis.md): on or off, a volume, a sound theme and each event's sound,
+# written to appearance.yaml, and each heard as it is chosen.
+#
+# Not rows: whether a preview is *played* (`play_previews`, set by `main`) is
+# unobservable here -- on this host `sound::play` answers "no device" at once,
+# and a test plays nothing aloud by design -- so the gate and `main`'s line
+# setting it have no test that could fail.
+SOUNDS_CHOSEN = "the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file"
+SOUNDS_OFF = "with_system_sounds_off_the_rest_of_the_section_is_not_offered"
+SOUNDS_HEARD = "a_sound_is_heard_as_it_is_chosen"
+SLIDER_DRAG = "test_a_slider_drag_follows_the_pointer_past_the_track"
+
+MUTATIONS += [
+    (
+        "the sound themes are not read on entering the Sound page",
+        "            self.refresh_sound_themes();\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the page lists the machine's sound themes, not where it looks",
+        "            Some(roots) => appearance::sounds::available_in(roots),",
+        "            Some(_roots) => appearance::sounds::available(),",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a theme chosen is looked for in the standard places, not where it was listed",
+        "            Some(roots) => {\n                appearance::sounds::SoundTheme::named(id, self.theme_dirs.clone(), roots.clone())\n            }",
+        "            Some(_roots) => appearance::sounds::SoundTheme::load(id),",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "an event's list opens on the theme's when it is Off",
+        "            Some(appearance::EventSound::Off) => 1,",
+        "            Some(appearance::EventSound::Off) => 0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's list opens on the theme's when it is the user's own",
+        "            Some(appearance::EventSound::File(_)) => 2,",
+        "            Some(appearance::EventSound::File(_)) => 0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event that is Off is shown as the theme's",
+        "            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[1].to_owned(),",
+        "            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[0].to_owned(),",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's row does not say the file is the user's own",
+        '                format!("Your own: {file}")',
+        '                format!("{file}")',
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the theme's, chosen again, keeps the user's choice",
+        "                events.remove(event.name);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "Off is not kept",
+        "                events.insert(event.name.to_owned(), appearance::EventSound::Off);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a file of my own puts no picker up",
+        "            2 => self.open_sound_dialog(index),",
+        "            2 => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the sound picker's answer goes to another errand",
+        "        self.picker_is_for = PickerPurpose::EventSound(index);",
+        "        self.picker_is_for = PickerPurpose::LoginImage;",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the picker's file goes to the first event",
+        "                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) {\n                            self.appearance",
+        "                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index.min(0)) {\n                            self.appearance",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the picker's file is not kept",
+        ".insert(event.name.to_owned(), appearance::EventSound::File(path));",
+        ".insert(event.name.to_owned(), appearance::EventSound::Off);",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume is drawn at nought",
+        "            SliderId::SoundVolume => self.appearance.settings.sounds.volume,",
+        "            SliderId::SoundVolume => 0.0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume is not kept",
+        "            SliderId::SoundVolume => self.appearance.settings.sounds.volume = value,",
+        "            SliderId::SoundVolume => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume has no readout",
+        '            Self::SoundVolume => Some(format!("{}%", round_u16(value * 100.0))),',
+        "            Self::SoundVolume => None,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the sounds' switch flips nothing",
+        "            ToggleId::SystemSounds => &mut self.appearance.settings.sounds.enabled,",
+        "            ToggleId::SystemSounds => return None,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the rest of the section is offered with the sounds off",
+        "        if !sounds.enabled {\n            s.gap();\n            return;\n        }\n",
+        "",
+        [SOUNDS_OFF],
+    ),
+    (
+        "the section has no volume",
+        '        self.slider(s, "Volume", SliderId::SoundVolume);\n',
+        "",
+        [SOUNDS_OFF, SOUNDS_CHOSEN],
+    ),
+    (
+        "the theme's row does not name it",
+        '                |t| t.name.clone(),\n            );\n        s.dropdown_row("Sound theme"',
+        '                |_t| String::new(),\n            );\n        s.dropdown_row("Sound theme"',
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "every event's row is the first event's",
+        "                DropdownId::EventSound(index),\n                &self.event_sound_shown(index),",
+        "                DropdownId::EventSound(0),\n                &self.event_sound_shown(index),",
+        [SOUNDS_OFF],
+    ),
+    (
+        "the theme list opens on the first theme",
+        "                    .position(|t| t.id.as_os_str() == current)\n                    .unwrap_or(0);",
+        "                    .position(|_t| current.is_empty())\n                    .unwrap_or(0);",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's list opens on the first choice",
+        "                (items, self.event_sound_choice(index))",
+        "                (items, index.min(0))",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a theme chosen is not kept",
+        "                    self.appearance.settings.sound_theme = self.sound_theme_named(&id);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's choice does nothing",
+        "            DropdownId::EventSound(event) => self.choose_event_sound(event, index),",
+        "            DropdownId::EventSound(_event) => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    # The previews.
+    (
+        "the theme's sound, chosen again, is not heard",
+        "                events.remove(event.name);\n                self.preview_event(event.name);\n",
+        "                events.remove(event.name);\n",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the user's file is not heard when the picker answers",
+        "                            self.preview_event(event.name);\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a theme chosen is not heard",
+        "                        self.preview(&choice);\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a theme chosen plays the user's sound in its place",
+        "                        let choice = self.appearance.settings.sound_theme.sound(first.name);",
+        "                        let choice = self.appearance.settings.sound_for(first.name);",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "every slider let go plays the volume's sound",
+        "                    if slider == SliderId::SoundVolume {",
+        "                    if slider == slider {",
+        [SLIDER_DRAG],
+    ),
+    (
+        "the volume let go is not heard",
+        "                    if slider == SliderId::SoundVolume {",
+        "                    if slider != SliderId::SoundVolume {",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the volume let go plays the notification",
+        '                        self.preview_event("audio-volume-change");',
+        '                        self.preview_event("message-new-instant");',
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview is not recorded",
+        "        self.previewed = Some((sound.clone(), volume));\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview plays at full volume",
+        "        let volume = self.appearance.settings.sounds.volume;\n        self.previewed",
+        "        let volume = 1.0;\n        self.previewed",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a built-in sound is not previewed",
+        "                    Some(builtin) => sound::Sound::BuiltIn(builtin),",
+        "                    Some(_builtin) => return,",
+        [SOUNDS_HEARD],
+    ),
+]
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

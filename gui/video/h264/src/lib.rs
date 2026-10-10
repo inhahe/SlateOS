@@ -17,11 +17,13 @@
 //! - `sei`: `h264_sei.c` and `h2645_sei.c` -- supplemental enhancement
 //!   information: recovery points, the x264 version, picture timing,
 //!   captions, film grain, and what is about the picture rather than in it.
+//! - `slice`: `h264_slice_header_parse` in `h264_slice.c`, with the
+//!   reference counts and weights of `h264_parse.c` and the list
+//!   modifications and marking of `h264_refs.c` -- a slice's header.
 //!
 //! The rest is being translated in this order, each part against FFmpeg's
-//! output before the next: slice
-//! headers and pictures (`h264_slice.c`, `h264_picture.c`), references
-//! (`h264_refs.c`), CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
+//! output before the next: pictures (`h264_slice.c`, `h264_picture.c`),
+//! references (`h264_refs.c`), CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
 //! `h264_cabac.c`), motion vector prediction (`h264_mvpred.h`,
 //! `h264_direct.c`), reconstruction (`h264_mb.c` and its templates, with
 //! `h264pred`, `h264qpel`, `h264chroma`, `h264idct` and `h264dsp`), the
@@ -41,7 +43,10 @@ mod bits;
 mod nal;
 mod ps;
 mod sei;
+mod slice;
 mod tables;
+#[cfg(test)]
+mod writer;
 
 /// Why a packet or a stream could not be decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

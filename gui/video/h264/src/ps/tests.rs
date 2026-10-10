@@ -13,7 +13,7 @@
 mod fixtures;
 
 use super::*;
-use crate::nal::{Flags, Splitter};
+use crate::writer::{Syntax, read_unit};
 use fixtures::ALL;
 
 /// A trace, read in order: what FFmpeg's `trace_headers` printed for one
@@ -62,18 +62,6 @@ impl<'t> Trace<'t> {
     }
 }
 
-/// A unit as it is in a file, split as the decoder splits a packet: its
-/// reader past the header, and its syntax length in bits.
-fn read_unit(unit: &[u8], f: impl FnOnce(&mut Bits<'_>, usize)) {
-    let mut packet = vec![0, 0, 0, 1];
-    packet.extend_from_slice(unit);
-    let mut s = Splitter::default();
-    s.split(&packet, 4, Flags::default()).unwrap();
-    let nal = s.nals()[0];
-    let mut gb = s.reader(&packet, &nal).unwrap();
-    f(&mut gb, nal.size_bits);
-}
-
 /// A sequence and a picture parameter set as they are in a stream, and the
 /// trace of each.
 struct Sets {
@@ -108,100 +96,13 @@ fn all_sets() -> Vec<Sets> {
 fn parse(f: &Sets) -> ParamSets {
     let mut ps = ParamSets::default();
     read_unit(&f.sps, |gb, _| decode_sps(gb, &mut ps, false).unwrap());
-    read_unit(&f.pps, |gb, bits| decode_pps(gb, &mut ps, bits).unwrap());
+    read_unit(&f.pps, |gb, nal| {
+        decode_pps(gb, &mut ps, nal.size_bits).unwrap();
+    });
     ps
 }
 
 // ---- parameter sets written here ------------------------------------------
-
-/// A unit written syntax element by syntax element, each recorded as
-/// `trace_headers` would print it.
-#[derive(Default)]
-struct Syntax {
-    bytes: Vec<u8>,
-    len: usize,
-    trace: Vec<(String, i64)>,
-}
-
-impl Syntax {
-    fn bits(&mut self, v: u64, n: u32) {
-        for k in (0..n).rev() {
-            if self.len.is_multiple_of(8) {
-                self.bytes.push(0);
-            }
-            if (v >> k) & 1 != 0 {
-                *self.bytes.last_mut().unwrap() |= 0x80 >> (self.len % 8);
-            }
-            self.len += 1;
-        }
-    }
-
-    fn u(&mut self, name: &str, n: u32, v: i64) -> &mut Self {
-        self.bits(v as u64, n);
-        self.trace.push((name.to_owned(), v));
-        self
-    }
-
-    fn ue(&mut self, name: &str, v: i64) -> &mut Self {
-        let x = v as u64 + 1;
-        let n = 64 - x.leading_zeros();
-        self.bits(0, n - 1);
-        self.bits(x, n);
-        self.trace.push((name.to_owned(), v));
-        self
-    }
-
-    fn se(&mut self, name: &str, v: i64) -> &mut Self {
-        let code = if v > 0 { 2 * v - 1 } else { -2 * v };
-        let x = code as u64 + 1;
-        let n = 64 - x.leading_zeros();
-        self.bits(0, n - 1);
-        self.bits(x, n);
-        self.trace.push((name.to_owned(), v));
-        self
-    }
-
-    /// A scaling list: absent (`None`), the default (`Some(&[])`), or these
-    /// values in zigzag order, each written as a delta from the last.
-    fn list(&mut self, flag: &str, list: Option<&[u8]>) -> &mut Self {
-        self.u(flag, 1, i64::from(list.is_some()));
-        match list {
-            None => {}
-            Some([]) => {
-                self.se("delta_scale[0]", -8);
-            }
-            Some(values) => {
-                let mut last = 8i64;
-                for (j, &v) in values.iter().enumerate() {
-                    let delta = (i64::from(v) - last + 128).rem_euclid(256) - 128;
-                    self.se(&format!("delta_scale[{j}]"), delta);
-                    last = i64::from(v);
-                }
-            }
-        }
-        self
-    }
-
-    /// The stop bit and alignment, the header in front, and the escapes a
-    /// stream carries.
-    fn finish(&mut self, header: u8) -> Vec<u8> {
-        self.bits(1, 1);
-        while !self.len.is_multiple_of(8) {
-            self.bits(0, 1);
-        }
-        let mut out = vec![header];
-        let mut zeros = 0;
-        for &b in &self.bytes {
-            if zeros >= 2 && b <= 3 {
-                out.push(3);
-                zeros = 0;
-            }
-            out.push(b);
-            zeros = if b == 0 { zeros + 1 } else { 0 };
-        }
-        out
-    }
-}
 
 /// A list of `n` values counting up from `start`: plainly not a default.
 fn ramp(n: usize, start: u8) -> Vec<u8> {
@@ -728,8 +629,11 @@ fn a_set_ffmpeg_refuses_is_refused() {
     let f = &fixtures::BASELINE;
     let mut ps = ParamSets::default();
     // A PPS before any SPS names a set that is not there.
-    read_unit(f.pps, |gb, bits| {
-        assert_eq!(decode_pps(gb, &mut ps, bits).unwrap_err(), PsError::Invalid);
+    read_unit(f.pps, |gb, nal| {
+        assert_eq!(
+            decode_pps(gb, &mut ps, nal.size_bits).unwrap_err(),
+            PsError::Invalid
+        );
     });
     // An SPS without its last byte -- three flags and the stop bit -- whose
     // last bit kept then reads as the stop bit: refused, unless truncation

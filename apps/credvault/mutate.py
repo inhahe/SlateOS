@@ -29,6 +29,7 @@ REFUSED_WHOLE = "contents_that_are_not_understood_are_refused_whole"
 COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
 FORGETS = "locking_forgets_the_key_and_every_entry"
 AUTO_LOCK = "test_vault_auto_lock"
+FOLDERS = "a_folder_edit_leaves_a_vault_that_opens"
 
 MUTATIONS = [
     (
@@ -81,6 +82,28 @@ MODEL_MUTATIONS = [
         "        let due = self.last_access.saturating_add(timeout_seconds);\n",
         "        let due = self.last_access;\n",
         [AUTO_LOCK],
+    ),
+    (
+        "an entry may be put in a folder that is not there",
+        "        if folder_id.is_some_and(|f| self.get_folder(f).is_none()) {\n"
+        "            return false;\n"
+        "        }\n",
+        "",
+        [FOLDERS],
+    ),
+    (
+        "removing a folder sends its entries to no folder, not up",
+        "                entry.folder_id = removed.parent_id;\n",
+        "                entry.folder_id = None;\n",
+        [FOLDERS],
+    ),
+    (
+        "removing a folder leaves the folders inside it in a folder that is gone",
+        "            if folder.parent_id == Some(folder_id) {\n"
+        "                folder.parent_id = removed.parent_id;\n"
+        "            }\n",
+        "",
+        [FOLDERS],
     ),
 ]
 

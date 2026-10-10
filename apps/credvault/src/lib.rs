@@ -694,10 +694,14 @@ impl Vault {
         }
     }
 
-    /// Move an entry into a folder. Nothing creates a folder, so there is
-    /// nowhere to move one to. See `Folder` and `todo.txt`.
+    /// Move entry `entry_id` into folder `folder_id` (`None`: into no
+    /// folder). Whether it did: a folder the vault does not have is refused,
+    /// since a vault holding an entry in one could never be opened again.
     #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     pub fn set_folder(&mut self, entry_id: u64, folder_id: Option<u64>) -> bool {
+        if folder_id.is_some_and(|f| self.get_folder(f).is_none()) {
+            return false;
+        }
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.folder_id = folder_id;
             true
@@ -717,17 +721,27 @@ impl Vault {
         id
     }
 
+    /// Remove folder `folder_id`. What was in it -- its entries and the
+    /// folders inside it -- moves up into the folder it was in, so nothing is
+    /// left in a folder the vault no longer has: a vault holding anything
+    /// there could never be opened again. Whether there was one to remove.
     #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     pub fn remove_folder(&mut self, folder_id: u64) -> bool {
-        let before = self.folders.len();
-        self.folders.retain(|f| f.id != folder_id);
-        // Unset folder_id on entries in this folder
+        let Some(at) = self.folders.iter().position(|f| f.id == folder_id) else {
+            return false;
+        };
+        let removed = self.folders.remove(at);
         for entry in &mut self.entries {
             if entry.folder_id == Some(folder_id) {
-                entry.folder_id = None;
+                entry.folder_id = removed.parent_id;
             }
         }
-        self.folders.len() < before
+        for folder in &mut self.folders {
+            if folder.parent_id == Some(folder_id) {
+                folder.parent_id = removed.parent_id;
+            }
+        }
+        true
     }
 
     pub fn get_folder(&self, folder_id: u64) -> Option<&Folder> {
@@ -1211,6 +1225,57 @@ mod tests {
         let mut v = Vault::for_test("Test", "secret");
         assert!(!v.unlock("wrong", 100));
         assert!(!v.is_unlocked());
+    }
+
+    /// **A folder edit leaves a vault that opens**: an entry is not put in a
+    /// folder the vault does not have, and removing a folder moves what was
+    /// in it -- entries and folders -- up into the folder it was in, where
+    /// the file's reader finds them.
+    #[test]
+    fn a_folder_edit_leaves_a_vault_that_opens() {
+        let mut v = unlocked_vault();
+        let id = v.add_entry(EntryData::SecureNote(SecureNoteData::new("n", "")), 0);
+        assert!(
+            !v.set_folder(id, Some(999)),
+            "an entry was put in a folder that is not there"
+        );
+        assert_eq!(v.get_entry(id).unwrap().folder_id, None);
+
+        let outer = v.add_folder("outer");
+        let inner = v.add_folder("inner");
+        let innermost = v.add_folder("innermost");
+        let nest = |v: &mut Vault, child: u64, parent: u64| {
+            v.folders
+                .iter_mut()
+                .find(|f| f.id == child)
+                .unwrap()
+                .parent_id = Some(parent);
+        };
+        nest(&mut v, inner, outer);
+        nest(&mut v, innermost, inner);
+        assert!(v.set_folder(id, Some(inner)));
+
+        assert!(v.remove_folder(inner));
+        assert!(!v.remove_folder(inner), "a folder was removed twice");
+        assert_eq!(
+            v.get_entry(id).unwrap().folder_id,
+            Some(outer),
+            "the entry was not moved up"
+        );
+        assert_eq!(
+            v.get_folder(innermost).unwrap().parent_id,
+            Some(outer),
+            "the folder inside was not moved up"
+        );
+
+        v.reseal([0x33; seal::NONCE_LEN]).unwrap();
+        let mut reopened = Vault::from_file(v.sealed.clone()).unwrap();
+        assert!(
+            reopened.unlock(TEST_MASTER_PASSWORD, 0),
+            "the vault no longer opens"
+        );
+        assert_eq!(reopened.entries.len(), 1);
+        assert_eq!(reopened.folders.len(), 2);
     }
 
     /// **Locking forgets the key and every entry and folder**, and unlocking

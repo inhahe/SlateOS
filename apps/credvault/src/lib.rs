@@ -18,6 +18,7 @@
 
 use std::collections::HashSet;
 
+pub mod store;
 pub mod vaultfile;
 
 /// How long an unlocked vault may sit unused before it locks itself, unless

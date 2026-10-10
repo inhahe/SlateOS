@@ -10,20 +10,11 @@ guitk = { path = "../../gui/toolkit" }
 # service, which reads it with the very code that writes it
 # (requests/c-e-share-the-password-vault-with-the-credential-service.md).
 credvault = { path = "../credvault" }
-# The vault's cipher and its key derivation: XChaCha20-Poly1305 and Argon2id,
-# vendored from RustCrypto (design-decisions.md §539, §1218). This crate
-# checked its master password against pwkdf's verifier until 2026-09-27, and
-# kept nothing on disk to check it against.
+# The key derivation's parameters (a new vault's, and the cheaper ones tests
+# set) and the lengths of the salt and nonce this program draws.
 seal = { path = "../../rustcrypto/seal" }
-# The vault's contents are tab-separated records, escaped the way every
-# program's record files are.
-textfmt = { path = "../../textfmt" }
 # A fingerprint of the contents, to save exactly when they change.
 sha2 = { path = "../../sha2" }
-# Where the vault is kept: beside every other program's settings and data.
-settingsfile = { path = "../../gui/settingsfile" }
-# The vault written whole or not at all.
-safeio = { path = "../safeio" }
 # A path shown by its bytes, never a lossy decode.
 pathtext = { path = "../pathtext" }
 # The window itself: `app::launch` is what turns the renderer below into a
@@ -35,6 +26,8 @@ textline = { path = "../textline" }
 [dev-dependencies]
 # Scratch folders for the vault file, so no test reads or writes a real one.
 scratchdir = { path = "../../userspace/scratchdir" }
+# The CSV reader the export's tests read an export back with.
+textfmt = { path = "../../textfmt" }
 # The vault the cheapest key derivation opens, for this program's tests.
 credvault = { path = "../credvault", features = ["testing"] }
 

@@ -18,6 +18,15 @@ seal = { path = "../../rustcrypto/seal" }
 # The contents are tab-separated records, escaped the way every program's
 # record files are.
 textfmt = { path = "../../textfmt" }
+# Where the vault is kept: beside every program's settings and data.
+settingsfile = { path = "../../gui/settingsfile" }
+# The file read with a cap, and written whole -- a new file renamed over the
+# old -- so a reader in another process never sees half a save.
+safeio = { path = "../safeio" }
+
+[dev-dependencies]
+# Scratch folders, so no test reads or writes a real vault.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

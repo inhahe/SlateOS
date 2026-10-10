@@ -4,12 +4,14 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
-Two tables:
+Three tables:
 
 * **the file** (`vaultfile.rs`): a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 * **the model** (`lib.rs`): locking forgets the key and every entry, and the
   auto-lock falls due a timeout after the last use.
+* **the store** (`store.rs`): a file larger than any vault is refused, not
+  read in part, and no file is no vault rather than an error.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -24,6 +26,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "vaultfile.rs"
 MODEL_SRC = Path(__file__).parent / "src" / "lib.rs"
+STORE_SRC = Path(__file__).parent / "src" / "store.rs"
 
 REFUSED_WHOLE = "contents_that_are_not_understood_are_refused_whole"
 COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
@@ -35,6 +38,7 @@ WIPE = "wipe_overwrites_every_byte"
 MADE_AT = "a_new_vault_counts_its_auto_lock_from_when_it_was_made"
 HEADER_FIRST = "bytes_that_are_no_vault_are_refused_before_any_key_is_made"
 TAKES = "a_vault_takes_a_backups_contents_and_keeps_its_own_key"
+READ = "a_vault_file_is_read_whole_or_said_to_be_missing_or_too_large"
 
 MUTATIONS = [
     (
@@ -164,11 +168,26 @@ MODEL_MUTATIONS = [
     ),
 ]
 
+STORE_MUTATIONS = [
+    (
+        "a file larger than any vault is read in part",
+        "        Ok(read) if read.truncated => Err(ReadError::TooLarge),\n",
+        "",
+        [READ],
+    ),
+    (
+        "no file is an error, not no vault",
+        "        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),\n",
+        "",
+        [READ],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
     only = sys.argv[1:]
-    tables = [(SRC, MUTATIONS), (MODEL_SRC, MODEL_MUTATIONS)]
+    tables = [(SRC, MUTATIONS), (MODEL_SRC, MODEL_MUTATIONS), (STORE_SRC, STORE_MUTATIONS)]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]
     if unmatched:

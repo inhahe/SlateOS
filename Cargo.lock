@@ -788,10 +788,8 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
- "safeio",
  "scratchdir",
  "seal",
- "settingsfile",
  "sha2",
  "textfmt",
  "textline",
@@ -801,7 +799,10 @@ dependencies = [
 name = "credvault"
 version = "0.1.0"
 dependencies = [
+ "safeio",
+ "scratchdir",
  "seal",
+ "settingsfile",
  "textfmt",
 ]
 

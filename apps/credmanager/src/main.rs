@@ -2505,17 +2505,6 @@ enum PickFor {
     Export,
 }
 
-/// The largest file Restore reads as a vault. A vault of ten thousand entries
-/// is a few MiB; this is room for far more, and a stop for a file that is
-/// plainly something else.
-const MAX_VAULT_BYTES: usize = 256 << 20;
-
-/// Where the vault is kept: `<config>/credmanager/vault`, beside every other
-/// program's settings and data (`settingsfile::config_dir`).
-fn vault_path() -> Option<PathBuf> {
-    settingsfile::config_dir().map(|dir| dir.join("credmanager").join("vault"))
-}
-
 /// Fill `out` from the kernel's secure random source: `false` if it cannot
 /// be reached, and then nothing may be sealed -- a salt or nonce that is not
 /// random is not a salt or a nonce.
@@ -2546,33 +2535,6 @@ fn no_entropy(_out: &mut [u8]) -> bool {
 /// nothing saves nothing.
 fn fingerprint(vault: &Vault) -> [u8; 32] {
     sha2::sha256(vaultfile::contents_text(vault).as_bytes())
-}
-
-/// Write the sealed vault to `path`, whole or not at all, readable by its
-/// owner alone.
-///
-/// The folder is made owner-only as it is made, so the file is never
-/// readable by anyone else even for the moment before its own mode is set.
-/// Its contents are encrypted either way; this keeps other users from
-/// copying it to guess at offline.
-fn write_vault(path: &Path, sealed: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(dir)?;
-    }
-    safeio::write_atomically(path, sealed)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
 }
 
 /// Seconds since 1970, from the clock.
@@ -3207,13 +3169,10 @@ impl AppState {
     /// file there cannot be opened.
     fn open(store: Option<PathBuf>) -> Self {
         let mut state = Self::new(Vault::none_yet());
-        state.gate = match store.as_deref().map(std::fs::read) {
-            None => Gate::Create(NewVault::default()),
-            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                Gate::Create(NewVault::default())
-            }
-            Some(Err(e)) => Gate::Unreadable(format!("it could not be read: {e}")),
-            Some(Ok(bytes)) => match Vault::from_file(bytes) {
+        state.gate = match store.as_deref().map(credvault::store::read_vault_file) {
+            None | Some(Ok(None)) => Gate::Create(NewVault::default()),
+            Some(Err(e)) => Gate::Unreadable(e.to_string()),
+            Some(Ok(Some(bytes))) => match Vault::from_file(bytes) {
                 Ok(vault) => {
                     state.vault = vault;
                     Gate::Unlock
@@ -3256,7 +3215,7 @@ impl AppState {
             return;
         }
         if let Some(path) = self.store.as_deref()
-            && let Err(e) = write_vault(path, self.vault.sealed())
+            && let Err(e) = credvault::store::write_owner_only(path, self.vault.sealed())
         {
             self.save_error = Some(format!("{} could not be written: {e}", path.shown()));
             return;
@@ -3316,25 +3275,31 @@ impl AppState {
             self.vault_message = Some(format!("Not backed up: {why}."));
             return;
         }
-        self.vault_message = Some(match write_vault(path, self.vault.sealed()) {
-            Ok(()) => format!(
-                "Backed up to {}. It opens with the master password you have now.",
-                path.shown()
-            ),
-            Err(e) => format!("Not backed up: {} could not be written: {e}", path.shown()),
-        });
+        self.vault_message = Some(
+            match credvault::store::write_owner_only(path, self.vault.sealed()) {
+                Ok(()) => format!(
+                    "Backed up to {}. It opens with the master password you have now.",
+                    path.shown()
+                ),
+                Err(e) => format!("Not backed up: {} could not be written: {e}", path.shown()),
+            },
+        );
     }
 
     /// Read the backup at `path`, and ask for the master password it was made
     /// with.
     fn start_restore(&mut self, path: &Path) {
-        let bytes = match safeio::read_capped(path, MAX_VAULT_BYTES) {
-            Ok(read) if read.truncated => {
+        let bytes = match credvault::store::read_vault_file(path) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                self.vault_message = Some(format!("{} is not there.", path.shown()));
+                return;
+            }
+            Err(credvault::store::ReadError::TooLarge) => {
                 self.vault_message = Some(format!("{} is too large to be a vault.", path.shown()));
                 return;
             }
-            Ok(read) => read.bytes,
-            Err(e) => {
+            Err(credvault::store::ReadError::Io(e)) => {
                 self.vault_message = Some(format!("{} could not be read: {e}", path.shown()));
                 return;
             }
@@ -3409,7 +3374,7 @@ impl AppState {
     fn export_to(&mut self, path: &Path) {
         let count = self.vault.entries().len();
         self.vault_message = Some(
-            match write_vault(path, export_csv(&self.vault).as_bytes()) {
+            match credvault::store::write_owner_only(path, export_csv(&self.vault).as_bytes()) {
                 Ok(()) => format!(
                     "Exported {count} {} to {} in plain text: anyone who can open it can read \
                  every password in it. Delete it once it is imported.",
@@ -8040,7 +8005,7 @@ impl Probe for AppState {
 /// `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK`, and wiring the window is what turns
 /// the gap from theoretical into visible.
 fn main() -> ExitCode {
-    let mut state = AppState::open(vault_path());
+    let mut state = AppState::open(credvault::store::vault_path());
     state.clock = Clock::Wall;
     state.now = unix_now();
     app::launch("credmanager", &mut state)

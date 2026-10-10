@@ -1877,7 +1877,7 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 
     // Collect passwords for reuse detection
     let mut password_counts: HashMap<String, Vec<u64>> = HashMap::new();
-    for entry in &vault.entries {
+    for entry in vault.entries() {
         if let Some(pw) = entry.data.password() {
             password_counts
                 .entry(pw.to_string())
@@ -1886,7 +1886,7 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
         }
     }
 
-    for entry in &vault.entries {
+    for entry in vault.entries() {
         let name = entry.display_name().to_string();
 
         // Compromised check
@@ -2012,7 +2012,7 @@ fn export_csv(vault: &Vault) -> String {
     ];
     let mut csv = header.map(quoted).join(",");
     csv.push_str("\r\n");
-    for entry in &vault.entries {
+    for entry in vault.entries() {
         let (username, password, url, notes, totp) = match &entry.data {
             EntryData::Login(d) => (
                 d.username.clone(),
@@ -2218,7 +2218,7 @@ impl SidebarSelection {
             Self::Audit => "! Audit".to_string(),
             Self::TypeFilter(etype) => format!("{} {}", etype.icon_char(), etype.label()),
             Self::Folder(id) => vault
-                .folders
+                .folders()
                 .iter()
                 .find(|f| f.id == *id)
                 .map_or_else(String::new, |f| f.name.clone()),
@@ -3038,7 +3038,7 @@ impl AppState {
     fn auto_lock_shown(&self) -> guitk::slider::Slider {
         let mut shown = self.auto_lock.clone();
         if !shown.is_dragging() {
-            shown.set_value(f64::from(self.vault.auto_lock_minutes));
+            shown.set_value(f64::from(self.vault.auto_lock_minutes()));
         }
         shown
     }
@@ -3046,7 +3046,7 @@ impl AppState {
     /// Keep a value the slider settled on as the vault's auto-lock time:
     /// written with the vault, and the time the next lock is counted by.
     fn set_auto_lock(&mut self, minutes: f64) {
-        self.vault.auto_lock_minutes = whole_minutes(minutes);
+        self.vault.set_auto_lock_minutes(whole_minutes(minutes));
     }
 
     /// The auto-lock slider's share of a pointer event while the settings
@@ -3256,7 +3256,7 @@ impl AppState {
             return;
         }
         if let Some(path) = self.store.as_deref()
-            && let Err(e) = write_vault(path, &self.vault.sealed)
+            && let Err(e) = write_vault(path, self.vault.sealed())
         {
             self.save_error = Some(format!("{} could not be written: {e}", path.shown()));
             return;
@@ -3316,7 +3316,7 @@ impl AppState {
             self.vault_message = Some(format!("Not backed up: {why}."));
             return;
         }
-        self.vault_message = Some(match write_vault(path, &self.vault.sealed) {
+        self.vault_message = Some(match write_vault(path, self.vault.sealed()) {
             Ok(()) => format!(
                 "Backed up to {}. It opens with the master password you have now.",
                 path.shown()
@@ -3382,27 +3382,23 @@ impl AppState {
     fn restore_replace(&mut self) {
         match self.dialog.take() {
             Some(VaultDialog::RestoreConfirm { path, backup }) => {
-                let mut backup = *backup;
-                let entries = std::mem::take(&mut backup.entries);
-                let folders = std::mem::take(&mut backup.folders);
-                let name = std::mem::take(&mut backup.name);
-                let (id_gen, auto_lock) = (backup.id_gen, backup.auto_lock_minutes);
-                // Its key, overwritten, and nothing of it left behind.
-                backup.lock();
-                let count = entries.len();
-                self.vault.name = name;
-                self.vault.entries = entries;
-                self.vault.folders = folders;
-                self.vault.id_gen = id_gen;
-                self.vault.auto_lock_minutes = auto_lock;
-                self.selected_entry_id = None;
-                self.refresh_filter();
-                self.keep_if_changed();
-                self.vault_message = Some(format!(
-                    "Restored {count} {} from {}. It opens with your master password.",
-                    if count == 1 { "entry" } else { "entries" },
-                    path.shown()
-                ));
+                // The backup is locked as its contents come over: its key
+                // wiped, and nothing of it left behind.
+                match self.vault.take_contents_of(*backup) {
+                    Ok(count) => {
+                        self.selected_entry_id = None;
+                        self.refresh_filter();
+                        self.keep_if_changed();
+                        self.vault_message = Some(format!(
+                            "Restored {count} {} from {}. It opens with your master password.",
+                            if count == 1 { "entry" } else { "entries" },
+                            path.shown()
+                        ));
+                    }
+                    Err(why) => {
+                        self.vault_message = Some(format!("Nothing was restored: {why}."));
+                    }
+                }
             }
             other => self.dialog = other,
         }
@@ -3411,7 +3407,7 @@ impl AppState {
     /// Write every entry to `path` as CSV, passwords in plain text -- the
     /// operator's option A of C-Q25, reached only through the warning.
     fn export_to(&mut self, path: &Path) {
-        let count = self.vault.entries.len();
+        let count = self.vault.entries().len();
         self.vault_message = Some(
             match write_vault(path, export_csv(&self.vault).as_bytes()) {
                 Ok(()) => format!(
@@ -3487,7 +3483,7 @@ impl AppState {
         );
         items.extend(
             self.vault
-                .folders
+                .folders()
                 .iter()
                 .map(|folder| SidebarSelection::Folder(folder.id)),
         );
@@ -3545,12 +3541,12 @@ impl AppState {
     /// Rebuild the filtered entry list from current sidebar + search + sort.
     fn refresh_filter(&mut self) {
         let mut entries: Vec<&Entry> = match &self.sidebar_selection {
-            SidebarSelection::AllItems => self.vault.entries.iter().collect(),
+            SidebarSelection::AllItems => self.vault.entries().iter().collect(),
             SidebarSelection::Favorites => self.vault.starred_entries(),
             SidebarSelection::Folder(fid) => self.vault.entries_in_folder(Some(*fid)),
             SidebarSelection::Tag(tag) => self.vault.entries_with_tag(tag),
             SidebarSelection::TypeFilter(et) => self.vault.entries_of_type(*et),
-            SidebarSelection::Audit => self.vault.entries.iter().collect(),
+            SidebarSelection::Audit => self.vault.entries().iter().collect(),
         };
 
         // Apply search filter
@@ -4059,7 +4055,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         frame,
         text_x,
         y,
-        &state.vault.name,
+        state.vault.name(),
         state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
@@ -5856,7 +5852,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
     y += 24.0;
 
     let info_items = [
-        ("Vault name", state.vault.name.as_str()),
+        ("Vault name", state.vault.name()),
         (
             "Status",
             if state.vault.is_unlocked() {
@@ -5890,7 +5886,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         y += 26.0;
     }
 
-    let count_text = format!("{}", state.vault.entries.len());
+    let count_text = format!("{}", state.vault.entries().len());
     draw_text(
         frame,
         x_start + pad,
@@ -5913,7 +5909,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
     );
     y += 26.0;
 
-    let folder_count_text = format!("{}", state.vault.folders.len());
+    let folder_count_text = format!("{}", state.vault.folders().len());
     draw_text(
         frame,
         x_start + pad,
@@ -6567,13 +6563,13 @@ fn render_vault_dialog(
                         "{} holds {} {}; this vault holds {}.",
                         path.file_name()
                             .map_or_else(|| path.shown().to_string(), |n| n.shown().to_string()),
-                        backup.entries.len(),
-                        if backup.entries.len() == 1 {
+                        backup.entries().len(),
+                        if backup.entries().len() == 1 {
                             "entry"
                         } else {
                             "entries"
                         },
-                        state.vault.entries.len()
+                        state.vault.entries().len()
                     ),
                     state.palette.text,
                 ),
@@ -6693,10 +6689,10 @@ fn render_unlock_panel(frame: &mut Frame, state: &AppState, width: f32, height: 
     // centre by half its excess byte count, since the offset was `len * 5.0`.
     // A vault read from its file has no name until it is opened: the name is
     // inside, encrypted with everything else.
-    let name = if state.vault.name.is_empty() {
+    let name = if state.vault.name().is_empty() {
         "Your vault"
     } else {
-        state.vault.name.as_str()
+        state.vault.name()
     };
     let name_x = text::center_x(name, center_x, HEADING_FONT_SIZE, FontWeightHint::Bold);
     draw_text(
@@ -8797,7 +8793,7 @@ mod tests {
         let mut opened = Vault::from_file(bytes).unwrap();
         assert!(!opened.unlock("not it", 0));
         assert!(opened.unlock(MASTER, 0));
-        assert_eq!(opened.entries.len(), 1);
+        assert_eq!(opened.entries().len(), 1);
     }
 
     #[test]
@@ -8832,7 +8828,7 @@ mod tests {
             "{:?}",
             state.dialog
         );
-        assert_eq!(state.vault.entries.len(), 1);
+        assert_eq!(state.vault.entries().len(), 1);
 
         type_in(&mut state, MASTER);
         handle_event(&mut state, &key(Key::Enter));
@@ -8846,17 +8842,21 @@ mod tests {
             "{}",
             drawn(&state)
         );
-        assert_eq!(state.vault.entries.len(), 1, "replaced before being asked");
+        assert_eq!(
+            state.vault.entries().len(),
+            1,
+            "replaced before being asked"
+        );
 
         handle_event(&mut state, &key(Key::Enter));
         assert!(state.dialog.is_none());
-        assert_eq!(state.vault.entries.len(), 2);
+        assert_eq!(state.vault.entries().len(), 2);
 
         // Kept, under this vault's own master password and not the backup's.
         let mut again = reopen(&scratch2);
         assert!(!again.vault.unlock(MASTER, 0));
         assert!(again.vault.unlock(other, 0));
-        assert_eq!(again.vault.entries.len(), 2);
+        assert_eq!(again.vault.entries().len(), 2);
     }
 
     #[test]
@@ -9016,7 +9016,7 @@ mod tests {
     fn unlocked_for_the_clock() -> (AppState, u64) {
         let mut state = AppState::for_test();
         assert!(state.vault.unlock(TEST_MASTER_PASSWORD, state.now));
-        let timeout = u64::from(state.vault.auto_lock_minutes) * 60;
+        let timeout = u64::from(state.vault.auto_lock_minutes()) * 60;
         (state, timeout)
     }
 
@@ -9781,7 +9781,7 @@ mod tests {
     #[test]
     fn a_folder_row_in_the_sidebar_selects_that_folder() {
         let mut state = unlocked_with_a_folder_and_a_tag();
-        let folder = state.vault.folders[0].id;
+        let folder = state.vault.folders()[0].id;
         let index = state
             .sidebar_items()
             .iter()
@@ -10420,7 +10420,7 @@ mod tests {
     #[test]
     fn a_credential_typed_into_the_form_reaches_the_vault() {
         let mut state = unlocked_app();
-        let before = state.vault.entries.len();
+        let before = state.vault.entries().len();
         press(&mut state, Target::Add);
         type_str(&mut state, "example.com");
         handle_key(&mut state, &key_of(Key::Tab));
@@ -10429,7 +10429,7 @@ mod tests {
         type_str(&mut state, "hunter2");
         assert_eq!(press(&mut state, Target::NewSave), EventResult::Consumed);
 
-        assert_eq!(state.vault.entries.len(), before + 1);
+        assert_eq!(state.vault.entries().len(), before + 1);
         let id = state.selected_entry_id.expect("the new entry is selected");
         let entry = state.vault.get_entry(id).expect("it is in the vault");
         match &entry.data {
@@ -10447,14 +10447,14 @@ mod tests {
     #[test]
     fn a_form_with_no_name_is_not_saved() {
         let mut state = unlocked_app();
-        let before = state.vault.entries.len();
+        let before = state.vault.entries().len();
         press(&mut state, Target::Add);
         // Straight to the password, leaving the site blank.
         handle_key(&mut state, &key_of(Key::Tab));
         handle_key(&mut state, &key_of(Key::Tab));
         type_str(&mut state, "secret");
         press(&mut state, Target::NewSave);
-        assert_eq!(state.vault.entries.len(), before);
+        assert_eq!(state.vault.entries().len(), before);
         assert!(
             state.new_entry.is_some(),
             "the form stays open rather than discarding what was typed"
@@ -10464,12 +10464,12 @@ mod tests {
     #[test]
     fn cancelling_throws_the_form_away() {
         let mut state = unlocked_app();
-        let before = state.vault.entries.len();
+        let before = state.vault.entries().len();
         press(&mut state, Target::Add);
         type_str(&mut state, "something");
         assert_eq!(press(&mut state, Target::NewCancel), EventResult::Consumed);
         assert!(state.new_entry.is_none());
-        assert_eq!(state.vault.entries.len(), before);
+        assert_eq!(state.vault.entries().len(), before);
         assert_eq!(state.detail_view, DetailView::EntryDetail);
     }
 
@@ -10869,12 +10869,12 @@ mod tests {
     #[test]
     fn a_name_of_only_spaces_is_not_a_name() {
         let mut state = unlocked_app();
-        let before = state.vault.entries.len();
+        let before = state.vault.entries().len();
         press(&mut state, Target::Add);
         type_str(&mut state, "   ");
         press(&mut state, Target::NewSave);
         assert_eq!(
-            state.vault.entries.len(),
+            state.vault.entries().len(),
             before,
             "a credential whose name is blank is one the list cannot show and the user cannot find again"
         );
@@ -10919,7 +10919,7 @@ mod tests {
     #[test]
     fn enter_saves_the_form() {
         let mut state = unlocked_app();
-        let before = state.vault.entries.len();
+        let before = state.vault.entries().len();
         press(&mut state, Target::Add);
         type_str(&mut state, "example.com");
         assert_eq!(
@@ -10927,7 +10927,7 @@ mod tests {
             EventResult::Consumed
         );
         assert_eq!(
-            state.vault.entries.len(),
+            state.vault.entries().len(),
             before + 1,
             "a form that cannot be finished from the keyboard needs the mouse for its last step"
         );
@@ -11237,7 +11237,7 @@ mod tests {
         assert_eq!(again.gate, Gate::Unlock);
         assert!(!again.vault.is_unlocked());
         assert!(
-            again.vault.entries.is_empty(),
+            again.vault.entries().is_empty(),
             "entries in memory before unlocking"
         );
 
@@ -11259,9 +11259,9 @@ mod tests {
         type_in(&mut again, MASTER);
         handle_event(&mut again, &key(Key::Enter));
         assert!(again.vault.is_unlocked());
-        assert_eq!(again.vault.entries.len(), 1);
-        let EntryData::Login(login) = &again.vault.entries[0].data else {
-            panic!("{:?}", again.vault.entries[0].data)
+        assert_eq!(again.vault.entries().len(), 1);
+        let EntryData::Login(login) = &again.vault.entries()[0].data else {
+            panic!("{:?}", again.vault.entries()[0].data)
         };
         assert_eq!(login.password, "hunter2-secret");
         assert_eq!(
@@ -11289,7 +11289,7 @@ mod tests {
 
         let mut again = reopen(&scratch);
         assert!(again.vault.unlock(MASTER, 0));
-        assert_eq!(again.vault.entries.len(), 2);
+        assert_eq!(again.vault.entries().len(), 2);
     }
 
     #[test]
@@ -11358,14 +11358,13 @@ mod tests {
             }),
         );
         assert!(!state.vault.is_unlocked());
-        assert!(state.vault.key.is_none(), "the key outlived the lock");
         assert!(
-            state.vault.entries.is_empty(),
+            state.vault.entries().is_empty(),
             "the entries outlived the lock"
         );
         assert!(state.vault.unlock(TEST_MASTER_PASSWORD, 0));
         assert_eq!(
-            state.vault.entries.len(),
+            state.vault.entries().len(),
             1,
             "what was locked did not come back"
         );
@@ -11480,7 +11479,7 @@ mod tests {
         form.values[2] = String::from("new-password");
         assert!(save_new_entry(&mut state));
 
-        assert_eq!(state.vault.entries.len(), 1, "an edit added an entry");
+        assert_eq!(state.vault.entries().len(), 1, "an edit added an entry");
         let entry = state.vault.get_entry(id).unwrap();
         let EntryData::Login(login) = &entry.data else {
             panic!("{:?}", entry.data)
@@ -11540,7 +11539,7 @@ mod tests {
         make_vault(&mut state, MASTER, MASTER);
         add_login(&mut state, "bank.example", "hunter2-secret");
         add_login(&mut state, "mail.example", "other-secret");
-        let id = state.vault.entries[0].id;
+        let id = state.vault.entries()[0].id;
         state.selected_entry_id = Some(id);
 
         handle_event(&mut state, &key(Key::Delete));
@@ -11555,20 +11554,20 @@ mod tests {
             drawn(&state)
         );
         handle_event(&mut state, &key(Key::Escape));
-        assert_eq!(state.vault.entries.len(), 2, "Escape deleted it");
+        assert_eq!(state.vault.entries().len(), 2, "Escape deleted it");
 
         assert_eq!(
             act_on(&mut state, Target::DeleteEntry),
             EventResult::Consumed
         );
         handle_event(&mut state, &key(Key::Enter));
-        assert_eq!(state.vault.entries.len(), 1);
+        assert_eq!(state.vault.entries().len(), 1);
         assert!(state.vault.get_entry(id).is_none());
         assert_eq!(state.selected_entry_id, None);
 
         let mut again = reopen(&scratch);
         assert!(again.vault.unlock(MASTER, 0));
-        assert_eq!(again.vault.entries.len(), 1, "the deletion was not kept");
+        assert_eq!(again.vault.entries().len(), 1, "the deletion was not kept");
     }
 
     #[test]
@@ -12029,7 +12028,7 @@ mod tests {
         let (scratch, mut state) = first_run("auto_lock");
         make_vault(&mut state, MASTER, MASTER);
         assert!(state.vault.is_unlocked(), "control: the vault must be made");
-        state.vault.auto_lock_minutes = 7; // as a restore sets it
+        state.vault.set_auto_lock_minutes(7); // as a restore sets it
         press_on(&mut state, Target::Settings);
         let shown = drawn(&state);
         assert!(
@@ -12056,7 +12055,8 @@ mod tests {
             "a press on the track did not move the slider there"
         );
         assert_eq!(
-            state.vault.auto_lock_minutes, 7,
+            state.vault.auto_lock_minutes(),
+            7,
             "a drag kept its minutes before it was let go"
         );
         pointer_at(&mut state, at(45.0), y, MouseEventKind::Move);
@@ -12071,7 +12071,8 @@ mod tests {
             MouseEventKind::Release(MouseButton::Left),
         );
         assert_eq!(
-            state.vault.auto_lock_minutes, 45,
+            state.vault.auto_lock_minutes(),
+            45,
             "letting the drag go kept nothing"
         );
         assert_eq!(
@@ -12081,15 +12082,21 @@ mod tests {
         );
 
         App::on_event(&mut state, &key(Key::Left));
-        assert_eq!(state.vault.auto_lock_minutes, 44, "Left took no minute off");
+        assert_eq!(
+            state.vault.auto_lock_minutes(),
+            44,
+            "Left took no minute off"
+        );
         App::on_event(&mut state, &key(Key::Up));
         assert_eq!(
-            state.vault.auto_lock_minutes, 44,
+            state.vault.auto_lock_minutes(),
+            44,
             "Up, the entry list's, moved the slider"
         );
         App::on_event(&mut state, &key(Key::End));
         assert_eq!(
-            state.vault.auto_lock_minutes, 60,
+            state.vault.auto_lock_minutes(),
+            60,
             "End did not go to the hour"
         );
 
@@ -12108,7 +12115,8 @@ mod tests {
             MouseEventKind::Release(MouseButton::Left),
         );
         assert_eq!(
-            state.vault.auto_lock_minutes, 60,
+            state.vault.auto_lock_minutes(),
+            60,
             "a drag taken back with Escape kept its minutes"
         );
         assert!(drawn(&state).contains("60 minutes"));
@@ -12116,7 +12124,8 @@ mod tests {
         let mut again = reopen(&scratch);
         assert!(again.vault.unlock(MASTER, 0));
         assert_eq!(
-            again.vault.auto_lock_minutes, 60,
+            again.vault.auto_lock_minutes(),
+            60,
             "the time set was not kept with the vault"
         );
     }
@@ -12132,23 +12141,25 @@ mod tests {
             placement.track.x + 1.0,
             placement.track.y + placement.track.h / 2.0,
         );
-        let before = state.vault.auto_lock_minutes;
+        let before = state.vault.auto_lock_minutes();
 
         // Not the slider's keys or presses with another panel up.
         App::on_event(&mut state, &key(Key::Home));
         pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
         pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
         assert_eq!(
-            state.vault.auto_lock_minutes, before,
+            state.vault.auto_lock_minutes(),
+            before,
             "the slider was moved with the settings panel not up"
         );
 
         press_on(&mut state, Target::Settings);
         state.now += 30;
-        let used = state.vault.last_access;
+        let used = state.vault.last_access();
         pointer_at(&mut state, x, y, MouseEventKind::Move);
         assert_eq!(
-            state.vault.last_access, used,
+            state.vault.last_access(),
+            used,
             "the pointer passing over the slider counted as use of the vault"
         );
 
@@ -12157,7 +12168,8 @@ mod tests {
         pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
         pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
         assert_eq!(
-            state.vault.auto_lock_minutes, before,
+            state.vault.auto_lock_minutes(),
+            before,
             "a press under a dialog moved the slider"
         );
 
@@ -12167,24 +12179,27 @@ mod tests {
         pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
         pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
         assert_eq!(
-            state.vault.auto_lock_minutes, 1,
+            state.vault.auto_lock_minutes(),
+            1,
             "control: with the dialog gone the press moves it"
         );
         assert_eq!(
-            state.vault.last_access, state.now,
+            state.vault.last_access(),
+            state.now,
             "a press on the slider was not counted as use of the vault"
         );
 
         // Nor through the lock screen, which is drawn over the panel.
         App::on_event(&mut state, &key(Key::End));
-        assert_eq!(state.vault.auto_lock_minutes, 60);
+        assert_eq!(state.vault.auto_lock_minutes(), 60);
         state.lock_vault();
         pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
         pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
         // Read while still locked: opening the vault reads its time back
         // from the sealed file, which would hide a change made in memory.
         assert_eq!(
-            state.vault.auto_lock_minutes, 60,
+            state.vault.auto_lock_minutes(),
+            60,
             "a press on the lock screen moved the slider behind it"
         );
     }
@@ -12465,7 +12480,7 @@ mod tests {
         );
         let mut again = reopen(&scratch);
         assert!(again.vault.unlock(MASTER, again.now));
-        assert_eq!(again.vault.entries.len(), 1, "the login was not kept");
+        assert_eq!(again.vault.entries().len(), 1, "the login was not kept");
     }
 
     // -- The boxes edit at a caret ---------------------------------------------------

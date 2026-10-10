@@ -34,6 +34,7 @@ NO_SECRET = "a_debug_print_shows_no_secret"
 WIPE = "wipe_overwrites_every_byte"
 MADE_AT = "a_new_vault_counts_its_auto_lock_from_when_it_was_made"
 HEADER_FIRST = "bytes_that_are_no_vault_are_refused_before_any_key_is_made"
+TAKES = "a_vault_takes_a_backups_contents_and_keeps_its_own_key"
 
 MUTATIONS = [
     (
@@ -142,6 +143,24 @@ MODEL_MUTATIONS = [
         "        let mut key = vaultfile::key_for(password, self.kdf, &self.salt)?;\n"
         "        let _header = vaultfile::Header::parse(&self.sealed)?;\n",
         [HEADER_FIRST],
+    ),
+    (
+        "a locked backup's nothing is taken",
+        "        if !backup.is_unlocked() {\n            return Err(\"the backup is locked\");\n        }\n",
+        "",
+        [TAKES],
+    ),
+    (
+        "a restore keeps this vault's own entries",
+        "        self.entries = std::mem::take(&mut backup.entries);\n",
+        "",
+        [TAKES],
+    ),
+    (
+        "a restore takes the entries but not the ids",
+        "        self.id_gen = backup.id_gen;\n",
+        "",
+        [TAKES],
     ),
 ]
 

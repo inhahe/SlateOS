@@ -445,7 +445,7 @@ pub const TEST_MASTER_PASSWORD: &str = "master123";
 
 /// Lock state of the vault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VaultState {
+enum VaultState {
     Locked,
     Unlocked,
 }
@@ -461,22 +461,22 @@ pub enum VaultState {
 /// is no other check, so none that is cheaper to run. **Locking** forgets the
 /// key and every entry.
 pub struct Vault {
-    pub name: String,
-    pub state: VaultState,
+    name: String,
+    state: VaultState,
     /// How the key is made from the master password.
-    pub kdf: seal::KdfParams,
+    kdf: seal::KdfParams,
     /// What it is made with besides -- drawn at random when the vault is made.
-    pub salt: [u8; seal::SALT_LEN],
+    salt: [u8; seal::SALT_LEN],
     /// The key, while unlocked.
-    pub key: Option<seal::Key>,
+    key: Option<seal::Key>,
     /// The vault as last sealed: what its file holds, and what unlocking
     /// opens. Empty for a vault that has never been sealed.
-    pub sealed: Vec<u8>,
-    pub entries: Vec<Entry>,
-    pub folders: Vec<Folder>,
-    pub last_access: u64,
-    pub auto_lock_minutes: u32,
-    pub id_gen: u64,
+    sealed: Vec<u8>,
+    entries: Vec<Entry>,
+    folders: Vec<Folder>,
+    last_access: u64,
+    auto_lock_minutes: u32,
+    id_gen: u64,
 }
 
 /// What a vault is, never what it holds: no key, and no entry's contents.
@@ -549,7 +549,7 @@ impl Vault {
 
     /// A locked vault around `sealed` -- the one place the fields are set, so
     /// the constructors cannot drift apart in what a vault starts with.
-    pub fn locked(kdf: seal::KdfParams, salt: [u8; seal::SALT_LEN], sealed: Vec<u8>) -> Self {
+    fn locked(kdf: seal::KdfParams, salt: [u8; seal::SALT_LEN], sealed: Vec<u8>) -> Self {
         Self {
             name: String::new(),
             state: VaultState::Locked,
@@ -582,7 +582,7 @@ impl Vault {
         vault
     }
 
-    pub fn next_id(&mut self) -> u64 {
+    fn next_id(&mut self) -> u64 {
         let id = self.id_gen;
         self.id_gen = self.id_gen.saturating_add(1);
         id
@@ -682,8 +682,75 @@ impl Vault {
         Ok(())
     }
 
+    /// Whether the vault is open: its key and entries in memory.
     pub fn is_unlocked(&self) -> bool {
         self.state == VaultState::Unlocked
+    }
+
+    /// The vault's name, as its sealed contents hold it: empty while it has
+    /// never been opened.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The vault as last sealed -- what its file holds, and what unlocking
+    /// opens -- or nothing for a vault never sealed.
+    pub fn sealed(&self) -> &[u8] {
+        &self.sealed
+    }
+
+    /// Its entries while it is open; none while it is locked.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// Its folders while it is open; none while it is locked.
+    pub fn folders(&self) -> &[Folder] {
+        &self.folders
+    }
+
+    /// When the vault was last used, in Unix seconds: opened, made, or
+    /// [`touch`](Self::touch)ed. The auto-lock counts from it.
+    pub fn last_access(&self) -> u64 {
+        self.last_access
+    }
+
+    /// How many minutes the vault may sit unused, once open, before it locks
+    /// itself.
+    pub fn auto_lock_minutes(&self) -> u32 {
+        self.auto_lock_minutes
+    }
+
+    /// Set [`auto_lock_minutes`](Self::auto_lock_minutes). It is kept in the
+    /// vault's contents, so the next seal keeps it.
+    pub fn set_auto_lock_minutes(&mut self, minutes: u32) {
+        self.auto_lock_minutes = minutes;
+    }
+
+    /// Take `backup`'s contents -- its name, entries, folders, ids and
+    /// auto-lock time -- in place of this vault's own, keeping this vault's
+    /// key: the next seal keeps them under this vault's master password.
+    /// `backup` is locked as it goes, its key wiped. How many entries came
+    /// over.
+    ///
+    /// # Errors
+    ///
+    /// Either vault is locked: this one would have no key to seal them under,
+    /// and that one has no contents to give.
+    pub fn take_contents_of(&mut self, mut backup: Vault) -> Result<usize, &'static str> {
+        if !self.is_unlocked() {
+            return Err("this vault is locked");
+        }
+        if !backup.is_unlocked() {
+            return Err("the backup is locked");
+        }
+        self.name = std::mem::take(&mut backup.name);
+        self.entries = std::mem::take(&mut backup.entries);
+        self.folders = std::mem::take(&mut backup.folders);
+        self.id_gen = backup.id_gen;
+        self.auto_lock_minutes = backup.auto_lock_minutes;
+        backup.lock();
+        Ok(self.entries.len())
     }
 
     /// Seconds from `now` until the auto-lock falls due, or `None` while the
@@ -733,7 +800,7 @@ impl Vault {
 
     /// An entry that can be changed. No caller yet, for the same reason as
     /// `remove_entry`: the detail view shows a credential and cannot edit one.
-    pub fn get_entry_mut(&mut self, entry_id: u64) -> Option<&mut Entry> {
+    fn get_entry_mut(&mut self, entry_id: u64) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }
 
@@ -1457,6 +1524,52 @@ mod tests {
             v.open("pw", 0),
             Err(vaultfile::OpenError::NotAVault)
         ));
+    }
+
+    /// **A vault takes a backup's contents and keeps its own key**: the
+    /// backup's entries, folders, name and auto-lock time come over -- and
+    /// its ids, so the next entry's is new -- while this vault's key stays;
+    /// a locked vault on either side is refused.
+    #[test]
+    fn a_vault_takes_a_backups_contents_and_keeps_its_own_key() {
+        let mut backup = Vault::for_test("Backup", "backup pw");
+        assert!(backup.unlock("backup pw", 0));
+        let old = backup.add_entry(EntryData::SecureNote(SecureNoteData::new("old", "")), 0);
+        backup.add_folder("f");
+        backup.set_auto_lock_minutes(7);
+        let mut mine = unlocked_vault();
+        mine.add_entry(EntryData::SecureNote(SecureNoteData::new("gone", "")), 0);
+        let my_key = mine.key;
+
+        assert!(mine.take_contents_of(Vault::for_test("L", "x")).is_err());
+        assert_eq!(mine.take_contents_of(backup).unwrap(), 1);
+        assert_eq!(mine.name(), "Backup");
+        assert_eq!(mine.entries().len(), 1);
+        assert_eq!(mine.entries()[0].display_name(), "old");
+        assert_eq!(mine.folders().len(), 1);
+        assert_eq!(mine.auto_lock_minutes(), 7);
+        assert_eq!(mine.key, my_key, "this vault's key was not kept");
+        mine.add_entry(EntryData::SecureNote(SecureNoteData::new("new", "")), 0);
+        let mut ids: Vec<u64> = (mine.entries().iter().map(|e| e.id))
+            .chain(mine.folders().iter().map(|f| f.id))
+            .collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            count,
+            "an id the backup had was handed out again"
+        );
+        assert!(ids.contains(&old));
+
+        let mut closed = Vault::for_test("C", "y");
+        let mut open = Vault::for_test("O", "z");
+        assert!(open.unlock("z", 0));
+        assert!(
+            closed.take_contents_of(open).is_err(),
+            "a locked vault took contents"
+        );
     }
 
     /// `wipe` overwrites every byte it is given.

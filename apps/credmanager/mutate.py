@@ -457,7 +457,7 @@ MAIN = [
     (
         "the panel shows the slider's own time, not the vault's",
         '        if !shown.is_dragging() {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n'
         '        }\n',
         '',
         [SLIDER_SETS],
@@ -465,9 +465,9 @@ MAIN = [
     (
         "a drag's minutes are not shown as it goes",
         '        if !shown.is_dragging() {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n',
         '        if true {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n',
         [SLIDER_SETS],
     ),
     (

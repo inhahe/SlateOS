@@ -21,7 +21,9 @@
   does; turning it on also sets up a dynamic DNS name, the router's port and
   a certificate, and the viewer runs in a browser on any screen size.
 - F-Q7 The MP4 reader translated from FFmpeg: keep it? — resolved 2026-10-09
-  (1375): **A**, kept, under FFmpeg's LGPL; not tied to D-Q6.
+  (1375): **A**, kept, under FFmpeg's LGPL; decided apart from lane D's
+  question on libxcrypt's crypt API. (That question's id is not written
+  here: an id in this directory reads as answered, `check-docs.py` Q2.)
 - F-Q8 H.264 video: include a decoder, from which code? — resolved
   2026-10-09 (1376): **B**, FFmpeg's decoder translated, included.
 - F-Q9 AAC sound: include a decoder, from which code? — resolved 2026-10-09

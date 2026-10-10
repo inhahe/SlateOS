@@ -227,7 +227,16 @@ impl Sps {
 const QPS: usize = QP_MAX_NUM + 1;
 
 /// A picture parameter set (`PPS`).
+///
+/// FFmpeg's whole: some fields only FFmpeg's other users read -- its
+/// hardware decoders, its refusal of slice groups -- and the decoder reads
+/// the scaling lists through the dequantization tables made from them; the
+/// tests read them all, holding the parse to FFmpeg's `trace_headers`.
 #[derive(Clone, Debug)]
+#[allow(
+    dead_code,
+    reason = "FFmpeg's PPS whole; the fields the decoder does not read are read by the tests"
+)]
 pub(crate) struct Pps {
     pub(crate) pps_id: u32,
     pub(crate) sps_id: u32,

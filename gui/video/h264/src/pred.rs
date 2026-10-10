@@ -338,14 +338,10 @@ pub(crate) fn pred4x4<P: Pixel>(
 }
 
 /// The filtered edges an 8x8 luma block predicts from
-/// (`PREDICT_8x8_LOAD_*`): the left column, the top row, the eight
-/// samples beyond it, and the corner -- each smoothed with its neighbours,
-/// the ends with what is there.
-struct Edges8 {
-    l: [i32; 8],
-    t: [i32; 16],
-    lt: i32,
-}
+/// (`PREDICT_8x8_LOAD_*`), each made by one of these: the left column, the
+/// top row and the eight samples beyond it, and the corner -- each smoothed
+/// with its neighbours, the ends with what is there.
+struct Edges8;
 
 impl Edges8 {
     fn left<P: Pixel>(b: &Block<'_, P>, has_topleft: bool) -> [i32; 8] {

@@ -179,11 +179,6 @@ impl<'a> Bits<'a> {
         v
     }
 
-    /// Read `n` bits, 0 to 25 (`get_bitsz`).
-    pub(crate) fn bits_z(&mut self, n: u32) -> u32 {
-        if n == 0 { 0 } else { self.bits(n) }
-    }
-
     /// Read one bit (`get_bits1`).
     pub(crate) fn bit(&mut self) -> u32 {
         let b = self.byte((self.index >> 3) as usize);
@@ -208,27 +203,6 @@ impl<'a> Bits<'a> {
         let v = self.cache32() >> (32 - n);
         self.advance(n);
         v
-    }
-
-    /// Read `n` bits, 1 to 25, as a two's-complement number (`get_sbits`).
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "the bits taken as signed, as NEG_SSR32 does"
-    )]
-    pub(crate) fn sbits(&mut self, n: u32) -> i32 {
-        debug_assert!((1..=MIN_CACHE_BITS).contains(&n));
-        let v = (self.cache() as i32) >> (32 - n);
-        self.advance(n);
-        v
-    }
-
-    /// Read `n` bits, 0 to 32, as a two's-complement number
-    /// (`get_sbits_long`).
-    pub(crate) fn sbits_long(&mut self, n: u32) -> i32 {
-        if n == 0 {
-            return 0;
-        }
-        sign_extend(self.bits_long(n), n)
     }
 
     /// The next `n` bits, 1 to 25, without moving (`show_bits`).
@@ -370,39 +344,12 @@ impl<'a> Bits<'a> {
         let sign = ((buf & 1) as i32).wrapping_sub(1);
         (((buf >> 1) as i32) ^ sign).wrapping_add(1)
     }
-
-    /// A truncated Exp-Golomb code whose range is `range`: one inverted bit
-    /// for a range of 2, else [`ue`](Self::ue) (`get_te_golomb`).
-    pub(crate) fn te(&mut self, range: u32) -> i32 {
-        debug_assert!(range >= 1);
-        if range == 2 {
-            #[allow(clippy::cast_possible_wrap, reason = "0 or 1")]
-            let v = (self.bit() ^ 1) as i32;
-            v
-        } else {
-            self.ue()
-        }
-    }
-
-    /// [`te`](Self::te), with nothing read for a range of 1
-    /// (`get_te0_golomb`).
-    pub(crate) fn te0(&mut self, range: u32) -> i32 {
-        if range == 1 { 0 } else { self.te(range) }
-    }
 }
 
 /// The position of `v`'s highest set bit, 0 for 0 (`av_log2`).
 #[allow(clippy::cast_possible_wrap, reason = "0 to 31")]
 pub(crate) fn av_log2(v: u32) -> i32 {
     (v | 1).ilog2() as i32
-}
-
-/// `v`'s low `n` bits, 1 to 32, as a two's-complement number
-/// (`sign_extend`).
-#[allow(clippy::cast_possible_wrap, reason = "the bits taken as signed")]
-pub(crate) fn sign_extend(v: u32, n: u32) -> i32 {
-    let shift = 32 - n;
-    ((v << shift) as i32) >> shift
 }
 
 #[cfg(test)]

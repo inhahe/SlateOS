@@ -278,13 +278,12 @@ struct Part {
     y_offset: usize,
 }
 
-/// The current macroblock's planes, where it starts in each, and the
-/// strides it is written with.
+/// The current macroblock's planes, and where the partition being
+/// predicted starts in each; the strides are the slice's
+/// (`mb_linesize`, `mb_uvlinesize`).
 pub(crate) struct Dst<'a, P> {
     pub(crate) planes: [&'a mut [P]; 3],
     pub(crate) at: [usize; 3],
-    pub(crate) linesize: usize,
-    pub(crate) uvlinesize: usize,
 }
 
 impl Context {
@@ -653,8 +652,6 @@ impl Context {
         planes: [&mut [P]; 3],
         dest_y: usize,
         dest_c: [usize; 2],
-        linesize: usize,
-        uvlinesize: usize,
     ) -> Result<(), DecodeError> {
         let sl = &*sl;
         // Under H264_MV the line `tools/ffdbg`'s FFDBG_MV prints in FFmpeg,
@@ -681,12 +678,7 @@ impl Context {
             }
             eprintln!("{line}");
         }
-        let mut dst = Dst {
-            planes,
-            at: [0; 3],
-            linesize,
-            uvlinesize,
-        };
+        let mut dst = Dst { planes, at: [0; 3] };
         let mb_at = [dest_y, dest_c[0], dest_c[1]];
         let dir = |t: u32, part: u32, list: u32| is_dir(t, part, list);
         let part = |n, w, h, x_offset, y_offset| Part {

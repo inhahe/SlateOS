@@ -305,8 +305,6 @@ impl Context {
                 [&mut *y, &mut *cb, &mut *cr],
                 d.y,
                 [d.cb, d.cr],
-                d.linesize,
-                d.uvlinesize,
             )?;
         }
 

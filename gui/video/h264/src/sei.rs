@@ -59,6 +59,7 @@ const AMBIENT_VIEWING_ENVIRONMENT: u32 = 148;
 /// `H264_SEI_PIC_STRUCT_*`: how a picture is to be shown -- a frame, one
 /// field, two fields in either order, three (telecine), or a frame shown
 /// two or three times.
+#[allow(dead_code, reason = "the set whole: a frame is 0, which nothing names")]
 pub(crate) const PIC_STRUCT_FRAME: u32 = 0;
 pub(crate) const PIC_STRUCT_TOP_FIELD: u32 = 1;
 pub(crate) const PIC_STRUCT_BOTTOM_FIELD: u32 = 2;

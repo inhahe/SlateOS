@@ -76,13 +76,6 @@
 //! neighbours.
 
 #![forbid(unsafe_code)]
-// The decoder is translated a module at a time, and each module's parts are
-// read only by the next ones and by its tests until the decoder that drives
-// them is in (`todo.txt`: "h264: the crate-level dead_code allowance").
-#![allow(
-    dead_code,
-    reason = "translated module by module; nothing drives the parts until the decoder is in"
-)]
 
 mod bits;
 mod cavlc;

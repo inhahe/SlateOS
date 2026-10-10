@@ -83,9 +83,6 @@ pub(crate) fn is_sub_8x4(a: u32) -> bool {
 pub(crate) fn is_sub_4x8(a: u32) -> bool {
     a & MB_TYPE_8X16 != 0
 }
-pub(crate) fn is_sub_4x4(a: u32) -> bool {
-    a & MB_TYPE_8X8 != 0
-}
 /// Whether partition `part` predicts from `list` (`IS_DIR`).
 pub(crate) fn is_dir(a: u32, part: u32, list: u32) -> bool {
     a & (MB_TYPE_P0L0 << (part | (list << 1))) != 0

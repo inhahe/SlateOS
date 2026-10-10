@@ -122,7 +122,6 @@ pub(crate) struct SliceContext {
 
     // The macroblock being decoded, and its neighbours.
     pub(crate) prev_mb_skipped: i32,
-    pub(crate) next_mb_skipped: i32,
     pub(crate) chroma_pred_mode: i32,
     pub(crate) intra16x16_pred_mode: i32,
     /// Each 4x4 block's intra prediction mode, `scan8`-laid with the
@@ -157,7 +156,6 @@ pub(crate) struct SliceContext {
     /// The first macroblock of the next slice.
     pub(crate) next_slice_idx: i32,
     pub(crate) mb_skip_run: i32,
-    pub(crate) is_complex: i32,
     /// How many of the top and left neighbours used the 8x8 transform.
     pub(crate) neighbor_transform_size: i32,
     pub(crate) cbp: i32,
@@ -248,7 +246,6 @@ impl Default for SliceContext {
             col_parity: 0,
             col_fieldoff: 0,
             prev_mb_skipped: 0,
-            next_mb_skipped: 0,
             chroma_pred_mode: 0,
             intra16x16_pred_mode: 0,
             intra4x4_pred_mode_cache: [0; 40],
@@ -273,7 +270,6 @@ impl Default for SliceContext {
             mb_xy: 0,
             next_slice_idx: 0,
             mb_skip_run: 0,
-            is_complex: 0,
             neighbor_transform_size: 0,
             cbp: 0,
             top_cbp: 0,
@@ -394,6 +390,10 @@ pub(crate) struct Context {
     pub(crate) height_from_caller: i32,
     /// Lost slices concealed (`enable_er`, on by default without slice
     /// threads).
+    #[allow(
+        dead_code,
+        reason = "read by error concealment, not yet translated (todo.txt)"
+    )]
     pub(crate) enable_er: bool,
     /// Each slice's reference numbers for the loop filter: `[slice][list][2 + ref]`.
     pub(crate) ref2frm: Box<[[[i32; 64]; 2]; MAX_SLICES]>,
@@ -444,6 +444,10 @@ pub(crate) struct Context {
     /// The picture FFmpeg keeps for concealing lost slices of pictures
     /// without references (`last_pic_for_ec`) while it is still a live
     /// slot; copied into its own slot when that slot is let go.
+    #[allow(
+        dead_code,
+        reason = "read by error concealment, not yet translated (todo.txt)"
+    )]
     pub(crate) last_pic_for_ec: Option<usize>,
 
     /// FFmpeg's `-debug pict` lines, one a slice, for the tests to hold to

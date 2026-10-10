@@ -87,18 +87,13 @@ fn reads_agree_with_a_reader_taking_one_bit_at_a_time() {
                 let mut c = b.clone();
                 assert_eq!(c.bits(n), want, "bits({n}) at {start}");
                 assert_eq!(c.count(), start as u32 + n);
-                let mut s = b.clone();
-                assert_eq!(s.sbits(n), sign_extend(want, n), "sbits({n}) at {start}");
             }
-            assert_eq!(b.clone().sbits_long(n), sign_extend(want, n));
             assert_eq!(b.bits_long(n), want, "bits_long({n}) at {start}");
             assert_eq!(b.count(), start as u32 + n);
         }
         let mut b = Bits::whole(&buf).unwrap();
         b.skip_long(start);
-        assert_eq!(b.clone().bits_z(0), 0);
         assert_eq!(b.clone().bits_long(0), 0);
-        assert_eq!(b.clone().sbits_long(0), 0);
         assert_eq!(b.bit(), bit_at(&buf, start as usize));
         assert_eq!(b.count(), start as u32 + 1);
     }
@@ -182,20 +177,6 @@ fn ue_31_takes_a_longer_code_as_out_of_range() {
     }
 }
 
-#[test]
-fn truncated_codes() {
-    let mut b = Bits::whole(&[0b0100_0000]).unwrap();
-    assert_eq!(b.te0(1), 0);
-    assert_eq!(b.count(), 0);
-    assert_eq!(b.te(2), 1, "a range of two is one inverted bit");
-    assert_eq!(b.te(2), 0);
-    assert_eq!(b.count(), 2);
-    let mut w = Writer::default();
-    w.ue(5);
-    let mut b = Bits::whole(&w.bytes).unwrap();
-    assert_eq!(b.te(3), 5);
-}
-
 /// A read past the end goes on into the bytes after the syntax, then into
 /// zeros. The checked reader stops counting eight bits past the end; the
 /// unchecked one does not.
@@ -252,12 +233,9 @@ fn skipping_and_aligning() {
 }
 
 #[test]
-fn log2_and_sign_extension() {
+fn log2() {
     assert_eq!(av_log2(0), 0);
     assert_eq!(av_log2(1), 0);
     assert_eq!(av_log2(0x8000_0000), 31);
     assert_eq!(av_log2(0x0001_0001), 16);
-    assert_eq!(sign_extend(0b111, 3), -1);
-    assert_eq!(sign_extend(0b011, 3), 3);
-    assert_eq!(sign_extend(0x8000_0000, 32), i32::MIN);
 }

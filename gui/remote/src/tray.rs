@@ -38,16 +38,28 @@
 //!
 //! ## What an icon carries, and what it deliberately does not
 //!
-//! A glyph and a tooltip. **Not a bitmap**: every icon this tree draws is a
-//! text glyph, because the render protocol carries draw commands rather than
-//! pixels and a picture would need the upload path. **Not a colour**: the tray
-//! is shell chrome and its contrast is the shell's problem — a program that
-//! chose its own would be choosing against a palette it cannot see, which is
-//! the defect `Palette::ink` exists to prevent.
+//! A glyph and a tooltip; the name of the program it belongs to
+//! ([`TrayIcon::app_id`]); and, if the program gives one, the name of an icon
+//! from the icon theme ([`IconName`]) for the shell to draw in the glyph's
+//! place.
+//!
+//! **A name, not a bitmap.** The pictures a tray most wants -- a battery, a
+//! network, a speaker -- are emoji to a font, and no font this system has
+//! draws emoji, so a glyph alone leaves them boxes. An icon name follows the
+//! user's theme and its light or dark mode, costs a few bytes, and lets the
+//! shell upload each picture once; pixels would be one more image format on
+//! this wire and a copy per program. The glyph stays, as what the shell draws
+//! when the theme has no such icon.
+//!
+//! **Not a colour**: the tray is shell chrome and its contrast is the shell's
+//! problem — a program that chose its own would be choosing against a palette
+//! it cannot see, which is the defect `Palette::ink` exists to prevent. The
+//! shell draws a named icon in its own ink, as it draws the glyph.
 //!
 //! **Not a position, either.** Order is the shell's, which is what lets a user
 //! rearrange the tray; a program that could pin itself leftmost would take that
-//! from them.
+//! from them. The program's name is what lets the shell *remember* an
+//! arrangement: an owner is a new number every time the program starts.
 
 use crate::{DecodeError, Reader, capacity_hint, write_string, write_u32, write_u64};
 
@@ -55,7 +67,12 @@ use crate::{DecodeError, Reader, capacity_hint, write_string, write_u32, write_u
 pub const TRAY_MAGIC: [u8; 4] = *b"TRAY";
 
 /// The version of the tray frame this build writes and understands.
-pub const TRAY_VERSION: u8 = 1;
+///
+/// **2** — each icon gained the program's name ([`TrayIcon::app_id`]) and an
+/// icon name ([`TrayIcon::icon_name`]), written after its tooltip. Moves
+/// bytes: a version-1 decoder would read the app id's length as the next
+/// icon's owner, so a version-1 frame is refused rather than read.
+pub const TRAY_VERSION: u8 = 2;
 
 /// Magic, version, flags, and the icon count.
 pub const TRAY_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -100,6 +117,139 @@ pub const MAX_TOOLTIP_BYTES: usize = 1024;
 /// past the share is.
 pub const MAX_TRAY_ICONS_PER_CLIENT: u32 = 32;
 
+/// The longest program name an icon keeps, in bytes.
+///
+/// A program's name is its executable's stem, or a reverse-domain name
+/// (`org.example.Notes`); 255 bytes is the bound freedesktop's names share
+/// with D-Bus's, and more than any program has. The compositor keeps the
+/// first 255 bytes of a longer one, cut on a character boundary as it cuts a
+/// glyph or a tooltip: too long is cut, never refused, for every text an
+/// icon carries.
+pub const MAX_APP_ID_BYTES: usize = 255;
+
+/// The name of an icon in the icon theme: `battery-caution`,
+/// `network-offline`, `audio-volume-muted`.
+///
+/// Known to be a name and not a path: 1 to [`IconName::MAX_LEN`] bytes of
+/// `a`-`z`, `0`-`9`, `-` and `_`, not starting with `-` -- the names
+/// `appearance::icons::is_valid_name` accepts, within a length. Nothing that
+/// holds one can hold a `/`, a `.` or a `..`, so the shell can join it to a
+/// theme's folder without checking it again, and a program that names
+/// something else finds out when it builds the name rather than when the
+/// icon fails to appear.
+///
+/// Held inline, so it is `Copy` and the compositor allocates nothing for the
+/// names its clients send.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IconName {
+    len: u8,
+    // Zero past `len`, always: what makes the derived equality and hash those
+    // of the name.
+    bytes: [u8; IconName::MAX_LEN],
+}
+
+impl IconName {
+    /// The longest name, in bytes. The longest name in the freedesktop icon
+    /// naming specification is under forty.
+    pub const MAX_LEN: usize = 64;
+
+    /// `name` as an icon name, or `None` if it is not one: empty, longer than
+    /// [`Self::MAX_LEN`] bytes, starting with `-`, or holding anything but
+    /// `a`-`z`, `0`-`9`, `-` and `_`.
+    ///
+    /// `None` rather than an error, so a program can hand it straight to
+    /// [`TraySpec::with_icon_name`]: a name that is not one leaves the icon
+    /// its glyph, which is what the shell would draw for a name its theme
+    /// lacks anyway.
+    #[must_use]
+    pub fn new(name: &str) -> Option<Self> {
+        Self::from_bytes(name.as_bytes())
+    }
+
+    /// [`Self::new`] for bytes off the wire. Every byte a name may hold is
+    /// ASCII, so bytes that pass are text.
+    pub(crate) fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let named = raw.len() <= Self::MAX_LEN
+            && raw.first().is_some_and(|&b| b != b'-')
+            && raw
+                .iter()
+                .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if !named {
+            return None;
+        }
+        let mut bytes = [0u8; Self::MAX_LEN];
+        bytes.get_mut(..raw.len())?.copy_from_slice(raw);
+        Some(Self {
+            len: u8::try_from(raw.len()).ok()?,
+            bytes,
+        })
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Built only from bytes `from_bytes` passed, every one ASCII, so the
+        // empty answer is unreachable.
+        self.bytes
+            .get(..usize::from(self.len))
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for IconName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "IconName({:?})", self.as_str())
+    }
+}
+
+impl core::fmt::Display for IconName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialOrd for IconName {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// By the names' text: the derived order would put every short name before
+/// every long one, since the length is the first field.
+impl Ord for IconName {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+/// An icon name on the wire: its length in one byte, `0` for none, then its
+/// bytes. Here because two codecs carry it -- the request a program sends
+/// (`control`) and the list a shell is sent (this module's frame) -- and two
+/// spellings of one field is how the two ends of a wire come to disagree.
+pub(crate) fn write_icon_name(out: &mut Vec<u8>, name: Option<IconName>) {
+    let bytes = name.as_ref().map_or(&[][..], |n| n.as_str().as_bytes());
+    // At most `IconName::MAX_LEN`, 64, bytes, so the length always fits the
+    // byte; the fallback is unreachable, and a length it wrote would be
+    // refused by the reader rather than misread.
+    out.push(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
+    out.extend_from_slice(bytes);
+}
+
+/// [`write_icon_name`]'s reader: the length, the bytes, and
+/// [`IconName::new`]'s verdict on them -- the one validation, so a name that
+/// crossed the wire is a name a program could have made.
+pub(crate) fn read_icon_name(r: &mut Reader<'_>) -> Result<Option<IconName>, DecodeError> {
+    let len = r.read_u8()?;
+    if len == 0 {
+        return Ok(None);
+    }
+    let bytes = r.take(usize::from(len))?;
+    IconName::from_bytes(bytes)
+        .map(Some)
+        .ok_or(DecodeError::BadIconName)
+}
+
 /// One icon in the tray.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayIcon {
@@ -117,21 +267,38 @@ pub struct TrayIcon {
     /// than appends, which is what makes "set the battery to 20%" a set rather
     /// than a leak.
     pub id: u32,
-    /// The character to draw.
+    /// The character to draw, when there is no [`icon_name`](Self::icon_name)
+    /// or the theme has no such icon.
     pub glyph: String,
     /// What to show when the pointer rests on it.
     pub tooltip: String,
+    /// Which program this icon belongs to: the name it declares for itself,
+    /// as for its windows ([`WindowInfo::app_id`](crate::window_list::WindowInfo::app_id))
+    /// -- conventionally its executable's stem, lower-cased. Empty when the
+    /// program did not say.
+    ///
+    /// What a user's arrangement of the tray is remembered by: the
+    /// [`owner`](Self::owner) is a new number every time the program starts,
+    /// and this is not.
+    ///
+    /// The client's word, and unverified: fine for grouping and remembering,
+    /// never for a permission. Any program may call itself anything.
+    pub app_id: String,
+    /// An icon from the icon theme to draw instead of the glyph, if the
+    /// program named one.
+    pub icon_name: Option<IconName>,
 }
 
 impl TrayIcon {
-    /// An icon `id` of process `owner`, drawn as `glyph`, with `tooltip`.
+    /// An icon `id` of process `owner`, drawn as `glyph`, with `tooltip`; of
+    /// no named program and naming no theme icon until
+    /// [`with_app_id`](Self::with_app_id) and
+    /// [`with_icon_name`](Self::with_icon_name) say otherwise.
     ///
     /// The way to build one outside this crate. A struct literal names every
-    /// field, so each field added to the icon (the program's name and a theme
-    /// icon's name are next: `requests/c-f-name-a-tray-icons-program.md`,
-    /// `requests/c-f-let-a-tray-icon-name-a-theme-icon.md`) would break every
-    /// literal in another lane's tree; a constructor plus a builder per new
-    /// field breaks none.
+    /// field, so each field added to the icon would break every literal in
+    /// another lane's tree; a constructor plus a builder per new field breaks
+    /// none.
     #[must_use]
     pub fn new(owner: u64, id: u32, glyph: impl Into<String>, tooltip: impl Into<String>) -> Self {
         Self {
@@ -139,7 +306,74 @@ impl TrayIcon {
             id,
             glyph: glyph.into(),
             tooltip: tooltip.into(),
+            app_id: String::new(),
+            icon_name: None,
         }
+    }
+
+    /// This icon, belonging to the program named `app_id`.
+    #[must_use]
+    pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = app_id.into();
+        self
+    }
+
+    /// This icon, drawn as the theme's `name` -- or as its glyph, for `None`.
+    ///
+    /// Takes an [`IconName`] or an `Option` of one, so
+    /// `with_icon_name(IconName::new("battery-low"))` reads as it should.
+    #[must_use]
+    pub fn with_icon_name(mut self, name: impl Into<Option<IconName>>) -> Self {
+        self.icon_name = name.into();
+        self
+    }
+}
+
+/// What a program asks the tray to show under one of its ids: everything in a
+/// [`TrayIcon`] but the owner, which the compositor fills in from the
+/// connection, and the id, which names the icon this is for.
+///
+/// The request's half of the icon, as a
+/// [`WindowSpec`](crate::control::WindowSpec) is a window's. Built with
+/// [`new`](Self::new) and the `with_` builders, so a field added later breaks
+/// no program.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TraySpec {
+    /// The character to draw. See [`TrayIcon::glyph`].
+    pub glyph: String,
+    /// What to show when the pointer rests on it.
+    pub tooltip: String,
+    /// The program's name. See [`TrayIcon::app_id`]. Left empty, `oswindow`
+    /// fills in the name the program declared for its windows.
+    pub app_id: String,
+    /// An icon from the theme to draw instead of the glyph.
+    pub icon_name: Option<IconName>,
+}
+
+impl TraySpec {
+    /// An icon drawn as `glyph`, with `tooltip`.
+    #[must_use]
+    pub fn new(glyph: impl Into<String>, tooltip: impl Into<String>) -> Self {
+        Self {
+            glyph: glyph.into(),
+            tooltip: tooltip.into(),
+            ..Self::default()
+        }
+    }
+
+    /// This icon, as the program named `app_id`'s.
+    #[must_use]
+    pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = app_id.into();
+        self
+    }
+
+    /// This icon, drawn as the theme's `name` -- or as its glyph, for `None`.
+    /// See [`TrayIcon::with_icon_name`].
+    #[must_use]
+    pub fn with_icon_name(mut self, name: impl Into<Option<IconName>>) -> Self {
+        self.icon_name = name.into();
+        self
     }
 }
 
@@ -158,9 +392,10 @@ pub struct TrayList {
 /// Encode a tray list as one self-contained `TRAY` frame.
 #[must_use]
 pub fn encode_tray_list(list: &TrayList) -> Vec<u8> {
-    // 12 fixed bytes per icon (owner, id) plus two 4-byte string lengths, so 40
-    // leaves room for a glyph and a short tooltip before the vector grows.
-    let mut out = Vec::with_capacity(capacity_hint(TRAY_HEADER_LEN, list.icons.len(), 40));
+    // 25 fixed bytes per icon -- owner and id, three 4-byte string lengths and
+    // the icon name's length byte -- so 64 leaves room for a glyph, a short
+    // tooltip and a program's name before the vector grows.
+    let mut out = Vec::with_capacity(capacity_hint(TRAY_HEADER_LEN, list.icons.len(), 64));
     encode_tray_list_into(&mut out, list);
     out
 }
@@ -178,6 +413,8 @@ pub fn encode_tray_list_into(out: &mut Vec<u8>, list: &TrayList) {
         write_u32(out, icon.id);
         write_string(out, &icon.glyph);
         write_string(out, &icon.tooltip);
+        write_string(out, &icon.app_id);
+        write_icon_name(out, icon.icon_name);
     }
 }
 
@@ -188,8 +425,9 @@ pub fn encode_tray_list_into(out: &mut Vec<u8>, list: &TrayList) {
 /// [`DecodeError::BadMagic`] if the frame is not `TRAY`,
 /// [`DecodeError::UnsupportedVersion`] for a version this build does not know,
 /// [`DecodeError::ReservedFlags`] for reserved bits set,
-/// [`DecodeError::TooManyTrayIcons`] for a count past [`MAX_TRAY_ICONS`], and
-/// [`DecodeError::UnexpectedEof`] for a frame that ends early.
+/// [`DecodeError::TooManyTrayIcons`] for a count past [`MAX_TRAY_ICONS`],
+/// [`DecodeError::BadIconName`] for an icon name [`IconName::new`] refuses,
+/// and [`DecodeError::UnexpectedEof`] for a frame that ends early.
 ///
 /// On success, answers the list and how many bytes it occupied.
 pub fn decode_tray_list(input: &[u8]) -> Result<(TrayList, usize), DecodeError> {
@@ -209,7 +447,7 @@ pub fn decode_tray_list(input: &[u8]) -> Result<(TrayList, usize), DecodeError> 
     if count > MAX_TRAY_ICONS {
         return Err(DecodeError::TooManyTrayIcons(count));
     }
-    // Checked before reserving: a count is 4 bytes and an icon is at least 20,
+    // Checked before reserving: a count is 4 bytes and an icon is at least 25,
     // so a frame claiming a million icons is short long before it is big, and
     // reserving for the claim first is how a length field becomes an
     // allocation primitive for whoever sends it.
@@ -219,11 +457,15 @@ pub fn decode_tray_list(input: &[u8]) -> Result<(TrayList, usize), DecodeError> 
         let id = r.read_u32()?;
         let glyph = r.read_string()?;
         let tooltip = r.read_string()?;
+        let app_id = r.read_string()?;
+        let icon_name = read_icon_name(&mut r)?;
         icons.push(TrayIcon {
             owner,
             id,
             glyph,
             tooltip,
+            app_id,
+            icon_name,
         });
     }
     // The position, not the input length: a `TRAY` frame arrives in a stream
@@ -249,6 +491,10 @@ mod tests {
         TrayIcon::new(owner, id, glyph, tooltip)
     }
 
+    fn name(text: &str) -> IconName {
+        IconName::new(text).expect("a name")
+    }
+
     #[test]
     fn the_constructor_fills_every_field_it_is_given() {
         let built = TrayIcon::new(7, 3, "B", "Battery: 87%");
@@ -259,21 +505,148 @@ mod tests {
                 id: 3,
                 glyph: "B".to_string(),
                 tooltip: "Battery: 87%".to_string(),
+                app_id: String::new(),
+                icon_name: None,
             }
         );
+        let named = built
+            .with_app_id("powerd")
+            .with_icon_name(name("battery-good"));
+        assert_eq!(named.app_id, "powerd");
+        assert_eq!(named.icon_name, Some(name("battery-good")));
+        assert_eq!(named.with_icon_name(None).icon_name, None);
+    }
+
+    #[test]
+    fn a_spec_is_built_the_same_way() {
+        let spec = TraySpec::new("B", "Battery: 12%")
+            .with_app_id("powerd")
+            .with_icon_name(IconName::new("battery-caution"));
+        assert_eq!(
+            spec,
+            TraySpec {
+                glyph: "B".to_string(),
+                tooltip: "Battery: 12%".to_string(),
+                app_id: "powerd".to_string(),
+                icon_name: Some(name("battery-caution")),
+            }
+        );
+        // A name that is not one leaves the icon its glyph, with no
+        // separate failure for a program to handle.
+        let unnamed = TraySpec::new("B", "").with_icon_name(IconName::new("../battery"));
+        assert_eq!(unnamed.icon_name, None);
     }
 
     #[test]
     fn a_list_survives_the_wire() {
         let list = TrayList {
             icons: vec![
-                icon(7, 1, "B", "Battery: 87%"),
-                icon(7, 2, "W", "Wi-Fi: Home"),
-                icon(9, 1, "M", "Music"),
+                icon(7, 1, "B", "Battery: 87%")
+                    .with_app_id("powerd")
+                    .with_icon_name(name("battery-good")),
+                icon(7, 2, "W", "Wi-Fi: Home").with_app_id("powerd"),
+                icon(9, 1, "M", "Music").with_icon_name(name("audio-volume-high")),
+                icon(9, 2, "\u{2709}", "Mail").with_app_id("org.example.Mail"),
             ],
         };
         let bytes = encode_tray_list(&list);
         assert_eq!(decode_tray_list(&bytes).expect("round trip").0, list);
+    }
+
+    /// The names `appearance::icons::is_valid_name` accepts, within 64 bytes,
+    /// and nothing that could be a path.
+    #[test]
+    fn an_icon_name_is_a_name_and_never_a_path() {
+        for good in [
+            "battery-caution",
+            "network-offline",
+            "audio-volume-muted",
+            "a",
+            "0",
+            "x_y",
+            "_private",
+            "go-next-symbolic",
+            "trailing-",
+        ] {
+            assert_eq!(
+                IconName::new(good).map(|n| n.to_string()),
+                Some(good.to_string()),
+                "{good:?}"
+            );
+        }
+        for bad in [
+            "",
+            "-leading",
+            "Upper",
+            "battery/low",
+            "../etc/passwd",
+            "..",
+            ".",
+            "a.png",
+            "with space",
+            "back\\slash",
+            "nul\0",
+            "caf\u{e9}",
+            "\u{1F50B}",
+        ] {
+            assert_eq!(IconName::new(bad), None, "{bad:?} was taken as a name");
+        }
+        let longest = "a".repeat(IconName::MAX_LEN);
+        assert_eq!(
+            IconName::new(&longest).map(|n| n.to_string()),
+            Some(longest.clone())
+        );
+        assert_eq!(IconName::new(&format!("{longest}a")), None);
+    }
+
+    /// Equal names are equal and hash alike however they were built, and
+    /// names sort as their text -- not short before long.
+    #[test]
+    fn icon_names_compare_as_their_text() {
+        use std::collections::HashSet;
+        let names: HashSet<IconName> = ["b", "b", "ab"].into_iter().map(name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(
+            name("b") > name("ab"),
+            "a short name sorted before a long one"
+        );
+        assert!(name("ab") < name("abc"));
+        assert_eq!(format!("{:?}", name("x-y")), "IconName(\"x-y\")");
+    }
+
+    /// A name off the wire is held to the rule a program's is: a frame naming
+    /// a path is refused, not passed to the shell to join to a folder.
+    #[test]
+    fn a_frame_naming_something_that_is_not_an_icon_is_refused() {
+        let list = TrayList {
+            icons: vec![icon(1, 1, "A", "").with_icon_name(name("aa-bb"))],
+        };
+        let bytes = encode_tray_list(&list);
+        let at = bytes
+            .windows(5)
+            .position(|w| w == b"aa-bb")
+            .expect("the name is in the frame");
+        for (with, what) in [
+            (*b"../bb", "a path"),
+            (*b"AA-BB", "capitals"),
+            (*b"-a-bb", "a leading -"),
+        ] {
+            let mut bad = bytes.clone();
+            bad[at..at + 5].copy_from_slice(&with);
+            assert_eq!(
+                decode_tray_list(&bad).map(|(l, _)| l),
+                Err(DecodeError::BadIconName),
+                "a name of {what} decoded"
+            );
+        }
+        // A length past the bound is refused, whatever the bytes.
+        let mut long = bytes.clone();
+        long[at - 1] = u8::try_from(IconName::MAX_LEN + 1).expect("small");
+        long.extend(std::iter::repeat_n(b'a', IconName::MAX_LEN));
+        assert_eq!(
+            decode_tray_list(&long).map(|(l, _)| l),
+            Err(DecodeError::BadIconName)
+        );
     }
 
     /// Two programs may both call an icon `1`, and they stay apart.

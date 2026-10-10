@@ -487,6 +487,11 @@ pub enum DecodeError {
     /// A scene frame's video names a codec this decoder does not know
     /// ([`scene::VIDEO_VP9`] is the only one).
     BadVideoCodec(u8),
+    /// A tray icon's theme-icon name that [`tray::IconName::new`] refuses:
+    /// longer than 64 bytes, starting with `-`, or holding a byte outside
+    /// `a`-`z`, `0`-`9`, `-` and `_` -- anything that could name more than
+    /// an icon in a theme's folder.
+    BadIconName,
 }
 
 impl core::fmt::Display for DecodeError {
@@ -581,6 +586,7 @@ impl core::fmt::Display for DecodeError {
                 scene::MAX_VIDEO_FRAME_BYTES
             ),
             Self::BadVideoCodec(b) => write!(f, "unknown video codec {b:#04x}"),
+            Self::BadIconName => write!(f, "not an icon name"),
         }
     }
 }

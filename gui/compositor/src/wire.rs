@@ -1025,13 +1025,13 @@ impl Compositor {
             // connection: two to know whose icon it is, one because a
             // subscription is a property of the link.
             match &req.body {
-                RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+                RequestBody::SetTrayIcon { id, icon } => {
                     let owner = link.client_pid;
                     // `Ok` whether or not anything changed -- a program
                     // re-sending its icon has done nothing wrong -- and the
                     // refusal itself when the icon is not shown, so the
                     // program can tell a full tray from a shell not drawing.
-                    let body = match self.set_tray_icon(owner, *id, glyph, tooltip) {
+                    let body = match self.set_tray_icon(owner, *id, icon) {
                         Ok(_) => ResponseBody::Ok,
                         Err(refused) => ResponseBody::Error {
                             message: refused.to_string(),
@@ -1443,6 +1443,7 @@ mod tests {
         decode_responses,
     };
     use guiremote::input::decode_input_frame;
+    use guiremote::tray::{IconName, TraySpec};
     use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
@@ -2177,8 +2178,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("B"),
-                tooltip: String::from("Battery: 87%"),
+                icon: TraySpec::new("B", "Battery: 87%"),
             }],
         );
         assert!(matches!(replies[0].body, ResponseBody::Ok));
@@ -2216,8 +2216,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 7,
-                glyph: String::from("M"),
-                tooltip: String::from("Music"),
+                icon: TraySpec::new("M", "Music"),
             }],
         );
         // The negative control: this program has opened no window, so if the
@@ -2296,8 +2295,7 @@ mod tests {
                 &mut app,
                 vec![RequestBody::SetTrayIcon {
                     id: 1,
-                    glyph: String::from("B"),
-                    tooltip: tooltip.to_string(),
+                    icon: TraySpec::new("B", tooltip.to_string()),
                 }],
             );
         }
@@ -2323,8 +2321,7 @@ mod tests {
                 &mut app,
                 vec![RequestBody::SetTrayIcon {
                     id: 1,
-                    glyph: String::from("X"),
-                    tooltip: format!("from {pid}"),
+                    icon: TraySpec::new("X", format!("from {pid}")),
                 }],
             );
         }
@@ -2351,8 +2348,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("M"),
-                tooltip: String::from("Music"),
+                icon: TraySpec::new("M", "Music"),
             }],
         );
         assert_eq!(
@@ -2822,8 +2818,7 @@ mod tests {
         );
         let set = |id: u32| RequestBody::SetTrayIcon {
             id,
-            glyph: String::from("X"),
-            tooltip: format!("icon {id}"),
+            icon: TraySpec::new("X", format!("icon {id}")),
         };
         let mut greedy = ClientLink::new(99);
         let replies = exchange(
@@ -2874,7 +2869,8 @@ mod tests {
         let programs = MAX_TRAY_ICONS / MAX_TRAY_ICONS_PER_CLIENT;
         for owner in 0..u64::from(programs) {
             for id in 0..MAX_TRAY_ICONS_PER_CLIENT {
-                comp.set_tray_icon(owner, id, "X", "").expect("room");
+                comp.set_tray_icon(owner, id, &TraySpec::new("X", ""))
+                    .expect("room");
             }
         }
         assert_eq!(
@@ -2887,8 +2883,7 @@ mod tests {
             &mut late,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("L"),
-                tooltip: String::from("late"),
+                icon: TraySpec::new("L", "late"),
             }],
         );
         match &replies[0].body {
@@ -2926,8 +2921,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("T"),
-                tooltip: tooltip.clone(),
+                icon: TraySpec::new("T", tooltip.clone()),
             }],
         );
         assert!(
@@ -2948,9 +2942,150 @@ mod tests {
 
         // At the bound exactly, nothing is cut.
         let exact = "t".repeat(MAX_TOOLTIP_BYTES);
-        comp.set_tray_icon(99, 1, "T", &exact)
+        comp.set_tray_icon(99, 1, &TraySpec::new("T", exact.clone()))
             .expect("a replacement");
         assert_eq!(comp.tray_list().icons[0].tooltip, exact);
+    }
+
+    /// The shell is told which program an icon is and which theme icon to
+    /// draw for it -- what lets it draw a battery rather than a box, and keep
+    /// a user's arrangement of the tray across the program's restarts.
+    #[test]
+    fn a_shell_is_told_an_icons_program_and_its_theme_icon() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let battery = IconName::new("battery-caution").expect("a name");
+        let mut app = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![
+                RequestBody::SetTrayIcon {
+                    id: 1,
+                    icon: TraySpec::new("B", "Battery: 12%")
+                        .with_app_id("powerd")
+                        .with_icon_name(battery),
+                },
+                // A program that says neither: today's icon, unchanged.
+                RequestBody::SetTrayIcon {
+                    id: 2,
+                    icon: TraySpec::new("W", "Wi-Fi"),
+                },
+            ],
+        );
+        let lists = pump_trays(&mut comp, &mut shell);
+        let icons = &lists.last().expect("a frame").icons;
+        assert_eq!(icons[0].app_id, "powerd");
+        assert_eq!(icons[0].icon_name, Some(battery));
+        assert_eq!(icons[0].glyph, "B", "the glyph stays, as the fallback");
+        assert_eq!(icons[1].app_id, "");
+        assert_eq!(icons[1].icon_name, None);
+    }
+
+    /// A program switching only its theme icon -- the battery from good to
+    /// caution, the glyph unchanged -- has changed what the shell draws, and
+    /// the shell is sent the new list.
+    #[test]
+    fn changing_only_the_theme_icon_is_a_change() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        for name in ["battery-good", "battery-caution"] {
+            let replies = exchange(
+                &mut comp,
+                &mut app,
+                vec![RequestBody::SetTrayIcon {
+                    id: 1,
+                    icon: TraySpec::new("B", "Battery").with_icon_name(IconName::new(name)),
+                }],
+            );
+            assert!(matches!(replies[0].body, ResponseBody::Ok));
+            let lists = pump_trays(&mut comp, &mut shell);
+            assert_eq!(lists.len(), 1, "{name}: the change sent no frame");
+            assert_eq!(lists[0].icons[0].icon_name, IconName::new(name));
+        }
+        let same = comp
+            .set_tray_icon(
+                99,
+                1,
+                &TraySpec::new("B", "Battery").with_icon_name(IconName::new("battery-caution")),
+            )
+            .expect("a replacement");
+        assert!(!same, "the same icon again was counted a change");
+    }
+
+    /// A program's name is kept to 255 bytes, cut where a character ends, as
+    /// a glyph and a tooltip are: too long is cut, never refused.
+    #[test]
+    fn a_long_program_name_is_cut_on_a_character_boundary() {
+        use guiremote::tray::MAX_APP_ID_BYTES;
+        let (mut comp, _shell) = wired();
+        // "€" is three bytes; 255 is a multiple of three, so one byte in
+        // front puts the bound inside a "€".
+        let app_id = format!("x{}", "\u{20ac}".repeat(MAX_APP_ID_BYTES));
+        comp.set_tray_icon(99, 1, &TraySpec::new("A", "").with_app_id(app_id.clone()))
+            .expect("cut, not refused");
+        let kept = comp.tray_list().icons[0].app_id.clone();
+        assert_eq!(kept.len(), 253, "x and 84 whole euro signs");
+        assert!(app_id.starts_with(&kept));
+    }
+
+    /// `guiremote`'s icon-name rule is the theme's: a name the shell's
+    /// `appearance::icons::is_valid_name` would refuse never crosses the
+    /// wire, and every name it accepts does, up to the wire's 64 bytes.
+    ///
+    /// Two crates hold the rule because `guiremote` is linked by every
+    /// program and `appearance` reads files and decodes pictures; the
+    /// compositor links both, so this is where the two are held together.
+    #[test]
+    fn the_wires_icon_names_are_the_ones_a_theme_can_hold() {
+        let mut probes: Vec<String> = [
+            "",
+            "-",
+            "a",
+            "-a",
+            "a-",
+            "_",
+            "a_b",
+            "battery-caution",
+            "Battery",
+            "a/b",
+            "..",
+            ".",
+            "a.b",
+            "a b",
+            "\u{e9}",
+            "\u{0}",
+            "9",
+            "z-0_9",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        // Every single byte that is a character, as a name and as one's tail.
+        for b in 0u8..=127 {
+            let c = char::from(b);
+            probes.push(c.to_string());
+            probes.push(format!("a{c}"));
+        }
+        probes.push("a".repeat(IconName::MAX_LEN));
+        probes.push("a".repeat(IconName::MAX_LEN + 1));
+        for probe in &probes {
+            let theme = appearance::icons::is_valid_name(probe) && probe.len() <= IconName::MAX_LEN;
+            assert_eq!(
+                IconName::new(probe).is_some(),
+                theme,
+                "{probe:?}: the wire and the theme disagree"
+            );
+        }
     }
 
     /// An unchanged tray is not resent.
@@ -2968,8 +3103,7 @@ mod tests {
             &mut app,
             vec![RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: String::from("N"),
-                tooltip: String::from("Network"),
+                icon: TraySpec::new("N", "Network"),
             }],
         );
         assert_eq!(pump_trays(&mut comp, &mut shell).len(), 1);

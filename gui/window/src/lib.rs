@@ -88,6 +88,10 @@ pub use guiremote::control::{
     BlurKind, BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
     PickedWindow, ShellControlAction, WindowSpec as Spec,
 };
+/// What a program puts in the system tray ([`EventLoop::set_tray_icon`]),
+/// and what a shell is told is there ([`EventLoop::tray_icons`]) -- so a
+/// program with a tray icon need not depend on `guiremote` to build one.
+pub use guiremote::tray::{IconName, TrayIcon, TraySpec};
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
 pub use guiremote::window_list::{WindowInfo, WindowList};
@@ -980,6 +984,9 @@ pub struct EventLoop<T: Transport> {
     /// sleep -- and has not yet been announced, by sequence number. See
     /// [`EventLoop::take_answered`].
     awaited: Vec<u32>,
+    /// The program's declared name, for windows and tray icons that do not
+    /// name one. See [`EventLoop::set_app_id`].
+    app_id: String,
 }
 
 /// Two presses of one button in one window, close together in time and on
@@ -1118,6 +1125,7 @@ impl<T: Transport> EventLoop<T> {
             clicks: Clicks::new(),
             modifiers: Modifiers::NONE,
             awaited: Vec::new(),
+            app_id: String::new(),
         }
     }
 
@@ -1371,10 +1379,17 @@ impl<T: Transport> EventLoop<T> {
     /// Create a window from a protocol spec. [`WindowBuilder::build`] is the
     /// usual way in.
     ///
+    /// A spec naming no program takes the one this loop was told
+    /// ([`set_app_id`](Self::set_app_id)), so a program that declares its name
+    /// once has it on every window.
+    ///
     /// # Errors
     ///
     /// As [`Connection::create_window`].
-    pub fn create(&mut self, spec: WindowSpec) -> Result<u64, Error<T>> {
+    pub fn create(&mut self, mut spec: WindowSpec) -> Result<u64, Error<T>> {
+        if spec.app_id.is_empty() {
+            spec.app_id.clone_from(&self.app_id);
+        }
         let id = self.conn.create_window(spec.clone())?;
         self.windows.push(Window {
             id,
@@ -1475,7 +1490,7 @@ impl<T: Transport> EventLoop<T> {
 
     /// The tray's icons, or an empty slice before the first frame arrives.
     #[must_use]
-    pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
+    pub fn tray_icons(&self) -> &[TrayIcon] {
         self.conn.tray_icons()
     }
 
@@ -1485,13 +1500,53 @@ impl<T: Transport> EventLoop<T> {
         self.conn.tray_revision()
     }
 
-    /// Put an icon in the system tray, or replace this program's icon.
+    /// Put an icon in the system tray, or replace this program's icon `id`.
+    ///
+    /// `icon` says what to draw -- a glyph, and if the theme should draw a
+    /// picture instead, its name:
+    ///
+    /// ```ignore
+    /// events.set_tray_icon(
+    ///     1,
+    ///     TraySpec::new("B", "Battery: 12%").with_icon_name(IconName::new("battery-caution")),
+    /// )?;
+    /// ```
+    ///
+    /// An icon naming no program takes the one this loop was told
+    /// ([`set_app_id`](Self::set_app_id)), as a window does: the shell
+    /// remembers where a user put a program's icon by that name.
     ///
     /// # Errors
     ///
-    /// As [`Connection::confirm`].
-    pub fn set_tray_icon(&mut self, id: u32, glyph: &str, tooltip: &str) -> Result<(), Error<T>> {
-        self.conn.set_tray_icon(id, glyph, tooltip)
+    /// As [`Connection::confirm`]: [`ClientError::Refused`] when this program
+    /// has its share of the tray, or the tray is full.
+    pub fn set_tray_icon(&mut self, id: u32, mut icon: TraySpec) -> Result<(), Error<T>> {
+        if icon.app_id.is_empty() {
+            icon.app_id.clone_from(&self.app_id);
+        }
+        self.conn.set_tray_icon(id, icon)
+    }
+
+    /// Declare which program this is: the name its windows and tray icons
+    /// carry when they do not name one of their own.
+    ///
+    /// Conventionally the executable's stem, lower-cased; [`app::launch`]
+    /// declares [`App::app_id`](crate::app::App::app_id), which is that
+    /// unless the application says otherwise. A program driving the loop
+    /// itself -- one that lives in the tray with no window, say -- declares
+    /// it here, or its icons carry no name and the shell cannot remember
+    /// where the user put them.
+    ///
+    /// Advisory, as a window's app id is: the compositor cannot check it.
+    pub fn set_app_id(&mut self, app_id: impl Into<String>) {
+        self.app_id = app_id.into();
+    }
+
+    /// The program's declared name, empty until
+    /// [`set_app_id`](Self::set_app_id).
+    #[must_use]
+    pub fn app_id(&self) -> &str {
+        &self.app_id
     }
 
     /// Take this program's icon out of the tray.
@@ -4150,7 +4205,9 @@ mod tests {
     fn the_tray_calls_go_to_the_compositor_rather_than_staying_here() {
         let (mut events, server) = wired();
         events.watch_tray(true).unwrap();
-        events.set_tray_icon(1, "B", "Battery: 87%").unwrap();
+        events
+            .set_tray_icon(1, TraySpec::new("B", "Battery: 87%"))
+            .unwrap();
         events.remove_tray_icon(1).unwrap();
 
         let seen = server.borrow();
@@ -4163,8 +4220,8 @@ mod tests {
         assert!(
             seen.seen.iter().any(|r| matches!(
                 &r.body,
-                RequestBody::SetTrayIcon { id: 1, glyph, tooltip }
-                    if glyph == "B" && tooltip == "Battery: 87%"
+                RequestBody::SetTrayIcon { id: 1, icon }
+                    if icon.glyph == "B" && icon.tooltip == "Battery: 87%"
             )),
             "the icon and its tooltip should have gone out as sent"
         );
@@ -4174,6 +4231,72 @@ mod tests {
                 .any(|r| matches!(r.body, RequestBody::RemoveTrayIcon { id: 1 })),
             "removing should have gone out too"
         );
+    }
+
+    /// The tray icons sent, by id, as the compositor saw them.
+    fn sent_tray_icons(server: &RefCell<super::testing::TestDesktop>) -> Vec<(u32, TraySpec)> {
+        server
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match &r.body {
+                RequestBody::SetTrayIcon { id, icon } => Some((*id, icon.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tray icon carries the program's declared name, unless it names its
+    /// own -- the name the shell remembers a user's arrangement by -- and the
+    /// theme icon it names goes out as named.
+    #[test]
+    fn a_tray_icon_carries_the_programs_declared_name() {
+        let (mut events, server) = wired();
+        let caution = IconName::new("battery-caution");
+        events
+            .set_tray_icon(1, TraySpec::new("B", "Battery").with_icon_name(caution))
+            .unwrap();
+        events.set_app_id("powerd");
+        assert_eq!(events.app_id(), "powerd");
+        events
+            .set_tray_icon(2, TraySpec::new("B", "Battery"))
+            .unwrap();
+        events
+            .set_tray_icon(3, TraySpec::new("N", "Network").with_app_id("netd"))
+            .unwrap();
+
+        let sent = sent_tray_icons(&server);
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0].1.app_id, "", "before the program said, no name");
+        assert_eq!(sent[0].1.icon_name, caution);
+        assert_eq!(sent[1].1.app_id, "powerd");
+        assert_eq!(sent[2].1.app_id, "netd", "an icon's own name wins");
+    }
+
+    /// The declared name is the default for a window too, so a program says
+    /// it once; a window naming its own keeps it.
+    #[test]
+    fn a_window_naming_no_program_takes_the_declared_name() {
+        let (mut events, server) = wired();
+        events.set_app_id("editor");
+        let first = WindowBuilder::new("notes.md - Editor", 640, 480)
+            .build(&mut events)
+            .unwrap();
+        let _ = WindowBuilder::new("Find", 320, 120)
+            .app_id("finder")
+            .build(&mut events)
+            .unwrap();
+        assert_eq!(events.window(first).unwrap().app_id(), "editor");
+        let borrowed = server.borrow();
+        let created: Vec<&str> = borrowed
+            .seen
+            .iter()
+            .filter_map(|r| match &r.body {
+                RequestBody::CreateWindow(spec) => Some(spec.app_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, ["editor", "finder"]);
     }
 
     #[test]

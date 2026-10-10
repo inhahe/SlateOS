@@ -141,7 +141,12 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// [`ResponseBody::Picked`] (response tag `0x08`); and
 /// [`RequestBody::CancelPick`] (tag `0x32`). Incompatible on 2's terms in
 /// both directions.
-pub const CONTROL_VERSION: u8 = 24;
+/// **25** — [`RequestBody::SetTrayIcon`] gained the program's name and a
+/// theme icon's name, written after the tooltip
+/// ([`TraySpec`](crate::tray::TraySpec)). Moves bytes on 3's terms: a
+/// version-24 decoder would read the app id's length as the next message's
+/// `seq`.
+pub const CONTROL_VERSION: u8 = 25;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1021,8 +1026,9 @@ pub enum RequestBody {
     /// tray on another program's behalf, and clicking it would deliver to a
     /// process that never asked.
     ///
-    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES) and
-    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) is cut, on a
+    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES),
+    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) and
+    /// [`MAX_APP_ID_BYTES`](crate::tray::MAX_APP_ID_BYTES) is cut, on a
     /// character boundary. A new id is refused with [`ResponseBody::Error`]
     /// once this client has
     /// [`MAX_TRAY_ICONS_PER_CLIENT`](crate::tray::MAX_TRAY_ICONS_PER_CLIENT)
@@ -1030,8 +1036,7 @@ pub enum RequestBody {
     /// replacing an icon the client has is never refused.
     SetTrayIcon {
         id: u32,
-        glyph: String,
-        tooltip: String,
+        icon: crate::tray::TraySpec,
     },
     /// Take this client's icon out of the tray.
     ///
@@ -2017,11 +2022,13 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SubscribeWindowList as u8);
             out.push(u8::from(*subscribe));
         }
-        RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+        RequestBody::SetTrayIcon { id, icon } => {
             out.push(RequestTag::SetTrayIcon as u8);
             write_u32(out, *id);
-            write_string(out, glyph);
-            write_string(out, tooltip);
+            write_string(out, &icon.glyph);
+            write_string(out, &icon.tooltip);
+            write_string(out, &icon.app_id);
+            crate::tray::write_icon_name(out, icon.icon_name);
         }
         RequestBody::RemoveTrayIcon { id } => {
             out.push(RequestTag::RemoveTrayIcon as u8);
@@ -2379,8 +2386,12 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         },
         RequestTag::SetTrayIcon => RequestBody::SetTrayIcon {
             id: r.read_u32()?,
-            glyph: r.read_string()?,
-            tooltip: r.read_string()?,
+            icon: crate::tray::TraySpec {
+                glyph: r.read_string()?,
+                tooltip: r.read_string()?,
+                app_id: r.read_string()?,
+                icon_name: crate::tray::read_icon_name(r)?,
+            },
         },
         RequestTag::RemoveTrayIcon => RequestBody::RemoveTrayIcon { id: r.read_u32()? },
         RequestTag::SubscribeTrayIcons => RequestBody::SubscribeTrayIcons {
@@ -2998,6 +3009,46 @@ mod tests {
             Request::new(37, RequestBody::CancelPick),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// A tray icon's request carries its whole spec -- the program's name and
+    /// the theme icon's name after the tooltip -- and a name off the wire is
+    /// held to the rule a program's is: one naming a path fails the frame.
+    #[test]
+    fn a_tray_icon_request_carries_its_whole_spec() {
+        use crate::tray::{IconName, TraySpec};
+        let reqs = vec![
+            Request::new(
+                1,
+                RequestBody::SetTrayIcon {
+                    id: 7,
+                    icon: TraySpec::new("B", "Battery: 12%")
+                        .with_app_id("powerd")
+                        .with_icon_name(IconName::new("battery-caution")),
+                },
+            ),
+            // Every field empty: a name of none is one byte, not a string.
+            Request::new(
+                2,
+                RequestBody::SetTrayIcon {
+                    id: u32::MAX,
+                    icon: TraySpec::new("", ""),
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+
+        let named = encode_requests(&reqs[..1]);
+        let at = named
+            .windows(15)
+            .position(|w| w == b"battery-caution")
+            .expect("the name is in the frame");
+        let mut bad = named.clone();
+        bad[at..at + 3].copy_from_slice(b"../");
+        assert_eq!(
+            decode_requests(&bad).map(|(r, _)| r),
+            Err(DecodeError::BadIconName)
+        );
     }
 
     /// The held-modifiers question carries nothing, and its answer is every

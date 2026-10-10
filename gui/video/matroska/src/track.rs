@@ -367,20 +367,31 @@ struct RawEncoding {
     key_id: Vec<u8>,
 }
 
+/// Why a `TrackEntry` gives no track: its elements are broken -- which
+/// FFmpeg's reading of the Segment meets, and goes on past -- or it is
+/// whole and FFmpeg refuses the file for what it says, once the Segment is
+/// read (`matroska_parse_tracks`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EntryError {
+    Damaged(Error),
+    Refused(Error),
+}
+
 /// A `TrackEntry`: its number, and the track -- `None` for one FFmpeg
 /// ignores (a kind it does not read, no codec ID, or a codec ID of another
 /// kind), whose number still names it.
 ///
 /// # Errors
 ///
-/// When the entry is damaged; or -- each of which FFmpeg refuses the whole
-/// file for -- a video track's crop leaves nothing of its picture, its
-/// spherical projection's private data is not what its type has, or an
-/// audio track claims more channels than an `int` holds.
+/// [`EntryError::Damaged`] when the entry's elements are broken;
+/// [`EntryError::Refused`] -- each of which FFmpeg refuses the whole file
+/// for, the entry whole -- when a video track's crop leaves nothing of its
+/// picture, its spherical projection's private data is not what its type
+/// has, or an audio track claims more channels than an `int` holds.
 pub(crate) fn read_track<R: Read + Seek>(
     r: &mut Reader<R>,
     entry: &Header,
-) -> Result<(u64, Option<Track>), Error> {
+) -> Result<(u64, Option<Track>), EntryError> {
     let mut number = 0;
     let mut uid = 0;
     let mut kind = 0;
@@ -420,7 +431,8 @@ pub(crate) fn read_track<R: Read + Seek>(
             _ => {}
         }
         Ok(())
-    })?;
+    })
+    .map_err(EntryError::Damaged)?;
 
     let Some(kind) = TrackKind::from_type(kind) else {
         return Ok((number, None));
@@ -432,9 +444,9 @@ pub(crate) fn read_track<R: Read + Seek>(
     if kind == TrackKind::Audio
         && audio.is_some_and(|a| a.channels > u64::from(i32::MAX.unsigned_abs()))
     {
-        return Err(Error::Unsupported(
+        return Err(EntryError::Refused(Error::Unsupported(
             "an audio track of more than 2^31 channels",
-        ));
+        )));
     }
     let audio = audio.filter(|_| kind == TrackKind::Audio).map(|mut a| {
         // FFmpeg: a rate that is not a number, or outside int's range, is
@@ -457,9 +469,9 @@ pub(crate) fn read_track<R: Read + Seek>(
             if default_duration == 0 {
                 default_duration = duration_of_frame_rate(frame_rate);
             }
-            let v = checked_video(v)?;
+            let v = checked_video(v).map_err(EntryError::Refused)?;
             if let Some(why) = projection_fault {
-                return Err(Error::Invalid(why));
+                return Err(EntryError::Refused(Error::Invalid(why)));
             }
             Some(v)
         }

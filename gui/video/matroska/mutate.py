@@ -31,6 +31,7 @@ SRC = Path(__file__).parent / "src"
 
 # A video track's projection, as ffprobe reads it (`tests/projection.rs`).
 PROJECTIONS = "every_projection_is_read_as_ffmpeg_reads_it"
+SEEKHEAD_DAMAGE = "a_seekhead_ffmpeg_reads_past_does_not_refuse_the_file"
 # A video track's colour, as ffprobe reads it (`tests/colour.rs`).
 COLOURS = "every_colour_is_read_as_ffmpeg_reads_it"
 COLOUR_NUMBERS = "a_colour_keeps_its_numbers"
@@ -324,7 +325,7 @@ TRACK = [
     ),
     (
         "a projection's fault refuses nothing",
-        "                return Err(Error::Invalid(why));",
+        "                return Err(EntryError::Refused(Error::Invalid(why)));",
         "                let _ = why;",
         [PROJECTIONS],
     ),
@@ -441,12 +442,27 @@ CUES = [
 DEMUX = [
     # Reading the description.
     (
+        "a Tracks damaged before its first entry refuses the file",
+        "                        }) if refused || read > 0 => return Err(error),",
+        "                        }) if refused || read >= 0 => return Err(error),",
+        [SEEKHEAD_DAMAGE],
+    ),
+    (
+        "an entry FFmpeg refuses the file for is passed over",
+        "                        }) if refused || read > 0 => return Err(error),",
+        "                        }) if read > 0 => return Err(error),",
+        [PROJECTIONS],
+    ),
+    (
         "a damaged Info before the Clusters refuses the file",
-        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
-        "                    ids::CUES => cues_read.push(h.start),",
-        "                    ids::INFO => nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?,\n"
-        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
-        "                    ids::CUES => cues_read.push(h.start),",
+        "                    ids::CUES => {\n"
+        "                        cues_read.push(h.start);",
+        "                    ids::INFO => {\n"
+        "                        nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?;\n"
+        "                        Ok(())\n"
+        "                    }\n"
+        "                    ids::CUES => {\n"
+        "                        cues_read.push(h.start);",
         [META_DAMAGED_INFO, META_DAMAGED_INFO_PACKETS],
     ),
     (
@@ -457,7 +473,7 @@ DEMUX = [
     ),
     (
         "Tracks after the Clusters are not looked for",
-        "            ids::TRACKS => self.read_tracks(&h),\n",
+        "            ids::TRACKS => self.read_tracks(&h).map_err(|d| d.error),\n",
         "            ids::TRACKS => Ok(()),\n",
         [TRACKS_AT_THE_END],
     ),
@@ -469,9 +485,12 @@ DEMUX = [
     ),
     (
         "only the first Cues element before the Clusters is the index",
-        "                    ids::CUES => cues_read.push(h.start),",
-        "                    ids::CUES if cues_read.is_empty() => cues_read.push(h.start),\n"
-        "                    ids::CUES => {}",
+        "                        cues_read.push(h.start);\n"
+        "                        Ok(())",
+        "                        if cues_read.is_empty() {\n"
+        "                            cues_read.push(h.start);\n"
+        "                        }\n"
+        "                        Ok(())",
         [SEEKS_TWO_CUES],
     ),
     (
@@ -496,9 +515,9 @@ DEMUX = [
     ),
     (
         "a second Tracks before the Clusters is not read",
-        "                    ids::TRACKS => self.read_tracks(&h)?,",
-        "                    ids::TRACKS if self.tracks.is_empty() => self.read_tracks(&h)?,\n"
-        "                    ids::TRACKS => {}",
+        "                    ids::TRACKS => match self.read_tracks(&h) {",
+        "                    ids::TRACKS if !self.tracks.is_empty() => Ok(()),\n"
+        "                    ids::TRACKS => match self.read_tracks(&h) {",
         [META_TWO_TRACKS_PACKETS, META_TWO_TRACKS],
     ),
     (
@@ -515,17 +534,17 @@ DEMUX = [
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
-        "                                        segment_ends = None;\n",
+        "                                segment_ends = None;\n",
         "",
         ["after_damage_the_segment_runs_to_the_end_of_the_file"],
     ),
     (
         "damage before the first Cluster refuses the file",
-        "                            Err(_) => {\n"
-        "                                // Past its four-byte ID, and one more.",
-        "                            Err(e) => {\n"
-        "                                return Err(e);\n"
-        "                                // Past its four-byte ID, and one more.",
+        "                    Err(_) => {\n"
+        "                        // Past its four-byte ID, and one more.",
+        "                    Err(e) => {\n"
+        "                        return Err(e);\n"
+        "                        // Past its four-byte ID, and one more.",
         [META_DAMAGE],
     ),
     # Reading the Clusters.

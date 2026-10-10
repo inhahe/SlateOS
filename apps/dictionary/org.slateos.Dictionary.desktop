@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Dictionary
+Comment=Look a word up, read it, keep it
+Icon=accessories-dictionary
+Exec=dictionary
+Categories=Office;Dictionary;
+Keywords=words;definition;thesaurus;

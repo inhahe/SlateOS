@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Typing Tutor
+Comment=Learn to type faster and without looking
+Icon=input-keyboard
+Exec=typingtutor
+Categories=Education;
+Keywords=typing;keyboard;practice;

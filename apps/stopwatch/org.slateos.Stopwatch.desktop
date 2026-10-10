@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Stopwatch
+Comment=Time things, with laps
+Icon=appointment-soon
+Exec=stopwatch
+Categories=Utility;Clock;
+Keywords=timer;laps;

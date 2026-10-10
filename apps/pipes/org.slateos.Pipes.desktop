@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pipes
+Comment=Turn the pipes until the water reaches the drain
+Icon=applications-games
+Exec=pipes
+Categories=Game;LogicGame;
+Keywords=plumbing;puzzle;

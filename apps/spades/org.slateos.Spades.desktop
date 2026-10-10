@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spades
+Comment=The Spades card game with a computer partner
+Icon=applications-games
+Exec=spades
+Categories=Game;CardGame;
+Keywords=cards;

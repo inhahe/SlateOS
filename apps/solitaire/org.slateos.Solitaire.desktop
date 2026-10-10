@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Solitaire
+Comment=Klondike patience
+Icon=applications-games
+Exec=solitaire
+Categories=Game;CardGame;
+Keywords=cards;patience;klondike;

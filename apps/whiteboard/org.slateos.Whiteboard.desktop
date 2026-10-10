@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Whiteboard
+Comment=Draw freely on an endless board
+Icon=applications-graphics
+Exec=whiteboard
+Categories=Graphics;
+Keywords=drawing;sketch;board;

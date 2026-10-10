@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Tic-tac-toe
+Comment=Noughts and crosses against the computer
+Icon=applications-games
+Exec=tictactoe
+Categories=Game;BoardGame;
+Keywords=noughts;crosses;

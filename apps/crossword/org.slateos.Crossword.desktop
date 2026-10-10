@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Crossword
+Comment=Fill the grid from the clues
+Icon=applications-games
+Exec=crossword
+Categories=Game;LogicGame;
+Keywords=puzzle;words;clues;

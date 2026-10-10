@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=World Clock
+Comment=The time in cities around the world
+Icon=preferences-system-time
+Exec=worldclock
+Categories=Utility;Clock;
+Keywords=time;zones;cities;

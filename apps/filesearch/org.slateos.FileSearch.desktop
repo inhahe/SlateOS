@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=File Search
+Comment=Find files by name and content
+Icon=system-search
+Exec=filesearch
+Categories=System;FileTools;
+Keywords=find;search;files;

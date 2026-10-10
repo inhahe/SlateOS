@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Image Viewer
+Comment=Look at pictures, one at a time or as a slideshow
+Icon=image-x-generic
+Exec=imageviewer %f
+Categories=Graphics;Viewer;
+Keywords=pictures;photos;images;
+MimeType=image/png;image/jpeg;image/gif;image/bmp;

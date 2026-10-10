@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hangman
+Comment=Guess the word a letter at a time
+Icon=applications-games
+Exec=hangman
+Categories=Game;
+Keywords=words;letters;

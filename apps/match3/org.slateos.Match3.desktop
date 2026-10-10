@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Match Three
+Comment=Swap gems to line up three of a kind
+Icon=applications-games
+Exec=match3
+Categories=Game;LogicGame;
+Keywords=gems;puzzle;

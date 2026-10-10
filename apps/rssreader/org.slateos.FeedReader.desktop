@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Feed Reader
+Comment=Follow news feeds
+Icon=internet-news-reader
+Exec=rssreader
+Categories=Network;Feed;
+Keywords=rss;atom;news;

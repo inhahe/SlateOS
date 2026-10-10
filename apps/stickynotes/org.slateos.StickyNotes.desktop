@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sticky Notes
+Comment=Keep short notes on the desktop
+Icon=accessories-text-editor
+Exec=stickynotes
+Categories=Utility;
+Keywords=notes;sticky;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sudoku
+Comment=The 9 by 9 number puzzle
+Icon=applications-games
+Exec=sudoku
+Categories=Game;LogicGame;
+Keywords=numbers;puzzle;

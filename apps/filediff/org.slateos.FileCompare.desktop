@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=File Compare
+Comment=Compare two files and see what changed
+Icon=accessories-text-editor
+Exec=filediff
+Categories=Development;
+Keywords=diff;compare;changes;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lights Out
+Comment=Switch every light off
+Icon=applications-games
+Exec=lightsout
+Categories=Game;LogicGame;
+Keywords=lights;puzzle;

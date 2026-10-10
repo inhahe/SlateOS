@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Comment=Do sums, from arithmetic to scientific
+Icon=accessories-calculator
+Exec=calculator
+Categories=Utility;Calculator;
+Keywords=math;arithmetic;sum;

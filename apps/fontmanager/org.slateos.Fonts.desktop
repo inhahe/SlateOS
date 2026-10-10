@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Fonts
+Comment=See and manage the installed fonts
+Icon=preferences-desktop-font
+Exec=fontmanager
+Categories=Settings;DesktopSettings;
+Keywords=fonts;typeface;

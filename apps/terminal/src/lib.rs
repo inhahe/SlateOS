@@ -58,6 +58,7 @@ use guitk::scrollbar;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{App, Response};
+use pathtext::ShowPath;
 
 use std::collections::VecDeque;
 use std::task::Waker;
@@ -305,6 +306,63 @@ fn cube_level(component: u8) -> u8 {
         0
     } else {
         component.saturating_mul(40).saturating_add(55)
+    }
+}
+
+// ============================================================================
+// The command line
+// ============================================================================
+
+/// What the terminal's command line asks for:
+/// `terminal [--display ADDR] [-e PROGRAM [ARG...]]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandLine {
+    /// The display to open the window on (`--display`), if one was named.
+    pub display: Option<String>,
+    /// The program to run in place of the shell, and its arguments, if `-e`
+    /// named one.
+    pub command: Option<(std::ffi::OsString, Vec<std::ffi::OsString>)>,
+}
+
+impl CommandLine {
+    /// Read a command line, the program's own name left off.
+    ///
+    /// `-e` is xterm's convention, which every terminal since has followed
+    /// and which the desktop starts a `Terminal=true` program with
+    /// (`terminal -e PROGRAM ARG...`): everything after it is the command's,
+    /// each argument its own, `--display` included -- an option meant for the
+    /// program run must not be taken by the terminal that runs it. Only what
+    /// comes before `-e` is the terminal's own.
+    ///
+    /// # Errors
+    ///
+    /// A message fit to print: `-e` with nothing after it, an argument the
+    /// terminal does not take, or a bad `--display`.
+    pub fn parse(args: Vec<std::ffi::OsString>) -> Result<Self, String> {
+        let at_e = args.iter().position(|a| a.as_encoded_bytes() == b"-e");
+        let (own, command) = match at_e {
+            Some(i) => {
+                let mut own = args;
+                let after = own.split_off(i);
+                let mut after = after.into_iter().skip(1);
+                let Some(program) = after.next() else {
+                    return Err(String::from("-e needs a program to run, e.g. -e top"));
+                };
+                (own, Some((program, after.collect())))
+            }
+            None => (args, None),
+        };
+        let parsed = oswindow::app::ArgsOs::parse(own)?;
+        if let Some(stray) = parsed.rest.first() {
+            return Err(format!(
+                "unexpected argument {} -- to run a program in the terminal, put -e before it",
+                std::path::Path::new(stray).shown()
+            ));
+        }
+        Ok(Self {
+            display: parsed.display,
+            command,
+        })
     }
 }
 
@@ -3932,6 +3990,53 @@ mod tests {
     fn cell() -> (f32, f32) {
         let config = TerminalConfig::default();
         (config.cell_width, config.cell_height)
+    }
+
+    fn args(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// **`-e` runs a program in place of the shell** (lane C's
+    /// `c-e-ship-a-desktop-entry-with-each-program.md`, part 2): the desktop
+    /// starts a `Terminal=true` program as `terminal -e PROGRAM ARG...`.
+    /// Everything after `-e` is the program's, `--display` included; only
+    /// what comes before it is the terminal's.
+    #[test]
+    fn dash_e_runs_the_program_after_it_with_every_argument_its_own() {
+        use super::CommandLine;
+        let none = CommandLine::parse(Vec::new()).unwrap();
+        assert_eq!(
+            (none.display, none.command),
+            (None, None),
+            "no shell asked for"
+        );
+
+        let top = CommandLine::parse(args(&["-e", "top"])).unwrap();
+        assert_eq!(top.command, Some(("top".into(), Vec::new())));
+
+        let vim = CommandLine::parse(args(&["-e", "vim", "--display", "x", "a b.txt"])).unwrap();
+        assert_eq!(vim.display, None, "the program's --display was taken");
+        assert_eq!(
+            vim.command,
+            Some(("vim".into(), args(&["--display", "x", "a b.txt"])))
+        );
+
+        let ls =
+            CommandLine::parse(args(&["--display", "10.0.0.2:7373", "-e", "ls", "-l"])).unwrap();
+        assert_eq!(ls.display.as_deref(), Some("10.0.0.2:7373"));
+        assert_eq!(ls.command, Some(("ls".into(), args(&["-l"]))));
+    }
+
+    #[test]
+    fn a_command_line_the_terminal_does_not_take_is_refused_by_name() {
+        use super::CommandLine;
+        let bare = CommandLine::parse(args(&["-e"])).unwrap_err();
+        assert!(bare.contains("-e needs a program"), "{bare}");
+        let stray = CommandLine::parse(args(&["top"])).unwrap_err();
+        assert!(
+            stray.contains("unexpected argument top") && stray.contains("-e"),
+            "{stray}"
+        );
     }
 
     impl TerminalState {

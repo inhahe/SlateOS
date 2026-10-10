@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Database Viewer
+Comment=Browse and query SQLite databases
+Icon=x-office-spreadsheet
+Exec=dbviewer
+Categories=Development;Database;
+Keywords=sqlite;sql;database;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Browse, copy, move and open files
+Icon=system-file-manager
+Exec=explorer %f
+Categories=System;FileManager;
+Keywords=files;folders;explorer;browse;
+MimeType=inode/directory;

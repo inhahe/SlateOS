@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Information
+Comment=See what the computer is and has
+Icon=computer
+Exec=sysinfo-app
+Categories=System;
+Keywords=hardware;system;information;

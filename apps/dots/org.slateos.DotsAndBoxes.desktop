@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Dots and Boxes
+Comment=Close more boxes than the computer
+Icon=applications-games
+Exec=dots
+Categories=Game;BoardGame;
+Keywords=pencil;paper;boxes;

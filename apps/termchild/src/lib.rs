@@ -50,6 +50,7 @@
 //! asking it on a clock.
 
 use pathtext::ShowPath;
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::PathBuf;
 use std::task::Waker;
@@ -284,6 +285,70 @@ where
     env
 }
 
+/// The directories searched for a program when `PATH` is unset: POSIX's
+/// default, as `execvp` uses it.
+const DEFAULT_PATH: &str = "/bin:/usr/bin";
+
+/// Where `program` is, as `execvp` looks for it: itself if it names a path
+/// (it holds a `/`), else the first executable file of that name in the
+/// directories of `path_var` -- `$PATH`, or [`DEFAULT_PATH`] when unset. An
+/// empty entry in it is the current directory, as POSIX has it. `None` when
+/// nothing is found, or for an empty name.
+#[must_use]
+pub fn find_program(program: &OsStr, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    if program.is_empty() {
+        return None;
+    }
+    if program.as_encoded_bytes().contains(&b'/') {
+        return Some(PathBuf::from(program));
+    }
+    let search = path_var.unwrap_or_else(|| OsStr::new(DEFAULT_PATH));
+    std::env::split_paths(search)
+        .map(|dir| {
+            if dir.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                dir
+            }
+        })
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Whether `path` is a file this user could run: a regular file (not a
+/// directory of the program's name) with an execute bit set.
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// The environment a program on the terminal gets ([`shell_environment`]
+/// over this process's own), as C strings.
+#[cfg(unix)]
+fn child_environment() -> Vec<std::ffi::CString> {
+    use std::os::unix::ffi::OsStringExt;
+    shell_environment(std::env::vars_os().map(|(k, v)| (k.into_vec(), v.into_vec())))
+        .into_iter()
+        // `shell_environment` removed every entry with a NUL, so this cannot
+        // fail; filtering rather than unwrapping keeps a mistake there from
+        // becoming a panic here.
+        .filter_map(|entry| std::ffi::CString::new(entry).ok())
+        .collect()
+}
+
 /// Start the user's shell on a new pseudo-terminal of `size`.
 ///
 /// # Errors
@@ -293,7 +358,7 @@ where
 #[cfg(unix)]
 pub fn spawn_shell(size: WinSize) -> Result<Box<dyn Link>, SpawnError> {
     use std::ffi::CString;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::ffi::OsStrExt;
 
     let program = shell_path(std::env::var_os("SHELL"));
     let refuse = |errno| SpawnError {
@@ -311,18 +376,75 @@ pub fn spawn_shell(size: WinSize) -> Result<Box<dyn Link>, SpawnError> {
     );
     let argv0 = CString::new(name).map_err(|_| refuse(libcall::EINVAL))?;
 
-    let env: Vec<CString> =
-        shell_environment(std::env::vars_os().map(|(k, v)| (k.into_vec(), v.into_vec())))
-            .into_iter()
-            // `shell_environment` removed every entry with a NUL, so this cannot
-            // fail; filtering rather than unwrapping keeps a mistake there from
-            // becoming a panic here.
-            .filter_map(|entry| CString::new(entry).ok())
-            .collect();
+    let env = child_environment();
     let envp: Vec<&std::ffi::CStr> = env.iter().map(CString::as_c_str).collect();
 
     let link = pty_link::PtyLink::spawn(&path, &[argv0.as_c_str()], &envp, size).map_err(refuse)?;
     Ok(Box::new(link))
+}
+
+/// Start `program` with `args` on a new pseudo-terminal of `size`, in place
+/// of the shell: what `terminal -e PROGRAM ARG...` runs, and how the desktop
+/// starts a program whose entry says `Terminal=true`.
+///
+/// The program is found as `execvp` finds it ([`find_program`]) and gets its
+/// arguments one each, exactly as given -- never through a shell, so nothing
+/// in them is expanded or split. Its `argv[0]` is the name as given.
+///
+/// # Errors
+///
+/// The program that could not be run and why, as [`spawn_shell`]'s: `ENOENT`
+/// when no program of that name is found, `EINVAL` for a name or an argument
+/// with a NUL in it, which no C program could be handed.
+#[cfg(unix)]
+pub fn spawn_command(
+    program: &OsStr,
+    args: &[std::ffi::OsString],
+    size: WinSize,
+) -> Result<Box<dyn Link>, SpawnError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let named = PathBuf::from(program);
+    let refuse = |errno| SpawnError {
+        program: named.clone(),
+        errno,
+    };
+    let found = find_program(program, std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| refuse(libcall::ENOENT))?;
+    let path = CString::new(found.as_os_str().as_bytes()).map_err(|_| refuse(libcall::EINVAL))?;
+    let mut argv = Vec::with_capacity(args.len().saturating_add(1));
+    for arg in std::iter::once(program).chain(args.iter().map(std::ffi::OsString::as_os_str)) {
+        argv.push(CString::new(arg.as_bytes()).map_err(|_| refuse(libcall::EINVAL))?);
+    }
+    let argvp: Vec<&std::ffi::CStr> = argv.iter().map(CString::as_c_str).collect();
+    let env = child_environment();
+    let envp: Vec<&std::ffi::CStr> = env.iter().map(CString::as_c_str).collect();
+
+    let link = pty_link::PtyLink::spawn(&path, &argvp, &envp, size).map_err(refuse)?;
+    Ok(Box::new(link))
+}
+
+/// Start `program` on a new pseudo-terminal of `size`.
+///
+/// # Errors
+///
+/// Always, as [`spawn_shell`]'s host build: no pseudo-terminals here, so no
+/// program to give the arguments to.
+#[cfg(not(unix))]
+pub fn spawn_command(
+    program: &OsStr,
+    _args: &[std::ffi::OsString],
+    size: WinSize,
+) -> Result<Box<dyn Link>, SpawnError> {
+    let errno = match libcall::pty::spawn(c"/bin/sh", &[c"sh"], &[], size) {
+        Err(errno) => errno,
+        Ok(_) => libcall::ENOSYS,
+    };
+    Err(SpawnError {
+        program: PathBuf::from(program),
+        errno,
+    })
 }
 
 /// Start the user's shell on a new pseudo-terminal of `size`.
@@ -978,6 +1100,65 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// A fresh directory under the system's temporary one, removed again by
+    /// the caller.
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("termchild-{tag}-{}-{n}", std::process::id()));
+        // A directory left by an earlier run of the same number: start clean.
+        let _left_over = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    /// A file at `path` that this user may run.
+    fn runnable(path: &std::path::Path) {
+        std::fs::write(path, b"#!/bin/sh\n").expect("written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+    }
+
+    #[test]
+    fn a_program_is_found_along_the_path_as_execvp_finds_it() {
+        let root = scratch("path");
+        let (first, second) = (root.join("first"), root.join("second"));
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+        // In the first directory, a directory of the program's name, which
+        // is not something that runs; in the second, the program.
+        std::fs::create_dir_all(first.join("prog")).expect("a directory named prog");
+        runnable(&second.join("prog"));
+        let path = std::env::join_paths([&first, &second]).expect("a PATH");
+
+        assert_eq!(
+            find_program(OsStr::new("prog"), Some(&path)),
+            Some(second.join("prog"))
+        );
+        assert_eq!(find_program(OsStr::new("absent"), Some(&path)), None);
+        assert_eq!(find_program(OsStr::new(""), Some(&path)), None);
+        // A name with a slash is a path already, and is not searched for.
+        assert_eq!(
+            find_program(OsStr::new("./tools/prog"), Some(&path)),
+            Some(PathBuf::from("./tools/prog"))
+        );
+        // A file the user may not run is passed over for the next.
+        #[cfg(unix)]
+        {
+            std::fs::write(first.join("other"), b"data").expect("written");
+            runnable(&second.join("other"));
+            assert_eq!(
+                find_program(OsStr::new("other"), Some(&path)),
+                Some(second.join("other"))
+            );
+        }
+        let _cleaned = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_relative_or_missing_shell_falls_back_to_bin_sh() {

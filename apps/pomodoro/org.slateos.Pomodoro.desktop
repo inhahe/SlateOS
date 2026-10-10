@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pomodoro Timer
+Comment=Work in focused stretches with breaks between
+Icon=appointment-soon
+Exec=pomodoro
+Categories=Utility;Clock;
+Keywords=focus;timer;productivity;

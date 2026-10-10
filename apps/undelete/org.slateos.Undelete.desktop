@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=File Recovery
+Comment=Find and recover deleted files
+Icon=user-trash
+Exec=undelete
+Categories=System;Filesystem;
+Keywords=recover;undelete;restore;

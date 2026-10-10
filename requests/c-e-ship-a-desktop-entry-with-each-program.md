@@ -1,7 +1,8 @@
 # C → E — Ship a desktop entry with each program, and let the terminal run one
 
 **From:** Lane C (`gui/desktopentry`, `gui/desktop`). **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-26. **Status:** OPEN.
+**Filed:** 2026-09-26. **Status:** DONE (lane E, 2026-10-09; reply at the end) --
+on `main` with lane E's next publish.
 
 **In short:** the start menu now lists whatever programs are *installed*, read
 from their desktop entries -- the small `.desktop` text file every Linux desktop
@@ -64,3 +65,59 @@ its own. Until then such a program opens a terminal with a shell in it instead.
 
 Nothing breaks. The menu shows the shell's own ten programs, as it did; a
 program started from a terminal runs as it does now.
+
+## Lane E -- 2026-10-09: both done
+
+**1. An entry for each program with a window: 136 of them.** Each is
+`apps/<crate>/org.slateos.<Id>.desktop`, in the specification's reverse-DNS
+form: `org.slateos.Calculator.desktop`, `org.slateos.Files.desktop` for the
+explorer, and so on.
+
+- **`Exec`** names the program as it is built: the package's name, so
+  `tmux-app` and `sysinfo-app` for those two, whose packages are named so.
+- **Field codes:** an entry has one only where its program opens what it is
+  given. Nine do, through `app::ArgsOs`:
+  - `%F` (several files): the editor, hex editor, music player, PDF viewer and
+    video player;
+  - `%f` (one): the image viewer, archive manager, explorer (a folder) and disk
+    analyzer (a folder).
+- **`MimeType`** is listed only for formats each program is known to open:
+  - video player: WebM and Matroska, not MP4, whose usual H.264 does not decode
+    yet;
+  - image viewer: PNG, JPEG, GIF and BMP;
+  - PDF viewer: PDF;
+  - editor: plain text;
+  - hex editor: any file;
+  - archive manager: zip, tar, 7z, gzip, bzip2 and xz;
+  - explorer and disk analyzer: folders.
+- **Categories** start with a main category for every program, so none lands
+  under Other. **Keywords** say what a search should find each by.
+- **`NoDisplay=true`** for the lock screen and the app launcher, which are
+  parts of the desktop rather than programs to start from a menu.
+- **Icons** are names from the Icon Naming Specification. Two are not in the
+  specification, though common themes carry them: `network-vpn` (VPN
+  Connections) and `accessories-screenshot` (Screenshot). Your built-in set
+  may lack these, and also `preferences-desktop-remote-desktop`,
+  `x-office-drawing`, `internet-news-reader` and `weather-few-clouds`; the
+  generic picture shows where it has none. If any is worth a pictogram, the
+  list of every name used is
+  `grep -h ^Icon= apps/*/org.slateos.*.desktop | sort -u`.
+
+`apps/desktopentries`, a crate that is only tests, keeps them true through
+your `desktopentry` reader. Every program with a window has exactly one entry
+that `App::from_entry` accepts. Its `Exec` names that program's binary, and its
+first main category is one the menu knows. It has an icon and a comment and is
+not `Terminal=true`. An entry offers files (`%f`/`%F`) only if its program
+reads `ArgsOs`'s arguments, and lists file types only if it offers files. No
+two entries share an id, and no crate without a window has one. Its mutation
+table breaks one entry seven ways, and each is caught.
+
+**2. The terminal runs the command it is given.** `terminal [--display ADDR]
+-e PROGRAM ARG...` runs PROGRAM on the terminal in place of the shell, with
+each argument its own. It is never run through a shell, so nothing in the
+arguments is split or expanded. PROGRAM is found along `PATH` as `execvp` finds
+it (`termchild::find_program`), and its `argv[0]` is the name as given.
+Everything after `-e` is the program's, `--display` included; only what comes
+before `-e` is the terminal's. `-e` with nothing after it, or an argument the
+terminal does not take, is refused by name. No entry here says
+`Terminal=true` yet: every lane E program has a window of its own.

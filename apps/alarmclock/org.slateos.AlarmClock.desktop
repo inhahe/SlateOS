@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Alarm Clock
+Comment=Wake to an alarm, with snooze and repeats
+Icon=appointment-soon
+Exec=alarmclock
+Categories=Utility;Clock;
+Keywords=alarm;wake;timer;snooze;

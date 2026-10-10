@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Towers of Hanoi
+Comment=Move the stack of disks, one at a time
+Icon=applications-games
+Exec=towers
+Categories=Game;LogicGame;
+Keywords=hanoi;disks;puzzle;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nonogram
+Comment=Uncover a hidden picture from number clues
+Icon=applications-games
+Exec=nonogram
+Categories=Game;LogicGame;
+Keywords=picross;griddlers;puzzle;

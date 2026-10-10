@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Flood It
+Comment=Flood the board with one colour in few moves
+Icon=applications-games
+Exec=flood
+Categories=Game;LogicGame;
+Keywords=colour;puzzle;

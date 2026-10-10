@@ -650,10 +650,10 @@ pub struct SettingsState {
     /// that does all of that, and does it correctly for right-to-left text,
     /// which a hand-rolled one was never going to.
     pub exclusion_draft: TextInput,
-    /// What the last copy or cut in either field took: one for the window,
-    /// so a pattern copied from the search pastes into the exclusions. Each
-    /// field kept its own (`TextInput`'s), and a copy reached only itself.
-    clipboard: String,
+    /// A text field's right-click menu while it is up -- Cut, Copy, Paste,
+    /// Delete, Select all -- and the field it is for
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// Which place on the page typing goes to, if any.
     focused_field: Option<FieldId>,
     /// What the open picker is being used for.
@@ -2451,7 +2451,7 @@ impl SettingsState {
         Self {
             current_category: SettingsCategory::System,
             current_page: SettingsPage::Display,
-            search_query: TextInput::new(),
+            search_query: field_holding(SEARCH_CAPACITY),
             search_focused: false,
             show_help: false,
             sidebar_hovered: None,
@@ -2466,8 +2466,8 @@ impl SettingsState {
             dialog: None,
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
-            exclusion_draft: TextInput::new(),
-            clipboard: String::new(),
+            exclusion_draft: field_holding(EXCLUSION_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
             focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
@@ -3777,6 +3777,23 @@ impl FieldId {
     }
 }
 
+/// The text field a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The sidebar's search.
+    Search,
+    /// A field on the page.
+    Page(FieldId),
+}
+
+/// An empty one-line field that typing and pasting -- by key or from its
+/// right-click menu -- fill to at most `capacity` characters.
+fn field_holding(capacity: usize) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_capacity(Some(capacity));
+    input
+}
+
 /// A continuously-valued setting the pointer can drag along a track.
 ///
 /// Named rather than addressed by coordinates for the same reason
@@ -4755,6 +4772,9 @@ impl SettingsState {
         if self.open_dropdown.is_some() {
             self.render_open_dropdown(&mut tree);
         }
+
+        // A text field's right-click menu, over the page it was opened on.
+        tree.commands.extend(self.field_menu.render(pal));
 
         // And a modal over even that: a dropdown drawn over one would be a
         // list the user could not dismiss. Two of them now, the file picker
@@ -5932,8 +5952,7 @@ impl SettingsState {
                     .rule_draft
                     .as_mut()
                     .and_then(|draft| rule_input(draft, field))?;
-                Self::edit_line(input, &mut self.clipboard, evt, field.capacity())
-                    .then_some(EventResult::Consumed)
+                Self::edit_line(input, evt, field.capacity()).then_some(EventResult::Consumed)
             }
         }
     }
@@ -9374,6 +9393,9 @@ impl SettingsState {
             if self.why_disabled.tick(self.clock_ms) {
                 result = EventResult::Consumed;
             }
+            if self.field_menu.tick(self.clock_ms) {
+                result = EventResult::Consumed;
+            }
         }
         if self.explain_disabled() {
             result = EventResult::Consumed;
@@ -9426,6 +9448,20 @@ impl SettingsState {
         // category and Alt+Enter, in the exclusion field, added the pattern.
         let plain = textline::is_plain(evt.modifiers);
 
+        // A text field's menu takes the keys while it is up: the arrows move
+        // through its rows, Enter does the lit one, Escape puts it away --
+        // none of them reaches the field or the page under it.
+        match self.field_menu.key(evt) {
+            fieldmenu::Outcome::NotUp => {}
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(id, field);
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
+                return EventResult::Consumed;
+            }
+        }
+
         // Above the focused-field branch below, which takes the keyboard and
         // returns. Placed after it, the card could be raised from a page and
         // then not dismissed from a text box -- and on this window an
@@ -9473,12 +9509,7 @@ impl SettingsState {
                     return EventResult::Consumed;
                 }
                 _ => {
-                    if Self::edit_line(
-                        &mut self.exclusion_draft,
-                        &mut self.clipboard,
-                        evt,
-                        EXCLUSION_CAPACITY,
-                    ) {
+                    if Self::edit_line(&mut self.exclusion_draft, evt, EXCLUSION_CAPACITY) {
                         return EventResult::Consumed;
                     }
                 }
@@ -9510,12 +9541,7 @@ impl SettingsState {
                 self.search_query.clear();
                 return EventResult::Consumed;
             }
-            if Self::edit_line(
-                &mut self.search_query,
-                &mut self.clipboard,
-                evt,
-                SEARCH_CAPACITY,
-            ) {
+            if Self::edit_line(&mut self.search_query, evt, SEARCH_CAPACITY) {
                 return EventResult::Consumed;
             }
         }
@@ -9573,20 +9599,69 @@ impl SettingsState {
     }
 
     /// Apply `evt` to a one-line field with `textline`'s keys, keeping what a
-    /// copy or a cut took on the window's clipboard. Whether the field
-    /// answered the key: one it does not -- Tab, an arrow it has no use for,
-    /// a Ctrl chord other than A, C, X and V -- is the page's.
-    fn edit_line(
-        field: &mut TextInput,
-        clipboard: &mut String,
-        evt: &KeyEvent,
-        capacity: usize,
-    ) -> bool {
-        let edit = textline::apply_key(field, evt, capacity, clipboard, FIELD_FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            *clipboard = copied;
+    /// copy or a cut took on the program's clipboard -- the one the fields'
+    /// right-click menu copies to and pastes from, so a pattern copied from
+    /// the search with Ctrl+C pastes into the exclusions from the menu. Until
+    /// 2026-10-10 the keys kept a clipboard of the window's own. Whether the
+    /// field answered the key: one it does not -- Tab, an arrow it has no use
+    /// for, a Ctrl chord other than A, C, X and V -- is the page's.
+    fn edit_line(field: &mut TextInput, evt: &KeyEvent, capacity: usize) -> bool {
+        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled
+    }
+
+    /// The text field `field` names, as the window holds it now: `None` for a
+    /// rule field while no rule is being written.
+    fn menu_field_input(&mut self, field: MenuField) -> Option<&mut TextInput> {
+        match field {
+            MenuField::Search => Some(&mut self.search_query),
+            MenuField::Page(FieldId::ExclusionDraft) => Some(&mut self.exclusion_draft),
+            MenuField::Page(id) => self
+                .rule_draft
+                .as_mut()
+                .and_then(|draft| rule_input(draft, id)),
         }
-        edit.handled
+    }
+
+    /// A right press: over a text field, its menu where the press landed,
+    /// the field given the keyboard and its caret and selection left as they
+    /// are, so Cut and Copy act on what the user selected (§1454). Anywhere
+    /// else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let field = if Self::search_rect().contains(x, y) {
+            MenuField::Search
+        } else if let Some(RowHit::Focus(id)) = self.row_at(x, y) {
+            MenuField::Page(id)
+        } else {
+            return EventResult::Ignored;
+        };
+        let viewport = (self.window_width, self.window_height);
+        let Some(input) = self.menu_field_input(field) else {
+            return EventResult::Ignored;
+        };
+        let menu = input.edit_menu();
+        self.field_menu.open(field, menu, x, y, viewport);
+        match field {
+            MenuField::Search => {
+                self.search_focused = true;
+                self.focused_field = None;
+            }
+            MenuField::Page(id) => {
+                self.search_focused = false;
+                self.focused_field = Some(id);
+            }
+        }
+        self.open_dropdown = None;
+        EventResult::Consumed
+    }
+
+    /// Do the menu row `id` to `field`, as its key would.
+    fn do_field_menu_row(&mut self, id: guitk::menu::MenuItemId, field: MenuField) {
+        if let Some(input) = self.menu_field_input(field) {
+            // What changed needs nothing more: the search's filter and the
+            // rule editor's checks are read from the fields as the page is
+            // drawn.
+            let _edit = input.edit_command(id);
+        }
     }
 
     /// Move the sidebar selection by `delta` categories, stopping at the ends.
@@ -9632,8 +9707,25 @@ impl SettingsState {
                 _ => {}
             }
         }
+        // A text field's menu takes every press while it is up, as any menu
+        // does -- a row chosen, a press outside putting it away and reaching
+        // nothing under it, a right press there opening that field's own --
+        // and the pointer and the wheel over it.
+        match self.field_menu.mouse(evt) {
+            fieldmenu::Outcome::NotUp => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(id, field);
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
             // Nothing is under a pointer that has left.
             MouseEventKind::Leave => {
@@ -10634,9 +10726,15 @@ impl oswindow::app::App for SettingsState {
     /// and the clock moves only with a tick, which shows the reason the
     /// moment it is due.
     fn tick_interval(&self) -> Option<std::time::Duration> {
-        self.why_disabled
-            .due_in(self.clock_ms)
-            .map(std::time::Duration::from_millis)
+        // And a text field's menu, whose dimmed rows say why while the
+        // pointer rests on one, on the same clock.
+        let menu = self.field_menu.due_in(self.clock_ms);
+        let why = self.why_disabled.due_in(self.clock_ms);
+        match (why, menu) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+        .map(std::time::Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -14868,7 +14966,7 @@ mod tests {
             );
 
             // One clipboard: copied from the search, pasted into the pattern.
-            state.handle_event(&chord(Key::A, "a", Modifiers::ctrl()));
+            state.handle_event(&ctrl_chord(Key::A, "a"));
             state.handle_event(&chord(Key::C, "c", Modifiers::ctrl()));
             state.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
             assert!(state.search_focused, "Alt+Escape left the search");
@@ -14882,7 +14980,7 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }));
             state.handle_event(&key_press(Key::End));
-            state.handle_event(&chord(Key::V, "v", Modifiers::ctrl()));
+            state.handle_event(&ctrl_chord(Key::V, "v"));
             assert_eq!(
                 state.exclusion_draft.text(),
                 "ab\u{105}\u{17a}wall",
@@ -18088,6 +18186,215 @@ mod tests {
                 .contains("Could not start Network Connections (/usr/bin/netmanager)"),
             "a start that failed is not said"
         );
+    }
+
+    // --- A text field's right-click menu ------------------------------------------
+
+    /// `key` pressed with Ctrl, carrying `text` as the compositor sends a
+    /// command's letter.
+    fn ctrl_chord(key: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: text.to_owned(),
+        })
+    }
+
+    /// A right press at `(x, y)`.
+    fn right_press(state: &mut SettingsState, x: f32, y: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }))
+    }
+
+    /// The middle of the search box.
+    fn search_middle() -> (f32, f32) {
+        let r = SettingsState::search_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The row of the open field menu that does `command`, and whether it is
+    /// lit.
+    fn field_menu_row(
+        state: &SettingsState,
+        command: guitk::editmenu::EditCommand,
+    ) -> (usize, bool) {
+        let menu = state.field_menu.menu().expect("a field menu is up");
+        menu.items()
+            .iter()
+            .enumerate()
+            .find_map(|(at, item)| match item {
+                guitk::menu::MenuItem::Action { id, enabled, .. } if *id == command.id() => {
+                    Some((at, *enabled))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {command:?} row"))
+    }
+
+    /// Choose `command` in the open field menu with a click on its row.
+    fn choose_in_field_menu(state: &mut SettingsState, command: guitk::editmenu::EditCommand) {
+        let (at, enabled) = field_menu_row(state, command);
+        assert!(enabled, "{command:?} is dimmed");
+        let rect = state
+            .field_menu
+            .menu()
+            .and_then(|menu| menu.item_rect(at))
+            .expect("the row is drawn");
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: rect.x + rect.w / 2.0,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **A right-click in a text field offers Cut, Copy, Paste, Delete and
+    /// Select all, each lit only when it would do something, and a row chosen
+    /// does it** (`requests/c-e-text-fields-have-a-right-click-menu.md`):
+    /// the search's selection copied from the menu, pasted from the menu into
+    /// the Background page's pattern -- and pasted by Ctrl+V too, the keys
+    /// and the menu sharing the program's clipboard.
+    #[test]
+    fn a_text_fields_right_click_menu_cuts_copies_and_pastes() {
+        let mut state = rotation_page();
+        let (sx, sy) = search_middle();
+        state.handle_click(sx, sy);
+        type_text(&mut state, "wall");
+        assert_eq!(state.search_query.text(), "wall");
+
+        // Nothing selected: Cut, Copy and Delete are dimmed.
+        assert_eq!(right_press(&mut state, sx, sy), EventResult::Consumed);
+        assert_eq!(state.field_menu.field(), Some(MenuField::Search));
+        assert!(!field_menu_row(&state, guitk::editmenu::EditCommand::Copy).1);
+        assert!(field_menu_row(&state, guitk::editmenu::EditCommand::SelectAll).1);
+        assert!(
+            drawn_texts(&state).iter().any(|t| t.starts_with("Select")),
+            "the menu is not drawn"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::SelectAll);
+        assert!(!state.field_menu.is_up(), "the menu stayed up");
+        right_press(&mut state, sx, sy);
+        assert!(
+            field_menu_row(&state, guitk::editmenu::EditCommand::Copy).1,
+            "a selection does not light Copy"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Copy);
+        assert_eq!(guitk::clipboard::text(), "wall");
+
+        // Into the pattern, from its own menu.
+        let (px, py) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut state, px, py);
+        assert_eq!(
+            state.focused_field,
+            Some(FieldId::ExclusionDraft),
+            "the right-click did not give the field the keyboard"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Paste);
+        assert_eq!(state.exclusion_draft.text(), "wall");
+        // And by key, from the same clipboard.
+        state.handle_event(&ctrl_chord(Key::V, "v"));
+        assert_eq!(state.exclusion_draft.text(), "wallwall");
+
+        // Cut takes the selection out and keeps it.
+        state.handle_event(&ctrl_chord(Key::A, "a"));
+        right_press(&mut state, px, py);
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Cut);
+        assert_eq!(state.exclusion_draft.text(), "");
+        assert_eq!(guitk::clipboard::text(), "wallwall");
+    }
+
+    /// **The menu is modal while it is up**: Escape puts it away and reaches
+    /// no field, a press elsewhere puts it away and works nothing under it,
+    /// the arrows and Enter choose a row -- and a right-click on no field
+    /// offers nothing.
+    #[test]
+    fn a_field_menu_takes_the_keys_and_presses_while_it_is_up() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let (sx, sy) = search_middle();
+        state.handle_click(sx, sy);
+        type_text(&mut state, "glob");
+
+        right_press(&mut state, sx, sy);
+        state.handle_event(&key_press(Key::Escape));
+        assert!(!state.field_menu.is_up(), "Escape left the menu up");
+        assert_eq!(
+            state.search_query.text(),
+            "glob",
+            "Escape reached the search"
+        );
+
+        // A press elsewhere: the menu goes, and the category under it is not
+        // chosen.
+        right_press(&mut state, sx, sy);
+        let category = state.current_category;
+        let (cx, cy) = (40.0, SettingsState::category_row_top(3) + 10.0);
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!state.field_menu.is_up());
+        assert_eq!(
+            state.current_category, category,
+            "the press went through the menu"
+        );
+
+        // The keys: down to Select all and Enter.
+        right_press(&mut state, sx, sy);
+        let (select_all, _) = field_menu_row(&state, guitk::editmenu::EditCommand::SelectAll);
+        // Down from the top until Select all is lit, then Enter.
+        for _ in 0..12 {
+            if state
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::highlighted)
+                == Some(select_all)
+            {
+                break;
+            }
+            state.handle_event(&key_press(Key::Down));
+        }
+        state.handle_event(&key_press(Key::Enter));
+        assert!(!state.field_menu.is_up());
+        assert!(
+            state.search_query.has_selection(),
+            "Enter did not choose the row"
+        );
+
+        // A right-click on no field.
+        let (bx, by) = (SIDEBAR_WIDTH + 400.0, 10.0);
+        assert_eq!(right_press(&mut state, bx, by), EventResult::Ignored);
+        assert!(!state.field_menu.is_up());
+    }
+
+    /// **A paste from the menu stops at the field's capacity**, as one by
+    /// key does -- the fields carry their own capacities now, which the
+    /// menu's paste honours -- and a rule's long name, read from the file,
+    /// is not cut by the field holding it.
+    #[test]
+    fn a_paste_from_the_menu_stops_at_the_fields_capacity() {
+        let mut state = rotation_page();
+        guitk::clipboard::set_text(&"x".repeat(EXCLUSION_CAPACITY + 50));
+        let (px, py) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut state, px, py);
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Paste);
+        assert_eq!(
+            state.exclusion_draft.text().chars().count(),
+            EXCLUSION_CAPACITY
+        );
+
+        let long = "n".repeat(rules::NAME_CAPACITY + 20);
+        let rule = windowrules::WindowRule {
+            name: long.clone(),
+            ..windowrules::default_rules().remove(0)
+        };
+        let draft = rules::RuleDraft::of(&rule, 0);
+        assert_eq!(draft.name.text(), long, "a name from the file was cut");
+        assert_eq!(draft.name.capacity(), Some(rules::NAME_CAPACITY));
     }
 
     // --- Notes wrap to their column --------------------------------------------

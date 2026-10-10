@@ -3752,6 +3752,7 @@ dependencies = [
  "compositor",
  "datetimesettings",
  "desktopentry",
+ "fieldmenu",
  "guitk",
  "hwquery",
  "imagecodec",

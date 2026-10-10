@@ -560,10 +560,13 @@ impl Default for RuleDraft {
     }
 }
 
-/// A field holding `text`.
-fn field(text: &str) -> TextInput {
+/// A field holding `text`, which typing and pasting -- by key or from the
+/// right-click menu -- fill to at most `capacity` characters. The text it
+/// starts with is not cut: a rule written by hand may hold a longer one.
+fn field(text: &str, capacity: usize) -> TextInput {
     let mut input = TextInput::new();
     input.set_text(text);
+    input.set_capacity(Some(capacity));
     input
 }
 
@@ -619,16 +622,16 @@ impl RuleDraft {
     pub fn new() -> Self {
         Self {
             editing: None,
-            name: field(""),
+            name: field("", NAME_CAPACITY),
             matching: MatchKind::Program,
-            match_text: field(""),
+            match_text: field("", MATCH_CAPACITY),
             place: Place::AsUsual,
             centre_monitor: 0,
-            place_text: field(""),
+            place_text: field("", NUMBERS_CAPACITY),
             size: Size::AsUsual,
-            size_text: field(""),
-            min_size: field(""),
-            max_size: field(""),
+            size_text: field("", NUMBERS_CAPACITY),
+            min_size: field("", NUMBERS_CAPACITY),
+            max_size: field("", NUMBERS_CAPACITY),
             actions: RuleActions::new(),
             enabled: true,
             once: false,
@@ -662,16 +665,16 @@ impl RuleDraft {
         };
         Self {
             editing: Some(index),
-            name: field(&rule.name),
+            name: field(&rule.name, NAME_CAPACITY),
             matching,
-            match_text: field(text),
+            match_text: field(text, MATCH_CAPACITY),
             place,
             centre_monitor,
-            place_text: field(&place_text),
+            place_text: field(&place_text, NUMBERS_CAPACITY),
             size,
-            size_text: field(&size_text),
-            min_size: field(&shown_pair(a.min_size)),
-            max_size: field(&shown_pair(a.max_size)),
+            size_text: field(&size_text, NUMBERS_CAPACITY),
+            min_size: field(&shown_pair(a.min_size), NUMBERS_CAPACITY),
+            max_size: field(&shown_pair(a.max_size), NUMBERS_CAPACITY),
             actions: a.clone(),
             enabled: rule.enabled,
             once: rule.one_shot,

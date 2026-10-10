@@ -574,12 +574,8 @@ MUTATIONS = [
         '        // Category navigation',
         ['a_chord_is_neither_a_settings_key_nor_typing'],
     ),
-    (
-        'a copy reaches only its own field',
-        '            *clipboard = copied;\n',
-        '            let _ = copied;\n',
-        ['a_chord_is_neither_a_settings_key_nor_typing'],
-    ),
+    # 'a copy reaches only its own field' moved to the field menu's rows
+    # (2026-10-10), the keys now copying to the program's clipboard.
     # -- the search box and the text field, the toolkit's (c-e-a-theme-can-shape-the-controls)
     (
         'the search box is drawn the same wherever the pointer is',
@@ -1314,8 +1310,8 @@ MUTATIONS += [
     ),
     (
         "the window asks for no tick",
-        "            .due_in(self.clock_ms)\n            .map(std::time::Duration::from_millis)",
-        "            .due_in(self.clock_ms)\n            .filter(|_| false)\n            .map(std::time::Duration::from_millis)",
+        "        let why = self.why_disabled.due_in(self.clock_ms);\n",
+        "        let why = self.why_disabled.due_in(self.clock_ms).filter(|_| false);\n",
         [WHY_BUTTONS],
     ),
     (
@@ -2671,6 +2667,73 @@ MUTATIONS += [
 ]
 
 
+# A text field's right-click menu (2026-10-10, requests/c-e-text-fields-have-
+# a-right-click-menu.md): Cut, Copy, Paste, Delete and Select all over the
+# search and the page's fields, through apps/fieldmenu; the keys and the menu
+# share the program's clipboard; each field holds its capacity.
+FM_CUT = "a_text_fields_right_click_menu_cuts_copies_and_pastes"
+FM_MODAL = "a_field_menu_takes_the_keys_and_presses_while_it_is_up"
+FM_CAP = "a_paste_from_the_menu_stops_at_the_fields_capacity"
+FM_CHORD = "a_chord_is_neither_a_settings_key_nor_typing"
+
+MUTATIONS += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(evt.x, evt.y),\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "a chosen row does nothing",
+        "            let _edit = input.edit_command(id);\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "the right-click leaves the keyboard where it was",
+        "            MenuField::Page(id) => {\n                self.search_focused = false;\n                self.focused_field = Some(id);\n            }\n",
+        "            MenuField::Page(_id) => {}\n",
+        [FM_CUT],
+    ),
+    (
+        "the menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(pal));\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "the keys keep no clipboard the menu shares",
+        "        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled\n",
+        "        textline::apply_key(field, evt, capacity, \"\", FIELD_FONT_SIZE).handled\n",
+        [FM_CUT, FM_CHORD],
+    ),
+    (
+        "a field holds no capacity",
+        "    input.set_capacity(Some(capacity));\n    input\n}\n",
+        "    let _ = capacity;\n    input\n}\n",
+        [FM_CAP],
+    ),
+    (
+        "the menu's keys reach the page too",
+        "            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                return EventResult::Consumed;\n            }\n",
+        "            fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [FM_MODAL],
+    ),
+    (
+        "a press the menu took reaches the page too",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [FM_MODAL],
+    ),
+    (
+        "a right press on no field is taken",
+        "            return EventResult::Ignored;\n        };\n        let viewport = (self.window_width, self.window_height);\n",
+        "            return EventResult::Consumed;\n        };\n        let viewport = (self.window_width, self.window_height);\n",
+        [FM_MODAL],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",
@@ -2767,6 +2830,12 @@ RULE_SAID = "a_rule_is_said_in_a_sentence"
 RULE_LISTS = "a_list_shows_what_a_rule_says_even_off_the_list"
 
 RULES = [
+    (
+        "a rule's field holds no capacity",
+        "    input.set_capacity(Some(capacity));\n    input\n}\n",
+        "    let _ = capacity;\n    input\n}\n",
+        ["a_paste_from_the_menu_stops_at_the_fields_capacity"],
+    ),
     (
         "only spaces part a pair of numbers",
         "matches!(c, ',' | 'x' | 'X' | '\\u{d7}')",

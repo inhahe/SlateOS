@@ -9698,49 +9698,51 @@ mod tests {
     /// cleared.
     #[test]
     fn choosing_a_source_clears_those_above_it_and_keeps_those_below() {
-        use std::ffi::OsStr;
-        let everything = || {
-            let mut state = SettingsState::new();
-            state.current_page = SettingsPage::Wallpaper;
-            let s = &mut state.appearance.settings;
-            s.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
-            s.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
-                "aurora",
-                None,
-                Some(PathBuf::from("/themes/aurora/day.png")),
-            );
-            s.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
-            s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
-                from: DAY_FROM,
-                image: PathBuf::from("/pics/day.jpg"),
-            });
-            state
-        };
-        // Kept: the schedule, the folder, the theme, the picture.
-        for (source, kept) in [
-            (WallpaperSource::TimeOfDay, [true, true, true, true]),
-            (WallpaperSource::Folder, [false, true, true, true]),
-            (WallpaperSource::Theme, [false, false, true, true]),
-            (WallpaperSource::Picture, [false, false, false, true]),
-            (WallpaperSource::Plain, [false, false, false, false]),
-        ] {
-            let mut state = everything();
-            show_source(&mut state, source);
-            let s = &state.appearance.settings;
-            let got = [
-                !s.wallpaper_schedule.is_empty(),
-                s.wallpaper_folder.is_some(),
-                s.wallpaper_theme.id() == OsStr::new("aurora"),
-                s.wallpaper.is_some(),
-            ];
-            assert_eq!(got, kept, "{source:?}");
-            assert_eq!(
-                WallpaperSource::shown(s),
-                source,
-                "{source:?} is not what the desktop shows"
-            );
-            assert_eq!(state.wallpaper_source(), source);
-        }
+        settingsfile::testing::with_scratch_config("settings-sources-clear", |_| {
+            use std::ffi::OsStr;
+            let everything = || {
+                let mut state = SettingsState::new();
+                state.current_page = SettingsPage::Wallpaper;
+                let s = &mut state.appearance.settings;
+                s.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+                s.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
+                    "aurora",
+                    None,
+                    Some(PathBuf::from("/themes/aurora/day.png")),
+                );
+                s.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+                s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
+                state
+            };
+            // Kept: the schedule, the folder, the theme, the picture.
+            for (source, kept) in [
+                (WallpaperSource::TimeOfDay, [true, true, true, true]),
+                (WallpaperSource::Folder, [false, true, true, true]),
+                (WallpaperSource::Theme, [false, false, true, true]),
+                (WallpaperSource::Picture, [false, false, false, true]),
+                (WallpaperSource::Plain, [false, false, false, false]),
+            ] {
+                let mut state = everything();
+                show_source(&mut state, source);
+                let s = &state.appearance.settings;
+                let got = [
+                    !s.wallpaper_schedule.is_empty(),
+                    s.wallpaper_folder.is_some(),
+                    s.wallpaper_theme.id() == OsStr::new("aurora"),
+                    s.wallpaper.is_some(),
+                ];
+                assert_eq!(got, kept, "{source:?}");
+                assert_eq!(
+                    WallpaperSource::shown(s),
+                    source,
+                    "{source:?} is not what the desktop shows"
+                );
+                assert_eq!(state.wallpaper_source(), source);
+            }
+        });
     }
 
     /// **A source chosen and not set up yet is shown until it is**: the page
@@ -9749,52 +9751,56 @@ mod tests {
     /// Leaving the page forgets a choice never set up.
     #[test]
     fn a_source_chosen_and_not_set_up_is_shown_until_it_is() {
-        let dir = scratchdir::ScratchDir::new("settings-wallpaper-pending");
-        let mut state = wallpaper_state(&dir);
-        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
-        show_source(&mut state, WallpaperSource::Folder);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
-        assert_eq!(
-            WallpaperSource::shown(&state.appearance.settings),
-            WallpaperSource::Picture,
-            "the picture below the folder was not kept"
-        );
-        let texts = drawn_texts(&state);
-        assert!(
-            texts.iter().any(|t| t == "No folder chosen yet."),
-            "{texts:?}"
-        );
-        // Nothing of the folder's to place yet.
-        assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none());
-        press_on(&mut state, RowHit::Press(ButtonId::ChooseRotationFolder));
-        assert!(state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/rotation"))));
-        assert_eq!(
-            WallpaperSource::shown(&state.appearance.settings),
-            WallpaperSource::Folder
-        );
-        assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some());
+        settingsfile::testing::with_scratch_config("settings-source-pending", |_| {
+            let dir = scratchdir::ScratchDir::new("settings-wallpaper-pending");
+            let mut state = wallpaper_state(&dir);
+            state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+            show_source(&mut state, WallpaperSource::Folder);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+            assert_eq!(
+                WallpaperSource::shown(&state.appearance.settings),
+                WallpaperSource::Picture,
+                "the picture below the folder was not kept"
+            );
+            let texts = drawn_texts(&state);
+            assert!(
+                texts.iter().any(|t| t == "No folder chosen yet."),
+                "{texts:?}"
+            );
+            // Nothing of the folder's to place yet.
+            assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none());
+            press_on(&mut state, RowHit::Press(ButtonId::ChooseRotationFolder));
+            assert!(
+                state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/rotation")))
+            );
+            assert_eq!(
+                WallpaperSource::shown(&state.appearance.settings),
+                WallpaperSource::Folder
+            );
+            assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some());
 
-        // Chosen and never set up, and the page left: it opens again on what
-        // the desktop shows.
-        show_source(&mut state, WallpaperSource::TimeOfDay);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
-        state.go_to_page(SettingsPage::Themes);
-        state.go_to_page(SettingsPage::Wallpaper);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+            // Chosen and never set up, and the page left: it opens again on what
+            // the desktop shows.
+            show_source(&mut state, WallpaperSource::TimeOfDay);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+            state.go_to_page(SettingsPage::Themes);
+            state.go_to_page(SettingsPage::Wallpaper);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
 
-        // A source chosen and not set up gives way to one set above it since
-        // -- by another program, say: the page shows what the desktop does.
-        show_source(&mut state, WallpaperSource::Picture);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
-        state
-            .appearance
-            .settings
-            .wallpaper_schedule
-            .push(appearance::ScheduledWallpaper {
-                from: DAY_FROM,
-                image: PathBuf::from("/pics/day.jpg"),
-            });
-        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+            // A source chosen and not set up gives way to one set above it since
+            // -- by another program, say: the page shows what the desktop does.
+            show_source(&mut state, WallpaperSource::Picture);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        });
     }
 
     /// **Each source's Clear empties it and stays on it**, to choose again:
@@ -9803,38 +9809,40 @@ mod tests {
     /// the page would stay on anyway.
     #[test]
     fn each_clear_empties_its_source_and_stays_on_it() {
-        let fresh = |set: fn(&mut appearance::AppearanceSettings)| {
-            let mut state = SettingsState::new();
-            state.current_page = SettingsPage::Wallpaper;
-            // Below every source here, so a Clear that let go of its source
-            // would show this instead.
-            state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
-            set(&mut state.appearance.settings);
-            state
-        };
+        settingsfile::testing::with_scratch_config("settings-each-clear", |_| {
+            let fresh = |set: fn(&mut appearance::AppearanceSettings)| {
+                let mut state = SettingsState::new();
+                state.current_page = SettingsPage::Wallpaper;
+                // Below every source here, so a Clear that let go of its source
+                // would show this instead.
+                state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+                set(&mut state.appearance.settings);
+                state
+            };
 
-        let mut state = fresh(|s| {
-            s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
-                from: DAY_FROM,
-                image: PathBuf::from("/pics/day.jpg"),
+            let mut state = fresh(|s| {
+                s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
             });
+            press_on(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+            assert!(state.appearance.settings.wallpaper_schedule.is_empty());
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
+
+            let mut state = fresh(|s| s.wallpaper_folder = Some(PathBuf::from("/pics/rotation")));
+            press_on(&mut state, RowHit::Press(ButtonId::ClearRotation));
+            assert_eq!(state.appearance.settings.wallpaper_folder, None);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some());
+
+            let mut state = fresh(|_| {});
+            press_on(&mut state, RowHit::Press(ButtonId::ClearWallpaper));
+            assert_eq!(state.appearance.settings.wallpaper, None);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some());
         });
-        press_on(&mut state, RowHit::Press(ButtonId::ClearSchedule));
-        assert!(state.appearance.settings.wallpaper_schedule.is_empty());
-        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
-        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
-
-        let mut state = fresh(|s| s.wallpaper_folder = Some(PathBuf::from("/pics/rotation")));
-        press_on(&mut state, RowHit::Press(ButtonId::ClearRotation));
-        assert_eq!(state.appearance.settings.wallpaper_folder, None);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
-        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some());
-
-        let mut state = fresh(|_| {});
-        press_on(&mut state, RowHit::Press(ButtonId::ClearWallpaper));
-        assert_eq!(state.appearance.settings.wallpaper, None);
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
-        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some());
     }
 
     /// **A picture decoded is drawn in the next frame, and a wake says so**:
@@ -9988,38 +9996,40 @@ mod tests {
     /// as the picture -- not the theme.
     #[test]
     fn the_pictures_themes_bring_are_offered_as_pictures() {
-        let dir = scratch_wallpaper_themes();
-        let mut state = wallpaper_state(&dir);
-        show_source(&mut state, WallpaperSource::Picture);
-        let names: Vec<String> = state
-            .bundled_picture_cards
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
-        assert!(
-            names.contains(&String::from("day.png (Aurora)"))
-                && names.contains(&String::from("night.png (Aurora)")),
-            "{names:?}"
-        );
-        // Each card chooses its own picture.
-        for name in ["night.png (Aurora)", "day.png (Aurora)"] {
-            let at = names.iter().position(|n| n == name).expect("listed");
-            let picture = state.bundled_picture_cards[at]
-                .picture
-                .clone()
-                .expect("a bundled card has its picture");
-            press_on(&mut state, RowHit::Select(SelectId::BundledPicture, at));
-            assert_eq!(
-                state.appearance.settings.wallpaper.as_deref(),
-                Some(picture.as_path()),
-                "{name}"
+        settingsfile::testing::with_scratch_config("settings-bundled-pictures", |_| {
+            let dir = scratch_wallpaper_themes();
+            let mut state = wallpaper_state(&dir);
+            show_source(&mut state, WallpaperSource::Picture);
+            let names: Vec<String> = state
+                .bundled_picture_cards
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            assert!(
+                names.contains(&String::from("day.png (Aurora)"))
+                    && names.contains(&String::from("night.png (Aurora)")),
+                "{names:?}"
             );
-        }
-        assert!(
-            state.appearance.settings.wallpaper_theme.is_built_in(),
-            "a picture chose a theme"
-        );
-        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+            // Each card chooses its own picture.
+            for name in ["night.png (Aurora)", "day.png (Aurora)"] {
+                let at = names.iter().position(|n| n == name).expect("listed");
+                let picture = state.bundled_picture_cards[at]
+                    .picture
+                    .clone()
+                    .expect("a bundled card has its picture");
+                press_on(&mut state, RowHit::Select(SelectId::BundledPicture, at));
+                assert_eq!(
+                    state.appearance.settings.wallpaper.as_deref(),
+                    Some(picture.as_path()),
+                    "{name}"
+                );
+            }
+            assert!(
+                state.appearance.settings.wallpaper_theme.is_built_in(),
+                "a picture chose a theme"
+            );
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+        });
     }
 
     /// **A chosen theme whose pictures cannot be used says why** under its

@@ -698,8 +698,8 @@ MUTATIONS = [
     ),
     (
         "the clock is woken even when there is nothing to count",
-        "        if self.status == GameStatus::Playing {\n            Some(Duration::from_millis(CLOCK_MS))\n        } else {\n            None\n        }",
-        "        Some(Duration::from_millis(CLOCK_MS))",
+        '            .sooner((self.status == GameStatus::Playing).then_some(Duration::from_millis(CLOCK_MS)))',
+        '            .sooner(Some(Duration::from_millis(CLOCK_MS)))',
         ["the_clock_is_only_woken_while_there_is_time_to_count"],
     ),
     (
@@ -1188,20 +1188,20 @@ MUTATIONS = [
     ),
     (
         "the hint key stays lit when the hints are gone",
-        "                    Target::Hint => self.hints_remaining() > 0,",
-        "                    Target::Hint => true,",
+        '            Target::Hint if self.hints_remaining() == 0 => {',
+        '            Target::Hint if false => {',
         ["the_hint_key_greys_out_when_the_hints_are_gone"],
     ),
     (
         "the undo key stays lit with nothing to take back",
-        "                    Target::Undo => self.history.can_undo(),",
-        "                    Target::Undo => true,",
+        '            Target::Undo if !self.history.can_undo() => Some(if self.history.can_redo() {',
+        '            Target::Undo if false => Some(if self.history.can_redo() {',
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
         "the redo key stays lit with nothing to put back",
-        "                    Target::Redo => self.history.can_redo(),",
-        "                    Target::Redo => true,",
+        '            Target::Redo if !self.history.can_redo() => {',
+        '            Target::Redo if false => {',
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
@@ -1249,8 +1249,8 @@ MUTATIONS = [
     ),
     (
         "the events this game has no use for are answered anyway",
-        "        _ => EventResult::Ignored,\n    }\n}\n\nimpl App for SudokuApp {",
-        "        _ => EventResult::Consumed,\n    }\n}\n\nimpl App for SudokuApp {",
+        '        _ => EventResult::Ignored,\n    };\n    if why { EventResult::Consumed } else { result }\n}\n\nimpl App for SudokuApp {',
+        '        _ => EventResult::Consumed,\n    };\n    if why { EventResult::Consumed } else { result }\n}\n\nimpl App for SudokuApp {',
         ["the_events_this_game_has_no_use_for_are_left_alone"],
     ),
     (
@@ -1267,14 +1267,14 @@ MUTATIONS = [
     ),
     (
         "render does not remember the size it drew at",
-        "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
-        "        self.frame(width, height).into_tree()",
+        '        self.resize(width, height);\n        let frame = self.frame(width, height);',
+        '        let frame = self.frame(width, height);',
         ["a_click_is_read_against_the_size_the_frame_was_drawn_at"],
     ),
     (
         "render draws something other than the frame",
-        "        self.frame(width, height).into_tree()",
-        "        Frame::new(width, height).into_tree()",
+        '        let mut tree = frame.into_tree();',
+        '        let mut tree = Frame::new(width, height).into_tree();',
         ["what_the_window_draws_is_what_the_frame_drew"],
     ),
     (
@@ -1303,8 +1303,8 @@ MUTATIONS = [
     ),
     (
         "the keys stay live while the game is paused or won",
-        "            let live = self.status == GameStatus::Playing\n",
-        "            let live = self.status != GameStatus::Won\n",
+        '            GameStatus::Paused => return Some("The game is paused: press Resume to play on."),',
+        '            GameStatus::Paused => {}',
         ["the_keys_are_switched_off_while_the_game_is_paused_or_won"],
     ),
     (
@@ -1437,6 +1437,57 @@ MUTATIONS += [
         "        }\n"
         "        let MouseEventKind::Press(MouseButton::Left) = event.kind else {\n",
         [CARD],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons\n            .sooner((self.status == GameStatus::Playing).then_some(Duration::from_millis(CLOCK_MS)))',
+        '        (self.status == GameStatus::Playing).then_some(Duration::from_millis(CLOCK_MS))',
+        ['the_window_wakes_for_a_reason_sooner_than_for_its_clock'],
+    ),
+    (
+        'a greyed button says nothing: There is no change to take back yet."',
+        '                "There is no change to take back yet."',
+        '                ""',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: The game is paused: press Resume to pla',
+        '            GameStatus::Paused => return Some("The game is paused: press Resume to play on."),',
+        '            GameStatus::Paused => return Some(""),',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: Nothing has been taken back, so there i',
+        '                Some("Nothing has been taken back, so there is nothing to put back.")',
+        '                Some("")',
+        ['a_greyed_key_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

@@ -961,14 +961,14 @@ MUTATIONS = [
     ),
     (
         "the clock runs whether or not the search owes a move",
-        "        self.ai_to_play().then_some(AI_TICK)",
-        "        Some(AI_TICK)",
+        '        self.reasons.sooner(self.ai_to_play().then_some(AI_TICK))',
+        '        self.reasons.sooner(Some(AI_TICK))',
         ["the_clock_runs_only_while_the_search_owes_a_move"],
     ),
     (
         "the clock never runs",
-        "        self.ai_to_play().then_some(AI_TICK)",
-        "        None",
+        '        self.reasons.sooner(self.ai_to_play().then_some(AI_TICK))',
+        '        self.reasons.sooner(None)',
         ["the_clock_runs_only_while_the_search_owes_a_move"],
     ),
     (
@@ -985,8 +985,8 @@ MUTATIONS = [
     ),
     (
         "rendering does not remember the size it rendered at",
-        "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
-        "        self.frame(width, height).into_tree()",
+        '        self.resize(width, height);\n        let frame = self.frame(width, height);',
+        '        let frame = self.frame(width, height);',
         ["rendering_remembers_the_size_it_rendered_at"],
     ),
     (
@@ -1214,14 +1214,14 @@ MUTATIONS = [
     ),
     (
         "the undo button is greyed whether or not there is anything to undo",
-        "            \"Undo\",\n            size,\n            self.can_undo(),",
-        "            \"Undo\",\n            size,\n            false,",
+        '            self.why_greyed(Target::Undo).is_none(),',
+        '            false,',
         ["the_undo_button_is_greyed_when_there_is_nothing_to_take_back"],
     ),
     (
         "the undo button is drawn live with nothing to take back",
-        "            \"Undo\",\n            size,\n            self.can_undo(),",
-        "            \"Undo\",\n            size,\n            true,",
+        '            self.why_greyed(Target::Undo).is_none(),',
+        '            true,',
         ["the_undo_button_is_greyed_when_there_is_nothing_to_take_back"],
     ),
     (
@@ -1449,6 +1449,57 @@ MUTATIONS = [
         '        Key::U => Some(Intent::Undo),\n',
         '',
         ['every_advertised_key_does_something'],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons.sooner(self.ai_to_play().then_some(AI_TICK))',
+        '        self.ai_to_play().then_some(AI_TICK)',
+        ['the_window_asks_for_the_tick_that_shows_a_reason'],
+    ),
+    (
+        "a greyed button's reason is given under the list of keys",
+        '        let greyed = if self.show_help {',
+        '        let greyed = if false {',
+        ['the_sheet_takes_a_reason_away'],
+    ),
+    (
+        'a greyed button says nothing: There is no turn to take back yet."',
+        '                "There is no turn to take back yet."',
+        '                ""',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: Every turn of this game has been taken ',
+        '                "Every turn of this game has been taken back already."',
+        '                ""',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

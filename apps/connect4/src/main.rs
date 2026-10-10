@@ -1161,6 +1161,8 @@ pub struct Connect4 {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame.
     palette: Palette,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Connect4 {
@@ -1183,6 +1185,22 @@ impl Connect4 {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            reasons: gamechrome::why::Reasons::new(),
+        }
+    }
+
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. The footer's Undo is greyed exactly when there
+    /// is no turn to take back.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        match target {
+            Target::Undo if !self.can_undo() => Some(if self.history.can_redo() {
+                "Every turn of this game has been taken back already."
+            } else {
+                "There is no turn to take back yet."
+            }),
+            _ => None,
         }
     }
 
@@ -1786,7 +1804,9 @@ impl Connect4 {
             Target::Undo,
             "Undo",
             size,
-            self.can_undo(),
+            // Greyed exactly when there is a reason to give for it: one
+            // answer for the paint and the words, so neither can drift.
+            self.why_greyed(Target::Undo).is_none(),
             ground,
         );
         button(
@@ -1971,7 +1991,10 @@ pub fn target_intent(target: Target) -> Intent {
 }
 
 pub fn handle_event(app: &mut Connect4, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
         Event::Resize { width, height } => {
@@ -1989,7 +2012,8 @@ pub fn handle_event(app: &mut Connect4, event: &Event) -> EventResult {
             }
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for Connect4 {
@@ -2009,13 +2033,14 @@ impl App for Connect4 {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// A clock only while the AI owes a move, and none at all otherwise.
+    /// A clock only while the AI owes a move or a greyed button's reason is
+    /// waiting to appear, and none at all otherwise.
     ///
     /// Consulted after every event, so this starts when the player moves and
     /// stops when the reply lands. A game waiting on a person holds no timer,
     /// and the desktop is not kept awake by a board nobody is playing.
     fn tick_interval(&self) -> Option<Duration> {
-        self.ai_to_play().then_some(AI_TICK)
+        self.reasons.sooner(self.ai_to_play().then_some(AI_TICK))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2032,7 +2057,18 @@ impl App for Connect4 {
         // The size the frame is drawn at is the size the next click is read
         // against — that is the whole point of storing it here.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives; none while the sheet covers them.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -2087,6 +2123,113 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// button gives, if one shows, over everything.
+    fn on_screen(g: &mut Connect4) -> RenderTree {
+        App::render(g, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Rest the pointer on Undo, where the last frame drew it, and let the
+    /// toolkit's delay pass.
+    fn rest_on_undo(g: &mut Connect4) {
+        let (x, y) = g
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Undo)
+            .expect("the footer draws Undo")
+            .centre();
+        handle_event(
+            g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        handle_event(g, &Event::Tick { elapsed_ms: 500 });
+    }
+
+    /// **The greyed Undo says why**, while the pointer rests on it: nothing
+    /// played, or everything taken back -- and says nothing while there is a
+    /// turn to take back.
+    #[test]
+    fn the_greyed_undo_says_why_while_the_pointer_rests_on_it() {
+        let mut g = Connect4::new();
+        on_screen(&mut g);
+        rest_on_undo(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            Some("There is no turn to take back yet.")
+        );
+        let tree = on_screen(&mut g);
+        let reason = g.reasons.render(&g.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        // A turn played: Undo is live, and the reason goes with the grey.
+        g.apply(Intent::Drop(3));
+        while g.ai_turn().is_some() {}
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason outlived the greyed button"
+        );
+        rest_on_undo(&mut g);
+        assert_eq!(g.reasons.showing(), None, "a live Undo explains itself");
+
+        // Taken back: Undo is greyed again, for another reason.
+        assert!(g.undo());
+        on_screen(&mut g);
+        rest_on_undo(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            Some("Every turn of this game has been taken back already.")
+        );
+    }
+
+    /// **Nothing is explained under the list of keys.**
+    #[test]
+    fn the_sheet_takes_a_reason_away() {
+        let mut g = Connect4::new();
+        on_screen(&mut g);
+        rest_on_undo(&mut g);
+        assert!(g.reasons.showing().is_some());
+        g.apply(Intent::ToggleHelp);
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason is drawn over the sheet"
+        );
+    }
+
+    /// **The window asks for the tick that shows a reason**, and only while
+    /// one waits: a board waiting on the player keeps no clock.
+    #[test]
+    fn the_window_asks_for_the_tick_that_shows_a_reason() {
+        let mut g = Connect4::new();
+        on_screen(&mut g);
+        assert_eq!(App::tick_interval(&g), None, "an idle board keeps a clock");
+        let (x, y) = g
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Undo)
+            .expect("the footer draws Undo")
+            .centre();
+        handle_event(
+            &mut g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        assert_eq!(App::tick_interval(&g), Some(Duration::from_millis(500)));
+    }
 
     /// The palette for a light or a dark theme, in the bordered look (the
     /// default) or the card look.

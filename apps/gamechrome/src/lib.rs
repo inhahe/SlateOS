@@ -27,6 +27,8 @@
 //!   way in every game.
 //! - [`help`], the keys that raise and put away a game's list of keys --
 //!   F1, `?` -- which every game draws with the toolkit's card.
+//! - [`why`], why a greyed button is greyed, said while the pointer rests
+//!   on it, as `design.txt` asks of every program.
 //!
 //! A game's own colours -- the seven tetrominoes, the four ghosts, a card's
 //! red suits -- stay in the game, named, and its palette test lists them as
@@ -534,6 +536,7 @@ pub fn button(
 pub mod help;
 pub mod history;
 pub mod legibility;
+pub mod why;
 
 pub use history::HistoryKey;
 

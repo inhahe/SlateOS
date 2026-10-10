@@ -571,6 +571,8 @@ pub struct Towers {
     /// first frame. A reset rebuilds the stacks in this same state, so they
     /// carry over.
     palette: Palette,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Default for Towers {
@@ -598,6 +600,7 @@ impl Towers {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            reasons: gamechrome::why::Reasons::new(),
         };
         app.reset();
         app
@@ -1114,6 +1117,19 @@ impl Towers {
         }
     }
 
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. The header's New game is greyed exactly when
+    /// [`enabled`](Self::enabled) refuses to start one.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        match target {
+            Target::NewGame if !self.enabled(Action::NewGame) => {
+                Some("Nothing has been moved yet: this puzzle is already new.")
+            }
+            _ => None,
+        }
+    }
+
     /// The one place a move is made. Returns whether the puzzle changed.
     pub fn apply(&mut self, action: Action) -> bool {
         match action {
@@ -1430,16 +1446,17 @@ impl Towers {
 
         let captions = ["New game", "Help"];
         let targets = [Target::NewGame, Target::Help];
-        let live = [self.enabled(Action::NewGame), true];
-        for i in 0..2 {
+        for (i, (caption, target)) in captions.into_iter().zip(targets).enumerate() {
             button(
                 f,
                 &self.palette,
                 l.header_button(i),
-                captions.get(i).copied().unwrap_or(""),
+                caption,
                 l.small,
-                live.get(i).copied().unwrap_or(true),
-                targets.get(i).copied().unwrap_or(Target::Help),
+                // Greyed exactly when there is a reason to give for it: one
+                // answer for the paint and the words, so neither can drift.
+                self.why_greyed(target).is_none(),
+                target,
                 c.chrome.page,
             );
         }
@@ -1948,7 +1965,10 @@ impl Towers {
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
 pub fn handle_event(app: &mut Towers, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
         Event::Resize { width, height } => {
@@ -1966,7 +1986,8 @@ pub fn handle_event(app: &mut Towers, event: &Event) -> EventResult {
             }
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for Towers {
@@ -1986,17 +2007,15 @@ impl App for Towers {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// Ticks are asked for only while the solver is running.
+    /// Ticks are asked for only while the solver is running, or a greyed
+    /// button's reason is waiting to appear.
     ///
     /// A puzzle waiting for you needs no frames, and one that asks for 60 a
     /// second regardless is one that keeps a laptop awake to draw the same
     /// pixels.
     fn tick_interval(&self) -> Option<Duration> {
-        if self.solving {
-            Some(Duration::from_millis(TICK_MS))
-        } else {
-            None
-        }
+        self.reasons
+            .sooner(self.solving.then_some(Duration::from_millis(TICK_MS)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2013,7 +2032,18 @@ impl App for Towers {
         // The size the frame is drawn at is the size the next click is read
         // against — that is the whole point of storing it here.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives; none while the sheet covers them.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -2061,6 +2091,93 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// button gives, if one shows, over everything.
+    fn on_screen(g: &mut Towers) -> RenderTree {
+        App::render(g, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Move the pointer onto New game, where the last frame drew it.
+    fn point_at_new_game(g: &mut Towers) {
+        let (x, y) = g
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::NewGame)
+            .expect("the header draws New game")
+            .centre();
+        handle_event(
+            g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// **The greyed New game says why**, while the pointer rests on it, after
+    /// the delay and drawn over everything -- and nothing once a disk has
+    /// been lifted and there is a puzzle to start again.
+    #[test]
+    fn the_greyed_new_game_says_why_while_the_pointer_rests_on_it() {
+        let mut g = game();
+        on_screen(&mut g);
+        point_at_new_game(&mut g);
+        assert_eq!(g.reasons.showing(), None, "the reason came at once");
+        assert_eq!(App::tick_interval(&g), Some(Duration::from_millis(500)));
+        assert_eq!(
+            handle_event(&mut g, &Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            g.reasons.showing(),
+            Some("Nothing has been moved yet: this puzzle is already new.")
+        );
+        assert_eq!(
+            App::tick_interval(&g),
+            None,
+            "the window ticks on for nothing"
+        );
+        let tree = on_screen(&mut g);
+        let reason = g.reasons.render(&g.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        assert!(g.apply(Action::Touch(0)), "could not lift a disk");
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason outlived the greyed button"
+        );
+        point_at_new_game(&mut g);
+        assert_eq!(
+            App::tick_interval(&g),
+            None,
+            "a live New game waits to explain itself"
+        );
+    }
+
+    /// **Nothing is explained under the list of keys.**
+    #[test]
+    fn the_list_of_keys_takes_a_reason_away() {
+        let mut g = game();
+        on_screen(&mut g);
+        point_at_new_game(&mut g);
+        handle_event(&mut g, &Event::Tick { elapsed_ms: 500 });
+        assert!(g.reasons.showing().is_some());
+        assert!(g.apply(Action::ToggleHelp));
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason is drawn over the list of keys"
+        );
+    }
 
     /// **The window is drawn in the user's colours**, light or dark -- a
     /// disk in hand over an aimed peg, a solved puzzle, and the help sheet --

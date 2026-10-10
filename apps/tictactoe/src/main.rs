@@ -501,6 +501,8 @@ pub struct TicTacToe {
     /// the defaults so it is never absent; the framework calls
     /// `App::theme_changed` before the first frame.
     palette: Palette,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Default for TicTacToe {
@@ -526,6 +528,7 @@ impl TicTacToe {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            reasons: gamechrome::why::Reasons::new(),
         }
     }
 
@@ -722,6 +725,19 @@ impl TicTacToe {
             self.play(index);
         }
         true
+    }
+
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not greyed. The header's buttons are greyed exactly
+    /// when [`enabled`](Self::enabled) refuses what they do.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        match target {
+            Target::NewGame if !self.enabled(Action::NewGame) => {
+                Some("Nothing has been played yet: this game is already new.")
+            }
+            _ => None,
+        }
     }
 
     /// Whether `action` would do anything, so the window can grey out a
@@ -1017,10 +1033,9 @@ impl TicTacToe {
         let targets = [Target::SwapSides, Target::NewGame, Target::Help];
         for (i, (caption, target)) in captions.iter().zip(targets).enumerate() {
             let r = l.header_button(i);
-            let live = match target {
-                Target::NewGame => self.enabled(Action::NewGame),
-                _ => true,
-            };
+            // Greyed exactly when there is a reason to give for it: one
+            // answer for the paint and the words, so neither can drift.
+            let live = self.why_greyed(target).is_none();
             button(
                 f,
                 &self.palette,
@@ -1368,7 +1383,10 @@ impl TicTacToe {
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
 pub fn handle_event(app: &mut TicTacToe, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
         Event::Resize { width, height } => {
@@ -1385,7 +1403,8 @@ pub fn handle_event(app: &mut TicTacToe, event: &Event) -> EventResult {
             }
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for TicTacToe {
@@ -1405,16 +1424,14 @@ impl App for TicTacToe {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// Ticks are asked for only while the computer owes a reply.
+    /// Ticks are asked for only while the computer owes a reply, or a greyed
+    /// button's reason is waiting to appear.
     ///
     /// A finished board needs no frames, and a game that asks for 60 a second
     /// regardless is a game that keeps a laptop awake to draw the same pixels.
     fn tick_interval(&self) -> Option<Duration> {
-        if self.thinking() {
-            Some(Duration::from_millis(TICK_MS))
-        } else {
-            None
-        }
+        self.reasons
+            .sooner(self.thinking().then_some(Duration::from_millis(TICK_MS)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -1431,7 +1448,18 @@ impl App for TicTacToe {
         // The size the frame is drawn at is the size the next click is read
         // against — that is the whole point of storing it here.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives; none while the sheet covers them.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -1479,6 +1507,115 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// button gives, if one shows, over everything.
+    fn on_screen(g: &mut TicTacToe) -> RenderTree {
+        App::render(g, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// The middle of the New game button, where the last frame drew it.
+    fn new_game_button(g: &TicTacToe) -> (f32, f32) {
+        g.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::NewGame)
+            .expect("the header draws New game")
+            .centre()
+    }
+
+    fn rest(g: &mut TicTacToe, (x, y): (f32, f32)) -> EventResult {
+        handle_event(
+            g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        )
+    }
+
+    /// **The greyed New game says why**, while the pointer rests on it, after
+    /// the toolkit's delay and not before -- and the window asks for the tick
+    /// that shows it, and draws it over everything.
+    #[test]
+    fn the_greyed_new_game_says_why_while_the_pointer_rests_on_it() {
+        let mut g = TicTacToe::new();
+        on_screen(&mut g);
+        let at = new_game_button(&g);
+        assert_eq!(rest(&mut g, at), EventResult::Ignored);
+        assert_eq!(g.reasons.showing(), None, "the reason came at once");
+        assert_eq!(App::tick_interval(&g), Some(Duration::from_millis(500)));
+        assert_eq!(
+            handle_event(&mut g, &Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed,
+            "the tick that shows the reason asks for no frame"
+        );
+        assert_eq!(
+            g.reasons.showing(),
+            Some("Nothing has been played yet: this game is already new.")
+        );
+        let tree = on_screen(&mut g);
+        let reason = g.reasons.render(&g.palette);
+        assert!(!reason.is_empty());
+        assert!(
+            tree.commands.ends_with(&reason),
+            "the reason is not drawn last"
+        );
+        assert_eq!(
+            App::tick_interval(&g),
+            None,
+            "the window ticks on for nothing"
+        );
+    }
+
+    /// **A New game that can be pressed says nothing**, and the reason a
+    /// greyed one gave goes when a move frees it under the resting pointer.
+    #[test]
+    fn new_game_says_nothing_once_there_is_a_game_to_start_again() {
+        let mut g = TicTacToe::new();
+        on_screen(&mut g);
+        let at = new_game_button(&g);
+        rest(&mut g, at);
+        handle_event(&mut g, &Event::Tick { elapsed_ms: 500 });
+        assert!(g.reasons.showing().is_some());
+
+        assert!(
+            g.apply(Action::Play(0)),
+            "the first square could not be played"
+        );
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason outlived the greyed button"
+        );
+        rest(&mut g, (at.0 + 1.0, at.1));
+        assert_eq!(
+            g.reasons.due_in(),
+            None,
+            "a button that can be pressed waits to explain itself"
+        );
+    }
+
+    /// **Nothing is explained under the list of keys**: raising it takes a
+    /// reason away, though the pointer has not moved.
+    #[test]
+    fn the_sheet_takes_a_reason_away() {
+        let mut g = TicTacToe::new();
+        on_screen(&mut g);
+        let at = new_game_button(&g);
+        rest(&mut g, at);
+        handle_event(&mut g, &Event::Tick { elapsed_ms: 500 });
+        assert!(g.reasons.showing().is_some());
+        g.apply(Action::ToggleHelp);
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason is drawn over the sheet"
+        );
+    }
 
     /// The palette for a light or a dark theme, in the bordered look (the
     /// default) or the card look.

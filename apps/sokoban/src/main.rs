@@ -119,6 +119,7 @@ use guitk::text;
 use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Colours ─────────────────────────────────────────────────────────
 //
@@ -994,6 +995,8 @@ pub struct Sokoban {
     /// Whether the list of keys is up. While it is, it is the window's: a
     /// box pushed under it would be one the player cannot see.
     show_help: bool,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Default for Sokoban {
@@ -1031,6 +1034,7 @@ impl Sokoban {
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
             show_help: false,
+            reasons: gamechrome::why::Reasons::new(),
         };
         // The table is validated at startup and is never empty, so level 0 is
         // always there; the answer is discarded because a game with no first
@@ -1203,6 +1207,21 @@ impl Sokoban {
     #[must_use]
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
+    }
+
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. Undo is greyed exactly when there is no move
+    /// to take back.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        match target {
+            Target::Undo if !self.history.can_undo() => Some(if self.history.can_redo() {
+                "Every move has been taken back already."
+            } else {
+                "There is no move to take back yet."
+            }),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -1876,8 +1895,10 @@ impl Sokoban {
             }
             // Undo on an empty stack is drawn dim but still recorded: it
             // answers `false` and changes nothing, and a target that reports
-            // "nothing happened" is the thing a test can hold on to.
-            let live = target != Target::Undo || self.history.can_undo();
+            // "nothing happened" is the thing a test can hold on to. Greyed
+            // exactly when there is a reason to give for it: one answer for
+            // the paint and the words, so neither can drift.
+            let live = self.why_greyed(target).is_none();
             let size = (r.h * 0.45).clamp(7.0, l.font);
             self.button(f, r, name, size, false, live, self.colours.mantle);
             f.hit(target, r);
@@ -2427,7 +2448,10 @@ fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
 pub fn handle_event(game: &mut Sokoban, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = game.reasons.event(event);
+    let result = match event {
         Event::Key(ev) => game.handle_key(ev),
         Event::Mouse(ev) => game.handle_mouse(ev),
         Event::Resize { width, height } => {
@@ -2435,7 +2459,8 @@ pub fn handle_event(game: &mut Sokoban, event: &Event) -> EventResult {
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for Sokoban {
@@ -2456,6 +2481,12 @@ impl App for Sokoban {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// A clock only while a greyed button's reason is waiting to appear:
+    /// nothing else in the warehouse moves on its own.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.reasons.due_in()
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
@@ -2470,7 +2501,20 @@ impl App for Sokoban {
         // The size the frame is drawn at is the size the next click is read
         // against — which is the only reason it is stored at all.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives. The win panel takes the boxes under it away
+        // itself (`Frame::discard_hits`); the list of keys does not, so it is
+        // asked here.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -2516,6 +2560,109 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// button gives, if one shows, over everything.
+    fn on_screen(g: &mut Sokoban) -> RenderTree {
+        App::render(g, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Move the pointer onto Undo, where the last frame drew it.
+    fn point_at_undo(g: &mut Sokoban) {
+        let (x, y) = g
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Undo)
+            .expect("the controls draw Undo")
+            .centre();
+        handle_event(
+            g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// Let the toolkit's tooltip delay pass, as the window's loop does.
+    fn wait_out_the_delay(g: &mut Sokoban) -> EventResult {
+        handle_event(g, &Event::Tick { elapsed_ms: 500 })
+    }
+
+    /// **The greyed Undo says why**, while the pointer rests on it, after
+    /// the delay and drawn over everything: nothing moved, or every move
+    /// taken back -- and says nothing while there is a move to take back.
+    #[test]
+    fn the_greyed_undo_says_why_while_the_pointer_rests_on_it() {
+        let mut g = playing();
+        on_screen(&mut g);
+        point_at_undo(&mut g);
+        assert_eq!(g.reasons.showing(), None, "the reason came at once");
+        assert_eq!(
+            App::tick_interval(&g),
+            Some(Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        assert_eq!(wait_out_the_delay(&mut g), EventResult::Consumed);
+        assert_eq!(
+            g.reasons.showing(),
+            Some("There is no move to take back yet.")
+        );
+        assert_eq!(
+            App::tick_interval(&g),
+            None,
+            "the window ticks on for nothing"
+        );
+        let tree = on_screen(&mut g);
+        let reason = g.reasons.render(&g.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        let moved = DIRECTIONS.iter().any(|&d| g.try_move(d));
+        assert!(moved, "the fixture could not move");
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason outlived the greyed button"
+        );
+        point_at_undo(&mut g);
+        assert_eq!(
+            App::tick_interval(&g),
+            None,
+            "a live Undo waits to explain itself"
+        );
+
+        assert!(g.undo());
+        on_screen(&mut g);
+        point_at_undo(&mut g);
+        wait_out_the_delay(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            Some("Every move has been taken back already.")
+        );
+    }
+
+    /// **Nothing is explained under the list of keys.**
+    #[test]
+    fn the_list_of_keys_takes_a_reason_away() {
+        let mut g = playing();
+        on_screen(&mut g);
+        point_at_undo(&mut g);
+        wait_out_the_delay(&mut g);
+        assert!(g.reasons.showing().is_some());
+        probe::key(&mut g, &probe::press(Key::F1));
+        on_screen(&mut g);
+        assert_eq!(
+            g.reasons.showing(),
+            None,
+            "the reason is drawn over the list of keys"
+        );
+    }
 
     /// The colours a game draws in until the theme says otherwise.
     fn colours() -> Colours {

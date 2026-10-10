@@ -68,5 +68,47 @@ MUTATIONS = [
     ),
 ]
 
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md).
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons.sooner(own)',
+        '        own',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: No game is under way yet: start one to ',
+        '            GameState::Menu => Some("No game is under way yet: start one to pause it."),',
+        '            GameState::Menu => Some(""),',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: The game is over: start a new one to pl',
+        '            GameState::GameOver => Some("The game is over: start a new one to play again."),',
+        '            GameState::GameOver => Some(""),',
+        ['a_greyed_pause_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "breakout", timeout=240))
+    sys.exit(sweep(SRC, MUTATIONS, "breakout", timeout=240, only=sys.argv[1:] or None))

@@ -169,5 +169,50 @@ MUTATIONS = [
     ),
 ]
 
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons\n            .sooner(self.solving.then_some(Duration::from_millis(TICK_MS)))',
+        '        self.solving.then_some(Duration::from_millis(TICK_MS))',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is given under the list of keys",
+        '        let greyed = if self.show_help {',
+        '        let greyed = if false {',
+        ['the_list_of_keys_takes_a_reason_away'],
+    ),
+    (
+        'a greyed button says nothing: Nothing has been moved yet: this puzzle',
+        '                Some("Nothing has been moved yet: this puzzle is already new.")',
+        '                Some("")',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 if __name__ == "__main__":
     sys.exit(sweep(SRC, MUTATIONS, "towers", timeout=240, only=sys.argv[1:] or None))

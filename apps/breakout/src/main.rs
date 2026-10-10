@@ -567,6 +567,8 @@ struct BreakoutApp {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame.
     palette: Palette,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl BreakoutApp {
@@ -596,6 +598,7 @@ impl BreakoutApp {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            reasons: gamechrome::why::Reasons::new(),
         };
         app.init_bricks();
         app
@@ -999,6 +1002,23 @@ impl BreakoutApp {
         }
     }
 
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. A button is greyed exactly when
+    /// [`enabled`](Self::enabled) refuses what it does.
+    fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        let Target::Button(action) = target else {
+            return None;
+        };
+        if self.enabled(action) {
+            return None;
+        }
+        match self.state {
+            GameState::Menu => Some("No game is under way yet: start one to pause it."),
+            GameState::GameOver => Some("The game is over: start a new one to play again."),
+            GameState::Playing | GameState::Paused => None,
+        }
+    }
+
     /// Carry out `action`. Returns whether anything changed.
     ///
     /// Every command arrives here, whether it came from a key or a click, so
@@ -1344,7 +1364,9 @@ impl BreakoutApp {
             if r.is_empty() {
                 continue;
             }
-            let on = self.enabled(*action);
+            // Greyed exactly when there is a reason to give for it: one
+            // answer for the paint and the words, so neither can drift.
+            let on = self.why_greyed(Target::Button(*action)).is_none();
             gamechrome::button(
                 f,
                 &self.palette,
@@ -1549,7 +1571,10 @@ fn centred(
 /// clicks the Pause button is a test of the shipped program rather than of a
 /// second implementation written to make the test pass.
 fn handle_event(app: &mut BreakoutApp, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(key) => app.handle_key(key),
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         Event::Resize { width, height } => {
@@ -1576,7 +1601,8 @@ fn handle_event(app: &mut BreakoutApp, event: &Event) -> EventResult {
             }
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for BreakoutApp {
@@ -1593,7 +1619,14 @@ impl App for BreakoutApp {
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives.
+        let greyed = gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target));
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 
     fn title(&self) -> String {
@@ -1618,11 +1651,15 @@ impl App for BreakoutApp {
     ///
     /// Dropped outside play: a menu is a still picture, and a still picture
     /// that asks to be redrawn sixty times a second keeps a laptop awake.
+    ///
+    /// Asked for outside play too while a greyed button's reason is waiting
+    /// to appear.
     fn tick_interval(&self) -> Option<Duration> {
-        match self.state {
+        let own = match self.state {
             GameState::Playing => Some(Duration::from_millis(16)),
             GameState::Menu | GameState::Paused | GameState::GameOver => None,
-        }
+        };
+        self.reasons.sooner(own)
     }
 }
 
@@ -1677,6 +1714,73 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// Draw the window, then move the pointer onto Pause, where it was drawn.
+    fn point_at_pause(app: &mut BreakoutApp) {
+        App::render(app, WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (x, y) = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Button(Action::PauseToggle))
+            .expect("the footer draws Pause")
+            .centre();
+        handle_event(
+            app,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// Let the toolkit's delay pass; what the window then says.
+    fn after_the_delay(app: &mut BreakoutApp) -> Option<String> {
+        handle_event(app, &Event::Tick { elapsed_ms: 500 });
+        app.reasons.showing().map(str::to_owned)
+    }
+
+    /// **A greyed Pause says why**, while the pointer rests on it, after the
+    /// delay and drawn over everything: before a game and after one -- and
+    /// says nothing while there is a game to pause.
+    #[test]
+    fn a_greyed_pause_says_why_while_the_pointer_rests_on_it() {
+        let mut app = BreakoutApp::new();
+        assert_eq!(app.state, GameState::Menu);
+        point_at_pause(&mut app);
+        assert_eq!(app.reasons.showing(), None, "the reason came at once");
+        assert_eq!(
+            App::tick_interval(&app),
+            Some(Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        assert_eq!(
+            after_the_delay(&mut app).as_deref(),
+            Some("No game is under way yet: start one to pause it.")
+        );
+        let tree = App::render(&mut app, WINDOW_WIDTH, WINDOW_HEIGHT);
+        let reason = app.reasons.render(&app.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        app.state = GameState::GameOver;
+        point_at_pause(&mut app);
+        assert_eq!(
+            after_the_delay(&mut app).as_deref(),
+            Some("The game is over: start a new one to play again.")
+        );
+
+        app.state = GameState::Paused;
+        point_at_pause(&mut app);
+        assert_eq!(
+            after_the_delay(&mut app),
+            None,
+            "a live Pause explains itself"
+        );
+    }
 
     /// The colours a game draws in until the theme says otherwise.
     fn colours() -> Colours {

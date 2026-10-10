@@ -483,9 +483,9 @@ MUTATIONS = [
     # -- The window ----------------------------------------------------
     (
         "the render pass ignores the size the window hands it",
-        "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
+        "        self.resize(width, height);\n        let frame = self.frame(width, height);",
         "        self.resize(width, height);\n"
-        "        self.frame(WINDOW_WIDTH, WINDOW_HEIGHT).into_tree()",
+        "        let frame = self.frame(WINDOW_WIDTH, WINDOW_HEIGHT);",
         ["the_render_pass_uses_the_size_the_window_hands_it"],
     ),
     (
@@ -568,7 +568,7 @@ MUTATIONS = [
     ),
     (
         "the roll button is live with no rolls left",
-        "                disabled: self.phase() == GamePhase::MustScore,",
+        "                disabled: self.why_greyed(Target::RollButton).is_some(),",
         "                disabled: false,",
         ["the_roll_button_is_switched_off_with_no_rolls_left"],
     ),
@@ -583,6 +583,42 @@ MUTATIONS = [
         '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
         '',
         ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md).
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = game.reasons.event(event);',
+        '    let why = false;',
+        ['a_greyed_roll_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['a_greyed_roll_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['a_greyed_roll_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons.due_in()',
+        '        None',
+        ['a_greyed_roll_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: Three rolls are used: score this turn i',
+        '            .then_some("Three rolls are used: score this turn in a category first.")',
+        '            .then_some("")',
+        ['a_greyed_roll_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

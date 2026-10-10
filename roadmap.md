@@ -4524,9 +4524,15 @@ lane C's `guitk`.
         `h264dec.c` -- order counts, gaps in frame numbers, field pairs,
         reference lists and their modification, marking, recovery, the
         order pictures are shown in, what each frame carries. Held to
-        FFmpeg on all 195 FATE conformance streams: 25,960 slices' set-up
-        (`-debug pict`), every marking (`-debug mmco`), 19,539 shown
-        pictures' order and flags (ffprobe).
+        FFmpeg on 716 streams -- all 195 FATE conformance streams, FATE's
+        other H.264 samples (containers' packets as their demuxers read
+        them), streams made with libx264 (every pic_struct, soft telecine,
+        open GOPs, intra refresh) and 469 cut from them all (begun at a P,
+        B or non-IDR I picture or at a recovery point, or with a field pair
+        broken): every slice's set-up (`-debug pict`), every marking
+        (`-debug mmco`), every shown picture's order and flags (ffprobe),
+        and FFmpeg's probe emulated packet by packet for the reorder delay
+        it finds. 27 of 27 mutants caught.
       - `[ ]` CAVLC and CABAC, prediction, reconstruction, the loop filter,
         error concealment -- the macroblock layer, which turns the set-up
         pictures into samples.

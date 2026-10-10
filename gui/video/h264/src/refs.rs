@@ -748,3 +748,6 @@ impl Context {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

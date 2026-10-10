@@ -779,6 +779,12 @@ pub mod drm;
 
 pub mod evdev;
 
+// The C library's calls `drm` and `evdev` make on a device node -- through
+// the C library rather than as `syscall` instructions, which a native SlateOS
+// program's table numbers as other calls (`libc`'s module docs).
+#[cfg(target_os = "linux")]
+mod libc;
+
 #[cfg(windows)]
 pub mod host;
 

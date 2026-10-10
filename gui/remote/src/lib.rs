@@ -150,6 +150,13 @@ pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
 pub mod wait;
 pub use wait::{AsWaitHandle, WaitHandle, WaitSet};
 
+// The C library's calls `wait` and `channel` make, on the platforms that have
+// them: through the C library rather than as `syscall` instructions, because
+// the C library is the one layer that is right in a native SlateOS program
+// and on a Linux host alike.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod libc;
+
 // Private: the decode cursor is an implementation detail of this crate's
 // decoders, and a *private module* is what makes its fields unreachable from
 // the sibling modules that used to index them directly. Fields left without

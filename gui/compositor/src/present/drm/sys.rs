@@ -1,9 +1,10 @@
 //! The only part of scanout that cannot be tested off the target.
 //!
-//! Four system calls — `open`, `ioctl`, `mmap`, `close` — and the rule for
-//! turning a kernel return value into an error. Everything else about talking
-//! to a DRM device is protocol, lives in [`super`], and is exercised on the
-//! build machine against `super::tests::FakeCard`.
+//! Four calls — `open`, `ioctl`, `mmap`, `close`, the C library's
+//! (`crate::present::libc`) — and the rule for turning their failures into
+//! an error. Everything else about talking to a DRM device is protocol, lives
+//! in [`super`], and is exercised on the build machine against
+//! `super::tests::FakeCard`.
 //!
 //! ## Why the trait exists, and why it is shaped like this
 //!
@@ -226,98 +227,37 @@ pub trait CardSource {
 #[cfg(target_os = "linux")]
 pub use target::{Card, Cards};
 
-/// The real thing: a `/dev/dri/cardN` file descriptor and raw system calls.
+/// The real thing: a `/dev/dri/cardN` file descriptor and the C library's
+/// calls on it (`crate::present::libc`).
 ///
 /// Gated on `target_os = "linux"` rather than on a SlateOS-specific cfg because
 /// the SlateOS target *is* `target_os = "linux"` (see
-/// `toolchain/x86_64-slateos.json`), and because the Linux ABI this speaks is
-/// the real one — a build of the compositor for a Linux host drives a Linux
-/// graphics card with this same code, which is a genuinely useful way to test
-/// it against hardware the kernel does not yet support.
+/// `toolchain/x86_64-slateos.json`), and because the calls are the C
+/// library's, right in either: a build of the compositor for a Linux host
+/// drives a Linux graphics card with this same code, which is a genuinely
+/// useful way to test it against hardware the kernel does not yet support.
 #[cfg(target_os = "linux")]
 mod target {
     use super::{Errno, KmsSys, Mapped, OutArray};
-    use std::arch::asm;
-
-    /// `read`-ish syscall numbers, x86-64 Linux.
-    const SYS_OPEN: u64 = 2;
-    /// `close`.
-    const SYS_CLOSE: u64 = 3;
-    /// `mmap`.
-    const SYS_MMAP: u64 = 9;
-    /// `munmap`.
-    const SYS_MUNMAP: u64 = 11;
-    /// `ioctl`.
-    const SYS_IOCTL: u64 = 16;
+    use crate::present::libc;
 
     /// `open` flags: read/write, and don't become the controlling terminal.
-    const O_RDWR: u64 = 0o2;
+    const O_RDWR: i32 = 0o2;
     /// Don't leak the card into a child across `exec`. A compositor spawns
     /// applications; none of them should inherit the display device.
-    const O_CLOEXEC: u64 = 0o2_000_000;
+    const O_CLOEXEC: i32 = 0o2_000_000;
 
     /// `mmap` protection: readable and writable.
-    const PROT_READ_WRITE: u64 = 0x1 | 0x2;
+    const PROT_READ_WRITE: i32 = 0x1 | 0x2;
     /// `mmap` flags: shared, because the point is that the display sees the
     /// writes.
-    const MAP_SHARED: u64 = 0x01;
-    /// What `mmap` returns on failure, before the errno is decoded.
-    const MAP_FAILED: i64 = -1;
+    const MAP_SHARED: i32 = 0x01;
 
-    /// Issue a system call with six arguments.
-    ///
-    /// Returns the kernel's raw return value: negative values in `-4095..0`
-    /// are `-errno`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the arguments are valid for the syscall named by
-    /// `n` — in particular that any pointer argument points to memory of the
-    /// size the kernel will read or write.
-    #[inline]
-    unsafe fn syscall6(n: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
-        let ret: i64;
-        // SAFETY: the `syscall` instruction clobbers `rcx` and `r11`, both
-        // declared `lateout(_)` below, and returns its result in `rax`. The
-        // register assignment (rdi, rsi, rdx, r10, r8, r9) is the x86-64 Linux
-        // syscall ABI. Validity of the arguments themselves is this function's
-        // documented precondition.
-        unsafe {
-            asm!(
-                "syscall",
-                inlateout("rax") n as i64 => ret,
-                in("rdi") a1,
-                in("rsi") a2,
-                in("rdx") a3,
-                in("r10") a4,
-                in("r8") a5,
-                in("r9") a6,
-                lateout("rcx") _,
-                lateout("r11") _,
-            );
-        }
-        ret
-    }
-
-    /// Turn a raw syscall return into a `Result`.
-    ///
-    /// Linux signals failure by returning `-errno` in the range `-4095..0`;
-    /// everything else is a successful result, including negative values that
-    /// are genuinely large addresses.
-    fn decode(ret: i64) -> Result<i64, Errno> {
-        if (-4095..0).contains(&ret) {
-            // `ret` is in -4095..0, so the negation is in 1..=4095 and fits in
-            // an `i32`. `checked_neg` rather than `-` anyway: the one input
-            // that would make the unary minus overflow is `i64::MIN`, and the
-            // fact that the range check already excludes it is a fact about
-            // two lines that could drift apart.
-            Err(ret
-                .checked_neg()
-                .and_then(|v| Errno::try_from(v).ok())
-                .unwrap_or(super::ENODEV))
-        } else {
-            Ok(ret)
-        }
+    /// The `errno` of the call that just failed; `ENODEV` if none can be
+    /// read, because a card that fails for an unknown reason is a card this
+    /// compositor cannot use.
+    fn errno() -> Errno {
+        libc::last_errno(super::ENODEV)
     }
 
     /// An open DRM card.
@@ -342,24 +282,19 @@ mod target {
         /// The kernel's `errno` — `ENOENT` when there is no such device node,
         /// `EACCES` when the compositor is not permitted to open it.
         pub fn open(path: &[u8]) -> Result<Self, Errno> {
-            // SAFETY: `path.as_ptr()` is valid for `path.len()` bytes and the
-            // caller's contract is that it is NUL-terminated within them, so
-            // the kernel's read stops inside the slice. `open` writes nothing.
-            let ret = unsafe {
-                syscall6(
-                    SYS_OPEN,
-                    path.as_ptr() as u64,
-                    O_RDWR | O_CLOEXEC,
-                    0,
-                    0,
-                    0,
-                    0,
-                )
-            };
-            let fd = decode(ret)?;
-            Ok(Self {
-                fd: i32::try_from(fd).unwrap_or(-1),
-            })
+            // A path with no NUL inside it would be read past its end.
+            if !path.contains(&0) {
+                return Err(super::ENOENT);
+            }
+            // SAFETY: `path.as_ptr()` is valid for `path.len()` bytes and holds
+            // a NUL within them (checked above), so the read stops inside the
+            // slice. `open` writes nothing; the mode is read only with
+            // `O_CREAT`, which is not passed.
+            let fd = unsafe { libc::open(path.as_ptr().cast(), O_RDWR | O_CLOEXEC, libc::NO_MODE) };
+            if fd < 0 {
+                return Err(errno());
+            }
+            Ok(Self { fd })
         }
     }
 
@@ -384,7 +319,7 @@ mod target {
                 // SAFETY: `close` takes an integer and touches no memory. The
                 // fd came from a successful `open` and is closed exactly once,
                 // because `Card` is not `Clone` and this runs at most once.
-                let _ = unsafe { syscall6(SYS_CLOSE, self.fd as u64, 0, 0, 0, 0, 0) };
+                let _ = unsafe { libc::close(self.fd) };
             }
         }
     }
@@ -423,38 +358,38 @@ mod target {
             // test pins. The out-of-line pointers just written point into
             // `arrays`, which outlive this call by virtue of being borrowed.
             let ret = unsafe {
-                syscall6(
-                    SYS_IOCTL,
-                    self.fd as u64,
-                    u64::from(request),
-                    payload.as_mut_ptr() as u64,
-                    0,
-                    0,
-                    0,
+                libc::ioctl(
+                    self.fd,
+                    core::ffi::c_ulong::from(request),
+                    payload.as_mut_ptr(),
                 )
             };
-            decode(ret).map(|_| ())
+            if ret < 0 {
+                return Err(errno());
+            }
+            Ok(())
         }
 
         fn map(&mut self, offset: u64, len: usize) -> Result<Box<dyn Mapped>, Errno> {
+            // An offset past `off_t`'s range is no offset `MAP_DUMB` handed out.
+            let offset = i64::try_from(offset).map_err(|_| super::ENODEV)?;
             // SAFETY: a null hint lets the kernel choose the address, so this
             // cannot clobber an existing mapping. `len` and `offset` are just
             // integers to the kernel; an invalid offset is rejected with
             // EINVAL rather than mapping something else.
-            let ret = unsafe {
-                syscall6(
-                    SYS_MMAP,
-                    0,
-                    len as u64,
+            let addr = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    len,
                     PROT_READ_WRITE,
                     MAP_SHARED,
-                    self.fd as u64,
+                    self.fd,
                     offset,
                 )
             };
-            let addr = decode(ret)?;
-            if addr == MAP_FAILED || addr == 0 {
-                return Err(super::ENODEV);
+            // `MAP_FAILED` is all ones; a null mapping is none either.
+            if addr as usize == usize::MAX || addr.is_null() {
+                return Err(errno());
             }
             Ok(Box::new(Mapping {
                 addr: addr as usize,
@@ -494,7 +429,7 @@ mod target {
             // SAFETY: unmaps exactly the region this struct owns, once —
             // `Mapping` is not `Clone` and `bytes()` hands out a borrow that
             // cannot outlive it.
-            let _ = unsafe { syscall6(SYS_MUNMAP, self.addr as u64, self.len as u64, 0, 0, 0, 0) };
+            let _ = unsafe { libc::munmap(self.addr as *mut core::ffi::c_void, self.len) };
         }
     }
 }

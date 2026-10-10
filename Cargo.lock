@@ -1924,6 +1924,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonvalue"
+version = "0.1.0"
+
+[[package]]
 name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
@@ -3811,6 +3815,7 @@ dependencies = [
 name = "snapstore"
 version = "0.1.0"
 dependencies = [
+ "jsonvalue",
  "pathcodec",
  "pathtext",
  "safeio",

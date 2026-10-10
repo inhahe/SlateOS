@@ -15,10 +15,10 @@
 //! caller converts it to RGB next anyway, which reads every sample.
 
 use crate::include::common::bitdepth::BitDepth;
-#[cfg(feature = "bitdepth_8")]
-use crate::include::common::bitdepth::BitDepth8;
 #[cfg(feature = "bitdepth_16")]
 use crate::include::common::bitdepth::BitDepth16;
+#[cfg(feature = "bitdepth_8")]
+use crate::include::common::bitdepth::BitDepth8;
 use crate::include::dav1d::data::Rav1dData;
 use crate::include::dav1d::dav1d::Rav1dSettings;
 use crate::include::dav1d::headers::Rav1dFrameType;

@@ -57,6 +57,7 @@ apps/settings/src/main.rs	DropdownId::FIXED	`NotifImportance` is one dropdown pe
 gui/toolkit/src/shortcut.rs	Key::LETTERS	the 26 letter keys, one group of `Key`'s several
 gui/toolkit/src/shortcut.rs	Key::DIGITS	the 10 digit keys, one group of `Key`'s several
 gui/toolkit/src/shortcut.rs	Key::FUNCTION_KEYS	the 12 function keys, one group of `Key`'s several
+apps/settings/src/main.rs	FieldId::RULE_FIELDS	the window-rule editor's six fields, in the order Tab visits them; `ExclusionDraft` is the Background page's "Skip pictures named" field, on another page, which the editor's Tab must not reach
 
 # --- the rest of the enum is drawn from somewhere else -----------------------
 apps/screenshot/src/main.rs	PreviewButton::PREVIEW_ACTIONS	the main toolbar row only; `Tool` is drawn once per tool from PREVIEW_TOOLS and `Undo` has its own rect

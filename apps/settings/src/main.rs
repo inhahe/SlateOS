@@ -1793,9 +1793,11 @@ impl SettingsState {
             self.refresh_sound_themes();
         }
         // The window rules, read on entry: the desktop and a hand edit both
-        // change the file while the window is open.
+        // change the file while the window is open, and an announcement of
+        // it can be lost. Read as an announcement is, so an editor left open
+        // follows its rule by name.
         if page == SettingsPage::WindowRules {
-            self.refresh_rules();
+            self.reread_rules();
         }
         // The context menus and the choices about them, read on entry: a
         // program installed since may have added one.
@@ -2638,7 +2640,15 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
     });
 }
 
-/// Push a text command with regular weight and optional max_width.
+/// `rules` as the file would hold them: what two lists of rules are
+/// compared by, a rule having no `==` of its own.
+fn rules_text(rules: &[windowrules::WindowRule]) -> String {
+    let rules: Vec<&windowrules::WindowRule> = rules.iter().collect();
+    let mut doc = yamldoc::Document::new();
+    windowrules::file::write(&rules, &mut doc);
+    doc.to_text()
+}
+
 /// `content` at (`x`, `y`), no wider than `max_width`: cut with an ellipsis
 /// where it is wider, so the reader can see that there is more.
 fn text_elided(
@@ -2716,27 +2726,6 @@ fn service_menu_said(menu: &servicemenus::ServiceMenu) -> String {
         servicemenus::Origin::User => "Yours: off until you turn it on.",
     };
     format!("{adds}, for {}. {whose}", menu.mime_types.join(", "))
-}
-
-fn text_clipped(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    content: &str,
-    color: Color,
-    size: f32,
-    max_width: f32,
-) {
-    tree.push(RenderCommand::Text {
-        x,
-        y,
-        text: content.to_string(),
-        color,
-        font_size: size,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(max_width),
-        overflow: TextOverflow::Ellipsis,
-    });
 }
 
 /// Render a toggle switch (on/off).
@@ -2879,7 +2868,7 @@ fn render_dropdown_button(
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
-    text_clipped(
+    text_elided(
         tree,
         x + 10.0,
         y + 16.0,
@@ -4512,7 +4501,7 @@ trait PageSink {
                 focus_width,
             );
             if text.is_empty() && !focused {
-                text_clipped(
+                text_elided(
                     tree,
                     fx + 8.0,
                     fy + 7.0,
@@ -5395,8 +5384,9 @@ impl SettingsState {
 
     /// Say why the disabled control under the pointer is disabled, or stop
     /// saying it: the pointer is on none, has left the window, or something
-    /// is drawn over the page -- a list, a picker, the shortcut card -- or a
-    /// slider is being dragged. Returns whether what is drawn changed.
+    /// is drawn over the page -- a list, a picker, the shortcut card, a
+    /// field's menu -- or a slider or the scrollbar is being dragged. Returns
+    /// whether what is drawn changed.
     ///
     /// Asked after every event rather than on pointer moves alone, because a
     /// page can change under a pointer that stays put: a key that goes to
@@ -5406,7 +5396,9 @@ impl SettingsState {
             || self.color_dialog.is_some()
             || self.show_help
             || self.open_dropdown.is_some()
-            || self.dragging.is_some();
+            || self.field_menu.is_up()
+            || self.dragging.is_some()
+            || self.page_bar_grab.is_some();
         match self.pointer {
             // Not over the header, where a disabled row may have scrolled
             // under it: the row is not what the pointer is on.
@@ -5872,7 +5864,12 @@ impl SettingsState {
         }
         s.toggle_row("For the first window only", ToggleId::RuleOnce, draft.once);
         s.gap();
-        let why = draft.rule(&self.rules).err();
+        // Refused while the file holds a rule that cannot be read, as every
+        // change to the rules is, and while the draft is not a rule.
+        let why = self
+            .rules_blocked()
+            .map(str::to_owned)
+            .or_else(|| draft.rule(&self.rules).err());
         let save = match &why {
             None => Press::Does(RowHit::Press(ButtonId::SaveRule)),
             Some(why) => Press::Cannot(why),
@@ -5947,6 +5944,13 @@ impl SettingsState {
                 self.focus_next_rule_field(field, back);
                 Some(EventResult::Consumed)
             }
+            // A field has no lines to move through: Up and Down go to the
+            // field above or below, staying put at the ends. Passed on, they
+            // changed the page's category in the middle of an edit.
+            Key::Up | Key::Down if plain => {
+                self.step_rule_field(field, evt.key == Key::Up);
+                Some(EventResult::Consumed)
+            }
             _ => {
                 let input = self
                     .rule_draft
@@ -5969,6 +5973,24 @@ impl SettingsState {
         .copied();
         self.focused_field = next;
         if let Some(field) = next {
+            self.scroll_into_view(AnchorId::Field(field));
+        }
+    }
+
+    /// Give the keyboard to the editor's field above `from` (`up`) or below
+    /// it, and scroll it into view; at the first or the last, `from` keeps it.
+    fn step_rule_field(&mut self, from: FieldId, up: bool) {
+        let fields = self.rule_fields();
+        let Some(at) = fields.iter().position(|f| *f == from) else {
+            return;
+        };
+        let next = if up {
+            at.checked_sub(1)
+        } else {
+            at.checked_add(1)
+        };
+        if let Some(field) = next.and_then(|at| fields.get(at)).copied() {
+            self.focused_field = Some(field);
             self.scroll_into_view(AnchorId::Field(field));
         }
     }
@@ -6008,8 +6030,15 @@ impl SettingsState {
     /// edit, another Settings window. A rule open in the editor is followed
     /// by its name to wherever it stands now, or becomes a new one if the
     /// file no longer has it; "Put it back" is forgotten, its place being
-    /// the old list's.
+    /// the old list's. Whether they changed: a file that holds the rules as
+    /// they were -- this window's own write, announced back to it -- changes
+    /// nothing, the offer to put a rule back included.
     fn reread_rules(&mut self) -> bool {
+        let before = (
+            rules_text(&self.rules),
+            self.rule_problems.clone(),
+            self.rules_built_in,
+        );
         let editing = self
             .rule_draft
             .as_ref()
@@ -6017,6 +6046,14 @@ impl SettingsState {
             .and_then(|at| self.rules.get(at))
             .map(|rule| rule.name.clone());
         self.refresh_rules();
+        let after = (
+            rules_text(&self.rules),
+            self.rule_problems.clone(),
+            self.rules_built_in,
+        );
+        if after == before {
+            return false;
+        }
         self.rule_deleted = None;
         if let Some(draft) = self.rule_draft.as_mut() {
             draft.editing = editing.and_then(|name| self.rules.iter().position(|r| r.name == name));
@@ -6137,12 +6174,18 @@ impl SettingsState {
     }
 
     /// Save the rule being written: in its own place if it is one already,
-    /// at the top -- where it wins -- if it is new. The editor closes.
+    /// at the top -- where it wins -- if it is new. The editor closes once
+    /// the rule is kept; a write the file refused leaves it open on the
+    /// draft, the list as the file has it, and why above.
     fn save_rule(&mut self) {
+        // Save is dimmed, with the reason, while the rules cannot be kept or
+        // the draft is not a rule.
+        if self.rules_blocked().is_some() {
+            return;
+        }
         let Some(draft) = &self.rule_draft else {
             return;
         };
-        // Save is dimmed, with the reason, while the draft is not a rule.
         let Ok(rule) = draft.rule(&self.rules) else {
             return;
         };
@@ -6150,8 +6193,9 @@ impl SettingsState {
             Some(slot) => *slot = rule,
             None => self.rules.insert(0, rule),
         }
-        self.close_rule_editor();
-        self.store_rules();
+        if self.store_rules() {
+            self.close_rule_editor();
+        }
     }
 
     /// Close the editor, keeping nothing of what it held.
@@ -7087,26 +7131,6 @@ impl SettingsState {
 
     // --- Network status page ---
 
-    /// The Network Status page.
-    ///
-    /// It used to list three network adapters -- `eth0`, Ethernet, connected,
-    /// 192.168.1.100; `wlan0`, Wi-Fi, disconnected; `lo`, loopback,
-    /// 127.0.0.1 -- each with a green or grey dot for its link state. All
-    /// three were written into the source as constants. **This system cannot
-    /// enumerate its network interfaces**: there is no such call in `net/`,
-    /// which carries a DNS resolver and an HTTP client and nothing that asks
-    /// the kernel what hardware is present, and no service between a GUI
-    /// application and the kernel's own interfaces.
-    ///
-    /// A green dot beside a name and an address is the strongest claim a
-    /// status page can make -- it says "I looked, and this is what is there".
-    ///
-    /// The address fields went for a second reason, which outlasts the first.
-    /// Nothing reads them. `net/dns` does define a `ResolverConfig` and parse
-    /// `resolv.conf`, so the *format* exists, but no program in this tree
-    /// loads one -- so a nameserver typed here would be stored in this
-    /// window's memory until it closed. Same for the proxy, whose page below
-    /// says so in its own words.
     /// The Network page: the machine's interfaces as the kernel publishes
     /// them (`/proc/net`, read through `hwquery` as the Network Manager reads
     /// it) -- each one's link, hardware address, IPv4 address, netmask,
@@ -7116,8 +7140,7 @@ impl SettingsState {
     /// where an interface is changed, through the kernel's
     /// `SYS_NET_IF_CONFIG`, administrator only; a second place to change one
     /// address would be two configurators each unaware of the other's edits.
-    /// The page opens it. Until 2026-10-10 the page said nothing could list
-    /// the interfaces, two weeks after the Network Manager had begun to.
+    /// The page opens it.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
         s.section("Network Adapters");
@@ -8442,28 +8465,10 @@ impl SettingsState {
                         for text in texts {
                             s.section(&text.name);
                             match &text.shown {
-                                Ok(body) => {
-                                    // Wrapped to the column with every byte
-                                    // kept -- indentation, blank lines: a
-                                    // licence's paragraphs are as its authors
-                                    // broke them, often one to a line, and a
-                                    // text command does not wrap.
+                                Ok(_) => {
                                     let colour = pal.subtext0;
-                                    // The file's last line ending ends a line
-                                    // rather than beginning an empty one, as
-                                    // `str::lines` reads it.
-                                    let body = body.strip_suffix('\n').map_or(body.as_str(), |b| {
-                                        b.strip_suffix('\r').unwrap_or(b)
-                                    });
-                                    for range in text::wrap_ranges(
-                                        body,
-                                        NOTE_WIDTH,
-                                        LICENCE_SIZE,
-                                        FontWeightHint::Regular,
-                                    ) {
-                                        let line = body.get(range).unwrap_or_default();
-                                        let line =
-                                            line.strip_suffix('\r').unwrap_or(line).to_owned();
+                                    for line in text.lines().iter() {
+                                        let line = line.clone();
                                         s.draw(move |tree, x, y| {
                                             tree.text(x, y, &line, colour, LICENCE_SIZE);
                                         });
@@ -8513,6 +8518,7 @@ impl SettingsState {
                     .read()
                     .map(|bytes| shown_as_text(&bytes))
                     .map_err(|e| e.to_string()),
+                wrapped: std::cell::RefCell::new(None),
             })
             .collect();
         self.open_notice = Some((index, texts));
@@ -9242,7 +9248,7 @@ impl SettingsState {
             }
 
             let item_color = if is_selected { pal.accent } else { pal.text };
-            text_clipped(
+            text_elided(
                 tree,
                 dropdown_x + 12.0,
                 iy + 10.0,
@@ -9307,7 +9313,13 @@ impl SettingsState {
         // change and written straight back over whoever wrote it -- and ahead
         // of the dialogs, which would otherwise be handed it while they are up.
         if let Event::SettingsChanged { group } = event {
-            return if self.reread(group.file_name()) {
+            let mut changed = self.reread(group.file_name());
+            // What `dispatch_event` does after every other event: a page the
+            // file made shorter is not left scrolled past its end, and a
+            // reason is not left up for a control the file took away.
+            changed |= self.clamp_page_scroll();
+            changed |= self.explain_disabled();
+            return if changed {
                 EventResult::Consumed
             } else {
                 EventResult::Ignored
@@ -9508,6 +9520,14 @@ impl SettingsState {
                     self.add_exclusion();
                     return EventResult::Consumed;
                 }
+                // The field's, not the page's, which would change the category
+                // or the page under a half-typed pattern: Up and Down have no
+                // line to move to, and Tab moves on, letting the keyboard go.
+                Key::Up | Key::Down if plain => return EventResult::Consumed,
+                Key::Tab if plain => {
+                    self.focused_field = None;
+                    return EventResult::Consumed;
+                }
                 _ => {
                     if Self::edit_line(&mut self.exclusion_draft, evt, EXCLUSION_CAPACITY) {
                         return EventResult::Consumed;
@@ -9548,6 +9568,16 @@ impl SettingsState {
 
         if !plain {
             return EventResult::Ignored;
+        }
+        // An open list stays by its row: the keys that would scroll the page
+        // or go to another page under it wait until it is put away.
+        if self.open_dropdown.is_some()
+            && matches!(
+                evt.key,
+                Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Tab
+            )
+        {
+            return EventResult::Consumed;
         }
         // Category navigation with Up/Down when sidebar focused
         match evt.key {
@@ -9601,10 +9631,10 @@ impl SettingsState {
     /// Apply `evt` to a one-line field with `textline`'s keys, keeping what a
     /// copy or a cut took on the program's clipboard -- the one the fields'
     /// right-click menu copies to and pastes from, so a pattern copied from
-    /// the search with Ctrl+C pastes into the exclusions from the menu. Until
-    /// 2026-10-10 the keys kept a clipboard of the window's own. Whether the
-    /// field answered the key: one it does not -- Tab, an arrow it has no use
-    /// for, a Ctrl chord other than A, C, X and V -- is the page's.
+    /// the search with Ctrl+C pastes into the exclusions from the menu.
+    /// Whether the field answered the key: one it does not -- Tab, an arrow
+    /// it has no use for, a Ctrl chord other than A, C, X and V -- is the
+    /// page's.
     fn edit_line(field: &mut TextInput, evt: &KeyEvent, capacity: usize) -> bool {
         textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled
     }
@@ -9725,6 +9755,19 @@ impl SettingsState {
         }
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
+            // An open list is put away by a press of any button, as by a left
+            // one off it, and the press reaches nothing under it.
+            MouseEventKind::Press(MouseButton::Right) if self.open_dropdown.is_some() => {
+                self.open_dropdown = None;
+                EventResult::Consumed
+            }
+            // During a drag -- a slider's, the scrollbar's -- nobody's: a menu
+            // opened now would take the release that ends the drag.
+            MouseEventKind::Press(MouseButton::Right)
+                if self.dragging.is_some() || self.page_bar_grab.is_some() =>
+            {
+                EventResult::Consumed
+            }
             MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
             // Nothing is under a pointer that has left.
@@ -9732,7 +9775,8 @@ impl SettingsState {
                 let category = self.sidebar_hovered.take().is_some();
                 let search = std::mem::take(&mut self.search_hovered);
                 let page = self.page_hovered.take().is_some();
-                if category || search || page {
+                let bar = std::mem::take(&mut self.page_bar_hovered);
+                if category || search || page || bar {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -9824,6 +9868,9 @@ impl SettingsState {
             let search_y = Self::search_top();
             if my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
                 self.search_focused = true;
+                // The keyboard is the search's alone: a page field left
+                // holding it is served first, and took what was typed.
+                self.focused_field = None;
                 return EventResult::Consumed;
             }
         }
@@ -10946,8 +10993,20 @@ const PICTURE_CARD_PICTURE_HEIGHT: f32 = 99.0;
 const PICTURE_CARD_HEIGHT: f32 = PICTURE_CARD_PICTURE_HEIGHT + 24.0;
 /// The gap between one card and the next, across and down.
 const PICTURE_CARD_GAP: f32 = 12.0;
-/// How many cards to a row.
-const PICTURE_CARD_COLUMNS: usize = 4;
+/// How many cards to a row: as many as the page's column holds -- the
+/// width its notes keep to, [`NOTE_WIDTH`] -- so none runs past the rows
+/// beside it, or under the scrollbar, where a press is the scrollbar's.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a few whole cards, from two positive widths in pixels"
+)]
+const PICTURE_CARD_COLUMNS: usize =
+    ((NOTE_WIDTH + PICTURE_CARD_GAP) / (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP)) as usize;
+const _: () = assert!(
+    PICTURE_CARD_COLUMNS >= 1,
+    "the page's column is narrower than one picture card"
+);
 
 /// Where the `index`-th picture card goes, with the grid's top left corner
 /// at (`x`, `y`).
@@ -11101,6 +11160,59 @@ struct OpenText {
     name: String,
     /// The text as shown ([`shown_as_text`]), or why it could not be read.
     shown: Result<String, String>,
+    /// Its lines as drawn ([`licence_lines`]), and the font they were
+    /// wrapped in -- the UI family and how it is rendered: wrapped again only
+    /// when that changes. Wrapping a long licence is most of what a walk of
+    /// the page costs, and the page is walked several times an event: its
+    /// height, what the pointer is on, what is drawn.
+    wrapped: std::cell::RefCell<Option<(WrapFont, Vec<String>)>>,
+}
+
+/// The font a text is wrapped in: the UI family, and how it is rendered.
+type WrapFont = (Option<String>, text::Rendering);
+
+impl OpenText {
+    /// The text's lines as the page draws them, wrapped in the font in use
+    /// now; none for a text that could not be read.
+    fn lines(&self) -> std::cell::Ref<'_, [String]> {
+        let font = (text::font_family(), text::rendering());
+        let stale = self
+            .wrapped
+            .borrow()
+            .as_ref()
+            .is_none_or(|(wrapped_in, _)| *wrapped_in != font);
+        if stale {
+            let lines = self
+                .shown
+                .as_deref()
+                .map_or_else(|_| Vec::new(), licence_lines);
+            *self.wrapped.borrow_mut() = Some((font, lines));
+        }
+        std::cell::Ref::map(self.wrapped.borrow(), |wrapped| {
+            wrapped
+                .as_ref()
+                .map_or(&[][..], |(_, lines)| lines.as_slice())
+        })
+    }
+}
+
+/// A licence's `body` as the About page draws it: wrapped to the column with
+/// every byte kept -- indentation, blank lines: a licence's paragraphs are as
+/// its authors broke them, often one to a line, and a text command does not
+/// wrap -- each line without the carriage return a file written on Windows
+/// ends it with. The last line ending ends a line rather than beginning an
+/// empty one, as `str::lines` reads it.
+fn licence_lines(body: &str) -> Vec<String> {
+    let body = body
+        .strip_suffix('\n')
+        .map_or(body, |b| b.strip_suffix('\r').unwrap_or(b));
+    text::wrap_ranges(body, NOTE_WIDTH, LICENCE_SIZE, FontWeightHint::Regular)
+        .into_iter()
+        .map(|range| {
+            let line = body.get(range).unwrap_or_default();
+            line.strip_suffix('\r').unwrap_or(line).to_owned()
+        })
+        .collect()
 }
 
 /// A licence text as the page shows it: its words as they are, and a byte
@@ -16193,8 +16305,11 @@ mod tests {
 
     /// The Sound page over `dir`'s sound themes, and no other.
     fn sound_page(dir: &scratchdir::ScratchDir) -> SettingsState {
+        // The settings as they start, not as a file has them: most of these
+        // tests run outside a scratch configuration, where reading one would
+        // read the developer's own -- sounds switched off there, and the rows
+        // a test looks for are never drawn.
         let mut state = SettingsState::new();
-        state.load_appearance();
         state.sound_roots = Some(vec![dir.dir().to_path_buf()]);
         state.theme_dirs = appearance::themes::ThemeDirs {
             user: None,
@@ -16845,7 +16960,6 @@ mod tests {
     /// Three rules, as a user might write them.
     const THREE_RULES: &str = "rules:\n  First:\n    app: one\n    desktop: 2\n  Second:\n    title-contains: chat\n    taskbar: false\n  Third:\n    any: true\n    on-top: true\n";
 
-    /// A rule that can be read, and one with a typo that cannot.
     /// Two rules that can be read, and one with a typo that cannot.
     const WITH_A_TYPO: &str = "rules:\n  Terminal:\n    app: terminal\n  Notes:\n    app: notes\n  Chat:\n    app: chat\n    taskbar: flase\n";
 
@@ -17080,6 +17194,342 @@ mod tests {
                     .any(|t| t.starts_with("There are no rules"))
             );
         });
+    }
+
+    /// **"Put it back" outlasts the announcement of the window's own write**:
+    /// the desktop tells every window the rules file changed, this one
+    /// included, and a file holding what this window wrote changes nothing
+    /// for it. A change it did not make does forget the rule deleted.
+    #[test]
+    fn put_it_back_outlasts_the_announcement_of_its_own_write() {
+        settingsfile::testing::with_scratch_config("settings-rules-own-write", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(1)));
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_some(),
+                "the window's own write, announced back to it, forgot the rule deleted"
+            );
+            write_rules_file(root, THREE_RULES);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none());
+        });
+    }
+
+    /// **An editor left open follows its rule by name when the page is
+    /// entered again**: the file may have changed with no announcement
+    /// reaching the window, and Save writes over the rule the editor was
+    /// opened on, not whichever now stands in its place.
+    #[test]
+    fn an_editor_left_open_follows_its_rule_back_onto_the_page() {
+        settingsfile::testing::with_scratch_config("settings-rules-reenter", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(1));
+            state.go_to_page(SettingsPage::Display);
+            write_rules_file(
+                root,
+                "rules:\n  Zero:\n    any: true\n  First:\n    app: one\n  Second:\n    title-contains: chat\n",
+            );
+            state.go_to_page(SettingsPage::WindowRules);
+            assert_eq!(
+                state.rule_draft.as_ref().and_then(|draft| draft.editing),
+                Some(2),
+                "the editor lost the rule it was opened on"
+            );
+        });
+    }
+
+    /// **A rule the file will not take stays in the editor**: a Save whose
+    /// write fails leaves the editor open on the draft, and says why.
+    #[test]
+    fn a_rule_the_file_will_not_take_stays_in_the_editor() {
+        settingsfile::testing::with_scratch_config("settings-rules-save-fails", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(None);
+            if let Some(draft) = state.rule_draft.as_mut() {
+                draft.name.set_text("Mine");
+                draft.match_text.set_text("terminal");
+            }
+            // A folder where the file goes: no file can be written there.
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            std::fs::remove_file(&path).expect("the rules file");
+            std::fs::create_dir_all(&path).expect("a folder in its place");
+            state.save_rule();
+            assert!(state.rules_error.is_some(), "the failed write was not said");
+            assert_eq!(
+                state
+                    .rule_draft
+                    .as_ref()
+                    .map(|draft| draft.name.text().to_owned())
+                    .as_deref(),
+                Some("Mine"),
+                "the draft was lost with the write"
+            );
+        });
+    }
+
+    /// **Save is refused while the file holds a rule that cannot be read**,
+    /// as every change to the rules is -- dimmed, with why -- though the
+    /// typo reached the file while the editor was open: nothing is written,
+    /// and the list does not show as saved a rule the file does not hold.
+    #[test]
+    fn save_is_refused_while_the_rules_cannot_be_kept() {
+        settingsfile::testing::with_scratch_config("settings-rules-save-blocked", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(0));
+            write_rules_file(root, WITH_A_TYPO);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(state.rules_blocked().is_some());
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::SaveRule)).is_none(),
+                "Save is offered while no change can be kept"
+            );
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            let before = std::fs::read_to_string(&path).expect("the file");
+            let listed = rule_names(&state);
+            state.save_rule();
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file"),
+                before,
+                "Save wrote over a rule the file cannot read"
+            );
+            assert_eq!(
+                rule_names(&state),
+                listed,
+                "the list shows as saved a rule the file does not hold"
+            );
+            assert!(
+                state.rule_draft.is_some(),
+                "the editor closed on nothing kept"
+            );
+        });
+    }
+
+    /// **Up and Down move between the editor's fields**, staying put at the
+    /// ends -- never on to the page, where they changed its category in the
+    /// middle of an edit.
+    #[test]
+    fn up_and_down_move_between_the_editors_fields() {
+        settingsfile::testing::with_scratch_config("settings-rules-arrows", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(0));
+            let fields = state.rule_fields();
+            assert_eq!(state.focused_field, fields.first().copied());
+            state.handle_event(&key_press(Key::Up));
+            assert_eq!(
+                state.focused_field,
+                fields.first().copied(),
+                "Up at the first field moved"
+            );
+            state.handle_event(&key_press(Key::Down));
+            assert_eq!(state.focused_field, fields.get(1).copied());
+            assert_eq!(
+                (state.current_category, state.current_page),
+                (SettingsCategory::Apps, SettingsPage::WindowRules),
+                "an arrow in a field left the page"
+            );
+        });
+    }
+
+    /// **The exclusion box keeps the arrows and Tab**: Up and Down have no
+    /// line to move to in it, Tab lets the keyboard go -- and none of them
+    /// changes the category or the page under a half-typed pattern.
+    #[test]
+    fn the_exclusion_box_keeps_the_arrows_and_tab() {
+        let mut state = rotation_page();
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        let at = (state.current_category, state.current_page);
+        state.dispatch_event(&key_press(Key::Down));
+        state.dispatch_event(&key_press(Key::Up));
+        assert_eq!((state.current_category, state.current_page), at);
+        assert_eq!(state.focused_field, Some(FieldId::ExclusionDraft));
+        state.dispatch_event(&key_press(Key::Tab));
+        assert_eq!(
+            (state.current_category, state.current_page),
+            at,
+            "Tab in the box went to another page"
+        );
+        assert_eq!(
+            state.focused_field, None,
+            "Tab kept the keyboard in the box"
+        );
+    }
+
+    /// **A press on the search box takes the keyboard from a page's field**:
+    /// what is typed next is the search's, not the field's.
+    #[test]
+    fn a_press_on_the_search_takes_the_keyboard_from_a_field() {
+        let mut state = rotation_page();
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        let search = SettingsState::search_rect();
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: search.x + search.w / 2.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_text(&mut state, "mouse");
+        assert_eq!(state.search_query.text(), "mouse");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "",
+            "what was typed for the search went into the field"
+        );
+    }
+
+    /// **No reason is drawn over a field's menu, or while the scrollbar is
+    /// held**: the menu is over the page, and a reason would be drawn over
+    /// the menu.
+    #[test]
+    fn no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar() {
+        settingsfile::testing::with_scratch_config("settings-reason-covered", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            let ((x, y, w, h), _) = state
+                .disabled_controls()
+                .into_iter()
+                .find(|(_, why)| why == "It is the first rule already.")
+                .expect("the first rule's dimmed Up");
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert!(
+                reason_on_screen(&state).is_some(),
+                "the dimmed Up says nothing"
+            );
+
+            let search = SettingsState::search_rect();
+            state.open_field_menu(search.x + 10.0, search.y + search.h / 2.0);
+            assert!(state.field_menu.is_up());
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert_eq!(
+                reason_on_screen(&state),
+                None,
+                "a reason was drawn over the field's menu"
+            );
+
+            state.field_menu = fieldmenu::FieldMenu::default();
+            state.page_bar_grab = Some(0.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert_eq!(
+                reason_on_screen(&state),
+                None,
+                "a reason was drawn while the scrollbar was held"
+            );
+        });
+    }
+
+    /// **A file that makes the page shorter leaves it within its rows**: the
+    /// page scrolled to its end, the rules cut to three by hand, and the
+    /// announcement keeps the scroll inside the new page.
+    #[test]
+    fn a_file_that_shortens_the_page_leaves_it_within_its_rows() {
+        settingsfile::testing::with_scratch_config("settings-rules-shorter", |root| {
+            let mut many = String::from("rules:\n");
+            for n in 0..30 {
+                many.push_str(&format!("  Rule {n:02}:\n    app: app{n}\n"));
+            }
+            let mut state = rules_page(root, Some(&many));
+            state.scroll_page_to(f32::MAX);
+            assert!(state.page_scroll > 0.0, "thirty rules fit the window");
+            write_rules_file(root, THREE_RULES);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(
+                state.page_scroll <= state.max_page_scroll(),
+                "the page is scrolled past its end"
+            );
+        });
+    }
+
+    /// **A right press is no field's while a list is open or a drag is
+    /// held**: it puts the list away, as a left one off it does, and opens
+    /// no menu under it; and during a drag it opens none, which would take
+    /// the release that ends the drag.
+    #[test]
+    fn a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held() {
+        let mut state = rotation_page();
+        let (fx, fy) =
+            center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("the exclusion box");
+        let right = Event::Mouse(MouseEvent {
+            x: fx,
+            y: fy,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        state.open_dropdown = Some(DropdownId::RotationInterval);
+        state.dispatch_event(&right);
+        assert!(
+            !state.field_menu.is_up(),
+            "a menu opened under the open list"
+        );
+        assert!(state.open_dropdown.is_none(), "the list stayed open");
+
+        state.dragging = Some(SliderId::TextSize);
+        state.dispatch_event(&right);
+        assert!(
+            !state.field_menu.is_up(),
+            "a menu opened in the middle of a drag"
+        );
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: fx,
+            y: fy,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        assert!(state.dragging.is_none(), "the release did not end the drag");
+    }
+
+    /// **An open list holds the keys that would move the page under it**:
+    /// End scrolls nothing and Down changes no category while it is up.
+    #[test]
+    fn an_open_list_holds_the_keys_that_would_move_the_page() {
+        let mut state = rotation_page();
+        state.window_height = 320.0;
+        assert!(state.max_page_scroll() > 0.0, "the page fits the window");
+        let at = (state.current_category, state.current_page);
+        state.open_dropdown = Some(DropdownId::RotationInterval);
+        state.dispatch_event(&key_press(Key::End));
+        assert_eq!(
+            state.page_scroll, 0.0,
+            "End scrolled the page under the list"
+        );
+        state.dispatch_event(&key_press(Key::Down));
+        assert_eq!(
+            (state.current_category, state.current_page),
+            at,
+            "Down went to another category under the list"
+        );
+    }
+
+    /// **The scrollbar is not left lit by a pointer that has left the
+    /// window over it.**
+    #[test]
+    fn the_scrollbar_goes_out_when_the_pointer_leaves() {
+        let mut state = rotation_page();
+        state.window_height = 320.0;
+        let (track, _) = state.page_bar().expect("a page longer than the window");
+        rest_at(&mut state, track.x + track.w / 2.0, track.y + track.h - 4.0);
+        assert!(
+            state.page_bar_hovered,
+            "the scrollbar is not lit under the pointer"
+        );
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(!state.page_bar_hovered, "the scrollbar stayed lit");
+    }
+
+    /// **The picture cards keep to the page's column**: a row of them ends
+    /// within the width the notes keep to, so none lies under the scrollbar,
+    /// where a press is the scrollbar's.
+    #[test]
+    fn the_picture_cards_keep_to_the_pages_column() {
+        let (x, _) = picture_card_origin(PICTURE_CARD_COLUMNS.saturating_sub(1), 0.0, 0.0);
+        assert!(
+            x + PICTURE_CARD_WIDTH <= NOTE_WIDTH,
+            "a row of cards is {} wide, and the column {NOTE_WIDTH}",
+            x + PICTURE_CARD_WIDTH
+        );
     }
 
     /// **A new rule is written above the rest, saying what was chosen and
@@ -18573,12 +19023,30 @@ mod tests {
         );
     }
 
+    /// **An opened licence is wrapped once, not on every walk of the page**:
+    /// the same lines come back while the font is the same. Wrapping a long
+    /// licence is most of what a walk of the page costs, and the page is
+    /// walked several times an event.
+    #[test]
+    fn an_opened_licence_is_wrapped_once() {
+        let text = OpenText {
+            name: "LICENSE".to_owned(),
+            shown: Ok("Some words\r\n\r\n    Indented.\r\n".to_owned()),
+            wrapped: std::cell::RefCell::new(None),
+        };
+        let first = text.lines().as_ptr();
+        assert_eq!(&*text.lines(), ["Some words", "", "    Indented."]);
+        assert_eq!(
+            text.lines().as_ptr(),
+            first,
+            "the text was wrapped again in the same font"
+        );
+    }
+
     /// **An opened licence is wrapped to the column with every byte kept**: a
     /// paragraph on one line -- the common way a licence is written -- is
     /// drawn as lines that end inside the column, its indentation and blank
-    /// lines as written and a line's carriage return not drawn. Until
-    /// 2026-10-10 each line of the file was one text command, so such a
-    /// paragraph ran off the window.
+    /// lines as written and a line's carriage return not drawn.
     #[test]
     fn an_opened_licence_wraps_to_the_column_and_keeps_every_byte() {
         settingsfile::testing::with_scratch_config("settings-about-wrap", |root| {

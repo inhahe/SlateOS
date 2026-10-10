@@ -611,6 +611,11 @@ fn optional_size(input: &TextInput, refused: &str) -> Result<Option<(u32, u32)>,
         .ok_or_else(|| refused.to_owned())
 }
 
+/// Two fractions as the editor shows them: `50% 33.3%`.
+fn shown_parts(a: f32, b: f32) -> String {
+    format!("{}% {}%", shown_percent(a), shown_percent(b))
+}
+
 /// `pair` as the editor shows it: `800 600`, or nothing.
 fn shown_pair(pair: Option<(u32, u32)>) -> String {
     pair.map_or_else(String::new, |(w, h)| format!("{w} {h}"))
@@ -648,20 +653,15 @@ impl RuleDraft {
             Some(PositionSpec::RememberLast) => (Place::Remember, 0, String::new()),
             Some(PositionSpec::CenterOnMonitor(monitor)) => (Place::Centre, monitor, String::new()),
             Some(PositionSpec::Absolute { x, y }) => (Place::At, 0, format!("{x} {y}")),
-            Some(PositionSpec::Percentage { x_pct, y_pct }) => (
-                Place::Part,
-                0,
-                format!("{}% {}%", shown_percent(x_pct), shown_percent(y_pct)),
-            ),
+            Some(PositionSpec::Percentage { x_pct, y_pct }) => {
+                (Place::Part, 0, shown_parts(x_pct, y_pct))
+            }
         };
         let (size, size_text) = match a.size {
             None => (Size::AsUsual, String::new()),
             Some(SizeSpec::RememberLast) => (Size::Remember, String::new()),
             Some(SizeSpec::Exact { width, height }) => (Size::Exactly, format!("{width} {height}")),
-            Some(SizeSpec::Percentage { w_pct, h_pct }) => (
-                Size::Part,
-                format!("{}% {}%", shown_percent(w_pct), shown_percent(h_pct)),
-            ),
+            Some(SizeSpec::Percentage { w_pct, h_pct }) => (Size::Part, shown_parts(w_pct, h_pct)),
         };
         Self {
             editing: Some(index),
@@ -746,6 +746,15 @@ impl RuleDraft {
                 )?;
                 Some(PositionSpec::Absolute { x, y })
             }
+            // The rule's own fractions while the field shows them as `of`
+            // wrote them: it shows a tenth of a percent, and a rule written
+            // by hand at 12.25% and saved untouched stays at 12.25%.
+            Place::Part
+                if matches!(self.actions.position, Some(PositionSpec::Percentage { x_pct, y_pct })
+                    if text == shown_parts(x_pct, y_pct)) =>
+            {
+                self.actions.position
+            }
             Place::Part => {
                 let (x_pct, y_pct) = two(text, percent).ok_or(
                     "Where it opens is two parts of the screen, across and down: 50% 25%.",
@@ -766,6 +775,13 @@ impl RuleDraft {
                     "Its size is two numbers above nought, its width and height: 800 600.",
                 )?;
                 Some(SizeSpec::Exact { width, height })
+            }
+            // As for a place: the rule's own, while the field shows them.
+            Size::Part
+                if matches!(self.actions.size, Some(SizeSpec::Percentage { w_pct, h_pct })
+                    if text == shown_parts(w_pct, h_pct)) =>
+            {
+                self.actions.size
             }
             Size::Part => {
                 let (w_pct, h_pct) = two(text, part)
@@ -935,7 +951,8 @@ mod tests {
 
     /// **A rule opened in the editor and saved untouched is the rule it
     /// was** -- every action, the ones the editor does not offer included,
-    /// and whether it is on and for the first window only.
+    /// parts of the screen finer than the editor shows, and whether it is on
+    /// and for the first window only. A part that is edited is read as typed.
     #[test]
     fn a_rule_saved_untouched_is_the_rule_it_was() {
         let rule = everything();
@@ -970,6 +987,19 @@ mod tests {
                     height: 2,
                 },
             ),
+            // Finer than the tenth of a percent the editor shows, as a rule
+            // written by hand may be.
+            (
+                MatchCriteria::TitleContains("chat".to_owned()),
+                PositionSpec::Percentage {
+                    x_pct: 0.1225,
+                    y_pct: 1.0 / 3.0,
+                },
+                SizeSpec::Percentage {
+                    w_pct: 0.6667,
+                    h_pct: 0.1225,
+                },
+            ),
         ] {
             let mut rule = WindowRule::new(0, "R", criteria);
             rule.actions.position = Some(position);
@@ -978,6 +1008,22 @@ mod tests {
             assert_eq!(again.criteria, rule.criteria);
             assert_eq!(again.actions, rule.actions, "{position:?} {size:?}");
         }
+
+        let mut rule = WindowRule::new(0, "R", MatchCriteria::Any);
+        rule.actions.position = Some(PositionSpec::Percentage {
+            x_pct: 0.1225,
+            y_pct: 0.5,
+        });
+        let mut draft = RuleDraft::of(&rule, 0);
+        draft.place_text.set_text("20% 50%");
+        assert_eq!(
+            draft.rule(&[]).unwrap().actions.position,
+            Some(PositionSpec::Percentage {
+                x_pct: 0.2,
+                y_pct: 0.5
+            }),
+            "an edited part was not read as typed"
+        );
     }
 
     /// **A new rule says nothing until it is told**: a draft named and given

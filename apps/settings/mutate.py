@@ -4,20 +4,19 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
-Covers what lane C asked this app for on 2026-09-27 and 2026-09-28: the
-taskbar's window-titles switch, the automatic mode's hours, the pointer's size
-and colours, the colour and icon themes, and the Date & Time page -- each a
-setting the desktop obeyed that nothing here could change.  The rest of the
-suite predates this table.  The last rows, added 2026-10-04, cover the list of
-keys' hold on the pointer: a press with it up puts it away and flips nothing
-under it, and the wheel scrolls no dropdown it covers.
-
-And, from 2026-10-10, why a disabled control is disabled, said while the
-pointer rests on it (lane C, requests/c-e-say-why-a-control-is-disabled.md).
-
-And, from 2026-10-09, the Recycle Bin page (design-decisions §1238, §1240):
-every drive's bin, the default limits, and each drive's own, in `main.rs`;
-what each limit offers and how it reads, in `recyclebins.rs`.
+The rows cover:
+- what lane C asked this app for: the taskbar's window-titles switch, the
+  automatic mode's hours, the pointer's size and colours, the colour and icon
+  themes, and the Date & Time page -- each a setting the desktop obeys;
+- the list of keys' hold on the pointer: a press with it up puts it away and
+  flips nothing under it, and the wheel scrolls no dropdown it covers;
+- why a disabled control is disabled, said while the pointer rests on it
+  (requests/c-e-say-why-a-control-is-disabled.md);
+- the Recycle Bin page (design-decisions §1238, §1240): every drive's bin,
+  the default limits and each drive's own, in `main.rs`; what each limit
+  offers and how it reads, in `recyclebins.rs`;
+- the window rules, their editor and their file, in `main.rs` and `rules.rs`.
+Tests older than the table have no rows.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -254,8 +253,8 @@ MUTATIONS = [
     ),
     (
         'an announced settings file is not read again',
-        '            return if self.reread(group.file_name()) {',
-        '            return if false && self.reread(group.file_name()) {',
+        '            let mut changed = self.reread(group.file_name());',
+        '            let mut changed = false;',
         ['a_file_changed_elsewhere_is_read_again_and_not_written_back', 'every_file_settings_shows_is_read_again_when_it_changes'],
     ),
     (
@@ -410,8 +409,8 @@ MUTATIONS = [
     ),
     (
         'an opened notice shows none of its text',
-        '                                        let line = body.get(range).unwrap_or_default();',
-        '                                        let line = body.get(range.start..range.start).unwrap_or_default();',
+        '            let line = body.get(range).unwrap_or_default();',
+        '            let line = body.get(range.start..range.start).unwrap_or_default();',
         ['the_about_page_lists_the_notices_and_opens_one'],
     ),
     (
@@ -570,8 +569,8 @@ MUTATIONS = [
     ),
     (
         "a chord works the page's keys",
-        '        if !plain {\n            return EventResult::Ignored;\n        }\n        // Category navigation',
-        '        // Category navigation',
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n        // An open list stays by its row',
+        '        // An open list stays by its row',
         ['a_chord_is_neither_a_settings_key_nor_typing'],
     ),
     # 'a copy reaches only its own field' moved to the field menu's rows
@@ -1340,14 +1339,14 @@ MUTATIONS += [
     ),
     (
         "a reason is given under a list",
-        "            || self.open_dropdown.is_some()\n            || self.dragging.is_some();",
-        "            || self.dragging.is_some();",
+        "            || self.open_dropdown.is_some()\n            || self.field_menu.is_up()\n",
+        "            || self.field_menu.is_up()\n",
         [WHY_COVERS],
     ),
     (
         "a reason is given during a drag",
-        "            || self.open_dropdown.is_some()\n            || self.dragging.is_some();",
-        "            || self.open_dropdown.is_some();",
+        "            || self.field_menu.is_up()\n            || self.dragging.is_some()\n",
+        "            || self.field_menu.is_up()\n",
         [WHY_COVERS],
     ),
 ]
@@ -1835,7 +1834,7 @@ R_REREAD = "rules_changed_under_the_page_are_read_again"
 MUTATIONS += [
     (
         "the rules are not read on entering the page",
-        "        if page == SettingsPage::WindowRules {\n            self.refresh_rules();\n        }\n",
+        "        if page == SettingsPage::WindowRules {\n            self.reread_rules();\n        }\n",
         "",
         [R_LISTED],
     ),
@@ -1943,7 +1942,7 @@ MUTATIONS += [
     ),
     (
         "Save leaves the editor open",
-        "        self.close_rule_editor();\n        self.store_rules();\n",
+        "        if self.store_rules() {\n            self.close_rule_editor();\n        }\n",
         "        self.store_rules();\n",
         [R_ADD],
     ),
@@ -2081,8 +2080,8 @@ MUTATIONS += [
     ),
     (
         "Tab leaves the field it goes to off screen",
-        "            self.scroll_into_view(AnchorId::Field(field));\n",
-        "",
+        "        if let Some(field) = next {\n            self.scroll_into_view(AnchorId::Field(field));\n",
+        "        if let Some(field) = next {\n",
         [R_TAB_SCROLL],
     ),
     (
@@ -2357,20 +2356,20 @@ MUTATIONS += [
     ),
     (
         "an opened licence is not wrapped",
-        "                                        NOTE_WIDTH,\n                                        LICENCE_SIZE,\n",
-        "                                        NOTE_WIDTH * 10.0,\n                                        LICENCE_SIZE,\n",
+        "    text::wrap_ranges(body, NOTE_WIDTH, LICENCE_SIZE, FontWeightHint::Regular)\n",
+        "    text::wrap_ranges(body, NOTE_WIDTH * 10.0, LICENCE_SIZE, FontWeightHint::Regular)\n",
         [FIT_LICENCE],
     ),
     (
         "a licence line draws its carriage return",
-        "line.strip_suffix('\\r').unwrap_or(line).to_owned();",
-        "line.to_owned();",
+        "            line.strip_suffix('\\r').unwrap_or(line).to_owned()\n",
+        "            line.to_owned()\n",
         [FIT_LICENCE],
     ),
     (
         "a licence's last line ending begins an empty line",
-        "let body = body.strip_suffix('\\n').map_or(body.as_str(), |b| {",
-        "let body = Some(body.as_str()).map_or(body.as_str(), |b| {",
+        "        .strip_suffix('\\n')\n        .map_or(body, |b| b.strip_suffix('\\r').unwrap_or(b));\n",
+        "        .strip_suffix('\\u{0}')\n        .map_or(body, |b| b.strip_suffix('\\r').unwrap_or(b));\n",
         [FIT_LICENCE],
     ),
     (
@@ -2734,6 +2733,121 @@ MUTATIONS += [
 ]
 
 
+# The reviews of the publish range: what the window does with its own write
+# announced back, a save the file refused, the keys a field or an open list
+# holds, a right press during a drag, and the page's walk.
+MUTATIONS += [
+    (
+        "the window's own write announced back forgets the rule deleted",
+        "        if after == before {\n            return false;\n        }\n",
+        "",
+        ["put_it_back_outlasts_the_announcement_of_its_own_write"],
+    ),
+    (
+        "the page is entered by a reading that loses an open editor's rule",
+        "        if page == SettingsPage::WindowRules {\n            self.reread_rules();\n",
+        "        if page == SettingsPage::WindowRules {\n            self.refresh_rules();\n",
+        ["an_editor_left_open_follows_its_rule_back_onto_the_page"],
+    ),
+    (
+        "Save closes the editor whether or not the rule was kept",
+        "        if self.store_rules() {\n            self.close_rule_editor();\n        }\n",
+        "        self.close_rule_editor();\n        self.store_rules();\n",
+        ["a_rule_the_file_will_not_take_stays_in_the_editor"],
+    ),
+    (
+        "Save is taken while the rules cannot be kept",
+        "        // the draft is not a rule.\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "        // the draft is not a rule.\n",
+        ["save_is_refused_while_the_rules_cannot_be_kept"],
+    ),
+    (
+        "Save is offered while the rules cannot be kept",
+        "        let why = self\n            .rules_blocked()\n            .map(str::to_owned)\n            .or_else(|| draft.rule(&self.rules).err());\n",
+        "        let why = draft.rule(&self.rules).err();\n",
+        ["save_is_refused_while_the_rules_cannot_be_kept"],
+    ),
+    (
+        "Up and Down in a rule's field go to the page",
+        "            Key::Up | Key::Down if plain => {\n                self.step_rule_field(field, evt.key == Key::Up);\n                Some(EventResult::Consumed)\n            }\n",
+        "",
+        ["up_and_down_move_between_the_editors_fields"],
+    ),
+    (
+        "the exclusion box gives the arrows to the page",
+        "                Key::Up | Key::Down if plain => return EventResult::Consumed,\n",
+        "",
+        ["the_exclusion_box_keeps_the_arrows_and_tab"],
+    ),
+    (
+        "Tab in the exclusion box goes to another page",
+        "                Key::Tab if plain => {\n                    self.focused_field = None;\n                    return EventResult::Consumed;\n                }\n",
+        "",
+        ["the_exclusion_box_keeps_the_arrows_and_tab"],
+    ),
+    (
+        "a press on the search leaves a field the keyboard",
+        "                // holding it is served first, and took what was typed.\n                self.focused_field = None;\n",
+        "                // holding it is served first, and took what was typed.\n",
+        ["a_press_on_the_search_takes_the_keyboard_from_a_field"],
+    ),
+    (
+        "a reason is drawn over a field's menu",
+        "            || self.field_menu.is_up()\n",
+        "",
+        ["no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar"],
+    ),
+    (
+        "a reason is drawn while the scrollbar is held",
+        "            || self.dragging.is_some()\n            || self.page_bar_grab.is_some();\n",
+        "            || self.dragging.is_some();\n",
+        ["no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar"],
+    ),
+    (
+        "a file that shortens the page leaves it past its end",
+        "            changed |= self.clamp_page_scroll();\n",
+        "",
+        ["a_file_that_shortens_the_page_leaves_it_within_its_rows"],
+    ),
+    (
+        "a right press opens a menu under an open list",
+        "            MouseEventKind::Press(MouseButton::Right) if self.open_dropdown.is_some() => {\n                self.open_dropdown = None;\n                EventResult::Consumed\n            }\n",
+        "",
+        ["a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held"],
+    ),
+    (
+        "a right press opens a menu in the middle of a drag",
+        "            MouseEventKind::Press(MouseButton::Right)\n                if self.dragging.is_some() || self.page_bar_grab.is_some() =>\n            {\n                EventResult::Consumed\n            }\n",
+        "",
+        ["a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held"],
+    ),
+    (
+        "an open list lets the page move under it",
+        "        if self.open_dropdown.is_some()\n            && matches!(\n",
+        "        if false\n            && matches!(\n",
+        ["an_open_list_holds_the_keys_that_would_move_the_page"],
+    ),
+    (
+        "the scrollbar stays lit when the pointer leaves",
+        "                let bar = std::mem::take(&mut self.page_bar_hovered);\n",
+        "                let bar = false;\n",
+        ["the_scrollbar_goes_out_when_the_pointer_leaves"],
+    ),
+    (
+        "the picture cards run past the page's column",
+        "    ((NOTE_WIDTH + PICTURE_CARD_GAP) / (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP)) as usize;\n",
+        "    4;\n",
+        ["the_picture_cards_keep_to_the_pages_column"],
+    ),
+    (
+        "an opened licence is wrapped on every walk of the page",
+        "            .is_none_or(|(wrapped_in, _)| *wrapped_in != font);\n",
+        "            .is_none_or(|_| true);\n",
+        ["an_opened_licence_is_wrapped_once"],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",
@@ -2961,6 +3075,18 @@ RULES = [
         "    match shown.strip_suffix(\".0\") {\n",
         "    match shown.strip_suffix(\".x\") {\n",
         [RULE_LISTS],
+    ),
+    (
+        "a rule's own place is rounded to what the editor shows",
+        "            Place::Part\n                if matches!(",
+        "            Place::Part\n                if false && matches!(",
+        ["a_rule_saved_untouched_is_the_rule_it_was"],
+    ),
+    (
+        "a rule's own size is rounded to what the editor shows",
+        "            Size::Part\n                if matches!(",
+        "            Size::Part\n                if false && matches!(",
+        ["a_rule_saved_untouched_is_the_rule_it_was"],
     ),
 ]
 

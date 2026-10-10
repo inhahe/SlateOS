@@ -32,6 +32,15 @@ pub const MAX_HEIGHT: u32 = 198;
 /// drawn as a plain card rather than read whole into memory to be made small.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The id the first picture gets, the rest counting up from it: a range of
+/// the window's image ids no other picture of Settings uses. An id is the
+/// window's whole namespace, and the icons drawn from the theme have the
+/// ids carrying `appearance::icons::ICON_ID_TAG`, so these must not -- until
+/// 2026-10-10 they began at `0x7448_0000_0000_0001`, which carries it, and a
+/// change of colours would have dropped every thumbnail with the icons.
+const FIRST_ID: u64 = 0x0000_7448_0000_0001;
+const _: () = assert!(FIRST_ID & appearance::icons::ICON_ID_TAG == 0);
+
 /// What is known of one picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Thumb {
@@ -86,9 +95,7 @@ impl Thumbs {
     pub fn new() -> Self {
         Self {
             by_path: HashMap::new(),
-            // Ids a window's other pictures do not use: none, today, but an
-            // id is the window's whole namespace, so these keep to a range.
-            next_id: 0x7448_0000_0000_0001,
+            next_id: FIRST_ID,
             jobs: None,
             done: None,
             waker: Arc::new(Mutex::new(None)),

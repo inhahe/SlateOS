@@ -43,6 +43,10 @@ windowrules = { path = "../../gui/windowrules" }
 # format KDE's file manager reads (lane C's `gui/servicemenus`, §1448) -- and
 # which of them the user turned on, for the Context Menus page.
 servicemenus = { path = "../../gui/servicemenus" }
+# The sidebar's and the pages' pictures, as icons from the user's icon theme
+# rather than emoji, which no font here draws: named while drawing, handed to
+# the loop with the thumbnails through `App::take_images`.
+themeicons = { path = "../themeicons" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.

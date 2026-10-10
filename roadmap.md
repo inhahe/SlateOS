@@ -3809,6 +3809,23 @@ word; text inside them that says "lane C" is history.
   kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
   shims.
 
+- `[-]` `[E]` **Programs draw their pictures from the icon theme, not as
+  emoji** -- 2026-10-10, lane C's
+  `requests/c-e-draw-pictures-from-the-icon-theme.md`. No font here draws
+  emoji, so each was a box. `apps/themeicons` is the piece every program
+  under `oswindow::app` uses: icons named while drawing, uploaded through
+  `App::take_images`, dropped and drawn again when the colours or the icon
+  theme change. **Done:** Settings (its sidebar, search field, open lists'
+  checks and placeholder card), the file manager's detail view (each file
+  by its type's own icon name, its kind's built-in icon where the theme has
+  none) and the archive manager's file list. **Remaining:** the file
+  manager's toolbar and transfer buttons and the world clock, which need
+  icons the built-in set does not draw
+  (`requests/e-c-icon-names-lane-e-s-programs-need.md`); the finance
+  categories, which no icon name describes; Settings' account pictures,
+  which wait on the picture being kept at all
+  (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

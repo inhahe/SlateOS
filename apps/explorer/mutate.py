@@ -1580,6 +1580,66 @@ MAIN += [
     ),
 ]
 
+
+# Pictures from the icon theme (2026-10-10, requests/c-e-draw-pictures-from-
+# the-icon-theme.md): each entry's kind in the detail view is an icon -- its
+# type's own name, its kind's built-in stand-in -- handed to the loop after
+# the thumbnails, and drawn again in other colours or another theme.
+EX_ICONS = "each_entry_is_drawn_with_its_kinds_icon_from_the_theme"
+EX_NAMES = "no_file_types_icon_name_shortens_to_another_built_in_icon"
+EX_COLOURS = "other_colours_drop_the_icons_and_draw_them_again"
+
+MAIN += [
+    (
+        "the frame's icons are never sent",
+        "        self.icons.frame_drawn(&tree.commands);\n",
+        "",
+        [EX_ICONS],
+    ),
+    (
+        "the icons are not handed to the loop",
+        "        changes.extend(self.icons.take_images());\n",
+        "",
+        [EX_ICONS],
+    ),
+    (
+        "other colours keep the old icons",
+        "        if self.palette != *palette {\n            self.icons.forget();\n        }\n",
+        "",
+        [EX_COLOURS],
+    ),
+    (
+        "the same colours drop the icons",
+        "        if self.palette != *palette {\n",
+        "        if self.palette == *palette || self.palette != *palette {\n",
+        [EX_COLOURS],
+    ),
+    (
+        "another icon theme is not followed",
+        "        self.icons.set_theme(settings.icon_theme.clone());\n",
+        "",
+        [EX_COLOURS],
+    ),
+    (
+        "a type is never asked for by its own name",
+        "        std::borrow::Cow::Owned(mime.replace('/', \"-\"))\n",
+        "        let _ = mime;\n        std::borrow::Cow::Borrowed(self.file_type.icon_stand_in())\n",
+        [EX_ICONS],
+    ),
+    (
+        "a folder is drawn as a page",
+        "            return std::borrow::Cow::Borrowed(\"folder\");\n",
+        "            return std::borrow::Cow::Borrowed(\"text-x-generic\");\n",
+        [EX_ICONS],
+    ),
+    (
+        "a stand-in the built-in set does not draw",
+        "            Self::Video => \"media-playback-start\",\n",
+        "            Self::Video => \"video-x-generic\",\n",
+        [EX_NAMES],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "binview.rs": BINVIEW,

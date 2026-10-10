@@ -93,6 +93,7 @@ dependencies = [
  "quoting",
  "sevenz",
  "tararchive",
+ "themeicons",
  "xz",
  "ziparchive",
 ]
@@ -1299,6 +1300,7 @@ dependencies = [
  "tararchive",
  "textfind",
  "textline",
+ "themeicons",
  "thumbs",
  "yamldoc",
  "ziparchive",
@@ -3759,6 +3761,7 @@ dependencies = [
  "settingsfile",
  "sound",
  "textline",
+ "themeicons",
  "windowrules",
  "yamldoc",
 ]
@@ -4442,6 +4445,15 @@ name = "textline"
 version = "0.1.0"
 dependencies = [
  "guitk",
+]
+
+[[package]]
+name = "themeicons"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "oswindow",
 ]
 
 [[package]]

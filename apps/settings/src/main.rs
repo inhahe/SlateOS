@@ -73,6 +73,14 @@ const CATEGORY_ITEM_HEIGHT: f32 = 44.0;
 const CONTENT_PADDING: f32 = 32.0;
 const SECTION_SPACING: f32 = 24.0;
 
+/// The side of a category's icon in the sidebar, in pixels.
+const CATEGORY_ICON_SIDE: u16 = 16;
+/// How far below its row's top a category's icon is drawn: centred on the
+/// label beside it.
+const CATEGORY_ICON_DY: f32 = 14.0;
+/// The side of the search field's magnifier, in pixels.
+const SEARCH_ICON_SIDE: u16 = 14;
+
 /// Width of the page tab drawn for `label`, including the 8 px padding each side.
 ///
 /// The renderer and the click handler both need this, and when they each had
@@ -138,16 +146,28 @@ impl SettingsCategory {
         }
     }
 
-    fn icon_char(self) -> &'static str {
+    /// The category's icon in the user's icon theme, by its freedesktop name,
+    /// and the built-in icon drawn where the theme has none of that name.
+    /// No name may shorten to a *different* built-in icon -- a missing name
+    /// falls back by dropping its last `-part` before the stand-in is tried,
+    /// so `preferences-system-network` would draw System's gear for Network.
+    ///
+    /// Until 2026-10-10 these were emoji, which no font SlateOS has draws: the
+    /// sidebar showed eight boxes
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    fn icon(self) -> (&'static str, &'static str) {
         match self {
-            Self::System => "\u{2699}",           // gear
-            Self::Network => "\u{1F310}",         // globe
-            Self::Personalization => "\u{1F3A8}", // palette
-            Self::Apps => "\u{1F4E6}",            // package
-            Self::Accounts => "\u{1F464}",        // person
-            Self::Privacy => "\u{1F512}",         // lock
-            Self::Accessibility => "\u{267F}",    // accessibility
-            Self::Update => "\u{1F504}",          // refresh
+            Self::System => ("preferences-system", "preferences-system"),
+            Self::Network => ("network-workgroup", "network-idle"),
+            Self::Personalization => ("preferences-desktop-theme", "image-x-generic"),
+            Self::Apps => ("applications-other", "application-x-executable"),
+            Self::Accounts => ("system-users", "avatar-default"),
+            Self::Privacy => ("security-high", "system-lock-screen"),
+            Self::Accessibility => (
+                "preferences-desktop-accessibility",
+                "preferences-desktop-accessibility",
+            ),
+            Self::Update => ("system-software-update", "system-reboot"),
         }
     }
 
@@ -853,6 +873,14 @@ pub struct SettingsState {
     bundled_picture_cards: Vec<PictureCard>,
     /// Those pictures drawn small, decoded on a thread of their own.
     thumbs: thumbs::Thumbs,
+    /// The pictures the window draws from the user's icon theme -- the
+    /// sidebar's, the dropdowns' checks -- and which of them it holds, handed
+    /// to the loop with the thumbnails (`App::take_images`).
+    icons: themeicons::Icons,
+    /// The palette the icons the window holds were drawn in: another one
+    /// draws them all again ([`themeicons::Icons::forget`]), since an icon's
+    /// colour is part of the picture.
+    icons_palette: Option<Palette>,
     /// The sound themes installed, read on entering the Sound page.
     sound_themes: Vec<appearance::sounds::SoundThemeInfo>,
     /// Where sound themes are looked for: `None` is the standard places
@@ -2509,6 +2537,8 @@ impl SettingsState {
             bundled_picture_cards: Vec::new(),
             // No thread yet: one starts when the first picture is asked for.
             thumbs: thumbs::Thumbs::new(),
+            icons: themeicons::Icons::new(appearance::icons::IconTheme::default()),
+            icons_palette: None,
             sound_themes: Vec::new(),
             sound_roots: None,
             pending_preview: None,
@@ -4828,10 +4858,21 @@ impl SettingsState {
             self.appearance.settings.focus_ring_width(),
         );
         if self.search_query.text().is_empty() && !self.search_focused {
+            tree.push(RenderCommand::Image {
+                x: 24.0,
+                y: search_y + 12.5,
+                width: f32::from(SEARCH_ICON_SIDE),
+                height: f32::from(SEARCH_ICON_SIDE),
+                image_id: self.icons.icon(
+                    "system-search",
+                    u32::from(SEARCH_ICON_SIDE),
+                    pal.subtext0,
+                ),
+            });
             tree.text(
-                24.0,
+                24.0 + f32::from(SEARCH_ICON_SIDE) + 6.0,
                 search_y + 12.0,
-                "\u{1F50D} Search settings...",
+                "Search settings...",
                 pal.subtext0,
                 13.0,
             );
@@ -4899,14 +4940,21 @@ impl SettingsState {
                 );
             }
 
-            // Icon
-            tree.text(
-                24.0,
-                item_y + 12.0,
-                category.icon_char(),
-                pal.subtext0,
-                16.0,
-            );
+            // Icon, from the user's icon theme in the colour the label beside
+            // it is drawn in.
+            let (name, stand_in) = category.icon();
+            tree.push(RenderCommand::Image {
+                x: 24.0,
+                y: item_y + CATEGORY_ICON_DY,
+                width: f32::from(CATEGORY_ICON_SIDE),
+                height: f32::from(CATEGORY_ICON_SIDE),
+                image_id: self.icons.icon_or(
+                    name,
+                    stand_in,
+                    u32::from(CATEGORY_ICON_SIDE),
+                    pal.subtext0,
+                ),
+            });
 
             // Label
             let label_color = if is_selected { pal.text } else { pal.subtext1 };
@@ -8513,6 +8561,7 @@ impl SettingsState {
     fn build_placeholder_page<S: PageSink>(&self, s: &mut S) {
         let pal = &self.palette();
         let page_name = self.current_page.label();
+        let sign = self.icons.icon("dialog-information", 36, pal.peach);
         s.draw(move |tree, x, y| {
             text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);
             tree.text(
@@ -8526,7 +8575,13 @@ impl SettingsState {
             // Visual placeholder: a card with icon
             let card_y = y + 100.0;
             fill_rounded(tree, x, card_y, 400.0, 150.0, pal.surface0, 12.0);
-            tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", pal.peach, 36.0);
+            tree.push(RenderCommand::Image {
+                x: x + 182.0,
+                y: card_y + 40.0,
+                width: 36.0,
+                height: 36.0,
+                image_id: sign,
+            });
             tree.text(
                 x + 120.0,
                 card_y + 110.0,
@@ -9076,15 +9131,18 @@ impl SettingsState {
                 popup_w - 24.0,
             );
 
-            // Checkmark for selected
+            // A check for the one chosen, from the icon theme: no face here
+            // draws U+2713.
             if is_selected {
-                tree.text(
-                    dropdown_x + popup_w - 24.0,
-                    iy + 10.0,
-                    "\u{2713}",
-                    pal.accent,
-                    14.0,
-                );
+                tree.push(RenderCommand::Image {
+                    x: dropdown_x + popup_w - 26.0,
+                    y: iy + 10.0,
+                    width: 14.0,
+                    height: 14.0,
+                    image_id: self
+                        .icons
+                        .icon_or("object-select", "emblem-ok", 14, pal.accent),
+                });
             }
         }
 
@@ -10534,7 +10592,17 @@ impl oswindow::app::App for SettingsState {
         // as on a link that cannot be woken -- are drawn in this frame, and
         // uploaded before it by `take_images`.
         self.thumbs.collect();
-        self.render_tree()
+        // The icon theme and the colours the icons are drawn in, as they are
+        // now: another of either draws every icon again.
+        self.icons
+            .set_theme(self.appearance.settings.icon_theme.clone());
+        let palette = self.palette();
+        if self.icons_palette.replace(palette) != Some(palette) {
+            self.icons.forget();
+        }
+        let tree = self.render_tree();
+        self.icons.frame_drawn(&tree.commands);
+        tree
     }
 
     /// The Background page decodes pictures on a thread of its own
@@ -10556,11 +10624,14 @@ impl oswindow::app::App for SettingsState {
         }
     }
 
-    /// The pictures decoded and not yet uploaded, asked for after each
-    /// render and before its frame goes out, so a frame never names a
-    /// picture the compositor does not have.
+    /// The pictures decoded and not yet uploaded, and the icons the frame
+    /// names that the window does not hold (or holds in colours no longer
+    /// drawn, dropped), asked for after each render and before its frame goes
+    /// out, so a frame never names a picture the compositor does not have.
     fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
-        self.thumbs.take_uploads()
+        let mut changes = self.thumbs.take_uploads();
+        changes.extend(self.icons.take_images());
+        changes
     }
 }
 
@@ -11779,28 +11850,49 @@ mod tests {
         }
         assert!(!state.take_images().is_empty(), "a wake queued no upload");
 
-        // The frame path, with nothing but frames.
+        // The frame path, with nothing but frames. The picture is told from
+        // the icons every frame draws by asking the icons which they drew.
         let mut state = wallpaper_state(&dir);
         show_source(&mut state, WallpaperSource::Theme);
         let until = deadline();
-        loop {
+        let picture = loop {
             let tree = state.render(1200.0, 800.0);
-            if tree
-                .commands
-                .iter()
-                .any(|c| matches!(c, RenderCommand::Image { .. }))
-            {
-                break;
+            if let Some(id) = tree.commands.iter().find_map(|c| match c {
+                RenderCommand::Image { image_id, .. } if !state.icons.drew(*image_id) => {
+                    Some(*image_id)
+                }
+                _ => None,
+            }) {
+                break id;
             }
             assert!(
                 std::time::Instant::now() < until,
                 "no frame drew the picture"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        };
         assert!(
-            !state.take_images().is_empty(),
+            state.take_images().iter().any(|change| matches!(
+                change,
+                oswindow::app::ImageChange::Upload { id, .. } if *id == picture
+            )),
             "a frame named a picture with no upload queued"
+        );
+
+        // Other colours draw the icons again; the picture stays where it is.
+        let settings = &mut state.appearance.settings;
+        settings.theme_mode = if settings.theme_mode == ThemeMode::Dark {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        let _frame = state.render(1200.0, 800.0);
+        assert!(
+            !state.take_images().iter().any(|change| matches!(
+                change,
+                oswindow::app::ImageChange::Drop(id) if *id == picture
+            )),
+            "other colours dropped the picture with the icons"
         );
     }
 
@@ -18138,6 +18230,161 @@ mod tests {
         });
     }
 
+    // --- Pictures from the icon theme ------------------------------------------
+
+    /// The ids `changes` uploads, and those it drops.
+    fn icon_changes(changes: &[oswindow::app::ImageChange]) -> (Vec<u64>, Vec<u64>) {
+        let mut uploads = Vec::new();
+        let mut drops = Vec::new();
+        for change in changes {
+            match change {
+                oswindow::app::ImageChange::Upload { id, .. } => uploads.push(*id),
+                oswindow::app::ImageChange::Drop(id) => drops.push(*id),
+                oswindow::app::ImageChange::Patch { .. } => {}
+            }
+        }
+        (uploads, drops)
+    }
+
+    /// The icon drawn at the left of the sidebar's row `idx`.
+    fn category_icon_drawn(tree: &RenderTree, idx: usize) -> Option<u64> {
+        let top = SettingsState::category_row_top(idx);
+        tree.commands.iter().find_map(|c| match c {
+            RenderCommand::Image { x, y, image_id, .. }
+                if (*x - 24.0).abs() < 0.01 && *y >= top && *y < top + CATEGORY_ITEM_HEIGHT =>
+            {
+                Some(*image_id)
+            }
+            _ => None,
+        })
+    }
+
+    /// **The sidebar draws each category's picture as an icon from the icon
+    /// theme, uploaded before the frame that names it, and once** -- they
+    /// were emoji, which no font here draws: eight boxes
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    #[test]
+    fn the_sidebar_draws_each_category_icon_from_the_theme() {
+        settingsfile::testing::with_scratch_config("settings-icons-sidebar", |_| {
+            let mut state = SettingsState::new();
+            let tree = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (uploads, drops) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            assert!(drops.is_empty(), "{drops:?}");
+            for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
+                let id = category_icon_drawn(&tree, idx)
+                    .unwrap_or_else(|| panic!("{} has no icon", category.label()));
+                assert!(
+                    uploads.contains(&id),
+                    "{}'s icon is drawn and never sent",
+                    category.label()
+                );
+            }
+            let _again = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            assert_eq!(
+                icon_changes(&oswindow::app::App::take_images(&mut state)),
+                (vec![], vec![]),
+                "the icons were sent again"
+            );
+        });
+    }
+
+    /// **No category's icon name shortens to another built-in icon**: a name
+    /// the theme lacks falls back by dropping its last `-part` before the
+    /// stand-in is tried, and `preferences-system-network` would have drawn
+    /// System's gear for Network. Each stand-in is one the built-in set draws.
+    #[test]
+    fn no_category_icon_shortens_to_another_built_in_icon() {
+        let built_in = appearance::icons::built_in_names();
+        for category in SettingsCategory::ALL {
+            let (name, stand_in) = category.icon();
+            assert!(
+                built_in.contains(&stand_in),
+                "{}'s stand-in {stand_in} is not built in",
+                category.label()
+            );
+            let mut shorter = name;
+            loop {
+                assert!(
+                    !built_in.contains(&shorter) || shorter == stand_in,
+                    "{}'s {name} would draw the built-in {shorter}, not {stand_in}",
+                    category.label()
+                );
+                match shorter.rfind('-') {
+                    Some(at) => shorter = &shorter[..at],
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// **Other colours draw every icon again**: the old ones are dropped from
+    /// the window and the new ones sent, since an icon's colour is part of
+    /// the picture.
+    #[test]
+    fn other_colours_draw_the_icons_again() {
+        settingsfile::testing::with_scratch_config("settings-icons-colours", |_| {
+            let mut state = SettingsState::new();
+            state.appearance.settings.theme_mode = ThemeMode::Light;
+            let _light = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (light, _) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            assert!(!light.is_empty());
+
+            state.appearance.settings.theme_mode = ThemeMode::Dark;
+            let _dark = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (dark, mut dropped) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            dropped.sort_unstable();
+            let mut held = light.clone();
+            held.sort_unstable();
+            assert_eq!(dropped, held, "the light icons stay in the window");
+            assert_eq!(dark.len(), light.len(), "{dark:?}");
+            assert!(
+                dark.iter().all(|id| !light.contains(id)),
+                "an icon was not drawn again in the dark colours"
+            );
+        });
+    }
+
+    /// Whether `c` is an emoji or a pictographic symbol: no font SlateOS has
+    /// draws one, so it is a box on screen.
+    fn is_pictograph(c: char) -> bool {
+        matches!(
+            u32::from(c),
+            0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F000..=0x1FAFF
+        )
+    }
+
+    /// **No page draws an emoji** -- every page with every switch on, the
+    /// sidebar and the open dropdowns' checks -- but the account pictures,
+    /// which wait on the account picture being kept at all
+    /// (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+    #[test]
+    fn no_page_draws_an_emoji() {
+        let mut drawn = Vec::new();
+        for page in all_pages() {
+            let mut state = fully_expanded(page);
+            for text in drawn_texts(&state) {
+                drawn.push((page.label(), text));
+            }
+            if let Some(id) = DropdownId::FIXED
+                .iter()
+                .copied()
+                .find(|id| center_of(&state, RowHit::Dropdown(*id)).is_some())
+            {
+                state.show_dropdown(id);
+                for text in drawn_texts(&state) {
+                    drawn.push((page.label(), text));
+                }
+            }
+        }
+        let boxes: Vec<String> = drawn
+            .iter()
+            .filter(|(_, text)| !ACCOUNT_PICTURES.contains(&text.as_str()))
+            .filter(|(_, text)| text.chars().any(is_pictograph))
+            .map(|(page, text)| format!("{page}: {text:?}"))
+            .collect();
+        assert!(boxes.is_empty(), "drawn as boxes:\n{}", boxes.join("\n"));
+    }
+
     // --- The account picture grid ------------------------------------------
     //
     // Six tiles that used to be painted inside one closure and hit-tested
@@ -21009,6 +21256,24 @@ mod loop_tests {
             .collect()
     }
 
+    /// Room in the script for the first frame of a state like `twin`: one
+    /// empty batch for each picture it uploads.
+    ///
+    /// The test desktop hands over one scripted batch at each turn, and a
+    /// turn is anything the loop waits through -- an upload's answer as much
+    /// as an event, an upload being a round trip. Settings' first frame
+    /// uploads its icons (the sidebar's, from the icon theme), so without
+    /// this room every batch would arrive during those uploads, all at once,
+    /// and no frame would answer them one by one. Counted from `twin`'s own
+    /// first frame rather than written down, so a picture added to the page
+    /// cannot shift the script unseen.
+    fn room_for_first_frame(desk: &mut testing::TestDesktop, twin: &mut SettingsState) {
+        let _frame = twin.render(1200.0, 800.0);
+        for _upload in twin.take_images() {
+            desk.script.push_back(Vec::new());
+        }
+    }
+
     fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
         let mut state = SettingsState::new();
         state.current_page = page;
@@ -21036,6 +21301,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             // Each batch is one turn of the loop, so these arrive in order with
             // Settings processing each before the next appears.
             desk.script
@@ -21081,6 +21354,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             desk.script
                 .push_back(vec![InputEvent::new(theirs, click_at(at.0, at.1))]);
             desk.script
@@ -21112,6 +21393,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             desk.script
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             // Delivered on a later turn, so it can only arrive if the loop is
@@ -21145,6 +21434,7 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(&mut desk, &mut SettingsState::new());
             desk.script.push_back(vec![InputEvent::new(
                 window,
                 Event::Resize {
@@ -21182,6 +21472,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -21227,6 +21521,14 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(
+                        SettingsPage::UserAccounts,
+                        RowHit::Select(SelectId::Account, 1),
+                    )
+                    .0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -21258,6 +21560,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 // Four more events, none of which touches the appearance file.
@@ -21352,6 +21658,7 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(&mut desk, &mut double_click_control().0);
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -21394,6 +21701,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script

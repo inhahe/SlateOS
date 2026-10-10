@@ -38,7 +38,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::layout::Axis;
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
-use guitk::render::RenderTree;
+use guitk::render::{RenderCommand, RenderTree};
 use guitk::scroll_window;
 use guitk::scrollbar;
 use guitk::splitter;
@@ -88,10 +88,26 @@ pub struct FileEntry {
     pub modified: Option<SystemTime>,
     pub file_type: FileType,
     pub selected: bool,
-    pub icon_id: u32,
 }
 
 impl FileEntry {
+    /// The icon to draw this entry with, by the freedesktop scheme: a
+    /// folder's, or the name of the file's type -- `image/png` is
+    /// `image-png` -- which a theme may draw for that type alone. The kind's
+    /// stand-in ([`FileType::icon_stand_in`]) is drawn where it does not.
+    ///
+    /// No type's name shortens to a different built-in icon than its kind's:
+    /// the built-in names are `folder`, places, devices and the kinds'
+    /// generic names, none of them a prefix of a type's name.
+    fn icon_name(&self) -> std::borrow::Cow<'static, str> {
+        if self.is_dir {
+            return std::borrow::Cow::Borrowed("folder");
+        }
+        let ext = self.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mime = filetypes::detect_from_extension(ext).mime_type;
+        std::borrow::Cow::Owned(mime.replace('/', "-"))
+    }
+
     /// Label for the detail view's Type column.
     ///
     /// The category when the entry has a recognised one, and the bare
@@ -199,19 +215,23 @@ impl FileType {
         }
     }
 
-    /// Icon character for this file type (unicode placeholder).
-    pub fn icon_char(self) -> char {
+    /// The icon drawn for a file of this kind where the theme has no picture
+    /// for its exact type: one the built-in set draws, so every row has a
+    /// picture. Until 2026-10-10 these were emoji, which no font here draws
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    ///
+    /// A video's, an archive's and source code's own generic names
+    /// (`video-x-generic`, `package-x-generic`, `text-x-script`) are not
+    /// built in yet (`requests/e-c-icon-names-lane-e-s-programs-need.md`).
+    pub fn icon_stand_in(self) -> &'static str {
         match self {
-            Self::Directory => '\u{1F4C1}', // folder
-            Self::Text => '\u{1F4C4}',      // page
-            Self::Image => '\u{1F5BC}',     // framed picture
-            Self::Audio => '\u{1F3B5}',     // musical note
-            Self::Video => '\u{1F3AC}',     // clapper board
-            Self::Archive => '\u{1F4E6}',   // package
-            Self::Executable => '\u{2699}', // gear
-            Self::Document => '\u{1F4D1}',  // bookmark tabs
-            Self::Code => '\u{1F4BB}',      // computer
-            Self::Unknown => '\u{1F4C3}',   // page with curl
+            Self::Directory => "folder",
+            Self::Image => "image-x-generic",
+            Self::Audio => "audio-x-generic",
+            Self::Video => "media-playback-start",
+            Self::Executable => "application-x-executable",
+            Self::Document => "x-office-document",
+            Self::Text | Self::Archive | Self::Code | Self::Unknown => "text-x-generic",
         }
     }
 }
@@ -237,6 +257,10 @@ const ROW_H: f32 = 22.0;
 
 /// Width reserved to the left of the first column for the entry's type icon.
 const ICON_GUTTER: f32 = 28.0;
+
+/// The side of a detail-view row's icon, in pixels: centred in the gutter
+/// and the row.
+const DETAIL_ICON_SIDE: u16 = 16;
 
 /// Width of one icon-view cell.
 const ICON_CELL_W: f32 = 96.0;
@@ -1255,6 +1279,10 @@ pub struct ExplorerState {
     /// The user's focus width, which the toolkit's dialogs and address bar
     /// are handed as they are made (`appearance_changed`).
     focus_ring_width: f32,
+    /// The pictures drawn from the user's icon theme -- each entry's kind in
+    /// the detail view -- and which of them the window holds, handed to the
+    /// loop after the thumbnails (`App::take_images`).
+    icons: themeicons::Icons,
     /// Whether the pointer is over the scrollbar's column: the bar lights
     /// under it, and a theme's overlay bar widens from a line only then.
     scrollbar_hovered: bool,
@@ -1529,6 +1557,7 @@ impl ExplorerState {
             wheel: WheelAccumulator::default(),
             thumb_grab: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            icons: themeicons::Icons::new(appearance::icons::IconTheme::default()),
             scrollbar_hovered: false,
             history_back: VecDeque::new(),
             history_forward: VecDeque::new(),
@@ -1947,7 +1976,6 @@ impl ExplorerState {
             modified,
             file_type,
             selected: false,
-            icon_id: 0,
         })
     }
 
@@ -6084,14 +6112,19 @@ impl ExplorerState {
                 tree.fill_rect(0.0, ey, w, ROW_H, self.palette.base);
             }
 
-            let mut icon = [0u8; 4];
-            tree.text(
-                8.0,
-                ey + 3.0,
-                entry.file_type.icon_char().encode_utf8(&mut icon),
-                self.palette.text,
-                12.0,
-            );
+            // The entry's icon from the user's icon theme, in the row's ink.
+            tree.push(RenderCommand::Image {
+                x: (ICON_GUTTER - f32::from(DETAIL_ICON_SIDE)) / 2.0,
+                y: ey + (ROW_H - f32::from(DETAIL_ICON_SIDE)) / 2.0,
+                width: f32::from(DETAIL_ICON_SIDE),
+                height: f32::from(DETAIL_ICON_SIDE),
+                image_id: self.icons.icon_or(
+                    entry.icon_name(),
+                    entry.file_type.icon_stand_in(),
+                    u32::from(DETAIL_ICON_SIDE),
+                    self.palette.text,
+                ),
+            });
 
             // Directory names stay visually distinct from file names, as they
             // were when this view drew its own three columns.
@@ -6500,6 +6533,11 @@ impl oswindow::app::App for ExplorerState {
     /// keeps its own colours -- which here were a hardcoded *light* theme, so
     /// a dark desktop got a white file manager.
     fn theme_changed(&mut self, palette: &Palette) {
+        // An icon's colour is part of its picture: other colours draw every
+        // icon again, and drop the old ones from the window.
+        if self.palette != *palette {
+            self.icons.forget();
+        }
         self.palette = *palette;
     }
 
@@ -6509,6 +6547,8 @@ impl oswindow::app::App for ExplorerState {
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.focus_ring_width = settings.focus_ring_width();
         self.pathbar.set_focus_ring_width(self.focus_ring_width);
+        // And the icon theme the entries' pictures come from.
+        self.icons.set_theme(settings.icon_theme.clone());
     }
 
     /// The folder's name first, then the application's.
@@ -6662,6 +6702,9 @@ impl oswindow::app::App for ExplorerState {
             // no frame in which this could be believed and be wrong.
             self.mark_uploaded(id);
         }
+        // The icons after the thumbnails, in their own order: their drops,
+        // queued when the colours changed, before their uploads.
+        changes.extend(self.icons.take_images());
         changes
     }
 
@@ -6676,7 +6719,9 @@ impl oswindow::app::App for ExplorerState {
             self.window_width = width.clamp(1.0, 16384.0) as u32;
             self.window_height = height.clamp(1.0, 16384.0) as u32;
         }
-        ExplorerState::render(self)
+        let tree = ExplorerState::render(self);
+        self.icons.frame_drawn(&tree.commands);
+        tree
     }
 }
 
@@ -11257,6 +11302,155 @@ mod tests {
         LAUNCHED_IN.with(|l| std::mem::take(&mut *l.borrow_mut()))
     }
 
+    // --- Pictures from the icon theme -----------------------------------------
+
+    /// **Each entry in the detail view is drawn with an icon from the icon
+    /// theme, uploaded before the frame that names it** -- its type's own
+    /// name, with its kind's stand-in where the theme has none, and a
+    /// folder's folder -- where an emoji was, which no font here draws
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    #[test]
+    fn each_entry_is_drawn_with_its_kinds_icon_from_the_theme() {
+        let dir = guarded_scratch("explorer-icons");
+        for name in ["a.png", "b.txt", "c.mp4", "d.zip", "e.rs"] {
+            std::fs::write(dir.dir().join(name), b"x").expect("a file");
+        }
+        std::fs::create_dir(dir.dir().join("sub")).expect("a folder");
+        let mut state = ExplorerState::new(dir.dir());
+        assert_eq!(state.view_mode, ViewMode::Details);
+        let tree = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let uploaded: Vec<u64> = oswindow::app::App::take_images(&mut state)
+            .iter()
+            .filter_map(|change| match change {
+                oswindow::app::ImageChange::Upload { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let drawn: Vec<u64> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => Some(*image_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(state.entries.len(), 6, "{:?}", state.entries);
+        let named = |name: &str| {
+            state
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(FileEntry::icon_name)
+                .unwrap_or_else(|| panic!("no entry {name}"))
+        };
+        assert_eq!(
+            named("a.png"),
+            "image-png",
+            "a type is not asked for by its own name"
+        );
+        assert_eq!(named("sub"), "folder");
+        for entry in &state.entries {
+            let id = state.icons.icon_or(
+                entry.icon_name(),
+                entry.file_type.icon_stand_in(),
+                u32::from(DETAIL_ICON_SIDE),
+                state.palette.text,
+            );
+            assert!(drawn.contains(&id), "{} is drawn with no icon", entry.name);
+            assert!(
+                uploaded.contains(&id),
+                "{}'s icon is drawn and never sent",
+                entry.name
+            );
+        }
+        let _again = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state).is_empty(),
+            "the icons were sent again"
+        );
+    }
+
+    /// **No file type's icon name shortens to a built-in icon other than its
+    /// kind's stand-in**: a name the theme lacks falls back by dropping its
+    /// last `-part` before the stand-in is tried, so a type whose name
+    /// shortened to, say, `audio-volume` would be drawn as a loudspeaker. Each
+    /// stand-in is one the built-in set draws.
+    #[test]
+    fn no_file_types_icon_name_shortens_to_another_built_in_icon() {
+        let built_in = appearance::icons::built_in_names();
+        for info in filetypes::all() {
+            let kind = FileType::from_extension(info.extension.trim_start_matches('.'));
+            let stand_in = kind.icon_stand_in();
+            assert!(
+                built_in.contains(&stand_in),
+                "{}'s stand-in {stand_in} is not built in",
+                info.extension
+            );
+            let name = info.mime_type.replace('/', "-");
+            let mut shorter = name.as_str();
+            loop {
+                assert!(
+                    !built_in.contains(&shorter) || shorter == stand_in,
+                    "{}: {name} would draw the built-in {shorter}, not {stand_in}",
+                    info.extension
+                );
+                match shorter.rfind('-') {
+                    Some(at) => shorter = &shorter[..at],
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// **Other colours draw every icon again**: the old ones are dropped from
+    /// the window, since an icon's colour is part of its picture; the same
+    /// colours again drop nothing.
+    #[test]
+    fn other_colours_drop_the_icons_and_draw_them_again() {
+        let dir = guarded_scratch("explorer-icons-colours");
+        std::fs::write(dir.dir().join("a.txt"), b"x").expect("a file");
+        let mut state = ExplorerState::new(dir.dir());
+        let light = Palette::for_mode(false);
+        oswindow::app::App::theme_changed(&mut state, &light);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let sent = oswindow::app::App::take_images(&mut state);
+        assert!(!sent.is_empty());
+
+        oswindow::app::App::theme_changed(&mut state, &light);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state).is_empty(),
+            "the same colours dropped the icons"
+        );
+
+        oswindow::app::App::theme_changed(&mut state, &Palette::for_mode(true));
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let changes = oswindow::app::App::take_images(&mut state);
+        let dropped = changes
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .count();
+        let uploaded = changes
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!((dropped, uploaded), (sent.len(), sent.len()), "{changes:?}");
+
+        // Another icon theme likewise.
+        let settings = appearance::AppearanceSettings {
+            icon_theme: appearance::icons::IconTheme::load(std::ffi::OsStr::new("another")),
+            ..appearance::AppearanceSettings::default()
+        };
+        oswindow::app::App::appearance_changed(&mut state, &settings);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state)
+                .iter()
+                .any(|c| matches!(c, oswindow::app::ImageChange::Drop(_))),
+            "another icon theme kept the old icons"
+        );
+    }
+
     /// A service menu for text, as a program ported from Linux might ship one.
     const SHOUT: &str = "[Desktop Entry]\nType=Service\nMimeType=text/plain;\nActions=shout;\n\n[Desktop Action shout]\nName=Shout it\nExec=shout %f\n";
 
@@ -15252,11 +15446,14 @@ mod tests {
                 texts.iter().any(|t| t.contains("alpha line")),
                 "the preview drew no line of the file: {texts:?}"
             );
+            // The detail view's rows draw their kinds as icons from the
+            // theme; any other picture is a thumbnail.
             assert!(
-                !tree
-                    .commands
-                    .iter()
-                    .any(|c| matches!(c, guitk::render::RenderCommand::Image { .. })),
+                !tree.commands.iter().any(|c| matches!(
+                    c,
+                    guitk::render::RenderCommand::Image { image_id, .. }
+                        if !state.icons.drew(*image_id)
+                )),
                 "the preview drew the thumbnail as well as the text"
             );
         });

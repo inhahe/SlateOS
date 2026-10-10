@@ -1196,14 +1196,14 @@ MUTATIONS += [
     ),
     (
         "no uploads reach the window",
-        "        self.thumbs.take_uploads()\n",
-        "        Vec::new()\n",
+        "        let mut changes = self.thumbs.take_uploads();\n",
+        "        let mut changes = Vec::new();\n",
         [THEME_CHOSEN, FRAMES_AND_WAKES],
     ),
     (
         "a frame does not collect decoded pictures",
-        "        self.thumbs.collect();\n        self.render_tree()",
-        "        self.render_tree()",
+        "        self.thumbs.collect();\n        // The icon theme",
+        "        // The icon theme",
         [FRAMES_AND_WAKES],
     ),
     (
@@ -2509,6 +2509,85 @@ MUTATIONS += [
         "        if let Some(error) = &self.rules_error {\n            s.problem(error);\n        }\n",
         "        if let Some(_error) = &self.rules_error {}\n",
         [CM_NOT_KEPT],
+    ),
+]
+
+
+# Pictures from the icon theme (2026-10-10, requests/c-e-draw-pictures-from-
+# the-icon-theme.md): the sidebar's categories, the search field's magnifier,
+# a dropdown's check and the placeholder card, drawn as theme icons through
+# `themeicons` and handed to the loop with the thumbnails.
+ICON_SIDEBAR = "the_sidebar_draws_each_category_icon_from_the_theme"
+ICON_NAMES = "no_category_icon_shortens_to_another_built_in_icon"
+ICON_COLOURS = "other_colours_draw_the_icons_again"
+NO_EMOJI = "no_page_draws_an_emoji"
+
+MUTATIONS += [
+    (
+        "the frame's icons are never sent",
+        "        self.icons.frame_drawn(&tree.commands);\n",
+        "",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "the icons are not handed to the loop",
+        "        changes.extend(self.icons.take_images());\n",
+        "",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "other colours keep the old icons",
+        "        if self.icons_palette.replace(palette) != Some(palette) {\n            self.icons.forget();\n        }\n",
+        "        self.icons_palette = Some(palette);\n",
+        [ICON_COLOURS],
+    ),
+    (
+        "the icons are drawn again every frame",
+        "        if self.icons_palette.replace(palette) != Some(palette) {\n",
+        "        if self.icons_palette.replace(palette).is_some() {\n",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "Network draws System's gear",
+        '            Self::Network => ("network-workgroup", "network-idle"),',
+        '            Self::Network => ("preferences-system-network", "network-idle"),',
+        [ICON_NAMES],
+    ),
+    (
+        "a stand-in nothing draws",
+        '            Self::Update => ("system-software-update", "system-reboot"),',
+        '            Self::Update => ("system-software-update", "system-update"),',
+        [ICON_NAMES, ICON_SIDEBAR],
+    ),
+    (
+        "a category's icon sits below its row",
+        "                y: item_y + CATEGORY_ICON_DY,\n",
+        "                y: item_y + CATEGORY_ITEM_HEIGHT,\n",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "a category's picture is an emoji again",
+        "            let (name, stand_in) = category.icon();\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n",
+        "            let (name, stand_in) = category.icon();\n            tree.text(24.0, item_y, \"\\u{2699}\", pal.subtext0, 16.0);\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "the search field's magnifier is an emoji again",
+        "            tree.push(RenderCommand::Image {\n                x: 24.0,\n                y: search_y + 12.5,\n",
+        "            tree.text(24.0, search_y, \"\\u{1F50D}\", pal.subtext0, 13.0);\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n                y: search_y + 12.5,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "a dropdown's check is a character again",
+        "            if is_selected {\n                tree.push(RenderCommand::Image {\n                    x: dropdown_x + popup_w - 26.0,\n",
+        "            if is_selected {\n                tree.text(dropdown_x, iy, \"\\u{2713}\", pal.accent, 14.0);\n                tree.push(RenderCommand::Image {\n                    x: dropdown_x + popup_w - 26.0,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "the placeholder's sign is an emoji again",
+        "        s.draw(move |tree, x, y| {\n            text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);\n",
+        "        s.draw(move |tree, x, y| {\n            tree.text(x, y, \"\\u{1F6A7}\", pal.peach, 36.0);\n            text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);\n",
+        [NO_EMOJI],
     ),
 ]
 

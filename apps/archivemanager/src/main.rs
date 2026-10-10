@@ -534,7 +534,9 @@ impl TreeSource for Folders<'_> {
 /// A folder's row: its name, an arrow when it has folders in it, and how many
 /// files are in it directly.
 fn folder_item(node: &TreeNode, key: String) -> TreeItem<String> {
-    let label = format!("\u{1F4C1} {}", node.name);
+    // No picture: every row of this pane is a folder, so one would say
+    // nothing. (It was an emoji, which no font here draws.)
+    let label = node.name.clone();
     let item = if node.children.is_empty() {
         TreeItem::leaf(key, label)
     } else {
@@ -1304,12 +1306,17 @@ pub struct AppState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The file list's pictures -- a folder, a file, a locked file -- drawn
+    /// from the user's icon theme, and which of them the window holds,
+    /// handed to the loop through `App::take_images`.
+    icons: themeicons::Icons,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            icons: themeicons::Icons::new(appearance::icons::IconTheme::default()),
             archive: None,
             current_dir: String::new(),
             sort: SortState::default(),
@@ -2072,9 +2079,25 @@ pub fn render_column_headers(
 }
 
 /// Render a single row in the file list.
+/// The side of a file-list row's picture, in pixels.
+const ROW_ICON_SIDE: u16 = 14;
+
+/// The icon an entry of the file list is drawn with: a folder, a file the
+/// archive keeps locked, or a file -- each one the built-in set draws.
+fn entry_icon(entry: &ArchiveEntry) -> &'static str {
+    if entry.is_dir {
+        "folder"
+    } else if entry.encrypted {
+        "system-lock-screen"
+    } else {
+        "text-x-generic"
+    }
+}
+
 pub fn render_file_row(
     entry: &ArchiveEntry,
     pal: &Palette,
+    icons: &themeicons::Icons,
     frame: &mut Frame,
     x_offset: f32,
     y: f32,
@@ -2097,24 +2120,26 @@ pub fn render_file_row(
 
     let mut x = x_offset + 4.0;
 
-    // Name column.
-    let icon = if entry.is_dir {
-        "\u{1F4C1} "
-    } else if entry.encrypted {
-        "\u{1F512} "
-    } else {
-        "\u{1F4C4} "
-    };
-    let name_text = format!("{icon}{}", entry.name);
+    // Name column: the entry's picture from the icon theme -- a folder, a
+    // locked file, a file -- in the name's ink, then the name. (They were
+    // emoji, which no font here draws.)
     let name_color = if entry.is_dir { pal.blue } else { pal.text };
-    frame.push(RenderCommand::Text {
+    frame.push(RenderCommand::Image {
         x: x + 4.0,
+        y: y + (ROW_H - f32::from(ROW_ICON_SIDE)) / 2.0,
+        width: f32::from(ROW_ICON_SIDE),
+        height: f32::from(ROW_ICON_SIDE),
+        image_id: icons.icon(entry_icon(entry), u32::from(ROW_ICON_SIDE), name_color),
+    });
+    let name_x = x + 4.0 + f32::from(ROW_ICON_SIDE) + 6.0;
+    frame.push(RenderCommand::Text {
+        x: name_x,
         y: y + 4.0,
-        text: name_text,
+        text: entry.name.clone(),
         color: name_color,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
-        max_width: Some(Column::Name.default_width() - 8.0),
+        max_width: Some((Column::Name.default_width() - (name_x - x) - 4.0).max(0.0)),
         overflow: TextOverflow::Ellipsis,
     });
     x += Column::Name.default_width();
@@ -2270,6 +2295,7 @@ pub fn render_file_list(
         render_file_row(
             entry,
             &state.palette,
+            &state.icons,
             frame,
             x_offset,
             ry,
@@ -3703,7 +3729,24 @@ pub fn create_sample_archive() -> ArchiveModel {
 
 impl App for AppState {
     fn theme_changed(&mut self, palette: &Palette) {
+        // An icon's colour is part of its picture: other colours draw every
+        // icon again, and drop the old ones from the window.
+        if self.palette != *palette {
+            self.icons.forget();
+        }
         self.palette = *palette;
+    }
+
+    /// The icon theme the file list's pictures come from.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.icons.set_theme(settings.icon_theme.clone());
+    }
+
+    /// The icons the last frame named that the window does not hold, and
+    /// those dropped since, asked for after each render and before its frame
+    /// goes out.
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        self.icons.take_images()
     }
 
     fn title(&self) -> String {
@@ -3780,6 +3823,8 @@ impl App for AppState {
                 tree.push(cmd);
             }
         }
+        // The icons the frame names that the window does not hold yet.
+        self.icons.frame_drawn(&tree.commands);
         tree
     }
 }
@@ -5293,6 +5338,131 @@ mod tests {
             archive: Some(create_sample_archive()),
             ..AppState::default()
         }
+    }
+
+    // --- Pictures from the icon theme -------------------------------------------
+
+    /// **Each row of the file list is drawn with an icon from the icon theme,
+    /// uploaded before the frame that names it, and once** -- and nothing in
+    /// the window, the folder pane included, draws an emoji, which no font
+    /// here draws (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    #[test]
+    fn each_file_row_is_drawn_with_its_icon_from_the_theme() {
+        let mut state = loaded();
+        let tree = App::render(&mut state, SIZE.0, SIZE.1);
+        let uploaded: Vec<u64> = App::take_images(&mut state)
+            .iter()
+            .filter_map(|change| match change {
+                oswindow::app::ImageChange::Upload { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let drawn: Vec<u64> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => Some(*image_id),
+                _ => None,
+            })
+            .collect();
+        let entries: Vec<ArchiveEntry> = state.visible_entries().into_iter().cloned().collect();
+        assert!(
+            entries.iter().any(|e| e.is_dir) && entries.iter().any(|e| !e.is_dir),
+            "the fixture lists no folder or no file: {entries:?}"
+        );
+        for entry in &entries {
+            let ink = if entry.is_dir {
+                state.palette.blue
+            } else {
+                state.palette.text
+            };
+            let id = state
+                .icons
+                .icon(entry_icon(entry), u32::from(ROW_ICON_SIDE), ink);
+            assert!(drawn.contains(&id), "{} is drawn with no icon", entry.name);
+            assert!(
+                uploaded.contains(&id),
+                "{}'s icon is drawn and never sent",
+                entry.name
+            );
+        }
+        let boxes: Vec<&str> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.chars().any(|ch| {
+                        matches!(u32::from(ch), 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F000..=0x1FAFF)
+                    }) =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(boxes.is_empty(), "drawn as boxes: {boxes:?}");
+        let _again = App::render(&mut state, SIZE.0, SIZE.1);
+        assert!(
+            App::take_images(&mut state).is_empty(),
+            "the icons were sent again"
+        );
+    }
+
+    /// **A folder, a locked file and a file each have an icon of their own**,
+    /// one the built-in set draws.
+    #[test]
+    fn a_folder_a_locked_file_and_a_file_have_icons_of_their_own() {
+        let sample = create_sample_archive();
+        let mut entry = sample.entries.first().expect("an entry").clone();
+        entry.is_dir = true;
+        assert_eq!(entry_icon(&entry), "folder");
+        entry.is_dir = false;
+        entry.encrypted = true;
+        assert_eq!(entry_icon(&entry), "system-lock-screen");
+        entry.encrypted = false;
+        assert_eq!(entry_icon(&entry), "text-x-generic");
+        let built_in = appearance::icons::built_in_names();
+        for name in ["folder", "system-lock-screen", "text-x-generic"] {
+            assert!(built_in.contains(&name), "{name} is not built in");
+        }
+    }
+
+    /// **Other colours draw every icon again**, dropping the old ones; the
+    /// same colours again drop nothing; another icon theme likewise.
+    #[test]
+    fn other_colours_or_another_theme_draw_the_icons_again() {
+        let mut state = loaded();
+        let light = Palette::for_mode(false);
+        App::theme_changed(&mut state, &light);
+        let _frame = App::render(&mut state, SIZE.0, SIZE.1);
+        let sent = App::take_images(&mut state).len();
+        assert!(sent > 0);
+        App::theme_changed(&mut state, &light);
+        let _frame = App::render(&mut state, SIZE.0, SIZE.1);
+        assert!(
+            App::take_images(&mut state).is_empty(),
+            "the same colours dropped the icons"
+        );
+        App::theme_changed(&mut state, &Palette::for_mode(true));
+        let _frame = App::render(&mut state, SIZE.0, SIZE.1);
+        let dropped = App::take_images(&mut state)
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .count();
+        assert_eq!(dropped, sent, "the old colours' icons stay in the window");
+
+        let settings = appearance::AppearanceSettings {
+            icon_theme: appearance::icons::IconTheme::load(std::ffi::OsStr::new("another")),
+            ..appearance::AppearanceSettings::default()
+        };
+        App::appearance_changed(&mut state, &settings);
+        let _frame = App::render(&mut state, SIZE.0, SIZE.1);
+        assert!(
+            App::take_images(&mut state)
+                .iter()
+                .any(|c| matches!(c, oswindow::app::ImageChange::Drop(_))),
+            "another icon theme kept the old icons"
+        );
     }
 
     /// **A press while the card is up puts it away and does nothing else,

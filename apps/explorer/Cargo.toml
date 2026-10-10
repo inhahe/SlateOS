@@ -23,6 +23,10 @@ desktopentry = { path = "../../gui/desktopentry" }
 # format KDE's file manager reads (design-decisions §1448) -- and which the
 # user turned on or off: the same rows the desktop's icons offer.
 servicemenus = { path = "../../gui/servicemenus" }
+# Each entry's kind drawn as an icon from the user's icon theme rather than
+# an emoji, which no font here draws: named while drawing, handed to the loop
+# after the thumbnails through `App::take_images`.
+themeicons = { path = "../themeicons" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

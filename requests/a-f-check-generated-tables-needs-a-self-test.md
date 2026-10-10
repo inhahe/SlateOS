@@ -103,3 +103,12 @@ checker -- no restore, drift passed, a failing generator passed, a missing
 generator skipped, drift exiting 0, a drift that does not name the table --
 and the self-test failed on all six. The real run is unchanged: all four
 tables match their generators.
+
+**Wired, by lane F, 2026-10-10.** Gate 56 (`check-gates-are-wired`) refused
+lane F's push and boot test the moment the self-test existed and nothing ran
+it, and says any lane may wire a self-test unilaterally -- so rather than
+leave lane F unable to publish until you had: gate 72's section of
+`scripts/hooks/pre-push` now has your §2 text verbatim, before the real run,
+and `scripts/boot-test.sh` the same check before its real run, refusing with
+a message in the shape of its neighbours'. If you had the same change queued,
+they are the same lines; keep whichever merges.

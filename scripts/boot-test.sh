@@ -7089,6 +7089,16 @@ check_lane_c_gui_gates() {
     fi
 
     echo "=== Checking that generated tables match their generators ==="
+    # A checker that has stopped comparing would report every table as
+    # matching, exactly as a clean tree does, so it is held to its own
+    # fixture before its verdict on the tree is believed.
+    if ! run_checker check-generated-tables-selftest "$py" \
+        "$PROJECT_ROOT/scripts/check-generated-tables.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-generated-tables.py failed its own" >&2
+        echo "self-test, so its verdict on this tree would not be trustworthy." >&2
+        return 1
+    fi
     if ! run_checker check-generated-tables "$py" \
         "$PROJECT_ROOT/scripts/check-generated-tables.py"; then
         echo "" >&2

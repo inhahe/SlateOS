@@ -1860,7 +1860,7 @@ impl NotesApp {
         let mut notebooks =
             recordfile::merge(&self.base.notebooks, &self.notebooks, &theirs.notebooks);
         let notes = recordfile::merge(&self.base.notes, &self.notes, &theirs.notes);
-        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks);
+        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks, &theirs.notebooks);
         Library { notebooks, notes }
     }
 
@@ -5638,15 +5638,32 @@ fn read_library_file(path: &std::path::Path, max_bytes: usize) -> Result<Option<
     parse_library(&read.text).map(Some)
 }
 
-/// Bring back, from this window's copy `mine`, every notebook something kept
-/// still needs: a note's notebook, or a notebook's parent.
+/// Bring back every notebook something kept still needs -- a note's
+/// notebook, or a notebook's parent -- from this window's copy `mine`, or
+/// from the file's, `theirs`, when this window has deleted it.
 ///
 /// Deleting a notebook deletes what is in it, but a merge takes records one
 /// by one: another window deleting a notebook while this one put a note in it
 /// would keep the note -- the later save wins for it -- and leave it in a
 /// notebook that is gone, kept and nowhere to be seen. The notebook comes
 /// back with it instead, so the note can be found and deleted on purpose.
-fn restore_needed_notebooks(notebooks: &mut Vec<Notebook>, notes: &[Note], mine: &[Notebook]) {
+///
+/// The other way round -- this window deleting the notebook while the other
+/// put a note in it -- it comes back from the file. Looked for in this
+/// window's copy alone, it was not found, and the note was written in a
+/// notebook the library does not have: a file `parse_library` refuses, so no
+/// window could read the notes again.
+///
+/// Every need is met: what is kept came from one copy or the other, and each
+/// has every notebook its own notes and notebooks need -- this window's
+/// because it deletes a notebook's notes and notebooks with it, the file's
+/// because `parse_library` read it.
+fn restore_needed_notebooks(
+    notebooks: &mut Vec<Notebook>,
+    notes: &[Note],
+    mine: &[Notebook],
+    theirs: &[Notebook],
+) {
     loop {
         let present: std::collections::HashSet<NotebookId> =
             notebooks.iter().map(|nb| nb.id).collect();
@@ -5659,12 +5676,14 @@ fn restore_needed_notebooks(notebooks: &mut Vec<Notebook>, notes: &[Note], mine:
         let restored: Vec<Notebook> = mine
             .iter()
             .filter(|nb| needed.contains(&nb.id))
+            .chain(
+                theirs
+                    .iter()
+                    .filter(|nb| needed.contains(&nb.id) && !mine.iter().any(|m| m.id == nb.id)),
+            )
             .cloned()
             .collect();
         if restored.is_empty() {
-            // Nothing more this window can bring back. A need left over is a
-            // library that was already like that, which the window shows as
-            // it shows it now.
             return;
         }
         notebooks.extend(restored);
@@ -9582,6 +9601,30 @@ mod tests {
                 again.notebooks.iter().any(|nb| nb.id == book),
                 "the note was kept in a notebook that is gone"
             );
+        });
+    }
+
+    /// The other way round: this window deletes a notebook the other has
+    /// just put a note in. The notebook comes back from the file. Looked for
+    /// in this window's copy alone, it was not found, and the note was
+    /// written in a notebook the library does not have -- a file no window
+    /// could read again.
+    #[test]
+    fn a_notebook_deleted_here_after_another_window_filled_it_comes_back() {
+        settingsfile::testing::with_scratch_config("notes-restore-theirs", |_| {
+            let mut first = NotesApp::from_settings();
+            let book = first.create_notebook("Trip");
+            first.keep();
+            let mut second = NotesApp::from_settings();
+            let note = second.create_note("Packing list", book);
+            second.keep();
+            assert!(first.delete_notebook(book));
+            first.keep();
+            assert_eq!(first.store_error, None);
+            let again = NotesApp::from_settings();
+            assert_eq!(again.store_error, None, "the library cannot be read again");
+            assert!(again.notes.iter().any(|n| n.id == note));
+            assert!(again.notebooks.iter().any(|nb| nb.id == book));
         });
     }
 

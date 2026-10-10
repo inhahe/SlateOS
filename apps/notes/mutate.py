@@ -598,9 +598,22 @@ MUTATIONS += [
     ),
     (
         "a notebook another window deleted is not brought back for a note in it",
-        "        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks);\n",
+        "        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks, &theirs.notebooks);\n",
         "",
-        ["a_notebook_deleted_while_another_window_filled_it_comes_back"],
+        [
+            "a_notebook_deleted_while_another_window_filled_it_comes_back",
+            "a_notebook_deleted_here_after_another_window_filled_it_comes_back",
+        ],
+    ),
+    (
+        "a notebook deleted here is looked for in this window's copy alone",
+        "            .chain(\n"
+        "                theirs\n"
+        "                    .iter()\n"
+        "                    .filter(|nb| needed.contains(&nb.id) && !mine.iter().any(|m| m.id == nb.id)),\n"
+        "            )\n",
+        "",
+        ["a_notebook_deleted_here_after_another_window_filled_it_comes_back"],
     ),
 ]
 

@@ -102,9 +102,10 @@ use guitk::render::RenderCommand;
 
 /// Every colour `cmd` will put on the screen.
 ///
-/// Commands that carry no colour — the clip, translate and font scopes, and
-/// [`RenderCommand::Image`] — contribute nothing, which is correct rather than
-/// a gap: an image's pixels are not the shell's to theme.
+/// Commands that carry no colour — the clip, translate and font scopes,
+/// [`RenderCommand::Image`] and [`RenderCommand::WindowPicture`] — contribute
+/// nothing, which is correct rather than a gap: an image's pixels, and a
+/// pictured window's, are not the shell's to theme.
 fn colors_of(cmd: &RenderCommand) -> Vec<Color> {
     match cmd {
         RenderCommand::FillRect { color, .. }
@@ -121,6 +122,7 @@ fn colors_of(cmd: &RenderCommand) -> Vec<Color> {
             v
         }
         RenderCommand::Image { .. }
+        | RenderCommand::WindowPicture { .. }
         | RenderCommand::PushClip { .. }
         | RenderCommand::PopClip
         | RenderCommand::PushTranslate { .. }
@@ -483,6 +485,7 @@ pub fn text_on_background(cmds: &[RenderCommand], root: Color) -> Vec<TextOn> {
             | RenderCommand::Line { .. }
             | RenderCommand::BoxShadow { .. }
             | RenderCommand::Image { .. }
+            | RenderCommand::WindowPicture { .. }
             | RenderCommand::PushClip { .. }
             | RenderCommand::PopClip => {}
         }

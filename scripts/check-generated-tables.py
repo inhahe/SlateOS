@@ -4,14 +4,24 @@ r"""Verify that checked-in generated tables still match what their generator emi
 Run this after every merge::
 
     python scripts/check-generated-tables.py
+    python scripts/check-generated-tables.py --self-test
 
-Exit 0 = every table matches, 1 = a table has drifted from its generator,
-2 = could not verify (which is a failure, not a skip).
+Exit 0 = every table matches; 1 = a table has drifted from its generator, or
+could not be verified -- a generator that will not run, or a listed file that
+is missing (see `run` for why that is 1 and not 2); 2 = an option this script
+does not know, which runs nothing.
 
-The check is **read-only**: each table is regenerated into a scratch copy of the
-tree and the original bytes are put back before the script returns, so a run
-never leaves the working tree dirty -- including on drift, and including if it
-is interrupted.
+The check is **read-only**: each generator rewrites its table in place, and the
+table's original bytes are put back before the check of it returns, so a run
+never leaves the working tree dirty -- including on drift, a generator that
+fails halfway, and an interruption (the restore is in a `finally`). Only a
+process killed outright, with no chance to run it, could leave a table
+regenerated; `git diff` would show it.
+
+``--self-test`` checks those promises against fixture generators and tables in
+a temporary directory: a match passes, one changed row is refused and named,
+a generator that fails or is missing is refused as unverifiable, and in every
+case -- an interruption included -- the table's bytes are what they were.
 
 ---------------------------------------------------------------------------
 The gap this fills, and why the two sibling checks do not fill it
@@ -68,10 +78,16 @@ which is ``B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`` again.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import pathlib
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
+from typing import Callable
+
+import selftestflag
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -118,14 +134,32 @@ def log(msg: str) -> None:
     print(f"{TAG} {msg}")
 
 
-def check(entry: Generated) -> str:
-    """Regenerate one table and compare. Returns "ok", "drift" or "error".
+def run_generator(generator: pathlib.Path, root: pathlib.Path) -> subprocess.CompletedProcess:
+    """Run one generator, with no arguments, from `root`."""
+    return subprocess.run(
+        (sys.executable, str(generator)),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=root,
+    )
+
+
+def check(
+    entry: Generated,
+    root: pathlib.Path = REPO,
+    runner: Callable[[pathlib.Path, pathlib.Path], subprocess.CompletedProcess] = run_generator,
+) -> str:
+    """Regenerate one table under `root` and compare. Returns "ok", "drift" or
+    "error".
 
     The table's original bytes are restored before returning in every case,
     including when the generator raises, so the caller's tree is untouched.
+    `runner` runs the generator; the self-test replaces it to interrupt one.
     """
-    table = REPO / entry.table
-    generator = REPO / entry.generator
+    table = root / entry.table
+    generator = root / entry.generator
 
     if not generator.is_file():
         log(f"ERROR {entry.generator} does not exist -- the row is disarmed, not passing")
@@ -136,14 +170,7 @@ def check(entry: Generated) -> str:
 
     original = table.read_bytes()
     try:
-        proc = subprocess.run(
-            (sys.executable, str(generator)),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=REPO,
-        )
+        proc = runner(generator, root)
         if proc.returncode != 0:
             log(f"ERROR {entry.generator} exited {proc.returncode}:")
             for line in (proc.stderr or proc.stdout).strip().splitlines()[-8:]:
@@ -167,8 +194,9 @@ def check(entry: Generated) -> str:
     return "drift"
 
 
-def main() -> int:
-    results = [check(entry) for entry in TABLES]
+def run(tables: tuple[Generated, ...], root: pathlib.Path = REPO) -> int:
+    """Check every table in `tables` under `root`; the exit code."""
+    results = [check(entry, root) for entry in tables]
 
     if "error" in results:
         # 1, not 2, and the distinction is the whole point of the two codes.
@@ -193,9 +221,130 @@ def main() -> int:
         return 1
     if "drift" in results:
         return 1
-    log(f"ok: all {len(TABLES)} generated tables match their generators")
+    log(f"ok: all {len(tables)} generated tables match their generators")
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+#: The fixture table's rows, as its fixture generator writes them.
+FIXTURE_ROWS = ("const T: [u8; 3] = [\n", "    1, 2, 3,\n", "];\n")
+
+#: A generator writing the fixture table, as the real ones write theirs: the
+#: table, in place, from the directory it is run in.
+FIXTURE_GENERATOR = (
+    "import pathlib\n"
+    "pathlib.Path('gen/table.rs').write_text({rows!r}, encoding='utf-8', newline='\\n')\n"
+)
+
+#: A generator that truncates its table and then fails: what a crash halfway
+#: through looks like from outside.
+FAILING_GENERATOR = (
+    "import pathlib, sys\n"
+    "pathlib.Path('gen/table.rs').write_text('', encoding='utf-8')\n"
+    "sys.exit(3)\n"
+)
+
+
+def self_test() -> int:
+    """Check the promises in the module docstring against fixtures; 0 if
+    every verdict is right."""
+    cases = 0
+    failures = 0
+
+    def expect(ok: bool, what: str) -> None:
+        nonlocal cases, failures
+        cases += 1
+        if not ok:
+            failures += 1
+            print(f"{TAG} SELF-TEST FAIL: {what}")
+
+    entry = Generated(table="gen/table.rs", generator="gen/gen_table.py", why="fixture")
+    good = "".join(FIXTURE_ROWS).encode("utf-8")
+    drifted = good.replace(b"1, 2, 3", b"1, 9, 3")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "gen").mkdir()
+        table = root / entry.table
+        generator = root / entry.generator
+
+        def setup(table_bytes: bytes | None, generator_source: str | None) -> None:
+            if table_bytes is None:
+                table.unlink(missing_ok=True)
+            else:
+                table.write_bytes(table_bytes)
+            if generator_source is None:
+                generator.unlink(missing_ok=True)
+            else:
+                generator.write_text(generator_source, encoding="utf-8")
+
+        good_generator = FIXTURE_GENERATOR.format(rows="".join(FIXTURE_ROWS))
+
+        # A table its generator emits byte for byte: passed.
+        setup(good, good_generator)
+        expect(check(entry, root) == "ok", "a matching table was not passed")
+        expect(table.read_bytes() == good, "a matching table was changed")
+        expect(run((entry,), root) == 0, "a matching table did not exit 0")
+
+        # One row changed: refused, naming the table, and the drifted bytes
+        # kept -- the check reports the drift, it does not repair it.
+        setup(drifted, good_generator)
+        expect(check(entry, root) == "drift", "a changed row was not refused as drift")
+        expect(table.read_bytes() == drifted, "a drifted table was not restored")
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = run((entry,), root)
+        expect(code == 1, "a drifted table did not exit 1")
+        expect(f"DRIFT {entry.table}" in said.getvalue(), "the drift did not name the table")
+
+        # A generator that truncates the table and fails: could not verify,
+        # and the table as it was.
+        setup(drifted, FAILING_GENERATOR)
+        expect(check(entry, root) == "error", "a failing generator was not refused")
+        expect(table.read_bytes() == drifted, "a failing generator's damage was left")
+        expect(run((entry,), root) == 1, "a failing generator did not exit 1")
+
+        # A listed generator that is missing: refused, not skipped.
+        setup(good, None)
+        expect(check(entry, root) == "error", "a missing generator was skipped")
+        expect(table.read_bytes() == good, "a missing generator's table was changed")
+
+        # A listed table that is missing: refused.
+        setup(None, good_generator)
+        expect(check(entry, root) == "error", "a missing table was skipped")
+        expect(not table.exists(), "a missing table was created")
+
+        # Interrupted after the generator has written: the interruption goes
+        # on up, and the table is restored first.
+        setup(drifted, good_generator)
+
+        def interrupted(gen: pathlib.Path, at: pathlib.Path) -> subprocess.CompletedProcess:
+            table.write_bytes(b"half a table")
+            raise KeyboardInterrupt
+
+        try:
+            check(entry, root, interrupted)
+            expect(False, "an interruption was swallowed")
+        except KeyboardInterrupt:
+            expect(True, "")
+        expect(table.read_bytes() == drifted, "an interrupted run left its table changed")
+
+    print(f"{TAG} {cases} self-test case(s), {failures} failed")
+    return 0 if failures == 0 else 1
+
+
+def main(argv: list[str]) -> int:
+    unknown = selftestflag.unknown_options(argv)
+    if unknown:
+        log(f"unrecognised option {unknown[0]!r}: nothing was checked")
+        return 2
+    if selftestflag.wants_selftest(argv):
+        return self_test()
+    return run(TABLES)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

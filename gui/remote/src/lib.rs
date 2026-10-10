@@ -263,6 +263,9 @@ enum Tag {
     /// [`DecodeError::BadTag`] naming the byte. See `FontFamilyTag` for the
     /// same argument at length.
     RichText = 0x0D,
+    /// A live picture of another window: its id (`u64`), then `x`, `y`,
+    /// `width`, `height` (`f32`s). A new tag byte, on `RichText`'s terms.
+    WindowPicture = 0x0E,
 }
 
 impl Tag {
@@ -281,6 +284,7 @@ impl Tag {
             0x0B => Some(Self::PushFont),
             0x0C => Some(Self::PopFont),
             0x0D => Some(Self::RichText),
+            0x0E => Some(Self::WindowPicture),
             _ => None,
         }
     }
@@ -862,6 +866,20 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
             write_f32(out, *height);
             write_u64(out, *image_id);
         }
+        RenderCommand::WindowPicture {
+            window,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            out.push(Tag::WindowPicture as u8);
+            write_u64(out, *window);
+            write_f32(out, *x);
+            write_f32(out, *y);
+            write_f32(out, *width);
+            write_f32(out, *height);
+        }
         RenderCommand::Line {
             x1,
             y1,
@@ -1150,6 +1168,13 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
             width: r.read_f32()?,
             height: r.read_f32()?,
             image_id: r.read_u64()?,
+        },
+        Tag::WindowPicture => RenderCommand::WindowPicture {
+            window: r.read_u64()?,
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            width: r.read_f32()?,
+            height: r.read_f32()?,
         },
         Tag::Line => RenderCommand::Line {
             x1: r.read_f32()?,
@@ -1525,6 +1550,28 @@ mod tests {
         assert_eq!(FontFamilyTag::Named as u8, 0x02);
         assert_eq!(Tag::PushFont as u8, 0x0B);
         assert_eq!(Tag::PopFont as u8, 0x0C);
+    }
+
+    /// A picture of a window crosses the wire with its window and its
+    /// rectangle -- a window id past `u32`, a negative and a fractional
+    /// coordinate, so a narrowed or swapped field fails -- and the command
+    /// after it still lines up. Its tag is a wire constant.
+    #[test]
+    fn a_window_picture_survives_the_wire() {
+        let mut t = RenderTree::new();
+        t.commands.push(RenderCommand::WindowPicture {
+            window: u64::MAX - 7,
+            x: -3.5,
+            y: 12.25,
+            width: 200.0,
+            height: 112.5,
+        });
+        t.commands.push(RenderCommand::PopClip);
+        let bytes = encode_frame_to_vec(&t);
+        let (back, used) = decode_frame(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(back.commands, t.commands);
+        assert_eq!(Tag::WindowPicture as u8, 0x0E);
     }
 
     /// A family the drawing names crosses the wire with its name, and the

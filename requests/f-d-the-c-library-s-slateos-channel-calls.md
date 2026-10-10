@@ -37,6 +37,16 @@ and meanings, in the C library for a native process:
 | `int slate_channel_peer_cred(int fd, struct { uint32_t pid, uid, gid; } *out)` | 0; `ENODATA` when the kernel recorded nobody |
 | `int slate_channel_peer_has_key(int fd)` | 1 or 0 |
 
+And a sixth, for a channel a program already holds as a native handle --
+the capability broker's (`SYS_CAP_BROKER_REGISTER` answers one, which lane
+C's desktop must wait on beside the display,
+`requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`), or
+anything else a native call hands out:
+
+| Function | Answers |
+|---|---|
+| `int slate_channel_fd(uint64_t handle, int flags)` | a descriptor that owns the channel end from now on, with the semantics below; `EBADF` for a handle that is not a live channel |
+
 `flags` is `O_NONBLOCK` and `O_CLOEXEC`, for the new descriptor (for
 `accept`, the listener's own `O_NONBLOCK` decides whether it waits, as
 `accept4` does). The descriptors then work as the Linux table's do:

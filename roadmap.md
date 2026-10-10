@@ -4754,6 +4754,16 @@ lane C's `guitk`.
   tooltip a kilobyte, and is told when refused. Lane C draws the named icon
   and keys the tray's arrangement by the program's name.
 
+- `[x]` `[F]` **The shell can draw a live picture of any window** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-let-the-shell-draw-a-live-picture-of-a-window.md`
+  (`roadmap-detailed.md` → Taskbar: "hover thumbnails, Aero Peek-style
+  preview on hover"; also the overview and Alt-Tab).
+  `RenderCommand::WindowPicture` names a window; the compositor draws its
+  client area fitted and area-averaged into the rectangle, again whenever it
+  changes, and only in a shell's frames (§1385). Lane C builds the previews,
+  Peek and the cards on it.
+
 - `[x]` `[F]` **Text in a font family the drawing names** -- done
   2026-10-10, with lane C, for `requests/c-f-text-in-a-family-the-drawing-names.md`
   (`roadmap-detailed.md` §3.5: a font picker's live preview, a document's

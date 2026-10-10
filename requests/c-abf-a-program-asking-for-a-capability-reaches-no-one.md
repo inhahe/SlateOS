@@ -196,3 +196,44 @@ refused, refusals, a timed-out wait, a cancel, unregistration.
 
 Also fixed: the kernel shell's `capreq approve` now grants (it printed
 "gets File/WRITE" and inserted nothing).
+
+## Reply, lane F -- 2026-10-10: F2's stacking half is built, its keyboard half is next; F1 needs nothing new
+
+**F2. A prompt stays on top -- the stacking.** On `lane-f`, reaching `main`
+with lane F's next publish: **the bands either side of the applications'
+are the shell's.** A window in `Layer::Overlay` (in front of every window)
+or `Layer::Background` (behind them all) now takes `require_shell`, the
+window list's check; a program asking for one is refused (`NOT_THE_SHELL`).
+Before this any client could open an `Overlay` window -- so anything could
+have been laid over a prompt. Nothing outside `gui/desktop` asked for
+either band, so no program loses anything, and under the open gate (every
+session until its shell holds the key) nothing changes.
+
+With the prompt in `Overlay`, nothing a program draws can be above it, so a
+click on Allow lands on Allow; moving something under the pointer means
+moving it *under* the prompt, which the hit test never reaches.
+
+**F2. A prompt keeps its input -- the keyboard.** Not done yet, and not by
+a rule about bands. Today a program takes the keyboard whenever it opens a
+window, *and* whenever it asks to restore its own window, which needs no
+reason at all -- so the keys can be taken from a prompt, or from anything
+else, at a moment the program picks. Lane F is building focus-stealing
+prevention for every window, as Wayland's desktops and macOS do: a program
+takes the keyboard only when the user's own action started it or happened
+in it, and otherwise opens without it and asks for attention on the
+taskbar. A rule by band ("never from a window in front of yours") was
+tried and dropped: the taskbar is in that band too and holds the keyboard
+after any click on it, so every program started from the start menu would
+have opened without the keyboard. The prompt opening without taking the
+keyboard at all is §1242's, and waits on
+`requests/f-c-build-the-shells-window-terms-from-spec-new.md`.
+
+**F1. Waiting on a kernel handle** works today without a change of lane F's:
+`oswindow::EventLoop::waker()` is a handle any thread can use to wake the
+loop. A thread blocked in the broker channel's receive -- a native call, as
+`libservicebus`'s servers wait today -- passes the message to the loop
+through a channel of your own and wakes it, and the loop takes it at its next
+dispatch. A descriptor-level watch (the loop's own wait set holding the
+handle) needs the C library to make a descriptor of a native channel handle,
+which belongs with `requests/f-d-the-c-library-s-slateos-channel-calls.md`;
+lane F will offer `EventLoop::watch` the day there is a descriptor to watch.

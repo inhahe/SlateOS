@@ -79,6 +79,10 @@ pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
 // The video-encoded capture fallback: a remote stream's VP9 of each window
 // that presents its own pixels. See the module docs.
 mod video;
+// Live pictures of windows (`RenderCommand::WindowPicture`): fitting, the
+// area-average downscale, and the set of pictures one draw names.
+mod picture;
+use picture::{PictureKey, PictureSet};
 // Sticky, filter and mouse keys. The state machines live here rather than
 // beside the settings because the compositor is the only place every
 // keystroke passes through; `inputsettings` owns what the user chose.
@@ -1155,6 +1159,14 @@ pub struct Window {
     /// that something else focuses still receives keys; see
     /// `design-decisions.md` 566.
     pub input_transparent: bool,
+    /// Counts every change to what the window shows in its client area --
+    /// new commands, a buffer attached or detached, an image uploaded,
+    /// patched or dropped, a new size -- so a picture of it
+    /// ([`RenderCommand::WindowPicture`]) knows when it is out of date.
+    content_revision: u64,
+    /// The windows this window's commands picture, each once: whose changes
+    /// must redraw this one. Recomputed whenever its commands arrive.
+    pictured: Vec<WindowId>,
     /// Smallest client area the window may be resized to, if it named one.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window may be resized to, if it named one.
@@ -1273,6 +1285,8 @@ impl Window {
             resizable: spec.resizable,
             transparent: spec.transparent,
             input_transparent: spec.input_transparent,
+            content_revision: 0,
+            pictured: Vec::new(),
             min_size: spec.min_size,
             max_size: spec.max_size,
             cursor: CursorShape::Arrow,
@@ -4211,6 +4225,96 @@ fn family_of(family: FontFamily) -> Family {
     }
 }
 
+/// The windows `commands` picture ([`RenderCommand::WindowPicture`]), each
+/// once, in the order first named: whose changes must redraw the window
+/// drawing them ([`Compositor::content_changed`]).
+fn pictured_in(commands: &[RenderCommand]) -> Vec<WindowId> {
+    let mut seen = std::collections::HashSet::new();
+    commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::WindowPicture { window, .. } if seen.insert(*window) => {
+                Some(WindowId::from_raw(*window))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pictures `viewer`'s `commands` name, from `thumbnails` as
+/// [`Compositor::prepare_pictures`] left them, ready for one draw. A free
+/// function over the two fields it reads, so the draw can hold the render
+/// engine and the backend mutably beside it.
+fn picture_set<'a>(
+    thumbnails: &'a HashMap<(WindowId, WindowId, u32, u32), Thumbnail>,
+    windows: &[Window],
+    viewer: WindowId,
+    commands: &[RenderCommand],
+) -> PictureSet<'a> {
+    let mut set = PictureSet::empty();
+    if thumbnails.is_empty() {
+        return set;
+    }
+    let sizes: HashMap<WindowId, (u32, u32)> = windows
+        .iter()
+        .map(|w| (w.id, (w.width, w.height)))
+        .collect();
+    for cmd in commands {
+        let RenderCommand::WindowPicture {
+            window,
+            width,
+            height,
+            ..
+        } = cmd
+        else {
+            continue;
+        };
+        let pictured = WindowId::from_raw(*window);
+        let Some(&size) = sizes.get(&pictured) else {
+            continue;
+        };
+        let Some((dw, dh)) = picture::fitted(size, (*width, *height)) else {
+            continue;
+        };
+        if let Some(thumb) = thumbnails.get(&(viewer, pictured, dw, dh)) {
+            set.insert(PictureKey::new(*window, *width, *height), &thumb.image);
+        }
+    }
+    set
+}
+
+/// `buffer`'s pixels as a `width` by `height` client area shows them: over
+/// white -- the undercoat a window's picture is made on -- and white where
+/// the buffer does not reach. `None` for a size too large to hold.
+fn buffer_over_white(buffer: &SharedBuffer, width: u32, height: u32) -> Option<Vec<u32>> {
+    let stride = usize::try_from(width).ok()?;
+    let mut out = vec![0xFF_FF_FF_FF; stride.checked_mul(usize::try_from(height).ok()?)?];
+    for y in 0..buffer.height().min(height) {
+        let row = usize::try_from(y).ok()?.checked_mul(stride)?;
+        for x in 0..buffer.width().min(width) {
+            let at = row.checked_add(usize::try_from(x).ok()?)?;
+            if let (Some(px), Some(slot)) = (buffer.pixel(x, y), out.get_mut(at)) {
+                *slot = over_white(px);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A straight-alpha `0xAARRGGBB` pixel composited over white, opaque.
+fn over_white(px: u32) -> u32 {
+    let alpha = px >> 24;
+    let channel = |shift: u32| {
+        let c = (px >> shift) & 0xFF;
+        // At most 255 * 255 * 2 + 127 before the division: no overflow.
+        c.saturating_mul(alpha)
+            .saturating_add(255u32.saturating_mul(255u32.saturating_sub(alpha)))
+            .saturating_add(127)
+            / 255
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 /// How many named font families the compositor loads in one frame, at most
 /// ([`RenderEngine::begin_frame`]).
 ///
@@ -4437,6 +4541,40 @@ impl RenderEngine {
         window_height: u32,
         opacity: f32,
     ) {
+        self.execute_with_pictures(
+            fb,
+            commands,
+            images,
+            &PictureSet::empty(),
+            window_x,
+            window_y,
+            window_width,
+            window_height,
+            opacity,
+        );
+    }
+
+    /// [`execute`](Self::execute), with the pictures of other windows the
+    /// commands name made and ready ([`RenderCommand::WindowPicture`]). They
+    /// must be made before the draw starts: making one draws the pictured
+    /// window, which would reset this engine's clip, translate and font
+    /// stacks in the middle of this draw.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "execute's arguments and the pictures; grouping them would only rename them"
+    )]
+    fn execute_with_pictures<T: RenderTarget + ?Sized>(
+        &mut self,
+        fb: &mut T,
+        commands: &[RenderCommand],
+        images: &HashMap<u64, ImageAsset>,
+        pictures: &PictureSet<'_>,
+        window_x: i32,
+        window_y: i32,
+        window_width: u32,
+        window_height: u32,
+        opacity: f32,
+    ) {
         // Set up initial clip to the window's client area.
         self.clip_stack.clear();
         self.translate_stack.clear();
@@ -4447,7 +4585,7 @@ impl RenderEngine {
         self.translate_stack.push(window_x as f32, window_y as f32);
 
         for cmd in commands {
-            self.execute_command(fb, cmd, images, opacity);
+            self.execute_command(fb, cmd, images, pictures, opacity);
         }
 
         self.clip_stack.clear();
@@ -4463,6 +4601,7 @@ impl RenderEngine {
         fb: &mut T,
         cmd: &RenderCommand,
         images: &HashMap<u64, ImageAsset>,
+        pictures: &PictureSet<'_>,
         opacity: f32,
     ) {
         let (tx, ty) = self.translate_stack.offset();
@@ -4631,6 +4770,27 @@ impl RenderEngine {
                     let px = (*x + tx) as i32;
                     let py = (*y + ty) as i32;
                     let dest = Rect::new(px, py, *width as u32, *height as u32);
+                    let clip = self.clip_stack.current().copied();
+                    fb.draw_image(image, dest, clip.as_ref(), opacity);
+                }
+            }
+            RenderCommand::WindowPicture {
+                window,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                // Made before this draw began, at the size it is drawn at
+                // (`Compositor::prepare_pictures`); none was made for a window
+                // gone, minimised or unknown, and that draws nothing.
+                if let Some(image) = pictures.get(PictureKey::new(*window, *width, *height)) {
+                    let (iw, ih) = (image.width(), image.height());
+                    // Centred in its rectangle, one pixel per pixel: the
+                    // picture is already as large as fits.
+                    let px = (*x + tx + (*width - iw as f32) / 2.0).round() as i32;
+                    let py = (*y + ty + (*height - ih as f32) / 2.0).round() as i32;
+                    let dest = Rect::new(px, py, iw, ih);
                     let clip = self.clip_stack.current().copied();
                     fb.draw_image(image, dest, clip.as_ref(), opacity);
                 }
@@ -5597,6 +5757,17 @@ impl StreamSession {
     }
 }
 
+/// A picture of a window, made at the size a viewer draws it
+/// ([`Compositor::thumbnails`]).
+#[derive(Debug)]
+struct Thumbnail {
+    /// The pictured window's [`Window::content_revision`] when it was made:
+    /// a different one now means it is out of date.
+    revision: u64,
+    /// The picture, already at its drawn size.
+    image: ImageAsset,
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -5616,6 +5787,12 @@ pub struct Compositor {
     /// moved there. Bounded by the window count: a window is in it at most
     /// once and leaves it when it closes.
     focus_history: Vec<WindowId>,
+    /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
+    /// made at the size they are drawn at: keyed by the viewer, the pictured
+    /// window and that size, and remade when the pictured window's content
+    /// changes. Bounded by the pictures the viewers draw: a viewer's entries
+    /// are replaced each time it is drawn, and a window's go when it closes.
+    thumbnails: HashMap<(WindowId, WindowId, u32, u32), Thumbnail>,
     /// The backend we composite through.
     ///
     /// Named for the seam rather than for the surface: nothing in this struct
@@ -6077,6 +6254,7 @@ impl Compositor {
             z_stack: Vec::new(),
             focused_window: None,
             focus_history: Vec::new(),
+            thumbnails: HashMap::new(),
             backend,
             display_manager,
             damage: DamageRegion::new(),
@@ -6893,6 +7071,12 @@ impl Compositor {
             self.pointer_grab = None;
         }
 
+        // Its pictures draw as nothing from now on, and pictures made of it,
+        // or for it, are kept for nobody.
+        self.damage_viewers(window_id);
+        self.thumbnails
+            .retain(|&(viewer, pictured, _, _), _| viewer != window_id && pictured != window_id);
+
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
@@ -6956,8 +7140,9 @@ impl Compositor {
             (w, h)
         };
 
-        // Damage new area.
-        self.damage_window(window_id);
+        // Damage new area -- and every picture of the window, whose shape
+        // just changed.
+        self.content_changed(window_id);
 
         // Notify client of resize.
         self.pending_notifications
@@ -6981,6 +7166,7 @@ impl Compositor {
         window.visible = false;
         window.dirty = true;
 
+        self.damage_viewers(window_id);
         self.release_keyboard(window_id);
 
         self.full_recomposite = true;
@@ -7506,7 +7692,8 @@ impl Compositor {
         }
 
         window.dirty = true;
-        self.damage_window(window_id);
+        // Shown again, perhaps at another size: its pictures change too.
+        self.content_changed(window_id);
         self.focus_window(window_id);
         self.full_recomposite = true;
 
@@ -7873,6 +8060,8 @@ impl Compositor {
             self.switch_workspace(workspace);
         }
         self.damage_window(window_id);
+        // Shown again if it was minimised: its pictures are back.
+        self.damage_viewers(window_id);
         self.focus_window(window_id);
         Ok(())
     }
@@ -8023,6 +8212,8 @@ impl Compositor {
             window.minimized = false;
         }
         window.dirty = true;
+        // Hidden, a window's pictures draw as nothing; shown, they are back.
+        self.damage_viewers(window_id);
 
         // Hiding the focused window must not leave keystrokes going to a window
         // the user cannot see.
@@ -8069,18 +8260,61 @@ impl Compositor {
     }
 
     /// Submit render commands from a client for its window.
+    ///
+    /// Any [`RenderCommand::WindowPicture`] among them is drawn from the
+    /// pictured window's content as it is then, and again whenever that
+    /// window changes. Whether a client may picture other windows at all is
+    /// decided before this, where the commands arrive (`wire`): this takes
+    /// what it is given.
     pub fn submit_render(
         &mut self,
         window_id: WindowId,
         commands: Vec<RenderCommand>,
     ) -> CompositorResult<()> {
+        let pictured = pictured_in(&commands);
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         window.render_tree = RenderTree { commands };
+        window.pictured = pictured;
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
+    }
+
+    /// Note that what `window_id` shows in its client area changed: its
+    /// [`Window::content_revision`] moves on, it is damaged, and so is every
+    /// other window whose commands picture it -- a picture is as live as the
+    /// window ([`RenderCommand::WindowPicture`]).
+    ///
+    /// The viewers are damaged here directly rather than through this, so a
+    /// window picturing another that pictures it back is drawn again once,
+    /// not round and round.
+    fn content_changed(&mut self, window_id: WindowId) {
+        if let Some(win) = self.window_mut(window_id) {
+            win.content_revision = win.content_revision.wrapping_add(1);
+        }
+        self.damage_window(window_id);
+        self.damage_viewers(window_id);
+    }
+
+    /// Damage every other window whose commands picture `window_id`: its
+    /// picture of it is no longer what it shows -- the content changed, or
+    /// the window was minimised, shown again, hidden or closed, which draw
+    /// its picture as nothing or bring it back.
+    fn damage_viewers(&mut self, window_id: WindowId) {
+        let viewers: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| w.id != window_id && w.pictured.contains(&window_id))
+            .map(|w| w.id)
+            .collect();
+        for viewer in viewers {
+            if let Some(win) = self.window_mut(viewer) {
+                win.dirty = true;
+            }
+            self.damage_window(viewer);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -8118,7 +8352,7 @@ impl Compositor {
         window.buffer = Some(buffer);
         window.dirty = true;
         self.next_buffer_serial = serial.wrapping_add(1);
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -8134,7 +8368,7 @@ impl Compositor {
             h
         };
         if handle.is_some() {
-            self.damage_window(window_id);
+            self.content_changed(window_id);
         }
         handle
     }
@@ -8201,7 +8435,7 @@ impl Compositor {
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         window.images.insert(image_id, image);
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -8243,7 +8477,7 @@ impl Compositor {
         image.patch(at, size, stride, bytes)?;
         image.stamp_patch(revision, at, size);
         window.dirty = true;
-        self.damage_window(window_id);
+        self.content_changed(window_id);
         Ok(())
     }
 
@@ -8271,7 +8505,7 @@ impl Compositor {
             None => false,
         };
         if removed {
-            self.damage_window(window_id);
+            self.content_changed(window_id);
         }
         removed
     }
@@ -10769,16 +11003,29 @@ impl Compositor {
             // `no_images` cannot actually be reached (the window was found a few
             // lines above, and nothing since could have removed it) and costs
             // nothing when it is not: an empty `HashMap` does not allocate.
+            // The pictures of other windows the commands name, made before the
+            // draw ([`Self::prepare_pictures`]) -- for a window naming none, as
+            // almost every window does, nothing at all.
+            if commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::WindowPicture { .. }))
+            {
+                self.prepare_pictures(window_id, &commands);
+            }
             let no_images = HashMap::new();
             let images = self
                 .windows
                 .iter()
                 .find(|w| w.id == window_id)
                 .map_or(&no_images, |w| &w.images);
-            self.render_engine.execute(
+            // Disjoint field borrows again: the thumbnails and the windows
+            // shared, the engine and the backend unique.
+            let pictures = picture_set(&self.thumbnails, &self.windows, window_id, &commands);
+            self.render_engine.execute_with_pictures(
                 &mut self.backend,
                 &commands,
                 images,
+                &pictures,
                 win_x,
                 win_y,
                 win_width,
@@ -10791,6 +11038,110 @@ impl Compositor {
         if let Some(win) = self.window_mut(window_id) {
             win.dirty = false;
         }
+    }
+
+    /// Make, or keep, the pictures `viewer`'s `commands` name
+    /// ([`RenderCommand::WindowPicture`]) in [`Self::thumbnails`], each at the
+    /// size it is drawn at, and drop the viewer's pictures they no longer
+    /// name.
+    ///
+    /// A picture is made again only when the pictured window's content has
+    /// changed since ([`Window::content_revision`]). None is made of a window
+    /// gone, minimised or hidden, and its picture draws as nothing; a window
+    /// on another virtual desktop is pictured, since an overview of every
+    /// desktop is what pictures are for. At most
+    /// [`picture::MAX_PICTURES_PER_WINDOW`] different ones.
+    fn prepare_pictures(&mut self, viewer: WindowId, commands: &[RenderCommand]) {
+        // (pictured, width, height, its revision now)
+        let mut wanted: Vec<(WindowId, u32, u32, u64)> = Vec::new();
+        for cmd in commands {
+            if wanted.len() >= picture::MAX_PICTURES_PER_WINDOW {
+                break;
+            }
+            let RenderCommand::WindowPicture {
+                window,
+                width,
+                height,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let pictured = WindowId::from_raw(*window);
+            let Some(win) = self.window_ref(pictured) else {
+                continue;
+            };
+            if win.minimized || !win.visible {
+                continue;
+            }
+            let Some((dw, dh)) = picture::fitted((win.width, win.height), (*width, *height)) else {
+                continue;
+            };
+            let revision = win.content_revision;
+            if !wanted
+                .iter()
+                .any(|&(p, w, h, _)| (p, w, h) == (pictured, dw, dh))
+            {
+                wanted.push((pictured, dw, dh, revision));
+            }
+        }
+        self.thumbnails.retain(|&(v, p, w, h), _| {
+            v != viewer
+                || wanted
+                    .iter()
+                    .any(|&(wp, ww, wh, _)| (wp, ww, wh) == (p, w, h))
+        });
+        for (pictured, dw, dh, revision) in wanted {
+            let key = (viewer, pictured, dw, dh);
+            if self
+                .thumbnails
+                .get(&key)
+                .is_some_and(|t| t.revision == revision)
+            {
+                continue;
+            }
+            match self.make_picture(pictured, dw, dh) {
+                Some(image) => {
+                    self.thumbnails.insert(key, Thumbnail { revision, image });
+                }
+                None => {
+                    self.thumbnails.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// A picture of `pictured`'s client area at `dw` by `dh` ([`picture`]):
+    /// its buffer, or its commands drawn offscreen, on white -- the undercoat
+    /// an opaque window gets, which a transparent window's see-through parts
+    /// show as here -- then area-averaged down to size. `None` if the window
+    /// is gone, or its size cannot be drawn.
+    ///
+    /// Any pictures in the pictured window's own commands draw as nothing
+    /// here: a picture of a picture would be a picture too far, and for a
+    /// window picturing itself, a loop.
+    fn make_picture(&mut self, pictured: WindowId, dw: u32, dh: u32) -> Option<ImageAsset> {
+        let win = self.window_ref(pictured)?;
+        let (sw, sh) = (win.width, win.height);
+        let full = if let Some(buffer) = win.buffer.as_ref() {
+            buffer_over_white(buffer, sw, sh)?
+        } else {
+            let commands = win.render_tree.commands.clone();
+            let mut target = RenderBackend::software(sw, sh).ok()?;
+            self.render_engine
+                .fill_rect(&mut target, 0, 0, sw, sh, 0xFF_FF_FF_FF, 1.0);
+            let no_images = HashMap::new();
+            let images = self
+                .windows
+                .iter()
+                .find(|w| w.id == pictured)
+                .map_or(&no_images, |w| &w.images);
+            self.render_engine
+                .execute(&mut target, &commands, images, 0, 0, sw, sh, 1.0);
+            target.working_pixels().to_vec()
+        };
+        let scaled = picture::downscale(&full, sw, sh, dw, dh)?;
+        ImageAsset::from_pixels(dw, dh, scaled)
     }
 
     /// Render the window shadow: concentric outlines around the frame box,
@@ -24559,6 +24910,196 @@ mod tests {
         assert_eq!(of(notes_id), "editor");
         assert_eq!(of(draft_id), "editor");
         assert_eq!(of(other_id), "explorer");
+    }
+
+    // ---- Live pictures of windows ----
+
+    /// A window `width` by `height` at `at` whose client area is `color` all
+    /// over, drawn by commands.
+    fn filled_window(
+        comp: &mut Compositor,
+        (width, height): (u32, u32),
+        at: (i32, i32),
+        color: Color,
+    ) -> WindowId {
+        let mut spec = WindowSpec::new("Filled", width, height);
+        spec.position = Some(at);
+        let id = comp.create_window_from_spec(&spec, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(0.0, 0.0, width as f32, height as f32, color);
+        comp.submit_render(id, tree.commands).expect("render");
+        id
+    }
+
+    /// A 200 by 200 window picturing `pictured` in a 100 by 100 rectangle at
+    /// its client area's corner.
+    fn viewer_of(comp: &mut Compositor, pictured: WindowId) -> WindowId {
+        let mut spec = WindowSpec::new("Viewer", 200, 200);
+        spec.position = Some((20, 40));
+        let id = comp.create_window_from_spec(&spec, 2);
+        comp.submit_render(
+            id,
+            vec![RenderCommand::WindowPicture {
+                window: pictured.raw(),
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }],
+        )
+        .expect("render");
+        id
+    }
+
+    /// The colour, without alpha, at `(x, y)` of `viewer`'s client area,
+    /// with the viewer drawn alone.
+    fn viewer_rgb(comp: &mut Compositor, viewer: WindowId, x: i32, y: i32) -> u32 {
+        comp.refresh_window_scales();
+        comp.backend.clear(0xFF00_0000);
+        comp.render_window(viewer);
+        let client = comp.window_ref(viewer).expect("viewer").client_rect();
+        let (x, y) = (
+            u32::try_from(client.x + x).expect("x"),
+            u32::try_from(client.y + y).expect("y"),
+        );
+        working_pixel(&comp.backend, x, y).expect("pixel") & 0x00FF_FFFF
+    }
+
+    const RED: u32 = 0xFF_0000;
+    const BLUE: u32 = 0x00_00FF;
+    const WHITE: u32 = 0xFF_FFFF;
+
+    /// A window is pictured as large as fits its rectangle with its
+    /// proportions kept, centred: 400 by 200 in 100 by 100 is 100 by 50,
+    /// rows 25 to 74. Around it, the viewer's own white.
+    #[test]
+    fn a_window_is_pictured_fitted_and_centred_in_its_rectangle() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), RED, "the middle");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 25), RED, "the top row");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 74), RED, "the bottom row");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 24), WHITE, "above it");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 75), WHITE, "below it");
+        assert_eq!(
+            viewer_rgb(&mut comp, viewer, 150, 50),
+            WHITE,
+            "beside the rectangle"
+        );
+    }
+
+    /// A picture is as live as its window: a change to the window redraws
+    /// the viewer with the change; minimised it pictures as nothing and back
+    /// it is there; closed it pictures as nothing, and no picture of it is
+    /// kept.
+    #[test]
+    fn a_picture_follows_its_window() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), RED);
+
+        let mut tree = RenderTree::new();
+        tree.fill_rect(0.0, 0.0, 400.0, 200.0, Color::rgba(0, 0, 255, 255));
+        comp.submit_render(pictured, tree.commands).expect("render");
+        assert!(
+            comp.window_ref(viewer).expect("viewer").dirty,
+            "the viewer was not told its picture changed"
+        );
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), BLUE);
+
+        comp.minimize_window(pictured).expect("minimise");
+        assert!(comp.window_ref(viewer).expect("viewer").dirty);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), WHITE);
+        comp.activate_window(pictured).expect("activate");
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), BLUE);
+
+        comp.destroy_window(pictured).expect("close");
+        assert!(comp.window_ref(viewer).expect("viewer").dirty);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), WHITE);
+        assert!(comp.thumbnails.keys().all(|&(_, p, _, _)| p != pictured));
+    }
+
+    /// A picture is made again only when its window has changed: drawing
+    /// the viewer again draws the same picture, not a new one.
+    #[test]
+    fn a_picture_is_made_again_only_when_its_window_changes() {
+        let mut comp = ungated_compositor(800, 600);
+        let pictured = filled_window(
+            &mut comp,
+            (400, 200),
+            (300, 300),
+            Color::rgba(255, 0, 0, 255),
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        let made = |comp: &Compositor| {
+            comp.thumbnails
+                .values()
+                .map(|t| (t.revision, t.image.pixels().as_ptr() as usize))
+                .collect::<Vec<_>>()
+        };
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        let first = made(&comp);
+        assert_eq!(first.len(), 1);
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        assert_eq!(made(&comp), first, "made again with nothing changed");
+        comp.submit_render(pictured, Vec::new()).expect("render");
+        let _ = viewer_rgb(&mut comp, viewer, 50, 50);
+        assert_ne!(
+            made(&comp)[0].0,
+            first[0].0,
+            "not made again after a change"
+        );
+    }
+
+    /// A window that presents its own pixels -- a game, a video -- is
+    /// pictured from its buffer.
+    #[test]
+    fn a_window_presenting_its_own_pixels_is_pictured_from_them() {
+        let mut comp = ungated_compositor(800, 600);
+        let (pictured, _, _) = painted_window(
+            &mut comp,
+            Layer::Normal,
+            Rect::new(300, 300, 400, 200),
+            0xFF00_FF00,
+        );
+        let viewer = viewer_of(&mut comp, pictured);
+        assert_eq!(viewer_rgb(&mut comp, viewer, 50, 50), 0x00_FF00);
+    }
+
+    /// A window picturing itself draws its own picture once, with the
+    /// picture inside it drawn as nothing -- not a picture of a picture, and
+    /// not a loop.
+    #[test]
+    fn a_window_picturing_itself_does_not_recurse() {
+        let mut comp = ungated_compositor(800, 600);
+        let mut spec = WindowSpec::new("Mirror", 200, 200);
+        spec.position = Some((20, 40));
+        let id = comp.create_window_from_spec(&spec, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(100.0, 0.0, 100.0, 200.0, Color::rgba(255, 0, 0, 255));
+        tree.commands.push(RenderCommand::WindowPicture {
+            window: id.raw(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        });
+        comp.submit_render(id, tree.commands).expect("render");
+        // Its own right half, red, pictured at half size in the corner.
+        assert_eq!(viewer_rgb(&mut comp, id, 75, 50), RED);
+        assert_eq!(viewer_rgb(&mut comp, id, 25, 50), WHITE);
     }
 
     #[test]

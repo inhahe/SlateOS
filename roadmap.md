@@ -4837,6 +4837,20 @@ lane C's `guitk`.
   damage; the colour scheme for the built-in art only; the pictures dropped
   on every `ReloadAppearance`. A shape the theme lacks is the built-in art.
 
+- `[x]` `[F]` **Window frames are drawn from the user's frame theme** -- done
+  2026-10-10 (§1388), for lane C's
+  `requests/c-f-draw-window-frames-from-the-theme.md` (§1456). Every window's
+  frame is measured by the chosen window-decorations theme: the title bar's
+  height, the border and the shadow. Its buttons and title are placed by the
+  same geometry the shell's run box uses, rounded to whole pixels, and drawn
+  and clicked in the same places. Titles go at the left or in the middle,
+  regular or bold, and are cut by clipping, by a mark at the end, or by
+  keeping the end. Buttons are rounded, round, square or bare marks, and the
+  one under the pointer lights up, whatever its shape. A theme change
+  re-measures every open window and refits the maximised and snapped ones. A
+  frame with neither border nor shadow keeps an invisible 6-pixel band to
+  resize it by.
+
 - `[F]` Port FreeRDP (line ~5058)
 
 `open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C

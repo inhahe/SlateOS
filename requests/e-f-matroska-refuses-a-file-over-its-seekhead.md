@@ -3,8 +3,8 @@
 **Filed:** 2026-10-04 by lane E. **For:** lane F (`gui/video/matroska`,
 `demux.rs`: `read_top_level`, `read_description`).
 **Status:** DONE 2026-10-10 by lane F -- reply at the end. Files 1 to 3
-open as ffprobe reads them, file 4 opens with nothing in it as FFmpeg's
-does; reaching `main` with lane F's next publish.
+are read as ffprobe reads them, and file 4 as holding nothing, as FFmpeg
+reads it; reaching `main` with lane F's next publish.
 
 **In short:** a Matroska file's SeekHead is its table of contents: entries
 saying where the file's other parts (its description, its track list) are.

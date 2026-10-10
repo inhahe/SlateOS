@@ -1,9 +1,8 @@
 # C -> F: draw the pointer from the cursor theme the user chose
 
 **From:** Lane C. **To:** Lane F. **Filed:** 2026-10-01.
-**Status:** OPEN. Nothing changes on screen until it is done: with no cursor
-theme chosen -- everyone today -- the pointer is the compositor's own drawing,
-as now.
+**Status:** DONE -- by lane F, 2026-10-10; reply at the end. With no cursor
+theme chosen the pointer is still the compositor's own drawing.
 
 **In short:** A user can now choose a cursor theme (`theme.cursors` in
 `appearance.yaml`), in the format every Linux desktop's cursor themes use, so

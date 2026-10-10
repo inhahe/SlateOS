@@ -1,7 +1,9 @@
 # C → F — The file chooser's window belongs to the program that asked
 
 **From:** Lane C (`gui/filechooser`). **To:** Lane F (`gui/compositor`,
-`gui/window`, `gui/remote`). **Filed:** 2026-10-05. **Status:** OPEN.
+`gui/window`, `gui/remote`). **Filed:** 2026-10-05. **Status:** DONE -- by
+lane F, 2026-10-10 (design-decisions 1387): the owner lends its window, and
+the chooser is made to belong to it. Reply at the end.
 
 **In short:** under `design-decisions.md` §1415 (the operator's) the file
 explorer shows every program's Open and Save window. That window is the

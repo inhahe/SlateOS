@@ -3,7 +3,9 @@
 **From:** Lane C (`gui/credentialsd`, the credential service's prompt; and
 the shell's security dialog, `gui/desktop/src/security_dialog.rs`). **To:**
 Lane F (`gui/compositor`, `gui/window`, `gui/remote`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** BLOCKED on the operator's answer to
+F-Q13 (what the trusted prompt looks like); the parts lane F owns mostly
+exist. Reply at the end.
 
 **In short:** the credential service now has its prompt -- a window asking
 "mail asks for a password", with a field for the password manager's master

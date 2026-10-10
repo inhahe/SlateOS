@@ -1314,8 +1314,8 @@ MUTATIONS += [
     ),
     (
         "the window asks for no tick",
-        "            .due_in(self.clock_ms)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)))",
-        "            .due_in(self.clock_ms)\n            .filter(|_| false)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)))",
+        "            .due_in(self.clock_ms)\n            .map(std::time::Duration::from_millis)",
+        "            .due_in(self.clock_ms)\n            .filter(|_| false)\n            .map(std::time::Duration::from_millis)",
         [WHY_BUTTONS],
     ),
     (
@@ -1353,6 +1353,36 @@ MUTATIONS += [
         "            || self.open_dropdown.is_some()\n            || self.dragging.is_some();",
         "            || self.open_dropdown.is_some();",
         [WHY_COVERS],
+    ),
+]
+
+
+# Notes wrap to their column and take the room their lines need
+# (2026-10-10): a note was one line however long, cut off by the window.
+MUTATIONS += [
+    (
+        'a note is not wrapped',
+        '        let lines = text::wrap(text, NOTE_WIDTH, NOTE_SIZE, FontWeightHint::Regular);',
+        '        let lines = vec![text.to_owned()];',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        'a wrapped note takes only the room asked',
+        '        self.advance(height.max(needed));',
+        '        self.advance(height);',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        'a note shrinks below the room asked',
+        '        self.advance(height.max(needed));',
+        '        self.advance(needed);',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        "a note's lines are drawn on one another",
+        '                line_y += NOTE_LINE_HEIGHT;',
+        '                line_y += 0.0;',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
     ),
 ]
 

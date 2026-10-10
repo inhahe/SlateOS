@@ -2883,6 +2883,22 @@ const ROW_HIT_INSET: f32 = 8.0;
 /// anyway.
 const ROW_HIT_WIDTH: f32 = 620.0;
 
+/// How wide a note may run before it wraps: the width a row's label and its
+/// control take together (a row's band less its inset each side), so a note
+/// never runs past the controls it explains, at any window size the page is
+/// laid out for.
+const NOTE_WIDTH: f32 = ROW_HIT_WIDTH - 2.0 * ROW_HIT_INSET;
+
+/// The size a note is drawn at.
+const NOTE_SIZE: f32 = 13.0;
+
+/// How far apart a wrapped note's lines are: the page's own convention, a
+/// note of two lines having always been given 44 against one line's 28.
+const NOTE_LINE_HEIGHT: f32 = 16.0;
+
+/// The room under a note's last line before whatever follows it.
+const NOTE_GAP: f32 = 12.0;
+
 /// Vertical space a section header occupies: the title, its divider, and the
 /// gap beneath. The same total [`render_section_header`] returns.
 const SECTION_HEADER_HEIGHT: f32 = 36.0;
@@ -3509,11 +3525,31 @@ trait PageSink {
         self.advance(SECTION_SPACING);
     }
 
-    /// A line of explanatory prose beneath a section header.
+    /// Explanatory prose beneath a section header, wrapped to [`NOTE_WIDTH`].
+    ///
+    /// `height` is the room the caller wants for the note: most ask 28, a
+    /// line and the gap after it. A note the column cannot hold on one line
+    /// takes the lines it needs, each [`NOTE_LINE_HEIGHT`] apart, and the room
+    /// grows with them -- never shrinks below what was asked. Until
+    /// 2026-10-10 every note was drawn on one line however long, past the
+    /// column and cut off by the window's edge (a text command does not wrap),
+    /// while the room below it was whatever its caller had guessed the line
+    /// count would be.
     fn note(&mut self, text: &str, height: f32) {
         let pal = &self.palette();
-        self.draw(|tree, x, y| tree.text(x, y + 4.0, text, pal.subtext0, 13.0));
-        self.advance(height);
+        let lines = text::wrap(text, NOTE_WIDTH, NOTE_SIZE, FontWeightHint::Regular);
+        let mut needed = NOTE_GAP;
+        for _ in &lines {
+            needed += NOTE_LINE_HEIGHT;
+        }
+        self.draw(move |tree, x, y| {
+            let mut line_y = y + 4.0;
+            for line in &lines {
+                tree.text(x, line_y, line, pal.subtext0, NOTE_SIZE);
+                line_y += NOTE_LINE_HEIGHT;
+            }
+        });
+        self.advance(height.max(needed));
     }
 
     /// A labelled row: text on the left, `control` drawn at the control
@@ -8565,10 +8601,14 @@ impl oswindow::app::App for SettingsState {
     /// of an event, with no animation and no toast that expires -- so a
     /// window nobody is pointing at sleeps. Without this the reason would
     /// wait for some unrelated event to draw it (`known-issues.md` lesson 47).
+    ///
+    /// Never a tick of nought: a wait starts at the clock's present reading,
+    /// and the clock moves only with a tick, which shows the reason the
+    /// moment it is due.
     fn tick_interval(&self) -> Option<std::time::Duration> {
         self.why_disabled
             .due_in(self.clock_ms)
-            .map(|ms| std::time::Duration::from_millis(ms.max(1)))
+            .map(std::time::Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -13954,6 +13994,80 @@ mod tests {
             rest_at(&mut state, cx + 2.0, cy);
             assert_eq!(asks_to_wake_in(&state), None, "a reason waits under {what}");
         }
+    }
+
+    // --- Notes wrap to their column --------------------------------------------
+
+    /// What a note draws, through the sink that paints a page: each line's
+    /// text and height, and where the cursor stands after it.
+    fn drawn_note(text: &str, height: f32) -> (Vec<(String, f32)>, f32) {
+        let mut tree = RenderTree::new();
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal: Palette::for_mode(false),
+            x: 0.0,
+            y: 0.0,
+        };
+        sink.note(text, height);
+        let after = sink.y;
+        let lines = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } => Some((text.clone(), *y)),
+                _ => None,
+            })
+            .collect();
+        (lines, after)
+    }
+
+    /// **A note too long for its column wraps**, each line within
+    /// [`NOTE_WIDTH`] and [`NOTE_LINE_HEIGHT`] below the last, and takes the
+    /// room its lines need -- never less than its caller asked. Until
+    /// 2026-10-10 every note was one line however long, drawn past the
+    /// column and cut off by the window's edge, with whatever room its
+    /// caller had guessed below it.
+    #[test]
+    fn a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need() {
+        let long = "Nothing on this system routes through a proxy, so an address \
+                    entered here would be read by nothing at all, and saying so in \
+                    one long line would run past the controls it explains.";
+        let (lines, after) = drawn_note(long, 28.0);
+        assert!(lines.len() > 1, "a long note was drawn on one line");
+        for (text, _) in &lines {
+            assert!(
+                text::width(text, NOTE_SIZE) <= NOTE_WIDTH + 0.5,
+                "\"{text}\" runs past the column"
+            );
+        }
+        for pair in lines.windows(2) {
+            let ((_, upper), (_, lower)) = (&pair[0], &pair[1]);
+            assert!(
+                (lower - upper - NOTE_LINE_HEIGHT).abs() < 0.01,
+                "lines {upper} and {lower} are not a line apart"
+            );
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a note has a handful of lines")]
+        let needed = NOTE_GAP + NOTE_LINE_HEIGHT * lines.len() as f32;
+        assert!(
+            (after - needed).abs() < 0.01,
+            "a note of {} lines took {after}, not {needed}",
+            lines.len()
+        );
+        let joined: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            joined.join(" "),
+            long.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+
+        // A short note keeps the room its caller asked for, however much.
+        assert_eq!(drawn_note("Short.", 28.0).1, 28.0);
+        assert_eq!(
+            drawn_note("Short.", 44.0).1,
+            44.0,
+            "a short note shrank its room"
+        );
+        assert_eq!(drawn_note("Short.", 28.0).0.len(), 1);
     }
 
     // --- The account picture grid ------------------------------------------

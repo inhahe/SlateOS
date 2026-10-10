@@ -3460,6 +3460,15 @@ word; text inside them that says "lane C" is history.
     the user's), each heard as it is chosen; heard on SlateOS once the C
     library reaches the sound device (lane D's half of
     `e-ad-no-application-can-reach-the-sound-device.md`);
+  - ~~a Window Rules page in Settings
+    (`c-e-a-window-rules-page-in-settings.md`)~~ **done 2026-10-10**: the
+    rules in order, each switched, changed, moved and deleted, a new one
+    added, and the file's unreadable ones said and never saved over
+    (`e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`
+    asks lane C to keep them); the snap zones wait on lane F to be named
+    (`e-f-settings-could-name-the-snap-zones.md`). Settings' pages scroll
+    since the same day -- they did not, and what ran past the window's bottom
+    could not be reached;
   - `[-]` a disabled control says why while the pointer rests on it
     (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
     (every dimmed button and unusable row), thirteen games through

@@ -10,6 +10,7 @@ mod dyndns;
 mod lockscreen;
 mod recyclebins;
 mod remote;
+mod rules;
 mod snapshots;
 mod thumbs;
 
@@ -196,6 +197,7 @@ impl SettingsCategory {
             ],
             Self::Apps => &[
                 SettingsPage::DefaultApps,
+                SettingsPage::WindowRules,
                 SettingsPage::StartupApps,
                 SettingsPage::InstalledApps,
             ],
@@ -245,6 +247,9 @@ pub enum SettingsPage {
     LockScreen,
     // Apps
     DefaultApps,
+    /// What happens to a program's windows as they open: lane C's window
+    /// rules (`gui/windowrules`), kept in `window-rules.yaml`.
+    WindowRules,
     StartupApps,
     InstalledApps,
     // Accounts
@@ -299,6 +304,7 @@ impl SettingsPage {
             Self::Fonts => "fonts",
             Self::LockScreen => "lock-screen",
             Self::DefaultApps => "default-apps",
+            Self::WindowRules => "window-rules",
             Self::StartupApps => "startup-apps",
             Self::InstalledApps => "installed-apps",
             Self::UserAccounts => "user-accounts",
@@ -350,6 +356,7 @@ impl SettingsPage {
             Self::Fonts => "Fonts",
             Self::LockScreen => "Lock Screen",
             Self::DefaultApps => "Default Apps",
+            Self::WindowRules => "Window Rules",
             Self::StartupApps => "Startup Apps",
             Self::InstalledApps => "Installed Apps",
             Self::UserAccounts => "User Accounts",
@@ -854,6 +861,24 @@ pub struct SettingsState {
     /// test run plays nothing on the machine running it -- the desktop's
     /// rule too (`event_sounds::allow_playback`).
     play_previews: bool,
+    /// The window rules, highest priority first, as the Window Rules page
+    /// shows them: the user's own, or the built-in ones while their file says
+    /// nothing about rules (`windowrules::file::load`). Read on entering the
+    /// page.
+    rules: Vec<windowrules::WindowRule>,
+    /// Whether [`Self::rules`] are the built-in ones -- the file says nothing
+    /// about rules -- rather than the user's own.
+    rules_built_in: bool,
+    /// The rules the file holds that could not be read, each with why.
+    rule_problems: Vec<windowrules::file::Problem>,
+    /// Why the last change to the rules could not be kept, if it could not.
+    rules_error: Option<String>,
+    /// The rule last deleted and where it stood, until the next change: what
+    /// "Put it back" restores.
+    rule_deleted: Option<(usize, windowrules::WindowRule)>,
+    /// The rule being written, while the editor is open: the page is the
+    /// editor then.
+    rule_draft: Option<rules::RuleDraft>,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -1059,6 +1084,23 @@ pub enum DropdownId {
     /// One of the `n`-th drive's own limits, as the Recycle Bin page lists
     /// the drives.
     BinDrive(usize, recyclebins::LimitKind),
+    /// How the rule being written picks its windows.
+    RuleMatch,
+    /// Where its windows open.
+    RulePlace,
+    /// How big they open.
+    RuleSize,
+    /// The snap zone a rule written by hand puts them in, which the editor
+    /// keeps or takes off (`rules` module's "What the editor keeps").
+    RuleSnap,
+    /// Which virtual desktop they open on.
+    RuleDesktop,
+    /// Whether they open minimised, maximised or full screen.
+    RuleState,
+    /// How opaque they are drawn.
+    RuleOpacity,
+    /// One of the rule's yes-or-no things.
+    RuleFlag(rules::Flag),
 }
 
 impl DropdownId {
@@ -1090,8 +1132,24 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 33] = [
+    pub const FIXED: [Self; 49] = [
         Self::SoundTheme,
+        Self::EventSound(0),
+        Self::RuleMatch,
+        Self::RulePlace,
+        Self::RuleSize,
+        Self::RuleSnap,
+        Self::RuleDesktop,
+        Self::RuleState,
+        Self::RuleOpacity,
+        Self::RuleFlag(rules::Flag::OnTop),
+        Self::RuleFlag(rules::Flag::Below),
+        Self::RuleFlag(rules::Flag::Taskbar),
+        Self::RuleFlag(rules::Flag::AltTab),
+        Self::RuleFlag(rules::Flag::Tray),
+        Self::RuleFlag(rules::Flag::CanClose),
+        Self::RuleFlag(rules::Flag::CanMove),
+        Self::RuleFlag(rules::Flag::CanResize),
         Self::WallpaperSource,
         Self::QuietStart,
         Self::QuietEnd,
@@ -1636,6 +1694,11 @@ impl SettingsState {
         if page == SettingsPage::Sound {
             self.refresh_sound_themes();
         }
+        // The window rules, read on entry: the desktop and a hand edit both
+        // change the file while the window is open.
+        if page == SettingsPage::WindowRules {
+            self.refresh_rules();
+        }
         // The themes with pictures, and theirs, read on entry as the themes
         // page reads them.
         if page == SettingsPage::Wallpaper {
@@ -2092,6 +2155,8 @@ impl SettingsState {
             let before = (self.lock_clock_seconds, self.lock_clock_date);
             (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
             before != (self.lock_clock_seconds, self.lock_clock_date)
+        } else if name == windowrules::file::CONFIG_NAME {
+            self.reread_rules()
         } else if name == associations::CONFIG_NAME {
             let before = (
                 std::mem::take(&mut self.default_apps),
@@ -2365,6 +2430,12 @@ impl SettingsState {
             sound_roots: None,
             previewed: None,
             play_previews: false,
+            rules: Vec::new(),
+            rules_built_in: false,
+            rule_problems: Vec::new(),
+            rules_error: None,
+            rule_deleted: None,
+            rule_draft: None,
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -2430,6 +2501,63 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 }
 
 /// Push a text command with regular weight and optional max_width.
+/// `content` at (`x`, `y`), no wider than `max_width`: cut with an ellipsis
+/// where it is wider, so the reader can see that there is more.
+fn text_elided(
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    content: &str,
+    color: Color,
+    size: f32,
+    max_width: f32,
+) {
+    tree.push(RenderCommand::Text {
+        x,
+        y,
+        text: content.to_string(),
+        color,
+        font_size: size,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(max_width),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// How wide a label a user wrote may be drawn: the label column, less a
+/// gap before the control.
+const NAME_WIDTH: f32 = CONTROL_COLUMN_DX - 16.0;
+
+/// The gap between two buttons of a strip.
+const BUTTON_GAP: f32 = 8.0;
+
+/// The field of the rule editor's `draft` that `field` names, or `None` for
+/// a field that is not the editor's.
+fn rule_input(draft: &mut rules::RuleDraft, field: FieldId) -> Option<&mut TextInput> {
+    Some(match field {
+        FieldId::RuleName => &mut draft.name,
+        FieldId::RuleMatch => &mut draft.match_text,
+        FieldId::RulePlace => &mut draft.place_text,
+        FieldId::RuleSize => &mut draft.size_text,
+        FieldId::RuleMinSize => &mut draft.min_size,
+        FieldId::RuleMaxSize => &mut draft.max_size,
+        FieldId::ExclusionDraft => return None,
+    })
+}
+
+/// `items` by their labels, and the place of the one `chosen` picks -- the
+/// first, if it picks none: a list's items and its chosen one.
+fn listed<T>(
+    items: &[T],
+    label: impl Fn(&T) -> String,
+    chosen: impl Fn(&T) -> bool,
+) -> (Vec<String>, usize) {
+    (
+        items.iter().map(&label).collect(),
+        items.iter().position(chosen).unwrap_or(0),
+    )
+}
+
 fn text_clipped(
     tree: &mut RenderTree,
     x: f32,
@@ -3178,6 +3306,12 @@ enum ToggleId {
     /// bin holds a `limits.yaml`, so flipping it writes or removes that file
     /// ([`SettingsState::set_bin_own_limits`]) rather than a `bool`.
     BinOwnLimits(usize),
+    /// Whether the `n`-th window rule is applied: written by
+    /// [`SettingsState::set_rule_enabled`], not through the snapshot.
+    RuleEnabled(usize),
+    /// Whether the rule being written is for the first window it matches
+    /// only.
+    RuleOnce,
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -3368,6 +3502,43 @@ enum SelectId {
 enum FieldId {
     /// The glob being typed, before it is added to the exclusion list.
     ExclusionDraft,
+    /// A window rule's name, in the rule editor.
+    RuleName,
+    /// The program, title or words a rule matches by.
+    RuleMatch,
+    /// The two numbers of where a rule's windows open.
+    RulePlace,
+    /// The two numbers of how big they open.
+    RuleSize,
+    /// The smallest they may be made.
+    RuleMinSize,
+    /// The largest they may be made.
+    RuleMaxSize,
+}
+
+impl FieldId {
+    /// The rule editor's fields, in the order Tab visits them -- those the
+    /// editor shows: [`SettingsState::rule_fields`].
+    const RULE_FIELDS: [Self; 6] = [
+        Self::RuleName,
+        Self::RuleMatch,
+        Self::RulePlace,
+        Self::RuleSize,
+        Self::RuleMinSize,
+        Self::RuleMaxSize,
+    ];
+
+    /// How many characters the field holds.
+    fn capacity(self) -> usize {
+        match self {
+            Self::ExclusionDraft => EXCLUSION_CAPACITY,
+            Self::RuleName => rules::NAME_CAPACITY,
+            Self::RuleMatch => rules::MATCH_CAPACITY,
+            Self::RulePlace | Self::RuleSize | Self::RuleMinSize | Self::RuleMaxSize => {
+                rules::NUMBERS_CAPACITY
+            }
+        }
+    }
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -3463,6 +3634,8 @@ enum AnchorId {
     Dropdown(DropdownId),
     /// The left end of a slider's track.
     Slider(SliderId),
+    /// The top-left of a text field's row: what Tab scrolls into view.
+    Field(FieldId),
 }
 
 /// A push button that does something when pressed.
@@ -3500,6 +3673,24 @@ enum ButtonId {
     ChooseNightWallpaper,
     /// Stop changing the picture by the time of day.
     ClearSchedule,
+    /// Open the `n`-th window rule in the editor.
+    EditRule(usize),
+    /// Move the `n`-th window rule above the one before it.
+    RuleUp(usize),
+    /// Move it below the one after it.
+    RuleDown(usize),
+    /// Delete the `n`-th window rule.
+    DeleteRule(usize),
+    /// Put the rule just deleted back where it was.
+    PutRuleBack,
+    /// Open the editor on a new window rule.
+    AddRule,
+    /// Save the rule being written.
+    SaveRule,
+    /// Close the editor and keep nothing of it.
+    CancelRule,
+    /// Remove from the file the rules it cannot read.
+    RemoveUnreadableRules,
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -3933,6 +4124,54 @@ trait PageSink {
         self.advance(ITEM_HEIGHT);
     }
 
+    /// Buttons side by side from the row's left, each live or dimmed by its
+    /// own [`Press`], as [`Self::button_at`] draws one.
+    fn button_strip(&mut self, buttons: &[(&str, Color, Press<'_>)]) {
+        let mut dx = 0.0;
+        for (label, color, press) in buttons {
+            self.button_at(dx, BUTTON_ROW_INSET_Y, label, *color, *press);
+            dx += button_width(label) + BUTTON_GAP;
+        }
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// [`Self::toggle_row`] labelled with a name the user wrote -- a window
+    /// rule's -- cut with an ellipsis at the control column rather than drawn
+    /// on under the switch.
+    fn named_toggle_row(&mut self, name: &str, id: ToggleId, on: bool) {
+        let pal = self.palette();
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(
+            x - ROW_HIT_INSET,
+            y,
+            ROW_HIT_WIDTH,
+            ITEM_HEIGHT,
+            RowHit::Toggle(id),
+        );
+        let control_x = self.control_x();
+        let name = name.to_owned();
+        self.draw(move |tree, x, y| {
+            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);
+            render_toggle(tree, &pal, control_x, y + 12.0, on);
+        });
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// [`Self::unavailable_row`] labelled with a name the user wrote, as
+    /// [`Self::named_toggle_row`] is.
+    fn named_unavailable_row(&mut self, name: &str, value: &str, why: &str) {
+        let pal = self.palette();
+        let (x, y) = (self.x(), self.y());
+        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);
+        let control_x = self.control_x();
+        let (name, value) = (name.to_owned(), value.to_owned());
+        self.draw(move |tree, x, y| {
+            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);
+            tree.text(control_x, y + 8.0, &value, pal.subtext0, 13.0);
+        });
+        self.advance(ITEM_HEIGHT);
+    }
+
     /// A row whose control is a place to type.
     ///
     /// Drawn like the other controls — label on the left, control in the
@@ -3955,6 +4194,7 @@ trait PageSink {
             render_setting_row(tree, pal, x, y, label, 0.0);
         });
         let (x, y) = (self.x(), self.y());
+        self.anchor(AnchorId::Field(id), x, y);
         self.hit_rect(
             x + CONTROL_COLUMN_DX,
             y + BUTTON_ROW_INSET_Y,
@@ -4553,6 +4793,7 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::WindowRules => self.build_window_rules_page(sink),
             SettingsPage::About => self.build_about_page(sink),
             SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
@@ -4978,6 +5219,672 @@ impl SettingsState {
                 pal.base,
                 16.0,
             );
+        }
+    }
+
+    // --- Window Rules page ---
+
+    /// The Window Rules page (`requests/c-e-a-window-rules-page-in-settings.md`):
+    /// what happens to a program's windows as they open. The rules in their
+    /// order, each said in a line, with a switch and buttons to change it,
+    /// move it and delete it; a new one added; and the rules the file holds
+    /// that could not be read, each with why.
+    ///
+    /// The rules are lane C's `windowrules`: read with `file::load`, written
+    /// with `file::store` as each change is made, and taken by the desktop
+    /// from the file for the next window a rule matches. While a rule is
+    /// being written the page is its editor ([`Self::build_rule_editor`]).
+    ///
+    /// A file holding a rule that cannot be read refuses every change, and
+    /// says why: `file::store` writes only the rules it is given, so the first
+    /// change would delete the very rule its author is meant to mend
+    /// (`requests/e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`).
+    /// "Remove them" is the way past, taken on purpose.
+    fn build_window_rules_page<S: PageSink>(&self, s: &mut S) {
+        if let Some(draft) = &self.rule_draft {
+            self.build_rule_editor(s, draft);
+            return;
+        }
+        let pal = self.palette();
+        s.section("Window Rules");
+        s.note(
+            "What happens to a program's windows as they open: where they go, how big they are, whether they have a taskbar button. Where two rules disagree, the one nearer the top wins, and a change applies to the next window a rule matches.",
+            44.0,
+        );
+        if self.rules_built_in {
+            s.note(
+                "These are the rules every account starts with. Change any of them and they are yours.",
+                28.0,
+            );
+        }
+        if let Some(error) = &self.rules_error {
+            s.value_row("Not kept", error, pal.ink(pal.red));
+        }
+        let blocked = self.rules_blocked();
+        if !self.rule_problems.is_empty() {
+            s.gap();
+            s.section("Not Applied");
+            s.note(
+                "Your window-rules file has rules that cannot be read, so they are not applied. Mend them in the file, or remove them here; until then nothing on this page can be changed, since saving would lose them.",
+                44.0,
+            );
+            for problem in &self.rule_problems {
+                let line = if problem.rule.is_empty() {
+                    format!("The rules as a whole: {}", problem.what)
+                } else {
+                    format!("\u{201c}{}\u{201d}: {}", problem.rule, problem.what)
+                };
+                s.note(&line, 28.0);
+            }
+            s.button_row(
+                "The rules that cannot be read",
+                "Remove them",
+                pal.surface1,
+                Press::Does(RowHit::Press(ButtonId::RemoveUnreadableRules)),
+            );
+        }
+        if let Some((_, rule)) = &self.rule_deleted {
+            s.gap();
+            s.note(&format!("\u{201c}{}\u{201d} is deleted.", rule.name), 28.0);
+            s.button_row(
+                "Deleted by mistake?",
+                "Put it back",
+                pal.accent,
+                blocked.map_or(
+                    Press::Does(RowHit::Press(ButtonId::PutRuleBack)),
+                    Press::Cannot,
+                ),
+            );
+        }
+        let last = self.rules.len().saturating_sub(1);
+        let or_blocked = |press: Press<'static>| blocked.map_or(press, Press::Cannot);
+        for (index, rule) in self.rules.iter().enumerate() {
+            s.gap();
+            match blocked {
+                None => s.named_toggle_row(&rule.name, ToggleId::RuleEnabled(index), rule.enabled),
+                Some(why) => s.named_unavailable_row(
+                    &rule.name,
+                    if rule.enabled { "On" } else { "Off" },
+                    why,
+                ),
+            }
+            s.note(
+                &format!(
+                    "{}. {}",
+                    rules::describe_criteria(&rule.criteria),
+                    rules::describe_actions(&rule.actions, rule.one_shot)
+                ),
+                28.0,
+            );
+            let up = if index == 0 {
+                Press::Cannot("It is the first rule already.")
+            } else {
+                or_blocked(Press::Does(RowHit::Press(ButtonId::RuleUp(index))))
+            };
+            let down = if index == last {
+                Press::Cannot("It is the last rule already.")
+            } else {
+                or_blocked(Press::Does(RowHit::Press(ButtonId::RuleDown(index))))
+            };
+            s.button_strip(&[
+                (
+                    "Change",
+                    pal.accent,
+                    or_blocked(Press::Does(RowHit::Press(ButtonId::EditRule(index)))),
+                ),
+                ("Move up", pal.surface1, up),
+                ("Move down", pal.surface1, down),
+                (
+                    "Delete",
+                    pal.surface1,
+                    or_blocked(Press::Does(RowHit::Press(ButtonId::DeleteRule(index)))),
+                ),
+            ]);
+        }
+        if self.rules.is_empty() {
+            s.gap();
+            s.note(
+                "There are no rules: every window opens as its program asks.",
+                28.0,
+            );
+        }
+        s.gap();
+        let full = format!(
+            "A file keeps {} rules at most: delete one first.",
+            windowrules::MAX_RULES
+        );
+        let add = match blocked {
+            Some(why) => Press::Cannot(why),
+            None if self.rules.len() >= windowrules::MAX_RULES => Press::Cannot(&full),
+            None => Press::Does(RowHit::Press(ButtonId::AddRule)),
+        };
+        s.button_row("A rule of your own", "Add a rule", pal.accent, add);
+    }
+
+    /// The window-rule editor: the rule's name and which windows it is for,
+    /// where and how big they open, how they open and behave, and Save --
+    /// dimmed, with the reason under it, until the draft is a rule
+    /// ([`rules::RuleDraft::rule`]).
+    fn build_rule_editor<S: PageSink>(&self, s: &mut S, draft: &rules::RuleDraft) {
+        let pal = self.palette();
+        s.section(if draft.editing.is_some() {
+            "Change a Rule"
+        } else {
+            "A New Rule"
+        });
+        self.rule_field(
+            s,
+            "Name",
+            FieldId::RuleName,
+            &draft.name,
+            "What the rule is for",
+        );
+        s.dropdown_row(
+            "Which windows",
+            DropdownId::RuleMatch,
+            draft.matching.label(),
+        );
+        if let Some(label) = draft.matching.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RuleMatch,
+                &draft.match_text,
+                draft.matching.placeholder(),
+            );
+        }
+        s.gap();
+        s.section("Where and How Big");
+        s.dropdown_row("Where it opens", DropdownId::RulePlace, draft.place.label());
+        if let Some(label) = draft.place.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RulePlace,
+                &draft.place_text,
+                draft.place.placeholder(),
+            );
+        }
+        s.dropdown_row("How big", DropdownId::RuleSize, draft.size.label());
+        if let Some(label) = draft.size.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RuleSize,
+                &draft.size_text,
+                draft.size.placeholder(),
+            );
+        }
+        self.rule_field(
+            s,
+            "Smallest size",
+            FieldId::RuleMinSize,
+            &draft.min_size,
+            "Width and height: 400 300",
+        );
+        self.rule_field(
+            s,
+            "Largest size",
+            FieldId::RuleMaxSize,
+            &draft.max_size,
+            "Width and height: 1600 1200",
+        );
+        if let Some(zone) = draft.actions.snap_zone {
+            s.dropdown_row("Snaps into", DropdownId::RuleSnap, &format!("Zone {zone}"));
+        }
+        s.gap();
+        s.section("How It Opens");
+        s.dropdown_row(
+            "Desktop",
+            DropdownId::RuleDesktop,
+            &rules::desktop_label(draft.actions.desktop),
+        );
+        s.dropdown_row(
+            "Opens",
+            DropdownId::RuleState,
+            rules::state_label(draft.actions.initial_state),
+        );
+        s.dropdown_row(
+            "Opacity",
+            DropdownId::RuleOpacity,
+            &rules::opacity_label(draft.actions.opacity),
+        );
+        for flag in rules::Flag::ALL {
+            s.dropdown_row(
+                flag.label(),
+                DropdownId::RuleFlag(flag),
+                rules::Tri::of(flag.get(&draft.actions)).label(),
+            );
+        }
+        if let Some(monitor) = draft.actions.target_monitor {
+            s.unavailable_row(
+                "Monitor",
+                &format!("Monitor {}", monitor.saturating_add(1)),
+                "Kept as your file has it, and not carried out yet: windows open on the one display this system drives.",
+            );
+        }
+        if let Some(none) = draft.actions.no_decorations {
+            s.unavailable_row(
+                "Title bar",
+                if none { "None" } else { "Its own" },
+                "Kept as your file has it, and not carried out yet: a window's title bar is its own program's to draw.",
+            );
+        }
+        s.toggle_row("For the first window only", ToggleId::RuleOnce, draft.once);
+        s.gap();
+        let why = draft.rule(&self.rules).err();
+        let save = match &why {
+            None => Press::Does(RowHit::Press(ButtonId::SaveRule)),
+            Some(why) => Press::Cannot(why),
+        };
+        s.button_strip(&[
+            ("Save", pal.accent, save),
+            (
+                "Cancel",
+                pal.surface1,
+                Press::Does(RowHit::Press(ButtonId::CancelRule)),
+            ),
+        ]);
+        if let Some(why) = &why {
+            s.note(why, 28.0);
+        }
+    }
+
+    /// One of the rule editor's fields.
+    fn rule_field<S: PageSink>(
+        &self,
+        s: &mut S,
+        label: &str,
+        id: FieldId,
+        input: &TextInput,
+        placeholder: &str,
+    ) {
+        s.text_field_row(
+            label,
+            id,
+            input,
+            placeholder,
+            self.focused_field == Some(id),
+            self.page_hovered == Some(RowHit::Focus(id)),
+            self.appearance.settings.focus_ring_width(),
+        );
+    }
+
+    /// The rule editor's fields it shows now, in the order Tab visits them.
+    fn rule_fields(&self) -> Vec<FieldId> {
+        let Some(draft) = &self.rule_draft else {
+            return Vec::new();
+        };
+        FieldId::RULE_FIELDS
+            .into_iter()
+            .filter(|field| match field {
+                FieldId::RuleMatch => draft.matching.field_label().is_some(),
+                FieldId::RulePlace => draft.place.field_label().is_some(),
+                FieldId::RuleSize => draft.size.field_label().is_some(),
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// A key for the rule editor's field `field`, if the field takes it: Tab
+    /// and Enter go on to the next field (Shift+Tab back to the one before),
+    /// Escape lets the keyboard go, and the rest are `textline`'s, as in
+    /// every field. `None` for a key the field has no use for, which goes on
+    /// to the page -- Ctrl+F to the search, say.
+    fn rule_field_key(
+        &mut self,
+        field: FieldId,
+        evt: &KeyEvent,
+        plain: bool,
+    ) -> Option<EventResult> {
+        match evt.key {
+            Key::Escape if plain => {
+                self.focused_field = None;
+                Some(EventResult::Consumed)
+            }
+            Key::Tab | Key::Enter if plain => {
+                let back = evt.key == Key::Tab && evt.modifiers.shift;
+                self.focus_next_rule_field(field, back);
+                Some(EventResult::Consumed)
+            }
+            _ => {
+                let input = self
+                    .rule_draft
+                    .as_mut()
+                    .and_then(|draft| rule_input(draft, field))?;
+                Self::edit_line(input, &mut self.clipboard, evt, field.capacity())
+                    .then_some(EventResult::Consumed)
+            }
+        }
+    }
+
+    /// Give the keyboard to the editor's field after `from` -- before it, if
+    /// `back` -- and scroll it into view. Past either end, to no field.
+    fn focus_next_rule_field(&mut self, from: FieldId, back: bool) {
+        let fields = self.rule_fields();
+        let next = match fields.iter().position(|f| *f == from) {
+            Some(at) if back => at.checked_sub(1).and_then(|at| fields.get(at)),
+            Some(at) => fields.get(at.saturating_add(1)),
+            None => fields.first(),
+        }
+        .copied();
+        self.focused_field = next;
+        if let Some(field) = next {
+            self.scroll_into_view(AnchorId::Field(field));
+        }
+    }
+
+    /// Scroll the page so the row `anchor` names is on screen.
+    fn scroll_into_view(&mut self, anchor: AnchorId) {
+        let Some((_, y)) = self.anchor_at(anchor) else {
+            return;
+        };
+        let top = Self::content_top();
+        if y < top {
+            self.scroll_page_by(y - top);
+        } else if y + ITEM_HEIGHT > self.window_height {
+            self.scroll_page_by(y + ITEM_HEIGHT - self.window_height);
+        }
+    }
+
+    /// Read the rules as the page shows them: the user's, or the built-in
+    /// ones while the file says nothing about rules -- and why any it holds
+    /// cannot be read.
+    fn refresh_rules(&mut self) {
+        match windowrules::file::load() {
+            Some(loaded) => {
+                self.rules = loaded.rules;
+                self.rule_problems = loaded.problems;
+                self.rules_built_in = false;
+            }
+            None => {
+                self.rules = windowrules::default_rules();
+                self.rule_problems = Vec::new();
+                self.rules_built_in = true;
+            }
+        }
+    }
+
+    /// The rules again, their file having changed under the page: a hand
+    /// edit, another Settings window. A rule open in the editor is followed
+    /// by its name to wherever it stands now, or becomes a new one if the
+    /// file no longer has it; "Put it back" is forgotten, its place being
+    /// the old list's.
+    fn reread_rules(&mut self) -> bool {
+        let editing = self
+            .rule_draft
+            .as_ref()
+            .and_then(|draft| draft.editing)
+            .and_then(|at| self.rules.get(at))
+            .map(|rule| rule.name.clone());
+        self.refresh_rules();
+        self.rule_deleted = None;
+        if let Some(draft) = self.rule_draft.as_mut() {
+            draft.editing = editing.and_then(|name| self.rules.iter().position(|r| r.name == name));
+        }
+        true
+    }
+
+    /// Why no change to the rules can be kept now, if none can: the file
+    /// holds a rule that cannot be read, which a save would delete.
+    fn rules_blocked(&self) -> Option<&'static str> {
+        (!self.rule_problems.is_empty()).then_some(
+            "Your window-rules file has a rule that cannot be read, and saving a change would delete it: mend it in the file, or remove it above.",
+        )
+    }
+
+    /// Write the rules as the page holds them, then show what the file says:
+    /// the rules as written, or as they were with why they could not be.
+    /// Whether they were written.
+    ///
+    /// Refused while [`Self::rules_blocked`]: every control that changes the
+    /// rules is dimmed then, and this is the line they all pass.
+    fn store_rules(&mut self) -> bool {
+        if self.rules_blocked().is_some() {
+            return false;
+        }
+        let rules: Vec<&windowrules::WindowRule> = self.rules.iter().collect();
+        let stored = windowrules::file::store(&rules);
+        self.rules_error = stored
+            .as_ref()
+            .err()
+            .map(|e| format!("The rules could not be kept: {e}"));
+        self.refresh_rules();
+        stored.is_ok()
+    }
+
+    /// Turn the `index`-th rule on or off, and keep it.
+    fn set_rule_enabled(&mut self, index: usize) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let Some(rule) = self.rules.get_mut(index) else {
+            return;
+        };
+        rule.enabled = !rule.enabled;
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Move the `index`-th rule above the one before it, or below the one
+    /// after it, and keep the order.
+    fn move_rule(&mut self, index: usize, up: bool) {
+        let other = if up {
+            index.checked_sub(1)
+        } else {
+            index.checked_add(1)
+        };
+        let Some(other) = other.filter(|other| *other < self.rules.len()) else {
+            return;
+        };
+        if index >= self.rules.len() || self.rules_blocked().is_some() {
+            return;
+        }
+        self.rules.swap(index, other);
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Delete the `index`-th rule, and offer it back until the next change.
+    fn delete_rule(&mut self, index: usize) {
+        if index >= self.rules.len() || self.rules_blocked().is_some() {
+            return;
+        }
+        let rule = self.rules.remove(index);
+        self.rule_deleted = None;
+        // Offered back only once it is gone: a delete the file refused leaves
+        // the rule where it was, read back by `store_rules`.
+        if self.store_rules() {
+            self.rule_deleted = Some((index, rule));
+        }
+    }
+
+    /// Put the rule just deleted back where it stood.
+    fn put_rule_back(&mut self) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let Some((index, rule)) = self.rule_deleted.take() else {
+            return;
+        };
+        let at = index.min(self.rules.len());
+        self.rules.insert(at, rule);
+        self.store_rules();
+    }
+
+    /// Take the rules the file cannot read out of it: the rules it can read
+    /// written back alone. The one change the page makes while the file holds
+    /// such a rule, and only when asked.
+    fn remove_unreadable_rules(&mut self) {
+        self.rule_problems.clear();
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Open the editor on the `index`-th rule, or on a new one; the keyboard
+    /// goes to its name.
+    fn open_rule_editor(&mut self, index: Option<usize>) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let draft = match index.and_then(|at| self.rules.get(at).map(|rule| (at, rule))) {
+            Some((at, rule)) => rules::RuleDraft::of(rule, at),
+            None => rules::RuleDraft::new(),
+        };
+        self.rule_draft = Some(draft);
+        self.rule_deleted = None;
+        self.page_scroll = 0.0;
+        self.focused_field = Some(FieldId::RuleName);
+    }
+
+    /// Save the rule being written: in its own place if it is one already,
+    /// at the top -- where it wins -- if it is new. The editor closes.
+    fn save_rule(&mut self) {
+        let Some(draft) = &self.rule_draft else {
+            return;
+        };
+        // Save is dimmed, with the reason, while the draft is not a rule.
+        let Ok(rule) = draft.rule(&self.rules) else {
+            return;
+        };
+        match draft.editing.and_then(|at| self.rules.get_mut(at)) {
+            Some(slot) => *slot = rule,
+            None => self.rules.insert(0, rule),
+        }
+        self.close_rule_editor();
+        self.store_rules();
+    }
+
+    /// Close the editor, keeping nothing of what it held.
+    fn close_rule_editor(&mut self) {
+        self.rule_draft = None;
+        if self
+            .focused_field
+            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))
+        {
+            self.focused_field = None;
+        }
+        self.page_scroll = 0.0;
+    }
+
+    /// A rule-editor list's items, and which is chosen.
+    fn rule_dropdown(&self, id: DropdownId) -> (Vec<String>, usize) {
+        let Some(draft) = &self.rule_draft else {
+            return (Vec::new(), 0);
+        };
+        let a = &draft.actions;
+        match id {
+            DropdownId::RuleMatch => listed(
+                &rules::MatchKind::ALL,
+                |kind| kind.label().to_owned(),
+                |kind| *kind == draft.matching,
+            ),
+            DropdownId::RulePlace => listed(
+                &rules::Place::ALL,
+                |place| place.label().to_owned(),
+                |place| *place == draft.place,
+            ),
+            DropdownId::RuleSize => listed(
+                &rules::Size::ALL,
+                |size| size.label().to_owned(),
+                |size| *size == draft.size,
+            ),
+            DropdownId::RuleSnap => (
+                vec![
+                    rules::AS_USUAL.to_owned(),
+                    a.snap_zone
+                        .map_or_else(String::new, |zone| format!("Zone {zone}")),
+                ],
+                usize::from(a.snap_zone.is_some()),
+            ),
+            DropdownId::RuleDesktop => listed(
+                &rules::desktop_choices(a.desktop),
+                |desktop| rules::desktop_label(*desktop),
+                |desktop| *desktop == a.desktop,
+            ),
+            DropdownId::RuleState => listed(
+                &rules::STATES,
+                |state| rules::state_label(*state).to_owned(),
+                |state| *state == a.initial_state,
+            ),
+            DropdownId::RuleOpacity => listed(
+                &rules::opacity_choices(a.opacity),
+                |opacity| rules::opacity_label(*opacity),
+                |opacity| match (opacity, a.opacity) {
+                    (Some(listed), Some(now)) => rules::same_opacity(*listed, now),
+                    (None, None) => true,
+                    _ => false,
+                },
+            ),
+            DropdownId::RuleFlag(flag) => {
+                let now = rules::Tri::of(flag.get(a));
+                listed(
+                    &rules::Tri::ALL,
+                    |tri| tri.label().to_owned(),
+                    |tri| *tri == now,
+                )
+            }
+            _ => (Vec::new(), 0),
+        }
+    }
+
+    /// Choose the `index`-th item of the rule editor's list `id`.
+    fn choose_in_rule(&mut self, id: DropdownId, index: usize) {
+        let Some(draft) = self.rule_draft.as_mut() else {
+            return;
+        };
+        match id {
+            DropdownId::RuleMatch => {
+                if let Some(kind) = rules::MatchKind::ALL.get(index) {
+                    draft.matching = *kind;
+                }
+            }
+            DropdownId::RulePlace => {
+                if let Some(place) = rules::Place::ALL.get(index) {
+                    draft.place = *place;
+                }
+            }
+            DropdownId::RuleSize => {
+                if let Some(size) = rules::Size::ALL.get(index) {
+                    draft.size = *size;
+                }
+            }
+            // Its zone or none: the editor cannot name the others
+            // (`rules` module's "What the editor keeps").
+            DropdownId::RuleSnap => {
+                if index == 0 {
+                    draft.actions.snap_zone = None;
+                }
+            }
+            DropdownId::RuleDesktop => {
+                if let Some(desktop) = rules::desktop_choices(draft.actions.desktop).get(index) {
+                    draft.actions.desktop = *desktop;
+                }
+            }
+            DropdownId::RuleState => {
+                if let Some(state) = rules::STATES.get(index) {
+                    draft.actions.initial_state = *state;
+                }
+            }
+            DropdownId::RuleOpacity => {
+                if let Some(opacity) = rules::opacity_choices(draft.actions.opacity).get(index) {
+                    draft.actions.opacity = *opacity;
+                }
+            }
+            DropdownId::RuleFlag(flag) => {
+                if let Some(tri) = rules::Tri::ALL.get(index) {
+                    flag.set(&mut draft.actions, tri.value());
+                }
+            }
+            _ => {}
+        }
+        // A field the choice took away does not keep the keyboard: "Every
+        // window" has no text, "As usual" no numbers.
+        if let Some(field) = self.focused_field
+            && FieldId::RULE_FIELDS.contains(&field)
+            && !self.rule_fields().contains(&field)
+        {
+            self.focused_field = None;
         }
     }
 
@@ -7320,6 +8227,14 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, at)
             }
+            DropdownId::RuleMatch
+            | DropdownId::RulePlace
+            | DropdownId::RuleSize
+            | DropdownId::RuleSnap
+            | DropdownId::RuleDesktop
+            | DropdownId::RuleState
+            | DropdownId::RuleOpacity
+            | DropdownId::RuleFlag(_) => self.rule_dropdown(dropdown_id),
             DropdownId::EventSound(index) => {
                 let items = EVENT_SOUND_CHOICES
                     .iter()
@@ -7976,6 +8891,12 @@ impl SettingsState {
         // pattern and AltGr+X, a Polish `ź`, cut it -- and typed the letter
         // every other chord carries: Ctrl+F put an `f` in the pattern and
         // never reached the search.
+        if let Some(field) = self.focused_field
+            && FieldId::RULE_FIELDS.contains(&field)
+            && let Some(result) = self.rule_field_key(field, evt, plain)
+        {
+            return result;
+        }
         if self.focused_field == Some(FieldId::ExclusionDraft) {
             match evt.key {
                 // Escape abandons the draft rather than merely unfocusing:
@@ -8306,6 +9227,7 @@ impl SettingsState {
                 self.drag_slider_to(id, mx);
             }
             RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),
+            RowHit::Toggle(ToggleId::RuleEnabled(index)) => self.set_rule_enabled(index),
             RowHit::Toggle(id) => {
                 // Saved, where it is one of the lock screen's two, by the
                 // whole-snapshot comparison in `handle_event`, as every other
@@ -8439,6 +9361,15 @@ impl SettingsState {
                 self.appearance.settings.wallpaper_schedule.clear();
                 self.wallpaper_source_pending = Some(WallpaperSource::TimeOfDay);
             }
+            RowHit::Press(ButtonId::EditRule(index)) => self.open_rule_editor(Some(index)),
+            RowHit::Press(ButtonId::RuleUp(index)) => self.move_rule(index, true),
+            RowHit::Press(ButtonId::RuleDown(index)) => self.move_rule(index, false),
+            RowHit::Press(ButtonId::DeleteRule(index)) => self.delete_rule(index),
+            RowHit::Press(ButtonId::PutRuleBack) => self.put_rule_back(),
+            RowHit::Press(ButtonId::AddRule) => self.open_rule_editor(None),
+            RowHit::Press(ButtonId::SaveRule) => self.save_rule(),
+            RowHit::Press(ButtonId::CancelRule) => self.close_rule_editor(),
+            RowHit::Press(ButtonId::RemoveUnreadableRules) => self.remove_unreadable_rules(),
         }
     }
 
@@ -8606,6 +9537,10 @@ impl SettingsState {
             // Not a `bool` of this state's: whether the drive's bin holds a
             // `limits.yaml`, flipped by `set_bin_own_limits`.
             ToggleId::BinOwnLimits(_) => return None,
+            // The rules' file is written as each change is made, not by the
+            // snapshot: see `set_rule_enabled`.
+            ToggleId::RuleEnabled(_) => return None,
+            ToggleId::RuleOnce => &mut self.rule_draft.as_mut()?.once,
         })
     }
 
@@ -8908,6 +9843,14 @@ impl SettingsState {
                 }
             }
             DropdownId::EventSound(event) => self.choose_event_sound(event, index),
+            DropdownId::RuleMatch
+            | DropdownId::RulePlace
+            | DropdownId::RuleSize
+            | DropdownId::RuleSnap
+            | DropdownId::RuleDesktop
+            | DropdownId::RuleState
+            | DropdownId::RuleOpacity
+            | DropdownId::RuleFlag(_) => self.choose_in_rule(dropdown_id, index),
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
@@ -13969,6 +14912,21 @@ mod tests {
         // machine running it.
         state.font_families = vec!["Example Sans".to_owned(), "Example Serif".to_owned()];
         state.mono_families = vec!["Example Mono".to_owned()];
+        // And the window-rule editor, which is the page while a rule is
+        // written: a rule complete enough to save, so Save is live, with
+        // numbers where it opens and how big, so their fields are drawn, and
+        // a snap zone, the one list a rule must already have to be drawn.
+        if page == SettingsPage::WindowRules {
+            let mut draft = rules::RuleDraft::new();
+            draft.name.set_text("Example");
+            draft.match_text.set_text("terminal");
+            draft.place = rules::Place::At;
+            draft.place_text.set_text("100 80");
+            draft.size = rules::Size::Exactly;
+            draft.size_text.set_text("800 600");
+            draft.actions.snap_zone = Some(1);
+            state.rule_draft = Some(draft);
+        }
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {
@@ -15140,6 +16098,693 @@ mod tests {
             "*.gif",
             "what was typed on another page went into the hidden box"
         );
+    }
+
+    // --- The Window Rules page ------------------------------------------------------
+
+    /// Three rules, as a user might write them.
+    const THREE_RULES: &str = "rules:\n  First:\n    app: one\n    desktop: 2\n  Second:\n    title-contains: chat\n    taskbar: false\n  Third:\n    any: true\n    on-top: true\n";
+
+    /// A rule that can be read, and one with a typo that cannot.
+    /// Two rules that can be read, and one with a typo that cannot.
+    const WITH_A_TYPO: &str = "rules:\n  Terminal:\n    app: terminal\n  Notes:\n    app: notes\n  Chat:\n    app: chat\n    taskbar: flase\n";
+
+    /// `yaml` as the run's `window-rules.yaml`, under the scratch
+    /// configuration `root` -- none, for `None` -- and the Window Rules page
+    /// opened on it.
+    fn rules_page(root: &std::path::Path, yaml: Option<&str>) -> SettingsState {
+        if let Some(yaml) = yaml {
+            write_rules_file(root, yaml);
+        }
+        let mut state = SettingsState::new();
+        state.current_category = SettingsCategory::Apps;
+        state.go_to_page(SettingsPage::WindowRules);
+        state
+    }
+
+    /// `yaml` as the run's `window-rules.yaml`.
+    fn write_rules_file(root: &std::path::Path, yaml: &str) {
+        let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("the settings folder");
+        std::fs::write(&path, yaml).expect("the rules file");
+    }
+
+    /// The rules the file holds now, by name and in order; `None` while it
+    /// says nothing about rules.
+    fn rules_on_file() -> Option<Vec<String>> {
+        windowrules::file::load()
+            .map(|loaded| loaded.rules.into_iter().map(|rule| rule.name).collect())
+    }
+
+    /// The rule named `name` in the file.
+    fn rule_on_file(name: &str) -> windowrules::WindowRule {
+        windowrules::file::load()
+            .expect("the file has rules")
+            .rules
+            .into_iter()
+            .find(|rule| rule.name == name)
+            .unwrap_or_else(|| panic!("the file has no rule {name:?}"))
+    }
+
+    /// The page's rules, by name.
+    fn rule_names(state: &SettingsState) -> Vec<String> {
+        state.rules.iter().map(|rule| rule.name.clone()).collect()
+    }
+
+    /// Choose the `index`-th item of the list `id` as a user does.
+    fn choose(state: &mut SettingsState, id: DropdownId, index: usize) {
+        press_on(state, RowHit::Dropdown(id));
+        assert_eq!(state.open_dropdown, Some(id), "{id:?} did not open");
+        press_dropdown_item(state, index);
+    }
+
+    /// Type `text` into the rule editor's field `field`, pressed first.
+    fn type_into(state: &mut SettingsState, field: FieldId, text: &str) {
+        press_on(state, RowHit::Focus(field));
+        assert_eq!(state.focused_field, Some(field));
+        type_text(state, text);
+    }
+
+    /// Shift+Tab, as a key press.
+    fn shift_tab() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// **With no rules written, the page shows the ones every account starts
+    /// with, and says so** -- and the first change makes them the user's own,
+    /// written to the file whole.
+    #[test]
+    fn with_no_rules_written_the_built_in_ones_are_shown_and_a_change_makes_them_yours() {
+        settingsfile::testing::with_scratch_config("settings-rules-built-in", |root| {
+            let mut state = rules_page(root, None);
+            let built_in: Vec<String> = windowrules::default_rules()
+                .into_iter()
+                .map(|rule| rule.name)
+                .collect();
+            assert_eq!(rule_names(&state), built_in);
+            let says_built_in = |state: &SettingsState| {
+                drawn_texts(state)
+                    .iter()
+                    .any(|t| t.starts_with("These are the rules every account starts with"))
+            };
+            assert!(
+                says_built_in(&state),
+                "the page does not say whose rules they are"
+            );
+            assert_eq!(rules_on_file(), None, "opening the page wrote the file");
+
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert_eq!(
+                rules_on_file(),
+                Some(built_in.clone()),
+                "the built-in rules were not written whole"
+            );
+            assert!(
+                !rule_on_file(&built_in[1]).enabled,
+                "the switch was not written"
+            );
+            assert!(rule_on_file(&built_in[0]).enabled);
+            assert!(
+                !says_built_in(&state),
+                "the user's own rules are called the built-in ones"
+            );
+        });
+    }
+
+    /// **Each rule is listed by its name, with what it matches and does in a
+    /// line, in the file's order.**
+    #[test]
+    fn each_rule_is_listed_with_what_it_matches_and_does() {
+        settingsfile::testing::with_scratch_config("settings-rules-listed", |root| {
+            let state = rules_page(root, Some(THREE_RULES));
+            assert_eq!(rule_names(&state), ["First", "Second", "Third"]);
+            let texts = drawn_texts(&state);
+            for name in ["First", "Second", "Third"] {
+                assert!(texts.iter().any(|t| t == name), "{name} is not drawn");
+            }
+            let said = "Windows whose title has \u{201c}chat\u{201d}. No taskbar button.";
+            assert!(
+                texts.iter().any(|t| t == said),
+                "the second rule is not said: {texts:?}"
+            );
+            assert!(state.rule_problems.is_empty() && state.rules_error.is_none());
+        });
+    }
+
+    /// **A rule switched off is written off, and stays where it was.**
+    #[test]
+    fn a_rule_switched_off_is_written_off_and_stays_in_its_place() {
+        settingsfile::testing::with_scratch_config("settings-rules-switch", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert!(!rule_on_file("Second").enabled);
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["First", "Second", "Third"]
+            );
+            assert!(rule_on_file("First").enabled && rule_on_file("Third").enabled);
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert!(
+                rule_on_file("Second").enabled,
+                "switching it on again was not written"
+            );
+        });
+    }
+
+    /// **Rules move up and down, and the order is written; the first cannot
+    /// go up nor the last down, and each says why.**
+    #[test]
+    fn rules_move_up_and_down_and_the_ends_say_why_they_cannot() {
+        settingsfile::testing::with_scratch_config("settings-rules-move", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::RuleDown(0)));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Second", "First", "Third"]
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::RuleUp(2)));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Second", "Third", "First"]
+            );
+            assert_eq!(rule_names(&state), ["Second", "Third", "First"]);
+
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleUp(0))).is_none());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleDown(2))).is_none());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleUp(1))).is_some());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleDown(1))).is_some());
+            let reasons: Vec<String> = state
+                .disabled_controls()
+                .into_iter()
+                .map(|(_, why)| why)
+                .collect();
+            assert!(reasons.iter().any(|r| r == "It is the first rule already."));
+            assert!(reasons.iter().any(|r| r == "It is the last rule already."));
+        });
+    }
+
+    /// **A rule deleted is gone from the file, and can be put back where it
+    /// was until the next change; deleting every rule leaves none, not the
+    /// built-in ones.**
+    #[test]
+    fn a_rule_deleted_can_be_put_back_where_it_was() {
+        settingsfile::testing::with_scratch_config("settings-rules-delete", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(1)));
+            assert_eq!(rules_on_file().expect("rules"), ["First", "Third"]);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t == "\u{201c}Second\u{201d} is deleted."),
+                "the page does not say what was deleted"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::PutRuleBack));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["First", "Second", "Third"]
+            );
+            assert_eq!(
+                rule_on_file("Second").criteria,
+                windowrules::MatchCriteria::TitleContains("chat".to_owned())
+            );
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none(),
+                "a rule put back is offered back again"
+            );
+
+            // The next change forgets it.
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(0)));
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert!(center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none());
+
+            for _ in 0..2 {
+                press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(0)));
+            }
+            assert_eq!(
+                rules_on_file(),
+                Some(Vec::new()),
+                "the built-in rules came back"
+            );
+            assert!(!state.rules_built_in);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t.starts_with("There are no rules"))
+            );
+        });
+    }
+
+    /// **A new rule is written above the rest, saying what was chosen and
+    /// nothing more.**
+    #[test]
+    fn a_new_rule_is_written_above_the_rest() {
+        settingsfile::testing::with_scratch_config("settings-rules-add", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            assert!(state.rule_draft.is_some(), "Add a rule opened no editor");
+            assert_eq!(
+                state.focused_field,
+                Some(FieldId::RuleName),
+                "the keyboard is not at the name"
+            );
+            type_text(&mut state, "Editor big");
+            state.handle_event(&key_press(Key::Tab));
+            assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+            type_text(&mut state, "editor");
+            let maximised = rules::STATES
+                .iter()
+                .position(|s| *s == Some(windowrules::InitialState::Maximized))
+                .expect("maximised is offered");
+            choose(&mut state, DropdownId::RuleState, maximised);
+            choose(&mut state, DropdownId::RuleFlag(rules::Flag::Taskbar), 2);
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert!(state.rule_draft.is_none(), "Save left the editor open");
+            assert_eq!(
+                state.focused_field, None,
+                "a closed editor's field kept the keyboard"
+            );
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Editor big", "First", "Second", "Third"]
+            );
+            let rule = rule_on_file("Editor big");
+            assert_eq!(
+                rule.criteria,
+                windowrules::MatchCriteria::AppId("editor".to_owned())
+            );
+            assert_eq!(
+                rule.actions.initial_state,
+                Some(windowrules::InitialState::Maximized)
+            );
+            assert_eq!(rule.actions.skip_taskbar, Some(true));
+            assert_eq!(
+                rule.actions.active_count(),
+                2,
+                "it says more than was chosen"
+            );
+        });
+    }
+
+    /// **A rule changed keeps its place and what it said, and its name must
+    /// be its own -- Save says why not, under the button as well as on it.**
+    #[test]
+    fn a_rule_changed_keeps_its_place_and_its_name_must_be_its_own() {
+        settingsfile::testing::with_scratch_config("settings-rules-edit", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(1)));
+            let draft = state.rule_draft.as_ref().expect("the editor");
+            assert_eq!(draft.name.text(), "Second");
+            assert_eq!(draft.matching, rules::MatchKind::TitleContains);
+            assert_eq!(draft.match_text.text(), "chat");
+
+            // Each list opens on what the rule says.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::RuleMatch));
+            let words = rules::MatchKind::ALL
+                .iter()
+                .position(|k| *k == rules::MatchKind::TitleContains)
+                .expect("offered");
+            assert_eq!(state.dropdown_layout().expect("open").selected, words);
+            state.open_dropdown = None;
+            press_on(
+                &mut state,
+                RowHit::Dropdown(DropdownId::RuleFlag(rules::Flag::Taskbar)),
+            );
+            assert_eq!(
+                state.dropdown_layout().expect("open").selected,
+                2,
+                "the taskbar's list does not open on No"
+            );
+            state.open_dropdown = None;
+
+            state
+                .rule_draft
+                .as_mut()
+                .expect("the editor")
+                .name
+                .set_text("Third");
+            let taken = "Another rule is called \u{201c}Third\u{201d} already.";
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::SaveRule)).is_none(),
+                "Save is offered for a name another rule has"
+            );
+            assert!(
+                state
+                    .disabled_controls()
+                    .iter()
+                    .any(|(_, why)| why == taken)
+            );
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == taken),
+                "the reason is not under Save"
+            );
+
+            state
+                .rule_draft
+                .as_mut()
+                .expect("the editor")
+                .name
+                .set_text("Chat");
+            let remember = rules::Place::ALL
+                .iter()
+                .position(|p| *p == rules::Place::Remember)
+                .expect("offered");
+            choose(&mut state, DropdownId::RulePlace, remember);
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(rules_on_file().expect("rules"), ["First", "Chat", "Third"]);
+            let rule = rule_on_file("Chat");
+            assert_eq!(
+                rule.actions.position,
+                Some(windowrules::PositionSpec::RememberLast)
+            );
+            assert_eq!(
+                rule.actions.skip_taskbar,
+                Some(true),
+                "what the rule said before was lost"
+            );
+        });
+    }
+
+    /// **Cancel keeps nothing of the editor**, and leaves the file as it was.
+    #[test]
+    fn cancel_keeps_nothing_of_the_editor() {
+        settingsfile::testing::with_scratch_config("settings-rules-cancel", |root| {
+            let mut state = rules_page(root, None);
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            type_text(&mut state, "Mine");
+            press_on(&mut state, RowHit::Press(ButtonId::CancelRule));
+            assert!(state.rule_draft.is_none());
+            assert_eq!(
+                state.focused_field, None,
+                "the hidden field kept the keyboard"
+            );
+            assert_eq!(rules_on_file(), None, "Cancel wrote the file");
+        });
+    }
+
+    /// **A rule the file cannot read is shown with why, and nothing on the
+    /// page saves over it** -- not even by a way round the controls -- until
+    /// the user removes it on purpose. `windowrules::file::store` keeps only
+    /// the rules it is given, so any save would have deleted it.
+    #[test]
+    fn a_rule_the_file_cannot_read_is_shown_and_nothing_saves_over_it() {
+        settingsfile::testing::with_scratch_config("settings-rules-unreadable", |root| {
+            let mut state = rules_page(root, Some(WITH_A_TYPO));
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            assert_eq!(rule_names(&state), ["Terminal", "Notes"]);
+            let texts = drawn_texts(&state);
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t.starts_with("\u{201c}Chat\u{201d}: `taskbar` is `true` or `false`")),
+                "the problem is not said: {texts:?}"
+            );
+            for what in [
+                RowHit::Toggle(ToggleId::RuleEnabled(0)),
+                RowHit::Press(ButtonId::EditRule(0)),
+                RowHit::Press(ButtonId::DeleteRule(0)),
+                RowHit::Press(ButtonId::AddRule),
+            ] {
+                assert!(center_of(&state, what).is_none(), "{what:?} is offered");
+            }
+            let blocked = state.rules_blocked().expect("changes are refused");
+            assert!(
+                state
+                    .disabled_controls()
+                    .iter()
+                    .any(|(_, why)| why == blocked)
+            );
+
+            // Nor by a way round the controls: each refuses for itself, and
+            // leaves the page's rules as they were -- or the next save, once
+            // allowed, would write what was refused.
+            state.set_rule_enabled(0);
+            state.move_rule(0, false);
+            state.delete_rule(0);
+            state.open_rule_editor(None);
+            assert!(state.rule_draft.is_none(), "the editor opened");
+            assert!(!state.store_rules());
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file"),
+                WITH_A_TYPO,
+                "the file was written over"
+            );
+
+            press_on(&mut state, RowHit::Press(ButtonId::RemoveUnreadableRules));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Terminal", "Notes"],
+                "a move or a delete refused before was written now"
+            );
+            assert!(
+                rule_on_file("Terminal").enabled,
+                "a switch refused before was written now"
+            );
+            assert!(
+                windowrules::file::load()
+                    .expect("rules")
+                    .problems
+                    .is_empty()
+            );
+            assert!(state.rule_problems.is_empty());
+            assert!(
+                center_of(&state, RowHit::Toggle(ToggleId::RuleEnabled(0))).is_some(),
+                "changes are still refused once the rule is gone"
+            );
+        });
+    }
+
+    /// **Every choice the editor offers reaches the file as itself.**
+    #[test]
+    fn every_choice_the_editor_offers_reaches_the_file() {
+        settingsfile::testing::with_scratch_config("settings-rules-every-choice", |root| {
+            let mut state = rules_page(root, Some("rules: {}\n"));
+            assert!(state.rules.is_empty() && !state.rules_built_in);
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            type_text(&mut state, "All of it");
+            let at = |items: &[rules::Place], item: rules::Place| {
+                items.iter().position(|i| *i == item).expect("offered")
+            };
+            let words = rules::MatchKind::ALL
+                .iter()
+                .position(|k| *k == rules::MatchKind::TitleContains)
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleMatch, words);
+            type_into(&mut state, FieldId::RuleMatch, "notes");
+            choose(
+                &mut state,
+                DropdownId::RulePlace,
+                at(&rules::Place::ALL, rules::Place::At),
+            );
+            type_into(&mut state, FieldId::RulePlace, "-20 80");
+            let part = rules::Size::ALL
+                .iter()
+                .position(|s| *s == rules::Size::Part)
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleSize, part);
+            type_into(&mut state, FieldId::RuleSize, "50% 75%");
+            type_into(&mut state, FieldId::RuleMinSize, "400 300");
+            type_into(&mut state, FieldId::RuleMaxSize, "1600x1200");
+            let third = rules::desktop_choices(None)
+                .iter()
+                .position(|d| *d == Some(2))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleDesktop, third);
+            let full = rules::STATES
+                .iter()
+                .position(|s| *s == Some(windowrules::InitialState::Fullscreen))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleState, full);
+            let eighty = rules::opacity_choices(None)
+                .iter()
+                .position(|o| *o == Some(0.8))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleOpacity, eighty);
+            let mut expected = windowrules::RuleActions::new();
+            for (n, flag) in rules::Flag::ALL.into_iter().enumerate() {
+                let yes = n % 2 == 0;
+                choose(
+                    &mut state,
+                    DropdownId::RuleFlag(flag),
+                    if yes { 1 } else { 2 },
+                );
+                flag.set(&mut expected, Some(yes));
+            }
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleOnce));
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+
+            let rule = rule_on_file("All of it");
+            assert_eq!(
+                rule.criteria,
+                windowrules::MatchCriteria::TitleContains("notes".to_owned())
+            );
+            expected.position = Some(windowrules::PositionSpec::Absolute { x: -20, y: 80 });
+            expected.size = Some(windowrules::SizeSpec::Percentage {
+                w_pct: 0.5,
+                h_pct: 0.75,
+            });
+            expected.min_size = Some((400, 300));
+            expected.max_size = Some((1600, 1200));
+            expected.desktop = Some(2);
+            expected.initial_state = Some(windowrules::InitialState::Fullscreen);
+            expected.opacity = Some(0.8);
+            assert_eq!(rule.actions, expected);
+            assert!(rule.one_shot, "for the first window only was not written");
+            assert!(rule.enabled);
+        });
+    }
+
+    /// **What the editor does not offer is kept as the file has it** -- the
+    /// monitor and the title bar, which the desktop does not carry out yet,
+    /// and the snap zone, which the editor cannot name -- **and a snap zone
+    /// can be taken off.**
+    #[test]
+    fn what_the_editor_does_not_offer_is_kept_and_a_snap_can_be_taken_off() {
+        settingsfile::testing::with_scratch_config("settings-rules-kept", |root| {
+            let mut state = rules_page(
+                root,
+                Some(
+                    "rules:\n  Kept:\n    app: chat\n    monitor: 2\n    decorations: false\n    snap: 3\n",
+                ),
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(0)));
+            let texts = drawn_texts(&state);
+            for shown in ["Monitor 2", "Zone 3"] {
+                assert!(texts.iter().any(|t| t == shown), "{shown} is not shown");
+            }
+            let reasons: Vec<String> = state
+                .disabled_controls()
+                .into_iter()
+                .map(|(_, why)| why)
+                .collect();
+            assert!(
+                reasons.iter().any(|r| r.contains("not carried out yet")),
+                "the monitor and the title bar do not say why they cannot be chosen"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            let rule = rule_on_file("Kept");
+            assert_eq!(rule.actions.target_monitor, Some(1));
+            assert_eq!(rule.actions.no_decorations, Some(true));
+            assert_eq!(rule.actions.snap_zone, Some(3));
+
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(0)));
+            choose(&mut state, DropdownId::RuleSnap, 0);
+            assert!(
+                center_of(&state, RowHit::Dropdown(DropdownId::RuleSnap)).is_none(),
+                "the snap row stays with no zone to show"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(rule_on_file("Kept").actions.snap_zone, None);
+            assert_eq!(
+                rule_on_file("Kept").actions.target_monitor,
+                Some(1),
+                "taking the snap off took the monitor too"
+            );
+        });
+    }
+
+    /// **The editor's fields take the keyboard in turn**: Tab and Enter go on
+    /// to the next field the editor shows -- past ones its choices hide --
+    /// Shift+Tab back, Escape lets go, and a field a choice hides lets go.
+    #[test]
+    fn the_editors_fields_take_the_keyboard_in_turn() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::WindowRules;
+        state.open_rule_editor(None);
+        assert_eq!(state.focused_field, Some(FieldId::RuleName));
+        type_text(&mut state, "R");
+        assert_eq!(state.rule_draft.as_ref().expect("editor").name.text(), "R");
+
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+        // "As usual" for where and how big: no fields, so on to the sizes.
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMinSize));
+        state.handle_event(&shift_tab());
+        assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMinSize));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMaxSize));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(
+            state.focused_field, None,
+            "past the last field the keyboard is let go"
+        );
+
+        state.focused_field = Some(FieldId::RuleMinSize);
+        state.handle_event(&key_press(Key::Escape));
+        assert_eq!(state.focused_field, None);
+
+        // Every window has no text to match: its field goes, and lets go.
+        state.focused_field = Some(FieldId::RuleMatch);
+        state.choose_in_rule(DropdownId::RuleMatch, 3);
+        assert_eq!(
+            state.rule_draft.as_ref().expect("editor").matching,
+            rules::MatchKind::Any
+        );
+        assert_eq!(
+            state.focused_field, None,
+            "a field no longer shown kept the keyboard"
+        );
+        assert!(!state.rule_fields().contains(&FieldId::RuleMatch));
+    }
+
+    /// **Tab scrolls the field it goes to into view.**
+    #[test]
+    fn tab_scrolls_the_field_it_goes_to_into_view() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::WindowRules;
+        state.open_rule_editor(None);
+        state.scroll_page_to(f32::MAX);
+        assert!(
+            state.page_scroll > 0.0,
+            "the editor fits the window: this proves nothing"
+        );
+        state.focused_field = Some(FieldId::RuleMinSize);
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMaxSize));
+        let (_, y) = state
+            .anchor_at(AnchorId::Field(FieldId::RuleMaxSize))
+            .expect("the field is drawn");
+        assert!(
+            y >= SettingsState::content_top() && y + ITEM_HEIGHT <= state.window_height,
+            "the field the keyboard went to is off screen: {y}"
+        );
+    }
+
+    /// **Rules changed under the page are read again**, and a rule open in
+    /// the editor is followed to its new place by its name.
+    #[test]
+    fn rules_changed_under_the_page_are_read_again() {
+        settingsfile::testing::with_scratch_config("settings-rules-reread", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(2)));
+            write_rules_file(
+                root,
+                &THREE_RULES.replacen("rules:\n", "rules:\n  Zeroth:\n    app: zero\n", 1),
+            );
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert_eq!(rule_names(&state), ["Zeroth", "First", "Second", "Third"]);
+            assert_eq!(
+                state.rule_draft.as_ref().expect("the editor").editing,
+                Some(3),
+                "the rule being changed was not followed to its new place"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Zeroth", "First", "Second", "Third"],
+                "saving wrote over the change, or put the rule elsewhere"
+            );
+        });
     }
 
     // --- Notes wrap to their column --------------------------------------------

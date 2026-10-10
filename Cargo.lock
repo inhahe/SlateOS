@@ -3745,6 +3745,7 @@ dependencies = [
  "settingsfile",
  "sound",
  "textline",
+ "windowrules",
  "yamldoc",
 ]
 

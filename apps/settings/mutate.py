@@ -1266,8 +1266,8 @@ MUTATIONS += [
     ),
     (
         "a row that cannot be used gives no reason",
-        "        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);",
-        "        let _ = (x, y, why);",
+        "        let text = value.to_string();\n        let (x, y) = (self.x(), self.y());\n        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);",
+        "        let text = value.to_string();\n        let (x, y) = (self.x(), self.y());\n        let _ = (x, y, why);",
         [WHY_ROWS],
     ),
     (
@@ -1800,6 +1800,363 @@ MUTATIONS += [
 ]
 
 
+# The Window Rules page (2026-10-10, requests/c-e-a-window-rules-page-in-
+# settings.md): lane C's rules in order, each switched, changed, moved and
+# deleted, a new one added, the file's unreadable rules said and never saved
+# over; the editor's fields and lists.
+#
+# Not rows: scrolling the editor to its top on opening and closing, which
+# only moves the view; and the 256-rule limit on Add, which would need a test
+# writing 256 rules for one sentence.
+R_BUILT_IN = "with_no_rules_written_the_built_in_ones_are_shown_and_a_change_makes_them_yours"
+R_LISTED = "each_rule_is_listed_with_what_it_matches_and_does"
+R_SWITCH = "a_rule_switched_off_is_written_off_and_stays_in_its_place"
+R_MOVE = "rules_move_up_and_down_and_the_ends_say_why_they_cannot"
+R_DELETE = "a_rule_deleted_can_be_put_back_where_it_was"
+R_ADD = "a_new_rule_is_written_above_the_rest"
+R_EDIT = "a_rule_changed_keeps_its_place_and_its_name_must_be_its_own"
+R_CANCEL = "cancel_keeps_nothing_of_the_editor"
+R_UNREADABLE = "a_rule_the_file_cannot_read_is_shown_and_nothing_saves_over_it"
+R_EVERY = "every_choice_the_editor_offers_reaches_the_file"
+R_KEPT = "what_the_editor_does_not_offer_is_kept_and_a_snap_can_be_taken_off"
+R_KEYS = "the_editors_fields_take_the_keyboard_in_turn"
+R_TAB_SCROLL = "tab_scrolls_the_field_it_goes_to_into_view"
+R_REREAD = "rules_changed_under_the_page_are_read_again"
+
+MUTATIONS += [
+    (
+        "the rules are not read on entering the page",
+        "        if page == SettingsPage::WindowRules {\n            self.refresh_rules();\n        }\n",
+        "",
+        [R_LISTED],
+    ),
+    (
+        "with no file there are no rules, not the built-in ones",
+        "                self.rules = windowrules::default_rules();\n",
+        "                self.rules = Vec::new();\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "the built-in rules are not said to be",
+        "        if self.rules_built_in {\n",
+        "        if !self.rules_built_in {\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "a rule's name is not drawn",
+        "            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);\n            render_toggle(",
+        "            render_toggle(",
+        [R_LISTED],
+    ),
+    (
+        "a rule's actions are not said",
+        "                    \"{}. {}\",\n",
+        "                    \"{}.{}\",\n",
+        [R_LISTED],
+    ),
+    (
+        "the switch flips nothing",
+        "        rule.enabled = !rule.enabled;\n",
+        "",
+        [R_SWITCH],
+    ),
+    (
+        "a change is not written",
+        "        let stored = windowrules::file::store(&rules);\n",
+        "        let stored: std::io::Result<()> = Ok(());\n        let _ = &rules;\n",
+        [R_SWITCH],
+    ),
+    (
+        "the page shows what it holds, not what the file says",
+        "        self.refresh_rules();\n        stored.is_ok()\n",
+        "        stored.is_ok()\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "a move moves nothing",
+        "        self.rules.swap(index, other);\n",
+        "",
+        [R_MOVE],
+    ),
+    (
+        "up moves down",
+        "        let other = if up {\n            index.checked_sub(1)\n        } else {\n            index.checked_add(1)\n        };\n",
+        "        let other = if up {\n            index.checked_add(1)\n        } else {\n            index.checked_sub(1)\n        };\n",
+        [R_MOVE],
+    ),
+    (
+        "the first rule is offered a move up",
+        "            let up = if index == 0 {\n",
+        "            let up = if index == usize::MAX {\n",
+        [R_MOVE],
+    ),
+    (
+        "the last rule is offered a move down",
+        "            let down = if index == last {\n",
+        "            let down = if index == usize::MAX {\n",
+        [R_MOVE],
+    ),
+    (
+        "a deleted rule is not offered back",
+        "            self.rule_deleted = Some((index, rule));\n",
+        "",
+        [R_DELETE],
+    ),
+    (
+        "a rule put back goes to the end",
+        "        let at = index.min(self.rules.len());\n",
+        "        let at = self.rules.len().min(index.max(self.rules.len()));\n",
+        [R_DELETE],
+    ),
+    (
+        "a rule put back is offered back again",
+        "        let Some((index, rule)) = self.rule_deleted.take() else {\n",
+        "        let Some((index, rule)) = self.rule_deleted.clone() else {\n",
+        [R_DELETE],
+    ),
+    (
+        "a change keeps the deleted rule on offer",
+        "        rule.enabled = !rule.enabled;\n        self.rule_deleted = None;\n",
+        "        rule.enabled = !rule.enabled;\n",
+        [R_DELETE],
+    ),
+    (
+        "a new rule goes to the bottom",
+        "            None => self.rules.insert(0, rule),\n",
+        "            None => self.rules.push(rule),\n",
+        [R_ADD],
+    ),
+    (
+        "a changed rule is added as a new one",
+        "        match draft.editing.and_then(|at| self.rules.get_mut(at)) {\n",
+        "        match draft.editing.and_then(|at| self.rules.get_mut(at)).filter(|_| false) {\n",
+        [R_EDIT],
+    ),
+    (
+        "Save leaves the editor open",
+        "        self.close_rule_editor();\n        self.store_rules();\n",
+        "        self.store_rules();\n",
+        [R_ADD],
+    ),
+    (
+        "Cancel keeps the editor",
+        "            RowHit::Press(ButtonId::CancelRule) => self.close_rule_editor(),\n",
+        "            RowHit::Press(ButtonId::CancelRule) => {}\n",
+        [R_CANCEL],
+    ),
+    (
+        "a closed editor's field keeps the keyboard",
+        "            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))\n        {\n            self.focused_field = None;\n        }\n",
+        "            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))\n        {\n        }\n",
+        [R_CANCEL],
+    ),
+    (
+        "the editor opens with the keyboard elsewhere",
+        "        self.focused_field = Some(FieldId::RuleName);\n",
+        "",
+        [R_ADD],
+    ),
+    (
+        "the editor opens on a blank rule to change one",
+        "            Some((at, rule)) => rules::RuleDraft::of(rule, at),\n",
+        "            Some(_) => rules::RuleDraft::new(),\n",
+        [R_EDIT],
+    ),
+    (
+        "Save is offered for a draft that is not a rule",
+        "        let save = match &why {\n            None => Press::Does(RowHit::Press(ButtonId::SaveRule)),\n            Some(why) => Press::Cannot(why),\n        };\n",
+        "        let save = Press::Does(RowHit::Press(ButtonId::SaveRule));\n",
+        [R_EDIT],
+    ),
+    (
+        "the reason is not said under Save",
+        "        if let Some(why) = &why {\n            s.note(why, 28.0);\n        }\n",
+        "",
+        [R_EDIT],
+    ),
+    (
+        "an unreadable rule's problem is not said",
+        "                s.note(&line, 28.0);\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "changes are not refused while a rule cannot be read",
+        "        (!self.rule_problems.is_empty()).then_some(\n",
+        "        (self.rule_problems.len() > usize::MAX - 1).then_some(\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a save writes over a rule that cannot be read",
+        "        if self.rules_blocked().is_some() {\n            return false;\n        }\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "a switch refused is kept to be written later",
+        "    fn set_rule_enabled(&mut self, index: usize) {\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "    fn set_rule_enabled(&mut self, index: usize) {\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a move refused is kept to be written later",
+        "        if index >= self.rules.len() || self.rules_blocked().is_some() {\n            return;\n        }\n        self.rules.swap(index, other);\n",
+        "        if index >= self.rules.len() {\n            return;\n        }\n        self.rules.swap(index, other);\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a delete refused is kept to be written later",
+        "        if index >= self.rules.len() || self.rules_blocked().is_some() {\n            return;\n        }\n        let rule = self.rules.remove(index);\n",
+        "        if index >= self.rules.len() {\n            return;\n        }\n        let rule = self.rules.remove(index);\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "the editor opens while a rule cannot be read",
+        "    fn open_rule_editor(&mut self, index: Option<usize>) {\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "    fn open_rule_editor(&mut self, index: Option<usize>) {\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "Remove them removes nothing",
+        "        self.rule_problems.clear();\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "the rules are not read again when their file changes",
+        "            self.reread_rules()\n",
+        "            false\n",
+        [R_REREAD],
+    ),
+    (
+        "the rule being changed is not followed to its new place",
+        "            draft.editing = editing.and_then(|name| self.rules.iter().position(|r| r.name == name));\n",
+        "            let _ = (draft, editing);\n",
+        [R_REREAD],
+    ),
+    (
+        "Tab does not go on to the next field",
+        "            Key::Tab | Key::Enter if plain => {\n",
+        "            Key::Enter if plain => {\n",
+        [R_KEYS],
+    ),
+    (
+        "Shift+Tab goes on, not back",
+        "                let back = evt.key == Key::Tab && evt.modifiers.shift;\n",
+        "                let back = evt.key == Key::Tab && evt.modifiers.shift && evt.modifiers.ctrl;\n",
+        [R_KEYS],
+    ),
+    (
+        "Escape keeps the keyboard in the field",
+        "            Key::Escape if plain => {\n                self.focused_field = None;\n                Some(EventResult::Consumed)\n            }\n            Key::Tab | Key::Enter",
+        "            Key::Escape if plain => Some(EventResult::Consumed),\n            Key::Tab | Key::Enter",
+        [R_KEYS],
+    ),
+    (
+        "what is typed does not reach the field",
+        "                    .and_then(|draft| rule_input(draft, field))?;\n",
+        "                    .and_then(|draft| rule_input(draft, FieldId::ExclusionDraft))?;\n",
+        [R_KEYS],
+    ),
+    (
+        "a field a choice hides keeps the keyboard",
+        "            && !self.rule_fields().contains(&field)\n        {\n            self.focused_field = None;\n        }\n",
+        "            && !self.rule_fields().contains(&field)\n        {\n        }\n",
+        [R_KEYS],
+    ),
+    (
+        "Tab goes to a field the editor does not show",
+        "                FieldId::RulePlace => draft.place.field_label().is_some(),\n",
+        "                FieldId::RulePlace => true,\n",
+        [R_KEYS],
+    ),
+    (
+        "Tab leaves the field it goes to off screen",
+        "            self.scroll_into_view(AnchorId::Field(field));\n",
+        "",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "a field above the view is scrolled further away",
+        "            self.scroll_page_by(y - top);\n",
+        "            self.scroll_page_by(top - y);\n",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "a field does not say where it is",
+        "        self.anchor(AnchorId::Field(id), x, y);\n",
+        "",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "the list of ways to match opens on the first",
+        "                |kind| *kind == draft.matching,\n",
+        "                |kind| *kind != *kind,\n",
+        [R_EDIT],
+    ),
+    (
+        "a yes-or-no list opens on the first",
+        "                    |tri| *tri == now,\n",
+        "                    |tri| *tri != *tri && now == now,\n",
+        [R_EDIT],
+    ),
+    (
+        "the way to match is not chosen",
+        "                    draft.matching = *kind;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "where it opens is not chosen",
+        "                    draft.place = *place;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "how big it opens is not chosen",
+        "                    draft.size = *size;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "the desktop is not chosen",
+        "                    draft.actions.desktop = *desktop;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "how it opens is not chosen",
+        "                    draft.actions.initial_state = *state;\n",
+        "",
+        [R_ADD],
+    ),
+    (
+        "the opacity is not chosen",
+        "                    draft.actions.opacity = *opacity;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "a yes or no is not chosen",
+        "                    flag.set(&mut draft.actions, tri.value());\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "a snap zone cannot be taken off",
+        "                    draft.actions.snap_zone = None;\n",
+        "",
+        [R_KEPT],
+    ),
+    (
+        "for the first window only is not kept",
+        "            ToggleId::RuleOnce => &mut self.rule_draft.as_mut()?.once,\n",
+        "            ToggleId::RuleOnce => return None,\n",
+        [R_EVERY],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",
@@ -1885,9 +2242,150 @@ THUMBS = [
     ),
 ]
 
+# The Window Rules editor's model (`src/rules.rs`): a draft read into a rule,
+# and a rule said in words.
+RULE_UNTOUCHED = "a_rule_saved_untouched_is_the_rule_it_was"
+RULE_NEW = "a_new_rule_does_nothing_until_it_is_told"
+RULE_REFUSED = "a_draft_that_cannot_be_a_rule_says_why"
+RULE_NUMBERS = "numbers_are_read_as_people_type_them"
+RULE_FLAGS = "each_flag_reads_and_writes_its_own_action_in_its_rows_sense"
+RULE_SAID = "a_rule_is_said_in_a_sentence"
+RULE_LISTS = "a_list_shows_what_a_rule_says_even_off_the_list"
+
+RULES = [
+    (
+        "only spaces part a pair of numbers",
+        "matches!(c, ',' | 'x' | 'X' | '\\u{d7}')",
+        "matches!(c, ' ')",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a third number is not refused",
+        "    if words.next().is_some() {\n        return None;\n    }\n",
+        "",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a percentage past a hundred is read",
+        "    (0.0..=100.0).contains(&number).then_some(number / 100.0)\n",
+        "    (0.0..=1000.0).contains(&number).then_some(number / 100.0)\n",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a window may be no part of the screen",
+        "    percent(word).filter(|fraction| *fraction > 0.0)\n",
+        "    percent(word)\n",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a window may be no pixels wide",
+        "    word.parse().ok().filter(|n| *n > 0)\n",
+        "    word.parse().ok()\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a name is not trimmed",
+        "        let name = self.name.text().trim();\n",
+        "        let name = self.name.text();\n",
+        [RULE_NEW],
+    ),
+    (
+        "a rule needs no name",
+        "        if name.is_empty() {\n",
+        "        if name.is_empty() && name.len() > 1 {\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a rule's own name is taken from it",
+        "            .any(|(at, other)| Some(at) != self.editing && other.name == name)\n",
+        "            .any(|(_, other)| other.name == name)\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a rule needs nothing to match",
+        "            kind if text.is_empty() => return Err(kind.missing().to_owned()),\n",
+        "",
+        [RULE_REFUSED],
+    ),
+    (
+        "the smallest size may be larger than the largest",
+        "            && (min_w > max_w || min_h > max_h)\n",
+        "            && (min_w > max_w && min_h > max_h && min_w == 0)\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "for the first window only is lost",
+        "        rule.one_shot = self.once;\n",
+        "",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "a point's numbers are shown the wrong way round",
+        "(Place::At, 0, format!(\"{x} {y}\"))",
+        "(Place::At, 0, format!(\"{y} {x}\"))",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "the middle of a monitor becomes the first monitor's",
+        "(Place::Centre, monitor, String::new())",
+        "(Place::Centre, monitor.min(0), String::new())",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "no taskbar button is said as one",
+        "            (Self::Taskbar, false) => \"no taskbar button\",\n",
+        "            (Self::Taskbar, false) => \"a taskbar button\",\n",
+        [RULE_SAID],
+    ),
+    (
+        "a rule that does nothing says nothing",
+        "        return \"Does nothing yet.\".to_owned();\n",
+        "        return String::new();\n",
+        [RULE_SAID],
+    ),
+    (
+        "the sentence starts small",
+        ".map(|first| first.to_uppercase().chain(chars).collect())",
+        ".map(|first| first.to_lowercase().chain(chars).collect())",
+        [RULE_SAID],
+    ),
+    (
+        "the taskbar row reads the model's sense",
+        "            Self::Taskbar => actions.skip_taskbar.map(|skip| !skip),\n",
+        "            Self::Taskbar => actions.skip_taskbar,\n",
+        [RULE_FLAGS],
+    ),
+    (
+        "the taskbar row writes the model's sense",
+        "            Self::Taskbar => actions.skip_taskbar = inverted,\n",
+        "            Self::Taskbar => actions.skip_taskbar = value,\n",
+        [RULE_FLAGS],
+    ),
+    (
+        "a desktop past the desktops is not listed",
+        "        choices.push(Some(desktop));\n",
+        "",
+        [RULE_LISTS],
+    ),
+    (
+        "an opacity between the steps goes in the wrong place",
+        ".position(|choice| choice.is_some_and(|step| step < opacity))",
+        ".position(|choice| choice.is_some_and(|step| step > opacity))",
+        [RULE_LISTS],
+    ),
+    (
+        "a whole percentage keeps its .0",
+        "    match shown.strip_suffix(\".0\") {\n",
+        "    match shown.strip_suffix(\".x\") {\n",
+        [RULE_LISTS],
+    ),
+]
+
+
 TABLES = {
     "main.rs": MUTATIONS,
     "recyclebins.rs": RECYCLEBINS,
+    "rules.rs": RULES,
     "thumbs.rs": THUMBS,
 }
 

@@ -35,6 +35,10 @@ appearance = { path = "../../gui/appearance" }
 # The desktop's player, for the Sound page's previews: a sound chosen there is
 # heard as the desktop will play it, decoded and converted by the same code.
 sound = { path = "../../gui/sound" }
+# The window rules -- what happens to a program's windows as they open -- read
+# and written as the desktop reads them (lane C's `gui/windowrules`,
+# requests/c-e-a-window-rules-page-in-settings.md).
+windowrules = { path = "../../gui/windowrules" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.

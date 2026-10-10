@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The boxes' right-click menu -- Cut, Copy, Paste, Delete, Select all --
+# held, routed and drawn as every program's is.
+fieldmenu = { path = "../fieldmenu" }
 pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }

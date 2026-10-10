@@ -290,6 +290,76 @@ MUTATIONS = [
     ),
 ]
 
+# A box's right-click menu (2026-10-10, requests/c-e-text-fields-have-a-
+# right-click-menu.md), through apps/fieldmenu: the box given the keys, a row
+# done to it taking effect as typing does, the clock for a dimmed row's
+# reason.
+RN_MENU = "a_boxs_right_click_menu_edits_it_and_takes_effect"
+RN_CLOCK = "a_dimmed_row_of_the_menu_says_why_on_the_clock"
+
+MUTATIONS += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [RN_MENU, RN_CLOCK],
+    ),
+    (
+        "the search box is no box to the menu",
+        "            Target::SearchBox => Some(Focus::Search),\n",
+        "",
+        [RN_MENU, RN_CLOCK],
+    ),
+    (
+        "the right-click leaves the keys where they were",
+        "        if self.focus != focus {\n            self.set_focus(focus);\n        }\n        let viewport",
+        "        let viewport",
+        [RN_MENU],
+    ),
+    (
+        "a row chosen does nothing",
+        "        let _edit = self.draft.edit_command(id);\n",
+        "",
+        [RN_MENU],
+    ),
+    (
+        "a change from the menu takes no effect",
+        "        if self.draft.text() != before {\n            self.draft_changed();\n        }\n",
+        "",
+        [RN_MENU],
+    ),
+    (
+        "the menu's keys reach the box too",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                    return EventResult::Consumed;\n                }\n",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [RN_MENU],
+    ),
+    (
+        "a press the menu took reaches the window too",
+        "                fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "                fieldmenu::Outcome::Taken => {}\n",
+        [RN_MENU],
+    ),
+    (
+        "the menu is never drawn",
+        "        commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [RN_MENU],
+    ),
+    (
+        "no clock while the menu waits",
+        "        self.field_menu\n            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n",
+        "        None\n",
+        [RN_CLOCK],
+    ),
+    (
+        "the clock does not move the menu",
+        "                if self.field_menu.tick(self.clock_ms) {\n",
+        "                if false {\n",
+        [RN_CLOCK],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "renamer", timeout=600, only=only))

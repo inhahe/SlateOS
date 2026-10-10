@@ -3514,6 +3514,7 @@ dependencies = [
  "appearance",
  "coreutils",
  "ere",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",

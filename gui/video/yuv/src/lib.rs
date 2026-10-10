@@ -7,6 +7,11 @@
 //!   matrices libyuv has constants for, libavif's own floating point for the
 //!   rest (SMPTE 240M, FCC, YCgCo, the identity matrix) -- with alpha, and
 //!   premultiplied alpha undone. What a caller with a decoded picture calls.
+//! - [`hdr`]: an HDR picture -- PQ or HLG -- to pixels as Chrome shows it on
+//!   an sRGB screen: Skia's colour conversion and its default tone map
+//!   (design-decisions §1378), over the same chroma upsampling. What a
+//!   caller calls instead of [`reformat`] for a picture whose transfer
+//!   [`hdr::Transfer::from_h273`] names.
 //! - [`convert`]: libyuv's conversions beneath it, as libyuv's x86 code
 //!   computes them (its C copies the x86 formulation): BT.601, BT.709 and
 //!   BT.2020 at limited and full range ([`convert::I601`] and its siblings),
@@ -27,6 +32,9 @@
 //! grant: `licenses/libyuv-LICENSE`, `licenses/libyuv-PATENTS`. Portions
 //! ([`reformat`]) are copyright 2019-2020 Joe Drago, from libavif, used
 //! under its BSD-2-Clause licence: `gui/imagecodec/licenses/libavif-LICENSE.txt`.
+//! Portions ([`hdr`]) are transcribed from Skia and its skcms, copyright
+//! Google, used under Skia's BSD licence:
+//! `gui/imagecodec/licenses/skia-LICENSE`.
 
 #![no_std]
 
@@ -36,6 +44,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod convert;
+pub mod hdr;
 pub mod reformat;
 pub mod scale;
 

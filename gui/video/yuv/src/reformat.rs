@@ -33,6 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::convert::{self as libyuv, Constants, Eight, Planes, Rows, Ten};
+use crate::hdr::ToneMap;
 use crate::{Plane, PlaneBuf, Sample};
 
 // H.273's matrix coefficients, as libavif names them.
@@ -160,6 +161,12 @@ pub trait Reformat: Sample + sealed::Sealed {
         first: usize,
         out: &mut [u32],
     ) -> (bool, bool);
+
+    /// [`crate::hdr`]'s conversion for this sample size, of the band of rows
+    /// `out` holds from `first`, once its checks have passed: libyuv's
+    /// chroma upsampling for the size, and Chrome's handling of the light.
+    #[doc(hidden)]
+    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]);
 }
 
 impl Reformat for u8 {
@@ -170,6 +177,10 @@ impl Reformat for u8 {
         out: &mut [u32],
     ) -> (bool, bool) {
         libyuv_eight(picture, k, first, out)
+    }
+
+    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
+        crate::hdr::convert::<Eight>(picture, map, first, out);
     }
 }
 
@@ -182,11 +193,20 @@ impl Reformat for u16 {
     ) -> (bool, bool) {
         libyuv_deep(picture, k, first, out)
     }
+
+    /// Every depth of 16-bit samples upsamples as 10-bit ones do (libyuv's
+    /// `I010` filters, which are the same for any sample under 16 bits) --
+    /// bilinearly at 12 bits too, where libyuv's ordinary conversion takes
+    /// the nearest chroma sample, as a GPU's filtering of Chrome's video does
+    /// not.
+    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
+        crate::hdr::convert::<Ten>(picture, map, first, out);
+    }
 }
 
 /// libavif's `avifReformatMode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
+pub(crate) enum Mode {
     /// Luma and colour difference, weighted by `kr`, `kg` and `kb`.
     Coefficients,
     /// G, B and R carried as Y, U and V.
@@ -198,17 +218,17 @@ enum Mode {
 
 /// The YUV half of `avifReformatState`: `avifYUVColorSpaceInfo`.
 #[derive(Clone, Copy, Debug)]
-struct State {
-    mode: Mode,
-    kr: f32,
-    kg: f32,
-    kb: f32,
+pub(crate) struct State {
+    pub(crate) mode: Mode,
+    pub(crate) kr: f32,
+    pub(crate) kg: f32,
+    pub(crate) kb: f32,
     depth: u8,
-    max_channel: u32,
-    bias_y: f32,
-    bias_uv: f32,
-    range_y: f32,
-    range_uv: f32,
+    pub(crate) max_channel: u32,
+    pub(crate) bias_y: f32,
+    pub(crate) bias_uv: f32,
+    pub(crate) range_y: f32,
+    pub(crate) range_uv: f32,
     /// libavif's chroma shift, which for 4:0:0 is 1 each way.
     shift_x: u32,
     shift_y: u32,
@@ -222,7 +242,7 @@ struct State {
     clippy::cast_precision_loss,
     reason = "depth is 8, 10, 12 or 16, so every shift is by under 16 and every value converted to float is under 2^16, exactly representable"
 )]
-fn prepare<T>(picture: &Picture<'_, T>) -> Result<State, Error> {
+pub(crate) fn prepare<T>(picture: &Picture<'_, T>) -> Result<State, Error> {
     let matrix = picture.matrix;
     // YCgCo-Re and -Ro carry two and one more bits than the RGB they encode,
     // which is 8 here.
@@ -606,23 +626,34 @@ pub fn to_argb_rows<T: Reformat>(
     first: usize,
     out: &mut [u32],
 ) -> Result<(), Error> {
+    let state = check_band(picture, first, out.len())?;
+    convert(picture, &state, first, out);
+    Ok(())
+}
+
+/// [`check`] for a band of `len` pixels from row `first`: whole rows, none
+/// past the picture's last. The state the conversion runs on.
+pub(crate) fn check_band<T>(
+    picture: &Picture<'_, T>,
+    first: usize,
+    len: usize,
+) -> Result<State, Error> {
     let (state, _) = check(picture)?;
-    let rows = out.len().checked_div(picture.width).ok_or(Error::Size)?;
-    let fits = out.len().is_multiple_of(picture.width)
+    let rows = len.checked_div(picture.width).ok_or(Error::Size)?;
+    let fits = len.is_multiple_of(picture.width)
         && first
             .checked_add(rows)
             .is_some_and(|end| end <= picture.height);
     if !fits {
         return Err(Error::Size);
     }
-    convert(picture, &state, first, out);
-    Ok(())
+    Ok(state)
 }
 
 /// What a conversion reads, checked before anything is: the colour
 /// description, and the planes against the picture's size. The state the
 /// conversion runs on, and how many pixels the whole picture has.
-fn check<T>(picture: &Picture<'_, T>) -> Result<(State, usize), Error> {
+pub(crate) fn check<T>(picture: &Picture<'_, T>) -> Result<(State, usize), Error> {
     let state = prepare(picture)?;
     let (width, height) = (picture.width, picture.height);
     let count = width.checked_mul(height).ok_or(Error::Size)?;
@@ -763,7 +794,7 @@ fn identity_full_range<T: Sample>(
     clippy::cast_precision_loss,
     reason = "code points are under 2^16, exactly representable as f32"
 )]
-fn tables(state: &State) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn tables(state: &State) -> (Vec<f32>, Vec<f32>) {
     let count = 1u32 << u32::from(state.depth).min(16);
     let luma: Vec<f32> = (0..count)
         .map(|cp| (cp as f32 - state.bias_y) / state.range_y)
@@ -780,7 +811,7 @@ fn tables(state: &State) -> (Vec<f32>, Vec<f32>) {
 
 /// A table's value for a sample, clamped to the depth's range first as the
 /// C clamps it "to protect against bad LUT lookups".
-fn lookup<T: Sample>(table: &[f32], sample: T, max: u32) -> f32 {
+pub(crate) fn lookup<T: Sample>(table: &[f32], sample: T, max: u32) -> f32 {
     let index: u32 = sample.into();
     usize::try_from(index.min(max))
         .ok()
@@ -792,7 +823,7 @@ fn lookup<T: Sample>(table: &[f32], sample: T, max: u32) -> f32 {
 /// `AVIF_CLAMP(v, 0.0f, 1.0f)`. `f32::clamp` agrees with the C's
 /// comparisons everywhere, a NaN passing through and -0.0 staying -0.0.
 #[inline(always)]
-fn clamp_unit(v: f32) -> f32 {
+pub(crate) fn clamp_unit(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
@@ -839,7 +870,7 @@ fn coefficients_rgb(state: &State, y: f32, cb: f32, cr: f32) -> [f32; 3] {
     clippy::arithmetic_side_effects,
     reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
 )]
-fn rgb_of(kr: f32, kg: f32, kb: f32, y: f32, cb: f32, cr: f32) -> [f32; 3] {
+pub(crate) fn rgb_of(kr: f32, kg: f32, kb: f32, y: f32, cb: f32, cr: f32) -> [f32; 3] {
     let r = y + (2.0 * (1.0 - kr)) * cr;
     let b = y + (2.0 * (1.0 - kb)) * cb;
     let g = y - ((2.0 * ((kr * (1.0 - kr) * cr) + (kb * (1.0 - kb) * cb))) / kg);
@@ -1135,7 +1166,7 @@ fn finish_row<T: Sample>(
     clippy::cast_possible_truncation,
     reason = "the luma code is under 2^16 and the rounded chroma small, so the integer arithmetic stays far inside i32; the clamped values are bytes, exact as f32"
 )]
-fn ycgco_r(unorm_y: u32, cb: f32, cr: f32, max_f: f32) -> [f32; 3] {
+pub(crate) fn ycgco_r(unorm_y: u32, cb: f32, cr: f32, max_f: f32) -> [f32; 3] {
     let yy = i32::try_from(unorm_y).unwrap_or(0);
     let cg = floor(cb * max_f + 0.5);
     let co = floor(cr * max_f + 0.5);

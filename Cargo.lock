@@ -33,7 +33,7 @@ version = "0.9.3"
 dependencies = [
  "cipher",
  "cpubits",
- "cpufeatures",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -103,7 +103,7 @@ version = "0.6.0"
 dependencies = [
  "base64ct",
  "blake2 0.11.0",
- "cpufeatures",
+ "cpufeatures 0.3.1",
  "password-hash",
 ]
 
@@ -474,7 +474,7 @@ version = "0.10.2"
 dependencies = [
  "cfg-if 1.0.5",
  "cipher",
- "cpufeatures",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -732,6 +732,10 @@ version = "0.1.1"
 
 [[package]]
 name = "cpufeatures"
+version = "0.2.17"
+
+[[package]]
+name = "cpufeatures"
 version = "0.3.1"
 
 [[package]]
@@ -854,6 +858,27 @@ name = "curl"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+dependencies = [
+ "cfg-if 1.0.5",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3142,7 +3167,7 @@ dependencies = [
 name = "poly1305"
 version = "0.9.1"
 dependencies = [
- "cpufeatures",
+ "cpufeatures 0.3.1",
  "universal-hash",
 ]
 
@@ -3298,6 +3323,10 @@ dependencies = [
  "oswindow",
  "textline",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
 
 [[package]]
 name = "randdist"
@@ -3519,6 +3548,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3613,12 +3651,19 @@ dependencies = [
  "cipher",
  "hex-literal",
  "poly1305",
+ "x25519-dalek",
  "xts-mode",
 ]
 
 [[package]]
 name = "secret"
 version = "0.1.0"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde_core"
@@ -4099,6 +4144,10 @@ dependencies = [
  "readpass",
  "userdb",
 ]
+
+[[package]]
+name = "subtle"
+version = "2.6.1"
 
 [[package]]
 name = "sudo"
@@ -4900,6 +4949,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "zeroize",
+]
+
+[[package]]
 name = "xdg"
 version = "0.1.0"
 dependencies = [
@@ -4969,6 +5027,22 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
 dependencies = [
  "proc-macro2",
  "quote",

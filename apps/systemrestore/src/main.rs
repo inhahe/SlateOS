@@ -25,6 +25,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::checkbox::{self, CheckState};
 use guitk::color::Color;
+use guitk::disabled::{Disabled, WhyDisabled};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::field;
 use guitk::frame::Rect;
@@ -2059,6 +2060,15 @@ pub struct SystemRestoreUI {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// Where the pointer is, `None` once it has left: kept for the reason a
+    /// switched-off checkbox gives, asked again after every event.
+    pointer: Option<(f32, f32)>,
+    /// Why a switched-off component checkbox is switched off, said while the
+    /// pointer rests on it (`requests/c-e-say-why-a-control-is-disabled.md`).
+    why_disabled: WhyDisabled,
+    /// The window's clock for that reason, in milliseconds: every tick's
+    /// `elapsed_ms`.
+    clock_ms: u64,
 }
 
 impl SystemRestoreUI {
@@ -2092,6 +2102,9 @@ impl SystemRestoreUI {
             .collect();
         let mut ui = Self {
             show_help: false,
+            pointer: None,
+            why_disabled: WhyDisabled::new(),
+            clock_ms: 0,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             manager,
             view_mode: ViewMode::Tree,
@@ -2282,6 +2295,9 @@ impl SystemRestoreUI {
                 "F1 or ? closes this",
             );
         }
+        // Why the switched-off checkbox under the pointer is switched off,
+        // over everything.
+        rt.commands.extend(self.why_disabled.render(&self.palette));
         rt
     }
 
@@ -2466,12 +2482,61 @@ impl SystemRestoreUI {
 
     /// Handle one event from the window.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        let result = self.dispatch(event);
+        if let Event::Mouse(mouse) = event {
+            self.pointer = match mouse.kind {
+                MouseEventKind::Leave => None,
+                _ => Some((mouse.x, mouse.y)),
+            };
+        }
+        let mut result = self.dispatch(event);
         // The comparison follows the pair, however the pair changed: a key,
         // a click, a deletion. Worked out here rather than when drawn, which
         // happens far more often and must not read the store.
         self.refresh_compare();
+        if let Event::Tick { elapsed_ms } = event {
+            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+            if self.why_disabled.tick(self.clock_ms) {
+                result = EventResult::Consumed;
+            }
+        }
+        if self.explain_disabled() {
+            result = EventResult::Consumed;
+        }
         result
+    }
+
+    /// The component checkboxes this system cannot keep, each as drawn --
+    /// its box, grown as the toolkit grows one -- with why, in a sentence:
+    /// `SnapshotComponent::source`'s own answer. None with the form closed,
+    /// or with the shortcut card over it.
+    fn switched_off_components(&self) -> Vec<((f32, f32, f32, f32), String)> {
+        if self.show_help {
+            return Vec::new();
+        }
+        self.component_rows()
+            .into_iter()
+            .filter_map(|(i, (cx, cy))| {
+                let component = SnapshotComponent::all().get(i)?;
+                let why = component.source(&self.locations).err()?;
+                let r = checkbox::hit(cx, cy, COMPONENT_ROW_HEIGHT, component.label());
+                Some(((r.x, r.y, r.w, r.h), format!("{why}.")))
+            })
+            .collect()
+    }
+
+    /// Say why the switched-off checkbox under the pointer is switched off,
+    /// or stop saying it. Asked after every event, as the form opens and
+    /// closes under a pointer that has not moved. Returns whether what is
+    /// drawn changed.
+    fn explain_disabled(&mut self) -> bool {
+        let Some(at) = self.pointer else {
+            return self.why_disabled.pointer_left();
+        };
+        let off = self.switched_off_components();
+        let boxes: Vec<Disabled<'_>> = off.iter().map(|(r, why)| (*r, why.as_str())).collect();
+        let screen = (self.window_width, self.window_height);
+        self.why_disabled
+            .pointer_at(at, self.clock_ms, screen, &boxes)
     }
 
     /// Route one event.
@@ -6336,11 +6401,18 @@ impl App for SystemRestoreUI {
         // never starts.
         // Often while work runs, so its reports reach the overlay as they
         // come; once a minute otherwise, for the clock and the schedule.
-        if self.work.is_some() {
-            Some(PROGRESS_STEP)
+        //
+        // Sooner while a switched-off checkbox's reason is waiting to appear.
+        let own = if self.work.is_some() {
+            PROGRESS_STEP
         } else {
-            Some(CLOCK_STEP)
-        }
+            CLOCK_STEP
+        };
+        Some(
+            self.why_disabled
+                .due_in(self.clock_ms)
+                .map_or(own, |ms| own.min(Duration::from_millis(ms))),
+        )
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -6402,6 +6474,113 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why a component checkbox is switched off ------------------------------
+
+    /// **A component this system cannot keep says why**, while the pointer
+    /// rests on its switched-off checkbox, after the delay and drawn over
+    /// everything: the component's own reason, as a sentence. The form
+    /// closing under the pointer takes it away.
+    #[test]
+    fn a_switched_off_component_says_why_while_the_pointer_rests_on_it() {
+        let mouse = |x, y, kind| Event::Mouse(MouseEvent { x, y, kind });
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        ui.open_create_dialog();
+        let (i, (cx, cy)) = ui
+            .component_rows()
+            .into_iter()
+            .find(|(i, _)| {
+                SnapshotComponent::all().get(*i) == Some(&SnapshotComponent::SystemFiles)
+            })
+            .expect("the form lists the system's files");
+        assert!(!ui.keepable(i), "the fixture can keep the system's files");
+        let label = SnapshotComponent::SystemFiles.label();
+        let r = checkbox::hit(cx, cy, COMPONENT_ROW_HEIGHT, label);
+        let (x, y) = (r.x + 4.0, r.y + r.h / 2.0);
+
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        assert_eq!(ui.why_disabled.showing(), None, "the reason came at once");
+        let soon = App::tick_interval(&ui).expect("the window always ticks");
+        assert_eq!(
+            soon,
+            Duration::from_millis(500),
+            "the reason waits for the slow clock"
+        );
+        assert_eq!(
+            ui.handle_event(&Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed
+        );
+        let want = format!("{}.", points::NEEDS_THE_SYSTEM);
+        assert_eq!(ui.why_disabled.showing(), Some(want.as_str()));
+        let tree = ui.render_tree();
+        let reason = ui.why_disabled.render(&ui.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        // A component that can be kept says nothing.
+        let (_, (kx, ky)) = ui
+            .component_rows()
+            .into_iter()
+            .find(|(i, _)| ui.keepable(*i))
+            .expect("the fixture can keep something");
+        ui.handle_event(&mouse(kx + 4.0, ky + 4.0, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            ui.why_disabled.showing(),
+            None,
+            "a live checkbox explains itself"
+        );
+
+        // The shortcut card over the form takes the reason away, and the
+        // pointer leaving the window does too.
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ui.why_disabled.showing().is_some());
+        ui.show_help = true;
+        ui.handle_event(&Event::Tick { elapsed_ms: 0 });
+        assert_eq!(
+            ui.why_disabled.showing(),
+            None,
+            "the reason is drawn over the card"
+        );
+        ui.show_help = false;
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ui.why_disabled.showing().is_some());
+        assert_eq!(
+            ui.handle_event(&mouse(-1.0, -1.0, MouseEventKind::Leave)),
+            EventResult::Consumed,
+            "the reason went without a frame to show it gone"
+        );
+        assert_eq!(
+            ui.why_disabled.showing(),
+            None,
+            "the reason outlived the pointer"
+        );
+
+        // The form closing under a resting pointer takes the reason away.
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ui.why_disabled.showing().is_some());
+        ui.handle_event(&Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert_ne!(
+            ui.dialog,
+            DialogKind::CreateSnapshot,
+            "Escape did not close the form"
+        );
+        assert_eq!(
+            ui.why_disabled.showing(),
+            None,
+            "the reason outlived the form"
+        );
+    }
 
     // ------------------------------------------------------------------
     // Input

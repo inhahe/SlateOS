@@ -17,6 +17,7 @@
 use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::disabled::WhyDisabled;
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -719,6 +720,34 @@ fn sin_approx(x: f32) -> f32 {
 // Lockout timer
 // ============================================================================
 
+/// [`WhyDisabled`], with a `Debug` that says what it shows: the toolkit's
+/// has none (`requests/e-c-whydisabled-and-tooltip-could-be-clone.md` asks
+/// for one), and this screen's state is `Debug` whole. Derefs to the
+/// toolkit's, so it is used as one.
+#[derive(Default)]
+struct ShownWhy(WhyDisabled);
+
+impl std::fmt::Debug for ShownWhy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhyDisabled")
+            .field("showing", &self.0.showing())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for ShownWhy {
+    type Target = WhyDisabled;
+    fn deref(&self) -> &WhyDisabled {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ShownWhy {
+    fn deref_mut(&mut self) -> &mut WhyDisabled {
+        &mut self.0
+    }
+}
+
 /// Manages the lockout timer after too many failed attempts.
 #[derive(Clone, Debug)]
 struct LockoutTimer {
@@ -1001,6 +1030,16 @@ pub struct LockScreen {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Where the pointer is, `None` once it has left: kept for the reason the
+    /// password box gives while a lockout switches it off, which is asked
+    /// again after every event -- the lockout ends under a pointer at rest.
+    pointer: Option<(f32, f32)>,
+    /// Why the switched-off password box is switched off, said while the
+    /// pointer rests on it (`requests/c-e-say-why-a-control-is-disabled.md`).
+    why_disabled: ShownWhy,
+    /// The screen's clock for that reason, in milliseconds: every tick's
+    /// `elapsed_ms`.
+    clock_ms: u64,
 }
 
 impl LockScreen {
@@ -1018,6 +1057,9 @@ impl LockScreen {
         let users = UserList::new(users);
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            pointer: None,
+            why_disabled: ShownWhy::default(),
+            clock_ms: 0,
             state: LockScreenState::Clock,
             screen_width: SCREEN_WIDTH,
             screen_height: SCREEN_HEIGHT,
@@ -1447,6 +1489,49 @@ impl LockScreen {
     /// collect it with [`Self::take_unlock_request`] after each call. This
     /// doc has said so since before the flag existed; it does now.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Mouse(mouse) = event {
+            self.pointer = match mouse.kind {
+                MouseEventKind::Leave => None,
+                _ => Some((mouse.x, mouse.y)),
+            };
+        }
+        let mut result = self.route_event(event);
+        if let Event::Tick { elapsed_ms } = event {
+            // Whether the reason appeared now is not asked: every tick draws
+            // this screen already, for its clock.
+            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+            self.why_disabled.tick(self.clock_ms);
+        }
+        if self.explain_disabled() {
+            result = EventResult::Consumed;
+        }
+        result
+    }
+
+    /// Say why the password box is switched off while the pointer rests on
+    /// it -- a lockout refuses every key -- or stop saying it. Asked after
+    /// every event, so a lockout that ends under a resting pointer takes its
+    /// reason with it. Returns whether what is drawn changed.
+    fn explain_disabled(&mut self) -> bool {
+        let locked = self.state == LockScreenState::PasswordEntry && self.lockout.is_active();
+        match self.pointer {
+            Some(at) => {
+                let field = self.password_field_rect();
+                let boxes = [(
+                    (field.x, field.y, field.width, field.height),
+                    "Too many wrong passwords: the box opens again when the countdown ends.",
+                )];
+                let disabled: &[guitk::disabled::Disabled<'_>] = if locked { &boxes } else { &[] };
+                let screen = (self.screen_width, self.screen_height);
+                self.why_disabled
+                    .pointer_at(at, self.clock_ms, screen, disabled)
+            }
+            None => self.why_disabled.pointer_left(),
+        }
+    }
+
+    /// Hand an event to whichever part of the screen answers it.
+    fn route_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_event) => self.handle_key(key_event),
             Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -1680,6 +1765,11 @@ impl LockScreen {
                 self.render_password_screen(&mut tree);
             }
         }
+
+        // Why the password box is switched off, over everything, while the
+        // pointer rests on it.
+        tree.commands
+            .extend(self.why_disabled.render(&self.palette));
 
         tree
     }
@@ -2507,6 +2597,70 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why the password box is switched off ----------------------------------
+
+    /// **The switched-off password box says why**, while the pointer rests
+    /// on it during a lockout, after the delay and drawn over everything --
+    /// and the reason goes when the lockout ends under the resting pointer.
+    #[test]
+    fn a_locked_out_password_box_says_why_while_the_pointer_rests_on_it() {
+        let mouse = |kind, (x, y): (f32, f32)| Event::Mouse(MouseEvent { x, y, kind });
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let field = ls.password_field_rect();
+        let at = (field.x + field.width / 2.0, field.y + field.height / 2.0);
+
+        ls.handle_event(&mouse(MouseEventKind::Move, at));
+        ls.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "a box that takes keys explains itself"
+        );
+
+        ls.lockout.start(30);
+        ls.handle_event(&mouse(MouseEventKind::Move, (at.0 + 1.0, at.1)));
+        assert_eq!(ls.why_disabled.showing(), None, "the reason came at once");
+        assert_eq!(
+            ls.handle_event(&Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            ls.why_disabled.showing(),
+            Some("Too many wrong passwords: the box opens again when the countdown ends.")
+        );
+        let tree = ls.render();
+        let reason = ls.why_disabled.render(&ls.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        // The lockout runs out under the pointer: the box takes keys again,
+        // and says nothing.
+        ls.handle_event(&Event::Tick { elapsed_ms: 30_000 });
+        assert!(!ls.lockout.is_active());
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "the reason outlived the lockout"
+        );
+
+        ls.lockout.start(30);
+        ls.handle_event(&mouse(MouseEventKind::Move, at));
+        ls.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ls.why_disabled.showing().is_some());
+        assert_eq!(
+            ls.handle_event(&mouse(MouseEventKind::Leave, at)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "the reason outlived the pointer"
+        );
+    }
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;

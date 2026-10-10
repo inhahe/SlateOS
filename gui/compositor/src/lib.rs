@@ -4147,9 +4147,9 @@ impl TranslateStack {
 // Text rendering
 // ---------------------------------------------------------------------------
 
-/// How glyphs are rasterized, from the appearance settings: `smoothing`, the
+/// How glyphs are rasterized, from the fonts in use: `smoothing`, the
 /// subpixel order and `hinting` -- and, from the theme `palette` resolved from
-/// them, which of a colour font's palettes its emoji are painted with: the
+/// the settings, which of a colour font's palettes its emoji are painted with: the
 /// one the font marks for a light background on a light theme, for a dark one
 /// on a dark theme (design-decisions §1327). Taken resolved rather than
 /// resolved here, because a palette is resolved once per change of settings
@@ -4160,11 +4160,11 @@ impl TranslateStack {
 /// (`FontSettings::apply`): one mapping, so a setting added later cannot be
 /// read one way here and another in the windows beside these decorations.
 fn font_rendering(
-    settings: &AppearanceSettings,
+    fonts: &appearance::FontSettings,
     palette: &appearance::Palette,
 ) -> osfont::raster::Rendering {
     use osfont::colr::ColourPalette;
-    settings.fonts.rendering(if palette.light {
+    fonts.rendering(if palette.light {
         ColourPalette::Light
     } else {
         ColourPalette::Dark
@@ -5640,6 +5640,19 @@ pub struct Compositor {
     /// added to it, and that is not a property anyone can see from the call
     /// site.
     palette: appearance::Palette,
+    /// The fonts this compositor draws in -- families, sizes and how glyphs
+    /// are rasterized: [`AppearanceSettings::fonts_in_use`], the user's own
+    /// with a chosen font theme's families in their place, resolved once per
+    /// change of settings for [`palette`](Self::palette)'s reason. What it
+    /// asks will grow to include which families this machine has, which is
+    /// no question for a render loop.
+    ///
+    /// Read here, never from `appearance.fonts`: a program measures its
+    /// labels in the fonts in use (`oswindow`'s event loop applies the same
+    /// call), and a compositor drawing the title bars in the user's raw
+    /// choice would measure one face and draw another the moment a theme
+    /// recommended fonts (`requests/c-f-apply-the-fonts-in-use.md`).
+    fonts_in_use: appearance::FontSettings,
     /// The user's appearance preferences, as far as the compositor can act on
     /// them: how round window corners are and whether windows cast shadows.
     ///
@@ -5977,8 +5990,11 @@ fn truncate_text(text: &str, max: usize) -> String {
 impl Compositor {
     /// Create a new compositor with the given display dimensions.
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
-        // The defaults' palette, resolved once for the fonts and the field.
-        let palette = appearance::Palette::from_settings(&AppearanceSettings::default());
+        // The defaults' palette and fonts, resolved once for the font cache
+        // and the fields.
+        let defaults = AppearanceSettings::default();
+        let palette = appearance::Palette::from_settings(&defaults);
+        let fonts_in_use = defaults.fonts_in_use();
         let backend = RenderBackend::software(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
         let frame_interval = frame_interval_for(refresh_rate);
@@ -6011,15 +6027,16 @@ impl Compositor {
                 let mut engine = RenderEngine::new();
                 engine
                     .fonts
-                    .set_rendering(font_rendering(&AppearanceSettings::default(), &palette));
+                    .set_rendering(font_rendering(&fonts_in_use, &palette));
                 engine
             },
             theme: DecorationTheme::default(),
             palette,
+            fonts_in_use,
             // The defaults, not the user's file: a constructor that read
             // `$HOME` would make every test of this crate depend on the machine
             // running it. `main` loads the file and calls `set_appearance`.
-            appearance: AppearanceSettings::default(),
+            appearance: defaults,
             // `None`, not the defaults, and for a sharper reason than the line
             // above: this is pushed into the input source, so "the defaults"
             // would be a push that overwrites the settings that source was
@@ -6089,7 +6106,8 @@ impl Compositor {
             return;
         }
         self.appearance = settings;
-        // The user's chosen families, installed into *this* cache.
+        self.fonts_in_use = self.appearance.fonts_in_use();
+        // The families in use, installed into *this* cache.
         //
         // Not `FontSettings::apply`, which is what every other process calls:
         // that sets the toolkit's process-global choice, and this process does
@@ -6103,11 +6121,11 @@ impl Compositor {
         // A family this machine does not have leaves the previous, working
         // face in place, which is the right answer and not something a
         // compositor can improve on; hence the discarded results.
-        let ui = self.appearance.fonts.ui_font.clone();
+        let ui = self.fonts_in_use.ui_font.clone();
         if !ui.is_empty() {
             let _ = guitk::text::install_family(&mut self.render_engine.fonts, &ui);
         }
-        let mono = self.appearance.fonts.mono_font.clone();
+        let mono = self.fonts_in_use.mono_font.clone();
         if !mono.is_empty() {
             let _ = guitk::text::install_family_as(
                 &mut self.render_engine.fonts,
@@ -6123,7 +6141,7 @@ impl Compositor {
         self.palette = appearance::Palette::from_settings(&self.appearance);
         self.render_engine
             .fonts
-            .set_rendering(font_rendering(&self.appearance, &self.palette));
+            .set_rendering(font_rendering(&self.fonts_in_use, &self.palette));
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
     }
@@ -10795,7 +10813,7 @@ impl Compositor {
         // grows and the writing on it does not, which reads as a bug long
         // before anyone measures the pixels. `max` keeps a fractional scale, or
         // a font size a config file made tiny, from producing zero.
-        let font_size = (self.appearance.fonts.ui_size * bar.scale).max(1.0);
+        let font_size = (self.fonts_in_use.ui_size * bar.scale).max(1.0);
         let text_x = tb_x.saturating_add(inset as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.

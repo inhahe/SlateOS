@@ -1436,7 +1436,12 @@ impl ThemeWatch {
         // is *reported* is the Settings font page, which asks
         // `guitk::text::font_family()` what is actually in use rather than
         // assuming the configured name took effect.
-        let _ = self.settings.fonts.apply();
+        //
+        // The fonts *in use*, not the user's raw `fonts`: a chosen font
+        // theme's families take their place there, and the compositor draws
+        // in the same call's answer, so a label measured here is drawn in the
+        // face it was measured in (`requests/c-f-apply-the-fonts-in-use.md`).
+        let _ = self.settings.fonts_in_use().apply();
         app.appearance_changed(&self.settings);
         app.theme_changed(&Palette::from_settings(&self.settings));
     }

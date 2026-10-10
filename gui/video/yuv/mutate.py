@@ -1,6 +1,7 @@
-"""Mutation test for yuv's HDR conversion (src/managed.rs): Chrome's handling of
-a PQ or HLG picture on an sRGB screen, and the chroma upsampling it shares
-with libavif's slow path (src/reformat.rs).
+"""Mutation test for yuv's colour-managed conversion (src/managed.rs):
+Chrome's handling of a PQ or HLG picture on an sRGB screen, and of an SDR
+one whose primaries or curve are not sRGB's; and the chroma upsampling it
+shares with libavif's slow path (src/reformat.rs).
 
 Each row puts back one way of not showing what Chrome shows -- a constant of
 Skia's misremembered, a step of its tone map dropped, a rounding done
@@ -123,8 +124,8 @@ HDR = [
     ),
     (
         "BT.2020's colours are shown as sRGB's",
-        "            to_srgb: gamut_transform(&working, &SRGB),",
-        "            to_srgb: diagonal([1.0; 3]),",
+        "            to_srgb: Some(gamut_transform(&working, &SRGB)),",
+        "            to_srgb: Some(diagonal([1.0; 3])),",
         [PQ, HLG, PRIMARIES],
     ),
     (
@@ -150,6 +151,50 @@ HDR = [
         "        if let (true, Some(a)) = (self.unmultiply, a) {",
         "        if let (true, Some(a)) = (false, a) {",
         [ALPHA],
+    ),
+]
+
+# Ordinary (SDR) pictures whose colours Chrome converts (managed.rs too):
+# held to Chrome 154's pixels for 2048 codes under seven taggings.
+SDR_CHROME = "sdr_is_chrome_s_to_within_a_level"
+TRANSFERS = "transfers_are_chrome_s_curves"
+
+SDR = [
+    (
+        "the sRGB curve has no linear toe",
+        "                0.077_399_38,\n                0.040_45,",
+        "                0.077_399_38,\n                0.0,",
+        [SDR_CHROME, TRANSFERS],
+    ),
+    (
+        "BT.709's transfer has no curve",
+        "            1 | 6 | 13..=15 => SdrCurve::Srgb,",
+        "            6 | 13..=15 => SdrCurve::Srgb,",
+        [SDR_CHROME, TRANSFERS],
+    ),
+    (
+        "BT.470 System M's transfer is a power of 2.8",
+        "            4 => SdrCurve::Gamma22,",
+        "            4 => SdrCurve::Gamma28,",
+        [SDR_CHROME, TRANSFERS],
+    ),
+    (
+        "SMPTE 240M's curve loses its offset",
+        "                0.899_626_7,\n                0.100_373_32,",
+        "                0.899_626_7,\n                0.0,",
+        [TRANSFERS],
+    ),
+    (
+        "SDR goes to BT.2020's primaries",
+        "                    to_working: gamut_transform(&source, &SRGB),",
+        "                    to_working: gamut_transform(&source, &REC2020),",
+        [SDR_CHROME],
+    ),
+    (
+        "SDR is tone mapped",
+        "                    curve: None,\n                    to_srgb: None,",
+        "                    curve: Curve::rwtmo(light.headroom()),\n                    to_srgb: None,",
+        [SDR_CHROME],
     ),
 ]
 
@@ -295,6 +340,7 @@ if __name__ == "__main__":
     only = sys.argv[1:]
     tables = [
         (SRC / "managed.rs", HDR),
+        (SRC / "managed.rs", SDR),
         (SRC / "reformat.rs", CHROMA),
         (SRC / "managed" / "avx2.rs", AVX),
     ]

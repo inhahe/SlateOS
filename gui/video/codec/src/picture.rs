@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::thread;
 
 use rav1d::safe as av1;
-use yuv::managed::{self, Conversion, Signal, Transfer};
+use yuv::managed::{self, Conversion, SdrCurve, Signal, Transfer};
 use yuv::reformat::{self, Format, Reformat};
 use yuv::{Plane, PlaneBuf};
 
@@ -149,7 +149,7 @@ impl Picture {
         // Only HDR is shown by its light.
         let look = Look {
             colour,
-            light: match Transfer::from_h273(colour.transfer) {
+            light: match Transfer::from_h273(colour.transfer).filter(|t| t.is_hdr()) {
                 Some(_) => self.light(),
                 None => Light::default(),
             },
@@ -202,9 +202,21 @@ impl Way<'_> {
 fn signal(transfer: Transfer) -> &'static Signal {
     static PQ: OnceLock<Signal> = OnceLock::new();
     static HLG: OnceLock<Signal> = OnceLock::new();
+    static SRGB: OnceLock<Signal> = OnceLock::new();
+    static GAMMA22: OnceLock<Signal> = OnceLock::new();
+    static GAMMA28: OnceLock<Signal> = OnceLock::new();
+    static SMPTE240: OnceLock<Signal> = OnceLock::new();
+    static LINEAR: OnceLock<Signal> = OnceLock::new();
+    static ST428: OnceLock<Signal> = OnceLock::new();
     let cell = match transfer {
         Transfer::Pq => &PQ,
         Transfer::Hlg => &HLG,
+        Transfer::Sdr(SdrCurve::Srgb) => &SRGB,
+        Transfer::Sdr(SdrCurve::Gamma22) => &GAMMA22,
+        Transfer::Sdr(SdrCurve::Gamma28) => &GAMMA28,
+        Transfer::Sdr(SdrCurve::Smpte240) => &SMPTE240,
+        Transfer::Sdr(SdrCurve::Linear) => &LINEAR,
+        Transfer::Sdr(SdrCurve::St428) => &ST428,
     };
     cell.get_or_init(|| Signal::new(transfer))
 }
@@ -284,10 +296,11 @@ impl<T: Sample> Planar<'_, T> {
             alpha: self.alpha,
             alpha_premultiplied: false,
         };
-        match Transfer::from_h273(colour.transfer) {
+        match Transfer::from_h273(colour.transfer).filter(|t| t.is_hdr()) {
             None => in_bands(&picture, Way::Ordinary, out),
             Some(transfer) => {
-                let map = Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));
+                let map =
+                    Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));
                 in_bands(&picture, Way::Hdr(&map), out)
             }
         }

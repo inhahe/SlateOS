@@ -1,13 +1,22 @@
-//! HDR pictures shown on an ordinary screen as Chrome shows them
-//! (design-decisions §1378): PQ (HDR10's, SMPTE ST 2084) and HLG (ARIB
-//! STD-B67) pictures turned into sRGB pixels by Chrome's own handling,
-//! transcribed from Skia and held to Chrome's pixels.
+//! Pictures shown on an ordinary (sRGB) screen as Chrome shows them, where
+//! that is not as sRGB's own pixels (design-decisions §1378, §1381): HDR --
+//! PQ (HDR10's, SMPTE ST 2084) and HLG (ARIB STD-B67) -- tone mapped; and
+//! ordinary (SDR) pictures of other primaries or curves, their colours
+//! converted. Chrome's own handling, transcribed from Skia and held to
+//! Chrome's pixels.
 //!
 //! [`crate::reformat`] -- libavif's conversion -- takes a picture's samples
-//! to be ordinary video's. An HDR picture's are not: a PQ sample is absolute
-//! light, up to 10 000 cd/m2; an HLG sample is a scene's light, for a display
-//! of about 1000 cd/m2; and both are in BT.2020's wider colours. Taken as
-//! ordinary samples they show dim, grey and oversaturated.
+//! to be sRGB's. An HDR picture's are not: a PQ sample is absolute light, up
+//! to 10 000 cd/m2; an HLG sample is a scene's light, for a display of about
+//! 1000 cd/m2; and both are in BT.2020's wider colours. Taken as ordinary
+//! samples they show dim, grey and oversaturated. Nor are an SDR picture's
+//! whose primaries are not BT.709's -- BT.601's (standard-definition
+//! video's, when it says so), BT.2020's, Display P3's -- or whose curve is
+//! not the sRGB curve Chrome takes BT.709's, BT.601's and BT.2020's for (a
+//! power of 2.2 or 2.8, linear, SMPTE 240M's): Chrome converts their
+//! colours, by up to 77 levels in saturated ones. Which pictures it converts
+//! is the caller's to settle (`gui/video/codec`, `gui/imagecodec`); this
+//! converts them.
 //!
 //! **What Chrome does** for a screen with no HDR headroom (an sRGB one) --
 //! Skia's colour conversion (`src/core/SkColorSpaceXformSteps.cpp`) and the
@@ -19,14 +28,16 @@
 //!    as libavif's floating-point path computes it, subsampled chroma
 //!    brought up as Chrome's GPU samples it -- bilinear, centred, which is
 //!    libavif's slow path's 9:3:3:1 -- and clamped to [0, 1].
-//! 2. Its light. PQ: skcms's `PQish` curve, light over 10 000 cd/m2. HLG: its
-//!    `HLGish` curve over 12 (BT.2100's inverse OETF: the scene's light), then
-//!    BT.2100's OOTF for a 1000 cd/m2 display, `Y^(gamma - 1)` with gamma 1.2
-//!    and `Y` in BT.2100's luminance weights.
-//! 3. Into the tone map's working space, linear BT.2020 with 1.0 at the HDR
-//!    reference white of 203 cd/m2: the picture's primaries to BT.2020's, and
-//!    times 10000/203 (PQ) or 1000/203 (HLG).
-//! 4. The tone map: RWTMO, the "reference white tone mapping operator" of
+//! 2. Its light ([`Transfer`]). PQ: skcms's `PQish` curve, light over 10 000
+//!    cd/m2. HLG: its `HLGish` curve over 12 (BT.2100's inverse OETF: the
+//!    scene's light), then BT.2100's OOTF for a 1000 cd/m2 display,
+//!    `Y^(gamma - 1)` with gamma 1.2 and `Y` in BT.2100's luminance weights.
+//!    SDR: the curve's skcms parameters, Skia's `SkNamedTransferFn`.
+//! 3. HDR: into the tone map's working space, linear BT.2020 with 1.0 at the
+//!    HDR reference white of 203 cd/m2 -- the picture's primaries to
+//!    BT.2020's, and times 10000/203 (PQ) or 1000/203 (HLG). SDR: the
+//!    picture's primaries to sRGB's, in the one step Skia takes.
+//! 4. HDR's tone map: RWTMO, the "reference white tone mapping operator" of
 //!    the adaptive global tone map (SMPTE ST 2094-50) that Skia applies when a
 //!    picture brings no tone map of its own. The content's headroom is
 //!    `log2(peak / 203)` ([`Light::peak`]); for a screen of no headroom the
@@ -35,8 +46,8 @@
 //!    max(R, G, B), whose gain multiplies all three. The reference white
 //!    lands at `1 - 0.5 * min(headroom / log2(1000/203), 1)` of the screen's
 //!    white, and the content's peak at its white.
-//! 5. To the screen: BT.2020's primaries to sRGB's, sRGB's curve, clamped,
-//!    8 bits.
+//! 5. To the screen: HDR's BT.2020 primaries to sRGB's; then sRGB's curve,
+//!    clamped, 8 bits.
 //!
 //! **Its arithmetic** is Skia's: single precision, Skia's matrices (its
 //! named gamuts, and `skcms_PrimariesToXYZD50` for the rest), the tone map's
@@ -48,8 +59,12 @@
 //! an 8-bit code; and step 5's rounding, which compares with the light at
 //! which each code begins, and so rounds exactly. Against a double-precision
 //! transcription of the same steps the codes agree in all but under one
-//! channel in ten thousand, and there by one; against Chrome 154's own
-//! pixels (the tests' patches) they agree exactly.
+//! channel in ten thousand, and there by one. Against Chrome 154's own
+//! pixels, HDR's agree exactly (the tests' patches); SDR's are within one
+//! level everywhere and exact in 97.8-99.4% of channels
+//! (`tests/data/chrome_sdr.py`) -- Chrome's own arithmetic rounds a few
+//! values within a twentieth of a level of one half the other way, which no
+//! order of single-precision operations tried here reproduces.
 //!
 //! **Its speed.** Each step is a pass along a row of floats, the arithmetic
 //! ones run several pixels at a time by the compiler. The table passes --
@@ -135,24 +150,116 @@ type Table = [f32; SEGMENTS + 1];
 /// one code's beginning.
 const CELLS: usize = 4096;
 
-/// How the samples of an HDR picture are light.
+/// How a picture's samples are light: the curve Chrome converts them by,
+/// which `gfx::ColorSpace::GetTransferFunction` gives each H.273
+/// `TransferCharacteristics`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transfer {
-    /// PQ, SMPTE ST 2084 (H.273 transfer 16): absolute light.
+    /// PQ, SMPTE ST 2084 (H.273 transfer 16): absolute light. HDR.
     Pq,
-    /// HLG, ARIB STD-B67 (H.273 transfer 18): a scene's light.
+    /// HLG, ARIB STD-B67 (H.273 transfer 18): a scene's light. HDR.
     Hlg,
+    /// An ordinary (SDR) picture's curve.
+    Sdr(SdrCurve),
+}
+
+/// The curve of an ordinary (SDR) picture, Skia's `SkNamedTransferFn` for
+/// each H.273 transfer Chrome names one for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SdrCurve {
+    /// The sRGB curve -- sRGB's own (13), and the one Chrome takes BT.709's,
+    /// BT.601's and BT.2020's for (1, 6, 14, 15): "most media playing
+    /// software uses the sRGB transfer function".
+    Srgb,
+    /// A power of 2.2: BT.470 System M's (4).
+    Gamma22,
+    /// A power of 2.8: BT.470 System B and G's (5).
+    Gamma28,
+    /// SMPTE 240M's (7).
+    Smpte240,
+    /// Linear light (8).
+    Linear,
+    /// SMPTE ST 428-1's (17): a power of 2.6 of the sample times 52.37/48.
+    St428,
 }
 
 impl Transfer {
-    /// The HDR transfer an H.273 `TransferCharacteristics` names: `None`
-    /// for an ordinary one, which [`crate::reformat`] converts.
+    /// The curve Chrome converts pictures of an H.273
+    /// `TransferCharacteristics` by: `None` for unspecified and reserved
+    /// values, and for the four Chrome has no curve for -- the logarithmic
+    /// ones (9, 10), IEC 61966-2-4 (11) and BT.1361 (12) -- whose pictures it
+    /// shows as they are.
     #[must_use]
     pub const fn from_h273(transfer: u16) -> Option<Self> {
-        match transfer {
-            16 => Some(Self::Pq),
-            18 => Some(Self::Hlg),
-            _ => None,
+        let sdr = match transfer {
+            16 => return Some(Self::Pq),
+            18 => return Some(Self::Hlg),
+            1 | 6 | 13..=15 => SdrCurve::Srgb,
+            4 => SdrCurve::Gamma22,
+            5 => SdrCurve::Gamma28,
+            7 => SdrCurve::Smpte240,
+            8 => SdrCurve::Linear,
+            17 => SdrCurve::St428,
+            _ => return None,
+        };
+        Some(Self::Sdr(sdr))
+    }
+
+    /// PQ or HLG: light past the SDR white, which is tone mapped.
+    #[must_use]
+    pub const fn is_hdr(self) -> bool {
+        !matches!(self, Self::Sdr(_))
+    }
+}
+
+impl SdrCurve {
+    /// The curve's skcms parameters, as `SkNamedTransferFn` holds them, in
+    /// single precision (sRGB's are `1/1.055`, `0.055/1.055` and `1/12.92`
+    /// as floats, SMPTE 240M's and ST 428-1's Skia's twelve-digit constants
+    /// as floats): `[g, a, b, c, d, e, f]` of `c x + f` below `d` and
+    /// `(a x + b)^g + e` from it.
+    const fn skcms(self) -> [f32; 7] {
+        match self {
+            Self::Srgb => [
+                2.4,
+                0.947_867_3,
+                0.052_132_7,
+                0.077_399_38,
+                0.040_45,
+                0.0,
+                0.0,
+            ],
+            Self::Gamma22 => [2.2, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            Self::Gamma28 => [2.8, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            Self::Smpte240 => [
+                2.222_222_3,
+                0.899_626_7,
+                0.100_373_32,
+                0.25,
+                0.091_286_34,
+                0.0,
+                0.0,
+            ],
+            Self::Linear => [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            Self::St428 => [2.6, 1.034_080_5, 0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// The light, 1.0 at the curve's white, of a sample `x`: skcms's
+    /// `skcms_TransferFunction_eval` in double precision, without its
+    /// approximate `powf` -- as a GPU's `pow`, which is what draws a video
+    /// in Chrome, computes it.
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::arithmetic_side_effects,
+        reason = "skcms's names for its parameters; floating-point arithmetic, which cannot overflow into undefined behaviour"
+    )]
+    fn light(self, x: f64) -> f64 {
+        let [g, a, b, c, d, e, f] = self.skcms().map(f64::from);
+        if x < d {
+            c * x + f
+        } else {
+            libm::pow(a * x + b, g) + e
         }
     }
 }
@@ -205,6 +312,7 @@ pub struct Signal {
     transfer: Transfer,
     /// PQ: the light over 10 000 cd/m2 at each of [`SEGMENTS`] + 1 points
     /// from 0 to 1. HLG: the scene's light at as many points from 0.5 to 1.
+    /// An SDR curve: the light, 1.0 at its white, at as many from 0 to 1.
     /// On the heap (64 KiB), and seen as a [`Table`] for each row.
     table: Box<[f32]>,
     /// HLG's OOTF power; `None` for PQ.
@@ -224,6 +332,7 @@ impl Signal {
                 sample(|i| hlgish(0.5 + 0.5 * i)),
                 Some(Power::new(f64::from(HLG_GAMMA - 1.0))),
             ),
+            Transfer::Sdr(curve) => (sample(|x| curve.light(x)), None),
         };
         Self {
             transfer,
@@ -873,27 +982,30 @@ fn half(v: f32) -> f32 {
     f32::from_bits(rounded.to_bits() | sign)
 }
 
-/// What a conversion of HDR pictures of one transfer, primaries and light
+/// What a conversion of pictures of one transfer, primaries and light
 /// needs -- cheap to make for each picture, its tables borrowed from the
 /// transfer's [`Signal`].
 #[derive(Clone, Debug)]
 pub struct Conversion<'a> {
     signal: &'a Signal,
-    /// Linear light in the picture's primaries to the working space: to
-    /// BT.2020's, and times 10000/203 (PQ) or 1000/203 (HLG).
+    /// Linear light in the picture's primaries to the working space: HDR's,
+    /// BT.2020's times 10000/203 (PQ) or 1000/203 (HLG); an SDR picture's,
+    /// sRGB's itself, as Skia converts it in one step.
     to_working: Matrix,
     /// HLG's OOTF: BT.2100's luminance weights in the picture's primaries
     /// (its power is the [`Signal`]'s).
     ootf: [f32; 3],
-    /// `None` for content no brighter than the reference white.
+    /// `None` for content no brighter than the reference white, and SDR.
     curve: Option<Curve>,
-    /// The working space to sRGB's linear light.
-    to_srgb: Matrix,
+    /// HDR's working space to sRGB's linear light; `None` for SDR, whose
+    /// working space is sRGB's.
+    to_srgb: Option<Matrix>,
 }
 
 impl<'a> Conversion<'a> {
-    /// The map for pictures of `signal`'s transfer whose primaries are
-    /// H.273's `primaries`, and which say `light` of their light.
+    /// The conversion of pictures of `signal`'s transfer whose primaries
+    /// are H.273's `primaries`, and which say `light` of their light (which
+    /// only HDR's tone map reads).
     #[must_use]
     #[allow(
         clippy::arithmetic_side_effects,
@@ -901,12 +1013,21 @@ impl<'a> Conversion<'a> {
     )]
     pub fn new(signal: &'a Signal, primaries: u16, light: Light) -> Self {
         let source = to_xyz_d50(primaries);
-        let working = primaries_to_xyz_d50(REC2020_PRIMARIES).unwrap_or(REC2020);
         // SkColorSpaceXformSteps folds the transfer's scale into the matrix.
         let scale = match signal.transfer {
             Transfer::Pq => 10_000.0 / REFERENCE_WHITE,
             Transfer::Hlg => HLG_PEAK / REFERENCE_WHITE,
+            Transfer::Sdr(_) => {
+                return Self {
+                    signal,
+                    to_working: gamut_transform(&source, &SRGB),
+                    ootf: [0.0; 3],
+                    curve: None,
+                    to_srgb: None,
+                };
+            }
         };
+        let working = primaries_to_xyz_d50(REC2020_PRIMARIES).unwrap_or(REC2020);
         let to_working = gamut_transform(&source, &working).map(|row| row.map(|v| v * scale));
         // set_ootf_Y: BT.2100's weights, which are BT.2020's, carried into
         // the picture's primaries.
@@ -923,7 +1044,7 @@ impl<'a> Conversion<'a> {
             to_working,
             ootf,
             curve: Curve::rwtmo(light.headroom()),
-            to_srgb: gamut_transform(&working, &SRGB),
+            to_srgb: Some(gamut_transform(&working, &SRGB)),
         }
     }
 
@@ -964,13 +1085,6 @@ impl<'a> Conversion<'a> {
         };
         // 2. The light.
         match (signal.transfer, &signal.power) {
-            // A channel at a time: a chained iterator over the three would
-            // test which one it is in at every step.
-            (Transfer::Pq, _) => {
-                for channel in [&mut *r, &mut *g, &mut *b] {
-                    interpolate_all(simd, table, channel);
-                }
-            }
             (Transfer::Hlg, power) => {
                 for channel in [&mut *r, &mut *g, &mut *b] {
                     hlg_all(simd, table, channel);
@@ -981,29 +1095,43 @@ impl<'a> Conversion<'a> {
                 }
                 scale(r, g, b, k);
             }
+            // PQ and the SDR curves: the table over the whole of [0, 1]. A
+            // channel at a time: a chained iterator over the three would
+            // test which one it is in at every step.
+            _ => {
+                for channel in [&mut *r, &mut *g, &mut *b] {
+                    interpolate_all(simd, table, channel);
+                }
+            }
         }
-        // 3. Into the working space, and the brightest channel there.
+        // 3. Into the working space, and -- for the tone map -- the
+        // brightest channel there.
         let m = &self.to_working;
-        for (((r, g), b), k) in r
-            .iter_mut()
-            .zip(g.iter_mut())
-            .zip(b.iter_mut())
-            .zip(k.iter_mut())
-        {
-            let [x, y, z] = apply(m, [*r, *g, *b]);
-            (*r, *g, *b) = (x, y, z);
-            *k = x.max(y).max(z);
-        }
-        // 4. The tone map's gain, of the brightest channel, on all three.
         if let Some(curve) = &self.curve {
+            for (((r, g), b), k) in r
+                .iter_mut()
+                .zip(g.iter_mut())
+                .zip(b.iter_mut())
+                .zip(k.iter_mut())
+            {
+                let [x, y, z] = apply(m, [*r, *g, *b]);
+                (*r, *g, *b) = (x, y, z);
+                *k = x.max(y).max(z);
+            }
+            // 4. The tone map's gain, of the brightest channel, on all
+            // three.
             gain_all(simd, curve, k);
             scale(r, g, b, k);
+        } else {
+            for ((r, g), b) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
+                [*r, *g, *b] = apply(m, [*r, *g, *b]);
+            }
         }
-        // 5. To sRGB ...
-        let m = &self.to_srgb;
-        for ((r, g), b) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
-            let [x, y, z] = apply(m, [*r, *g, *b]);
-            (*r, *g, *b) = (x, y, z);
+        // 5. To sRGB (an SDR picture is there already) ...
+        if let Some(m) = &self.to_srgb {
+            for ((r, g), b) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
+                [*r, *g, *b] = apply(m, [*r, *g, *b]);
+            }
         }
         // ... and its 8-bit codes.
         code_all(simd, cells, [&*r, &*g, &*b], out);
@@ -1771,6 +1899,149 @@ mod tests {
         }
     }
 
+    /// Chrome's curve for each H.273 transfer (`GetTransferFunction`): the
+    /// sRGB curve for BT.709's, BT.601's and BT.2020's as for sRGB's own; a
+    /// curve of its own for the rest Chrome names; none for unspecified and
+    /// reserved values or the four it has no curve for.
+    #[test]
+    fn transfers_are_chrome_s_curves() {
+        use SdrCurve::{Gamma22, Gamma28, Linear, Smpte240, Srgb, St428};
+        let curve = |code| Transfer::from_h273(code);
+        for code in [1, 6, 13, 14, 15] {
+            assert_eq!(curve(code), Some(Transfer::Sdr(Srgb)), "{code}");
+        }
+        let named = [
+            (4, Gamma22),
+            (5, Gamma28),
+            (7, Smpte240),
+            (8, Linear),
+            (17, St428),
+        ];
+        for (code, sdr) in named {
+            assert_eq!(curve(code), Some(Transfer::Sdr(sdr)), "{code}");
+        }
+        assert_eq!(curve(16), Some(Transfer::Pq));
+        assert_eq!(curve(18), Some(Transfer::Hlg));
+        for code in [0, 2, 3, 9, 10, 11, 12, 19, 255] {
+            assert_eq!(curve(code), None, "{code}");
+        }
+        assert!(Transfer::Pq.is_hdr() && Transfer::Hlg.is_hdr());
+        assert!(!Transfer::Sdr(Srgb).is_hdr());
+        // Each curve's ends: black is black, white is white (ST 428-1's white
+        // is its 52.37 over 48 cd/m2 reference, past 1).
+        for sdr in [Srgb, Gamma22, Gamma28, Smpte240, Linear] {
+            assert!(sdr.light(0.0).abs() < 1e-12, "{sdr:?}");
+            assert!((sdr.light(1.0) - 1.0).abs() < 1e-6, "{sdr:?}");
+        }
+        let st428_white = libm::pow(f64::from(1.034_080_5f32), f64::from(2.6f32));
+        assert!((St428.light(1.0) - st428_white).abs() < 1e-12);
+    }
+
+    /// The SDR curves' tables err by under a ten-thousandth of an 8-bit code
+    /// wherever the light falls: each sample's error in its light, carried
+    /// to the screen through sRGB's curve at its slope there.
+    #[test]
+    fn the_sdr_tables_err_by_a_ten_thousandth_of_a_code() {
+        use SdrCurve::{Gamma22, Gamma28, Linear, Smpte240, Srgb, St428};
+        let slope = |x: f64| {
+            255.0
+                * if x < 0.003_130_8 {
+                    12.92
+                } else {
+                    1.055 / 2.4 * libm::pow(x, 1.0 / 2.4 - 1.0)
+                }
+        };
+        for sdr in [Srgb, Gamma22, Gamma28, Smpte240, Linear, St428] {
+            let signal = Signal::new(Transfer::Sdr(sdr));
+            let table = signal.curve().unwrap();
+            let mut worst = 0.0f64;
+            for i in 0..=1_000_000u32 {
+                let c = i as f32 / 1_000_000.0;
+                let exact = sdr.light(f64::from(c));
+                let got = f64::from(interpolate(table, c));
+                worst = worst.max((got - exact).abs() * slope(exact.min(1.0)));
+            }
+            assert!(worst < 1e-4, "{sdr:?} errs by {worst:e} of a code");
+        }
+    }
+
+    /// Chrome's pixels for ordinary video it converts
+    /// (`tests/data/chrome_sdr.py`): 2048 Y'CbCr codes under each of seven
+    /// taggings -- BT.709 itself, BT.601's two, BT.2020, Display P3, a power
+    /// of 2.2 and linear -- converted each way. Chrome's own arithmetic
+    /// rounds some values within a twentieth of a level of one half the
+    /// other way, so each channel must be within one level of Chrome's, and
+    /// nearly all of them exactly Chrome's.
+    #[test]
+    fn sdr_is_chrome_s_to_within_a_level() {
+        let data = include_bytes!("../tests/data/chrome_sdr.bin");
+        assert_eq!(&data[..5], b"CSDR\x01");
+        let count = usize::from(u16::from_le_bytes([data[5], data[6]]));
+        let taggings = usize::from(data[7]);
+        let tags = &data[8..8 + 4 * taggings];
+        let codes = &data[8 + 4 * taggings..][..3 * count];
+        let pixels = &data[8 + 4 * taggings + 3 * count..];
+        assert_eq!(pixels.len(), 3 * count * taggings);
+        let planes: [Vec<u8>; 3] =
+            [0, 1, 2].map(|k| codes.iter().skip(k).step_by(3).copied().collect());
+        fn plane(samples: &[u8]) -> Plane<'_, u8> {
+            Plane {
+                samples,
+                stride: samples.len(),
+                width: samples.len(),
+                height: 1,
+            }
+        }
+        let (mut report, mut short) = (String::new(), false);
+        for (t, (tag, chrome)) in tags.chunks(4).zip(pixels.chunks(3 * count)).enumerate() {
+            let &[primaries, transfer, matrix, range] = tag else {
+                unreachable!()
+            };
+            let picture = Picture {
+                width: count,
+                height: 1,
+                depth: 8,
+                format: Format::Yuv444,
+                matrix: u16::from(matrix),
+                primaries: u16::from(primaries),
+                full_range: range == 2,
+                y: plane(&planes[0]),
+                u: Some(plane(&planes[1])),
+                v: Some(plane(&planes[2])),
+                alpha: None,
+                alpha_premultiplied: false,
+            };
+            let signal = Signal::new(Transfer::from_h273(u16::from(transfer)).unwrap());
+            let conversion = Conversion::new(&signal, u16::from(primaries), Light::default());
+            for way in ways() {
+                let out = converted(&picture, &conversion, way);
+                let mut exact = 0usize;
+                for (i, (&px, want)) in out.iter().zip(chrome.chunks(3)).enumerate() {
+                    let got = [(px >> 16) as u8, (px >> 8) as u8, px as u8];
+                    for (g, w) in got.into_iter().zip(want) {
+                        assert!(
+                            g.abs_diff(*w) <= 1,
+                            "tagging {t} {tag:?}, {way:?}: code {:?} gives {got:?}, Chrome {want:?}",
+                            &codes[3 * i..3 * i + 3]
+                        );
+                        exact += usize::from(g == *w);
+                    }
+                }
+                report += &format!("\n  {tag:?} {way:?}: {exact} of {} exact", 3 * count);
+                short |= exact * 100 < 3 * count * SDR_EXACT_PERCENT;
+            }
+        }
+        assert!(
+            !short,
+            "under {SDR_EXACT_PERCENT}% of channels exactly Chrome's:{report}"
+        );
+    }
+
+    /// How many in a hundred channels [`sdr_is_chrome_s_to_within_a_level`]
+    /// holds to Chrome's exactly: measured, 97.8% for BT.709 (the fewest)
+    /// to 99.4% for BT.2020.
+    const SDR_EXACT_PERCENT: usize = 97;
+
     /// The tables err by under a ten-thousandth of an 8-bit code wherever
     /// the light falls: each sample's error in its light, carried to the
     /// screen through sRGB's curve at its slope for that light. (The tone
@@ -1806,13 +2077,15 @@ mod tests {
     }
 
     /// The whole of a pixel's arithmetic in double precision, from the same
-    /// control points and matrices: `chrome_hdr.py`'s `pixel`.
+    /// control points and matrices: `chrome_hdr.py`'s `pixel` -- and for an
+    /// SDR picture the same, less the tone map.
     fn reference(map: &Conversion<'_>, rgb: [f32; 3]) -> [u32; 3] {
         let f = |m: &Matrix| m.map(|r| r.map(f64::from));
         let mul =
             |m: &[[f64; 3]; 3], v: [f64; 3]| m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
         let rgb = rgb.map(f64::from);
         let light = match map.signal.transfer {
+            Transfer::Sdr(curve) => rgb.map(|c| curve.light(c)),
             Transfer::Pq => rgb.map(pqish),
             Transfer::Hlg => {
                 let s = rgb.map(hlgish);
@@ -1846,7 +2119,8 @@ mod tests {
             };
             libm::exp2(g)
         });
-        let out = mul(&f(&map.to_srgb), working.map(|c| c * gain));
+        let mapped = working.map(|c| c * gain);
+        let out = map.to_srgb.map_or(mapped, |m| mul(&f(&m), mapped));
         out.map(|l| {
             let l = l.clamp(0.0, 1.0);
             let v = if l < 0.003_130_8 {
@@ -2481,8 +2755,9 @@ mod tests {
                 );
             }
         }
-        let red =
-            |primaries: u16| Conversion::new(&signal, primaries, light).pixel([0.58, 0.0, 0.0]) >> 16;
+        let red = |primaries: u16| {
+            Conversion::new(&signal, primaries, light).pixel([0.58, 0.0, 0.0]) >> 16
+        };
         assert!(
             red(12) < red(9),
             "P3 {} against BT.2020 {}",

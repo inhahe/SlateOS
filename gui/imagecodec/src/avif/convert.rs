@@ -124,7 +124,9 @@ fn hdr_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
         return None;
     }
     // An unspecified transfer is the sRGB curve: not HDR.
-    Transfer::from_h273(image.transfer).map(|transfer| (transfer, primaries))
+    Transfer::from_h273(image.transfer)
+        .filter(|t| t.is_hdr())
+        .map(|transfer| (transfer, primaries))
 }
 
 #[cfg(test)]

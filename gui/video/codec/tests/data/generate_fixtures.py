@@ -93,7 +93,7 @@ ALPHA = (",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)'"
 #        range), the decoder ffmpeg reads the frames with)
 FIXTURES = {
     # Nothing said, at a small size: BT.601 matrix, BT.709 primaries (mpv's
-    # guess for a height that is neither 576 nor 480), studio range.
+    # guess for a height that is none of 576, 480 and 486), studio range.
     "vp9_sd_untagged.webm": (
         SRC.format("176x144"), VP9 + ["-pix_fmt", "yuv420p"], "yuv420p",
         ("420", 8, 0), (6, 1, "limited"), None),

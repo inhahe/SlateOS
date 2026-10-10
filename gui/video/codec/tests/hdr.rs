@@ -3,6 +3,9 @@
 //! the mastering display and the content light level, the bitstream's kind
 //! by kind else the file's, in Matroska, WebM and MP4, from AV1's metadata
 //! OBUs and VP9's and AV1's containers (`tests/data/generate_hdr_fixtures.py`).
+//!
+//! And how each is shown: its first frame held to Chrome's pixels for it
+//! (`NAME.chrome.png`, from `tests/data/chrome_hdr.py`), within one.
 
 #![allow(
     clippy::unwrap_used,
@@ -134,6 +137,51 @@ fn check_light(light: Light, a: &Answer, what: &str) {
         .content
         .map(|c| format!("{},{}", c.max_cll, c.max_fall));
     assert_eq!(ours, a.light, "{what}: the content light level");
+}
+
+/// Each first frame is Chrome's -- the light the frame says it holds tone
+/// mapped as Chrome maps it, BT.2020 carried to sRGB -- within one in every
+/// channel, and one apart in under one channel in a thousand: the reference
+/// computes in double precision, the conversion in single, as Chrome's own
+/// does. The fixtures between them take the light from the bitstream over
+/// the file (`hdr10_av1.mkv`, whose file says 2000), a level beside a file's
+/// mastering display (`cll_av1.mkv`, whose display says 4000), a display's
+/// peak alone (`partial_vp9.webm`, 600), no light at all
+/// (`tagged_by_file_av1.mkv`, 1000), and HLG.
+#[test]
+fn every_first_frame_is_chrome_s() {
+    for name in FIXTURES {
+        let mut video =
+            Video::open(File::open(path(name)).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let frame = video
+            .next_picture()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}: no frame"))
+            .to_frame()
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let png = std::fs::read(path(&format!("{name}.chrome.png"))).unwrap();
+        let chrome = imagecodec::decode(&png, imagecodec::Limits::default()).unwrap();
+        assert_eq!(
+            (frame.width, frame.height),
+            (chrome.width, chrome.height),
+            "{name}"
+        );
+        let (mut off, mut worst) = (0usize, 0u32);
+        for (i, (&ours, &theirs)) in frame.pixels.iter().zip(&chrome.pixels).enumerate() {
+            assert_eq!(ours >> 24, 0xff, "{name}: pixel {i} is not opaque");
+            for shift in [16, 8, 0] {
+                let d = ((ours >> shift) & 0xff).abs_diff((theirs >> shift) & 0xff);
+                worst = worst.max(d);
+                off += usize::from(d != 0);
+            }
+        }
+        let channels = frame.pixels.len() * 3;
+        assert!(worst <= 1, "{name}: a channel {worst} from Chrome's");
+        assert!(
+            off * 1000 < channels,
+            "{name}: {off} of {channels} channels one from Chrome's"
+        );
+    }
 }
 
 #[test]

@@ -9,15 +9,24 @@
 //! [`Light`] a stream says it holds: its own, kind by kind, else its file's,
 //! as FFmpeg gives it with each frame.
 //!
-//! **The guess** is mpv's (`mp_csp_guess_colorspace`,
-//! `mp_csp_guess_primaries`), the same in VLC and Kodi: video of HD size
-//! (1280 wide or more, or taller than 576) was made for BT.709, and smaller
-//! video for BT.601 -- the 625-line primaries at a height of 576, the
-//! 525-line ones at 480 or 488. Range unsaid is the studio range, as video
-//! nearly always is, and a transfer unsaid is BT.709's -- ordinary video's,
-//! as mpv takes it. libavif's own fallback -- BT.601 for everything -- is
-//! right for pictures and wrong for most HD video, which is encoded BT.709
-//! and often not tagged (design-decisions §1346).
+//! **The guess** is mpv's (`mp_image_params_guess_csp`, with
+//! `mp_csp_guess_colorspace` and `mp_csp_guess_primaries`), the same in VLC
+//! and Kodi: video of HD size (1280 wide or more, or taller than 576) was
+//! made for BT.709, and smaller video for BT.601. Primaries unsaid are the
+//! matrix's -- BT.2020's for BT.2020's matrix, BT.709's for BT.709's -- and
+//! for BT.601's the size's: the 625-line primaries at a height of 576, the
+//! 525-line ones at 480 or 486, else BT.709's. Range unsaid is the studio
+//! range, as video nearly always is, and a transfer unsaid is BT.709's --
+//! ordinary video's, as mpv takes it. libavif's own fallback -- BT.601 for
+//! everything -- is right for pictures and wrong for most HD video, which is
+//! encoded BT.709 and often not tagged (design-decisions §1346).
+//!
+//! **Except for HDR**, which is shown as Chrome shows it (design-decisions
+//! §1378), and so guessed as Chrome guesses it
+//! (`VideoColorSpace::GuessGfxColorSpace`): a transfer of BT.2020's -- PQ,
+//! HLG, or its two ordinary ones -- makes an unsaid matrix and primaries
+//! BT.2020's, unless the matrix or the primaries say BT.709's, which Chrome
+//! ranks above it and then takes for both.
 
 use rav1d::safe as av1;
 
@@ -29,10 +38,16 @@ const UNSPECIFIED: u16 = 2;
 const RESERVED: u16 = 3;
 const MATRIX_BT709: u16 = 1;
 const MATRIX_BT601: u16 = 6;
+const MATRIX_BT2020_NCL: u16 = 9;
+const MATRIX_BT2020_CL: u16 = 10;
 const PRIMARIES_BT709: u16 = 1;
 const PRIMARIES_BT470BG: u16 = 5;
 const PRIMARIES_SMPTE170M: u16 = 6;
+const PRIMARIES_BT2020: u16 = 9;
 const TRANSFER_BT709: u16 = 1;
+/// BT.2020's transfers: its ordinary ones at 10 and 12 bits, PQ and HLG --
+/// those `GuessGfxColorSpace` guesses BT.2020 from.
+const TRANSFERS_BT2020: [u16; 4] = [14, 15, 16, 18];
 
 /// A picture's colour, settled: what it is converted to pixels with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,35 +253,45 @@ const fn is_hd(width: u32, height: u32) -> bool {
 
 /// The colour of a `width` x `height` picture whose bitstream says
 /// `bitstream` and whose track's description says `container`: each of the
-/// three from the first that says it, else the guess.
+/// four from the first that says it, else the guess (the module's).
 pub(crate) fn resolve(
     bitstream: ColourHint,
     container: ColourHint,
     width: u32,
     height: u32,
 ) -> Colour {
-    let hd = is_hd(width, height);
-    let matrix = bitstream.matrix.or(container.matrix).unwrap_or(if hd {
-        MATRIX_BT709
+    let said_matrix = bitstream.matrix.or(container.matrix);
+    let said_primaries = bitstream.primaries.or(container.primaries);
+    let said_transfer = bitstream.transfer.or(container.transfer);
+    let (matrix, primaries) = if said_transfer.is_some_and(|t| TRANSFERS_BT2020.contains(&t)) {
+        // Chrome's guess: BT.2020's, or BT.709's where either says it.
+        let bt709 = said_matrix == Some(MATRIX_BT709) || said_primaries == Some(PRIMARIES_BT709);
+        let (m, p) = if bt709 {
+            (MATRIX_BT709, PRIMARIES_BT709)
+        } else {
+            (MATRIX_BT2020_NCL, PRIMARIES_BT2020)
+        };
+        (said_matrix.unwrap_or(m), said_primaries.unwrap_or(p))
     } else {
-        MATRIX_BT601
-    });
-    let primaries = bitstream
-        .primaries
-        .or(container.primaries)
-        .unwrap_or(match height {
-            _ if hd => PRIMARIES_BT709,
-            576 => PRIMARIES_BT470BG,
-            480 | 488 => PRIMARIES_SMPTE170M,
-            _ => PRIMARIES_BT709,
+        // mpv's: the matrix by the size, the primaries by the matrix.
+        let hd = is_hd(width, height);
+        let matrix = said_matrix.unwrap_or(if hd { MATRIX_BT709 } else { MATRIX_BT601 });
+        let primaries = said_primaries.unwrap_or(match matrix {
+            MATRIX_BT2020_NCL | MATRIX_BT2020_CL => PRIMARIES_BT2020,
+            MATRIX_BT709 => PRIMARIES_BT709,
+            _ => match height {
+                _ if hd => PRIMARIES_BT709,
+                576 => PRIMARIES_BT470BG,
+                480 | 486 => PRIMARIES_SMPTE170M,
+                _ => PRIMARIES_BT709,
+            },
         });
+        (matrix, primaries)
+    };
     Colour {
         matrix,
         primaries,
-        transfer: bitstream
-            .transfer
-            .or(container.transfer)
-            .unwrap_or(TRANSFER_BT709),
+        transfer: said_transfer.unwrap_or(TRANSFER_BT709),
         full_range: bitstream
             .full_range
             .or(container.full_range)
@@ -349,6 +374,70 @@ mod tests {
             assert_eq!((hd.matrix, hd.primaries), (1, 1), "{w}x{h}");
         }
         assert_eq!(resolve(NOTHING, NOTHING, 1279, 576).matrix, 6);
+        // NTSC's professional height is mpv's 486, not 488.
+        assert_eq!(resolve(NOTHING, NOTHING, 720, 486).primaries, 6);
+        assert_eq!(resolve(NOTHING, NOTHING, 720, 488).primaries, 1);
+    }
+
+    /// mpv takes unsaid primaries from the matrix before the size:
+    /// BT.2020's and BT.709's matrices name their primaries, BT.601's
+    /// leaves them to the size.
+    #[test]
+    fn unsaid_primaries_are_the_matrix_s() {
+        let matrix = |m| ColourHint {
+            matrix: Some(m),
+            ..NOTHING
+        };
+        assert_eq!(resolve(matrix(9), NOTHING, 1920, 1080).primaries, 9);
+        assert_eq!(resolve(matrix(10), NOTHING, 720, 576).primaries, 9);
+        assert_eq!(resolve(matrix(1), NOTHING, 720, 576).primaries, 1);
+        assert_eq!(resolve(matrix(5), NOTHING, 720, 576).primaries, 5);
+        assert_eq!(resolve(matrix(6), NOTHING, 720, 480).primaries, 6);
+        assert_eq!(resolve(matrix(6), NOTHING, 1920, 1080).primaries, 1);
+        // Said primaries stand.
+        let both = ColourHint {
+            primaries: Some(12),
+            ..matrix(9)
+        };
+        assert_eq!(resolve(both, NOTHING, 1920, 1080).primaries, 12);
+    }
+
+    /// A transfer of BT.2020's guesses BT.2020 for what is unsaid, at any
+    /// size, as Chrome guesses it -- unless BT.709 is said, which Chrome
+    /// ranks above it.
+    #[test]
+    fn hdr_is_guessed_as_chrome_guesses_it() {
+        let hint = |transfer, matrix, primaries| ColourHint {
+            transfer: Some(transfer),
+            matrix,
+            primaries,
+            ..NOTHING
+        };
+        for transfer in [14, 15, 16, 18] {
+            let c = resolve(hint(transfer, None, None), NOTHING, 720, 576);
+            assert_eq!((c.matrix, c.primaries), (9, 9), "transfer {transfer}");
+        }
+        // BT.601's matrix ranks below BT.2020: the primaries are still
+        // BT.2020's, where mpv would take the size's.
+        let c = resolve(hint(16, Some(6), None), NOTHING, 720, 576);
+        assert_eq!((c.matrix, c.primaries), (6, 9));
+        let c = resolve(hint(18, None, Some(5)), NOTHING, 720, 576);
+        assert_eq!((c.matrix, c.primaries), (9, 5));
+        // BT.709 said by either is taken for the other.
+        let c = resolve(hint(16, Some(1), None), NOTHING, 3840, 2160);
+        assert_eq!((c.matrix, c.primaries), (1, 1));
+        let c = resolve(hint(16, None, Some(1)), NOTHING, 720, 576);
+        assert_eq!((c.matrix, c.primaries), (1, 1));
+        // An ordinary transfer is mpv's guess.
+        let c = resolve(hint(1, None, None), NOTHING, 720, 576);
+        assert_eq!((c.matrix, c.primaries), (6, 5));
+        // The bitstream's transfer and the file's matrix combine.
+        let file = ColourHint {
+            matrix: Some(6),
+            ..NOTHING
+        };
+        let c = resolve(hint(16, None, None), file, 1920, 1080);
+        assert_eq!((c.matrix, c.primaries, c.transfer), (6, 9, 16));
     }
 
     #[test]

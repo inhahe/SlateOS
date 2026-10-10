@@ -8,6 +8,15 @@ white point, and its peak and black) and the content light level
 (CTA-861.3: MaxCLL and MaxFALL). `tests/hdr.rs` holds videocodec's
 `Picture::colour` and `Picture::light` to those lines.
 
+And NAME.chrome.png: its first frame as Chrome shows it on an sRGB screen
+(design-decisions 1378), which `tests/hdr.rs` holds videocodec's pixels to,
+within one. Made from ffmpeg's decoding of the frame (libdav1d's and
+FFmpeg's VP9, which videocodec's decoders match bit for bit), its chroma
+upsampled as libyuv's bilinear 4:2:0 conversion upsamples it, Y'CbCr to
+R'G'B' as libavif's floating point computes it, and from there Chrome's
+handling of the light, in double precision (`chrome_hdr.py`), by the light
+ffprobe says the frame has.
+
 Where the answers come from -- none of it from the crate itself: ffprobe's
 `-show_frames`, whose frames carry what the bitstream says (AV1's sequence
 header and metadata OBUs, through libdav1d) and, where it says nothing,
@@ -48,7 +57,9 @@ import os
 import struct
 import subprocess
 import sys
+import zlib
 
+import chrome_hdr
 from generate_fixtures import insert_in_entry
 
 FRAMES = 4
@@ -135,15 +146,31 @@ def rational(s):
     return f"{int(num)}/{int(den)}"
 
 
+def resolved(frame):
+    """The frame's colour as src/colour.rs settles it from what ffprobe
+    reads: a transfer of BT.2020's guesses BT.2020 for the rest (BT.709's
+    where either says it), as Chrome does; otherwise mpv's guess, the matrix
+    by the size and the primaries by the matrix."""
+    width, height = (int(n) for n in SIZE.split("x"))
+    hd = width >= 1280 or height > 576
+    said_matrix = MATRICES.get(frame.get("color_space"))
+    said_primaries = PRIMARIES.get(frame.get("color_primaries"))
+    transfer = TRANSFERS.get(frame.get("color_transfer"), 1)
+    if transfer in (14, 15, 16, 18):
+        guess = 1 if 1 in (said_matrix, said_primaries) else 9
+        matrix, primaries = said_matrix or guess, said_primaries or guess
+    else:
+        matrix = said_matrix or (1 if hd else 6)
+        primaries = said_primaries or {9: 9, 10: 9, 1: 1}.get(
+            matrix, 1 if hd else {576: 5, 480: 6, 486: 6}.get(height, 1))
+    return matrix, primaries, transfer
+
+
 def answer(name, frames):
     lines = [f"# {name}: what its frames say of their light, as ffprobe reads them "
              "(generate_hdr_fixtures.py)."]
     for index, f in enumerate(frames):
-        size = SIZE.split("x")
-        hd = int(size[0]) >= 1280 or int(size[1]) > 576
-        matrix = MATRICES.get(f.get("color_space"), 1 if hd else 6)
-        primaries = PRIMARIES.get(f.get("color_primaries"), 1)
-        transfer = TRANSFERS.get(f.get("color_transfer"), 1)
+        matrix, primaries, transfer = resolved(f)
         rng = "full" if f.get("color_range") == "pc" else "limited"
         lines.append(f"frame {index} matrix={matrix} primaries={primaries} "
                      f"transfer={transfer} range={rng}")
@@ -163,6 +190,133 @@ def answer(name, frames):
             elif kind == "Content light level metadata":
                 lines.append(f"  light {sd['max_content']},{sd['max_average']}")
     return "\n".join(lines) + "\n"
+
+
+# --- the pixels, as Chrome shows them -------------------------------------------
+
+def up2_linear(src, w):
+    """libyuv's ScaleRowUp2_Linear_Any_C: a chroma row doubled to `w`, each
+    new sample 3:1 of its two nearest, the ends copied."""
+    dst = [0] * w
+    dst[0] = src[0]
+    work = (w - 1) & ~1
+    for k in range(min(work // 2, len(src) - 1)):
+        s0, s1 = src[k], src[k + 1]
+        dst[1 + 2 * k] = (s0 * 3 + s1 + 2) >> 2
+        dst[2 + 2 * k] = (s0 + s1 * 3 + 2) >> 2
+    dst[w - 1] = src[(w - 1) // 2]
+    return dst
+
+
+def up2_bilinear(sa, sb, w):
+    """libyuv's ScaleRowUp2_Bilinear_Any_C: two chroma rows to the two rows
+    between them, 9:3:3:1, each row's ends 3:1 of the column there."""
+    da, db = [0] * w, [0] * w
+    da[0] = (sa[0] * 3 + sb[0] + 2) >> 2
+    db[0] = (sa[0] + sb[0] * 3 + 2) >> 2
+    work = (w - 1) & ~1
+    for k in range(min(work // 2, len(sa) - 1, len(sb) - 1)):
+        s0, s1, t0, t1 = sa[k], sa[k + 1], sb[k], sb[k + 1]
+        da[1 + 2 * k] = (s0 * 9 + s1 * 3 + t0 * 3 + t1 + 8) >> 4
+        da[2 + 2 * k] = (s0 * 3 + s1 * 9 + t0 + t1 * 3 + 8) >> 4
+        db[1 + 2 * k] = (s0 * 3 + s1 + t0 * 9 + t1 * 3 + 8) >> 4
+        db[2 + 2 * k] = (s0 + s1 * 3 + t0 * 3 + t1 * 9 + 8) >> 4
+    last = (w - 1) // 2
+    a, b = sa[last], sb[last]
+    da[w - 1] = (a * 3 + b + 2) >> 2
+    db[w - 1] = (a + b * 3 + 2) >> 2
+    return da, db
+
+
+def chroma_rows_420(plane, width, height):
+    """Each picture row's chroma at full width, as libyuv's
+    I010ToARGBMatrixBilinear walks a 4:2:0 picture: the first row from the
+    first chroma row alone, each later pair 3:1 and 1:3 of the two chroma
+    rows around it, an even height's last row from the last alone."""
+    chroma_height = (height + 1) // 2
+    rows = []
+    for row in range(height):
+        c = max(row - 1, 0) // 2
+        if row == 0 or c + 1 >= chroma_height:
+            rows.append(up2_linear(plane[c], width))
+        else:
+            upper, lower = up2_bilinear(plane[c], plane[c + 1], width)
+            rows.append(upper if row % 2 == 1 else lower)
+    return rows
+
+
+def rgb_of(y, u, v):
+    """10-bit studio-range BT.2020 NCL Y'CbCr to R'G'B' as libavif's
+    floating point computes it (`(code - bias) / range`, then its colour
+    difference equations), in double precision, clamped to [0, 1]."""
+    kr, kb = 0.2627, 0.0593
+    kg = 1.0 - kr - kb
+    yv, cb, cr = (y - 64) / 876, (u - 512) / 896, (v - 512) / 896
+    r = yv + 2 * (1 - kr) * cr
+    b = yv + 2 * (1 - kb) * cb
+    g = yv - 2 * (kr * (1 - kr) * cr + kb * (1 - kb) * cb) / kg
+    return [min(max(c, 0.0), 1.0) for c in (r, g, b)]
+
+
+def first_frame(t, name):
+    """The first frame's 10-bit 4:2:0 planes, as ffmpeg's decoders make them."""
+    width, height = (int(n) for n in SIZE.split("x"))
+    raw = run([t.ffmpeg, "-hide_banner", "-v", "error", "-i", name, "-frames:v", "1",
+               "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-"])
+    cw, ch = (width + 1) // 2, (height + 1) // 2
+    samples = struct.unpack(f"<{width * height + 2 * cw * ch}H", raw)
+    y = [samples[r * width:(r + 1) * width] for r in range(height)]
+    at = width * height
+    u = [samples[at + r * cw:at + (r + 1) * cw] for r in range(ch)]
+    at += cw * ch
+    v = [samples[at + r * cw:at + (r + 1) * cw] for r in range(ch)]
+    return width, height, y, u, v
+
+
+def frame_light(frame):
+    """MaxCLL and the mastering display's peak, as the frame's side data
+    gives them (0 where it does not)."""
+    max_cll, peak = 0, 0.0
+    for sd in frame.get("side_data_list", []):
+        if sd["side_data_type"] == "Content light level metadata":
+            max_cll = int(sd["max_content"])
+        elif sd["side_data_type"] == "Mastering display metadata" and "max_luminance" in sd:
+            num, den = sd["max_luminance"].split("/")
+            peak = int(num) / int(den)
+    return max_cll, peak
+
+
+def png(path, width, height, rgb_rows):
+    """An 8-bit RGB PNG, no other chunks: no gamma, no profile."""
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+    raw = b"".join(b"\0" + bytes(row) for row in rgb_rows)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(raw, 9)))
+        f.write(chunk(b"IEND", b""))
+
+
+def chrome_frame(t, name):
+    """NAME.chrome.png: the first frame as Chrome shows it."""
+    frame = t.frames(name)[0]
+    matrix, primaries, transfer = resolved(frame)
+    if (matrix, primaries) != (9, 9) or transfer not in (16, 18):
+        raise SystemExit(f"{name}: chrome_hdr.py has only BT.2020's PQ and HLG")
+    width, height, y, u, v = first_frame(t, name)
+    us, vs = chroma_rows_420(u, width, height), chroma_rows_420(v, width, height)
+    max_cll, mastering_peak = frame_light(frame)
+    headroom = chrome_hdr.baseline_headroom(chrome_hdr.peak_luminance(max_cll, mastering_peak))
+    points = chrome_hdr.rwtmo_alt0(headroom, half=True)
+    rows = []
+    for r in range(height):
+        row = []
+        for c in range(width):
+            row += chrome_hdr.pixel(rgb_of(y[r][c], us[r][c], vs[r][c]), transfer, points)
+        rows.append(row)
+    png(f"{name}.chrome.png", width, height, rows)
 
 
 def main():
@@ -254,13 +408,32 @@ def main():
          "--max-luminance", "0:600", "--min-luminance", "0:0.05", "tmp_vp9_pq.webm"])
     made.append("partial_vp9.webm")
 
-    for name in made:
-        with open(f"{name}.colour", "w", encoding="utf-8", newline="\n") as f:
-            f.write(answer(name, t.frames(name)))
-        print("wrote", name)
+    answers(t, made)
     for tmp in [n for n in os.listdir(".") if n.startswith("tmp_")]:
         os.remove(tmp)
 
 
+def answers(t, names):
+    for name in names:
+        with open(f"{name}.colour", "w", encoding="utf-8", newline="\n") as f:
+            f.write(answer(name, t.frames(name)))
+        chrome_frame(t, name)
+        print("wrote", name)
+
+
+FIXTURES = ["hdr10_av1.mkv", "cll_av1.mkv", "tagged_by_file_av1.mkv", "hdr10_vp9.webm",
+            "hdr10_vp9.mp4", "hdr10_av1.mp4", "hlg_vp9.webm", "hlg_av1.mp4", "partial_vp9.webm"]
+
+
 if __name__ == "__main__":
-    main()
+    if "--answers-only" in sys.argv:
+        # The answers of the fixtures already made, without encoding anew:
+        # encoders are not bit-exact from build to build, the answers are.
+        sys.argv.remove("--answers-only")
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--ffmpeg", default="")
+        ap.add_argument("--mkvmerge", default="D:/utils/mkvtoolnix-99.0/mkvmerge.exe")
+        a = ap.parse_args()
+        answers(Tools(a.ffmpeg, a.mkvmerge), FIXTURES)
+    else:
+        main()

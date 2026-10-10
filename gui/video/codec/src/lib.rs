@@ -70,7 +70,7 @@
 //!
 //! Each picture is converted by its own colour description -- its matrix,
 //! primaries and range, from its bitstream, else from the file, else guessed
-//! from its size as players guess it (`colour.rs`) -- through
+//! as mpv guesses it, from the size and the matrix (`colour.rs`) -- through
 //! `gui/video/yuv`'s port of libavif's conversion, so a frame has exactly the
 //! pixels an AVIF still of the same picture would: libyuv's fixed point for
 //! BT.601, BT.709 and BT.2020, chroma upsampled bilinearly; libavif's
@@ -82,8 +82,14 @@
 //! picture says what HDR metadata it carries ([`Picture::light`]): the
 //! display it was mastered on and how bright its content gets, AV1's metadata
 //! OBUs kind by kind over the file's (Matroska's `Colour`, MP4's `mdcv` and
-//! `clli`, VP9's `SmDm` and `CoLL`), each as FFmpeg gives it with each frame
-//! (`tests/hdr.rs`).
+//! `clli`, VP9's `SmDm` and `CoLL`), each as FFmpeg gives it with each frame.
+//! An HDR picture is shown as Chrome shows it on an sRGB screen
+//! (design-decisions §1378): `gui/video/yuv`'s transcription of Skia's colour
+//! conversion and its tone map, by that light -- the content's peak its
+//! MaxCLL, else its mastering display's, else 1000 cd/m2 -- and BT.2020's
+//! colours carried to sRGB's; its colour unsaid is guessed as Chrome guesses
+//! it, BT.2020's for an HDR transfer. Held to the light ffprobe reads and to
+//! Chrome's pixels (`tests/hdr.rs`).
 //!
 //! # Time
 //!
@@ -172,10 +178,12 @@ pub struct ColourHint {
     pub light: Light,
 }
 
-/// What a video says of its light, for whatever maps HDR video to a display:
-/// the display it was mastered on, and how bright its content gets -- each
-/// `None` where nothing says. A picture's is its bitstream's, kind by kind,
-/// else its file's ([`Picture::light`]), as FFmpeg gives it with each frame.
+/// What a video says of its light, by which an HDR picture is mapped to the
+/// screen -- an sRGB one of no headroom, until screens say their own
+/// ([`Picture::to_frame`]): the display it was mastered on, and how bright
+/// its content gets -- each `None` where nothing says. A picture's is its
+/// bitstream's, kind by kind, else its file's ([`Picture::light`]), as FFmpeg
+/// gives it with each frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Light {
     pub mastering: Option<MasteringDisplay>,

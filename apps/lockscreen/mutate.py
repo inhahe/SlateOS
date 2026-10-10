@@ -176,9 +176,15 @@ MUTATIONS += [
     ),
     (
         "a shaken box is pressed where it stood",
-        "            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0 + self.shake.offset(),\n",
-        "            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0,\n",
+        "            x: home.x + self.shake.offset(),\n",
+        "            x: home.x,\n",
         ["a_shaken_password_box_is_pressed_where_it_is_drawn"],
+    ),
+    (
+        "the lockout's reason is asked where the shake has the box",
+        "                let field = self.password_field_home();\n",
+        "                let field = self.password_field_rect();\n",
+        ["the_lockouts_reason_waits_the_same_while_the_box_shakes"],
     ),
 ]
 

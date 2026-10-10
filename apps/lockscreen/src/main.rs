@@ -1516,7 +1516,10 @@ impl LockScreen {
         let locked = self.state == LockScreenState::PasswordEntry && self.lockout.is_active();
         match self.pointer {
             Some(at) => {
-                let field = self.password_field_rect();
+                // Where the box rests, not where the shake has it: a box that
+                // moved every frame would restart the reason's wait on every
+                // one, and the reason would wait out the whole shake.
+                let field = self.password_field_home();
                 let boxes = [(
                     (field.x, field.y, field.width, field.height),
                     "Too many wrong passwords: the box opens again when the countdown ends.",
@@ -1687,13 +1690,22 @@ impl LockScreen {
         self.screen_width / 2.0
     }
 
-    /// Where the password box is drawn, shaken or not.
-    fn password_field_rect(&self) -> Rect {
+    /// Where the password box stands when it is not shaking.
+    fn password_field_home(&self) -> Rect {
         Rect {
-            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0 + self.shake.offset(),
+            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0,
             y: self.password_field_y(),
             width: PASSWORD_FIELD_WIDTH,
             height: PASSWORD_FIELD_HEIGHT,
+        }
+    }
+
+    /// Where the password box is drawn, shaken or not.
+    fn password_field_rect(&self) -> Rect {
+        let home = self.password_field_home();
+        Rect {
+            x: home.x + self.shake.offset(),
+            ..home
         }
     }
 
@@ -2599,6 +2611,34 @@ mod tests {
     use super::*;
 
     // --- Why the password box is switched off ----------------------------------
+
+    /// **The reason waits the same while the box shakes**: the fifth wrong
+    /// password starts the lockout and the shake together, and the box
+    /// moving under a resting pointer does not start the wait again.
+    #[test]
+    fn the_lockouts_reason_waits_the_same_while_the_box_shakes() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let field = ls.password_field_home();
+        let at = (field.x + field.width / 2.0, field.y + field.height / 2.0);
+        ls.lockout.start(30);
+        ls.shake.trigger();
+        ls.handle_event(&Event::Mouse(MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::Move,
+        }));
+        // The window's animation ticks, through the first 512 ms -- most of
+        // them while the box shakes.
+        for _ in 0..32 {
+            ls.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert_eq!(
+            ls.why_disabled.showing(),
+            Some("Too many wrong passwords: the box opens again when the countdown ends."),
+            "the shake started the reason's wait again"
+        );
+    }
 
     /// **The switched-off password box says why**, while the pointer rests
     /// on it during a lockout, after the delay and drawn over everything --

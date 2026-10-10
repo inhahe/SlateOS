@@ -4617,14 +4617,22 @@ lane C's `guitk`.
   Chrome's pixels; the screen taken to be sRGB until screens report their
   colours, then the compositor's to manage
   (`known-issues/F-video-is-shown-without-colour-management.md`).
-  - `[-]` What a video says of its light, read as FFmpeg reads it -- the
+  - `[x]` What a video says of its light, read as FFmpeg reads it -- the
     transfer (PQ, HLG), the mastering display and the content light level,
     from AV1's metadata OBUs, Matroska's `Colour`, MP4's `colr`, `mdcv` and
     `clli` and VP9's `SmDm` and `CoLL` -- which Chrome's handling needs.
-    Done in a scratch branch (`lane-f-hdr`), merging next.
-  - `[ ]` Chrome's tone mapping of PQ and HLG, and its BT.2020 colours, on
-    every HDR frame.
+  - `[x]` Chrome's handling of HDR on an sRGB screen (§1379): Skia's PQ and
+    HLG curves, its RWTMO tone map by the content's peak, BT.2020 to sRGB,
+    chroma upsampled as Chrome's GPU samples it; on every HDR video frame
+    and HDR AVIF (its `clli`), held to Chrome 154's own pixels
+    (`gui/video/yuv/src/hdr.rs`).
+  - `[ ]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
+    table lookups a pixel -- 40-60 ms a 1080p frame on one thread today.
+  - `[ ]` SDR video's primaries other than BT.709's (BT.2020 SDR, P3) to
+    sRGB, as Chrome's gamut matrix converts them.
   - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
+  - `[ ]` Gain maps (ISO 21496-1: UltraHDR JPEG, AVIF `tmap`), and HDR
+    screens' headroom, once screens report their colours.
 - `[ ]` `[F]` **Screen capture** (F-Q3 answered, §1371): the capture request
   in `gui/remote`'s protocol and `gui/window`'s call; in the compositor,
   Print Screen and its own region and window picker, whose pick is the

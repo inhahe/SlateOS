@@ -5543,6 +5543,17 @@ pub struct Compositor {
     z_stack: Vec<WindowId>,
     /// The currently focused window (receives keyboard input).
     focused_window: Option<WindowId>,
+    /// Every living window that has held the keyboard, least recently first,
+    /// each once: where the keyboard goes back to when the window holding it
+    /// stops being somewhere the user can type
+    /// ([`hand_keyboard_back`](Self::hand_keyboard_back)).
+    ///
+    /// The order the user worked in, which the stacking order is not: a
+    /// window a rule keeps on top, a panel, a window raised by a shell -- each
+    /// sits above the window the user was typing in without the user having
+    /// moved there. Bounded by the window count: a window is in it at most
+    /// once and leaves it when it closes.
+    focus_history: Vec<WindowId>,
     /// The backend we composite through.
     ///
     /// Named for the seam rather than for the surface: nothing in this struct
@@ -6003,6 +6014,7 @@ impl Compositor {
             windows: Vec::new(),
             z_stack: Vec::new(),
             focused_window: None,
+            focus_history: Vec::new(),
             backend,
             display_manager,
             damage: DamageRegion::new(),
@@ -6822,23 +6834,19 @@ impl Compositor {
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
+        self.focus_history.retain(|&id| id != window_id);
         self.update_z_orders();
 
-        // If this was the focused window, focus the topmost remaining window
-        // *at or below the closed window's band*. Taking the topmost window
-        // outright would mean closing an application hands focus to the
-        // taskbar, which is in front of everything by construction and is
-        // never what the user was looking at next.
+        // The keyboard goes back to the window that had it before, by the one
+        // rule every other way of leaving the screen follows. No `FocusLost`:
+        // there is no window left to tell.
         if self.focused_window == Some(window_id) {
             self.focused_window = None;
-            if let Some(&next) = self
-                .z_stack
-                .iter()
-                .rev()
-                .find(|&&id| self.layer_of(id) <= closed_layer)
-            {
-                self.focus_window(next);
-            }
+            // An accent armed in the closed window must not complete itself in
+            // the next one; `focus_window` disarms it only when it takes the
+            // keyboard *from* a window, and none holds it now.
+            self.dead_keys.cancel();
+            self.hand_keyboard_back(closed_layer);
         }
 
         self.full_recomposite = true;
@@ -6911,11 +6919,7 @@ impl Compositor {
         window.visible = false;
         window.dirty = true;
 
-        // Focus next window if this was focused.
-        if self.focused_window == Some(window_id) {
-            self.focused_window = None;
-            self.focus_topmost_visible();
-        }
+        self.release_keyboard(window_id);
 
         self.full_recomposite = true;
         Ok(())
@@ -7619,8 +7623,27 @@ impl Compositor {
         }
     }
 
-    /// Set focus to a specific window.
+    /// Give a window the keyboard, and raise it within its band.
+    ///
+    /// Refused, changing nothing, for a window that is not on screen: a
+    /// minimized window and a window on another workspace alike, because the
+    /// keyboard would be going somewhere the user cannot see, and no amount
+    /// of typing would reveal where. [`activate_window`](Self::activate_window)
+    /// is the verb that means "make it reachable *and* focus it", and it
+    /// undoes both kinds of hiding before calling this.
+    ///
+    /// The refusal is decided before anything moves. It used to come after
+    /// the window holding the keyboard had been told it lost it -- and kept
+    /// it anyway, the compositor's record and the client's disagreeing about
+    /// where keys went from then on.
     pub fn focus_window(&mut self, window_id: WindowId) {
+        let workspace = self.current_workspace;
+        if !self
+            .window_ref(window_id)
+            .is_some_and(|w| w.is_showing(workspace))
+        {
+            return;
+        }
         let old_focused = self.focused_window;
 
         // Unfocus the previously focused window.
@@ -7641,30 +7664,86 @@ impl Compositor {
                 .push_back(EventNotification::FocusLost { window_id: old_id });
         }
 
-        // Focus the new window — unless it is not on screen. A minimized
-        // window and a window on another workspace are refused for the same
-        // reason: the keyboard would be going somewhere the user cannot see,
-        // and no amount of typing would reveal where. `activate_window` is the
-        // verb that means "make it reachable *and* focus it", and it undoes
-        // both kinds of hiding before calling this.
-        let workspace = self.current_workspace;
-        if let Some(win) = self.window_mut(window_id)
-            && win.is_showing(workspace)
-        {
+        if let Some(win) = self.window_mut(window_id) {
             win.focused = true;
             // The user is looking at it now, which is all the request asked.
             win.demands_attention = false;
             win.dirty = true;
-            self.focused_window = Some(window_id);
+        }
+        self.focused_window = Some(window_id);
+        self.focus_history.retain(|&id| id != window_id);
+        self.focus_history.push(window_id);
 
-            // Bring to the top of its own band — not to the top of the whole
-            // stack, which would let any application window climb over the
-            // taskbar simply by being clicked.
-            self.raise_within_layer(window_id);
+        // Bring to the top of its own band — not to the top of the whole
+        // stack, which would let any application window climb over the
+        // taskbar simply by being clicked.
+        self.raise_within_layer(window_id);
 
-            self.damage_window(window_id);
-            self.pending_notifications
-                .push_back(EventNotification::FocusGained { window_id });
+        self.damage_window(window_id);
+        self.pending_notifications
+            .push_back(EventNotification::FocusGained { window_id });
+    }
+
+    /// Take the keyboard from `window_id` if it holds it -- the window is
+    /// still there but has left the screen: minimized, hidden, filed on a
+    /// desktop not showing, or on the desktop just switched away from -- and
+    /// give it back to the window that had it before
+    /// ([`hand_keyboard_back`](Self::hand_keyboard_back)).
+    ///
+    /// The one way all of those leave. Each used to spell it out for itself,
+    /// and two of the four forgot to tell the window: a minimized window went
+    /// on believing it had the keyboard, and the window list showed it
+    /// focused beside the window that really was.
+    fn release_keyboard(&mut self, window_id: WindowId) {
+        if self.focused_window != Some(window_id) {
+            return;
+        }
+        let band = self.layer_of(window_id);
+        if let Some(win) = self.window_mut(window_id) {
+            win.focused = false;
+            win.dirty = true;
+        }
+        self.damage_window(window_id);
+        self.focused_window = None;
+        // As in `focus_window`: an accent belongs to the window it was armed
+        // in, and no window holds the keyboard to complete it now.
+        self.dead_keys.cancel();
+        self.pending_notifications
+            .push_back(EventNotification::FocusLost { window_id });
+        self.hand_keyboard_back(band);
+    }
+
+    /// Give the keyboard, which no window holds, back to the window that held
+    /// it most recently and can again -- on screen, and in `band` (the band
+    /// of the window that had it) or below; else to the topmost window that
+    /// can; else to none.
+    ///
+    /// **Most recently, not topmost.** The topmost window is not where the
+    /// user was: a window a rule keeps always on top sits above the one they
+    /// were typing in without their having moved to it. The stacking order
+    /// is only the fallback, for a desktop whose windows never held the
+    /// keyboard.
+    ///
+    /// **In its band or below**, so that closing or minimizing an application
+    /// does not hand the keyboard to the taskbar, which is in front of every
+    /// application by construction and is never what the user was looking at
+    /// next -- and a desktop with no application left focuses nothing rather
+    /// than the panel.
+    fn hand_keyboard_back(&mut self, band: Layer) {
+        let workspace = self.current_workspace;
+        let can = |comp: &Self, id: WindowId| {
+            comp.layer_of(id) <= band
+                && comp.window_ref(id).is_some_and(|w| w.is_showing(workspace))
+        };
+        let next = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| can(self, id))
+            .or_else(|| self.z_stack.iter().rev().copied().find(|&id| can(self, id)));
+        if let Some(id) = next {
+            self.focus_window(id);
         }
     }
 
@@ -7753,8 +7832,10 @@ impl Compositor {
     ///
     /// Focus follows the screen. A window on the desktop being left cannot keep
     /// the keyboard (that is a window nobody can see swallowing every
-    /// keystroke), so focus moves to the topmost window that *is* showing, and
-    /// to nothing at all on an empty desktop.
+    /// keystroke), so it goes to the window last typed in on the desktop
+    /// arriving ([`hand_keyboard_back`](Self::hand_keyboard_back)), and to
+    /// nothing at all on an empty desktop -- not to the taskbar, which is on
+    /// every desktop.
     ///
     /// A no-op when the named workspace is already the one showing, so a shell
     /// re-asserting its state costs nothing. There is no upper bound to check
@@ -7773,14 +7854,7 @@ impl Compositor {
                 .window_ref(focused)
                 .is_some_and(|w| w.is_showing(workspace))
         {
-            if let Some(win) = self.window_mut(focused) {
-                win.focused = false;
-                win.dirty = true;
-            }
-            self.focused_window = None;
-            self.pending_notifications
-                .push_back(EventNotification::FocusLost { window_id: focused });
-            self.focus_topmost_visible();
+            self.release_keyboard(focused);
         }
     }
 
@@ -7817,14 +7891,8 @@ impl Compositor {
         let vanished = !window.is_showing(showing);
         self.full_recomposite = true;
         self.damage_window(window_id);
-        if vanished && self.focused_window == Some(window_id) {
-            if let Some(win) = self.window_mut(window_id) {
-                win.focused = false;
-            }
-            self.focused_window = None;
-            self.pending_notifications
-                .push_back(EventNotification::FocusLost { window_id });
-            self.focus_topmost_visible();
+        if vanished {
+            self.release_keyboard(window_id);
         }
         Ok(())
     }
@@ -7894,12 +7962,10 @@ impl Compositor {
         }
         window.dirty = true;
 
-        // Hiding the focused window leaves focus nowhere; hand it to whatever
-        // is now on top rather than leaving keystrokes going to a window the
-        // user cannot see.
-        if !visible && self.focused_window == Some(window_id) {
-            self.focused_window = None;
-            self.focus_topmost_visible();
+        // Hiding the focused window must not leave keystrokes going to a window
+        // the user cannot see.
+        if !visible {
+            self.release_keyboard(window_id);
         }
 
         self.damage_window(window_id);
@@ -12204,18 +12270,6 @@ impl Compositor {
         self.stream_sessions.len()
     }
 
-    /// Focus the topmost visible window.
-    fn focus_topmost_visible(&mut self) {
-        let topmost = self.z_stack.iter().rev().copied().find(|&id| {
-            self.window_ref(id)
-                .is_some_and(|w| w.is_showing(self.current_workspace))
-        });
-
-        if let Some(id) = topmost {
-            self.focus_window(id);
-        }
-    }
-
     /// Mark the area occupied by a window (including decorations) as damaged.
     /// Mark everything the window draws as needing a repaint.
     ///
@@ -14436,6 +14490,35 @@ mod tests {
             first_key(&mut comp).text,
             "e",
             "the accent followed focus into the next window"
+        );
+    }
+
+    /// And closing the window it was armed in disarms it, though no window
+    /// is left to take the keyboard *from* when the next one is given it.
+    #[test]
+    fn closing_the_focused_window_disarms_a_pending_dead_key() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let staying = comp.create_window("Staying".to_string(), 400, 300, 1);
+        let closing = comp.create_window("Closing".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        assert_eq!(comp.focused_window, Some(closing));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        let _ = first_key(&mut comp);
+
+        comp.destroy_window(closing).unwrap();
+        assert_eq!(comp.focused_window, Some(staying));
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x12, // E
+            character: None,
+        });
+        assert_eq!(
+            first_key(&mut comp).text,
+            "e",
+            "the accent armed in the closed window completed itself in the next"
         );
     }
 
@@ -19552,6 +19635,130 @@ mod tests {
 
         comp.destroy_window(only).unwrap();
         assert_eq!(comp.focused_window, None);
+    }
+
+    /// The keyboard goes back to the window the user was typing in, not to
+    /// whatever is on top of the stack -- here a window a rule keeps always
+    /// on top, which sits above the user's window without their having
+    /// used it.
+    #[test]
+    fn closing_a_window_gives_the_keyboard_back_to_the_one_that_had_it() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let pinned = layered(&mut comp, "Sticky note", Layer::Normal);
+        let editor = layered(&mut comp, "Editor", Layer::Normal);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+        let dialog = layered(&mut comp, "Save as", Layer::Normal);
+        assert_eq!(comp.focused_window, Some(dialog));
+
+        comp.destroy_window(dialog).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "the keyboard went to the window kept on top, not the one the user was in"
+        );
+    }
+
+    /// Minimizing or hiding the window with the keyboard gives it back by
+    /// the same rule -- not to the taskbar, which the topmost-window rule
+    /// these used to follow picked -- and tells the window it lost it, so
+    /// the window list never shows one minimized and focused.
+    #[test]
+    fn leaving_the_screen_gives_the_keyboard_back_and_says_so() {
+        /// A way the window with the keyboard leaves the screen.
+        type Leave = fn(&mut Compositor, WindowId);
+        let leave: [(&str, Leave); 2] = [
+            ("minimized", |comp, id| comp.minimize_window(id).unwrap()),
+            ("hidden", |comp, id| comp.set_visible(id, false).unwrap()),
+        ];
+        for (how, leave) in leave {
+            let mut comp = Compositor::new(800, 600, 60).unwrap();
+            let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+            let behind = layered(&mut comp, "Behind", Layer::Normal);
+            let front = layered(&mut comp, "Front", Layer::Normal);
+            let _ = comp.drain_notifications();
+
+            leave(&mut comp, front);
+            assert_eq!(comp.focused_window, Some(behind), "{how}");
+            assert_ne!(comp.focused_window, Some(panel), "{how}");
+            assert!(
+                !comp.window_ref(front).unwrap().focused,
+                "{how}: the window still believes it has the keyboard"
+            );
+            assert!(
+                comp.drain_notifications().iter().any(
+                    |n| matches!(n, EventNotification::FocusLost { window_id } if *window_id == front)
+                ),
+                "{how}: the window was not told it lost the keyboard"
+            );
+            let focused: Vec<u64> = comp
+                .window_list()
+                .windows
+                .iter()
+                .filter(|w| w.focused)
+                .map(|w| w.id)
+                .collect();
+            assert_eq!(focused, vec![behind.raw()], "{how}");
+        }
+    }
+
+    /// Focusing a window that cannot take the keyboard changes nothing: the
+    /// window holding it keeps it and is told nothing.
+    #[test]
+    fn a_refused_focus_leaves_the_keyboard_where_it_was() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let hidden = comp.create_window("Hidden".to_string(), 100, 80, 1);
+        let working = comp.create_window("Working".to_string(), 100, 80, 1);
+        comp.minimize_window(hidden).unwrap();
+        assert_eq!(comp.focused_window, Some(working));
+        let _ = comp.drain_notifications();
+
+        comp.focus_window(hidden);
+        assert_eq!(comp.focused_window, Some(working));
+        assert!(comp.window_ref(working).unwrap().focused);
+        assert!(
+            comp.drain_notifications().is_empty(),
+            "the window with the keyboard was told something"
+        );
+    }
+
+    /// Closing a window passes over a minimized one stacked above the window
+    /// to go back to. The topmost-window rule picked the minimized one, which
+    /// cannot take the keyboard, and left it with nobody.
+    #[test]
+    fn closing_a_window_passes_over_a_minimized_one_kept_on_top() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let back = comp.create_window("Back".to_string(), 100, 80, 1);
+        let pinned = comp.create_window("Pinned".to_string(), 100, 80, 1);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+        comp.minimize_window(pinned).unwrap();
+        let closing = comp.create_window("Closing".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(closing));
+
+        comp.destroy_window(closing).unwrap();
+        assert_eq!(comp.focused_window, Some(back));
+    }
+
+    /// Switching desktops gives the keyboard to the window last typed in on
+    /// the desktop arriving, and to nothing on an empty one -- never to the
+    /// taskbar, which is on every desktop.
+    #[test]
+    fn switching_desktops_does_not_hand_the_keyboard_to_the_taskbar() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        let here = layered(&mut comp, "Here", Layer::Normal);
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.focused_window, None,
+            "an empty desktop focuses nothing, the taskbar included"
+        );
+        let there = layered(&mut comp, "There", Layer::Normal);
+
+        comp.switch_workspace(0);
+        assert_eq!(comp.focused_window, Some(here));
+        comp.switch_workspace(1);
+        assert_eq!(comp.focused_window, Some(there));
+        assert!(!comp.window_ref(panel).unwrap().focused);
     }
 
     #[test]

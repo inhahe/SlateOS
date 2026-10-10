@@ -4754,6 +4754,24 @@ lane C's `guitk`.
   tooltip a kilobyte, and is told when refused. Lane C draws the named icon
   and keys the tray's arrangement by the program's name.
 
+- `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
+  F's part** (the operator's rule, `design-decisions.md` §1242;
+  `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).
+  - `[x]` The keyboard goes back to the window that had it (§1384): one
+    rule for closing, minimising, hiding and leaving a desktop -- the
+    window used most recently that can take it, in the same band or below.
+    Fixed with it: a minimised or hidden window was never told it lost the
+    keyboard (and stayed focused in the window list); minimising and
+    switching desktops handed the keyboard to the taskbar; a refused focus
+    told the focused window it had lost it; closing a window behind a
+    minimised one kept on top left no window focused; and an accent half
+    typed in a closed window completed itself in the next.
+  - `[~]` A window that opens without taking the keyboard (a field of
+    `WindowSpec`), and a shell action giving the keyboard back without
+    closing the window -- **blocked by** lane C's `chrome()` naming every
+    field of a window's terms
+    (`requests/f-c-build-the-shells-window-terms-from-spec-new.md`).
+
 - `[F]` Port FreeRDP (line ~5058)
 
 `open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C

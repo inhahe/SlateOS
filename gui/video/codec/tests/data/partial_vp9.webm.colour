@@ -1,0 +1,9 @@
+# partial_vp9.webm: what its frames say of their light, as ffprobe reads them (generate_hdr_fixtures.py).
+frame 0 matrix=9 primaries=9 transfer=16 range=limited
+  mastering luminance=600/1,13421773/268435456
+frame 1 matrix=9 primaries=9 transfer=16 range=limited
+  mastering luminance=600/1,13421773/268435456
+frame 2 matrix=9 primaries=9 transfer=16 range=limited
+  mastering luminance=600/1,13421773/268435456
+frame 3 matrix=9 primaries=9 transfer=16 range=limited
+  mastering luminance=600/1,13421773/268435456

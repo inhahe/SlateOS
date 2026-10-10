@@ -31,6 +31,9 @@ SRC = Path(__file__).parent / "src"
 
 # A video track's projection, as ffprobe reads it (`tests/projection.rs`).
 PROJECTIONS = "every_projection_is_read_as_ffmpeg_reads_it"
+# A video track's colour, as ffprobe reads it (`tests/colour.rs`).
+COLOURS = "every_colour_is_read_as_ffmpeg_reads_it"
+COLOUR_NUMBERS = "a_colour_keeps_its_numbers"
 
 # The fixtures' tests: every packet, and the packets after each seek, as
 # ffprobe gives them.
@@ -348,6 +351,73 @@ TRACK = [
         "(_, 2, _) => Some(\"a cubemap projection's private data\"),",
         "(_, 2, _) => None,",
         [PROJECTIONS],
+    ),
+    # The colour: FFmpeg's rules for what of Colour it takes.
+    (
+        "a second Colour replaces the first",
+        "                v.colour.get_or_insert(colour);",
+        "                v.colour = Some(colour);",
+        [COLOURS, COLOUR_NUMBERS],
+    ),
+    (
+        "the transfer is not read",
+        "            ids::TRANSFER_CHARACTERISTICS => c.transfer_characteristics = r.uint(e.size, 2)?,",
+        "            ids::TRANSFER_CHARACTERISTICS => {\n                r.uint(e.size, 2)?;\n            }",
+        [COLOURS, COLOUR_NUMBERS],
+    ),
+    (
+        "MaxCLL alone is a content light level",
+        "    if max_cll != 0 && max_fall != 0 {",
+        "    if max_cll != 0 {",
+        [COLOURS],
+    ),
+    (
+        "a chromaticity of 0 is taken",
+        ".all(|&v| v > 0.0)",
+        ".all(|&v| v >= 0.0)",
+        [COLOURS],
+    ),
+    (
+        "a chromaticity that is not a number is taken",
+        ".all(|&v| v > 0.0)",
+        ".all(|&v| !(v <= 0.0))",
+        [COLOURS],
+    ),
+    (
+        "a peak without a black is a luminance",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(min >= 0.0 && max > min)",
+        [COLOURS],
+    ),
+    (
+        "a black below 0 is taken",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(self.min_said && max > min)",
+        [COLOURS],
+    ),
+    (
+        "a black at the peak is taken",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(self.min_said && min >= 0.0 && max >= min)",
+        [COLOURS],
+    ),
+    (
+        "a second MasteringMetadata keeps the first's numbers",
+        "    into.xy = [0.0; 8];\n    into.max = 0.0;\n    into.min = 0.0;\n",
+        "",
+        [COLOURS],
+    ),
+    (
+        "a black is counted in its own MasteringMetadata only",
+        "    into.min = 0.0;\n",
+        "    into.min = 0.0;\n    into.min_said = false;\n",
+        [COLOURS],
+    ),
+    (
+        "the peak is not read",
+        "            into.max = r.float(e.size, 0.0)?;",
+        "            r.float(e.size, 0.0)?;",
+        [COLOURS],
     ),
 ]
 

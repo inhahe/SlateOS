@@ -1,0 +1,2 @@
+# light_outside_a_track.mp4: ffprobe refuses it (light_outside_a_track.mp4: Invalid data found when processing input) (generate_fixtures.py).
+refused

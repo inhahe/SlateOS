@@ -121,6 +121,12 @@ pub struct Video {
     /// What `colr` (`nclx` or `nclc`) and `vpcC` say of the colour, a later
     /// box over an earlier; `None` where neither is there.
     pub colour: Option<Colour>,
+    /// The display the track was mastered on, as `mdcv` or VP9's `SmDm`
+    /// says it -- the first of them, as FFmpeg takes it.
+    pub mastering: Option<Mastering>,
+    /// How bright its content gets, as `clli` or VP9's `CoLL` says it -- the
+    /// first of them.
+    pub content_light: Option<ContentLight>,
     /// The display matrix -- the track's (`tkhd`) after the movie's
     /// (`mvhd`) -- where it is not the identity: rotation, mirroring and
     /// stretching for the picture to be shown with, as FFmpeg gives it
@@ -150,6 +156,34 @@ pub struct Colour {
     /// `nclx`'s flag, or `vpcC`'s; `None` where only `nclc` spoke, which has
     /// none.
     pub full_range: Option<bool>,
+}
+
+/// The display a track was mastered on (SMPTE ST 2086), as its box says it:
+/// each number a fraction of its scale, which differs with the box --
+/// `mdcv`'s 50000 for a chromaticity and 10000 for a luminance, `SmDm`'s
+/// 0.16, 24.8 and 18.14 fixed point -- so that each is FFmpeg's rational
+/// exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mastering {
+    /// The red, green and blue primaries' CIE 1931 x and y, then the white
+    /// point's, each over `chromaticity_scale`.
+    pub chromaticities: [u16; 8],
+    pub chromaticity_scale: u32,
+    /// The peak, in cd/m2 over `max_luminance_scale`.
+    pub max_luminance: u32,
+    pub max_luminance_scale: u32,
+    /// The black, in cd/m2 over `min_luminance_scale`.
+    pub min_luminance: u32,
+    pub min_luminance_scale: u32,
+}
+
+/// How bright a track's content gets (CTA-861.3), in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentLight {
+    /// MaxCLL: the brightest pixel's light.
+    pub max_cll: u16,
+    /// MaxFALL: the brightest frame's average light.
+    pub max_fall: u16,
 }
 
 /// An audio track's sound.

@@ -23,7 +23,7 @@ use yuv::{Plane, PlaneBuf};
 
 use crate::colour::{self, Colour};
 use crate::decoder::Packet;
-use crate::{ColourHint, Error, Frame};
+use crate::{ColourHint, Error, Frame, Light};
 
 /// A decoded picture, not yet converted.
 pub struct Picture {
@@ -99,9 +99,21 @@ impl Picture {
                 let (space, full_range) = picture.color();
                 ColourHint::vp9(space, full_range)
             }
-            Planes::Av1(p) => ColourHint::av1(p.colour()),
+            Planes::Av1(p) => ColourHint::av1(p),
         };
         colour::resolve(said, self.hint, width, height)
+    }
+
+    /// What it says of its light -- the display it was mastered on, and how
+    /// bright its content gets -- for whatever maps HDR video to a display:
+    /// its bitstream's (AV1's metadata OBUs), kind by kind, else its file's.
+    /// VP8 and VP9 carry none in the bitstream.
+    pub fn light(&self) -> Light {
+        let said = match &self.planes {
+            Planes::Av1(p) => ColourHint::av1(p).light,
+            Planes::Vp8 { .. } | Planes::Vp9 { .. } => Light::default(),
+        };
+        colour::light(said, self.hint.light)
     }
 
     /// The picture as pixels.
@@ -555,6 +567,7 @@ mod tests {
         let colour = Colour {
             matrix: 1,
             primaries: 1,
+            transfer: 1,
             full_range: false,
         };
         let planar = Planar {
@@ -599,6 +612,7 @@ mod tests {
             Colour {
                 matrix: 1,
                 primaries: 1,
+                transfer: 1,
                 full_range: false,
             },
             &mut out,

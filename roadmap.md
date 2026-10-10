@@ -3826,6 +3826,19 @@ word; text inside them that says "lane C" is history.
   which wait on the picture being kept at all
   (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
 
+- `[-]` `[E]` **A text field's right-click menu in every program** --
+  2026-10-10, lane C's `requests/c-e-text-fields-have-a-right-click-menu.md`:
+  Cut, Copy, Paste, Delete and Select all (Undo and Redo in a box with a
+  history), each dimmed when it would do nothing. `apps/fieldmenu` holds the
+  menu, routes the presses, keys, pointer and clock to it and draws it, for
+  every program; `textline::apply_key_on_clipboard` puts the keys on the
+  program's clipboard, which the menu copies to and pastes from -- programs
+  kept clipboards of their own for the keys. **Done:** Settings, the QR code
+  maker, the torrent client's magnet box, the renamer's boxes, the sound
+  recorder's marker names. **Remaining:** calendar, email, finance,
+  flashcards, jsonviewer, notes, paint, procexplorer, regextester,
+  reminders, snippets, stickynotes.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

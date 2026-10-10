@@ -4626,10 +4626,17 @@ lane C's `guitk`.
     chroma upsampled as Chrome's GPU samples it; on every HDR video frame
     and HDR AVIF (its `clli`), held to Chrome 154's own pixels
     (`gui/video/yuv/src/hdr.rs`).
-  - `[ ]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
-    table lookups a pixel -- 40-60 ms a 1080p frame on one thread today.
-  - `[ ]` SDR video's primaries other than BT.709's (BT.2020 SDR, P3) to
-    sRGB, as Chrome's gamut matrix converts them.
+  - `[x]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
+    table lookups a pixel, to the scalar passes' bits -- steps 2 to 5 1.7
+    to 3.6 times faster (`gui/video/yuv/src/hdr/avx2.rs`).
+  - `[ ]` HDR's speed, the rest: step 1 (Y'CbCr and its chroma in floating
+    point, some two fifths of a frame now) and the tone map's `exp2f` in
+    its curved middle, eight pixels at a time to the same bits.
+  - `[ ]` SDR video's colours to sRGB as Chrome converts them: every
+    primaries other than BT.709's (BT.601's 525- and 625-line ones too,
+    BT.2020 SDR, P3), and the transfers Chrome does not take for the sRGB
+    curve (gamma 2.2 and 2.8, linear, SMPTE 240M). Probed 2026-10-10 in
+    Chrome 154: up to 77 levels apart from what is shown today.
   - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
   - `[ ]` Gain maps (ISO 21496-1: UltraHDR JPEG, AVIF `tmap`), and HDR
     screens' headroom, once screens report their colours.

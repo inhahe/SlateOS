@@ -52,10 +52,18 @@
 //! pixels (the tests' patches) they agree exactly.
 //!
 //! **Its speed.** Each step is a pass along a row of floats, the arithmetic
-//! ones run several pixels at a time; what remains is the tables' lookups,
-//! six a pixel. A 1080p frame takes some 40-60 ms on one thread of an
-//! i7-8700K (`tests/bench.rs`) -- about ten times the ordinary conversion,
-//! which `gui/video/codec` divides among the cores as it does that one.
+//! ones run several pixels at a time by the compiler. The table passes --
+//! the transfer curves, HLG's OOTF power, the tone map's gain and the 8-bit
+//! encoding, six lookups a pixel -- run eight pixels at a time with AVX2
+//! where the processor has it (`hdr/avx2.rs`: chosen at run time, and to
+//! the scalar passes' bits, §1380). That takes steps 2 to 5 from 1.7 to
+//! 3.6 times faster on an i7-8700K (`bench_avx2_against_scalar`; least
+//! where much of the light is in the tone map's curved middle, whose
+//! `exp2f` stays a pixel at a time). A 1080p frame took 40-60 ms on one
+//! thread with the scalar passes (`tests/bench.rs`); step 1, the Y'CbCr
+//! and its chroma in floating point, is now some two fifths of it.
+//! `gui/video/codec` divides a frame among the cores, as it does the
+//! ordinary conversion.
 //!
 //! Portions of this file are transcribed from Skia and its skcms (copyright
 //! Google), used under Skia's BSD licence, whose text travels as
@@ -68,6 +76,29 @@ use alloc::vec::Vec;
 
 use crate::Sample;
 use crate::reformat::{self, Error, Format, Mode, Picture, Reformat};
+
+#[cfg(target_arch = "x86_64")]
+mod avx2;
+
+#[cfg(target_arch = "x86_64")]
+use avx2::Avx2;
+
+/// Off x86-64 there is no AVX2: a type with no values.
+#[cfg(not(target_arch = "x86_64"))]
+#[derive(Clone, Copy, Debug)]
+enum Avx2 {}
+
+/// The AVX2 passes (`hdr/avx2.rs`), where they may run.
+fn simd() -> Option<Avx2> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        avx2::detect()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}
 
 /// The HDR reference white, cd/m2: what 1.0 is in the working space, and
 /// what the content's headroom is measured from -- Chrome's
@@ -387,7 +418,9 @@ struct Encoder {
 }
 
 /// A cell of the [`Encoder`]'s light, from `i / CELLS` up to the next's.
+/// `repr(C)`: the AVX2 encoder gathers its two words by their offsets.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct Cell {
     /// The least light of the code after `code`.
     bound: f32,
@@ -900,11 +933,13 @@ impl<'a> ToneMap<'a> {
     /// at a time, and its table lookups one loop of them. Every pixel's
     /// operations are those of the steps in order, so a pixel's result is
     /// the same whatever row it is in. `channels` is left holding scratch.
+    /// The table passes run eight pixels at a time with AVX2 where `simd`
+    /// is one -- to the same bits either way.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
     )]
-    fn row(&self, channels: &mut Channels, out: &mut [u32]) {
+    fn row_with(&self, channels: &mut Channels, out: &mut [u32], simd: Option<Avx2>) {
         let Channels { r, g, b, k } = channels;
         let n = out
             .len()
@@ -933,21 +968,16 @@ impl<'a> ToneMap<'a> {
             // test which one it is in at every step.
             (Transfer::Pq, _) => {
                 for channel in [&mut *r, &mut *g, &mut *b] {
-                    for c in channel.iter_mut() {
-                        *c = interpolate(table, *c);
-                    }
+                    interpolate_all(simd, table, channel);
                 }
             }
             (Transfer::Hlg, power) => {
                 for channel in [&mut *r, &mut *g, &mut *b] {
-                    for c in channel.iter_mut() {
-                        *c = hlg(table, *c);
-                    }
+                    hlg_all(simd, table, channel);
                 }
-                let [wr, wg, wb] = self.ootf;
-                for (((&r, &g), &b), k) in r.iter().zip(g.iter()).zip(b.iter()).zip(k.iter_mut()) {
-                    let y = wr * r + wg * g + wb * b;
-                    *k = power.as_ref().map_or(0.0, |p| p.of(y));
+                match power {
+                    Some(power) => power_all(simd, power, self.ootf, [&*r, &*g, &*b], k),
+                    None => k.fill(0.0),
                 }
                 scale(r, g, b, k);
             }
@@ -966,9 +996,7 @@ impl<'a> ToneMap<'a> {
         }
         // 4. The tone map's gain, of the brightest channel, on all three.
         if let Some(curve) = &self.curve {
-            for k in k.iter_mut() {
-                *k = curve.gain(*k);
-            }
+            gain_all(simd, curve, k);
             scale(r, g, b, k);
         }
         // 5. To sRGB ...
@@ -977,19 +1005,12 @@ impl<'a> ToneMap<'a> {
             let [x, y, z] = apply(m, [*r, *g, *b]);
             (*r, *g, *b) = (x, y, z);
         }
-        // ... and its 8-bit codes, a channel at a time.
-        for (px, &r) in out.iter_mut().zip(r.iter()) {
-            *px = code(cells, r) << 16;
-        }
-        for (px, &g) in out.iter_mut().zip(g.iter()) {
-            *px |= code(cells, g) << 8;
-        }
-        for (px, &b) in out.iter_mut().zip(b.iter()) {
-            *px |= code(cells, b);
-        }
+        // ... and its 8-bit codes.
+        code_all(simd, cells, [&*r, &*g, &*b], out);
     }
 
-    /// One pixel's R'G'B' to its `0x00RRGGBB`, as [`Self::row`] makes it.
+    /// One pixel's R'G'B' to its `0x00RRGGBB`, as [`Self::row_with`] makes
+    /// it (a row of one, which the scalar passes take whatever the way).
     #[cfg(test)]
     fn pixel(&self, [r, g, b]: [f32; 3]) -> u32 {
         let mut channels = Channels {
@@ -999,7 +1020,7 @@ impl<'a> ToneMap<'a> {
             k: vec![0.0],
         };
         let mut out = [0];
-        self.row(&mut channels, &mut out);
+        self.row_with(&mut channels, &mut out, simd());
         let [px] = out;
         px
     }
@@ -1015,6 +1036,86 @@ fn scale(r: &mut [f32], g: &mut [f32], b: &mut [f32], k: &[f32]) {
         *r *= k;
         *g *= k;
         *b *= k;
+    }
+}
+
+// The table passes: AVX2's where `simd` is one (`hdr/avx2.rs`, the same
+// bits), else these loops.
+
+/// [`interpolate`] at every value, in place.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+fn interpolate_all(simd: Option<Avx2>, table: &Table, values: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(proof) = simd {
+        avx2::interpolate_all(proof, table, values);
+        return;
+    }
+    for c in values {
+        *c = interpolate(table, *c);
+    }
+}
+
+/// [`hlg`] at every value, in place.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+fn hlg_all(simd: Option<Avx2>, table: &Table, values: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(proof) = simd {
+        avx2::hlg_all(proof, table, values);
+        return;
+    }
+    for c in values {
+        *c = hlg(table, *c);
+    }
+}
+
+/// HLG's OOTF factor for each pixel into `k`: `power` of its luminance by
+/// `weights`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
+)]
+fn power_all(
+    simd: Option<Avx2>,
+    power: &Power,
+    weights: [f32; 3],
+    [r, g, b]: [&[f32]; 3],
+    k: &mut [f32],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(proof) = simd {
+        avx2::power_all(proof, power, weights, [r, g, b], k);
+        return;
+    }
+    let [wr, wg, wb] = weights;
+    for (((&r, &g), &b), k) in r.iter().zip(g).zip(b).zip(k.iter_mut()) {
+        *k = power.of(wr * r + wg * g + wb * b);
+    }
+}
+
+/// The tone map's gain at every value of `k`, in place.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+fn gain_all(simd: Option<Avx2>, curve: &Curve, k: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(proof) = simd {
+        avx2::gain_all(proof, curve, k);
+        return;
+    }
+    for k in k {
+        *k = curve.gain(*k);
+    }
+}
+
+/// Each pixel's three channels' 8-bit codes into `out`, as `0x00RRGGBB`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+fn code_all(simd: Option<Avx2>, cells: &Cells, [r, g, b]: [&[f32]; 3], out: &mut [u32]) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(proof) = simd {
+        avx2::code_all(proof, cells, [r, g, b], out);
+        return;
+    }
+    for (((&r, &g), &b), px) in r.iter().zip(g).zip(b).zip(out.iter_mut()) {
+        *px = (code(cells, r) << 16) | (code(cells, g) << 8) | code(cells, b);
     }
 }
 
@@ -1056,7 +1157,16 @@ impl Channels {
     clippy::cast_precision_loss,
     reason = "a depth's largest code is under 2^16, exact in f32"
 )]
-fn convert<S: Sample>(picture: &Picture<'_, S>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
+///
+/// The table passes run `simd`'s way: the public functions pass [`simd`],
+/// and the tests each way in turn.
+fn convert<S: Sample>(
+    picture: &Picture<'_, S>,
+    map: &ToneMap<'_>,
+    first: usize,
+    out: &mut [u32],
+    simd: Option<Avx2>,
+) {
     let Ok(state) = reformat::prepare(picture) else {
         return;
     };
@@ -1071,6 +1181,7 @@ fn convert<S: Sample>(picture: &Picture<'_, S>, map: &ToneMap<'_>, first: usize,
         depth: picture.depth,
         unmultiply,
         channels: Channels::new(width),
+        simd,
     };
     let grey = picture.format == Format::Yuv400 || picture.u.is_none() || picture.v.is_none();
     if grey {
@@ -1104,7 +1215,7 @@ fn fraction<S: Sample>(samples: &[S], out: &mut [f32], (bias, range): (f32, f32)
 }
 
 /// What turns a row of samples into pixels: the state step 1 reads, the
-/// map, and the row's floats.
+/// map, the row's floats, and the way its table passes run.
 struct Row<'a> {
     state: &'a reformat::State,
     map: &'a ToneMap<'a>,
@@ -1113,6 +1224,7 @@ struct Row<'a> {
     depth: u8,
     unmultiply: bool,
     channels: Channels,
+    simd: Option<Avx2>,
 }
 
 impl Row<'_> {
@@ -1242,7 +1354,7 @@ impl Row<'_> {
                 (*r, *g, *b) = (undo(*r), undo(*g), undo(*b));
             }
         }
-        self.map.row(&mut self.channels, dst);
+        self.map.row_with(&mut self.channels, dst, self.simd);
         match a {
             None => {
                 for px in dst.iter_mut() {
@@ -1297,7 +1409,7 @@ pub fn to_argb_into<T: Reformat>(
     let (_, count) = reformat::check(picture)?;
     out.try_reserve_exact(count).map_err(|_| Error::Size)?;
     out.resize(count, 0);
-    convert(picture, map, 0, out);
+    convert(picture, map, 0, out, simd());
     Ok(())
 }
 
@@ -1316,7 +1428,7 @@ pub fn to_argb_rows<T: Reformat>(
     out: &mut [u32],
 ) -> Result<(), Error> {
     reformat::check_band(picture, first, out.len())?;
-    convert(picture, map, first, out);
+    convert(picture, map, first, out, simd());
     Ok(())
 }
 
@@ -1417,20 +1529,60 @@ mod tests {
         ([575, 448, 583], [179, 107, 89]),
     ];
 
+    /// The ways a row's table passes run here: the scalar passes, and
+    /// AVX2's where the processor has it. A picture-level test takes each,
+    /// so that whichever way a machine runs is held to what the test holds
+    /// it to -- and a row a whole number of eights long, which AVX2 takes
+    /// entirely, does not leave the scalar passes untested there.
+    fn ways() -> Vec<Option<Avx2>> {
+        let mut ways = vec![None];
+        ways.extend(simd().map(Some));
+        ways
+    }
+
+    /// [`to_argb`] of `picture` with its table passes run `way`.
+    fn converted<T: Reformat>(
+        picture: &Picture<'_, T>,
+        map: &ToneMap<'_>,
+        way: Option<Avx2>,
+    ) -> Vec<u32> {
+        let (_, count) = reformat::check(picture).unwrap();
+        let mut out = vec![0; count];
+        convert(picture, map, 0, &mut out, way);
+        out
+    }
+
+    /// `picture` converted each of [`ways`], which must agree with each
+    /// other and with [`to_argb`]: their pixels.
+    fn both<T: Reformat>(picture: &Picture<'_, T>, map: &ToneMap<'_>) -> Vec<u32> {
+        let public = to_argb(picture, map).unwrap();
+        for way in ways() {
+            assert_eq!(converted(picture, map, way), public, "{way:?}");
+        }
+        public
+    }
+
     fn chrome_s_pixels(transfer: Transfer, patches: &[([u16; 3], [u8; 3])]) {
         let samples: Vec<[u16; 3]> = patches.iter().map(|p| p.0).collect();
         let planes = planes_of(&samples);
         let signal = Signal::new(transfer);
         let map = ToneMap::new(&signal, 9, Light::default());
-        let out = to_argb(&row_picture(&planes), &map).unwrap();
-        let mut wrong = String::new();
-        for (&px, (yuv, want)) in out.iter().zip(patches) {
-            let got = [(px >> 16) as u8, (px >> 8) as u8, px as u8];
-            if got != *want || px >> 24 != 0xff {
-                wrong += &format!("\n  {yuv:?}: {got:?} where Chrome shows {want:?}");
+        let picture = row_picture(&planes);
+        for way in ways() {
+            let out = converted(&picture, &map, way);
+            let mut wrong = String::new();
+            for (&px, (yuv, want)) in out.iter().zip(patches) {
+                let got = [(px >> 16) as u8, (px >> 8) as u8, px as u8];
+                if got != *want || px >> 24 != 0xff {
+                    wrong += &format!("\n  {yuv:?}: {got:?} where Chrome shows {want:?}");
+                }
             }
+            assert!(wrong.is_empty(), "{transfer:?}, {way:?}:{wrong}");
         }
-        assert!(wrong.is_empty(), "{transfer:?}:{wrong}");
+        assert_eq!(
+            to_argb(&picture, &map).unwrap(),
+            converted(&picture, &map, simd())
+        );
     }
 
     #[test]
@@ -1750,6 +1902,322 @@ mod tests {
         }
     }
 
+    /// The AVX2 passes give the scalar passes' bits: both transfers, light
+    /// that reaches every part of the curve, three gamuts, rows of every
+    /// remainder past their eights -- and values no conversion makes
+    /// (negative, past 1, infinite, NaN), so that the two agree on
+    /// everything rather than on what is likely. Where the processor has no
+    /// AVX2 there is nothing to compare.
+    #[test]
+    fn avx2_rows_are_the_scalar_rows_bit_for_bit() {
+        let Some(proof) = simd() else {
+            return;
+        };
+        let odd = [
+            0.0,
+            -0.0,
+            1.0,
+            0.5,
+            0.499_999_97,
+            0.500_000_06,
+            1e-30,
+            -0.25,
+            1.5,
+            7.0e4,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::MIN_POSITIVE,
+        ];
+        let mut seed = 11u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / 16_777_216.0
+        };
+        // Which odd values the rows met: all of them, or the test is
+        // narrower than it says.
+        let mut met = [false; 14];
+        for transfer in [Transfer::Pq, Transfer::Hlg] {
+            let signal = Signal::new(transfer);
+            for max_cll in [0.0, 250.0, 600.0, 4000.0, 10_000.0] {
+                for primaries in [9, 1, 12] {
+                    let light = Light {
+                        max_cll,
+                        ..Light::default()
+                    };
+                    let map = ToneMap::new(&signal, primaries, light);
+                    for len in [1usize, 7, 8, 9, 15, 16, 17, 64, 1001] {
+                        let mut channel = |k: usize| -> Vec<f32> {
+                            (0..len)
+                                .map(|i| {
+                                    if (i + k).is_multiple_of(5) {
+                                        // Each fifth pixel the next odd value,
+                                        // each channel from its own place.
+                                        let at = (i / 5 + 3 * k) % odd.len();
+                                        met[at] = true;
+                                        odd[at]
+                                    } else {
+                                        next()
+                                    }
+                                })
+                                .collect()
+                        };
+                        let (r, g, b) = (channel(0), channel(1), channel(2));
+                        let make = || Channels {
+                            r: r.clone(),
+                            g: g.clone(),
+                            b: b.clone(),
+                            k: vec![0.0; len],
+                        };
+                        let (mut scalar, mut wide) = (make(), make());
+                        let (mut want, mut got) = (vec![0u32; len], vec![0u32; len]);
+                        map.row_with(&mut scalar, &mut want, None);
+                        map.row_with(&mut wide, &mut got, Some(proof));
+                        assert_eq!(
+                            got, want,
+                            "{transfer:?} MaxCLL {max_cll} primaries {primaries}, {len} pixels"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(met, [true; 14], "the odd values the rows met");
+    }
+
+    /// The AVX2 passes are taken where the processor and the system run
+    /// AVX2, and only there: the standard library's own detection agrees.
+    /// (Were the detection to say no everywhere, the tests either side of
+    /// this one would pass by comparing nothing.)
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_is_detected_as_the_standard_library_detects_it() {
+        extern crate std;
+        assert_eq!(simd().is_some(), std::is_x86_feature_detected!("avx2"));
+    }
+
+    /// Each AVX2 pass gives its scalar twin's bits, value for value (any NaN
+    /// for a NaN), where eight lanes' way of computing parts most easily
+    /// from one's: at the tables' segment and cell edges and either side of
+    /// them, both sides of HLG's half, exponent and mantissa edges of the
+    /// OOTF's power, the gain curve's points, the encoder's code bounds --
+    /// and at values no conversion makes. The whole-row test above compares
+    /// 8-bit pixels, which a pass a few units in the last place out rarely
+    /// changes; this compares the passes' floats.
+    #[test]
+    fn avx2_passes_are_the_scalar_passes_bit_for_bit() {
+        fn random(seed: &mut u32) -> f32 {
+            *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (*seed >> 8) as f32 / 16_777_216.0
+        }
+        /// `edges` and either side of each, values no conversion makes, and
+        /// a scatter over `[low, high)`: an odd count, so that the passes'
+        /// scalar remainders run too.
+        fn values(seed: &mut u32, edges: &[f32], (low, high): (f32, f32)) -> Vec<f32> {
+            let mut v = vec![
+                0.0,
+                -0.0,
+                f32::NAN,
+                -f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::MIN_POSITIVE,
+                1e-40,
+                -1e-40,
+                -0.5,
+                2.0,
+                f32::MAX,
+            ];
+            for &e in edges {
+                v.extend([e, e.next_up(), e.next_down()]);
+            }
+            v.extend((0..2001).map(|_| low + random(seed) * (high - low)));
+            if v.len().is_multiple_of(8) {
+                v.push(0.5);
+            }
+            v
+        }
+        /// `v` turned by `by` places: the same values met in other lanes.
+        fn turned(v: &[f32], by: usize) -> Vec<f32> {
+            v.iter().cycle().skip(by).take(v.len()).copied().collect()
+        }
+        fn same(want: &[f32], got: &[f32], what: &str) {
+            assert_eq!(want.len(), got.len(), "{what}");
+            for (i, (&w, &g)) in want.iter().zip(got).enumerate() {
+                assert!(
+                    w.to_bits() == g.to_bits() || (w.is_nan() && g.is_nan()),
+                    "{what}: value {i} is {g:e} ({:08x}), not {w:e} ({:08x})",
+                    g.to_bits(),
+                    w.to_bits()
+                );
+            }
+        }
+        let Some(proof) = simd() else {
+            return;
+        };
+        let mut seed = 5u32;
+        let pq = Signal::new(Transfer::Pq);
+        let hlg_signal = Signal::new(Transfer::Hlg);
+
+        // PQ's table.
+        let table = pq.curve().unwrap();
+        let edges: Vec<f32> = [0u32, 1, 2, 3, 1000, 8191, 8192, 16382, 16383, 16384]
+            .iter()
+            .map(|&i| i as f32 / SEGMENTS as f32)
+            .collect();
+        let input = values(&mut seed, &edges, (-0.25, 1.25));
+        let (mut want, mut got) = (input.clone(), input);
+        interpolate_all(None, table, &mut want);
+        interpolate_all(Some(proof), table, &mut got);
+        same(&want, &got, "PQ");
+
+        // HLG's: the square below a half, the table above.
+        let table = hlg_signal.curve().unwrap();
+        let edges: Vec<f32> = [0u32, 1, 2, 8191, 8192, 16383, 16384]
+            .iter()
+            .map(|&i| 0.5 + i as f32 / (2 * SEGMENTS) as f32)
+            .chain([0.25, 1.0 / 3.0])
+            .collect();
+        let input = values(&mut seed, &edges, (-0.25, 1.25));
+        let (mut want, mut got) = (input.clone(), input);
+        hlg_all(None, table, &mut want);
+        hlg_all(Some(proof), table, &mut got);
+        same(&want, &got, "HLG");
+
+        // HLG's OOTF power: of red alone first (weights 1, 0, 0 over zero
+        // green and blue leave red's value), at its tables' edges; then of
+        // luminance summed as the conversion sums it.
+        let power = hlg_signal.power.as_ref().unwrap();
+        let mut edges = vec![1.0f32, 0.5, 0.25, 1e-30, 1e30];
+        for i in [1u32, 2, 511, 512, 1022, 1023] {
+            let m = 1.0 + i as f32 / 1024.0;
+            edges.extend([m, m * 0.125, m * 64.0]);
+        }
+        let r = values(&mut seed, &edges, (0.0, 1.0));
+        let n = r.len();
+        let zeros = vec![0.0f32; n];
+        let (mut want, mut got) = (vec![0.0; n], vec![0.0; n]);
+        power_all(
+            None,
+            power,
+            [1.0, 0.0, 0.0],
+            [&r, &zeros, &zeros],
+            &mut want,
+        );
+        power_all(
+            Some(proof),
+            power,
+            [1.0, 0.0, 0.0],
+            [&r, &zeros, &zeros],
+            &mut got,
+        );
+        same(&want, &got, "HLG's power of red");
+        let (g, b) = (turned(&r, 5), turned(&r, 11));
+        for primaries in [9, 1] {
+            let weights = ToneMap::new(&hlg_signal, primaries, Light::default()).ootf;
+            power_all(None, power, weights, [&r, &g, &b], &mut want);
+            power_all(Some(proof), power, weights, [&r, &g, &b], &mut got);
+            same(&want, &got, &format!("HLG's power, primaries {primaries}"));
+        }
+
+        // The tone map's gain, for light reaching each part of the curve.
+        for max_cll in [250.0, 600.0, 1000.0, 4000.0, 10_000.0] {
+            let light = Light {
+                max_cll,
+                ..Light::default()
+            };
+            let curve = Curve::rwtmo(light.headroom()).unwrap();
+            let edges: Vec<f32> = curve.points.iter().map(|p| p[0]).collect();
+            let input = values(&mut seed, &edges, (0.0, curve.points[7][0] * 1.5));
+            let (mut want, mut got) = (input.clone(), input);
+            gain_all(None, &curve, &mut want);
+            gain_all(Some(proof), &curve, &mut got);
+            same(&want, &got, &format!("the gain for MaxCLL {max_cll}"));
+        }
+
+        // The 8-bit codes, at every code's least light and the cells' edges.
+        let cells = pq.encoder.cells().unwrap();
+        let mut edges: Vec<f32> = bounds().into_iter().filter(|b| b.is_finite()).collect();
+        edges.extend(
+            [0u32, 1, 2, 2048, 4094, 4095, 4096]
+                .iter()
+                .map(|&i| i as f32 / CELLS as f32),
+        );
+        let r = values(&mut seed, &edges, (-0.1, 1.1));
+        let n = r.len();
+        let (g, b) = (turned(&r, 5), turned(&r, 11));
+        let (mut want, mut got) = (vec![0u32; n], vec![0u32; n]);
+        code_all(None, cells, [&r, &g, &b], &mut want);
+        code_all(Some(proof), cells, [&r, &g, &b], &mut got);
+        assert_eq!(got, want, "the 8-bit codes");
+    }
+
+    /// The AVX2 passes' speed against the scalar passes': a 1080p frame's
+    /// rows of noise through steps 2 to 5, the two ways taken in turn so
+    /// that the machine's load falls on both alike. A measurement: run with
+    /// `--release --ignored --nocapture`.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "a measurement: run with --release --ignored --nocapture"]
+    fn bench_avx2_against_scalar() {
+        extern crate std;
+        use std::time::Instant;
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        /// Rows of noise gone round, so that the rows touch the tables in
+        /// different places.
+        const ROWS: usize = 16;
+        let Some(proof) = simd() else {
+            std::println!("no AVX2 here");
+            return;
+        };
+        let mut seed = 3u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / 16_777_216.0
+        };
+        let rows: Vec<[Vec<f32>; 3]> = (0..ROWS)
+            .map(|_| [0, 1, 2].map(|_| (0..WIDTH).map(|_| next()).collect()))
+            .collect();
+        for (transfer, max_cll, name) in [
+            (Transfer::Pq, 1000.0, "PQ, MaxCLL 1000"),
+            (Transfer::Pq, 4000.0, "PQ, MaxCLL 4000"),
+            (
+                Transfer::Pq,
+                150.0,
+                "PQ, no brighter than the reference white",
+            ),
+            (Transfer::Hlg, 0.0, "HLG"),
+        ] {
+            let signal = Signal::new(transfer);
+            let light = Light {
+                max_cll,
+                ..Light::default()
+            };
+            let map = ToneMap::new(&signal, 9, light);
+            let mut channels = Channels::new(WIDTH);
+            let mut out = vec![0u32; WIDTH];
+            let mut frame = |simd: Option<Avx2>| {
+                let start = Instant::now();
+                for row in rows.iter().cycle().take(HEIGHT) {
+                    channels.r.copy_from_slice(&row[0]);
+                    channels.g.copy_from_slice(&row[1]);
+                    channels.b.copy_from_slice(&row[2]);
+                    map.row_with(&mut channels, &mut out, simd);
+                }
+                start.elapsed().as_secs_f64() * 1000.0
+            };
+            let (mut scalar, mut wide) = (f64::MAX, f64::MAX);
+            for _ in 0..10 {
+                scalar = scalar.min(frame(None));
+                wide = wide.min(frame(Some(proof)));
+            }
+            std::println!(
+                "{name}: {scalar:.1} ms scalar, {wide:.1} ms AVX2 ({:.2}x)",
+                scalar / wide
+            );
+        }
+    }
+
     /// Black is black, and the content's peak and anything brighter are the
     /// screen's white; below the reference white the gain is the same for
     /// every light, so it keeps its proportions.
@@ -1884,7 +2352,7 @@ mod tests {
         };
         let signal = Signal::new(Transfer::Pq);
         let map = ToneMap::new(&signal, 9, Light::default());
-        let out = to_argb(&picture, &map).unwrap();
+        let out = both(&picture, &map);
         let state = reformat::prepare(&picture).unwrap();
         let t = |code: u16| (f32::from(code) - 512.0) / 896.0;
         let luma = (502.0f32 - 64.0) / 876.0;
@@ -1927,7 +2395,7 @@ mod tests {
         });
         let signal = Signal::new(Transfer::Pq);
         let map = ToneMap::new(&signal, 9, Light::default());
-        let straight = to_argb(&picture, &map).unwrap();
+        let straight = both(&picture, &map);
         assert_eq!(straight[0], 0xffbc_bcbc, "203 cd/m2 grey, opaque");
         assert_eq!(straight[1] >> 24, 128);
         assert_eq!(
@@ -1937,7 +2405,7 @@ mod tests {
         );
         assert_eq!(straight[2] >> 24, 0);
         picture.alpha_premultiplied = true;
-        let undone = to_argb(&picture, &map).unwrap();
+        let undone = both(&picture, &map);
         assert_eq!(undone[0], straight[0]);
         assert!(undone[1] & 0xff > 0xbc, "divided by alpha, brighter");
         assert_eq!(undone[2], 0, "no alpha, no colour");
@@ -1972,7 +2440,7 @@ mod tests {
             alpha: None,
             alpha_premultiplied: false,
         };
-        assert_eq!(to_argb(&grey, &map).unwrap(), [0xffbc_bcbc]);
+        assert_eq!(both(&grey, &map), [0xffbc_bcbc]);
         // Full-range identity: R' = V, G' = Y, B' = U.
         let (g, b, r) = ([1023u16], [0u16], [0u16]);
         let identity = Picture {
@@ -1984,7 +2452,7 @@ mod tests {
             v: Some(one(&r)),
             ..grey
         };
-        let px = to_argb(&identity, &map).unwrap()[0];
+        let px = both(&identity, &map)[0];
         assert_eq!(
             px & 0xff00_ff00,
             0xff00_ff00,

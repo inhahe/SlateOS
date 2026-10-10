@@ -2272,6 +2272,7 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
   - [x] Verify command with integrity checking
   - [x] List, show, and delete backup management
   - [x] --exclude flag for skip patterns
+- [x] `[E]` Weather dashboard (apps/weather; 2026-10-09, E-Q2, design-decisions §1236) -- **forecasts from Open-Meteo, off until the user turns them on.** The window opens on what turning them on sends (each place's coordinates, and the names searched for), to whom, when, and that it goes in plain text, with a button that does it; nothing is sent before. Places are searched for by name (Open-Meteo's geocoding) and kept in `weather.yaml` with the switch and the units; a change in one window reaches the others. The forecast -- current conditions, 24 hours, 7 days -- and the US air-quality index are asked for when a place is added or chosen, every half hour, five minutes after a failure, and on R; one request of each kind (forecast, search) is out at a time, and an answer for a place no longer shown is dropped. Every frame showing the data credits it (CC BY 4.0). No alerts: Open-Meteo has none, and the Alerts tab says so. Tested against the service's own replies (`apps/weather/tests/data/`) and a loopback HTTP server; **not yet exercised against the real service from inside SlateOS.**
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 4: Applications

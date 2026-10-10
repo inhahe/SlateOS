@@ -322,8 +322,8 @@ MUTATIONS = [
     # -- the ledger -----------------------------------------------------------------------------------------------------
     (
         "nothing is kept",
-        "        self.save_ledger();",
-        "",
+        "        self.keep_lists_in_view();\n        self.save_ledger();",
+        "        self.keep_lists_in_view();",
         [
             "what_is_entered_is_there_next_time",
             "deleting_is_kept_too",
@@ -343,19 +343,27 @@ MUTATIONS = [
         ["a_window_made_by_new_keeps_nothing"],
     ),
     (
-        "an unreadable ledger is saved over",
+        # Each save reads the file again first and refuses to write over one
+        # it cannot read, so the file is safe either way; what this line
+        # does is stop the window trying -- and asking at the close about
+        # changes it said from the start would not be kept.
+        "a window that could not read its ledger goes on trying to keep it",
         "            Err(why) => {\n"
         "                self.persist = false;\n"
-        "                self.ledger_error = Some(refused(why));",
+        "                self.ledger_error = Some(format!(\n"
+        '                    "{} was not read ({why}), so nothing is saved over it",',
         "            Err(why) => {\n"
-        "                self.ledger_error = Some(refused(why));",
+        "                self.ledger_error = Some(format!(\n"
+        '                    "{} was not read ({why}), so nothing is saved over it",',
         ["a_ledger_that_cannot_be_read_is_left_as_it_is"],
     ),
     (
         "a failed save says nothing",
-        '            Err(err) => Some(format!("Not saved to {}: {err}", path.shown())),',
-        "            Err(_) => None,",
-        ["a_save_that_fails_says_so_and_the_next_one_clears_it"],
+        '                self.ledger_error = Some(format!("Not saved to {}: {err}", path.shown()));',
+        "                drop(err);",
+        # Not the folder-where-the-file-goes test since 2026-10-09: that fails
+        # the read a save now does first (§1239), before any write.
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         "a tab in a description splits its line",
@@ -376,10 +384,10 @@ MUTATIONS = [
         ["a_ledger_is_refused_whole_and_says_where"],
     ),
     (
-        "a new transaction reuses a kept one's number",
-        "                    .map(|t| t.id.saturating_add(1))",
-        "                    .map(|_| 1)",
-        ["what_is_entered_is_there_next_time"],
+        "a new transaction's number counts up from the largest",
+        "        let id = recordfile::fresh_id(|id| self.transactions.iter().any(|t| t.id == id));",
+        "        let id = self.transactions.iter().map(|t| t.id).max().map_or(1, |m| m.saturating_add(1));",
+        ["two_windows_each_enter_a_transaction_and_both_are_kept"],
     ),
     (
         "a chord works a form's own keys",
@@ -447,6 +455,212 @@ MUTATIONS = [
         '        self.focus_ring_width = settings.focus_ring_width();',
         '        let _ = settings;',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+]
+
+# Two windows of Finance save into one ledger (2026-10-09, design-decisions
+# §1239): each wrote its own copy over the other's, so the last to save threw
+# away the other's entries.
+TWO = "two_windows_each_enter_a_transaction_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+UNSAVED = "a_change_not_yet_saved_survives_hearing_another_save"
+STAYS_DELETED = "a_transaction_deleted_in_another_window_stays_deleted"
+BUDGETS = "budgets_set_in_two_windows_are_kept_by_category"
+ACCOUNT_BACK = "an_account_deleted_while_another_window_used_it_comes_back"
+FORM_DELETED = "a_transaction_deleted_elsewhere_while_changed_here_is_saved_back"
+CHOSEN_GONE = "what_another_window_deleted_is_no_longer_chosen"
+UNREADABLE = "a_save_leaves_a_file_it_cannot_read_as_it_is"
+FILE_DELETED = "a_ledger_file_deleted_while_open_is_written_back_whole"
+
+MUTATIONS += [
+    (
+        "a save writes this window's ledger over the file",
+        "        let merged = merge_ledgers(&self.base, &self.ledger(), &theirs);\n",
+        "        let merged = self.ledger();\n        let _ = &theirs;\n",
+        [TWO],
+    ),
+    (
+        "a save takes the file for unchanged without asking",
+        "        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {",
+        "        let read = if true {",
+        [TWO],
+    ),
+    (
+        "a missing file is taken for an empty one",
+        "            Ok(None) => self.base.clone(),",
+        "            Ok(None) => Ledger::default(),",
+        [FILE_DELETED],
+    ),
+    (
+        "a save over a file it cannot read goes ahead",
+        "            read_ledger_file(&path)\n        };",
+        "            read_ledger_file(&path).or(Ok::<_, String>(None))\n        };",
+        [UNREADABLE],
+    ),
+    (
+        "a save does not move on what it compares with",
+        "                self.base.clone_from(&merged);\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "an account's number counts up from the largest",
+        "        let id = recordfile::fresh_id(|id| self.accounts.iter().any(|a| a.id == id));",
+        "        let id = self.accounts.iter().map(|a| a.id).max().map_or(1, |m| m.saturating_add(1));",
+        [TWO],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {",
+        "        if true {",
+        [HEAR],
+    ),
+    (
+        "a reread throws away what is not saved",
+        "        let shown = if mine == self.base {",
+        "        let shown = if true {",
+        [UNSAVED],
+    ),
+    (
+        "a reread does not move on what the next save compares with",
+        "        self.base = theirs;\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        # Not ACCOUNT_BACK: the account a kept transaction is in is put back
+        # by the mend after the merge, from either side, so taking this
+        # window's accounts whole loses only the other window's new ones.
+        "the accounts are this window's",
+        "    let mut accounts = recordfile::merge(&base.accounts, &mine.accounts, &theirs.accounts);",
+        "    let mut accounts = mine.accounts.clone();",
+        [TWO],
+    ),
+    (
+        "the transactions are this window's",
+        "        recordfile::merge(&base.transactions, &mine.transactions, &theirs.transactions);",
+        "        mine.transactions.clone();",
+        [TWO],
+    ),
+    (
+        "the budgets are this window's",
+        "        budgets: recordfile::merge_by(&base.budgets, &mine.budgets, &theirs.budgets, |b| {\n            b.category\n        }),",
+        "        budgets: mine.budgets.clone(),",
+        [BUDGETS],
+    ),
+    (
+        "an account a kept transaction is in stays deleted",
+        "            .filter(|a| needed.contains(&a.id))\n            .chain(",
+        "            .filter(|_| false)\n            .chain(",
+        [ACCOUNT_BACK],
+    ),
+    (
+        "an account deleted here is looked for in this window's copy alone",
+        "                theirs.accounts.iter().filter(|a| {\n                    needed.contains(&a.id) && !mine.accounts.iter().any(|m| m.id == a.id)\n                }),",
+        "                theirs.accounts.iter().filter(|_| false),",
+        [ACCOUNT_BACK],
+    ),
+    (
+        "a change to a transaction deleted elsewhere is dropped",
+        "                    None => self.transactions.push(changed),",
+        "                    None => drop(changed),",
+        [FORM_DELETED],
+    ),
+    (
+        "an account another window deleted stays chosen",
+        "            .is_some_and(|id| !self.accounts.iter().any(|a| a.id == id))\n        {\n            self.selected_account",
+        "            .is_some_and(|_| false)\n        {\n            self.selected_account",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a delete waits on a transaction another window deleted",
+        "            Some(Doomed::Transaction(id)) => !self.transactions.iter().any(|t| t.id == id),",
+        "            Some(Doomed::Transaction(_)) => false,",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a delete waits on an account another window deleted",
+        "            Some(Doomed::Account(id)) => !self.accounts.iter().any(|a| a.id == id),",
+        "            Some(Doomed::Account(_)) => false,",
+        [CHOSEN_GONE],
+    ),
+]
+
+# Closing while a save is failing asks first (2026-10-10): the window went at
+# once, and the change the failing save held went with it -- the only one of
+# the programs that keep records to do so.
+CLOSING = "closing_while_a_save_fails_asks_first"
+DISCARD = "closing_without_saving_goes_without_the_change"
+BROKEN_LEFT = "a_ledger_that_cannot_be_read_is_left_as_it_is"
+
+MUTATIONS += [
+    (
+        "a close never asks",
+        "            return if self.request_close() {\n"
+        "                Response::Exit\n"
+        "            } else {\n"
+        "                Response::KeepOpen\n"
+        "            };",
+        "            return Response::Exit;",
+        [CLOSING, DISCARD],
+    ),
+    (
+        "a close with everything kept asks",
+        "        if !self.unkept() {\n            return true;\n        }\n        let detail",
+        "        let detail",
+        [CLOSING],
+    ),
+    (
+        "a close does not try the save again first",
+        "        if self.unkept() {\n            self.save_ledger();\n        }\n",
+        "",
+        [CLOSING],
+    ),
+    (
+        "a window that keeps nothing asks at the close",
+        "        self.persist && self.ledger() != self.base",
+        "        self.ledger() != self.base",
+        [BROKEN_LEFT],
+    ),
+    (
+        "the question does not say why",
+        '            &format!("{detail} -- try saving again before closing?"),',
+        '            &format!("{} -- try saving again before closing?", detail.len()),',
+        [CLOSING],
+    ),
+    (
+        "Save at the question goes even when the save fails",
+        "                self.save_ledger();\n                !self.unkept()",
+        "                self.save_ledger();\n                true",
+        [CLOSING],
+    ),
+    (
+        "Don't save stays",
+        "            unsaved::Choice::Discard => true,",
+        "            unsaved::Choice::Discard => false,",
+        [DISCARD],
+    ),
+    (
+        "Cancel goes",
+        "            unsaved::Choice::Cancel => false,",
+        "            unsaved::Choice::Cancel => true,",
+        [CLOSING],
+    ),
+    (
+        "a key under the question reaches the ledger",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))\n"
+        "        {",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Mouse(_))\n"
+        "        {",
+        [CLOSING, DISCARD],
+    ),
+    (
+        "the question is not drawn",
+        "            question.render(&palette, width, height, &mut tree);",
+        "            let _ = (question, palette);",
+        [CLOSING],
     ),
 ]
 

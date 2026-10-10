@@ -1,6 +1,13 @@
 ### [E] Two windows of one program: the last to save throws away what the other saved -- 2026-09-28
 
-**Status:** OPEN -- which fix is `open-questions.md` E-Q5.
+**Status:** OPEN -- E-Q5 answered (design-decisions §1239: two windows where
+they are useful, each saving only its own changes; one window for the rest).
+Being fixed program by program with `apps/recordfile` (random ids, a merge by
+id, a watch on the file): **all eight programs of §1239 done 2026-10-09/10 --
+Notes, Contacts, the kanban board, Reminders, the e-book library, Snippets,
+Flashcards and Finance**, each with tests of two windows; open until a boot
+test on `main` has run them. The single-window half waits on
+`requests/e-cf-a-program-can-ask-to-have-only-one-window.md`.
 
 **In short:** Many programs keep their data in a file of their own -- notes,
 contacts, the e-book reader's library, sticky notes, reminders. Each window

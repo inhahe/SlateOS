@@ -7006,6 +7006,10 @@ if [ "$skip_frneedles" != "1" ]; then
 fi
 note_gate check-frame-needles "$skip_frneedles"
 if [ "$skip_frneedles" != "1" ]; then
+    if ! run_checker check-frame-needles-selftest "$py" "$frneedles" --self-test; then
+        moved_gate_refuses 71 "frame needles" ALLOW_FRAME_NEEDLES \
+            "check-frame-needles.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
     if ! run_checker check-frame-needles "$py" "$frneedles"; then
         moved_gate_refuses 71 "frame needles" ALLOW_FRAME_NEEDLES "A whole-frame text assertion in an app's tests must be scoped to the band it
 names (lesson 91), or it passes on text drawn anywhere in the window."

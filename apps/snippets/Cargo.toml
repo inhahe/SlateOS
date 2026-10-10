@@ -19,6 +19,10 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 settingsfile = { path = "../../gui/settingsfile" }
 textfmt = { path = "../../textfmt" }
+# Two windows of Snippets save into one library without losing each other's
+# snippets: random ids, a merge by id, and a watch on the file
+# (design-decisions §1239).
+recordfile = { path = "../recordfile" }
 
 # The editor's fields: one-line and the code itself.
 textline = { path = "../textline" }
@@ -29,6 +33,8 @@ unsaved = { path = "../unsaved" }
 
 [dev-dependencies]
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# A file that cannot be replaced, for a save whose write fails.
+safeio = { path = "../safeio", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -12,6 +12,10 @@ suite predates this table.  The last rows, added 2026-10-04, cover the list of
 keys' hold on the pointer: a press with it up puts it away and flips nothing
 under it, and the wheel scrolls no dropdown it covers.
 
+And, from 2026-10-09, the Recycle Bin page (design-decisions §1238, §1240):
+every drive's bin, the default limits, and each drive's own, in `main.rs`;
+what each limit offers and how it reads, in `recyclebins.rs`.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -23,7 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src" / "main.rs"
+SRC = Path(__file__).parent / "src"
+
+BINS_LISTED = "the_recycle_bin_page_lists_every_drive_and_what_it_holds"
+BINS_DEFAULT = "the_default_limits_are_chosen_and_kept"
+BINS_OWN = "a_drive_given_limits_of_its_own_keeps_them_in_its_bin"
+BINS_UNREAD = "a_drive_whose_limits_cannot_be_read_says_so"
+BINS_BY_HAND = "a_limit_written_by_hand_is_offered_as_it_is"
 
 LABELS = "test_the_taskbar_labels_toggle_is_on_the_themes_page_and_reaches_the_file"
 AUTO = "the_automatic_modes_hours_are_chosen_beside_it_and_reach_the_file"
@@ -373,8 +383,8 @@ MUTATIONS = [
     ),
     (
         'the About page is listed nowhere',
-        '                SettingsPage::Power,\n                SettingsPage::About,\n            ],',
-        '                SettingsPage::Power,\n            ],',
+        '                SettingsPage::RecycleBin,\n                SettingsPage::About,\n            ],',
+        '                SettingsPage::RecycleBin,\n            ],',
         ['the_about_page_is_named_about_and_listed_under_system'],
     ),
     (
@@ -673,6 +683,408 @@ MUTATIONS += [
     ),
 ]
 
+# -- the Recycle Bin page (design-decisions §1238, §1240) --
+MUTATIONS += [
+    (
+        "the bins are not read when the page is opened",
+        "            self.bin_error = None;\n            self.refresh_bins();\n",
+        "            self.bin_error = None;\n",
+        [BINS_LISTED],
+    ),
+    (
+        "the default chosen is not kept",
+        "                        .bin_default\n                        .store_as_user_default()\n",
+        "                        .bin_default\n                        .max_age\n"
+        "                        .map_or(Ok::<(), std::io::Error>(()), |_| Ok(()))\n",
+        [BINS_DEFAULT],
+    ),
+    (
+        "turning a drive's own limits on writes nothing",
+        "            Ok(None) => bin.set_limits(Some(&self.bin_default)),",
+        "            Ok(None) => Ok(()),",
+        [BINS_OWN],
+    ),
+    (
+        "turning a drive's own limits off leaves them",
+        "            Ok(Some(_)) => bin.set_limits(None),",
+        "            Ok(Some(_)) => Ok(()),",
+        [BINS_OWN],
+    ),
+    (
+        "a drive's own limit is not kept",
+        "            .set_limits(Some(&own))\n",
+        "            .set_limits(Some(&self.bin_default))\n",
+        [BINS_OWN],
+    ),
+    (
+        "the switch is offered over limits nobody can read",
+        "            match &row.own {\n                Ok(own) => {",
+        "            match &row.own.clone().or(Ok::<Option<recyclebin::Limits>, String>(None)) {\n                Ok(own) => {",
+        [BINS_UNREAD],
+    ),
+    (
+        "the switch is a plain toggle",
+        "            RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),\n",
+        "",
+        [BINS_OWN],
+    ),
+]
+
+# -- how long notifications are kept (2026-10-10; lane C,
+# c-e-a-setting-for-how-long-notifications-are-kept): a choice made only by
+# editing notifications.yaml by hand.
+HISTORY = "how_long_notifications_are_kept_is_chosen_and_written"
+HISTORY_OFF_LIST = "a_history_length_not_on_the_list_is_shown_as_itself"
+
+MUTATIONS += [
+    (
+        "the history row opens another dropdown",
+        '            "Keep for",\n            DropdownId::NotifHistory,',
+        '            "Keep for",\n            DropdownId::NotifImportance(usize::MAX),',
+        [HISTORY],
+    ),
+    (
+        "a length chosen is not kept",
+        "                    self.notif.settings.history.days = *days;",
+        "                    let _ = days;",
+        [HISTORY],
+    ),
+    (
+        "a length written by hand snaps to the list",
+        "    if !days.contains(&current) {\n        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        "    if false {\n        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        [HISTORY_OFF_LIST],
+    ),
+    (
+        "a length written by hand goes at the end of the list",
+        "        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        "        let at = days.len();",
+        [HISTORY_OFF_LIST],
+    ),
+    (
+        "a week reads as seven days",
+        '        7 => String::from("1 week"),',
+        '        7 => String::from("7 days"),',
+        [HISTORY],
+    ),
+    (
+        "nothing kept reads as zero days",
+        '        0 => String::from("Don\'t keep"),',
+        '        0 => String::from("0 days"),',
+        [HISTORY],
+    ),
+    (
+        "the list opens on the first length, not the one kept",
+        "                let at = choices.iter().position(|d| *d == current).unwrap_or(0);\n                (choices.into_iter().map(history_label).collect(), at)",
+        "                let _ = current;\n                (choices.into_iter().map(history_label).collect(), 0)",
+        [HISTORY, HISTORY_OFF_LIST],
+    ),
+]
+
+# -- a theme's other axes, each chosen in a list of its own: the controls and
+# the motion (2026-10-06; lane C, c-e-a-theme-can-shape-the-controls and
+# c-e-a-theme-can-set-the-motion -- written without rows then, so given them
+# here), and windows' frames and the taskbar panel (2026-10-10; lane C,
+# c-e-choose-the-window-frames-in-settings and
+# c-e-choose-the-taskbar-panel-in-settings). The four are built alike, so
+# every one gets the same eight rows: its row, the name the row shows, the
+# choice kept, a theme with nothing for the axis refused, such a theme listed
+# as such, an unreadable one listed as unreadable, the list opening on the
+# choice, and the chosen theme's problem said.
+AXES_APART = "controls_and_motion_are_chosen_apart_from_the_colours"
+FRAMES_APART = "window_frames_and_the_taskbar_panel_are_chosen_apart"
+AXIS_ROWS = "each_theme_axis_row_opens_its_own_list"
+UNREADABLE = "a_theme_that_cannot_be_read_says_why_in_every_list"
+CANNOT_SERVE = "a_theme_chosen_for_an_axis_it_cannot_serve_says_why"
+FRAMES_WRITTEN = "window_frames_and_a_taskbar_panel_chosen_are_written"
+
+
+def axis_rows(what, label, variant, field, provides, without, apart, extra=()):
+    """The eight rows every theme axis gets; `extra` are tests a choice made
+    through the page also breaks (the frames and panel are saved by one)."""
+    loader = variant
+    return [
+        (
+            f"the {what} row opens another list",
+            f'"{label}", DropdownId::{variant}, &',
+            f'"{label}", DropdownId::IconTheme, &',
+            [AXIS_ROWS, *extra],
+        ),
+        (
+            f"the {what} row names the colour theme",
+            f"_name = self.theme_name(self.appearance.settings.{field}.id());",
+            "_name = self.theme_name(self.appearance.settings.color_theme.id());",
+            [apart],
+        ),
+        (
+            f"a {what} theme chosen is not kept",
+            f"                    self.appearance.settings.{field} =\n"
+            f"                        appearance::themes::{loader}::load_from(&self.theme_dirs, &info.id);",
+            "                    let _ = &info.id;",
+            [apart, *extra],
+        ),
+        (
+            f"a theme with no {what} can be chosen for it",
+            f"                    && info.{provides}()\n",
+            "                    && !info.name.is_empty()\n",
+            [apart, UNREADABLE],
+        ),
+        (
+            f"a theme with no {what} is listed as having it",
+            f"        if info.{provides}() {{\n            info.name.clone()",
+            "        if info.problem.is_none() {\n            info.name.clone()",
+            [apart],
+        ),
+        (
+            f"an unreadable theme is listed as having no {what}",
+            '            format!("{} -- cannot be used: it {problem}", info.name)\n'
+            f'        }} else {{\n            format!("{{}} -- {without}", info.name)',
+            "            let _ = problem;\n"
+            f'            format!("{{}} -- {without}", info.name)\n'
+            f'        }} else {{\n            format!("{{}} -- {without}", info.name)',
+            [UNREADABLE],
+        ),
+        (
+            f"the {what} list opens on the colour theme",
+            f"t.id.as_os_str() == self.appearance.settings.{field}.id()",
+            "t.id.as_os_str() == self.appearance.settings.color_theme.id()",
+            [apart],
+        ),
+    ]
+
+
+def problem_row(what, field):
+    """A chosen theme's problem said under the axis's row."""
+    return (
+        f"a {what} theme that cannot be used says nothing",
+        f"        if let Some(problem) = self.appearance.settings.{field}.problem() {{\n"
+        "            s.note(problem, 28.0);",
+        f"        if let Some(problem) = self.appearance.settings.{field}.problem() {{\n"
+        "            let _ = problem;",
+        [CANNOT_SERVE],
+    )
+
+
+MUTATIONS += [
+    *axis_rows(
+        "controls",
+        "Controls",
+        "WidgetTheme",
+        "widget_theme",
+        "provides_widget_style",
+        "no control shapes",
+        AXES_APART,
+    ),
+    problem_row("controls", "widget_theme"),
+    *axis_rows(
+        "motion",
+        "Motion",
+        "AnimationTheme",
+        "animation_theme",
+        "provides_animation",
+        "no motion",
+        AXES_APART,
+    ),
+    *axis_rows(
+        "window frames",
+        "Window frames",
+        "DecorationTheme",
+        "decoration_theme",
+        "provides_decorations",
+        "no window frames",
+        FRAMES_APART,
+        extra=(FRAMES_WRITTEN,),
+    ),
+    problem_row("window frames", "decoration_theme"),
+    *axis_rows(
+        "taskbar panel",
+        "Taskbar panel",
+        "PanelTheme",
+        "panel_theme",
+        "provides_panel",
+        "no taskbar panel",
+        FRAMES_APART,
+        extra=(FRAMES_WRITTEN,),
+    ),
+    problem_row("taskbar panel", "panel_theme"),
+    # The motion's notes: what it is, then the theme's problem.
+    (
+        "the motion is not described",
+        "        for note in self.animation_theme_notes() {\n            s.note(&note, 28.0);",
+        "        for note in self.animation_theme_notes() {\n            let _ = note;",
+        [AXES_APART, CANNOT_SERVE],
+    ),
+    (
+        "a motion theme that cannot be used says nothing",
+        "        if let Some(problem) = theme.problem() {\n            notes.push(problem.to_string());",
+        "        if let Some(problem) = theme.problem() {\n            let _ = problem;",
+        [CANNOT_SERVE],
+    ),
+    (
+        "nothing moving is described as moving",
+        "    let mut notes = vec![if motion.is_still() {",
+        "    let mut notes = vec![if false {",
+        [AXES_APART],
+    ),
+    (
+        "springing is described as gliding",
+        'guitk::motion::Curve::Spring => "Springs a little past its place and back",',
+        'guitk::motion::Curve::Spring => "Glides in and settles",',
+        [AXES_APART],
+    ),
+    (
+        "an even pace is described as gliding",
+        'guitk::motion::Curve::Linear => "Moves at an even pace",',
+        'guitk::motion::Curve::Linear => "Glides in and settles",',
+        [AXES_APART],
+    ),
+    (
+        "gliding is described as an even pace",
+        'guitk::motion::Curve::EaseOut => "Glides in and settles",',
+        'guitk::motion::Curve::EaseOut => "Moves at an even pace",',
+        [AXES_APART],
+    ),
+    (
+        "every motion takes the built-in time",
+        '"{how}, {} ms a move at Normal speed.", motion.standard_ms())',
+        '"{how}, {} ms a move at Normal speed.", 200)',
+        [AXES_APART],
+    ),
+    # The cursor theme (2026-10-10; lane C,
+    # c-e-choose-the-cursor-theme-in-settings): every XCursor theme installed,
+    # other desktops' included.
+    (
+        "the cursors row opens another list",
+        '"Cursors", DropdownId::CursorTheme, &',
+        '"Cursors", DropdownId::IconTheme, &',
+        [AXIS_ROWS, "a_cursor_theme_chosen_is_written"],
+    ),
+    (
+        "the cursors row names the colour theme",
+        "        let id = self.appearance.settings.cursor_theme.id();\n"
+        "        self.cursor_themes",
+        "        let id = self.appearance.settings.color_theme.id();\n"
+        "        self.cursor_themes",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "a cursor theme chosen is not kept",
+        "                    self.appearance.settings.cursor_theme =\n"
+        "                        appearance::cursors::CursorTheme::load(&info.id);",
+        "                    let _ = &info.id;",
+        [
+            "the_cursor_theme_is_chosen_from_every_installed_one",
+            "a_cursor_theme_chosen_is_written",
+        ],
+    ),
+    (
+        "the cursor list opens on the built-in pointer",
+        "t.id.as_os_str() == self.appearance.settings.cursor_theme.id())",
+        "t.id.as_os_str() == appearance::cursors::CursorTheme::built_in().id())",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "other desktops' cursor themes are not looked for",
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n",
+        "",
+        [
+            "the_cursor_theme_is_chosen_from_every_installed_one",
+            "a_cursor_theme_chosen_is_written",
+        ],
+    ),
+    (
+        "the theme folders' own cursor themes are not looked for",
+        "            .chain(std::iter::once(self.theme_dirs.system.clone()))\n"
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n"
+        "            .collect();",
+        "            .chain(std::iter::once(self.theme_dirs.system.clone()))\n"
+        "            .chain(self.cursor_icon_dirs.iter().cloned())\n"
+        "            .skip(1)\n"
+        "            .collect();",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "a cursor theme not installed is not said",
+        "        if let Some(note) = self.cursor_theme_note() {\n            s.note(&note, 28.0);",
+        "        if let Some(note) = self.cursor_theme_note() {\n            let _ = note;",
+        ["a_cursor_theme_not_installed_says_so"],
+    ),
+    (
+        "every cursor theme is said not to be installed",
+        "        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id))",
+        "        (!theme.is_built_in())",
+        ["the_cursor_theme_is_chosen_from_every_installed_one"],
+    ),
+    (
+        "the built-in pointer is said not to be installed",
+        "        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id))",
+        "        (!self.cursor_themes.iter().skip(1).any(|t| t.id.as_os_str() == id))",
+        ["a_cursor_theme_not_installed_says_so"],
+    ),
+    # The colour list's own unreadable theme.
+    (
+        "an unreadable theme is listed as an icon pack",
+        '            format!("{} -- cannot be used: it {problem}", info.name)\n'
+        "        } else if info.provides_icons() {",
+        "            let _ = problem;\n"
+        '            format!("{} -- icons only", info.name)\n'
+        "        } else if info.provides_icons() {",
+        [UNREADABLE],
+    ),
+]
+
+RECYCLEBINS = [
+    (
+        "a limit written by hand is not offered",
+        "        values.insert(at, current);\n        (values, at)",
+        "        let _ = (at, current);\n        (values, 0)",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a limit written by hand is offered in the wrong place",
+        ".position(|v| v.is_some_and(|v| current.is_some_and(|c| v > c)))",
+        ".position(|v| v.is_some_and(|v| current.is_some_and(|c| v < c)))",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a week reads in days",
+        '                7 => "1 week".to_string(),',
+        "",
+        [BINS_DEFAULT],
+    ),
+    (
+        "a size in gigabytes reads in megabytes",
+        "                if megabytes >= 1024 && megabytes % 1024 == 0 {",
+        "                if false {",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a number of items is not set",
+        "            Self::Count => limits.max_items = value.and_then(|n| u32::try_from(n).ok()),",
+        "            Self::Count => {}",
+        [BINS_OWN],
+    ),
+]
+
+TABLES = {
+    "main.rs": MUTATIONS,
+    "recyclebins.rs": RECYCLEBINS,
+}
+
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "settings", timeout=900, only=only))
+    only = sys.argv[1:]
+    names = [name for rows in TABLES.values() for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    worst = 0
+    for file, rows in TABLES.items():
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        print(f"\n######## {file} ########")
+        worst = max(worst, sweep(SRC / file, rows, "settings", timeout=900, only=mine))
+    raise SystemExit(worst)

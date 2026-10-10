@@ -19,6 +19,10 @@ oswindow = { path = "../../gui/window" }
 # as a fragment or as nothing -- and the library is every note the user has.
 # Same reasoning as `apps/editor`, which is where this pattern comes from.
 safeio = { path = "../safeio" }
+# Two windows of Notes save into one library without losing each other's
+# notes: fresh ids, a merge by id, and a watch on the file (design-decisions
+# §1239).
+recordfile = { path = "../recordfile" }
 
 # Whether a key is a chord, a command or typing: AltGr arrives as Ctrl+Alt,
 # and a command carries its letter as text.
@@ -44,6 +48,9 @@ unsaved = { path = "../unsaved" }
 # `with_scratch_config`, so the tests that keep a library keep it in a scratch
 # directory and never in the developer's own.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# `refuse_replacing`, so a test can fail a save at the write with the library
+# still readable: a save reads the file first (design-decisions §1239).
+safeio = { path = "../safeio", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -447,8 +447,8 @@ MUTATIONS = [
     ),
     (
         "a file too big to read whole is read in part",
-        "        if read.truncated {\n            self.persist = false;\n",
-        "        if false {\n            self.persist = false;\n",
+        "    if read.truncated {\n        return Err(format!(",
+        "    if false {\n        return Err(format!(",
         ["a_book_too_big_to_read_whole_is_refused"],
     ),
     (
@@ -467,7 +467,9 @@ MUTATIONS = [
         "a failed save is not said",
         '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
-        [FAILING],
+        # Not FAILING since 2026-10-09: its folder in the file's place fails
+        # the read a save now does first (§1239), before any write.
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         "the failure is drawn nowhere",
@@ -790,6 +792,66 @@ MUTATIONS += [
         "            let (cursor, anchor) = if focused {\n                self.box_caret(focus)\n",
         "            let (cursor, anchor) = if false {\n                self.box_caret(focus)\n",
         [LINE],
+    ),
+]
+
+# 2026-10-09: two windows of Contacts save into one book (design-decisions
+# §1239) -- each its own changes, into what the file holds.
+TWO = "two_windows_each_add_someone_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+GROUP_BACK = "a_group_deleted_while_another_window_used_it_comes_back"
+NAMES = "a_merged_book_names_nothing_it_does_not_have"
+MUTATIONS += [
+    (
+        "a save writes this window's copy over the file",
+        "        let merged = ContactStore::merged(&self.base, &self.store, &theirs);\n",
+        "        let _ = &theirs;\n        let merged = self.store.clone();\n",
+        # Not the hearing test: a window that has heard the other's save has
+        # it in its own copy, so writing that copy whole loses nothing there.
+        [TWO],
+    ),
+    (
+        "a new contact takes the next number",
+        "        recordfile::fresh_id(|id| self.contacts.iter().any(|c| c.id == id))\n",
+        "        self.contacts.iter().map(|c| c.id).max().map_or(1, |m| m.saturating_add(1))\n",
+        [TWO],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {\n",
+        "        if true || now == self.file_stamp {\n",
+        [HEAR],
+    ),
+    (
+        "hearing another window's save drops what is unsaved",
+        "        let shown = if unsaved {\n",
+        "        let shown = if false {\n",
+        [HEAR],
+    ),
+    (
+        "a group another window deleted is not brought back",
+        "        groups.extend(\n            mine.groups\n                .iter()\n"
+        "                .filter(|g| needed.contains(&g.id))\n                .cloned(),\n        );\n",
+        "",
+        [GROUP_BACK],
+    ),
+    (
+        "a membership of a group nobody has is kept",
+        "            contact.groups.retain(|id| present.contains(id));\n",
+        "",
+        [NAMES],
+    ),
+    (
+        "recently viewed is this window's though it did not change it",
+        "        let mut recently_viewed = if mine.recently_viewed == base.recently_viewed {\n",
+        "        let mut recently_viewed = if false {\n",
+        [NAMES],
+    ),
+    (
+        "recently viewed names someone who is gone",
+        "        recently_viewed.retain(|id| contacts.iter().any(|c| c.id == *id));\n",
+        "",
+        [NAMES],
     ),
 ]
 

@@ -53,7 +53,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
@@ -1357,16 +1357,27 @@ pub fn merge_contacts(primary: &Contact, secondary: &Contact, merged_id: u64) ->
     merged
 }
 
+impl recordfile::Record for Contact {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl recordfile::Record for ContactGroup {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 // ============================================================================
 // Contact store
 // ============================================================================
 
 /// In-memory contact store with CRUD, search, sort, filter, and group management.
+#[derive(Clone)]
 pub struct ContactStore {
     contacts: Vec<Contact>,
     groups: Vec<ContactGroup>,
-    next_contact_id: u64,
-    next_group_id: u64,
     recently_viewed: VecDeque<u64>,
     /// How many changes the store has had. Every method that can change it
     /// counts one -- the ones that hand out `&mut` included, whether or not
@@ -1381,8 +1392,6 @@ impl ContactStore {
         Self {
             contacts: Vec::new(),
             groups: Vec::new(),
-            next_contact_id: 1,
-            next_group_id: 1,
             recently_viewed: VecDeque::new(),
             revision: 0,
         }
@@ -1399,12 +1408,61 @@ impl ContactStore {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// A number for a new contact that no contact here has -- and, being
+    /// random, that no other window will give out ([`recordfile::fresh_id`]).
+    fn fresh_contact_id(&self) -> u64 {
+        recordfile::fresh_id(|id| self.contacts.iter().any(|c| c.id == id))
+    }
+
+    /// `mine`'s changes since `base`, put into `theirs` -- what the file
+    /// holds now (design-decisions §1239).
+    ///
+    /// Contacts and groups are merged one by one ([`recordfile::merge`]), and
+    /// then what a merge can break is mended, since a book that names a group
+    /// it does not have is not read back at all: a group a kept contact is
+    /// in, deleted by another window, comes back from this window's copy;
+    /// a membership of a group nobody has any more goes. Recently viewed is
+    /// this window's list if it changed it, the file's otherwise, less anyone
+    /// no longer in the book. `revision` stays `mine`'s, so what this window
+    /// has not saved is still unsaved.
+    fn merged(base: &Self, mine: &Self, theirs: &Self) -> Self {
+        let mut groups = recordfile::merge(&base.groups, &mine.groups, &theirs.groups);
+        let mut contacts = recordfile::merge(&base.contacts, &mine.contacts, &theirs.contacts);
+        let present: HashSet<u64> = groups.iter().map(|g| g.id).collect();
+        let needed: HashSet<u64> = contacts
+            .iter()
+            .flat_map(|c| c.groups.iter().copied())
+            .filter(|id| !present.contains(id))
+            .collect();
+        groups.extend(
+            mine.groups
+                .iter()
+                .filter(|g| needed.contains(&g.id))
+                .cloned(),
+        );
+        let present: HashSet<u64> = groups.iter().map(|g| g.id).collect();
+        for contact in &mut contacts {
+            contact.groups.retain(|id| present.contains(id));
+        }
+        let mut recently_viewed = if mine.recently_viewed == base.recently_viewed {
+            theirs.recently_viewed.clone()
+        } else {
+            mine.recently_viewed.clone()
+        };
+        recently_viewed.retain(|id| contacts.iter().any(|c| c.id == *id));
+        Self {
+            contacts,
+            groups,
+            recently_viewed,
+            revision: mine.revision,
+        }
+    }
+
     // ----- Contact CRUD -----
 
     /// Add a new contact, returning its assigned ID.
     pub fn add_contact(&mut self, mut contact: Contact) -> u64 {
-        let id = self.next_contact_id;
-        self.next_contact_id = self.next_contact_id.saturating_add(1);
+        let id = self.fresh_contact_id();
         contact.id = id;
         self.contacts.push(contact);
         self.changed();
@@ -1461,8 +1519,7 @@ impl ContactStore {
 
     /// Add a new group, returning its assigned ID.
     pub fn add_group(&mut self, mut group: ContactGroup) -> u64 {
-        let id = self.next_group_id;
-        self.next_group_id = self.next_group_id.saturating_add(1);
+        let id = recordfile::fresh_id(|id| self.groups.iter().any(|g| g.id == id));
         group.id = id;
         self.groups.push(group);
         self.changed();
@@ -1684,8 +1741,7 @@ impl ContactStore {
         let a = self.contacts.iter().find(|c| c.id == id_a)?.clone();
         let b = self.contacts.iter().find(|c| c.id == id_b)?.clone();
 
-        let merged_id = self.next_contact_id;
-        self.next_contact_id = self.next_contact_id.saturating_add(1);
+        let merged_id = self.fresh_contact_id();
 
         let merged = merge_contacts(&a, &b, merged_id);
         self.contacts.retain(|c| c.id != id_a && c.id != id_b);
@@ -1710,7 +1766,8 @@ impl ContactStore {
     /// 1970), so "recently added" puts them first. Returns number of contacts
     /// imported.
     pub fn import_vcards(&mut self, data: &str, now: u64) -> usize {
-        let imported = import_vcards(data, self.next_contact_id);
+        // The ids the cards are read with are replaced as each is added.
+        let imported = import_vcards(data, 0);
         let count = imported.len();
         for mut contact in imported {
             contact.created_at = now;
@@ -2030,6 +2087,28 @@ fn book_text(store: &ContactStore) -> String {
 /// would lose, without a word, whoever was not read. So is one that puts a
 /// contact in a group it does not have, holds two things with one number, or
 /// names a contact it does not have among the recently viewed.
+/// The book the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a book -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only whoever was understood.
+fn read_book_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Option<ContactStore>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_book(&read.text).map(Some)
+}
+
 fn parse_book(text: &str) -> Result<ContactStore, String> {
     let mut lines = text.lines().enumerate();
     let first = lines.next().map_or("", |(_, line)| line);
@@ -2256,15 +2335,7 @@ fn parse_book(text: &str) -> Result<ContactStore, String> {
         ));
     }
     store.recently_viewed = viewed;
-    store.next_contact_id = next_id_after(store.contacts.iter().map(|c| c.id));
-    store.next_group_id = next_id_after(store.groups.iter().map(|g| g.id));
     Ok(store)
-}
-
-/// The first number after `ids`, for the next thing made: past every one
-/// read, so nothing made later takes the number of something kept.
-fn next_id_after(ids: impl Iterator<Item = u64>) -> u64 {
-    ids.max().map_or(1, |highest| highest.saturating_add(1))
 }
 
 // ============================================================================
@@ -2732,6 +2803,16 @@ pub struct ContactsApp {
     persist: bool,
     /// The store's revision when the book was last written or read.
     kept_revision: u64,
+    /// The book as this window last read or wrote it: what a save merges
+    /// this window's changes against, so another window's, saved since, are
+    /// kept rather than written over (design-decisions §1239).
+    base: ContactStore,
+    /// The book's file as this window last read or wrote it, to tell another
+    /// window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the book's file, which wakes the window when another one
+    /// saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// Why the book is not being kept, drawn for as long as it is true: it
     /// could not be read (and so is left exactly as it is), there is nowhere
     /// to keep it, or the last save failed.
@@ -2808,6 +2889,9 @@ impl ContactsApp {
             last_stamp: 0,
             persist: false,
             kept_revision: 0,
+            base: ContactStore::new(),
+            file_stamp: None,
+            watch: None,
             store_error: None,
             question: None,
             quit: false,
@@ -5163,6 +5247,27 @@ impl App for ContactsApp {
         None
     }
 
+    /// Watch the book's file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps the book.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = book_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the book written: read it again if another window
+    /// wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         match event {
             Event::CloseRequested => {
@@ -5293,40 +5398,35 @@ impl ContactsApp {
     /// [`load_book`](Self::load_book) with the size limit given, so a test
     /// can reach the limit without writing sixty-four megabytes.
     fn load_book_within(&mut self, path: &std::path::Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
+        match read_book_file(path, max_bytes) {
+            // None there yet: a first run.
+            Ok(None) => {}
+            Ok(Some(store)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = store.clone();
+                self.take_store(store);
             }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_book(&read.text) {
-            Ok(store) => self.take_store(store),
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
     }
 
-    /// Make `store` this window's address book.
+    /// Make `store` this window's address book, nothing shown.
     fn take_store(&mut self, store: ContactStore) {
+        self.view = DetailView::Empty;
+        self.adopt(store, true);
+    }
+
+    /// Show `store`: what this window and the file hold together, after a
+    /// save or another window's. `kept` says whether it is what the file now
+    /// holds; a store with this window's unsaved changes in it is not. A
+    /// contact shown stays shown while it is there.
+    fn adopt(&mut self, store: ContactStore, kept: bool) {
         // Every time in the file, so that a change made now is later than all
         // of them even if the clock has since been set back.
         let latest = store
@@ -5337,8 +5437,56 @@ impl ContactsApp {
             .unwrap_or(0);
         self.last_stamp = self.last_stamp.max(latest);
         self.store = store;
-        self.kept_revision = self.store.revision();
-        self.view = DetailView::Empty;
+        if kept {
+            self.kept_revision = self.store.revision();
+        } else if self.store.revision() == self.kept_revision {
+            // Still unsaved, whatever the count says.
+            self.kept_revision = self.kept_revision.wrapping_sub(1);
+        }
+        if let DetailView::ViewContact(id) | DetailView::EditContact(id) = self.view
+            && self.store.get_contact(id).is_none()
+        {
+            self.view = DetailView::Empty;
+        }
+    }
+
+    /// Read the book again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's unsaved changes put into it. Whether what
+    /// is shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case.
+    pub fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = book_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(theirs) = read_book_file(&path, MAX_BOOK_BYTES) else {
+            return false;
+        };
+        let theirs = theirs.unwrap_or_else(ContactStore::new);
+        let unsaved = self.unkept();
+        let shown = if unsaved {
+            ContactStore::merged(&self.base, &self.store, &theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown.contacts != self.store.contacts
+            || shown.groups != self.store.groups
+            || shown.recently_viewed != self.store.recently_viewed;
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown, !unsaved);
+        changed
     }
 
     /// Write the address book, if it has changed and this window keeps
@@ -5355,15 +5503,41 @@ impl ContactsApp {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = book_text(&self.store);
+        // Into what the file holds now, not over it: another window may have
+        // saved since this one read it (design-decisions §1239). The file as
+        // this window last wrote or read it needs no reading -- it is `base`
+        // -- and a save follows every change, so the read is kept for when
+        // something else has written.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_book_file(&path, MAX_BOOK_BYTES)
+        };
+        let theirs = match read {
+            Ok(theirs) => theirs.unwrap_or_else(ContactStore::new),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Not saved: {} could not be read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = ContactStore::merged(&self.base, &self.store, &theirs);
+        let text = book_text(&merged);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| safeio::write_str_atomically(&path, &text));
         match written {
             Ok(()) => {
-                self.kept_revision = self.store.revision();
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known for
+                // its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged, true);
             }
             Err(err) => {
                 self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
@@ -6783,7 +6957,9 @@ mod tests {
         let mut store = ContactStore::new();
         let c = make_contact("Alice", "Anderson");
         let id = store.add_contact(c);
-        assert_eq!(id, 1);
+        // Random, so two windows do not give out one number (§1239).
+        assert!((1..=recordfile::MAX_ID).contains(&id));
+        assert_eq!(store.get_contact(id).unwrap().first_name, "Alice");
         assert_eq!(store.contact_count(), 1);
     }
 
@@ -6859,7 +7035,8 @@ mod tests {
     fn test_store_add_group() {
         let mut store = ContactStore::new();
         let gid = store.add_group(ContactGroup::new(0, "Friends"));
-        assert_eq!(gid, 1);
+        assert!((1..=recordfile::MAX_ID).contains(&gid));
+        assert_eq!(store.get_group(gid).unwrap().name, "Friends");
         assert_eq!(store.all_groups().len(), 1);
     }
 
@@ -7056,8 +7233,17 @@ mod tests {
     #[test]
     fn test_store_sort_by_recently_contacted() {
         let mut store = make_store_with_contacts();
-        store.mark_contacted(2, 5000); // Bob contacted most recently
-        store.mark_contacted(1, 3000); // Alice contacted earlier
+        let id_of = |store: &ContactStore, name: &str| {
+            store
+                .all_contacts()
+                .iter()
+                .find(|c| c.first_name == name)
+                .unwrap()
+                .id
+        };
+        let (alice, bob) = (id_of(&store, "Alice"), id_of(&store, "Bob"));
+        store.mark_contacted(bob, 5000); // Bob contacted most recently
+        store.mark_contacted(alice, 3000); // Alice contacted earlier
         let sorted = store.sorted_contacts(SortOrder::RecentlyContacted);
         assert_eq!(sorted[0].first_name, "Bob");
         assert_eq!(sorted[1].first_name, "Alice");
@@ -10165,8 +10351,6 @@ mod tests {
         assert_eq!(back.contacts, store.contacts);
         assert_eq!(back.groups, store.groups);
         assert_eq!(back.recently_viewed, store.recently_viewed);
-        assert_eq!(back.next_contact_id, store.next_contact_id);
-        assert_eq!(back.next_group_id, store.next_group_id);
         // No text broke a line: every line is one of the records.
         for line in text.lines().skip(1) {
             let kind = line.split('\t').next().unwrap();
@@ -10305,6 +10489,139 @@ mod tests {
         });
     }
 
+    /// **Two windows each add someone, and both are kept.** Each wrote its
+    /// own copy of the book whole, so the last to save threw away the other's
+    /// (design-decisions §1239).
+    #[test]
+    fn two_windows_each_add_someone_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("contacts-two-windows", |_| {
+            let mut first = ContactsApp::from_settings();
+            let mut second = ContactsApp::from_settings();
+            let ada = first.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            first.keep();
+            let alan = second.store.add_contact(Contact::new(0, "Alan", "Turing"));
+            second.keep();
+            assert_ne!(ada, alan, "two windows gave out one number");
+            assert_eq!(
+                second.store.contacts.len(),
+                2,
+                "the save did not show the other's"
+            );
+
+            // A change in each, to different people: both stand.
+            first.store.toggle_favorite(ada);
+            first.keep();
+            second.store.get_contact_mut(alan).unwrap().notes = String::from("computable");
+            second.keep();
+            let again = ContactsApp::from_settings();
+            assert!(again.store.get_contact(ada).unwrap().favorite);
+            assert_eq!(again.store.get_contact(alan).unwrap().notes, "computable");
+        });
+    }
+
+    /// **A window reads the book again when another saves**, keeping what it
+    /// has not saved; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("contacts-hear", |_| {
+            let mut first = ContactsApp::from_settings();
+            let mut second = ContactsApp::from_settings();
+            first.store.add_contact(Contact::new(0, "Grace", "Hopper"));
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert_eq!(second.store.contacts.len(), 1);
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+
+            let mine = second.store.add_contact(Contact::new(0, "Not", "Saved"));
+            first.store.add_contact(Contact::new(0, "Saved", "There"));
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.store.get_contact(mine).is_some(),
+                "an unsaved contact went"
+            );
+            assert_eq!(second.store.contacts.len(), 3);
+            assert!(second.unkept(), "the unsaved contact is taken for saved");
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert_eq!(ContactsApp::from_settings().store.contacts.len(), 3);
+        });
+    }
+
+    /// **A merged book names nobody and no group it does not have** -- the
+    /// reader refuses a book that does, whole. Recently viewed is the file's
+    /// unless this window changed it, less anyone deleted; a membership of a
+    /// group nobody has goes.
+    #[test]
+    fn a_merged_book_names_nothing_it_does_not_have() {
+        let mut base = ContactStore::new();
+        let ada = base.add_contact(make_contact("Ada", "Lovelace"));
+        let bob = base.add_contact(make_contact("Bob", "Baker"));
+        let cy = base.add_contact(make_contact("Cy", "Young"));
+        let work = base.add_group(ContactGroup::new(0, "Work"));
+        base.add_contact_to_group(ada, work);
+        base.record_view(cy);
+
+        // Another window viewed Ada; this one changed nothing in the list.
+        let mut theirs = base.clone();
+        theirs.record_view(ada);
+        let mut mine = base.clone();
+        mine.get_contact_mut(ada).unwrap().groups.push(77); // no such group
+        let merged = ContactStore::merged(&base, &mine, &theirs);
+        assert_eq!(merged.recently_viewed, theirs.recently_viewed);
+        assert_eq!(merged.get_contact(ada).unwrap().groups, vec![work]);
+        assert!(parse_book(&book_text(&merged)).is_ok());
+
+        // This window viewed Bob, whom the other deleted.
+        let mut theirs = base.clone();
+        theirs.delete_contact(bob);
+        let mut mine = base.clone();
+        mine.record_view(bob);
+        let merged = ContactStore::merged(&base, &mine, &theirs);
+        assert!(merged.get_contact(bob).is_none());
+        assert_eq!(
+            merged.recently_viewed,
+            [cy],
+            "a viewed contact who is gone is named"
+        );
+        assert!(parse_book(&book_text(&merged)).is_ok());
+    }
+
+    /// **A group another window deleted comes back for someone this window
+    /// put in it**, and a book never names a group it does not have -- which
+    /// would make it unreadable, whole.
+    #[test]
+    fn a_group_deleted_while_another_window_used_it_comes_back() {
+        settingsfile::testing::with_scratch_config("contacts-groups", |_| {
+            let mut first = ContactsApp::from_settings();
+            let work = first.store.add_group(ContactGroup::new(0, "Work"));
+            let ada = first.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            first.keep();
+            let mut second = ContactsApp::from_settings();
+            first.store.delete_group(work);
+            first.keep();
+            second.store.add_contact_to_group(ada, work);
+            second.keep();
+            let again = ContactsApp::from_settings();
+            assert!(
+                again.store_error.is_none(),
+                "the book is no longer readable: {:?}",
+                again.store_error
+            );
+            assert!(
+                again.store.get_group(work).is_some(),
+                "the group did not come back"
+            );
+            assert!(again.store.get_contact(ada).unwrap().groups.contains(&work));
+        });
+    }
+
     #[test]
     fn a_window_made_by_new_keeps_nothing() {
         settingsfile::testing::with_scratch_config("contacts-quiet", |dir| {
@@ -10398,7 +10715,10 @@ mod tests {
             typed_in(&mut app, "First");
             press(&mut app, Key::Enter);
             let error = app.store_error.clone().expect("a failed save said nothing");
-            assert!(error.starts_with("Not saved to "), "{error}");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239), and a folder in
+            // its place fails there.
+            assert!(error.starts_with("Not saved"), "{error}");
             assert!(drawn(&app).contains(&error), "the failure is not on screen");
             assert!(app.unkept());
 
@@ -10415,6 +10735,34 @@ mod tests {
                 ContactsApp::from_settings().store.contacts,
                 app.store.contacts
             );
+        });
+    }
+
+    /// A save whose write fails -- the book reads, and cannot be replaced --
+    /// says so, and the next change tries again. A folder where the file goes
+    /// (the test above) now fails at the read, which a save does first
+    /// (design-decisions §1239), so the write's failure needs a file that
+    /// reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("contacts-unwritable", |_| {
+            let mut app = ContactsApp::from_settings();
+            app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            app.keep();
+            let path = book_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.store.add_contact(Contact::new(0, "Alan", "Turing"));
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(app.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
         });
     }
 

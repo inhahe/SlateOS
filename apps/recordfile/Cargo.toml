@@ -1,0 +1,16 @@
+[package]
+name = "recordfile"
+version = "0.1.0"
+edition = "2024"
+description = "A program's data file shared by its windows: each saves only its own changes into what is on disk, and hears when another has written (design-decisions §1239)"
+
+[dependencies]
+# The data file's folder is watched with inotify, as the settings watcher
+# watches the settings folder; on a host without it, nothing is watched.
+libcall = { path = "../../libcall" }
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

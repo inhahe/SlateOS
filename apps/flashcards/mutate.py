@@ -239,12 +239,11 @@ MUTATIONS = [
         "            persist: true,",
         ["an_app_made_with_new_keeps_nothing"],
     ),
-    (
-        "an unreadable file's number is reused",
-        "        self.next_file_id = files",
-        "        self.next_file_id = decks.len() as u32 + 1;\n        let _ = files",
-        ["an_unreadable_deck_file_is_left_alone_and_reported"],
-    ),
+    # No row for "an unreadable file's number is reused" since 2026-10-09: a
+    # new deck's file number is random below 2^52 (design-decisions §1239),
+    # so the check against the files in the folder guards odds no test can
+    # reach; an_unreadable_deck_file_is_left_alone_and_reported still holds a
+    # new deck off the unreadable file.
     (
         "a deck file's description is not read",
         "                description = unescape_field(about);",
@@ -326,6 +325,302 @@ MUTATIONS = [
         '        self.focus_ring_width = settings.focus_ring_width();',
         '        let _ = settings;',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+]
+
+# Two windows of Flashcards save into one library (2026-10-09,
+# design-decisions §1239): each wrote its own copy of a deck over the other's,
+# so the last to save threw away the other's cards and reviews.
+TWO = "two_windows_each_add_a_card_to_one_deck_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+FIRST_SIGHT = "a_first_run_window_takes_the_decks_another_kept"
+DECK_GONE = "a_deck_deleted_in_another_window_goes_unless_changed_here"
+CARD_BACK = "a_card_deleted_elsewhere_while_changed_here_is_saved_back"
+SESSION = "a_card_deleted_elsewhere_leaves_a_study_session_in_its_place"
+STAYS_DELETED = "a_card_deleted_in_another_window_stays_deleted"
+CHOSEN_STAYS = "the_chosen_deck_stays_chosen_when_one_before_it_goes"
+UNSAVED = "a_change_not_yet_saved_survives_hearing_another_save"
+OLD_FORMAT = "cards_without_numbers_are_numbered_alike_in_every_window"
+ORDER = "the_decks_are_listed_in_the_order_they_were_made"
+UNREADABLE = "a_save_leaves_a_deck_file_it_cannot_read_as_it_is"
+
+MUTATIONS += [
+    (
+        "a save writes this window's deck over the file",
+        "            (Some(base), Some(theirs)) => merge_decks(base, &mine, &theirs),",
+        "            (Some(_), Some(_)) => mine.clone(),",
+        [TWO],
+    ),
+    (
+        "a save takes the file for unchanged without asking",
+        "        let read = if stamp_now.is_some() && stamp_now == self.file_stamps.get(&id).copied() {",
+        "        let read = if true {",
+        [TWO],
+    ),
+    (
+        "a save over a file it cannot read goes ahead",
+        "            read_deck_file(&file)\n        };",
+        "            read_deck_file(&file).or(Ok::<_, String>(None))\n        };",
+        [UNREADABLE],
+    ),
+    (
+        "a save does not move on what it compares with",
+        "                self.base.insert(id, merged.clone());\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "a failed save says nothing",
+        '            Err(err) => self.keep_failed(format!("Could not keep {}: {err}", mine.name)),',
+        "            Err(_) => {}",
+        [UNSAVED, "closing_while_a_keep_fails_asks_first"],
+    ),
+    (
+        "a first run's changes are measured from nothing",
+        "            app.base = app\n                .decks\n                .iter()\n                .filter_map(|d| Some((d.file_id?, d.clone())))\n                .collect();\n",
+        "            let _ = &app.base;\n",
+        [TWO],
+    ),
+    (
+        "the included decks take file numbers of their own",
+        "            deck.file_id = Some(number);",
+        "            deck.file_id = None;\n            let _ = number;",
+        [TWO],
+    ),
+    (
+        "a card's number is not written",
+        '            out.push_str(&format!("I: {}\\n", card.id));',
+        "",
+        [TWO],
+    ),
+    (
+        "a card's number is not read",
+        "                'I' => id = value.trim().parse::<u64>().ok(),",
+        "                'I' => {}",
+        [TWO],
+    ),
+    (
+        "cards read without numbers are numbered at random",
+        "            .unwrap_or_else(|| self.next_counted_card_id());",
+        "            .unwrap_or_else(|| self.fresh_card_id());",
+        [OLD_FORMAT],
+    ),
+    (
+        "another window's save is not heard",
+        "            if stamp.is_some() && stamp == self.file_stamps.get(id).copied() {",
+        "            if true {",
+        [HEAR],
+    ),
+    (
+        "a reread throws away what is not saved",
+        "                    (Some(base), Some(mine)) if mine != base => merge_decks(base, mine, &theirs),",
+        "                    (Some(base), Some(mine)) if false && mine != base => merge_decks(base, mine, &theirs),",
+        [UNSAVED],
+    ),
+    (
+        "a deck another window made does not come in",
+        "                self.decks.push(theirs.clone());\n                changed = true;",
+        "                changed = true;",
+        [HEAR],
+    ),
+    (
+        "a reread does not move on what the next save compares with",
+        "            self.base.insert(*id, theirs);\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "a deck another window deleted stays",
+        "                (was_kept && !on_disk.contains(&id) && self.base.get(&id) == Some(d)).then_some(id)",
+        "                (was_kept && !on_disk.contains(&id) && self.base.get(&id) == Some(d) && false).then_some(id)",
+        [DECK_GONE],
+    ),
+    (
+        "a deck changed here goes when another window deletes it",
+        "                (was_kept && !on_disk.contains(&id) && self.base.get(&id) == Some(d)).then_some(id)",
+        "                (was_kept && !on_disk.contains(&id)).then_some(id)",
+        [DECK_GONE],
+    ),
+    (
+        "a first-run window keeps a deck the other deleted before saving",
+        "                let was_kept = self.file_stamps.contains_key(&id) || first_sight;",
+        "                let was_kept = self.file_stamps.contains_key(&id);",
+        [FIRST_SIGHT],
+    ),
+    (
+        "the chosen deck is found again by its number, not its file",
+        "            (_, Some(i)) => self.selected_deck = i,",
+        "            (_, Some(_)) => {}",
+        [CHOSEN_STAYS],
+    ),
+    (
+        "a study session keeps cards another window deleted",
+        "            session.retain_cards(|id| deck.find_card(id).is_some());",
+        "            let _ = session;",
+        [SESSION],
+    ),
+    (
+        "a study session loses its place when a card before it goes",
+        "        self.current_pos = self.current_pos.saturating_sub(gone_before);",
+        "        let _ = gone_before;",
+        [SESSION],
+    ),
+    (
+        "the next card comes up face up",
+        "        if self.current_card_id() != shown {\n            self.flipped = false;\n        }",
+        "        let _ = shown;",
+        [SESSION],
+    ),
+    (
+        "a card deleted elsewhere while changed here is dropped",
+        "                deck.cards.push(original);",
+        "                let _ = original;",
+        [CARD_BACK],
+    ),
+    (
+        "the decks are read in the order of their files' numbers",
+        "        decks.sort_by_key(Deck::order);",
+        "",
+        [ORDER],
+    ),
+    (
+        "a new deck has no time it was made",
+        "            .max(1);\n        self.decks.push(deck);",
+        "            .max(1);\n        deck.made = 0;\n        self.decks.push(deck);",
+        [ORDER],
+    ),
+    (
+        "when a deck was made is not written",
+        '            out.push_str(&format!("#@ {}\\n", self.made));',
+        "",
+        [ORDER],
+    ),
+    (
+        "when a deck was made is not read",
+        "                made = when.trim().parse().unwrap_or(0);",
+        "                let _ = when;",
+        [ORDER],
+    ),
+]
+
+# Closing while keeping a deck is failing asks first (2026-10-10): the window
+# went at once, and the cards and reviews the failing keep held went with it.
+CLOSING = "closing_while_a_keep_fails_asks_first"
+DISCARD = "closing_without_saving_goes_without_the_change"
+NEVER_KEPT = "a_failed_keep_is_reported"
+KEEPS_NOTHING = "a_window_that_keeps_nothing_closes_at_once"
+NAMES = "closing_names_every_deck_a_keep_is_failing_for"
+
+MUTATIONS += [
+    (
+        "a close never asks",
+        "            return if self.request_close() {\n"
+        "                Response::Exit\n"
+        "            } else {\n"
+        "                Response::KeepOpen\n"
+        "            };",
+        "            return Response::Exit;",
+        [CLOSING, DISCARD, NEVER_KEPT, NAMES],
+    ),
+    (
+        "a close with everything kept asks",
+        "        if !self.unkept() {\n            return true;\n        }\n        let names",
+        "        let names",
+        [CLOSING],
+    ),
+    (
+        "a close does not try the keep again first",
+        "        if self.unkept() {\n            self.keep_unkept();\n        }\n",
+        "",
+        [CLOSING],
+    ),
+    (
+        "keeping what is not kept keeps nothing",
+        "        for i in unkept {\n            self.keep(i);\n        }",
+        "        let _ = unkept;",
+        [CLOSING],
+    ),
+    (
+        "a deck that never had a file is taken for kept",
+        "            None => true,\n        })",
+        "            None => false,\n        })",
+        [NEVER_KEPT],
+    ),
+    (
+        "a deck that differs from its file is taken for kept",
+        "            Some(id) => self.base.get(&id) != Some(d),",
+        "            Some(id) => self.base.get(&id).is_none(),",
+        [CLOSING, DISCARD, NAMES],
+    ),
+    (
+        "a window that keeps nothing asks at the close",
+        "        self.persist && (0..self.decks.len()).any(|i| self.deck_unkept(i))",
+        "        (0..self.decks.len()).any(|i| self.deck_unkept(i))",
+        [KEEPS_NOTHING],
+    ),
+    (
+        "the question does not say why",
+        '            &format!("{detail} -- try saving again before closing?"),',
+        '            &format!("{} -- try saving again before closing?", detail.len()),',
+        [CLOSING, NEVER_KEPT],
+    ),
+    (
+        "a failed keep's reason is not kept for the question",
+        "        self.keep_error = Some(why);",
+        "        drop(why);",
+        [CLOSING, NEVER_KEPT],
+    ),
+    (
+        "a failed keep's reason is forgotten at once",
+        "        if !self.unkept() {\n            self.keep_error = None;\n        }",
+        "        self.keep_error = None;",
+        [CLOSING],
+    ),
+    (
+        "the question names no deck",
+        '            [one] => format!("{one} has changes that are not saved."),',
+        '            [one] => format!("{} has changes that are not saved.", one.len()),',
+        [CLOSING, NEVER_KEPT],
+    ),
+    (
+        "two decks are not named",
+        '                "{} decks have changes that are not saved: {} and {last}.",',
+        '                "{} decks have changes that are not saved: {}{last}.",',
+        [NAMES],
+    ),
+    (
+        "Save at the question goes even when the keep fails",
+        "                self.keep_unkept();\n                !self.unkept()",
+        "                self.keep_unkept();\n                true",
+        [CLOSING],
+    ),
+    (
+        "Don't save stays",
+        "            unsaved::Choice::Discard => true,",
+        "            unsaved::Choice::Discard => false,",
+        [DISCARD],
+    ),
+    (
+        "Cancel goes",
+        "            unsaved::Choice::Cancel => false,",
+        "            unsaved::Choice::Cancel => true,",
+        [CLOSING],
+    ),
+    (
+        "a key under the question reaches the decks",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))\n"
+        "        {",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Mouse(_))\n"
+        "        {",
+        [CLOSING, DISCARD],
+    ),
+    (
+        "the question is not drawn",
+        "            question.render(&palette, width, height, &mut tree);",
+        "            let _ = (question, palette);",
+        [CLOSING, NEVER_KEPT, NAMES],
     ),
 ]
 

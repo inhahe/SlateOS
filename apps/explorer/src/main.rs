@@ -46,7 +46,7 @@ use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 use pathtext::ShowPath;
 
-use binview::{BinButton, BinHit, BinLayout, BinView};
+use binview::{BinButton, BinEntry, BinHit, BinLayout, BinView, EntryKey};
 use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
 use guitk::disabled::DisabledState;
@@ -61,7 +61,7 @@ use dropzone::{
 use fileops::{
     ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorAnswer, ErrorPolicy, ErrorQuestion,
     FileOpEvent, FileOperation, OperationExecutor, OperationPlan, OperationProgress,
-    OperationSummary, RecycleBin, UndoStack, UndoTarget,
+    OperationSummary, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -675,16 +675,16 @@ enum Modal {
 
 /// What a confirmed erasure from the recycle bin erases.
 ///
-/// The entries are named by id, taken when the question was asked: what the
-/// dialog counted is what is erased. An item recycled while the dialog was up
+/// The entries are named by key -- their bin and their id in it -- taken
+/// when the question was asked: what the dialog counted is what is erased. An item recycled while the dialog was up
 /// -- a delete still running behind it -- was never seen by the user, and
 /// Empty does not take it with the rest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BinAction {
     /// "Delete permanently": the chosen entries.
-    DeleteChosen(Vec<String>),
-    /// "Empty recycle bin": every entry the bin showed.
-    Empty(Vec<String>),
+    DeleteChosen(Vec<EntryKey>),
+    /// "Empty recycle bin": every entry the bins showed.
+    Empty(Vec<EntryKey>),
 }
 
 /// What a confirmation carries out if it is confirmed.
@@ -1351,8 +1351,10 @@ pub struct ExplorerState {
     /// Copy/paste and move/paste were previously irreversible because they were
     /// run by hand rather than through the executor that produces these entries.
     pub undo: UndoStack,
-    /// Recycle bin used by non-permanent delete.
-    pub recycle: RecycleBin,
+    /// The recycle bins a non-permanent delete moves things to: each
+    /// drive's own, so a file never leaves its drive to be binned
+    /// (design-decisions §1238).
+    pub recycle: recyclebin::Bins,
     /// The recycle bin, when the pane is showing it instead of the folder.
     ///
     /// Over the folder rather than in place of it: the folder's listing,
@@ -1523,7 +1525,7 @@ impl ExplorerState {
             window_height: 600,
             sidebar_width: 200.0,
             undo: UndoStack::new(),
-            recycle: RecycleBin::default_location(),
+            recycle: recyclebin::Bins::system(),
             bin: None,
             modal: None,
             show_help: false,
@@ -4056,7 +4058,13 @@ impl ExplorerState {
                     // bin entry rather than a path. Recording `None` here --
                     // which is what this did -- was indistinguishable from a
                     // permanent delete, and undo skipped it silently.
-                    Ok(id) => recycled.push((path.clone(), UndoTarget::Recycled(id))),
+                    Ok((went, id)) => recycled.push((
+                        path.clone(),
+                        UndoTarget::Recycled {
+                            bin: went.bin.root().to_path_buf(),
+                            id,
+                        },
+                    )),
                     Err(e) => {
                         if first_error.is_none() {
                             first_error = Some(format!("{}: {e}", path.shown()));
@@ -6943,14 +6951,22 @@ impl ExplorerState {
     // The recycle bin
     // ======================================================================
 
-    /// Show the recycle bin in the pane, over the folder.
+    /// Show the recycle bins -- every drive's, in one list -- in the pane,
+    /// over the folder.
+    ///
+    /// Each bin is held to its drive's limits first (design-decisions §1238),
+    /// so what the list shows is what the bins keep; what that took is said
+    /// on the status line, after the reset below.
     pub fn open_recycle_bin(&mut self) {
-        self.bin = Some(BinView::open(&self.recycle));
+        let pruned = self
+            .recycle
+            .prune_all(&recyclebin::Limits::user_default(), SystemTime::now());
+        self.bin = Some(BinView::open(&self.recycle.reachable()));
         self.fit_scroll();
         self.menu = None;
         self.row_drag = None;
         self.hover_hint.clear();
-        self.status_message.clear();
+        self.status_message = pruned_message(&pruned).unwrap_or_default();
     }
 
     /// Back to the folder the bin was opened over, read again: a restore may
@@ -6967,7 +6983,7 @@ impl ExplorerState {
     /// Read the bin again, if it is showing.
     fn reload_bin(&mut self) {
         if let Some(bin) = self.bin.as_mut() {
-            bin.reload(&self.recycle);
+            bin.reload(&self.recycle.reachable());
         }
     }
 
@@ -7127,14 +7143,15 @@ impl ExplorerState {
         let Some(bin) = self.bin.as_ref() else {
             return false;
         };
-        let chosen: Vec<recyclebin::RecycleEntry> = bin.chosen().into_iter().cloned().collect();
+        let chosen: Vec<BinEntry> = bin.chosen().into_iter().cloned().collect();
         if chosen.is_empty() {
             self.status_message = "Choose what to put back".to_string();
             return true;
         }
         let mut restored = Vec::new();
         let mut failed = Vec::new();
-        for entry in &chosen {
+        for item in &chosen {
+            let entry = &item.entry;
             let name = entry.display_name();
             let Some(original) = &entry.original_path else {
                 failed.push(format!(
@@ -7142,7 +7159,7 @@ impl ExplorerState {
                 ));
                 continue;
             };
-            match self.recycle.restore(&entry.id) {
+            match item.bin.restore(&entry.id) {
                 Ok(landed) => {
                     let renamed = landed != *original;
                     restored.push((name, landed, renamed));
@@ -7166,10 +7183,10 @@ impl ExplorerState {
                 self.status_message = "Choose what to delete".to_string();
                 return true;
             }
-            [one] => format!("\"{}\"", one.display_name()),
+            [one] => format!("\"{}\"", one.entry.display_name()),
             many => binview::items(many.len()),
         };
-        let ids: Vec<String> = chosen.iter().map(|e| e.id.clone()).collect();
+        let ids: Vec<EntryKey> = chosen.iter().map(|e| e.key()).collect();
         let mut dialog = AlertDialog::destructive(
             "Delete permanently",
             &format!("Permanently delete {subject}?"),
@@ -7190,7 +7207,7 @@ impl ExplorerState {
         let Some(bin) = self.bin.as_ref() else {
             return false;
         };
-        let ids: Vec<String> = bin.entries().iter().map(|e| e.id.clone()).collect();
+        let ids: Vec<EntryKey> = bin.entries().iter().map(BinEntry::key).collect();
         if ids.is_empty() {
             self.status_message = "The recycle bin is empty".to_string();
             return true;
@@ -7217,18 +7234,18 @@ impl ExplorerState {
     ///
     /// `emptying` is only the wording: Empty erases what the bin showed when
     /// it asked, by id, exactly as Delete permanently erases what was chosen.
-    fn erase_from_bin(&mut self, ids: &[String], emptying: bool) {
-        let name_of = |id: &String| {
+    fn erase_from_bin(&mut self, ids: &[EntryKey], emptying: bool) {
+        let name_of = |key: &EntryKey| {
             self.bin
                 .as_ref()
-                .and_then(|bin| bin.entries().iter().find(|e| &e.id == id))
-                .map_or_else(|| id.clone(), recyclebin::RecycleEntry::display_name)
+                .and_then(|bin| bin.find(key))
+                .map_or_else(|| key.id.clone(), |e| e.entry.display_name())
         };
         let mut erased = Vec::new();
         let mut failed = Vec::new();
         for id in ids {
             let name = name_of(id);
-            match self.recycle.delete(id) {
+            match id.bin().delete(&id.id) {
                 Ok(()) => erased.push(name),
                 Err(e) => failed.push(format!("{name}: {e}")),
             }
@@ -7545,7 +7562,7 @@ impl ExplorerState {
             return;
         };
 
-        let outcome = match fileops::execute_undo(&record, Some(&self.recycle)) {
+        let outcome = match fileops::execute_undo(&record) {
             Ok(0) => {
                 Outcome::ok("Nothing to undo: those items were deleted permanently".to_string())
             }
@@ -7680,6 +7697,58 @@ impl ExplorerState {
 pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
     let _turn = settingsfile::testing::config_turn();
     scratchdir::ScratchDir::new(label)
+}
+
+/// What holding the bins to their limits says, when it did anything: how
+/// many items went and how much they held, and any bin it could not prune or
+/// item it could not delete. `None` when nothing went and nothing failed --
+/// the usual case, and not worth a word.
+///
+/// Said because the bins are pruned as they are opened: items vanishing from
+/// a list while the user looks for them, unexplained, would read as a fault.
+fn pruned_message(
+    outcomes: &[(recyclebin::DriveBin, std::io::Result<recyclebin::Pruned>)],
+) -> Option<String> {
+    let mut deleted = 0_u32;
+    let mut freed = 0_u64;
+    let mut problems = Vec::new();
+    for (drive, outcome) in outcomes {
+        match outcome {
+            Ok(pruned) => {
+                deleted = deleted.saturating_add(pruned.deleted);
+                freed = freed.saturating_add(pruned.freed);
+                if !pruned.failed.is_empty() {
+                    problems.push(format!(
+                        "{} on {} could not be deleted",
+                        binview::items(pruned.failed.len()),
+                        drive.label()
+                    ));
+                }
+            }
+            Err(e) => problems.push(format!(
+                "the bin on {} could not be read: {e}",
+                drive.label()
+            )),
+        }
+    }
+    let mut said = match deleted {
+        0 => String::new(),
+        n => format!(
+            "Deleted {} past their drive's recycle-bin limits ({})",
+            binview::items(usize::try_from(n).unwrap_or(usize::MAX)),
+            guitk::bytes::iec(freed)
+        ),
+    };
+    if !problems.is_empty() {
+        if !said.is_empty() {
+            said.push_str("; ");
+        }
+        said.push_str(&format!(
+            "Holding the bins to their limits: {}",
+            problems.join("; ")
+        ));
+    }
+    (!said.is_empty()).then_some(said)
 }
 
 /// What putting things back from the recycle bin says: each restored item's
@@ -7896,7 +7965,6 @@ mod tests {
 
     use super::*;
     use scratchdir::ScratchDir;
-    use std::time::Duration;
 
     /// A copy part-way through, with `secs` of work left.
     fn mid_copy(secs: f64) -> OperationProgress {
@@ -8215,7 +8283,7 @@ mod tests {
         // down (`launched`).
         state.launch = record_launch;
         LAUNCHED.with(|l| l.borrow_mut().clear());
-        state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
+        state.recycle = recyclebin::Bins::single(dir.join(".recycle"));
         state.thumb_gen =
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
         state.queue_thumbnails();
@@ -12089,14 +12157,24 @@ mod tests {
         state.delete_selected(false);
 
         assert!(!root.join("notes.txt").exists(), "the file should be gone");
-        let listed = state.recycle.list().expect("the bin must be listable");
+        let listed = state
+            .recycle
+            .home()
+            .bin
+            .list()
+            .expect("the bin must be listable");
         assert_eq!(
             listed.len(),
             1,
             "a recycled file must appear in the bin, not vanish into a flat directory"
         );
         let id = listed.first().expect("one entry").id.clone();
-        state.recycle.restore(&id).expect("restore must work");
+        state
+            .recycle
+            .home()
+            .bin
+            .restore(&id)
+            .expect("restore must work");
         assert_eq!(
             fs::read_to_string(root.join("notes.txt")).expect("restored"),
             "keep me"
@@ -12124,8 +12202,7 @@ mod tests {
             .undo
             .pop()
             .expect("a recycle must leave an undo record");
-        let restored = fileops::execute_undo(&record, Some(&state.recycle))
-            .expect("undoing a recycle must not error");
+        let restored = fileops::execute_undo(&record).expect("undoing a recycle must not error");
         assert_eq!(restored, 1, "undo must report the one file it put back");
 
         assert_eq!(
@@ -12133,6 +12210,76 @@ mod tests {
             "keep me",
             "undo reported success, so the file must actually be restored"
         );
+    }
+
+    /// Drives of a test's own making: folders standing for mount points.
+    struct PretendDrives(Vec<PathBuf>);
+
+    impl recyclebin::Drives for PretendDrives {
+        fn mounted(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+        fn mount_point_of(&self, path: &Path) -> Option<PathBuf> {
+            recyclebin::longest_mount(&self.0, path)
+        }
+    }
+
+    /// **A file on another drive goes to that drive's own bin and comes back
+    /// from it** -- by Undo and by Restore -- and Delete permanently erases it
+    /// there (design-decisions §1238). Every other test here has one bin, in
+    /// which "the bin" and "its bin" cannot be told apart.
+    #[test]
+    fn a_file_on_another_drive_is_binned_and_brought_back_on_that_drive() {
+        let scratch = temp_dir("two_drives");
+        let root = scratch.dir().to_path_buf();
+        let stick = root.join("stick");
+        fs::create_dir_all(root.join("home")).expect("home");
+        fs::create_dir_all(&stick).expect("stick");
+        write(&stick.join("photo.jpg"), "jpeg");
+        let mut state = state_at(&stick);
+        state.recycle = recyclebin::Bins::new(
+            root.join("home").join(".recycle"),
+            Box::new(PretendDrives(vec![root.clone(), stick.clone()])),
+            None,
+        );
+        let stick_bin = recyclebin::RecycleBin::new(stick.join(".recycle"));
+
+        select_named(&mut state, "photo.jpg");
+        state.delete_selected(false);
+        assert_eq!(
+            stick_bin.list().expect("list").len(),
+            1,
+            "it did not go to the stick's own bin"
+        );
+        assert!(state.recycle.home().bin.list().expect("list").is_empty());
+
+        state.undo_last();
+        assert_eq!(
+            fs::read_to_string(stick.join("photo.jpg")).expect("undone"),
+            "jpeg"
+        );
+
+        select_named(&mut state, "photo.jpg");
+        state.delete_selected(false);
+        state.open_recycle_bin();
+        state.bin.as_mut().expect("bin").choose_only(0);
+        assert!(state.restore_chosen());
+        assert!(
+            stick.join("photo.jpg").exists(),
+            "Restore looked in the home bin"
+        );
+
+        state.leave_recycle_bin();
+        select_named(&mut state, "photo.jpg");
+        state.delete_selected(false);
+        state.open_recycle_bin();
+        let keys: Vec<EntryKey> = bin_of(&state).entries().iter().map(BinEntry::key).collect();
+        state.erase_from_bin(&keys, false);
+        assert!(
+            stick_bin.list().expect("list").is_empty(),
+            "Delete permanently looked in the home bin"
+        );
+        assert!(!stick.join("photo.jpg").exists());
     }
 
     #[test]
@@ -12154,7 +12301,7 @@ mod tests {
         select_named(&mut state, "notes.txt");
         state.delete_selected(false);
 
-        let listed = state.recycle.list().expect("list");
+        let listed = state.recycle.home().bin.list().expect("list");
         assert_eq!(
             listed.len(),
             2,
@@ -13856,7 +14003,7 @@ mod tests {
         assert!(state.modal.is_none(), "the dialog must close once answered");
         assert!(!root.join("notes.txt").exists(), "confirmed, so it goes");
         assert_eq!(
-            state.recycle.list().expect("bin").len(),
+            state.recycle.home().bin.list().expect("bin").len(),
             1,
             "the plain Delete key recycles rather than erases"
         );
@@ -13878,7 +14025,7 @@ mod tests {
             root.join("notes.txt").exists(),
             "a cancelled delete must not delete"
         );
-        assert_eq!(state.recycle.list().expect("bin").len(), 0);
+        assert_eq!(state.recycle.home().bin.list().expect("bin").len(), 0);
     }
 
     /// Enter alone is a refusal, because focus starts on Cancel.
@@ -13928,7 +14075,7 @@ mod tests {
         settle(&mut state);
         assert!(!root.join("notes.txt").exists());
         assert_eq!(
-            state.recycle.list().expect("bin").len(),
+            state.recycle.home().bin.list().expect("bin").len(),
             0,
             "a permanent delete must not leave a recoverable copy in the bin"
         );
@@ -16366,11 +16513,48 @@ mod tests {
         state.bin.as_ref().expect("the recycle bin is not showing")
     }
 
+    /// **Opening the bin holds it to its limits, and says what that took**
+    /// (design-decisions §1238): the thirty days the bin always claimed were
+    /// never applied by anything, and items going from the list unexplained
+    /// would read as a fault.
+    #[test]
+    fn opening_the_bin_holds_it_to_its_limits_and_says_so() {
+        settingsfile::testing::with_scratch_config("explorer-bin-limits", |_| {
+            let scratch = temp_dir("bin_limits");
+            let root = scratch.dir().to_path_buf();
+            let mut state = state_with_recycled(&root, &["a.txt", "b.txt", "c.txt"]);
+            state
+                .recycle
+                .home()
+                .bin
+                .set_limits(Some(&recyclebin::Limits {
+                    max_items: Some(1),
+                    ..recyclebin::Limits::NONE
+                }))
+                .expect("limits");
+            state.open_recycle_bin();
+            assert_eq!(bin_of(&state).entries().len(), 1);
+            assert!(
+                state
+                    .status_message
+                    .starts_with("Deleted 2 items past their drive's recycle-bin limits"),
+                "{}",
+                state.status_message
+            );
+
+            // Within its limits, nothing is said.
+            state.leave_recycle_bin();
+            state.open_recycle_bin();
+            assert_eq!(bin_of(&state).entries().len(), 1);
+            assert!(state.status_message.is_empty(), "{}", state.status_message);
+        });
+    }
+
     fn bin_names(state: &ExplorerState) -> Vec<String> {
         let mut names: Vec<String> = bin_of(state)
             .entries()
             .iter()
-            .map(recyclebin::RecycleEntry::display_name)
+            .map(|e| e.entry.display_name())
             .collect();
         names.sort();
         names
@@ -16380,7 +16564,7 @@ mod tests {
         bin_of(state)
             .entries()
             .iter()
-            .position(|e| e.display_name() == name)
+            .position(|e| e.entry.display_name() == name)
             .unwrap_or_else(|| panic!("{name} is not in the bin"))
     }
 
@@ -16608,8 +16792,9 @@ mod tests {
         let scratch = temp_dir("bin_damaged");
         let root = scratch.dir().to_path_buf();
         let mut state = state_with_recycled(&root, &["a.txt"]);
-        let id = state.recycle.list().unwrap()[0].id.clone();
-        fs::write(state.recycle.root().join(&id).join("meta.txt"), "damaged").unwrap();
+        let home = state.recycle.home().bin;
+        let id = home.list().unwrap()[0].id.clone();
+        fs::write(home.root().join(&id).join("meta.txt"), "damaged").unwrap();
         state.open_recycle_bin();
         state.bin.as_mut().unwrap().choose_only(0);
         assert!(

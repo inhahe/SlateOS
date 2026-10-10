@@ -24,12 +24,24 @@ through `ctutils`/`cmov`).
 |---|---|---|
 | `apps/credmanager` (lane E) | `seal` | the password vault on disk, and its encrypted backup (C-Q25 / §1417) |
 | `gui/credentials` (lane C) | `seal` | the system keyring's vault (moving over from its SHA-256 keystream) |
-| `kernel` diskencrypt (lane A) | `argon2` | the disk key's password derivation (§978, A-Q21) |
+| `kernel` diskencrypt (lane A) | `seal` | each key slot: the disk's master key sealed under a passphrase's Argon2id key (§978, A-Q21, §1523) |
 | `kernel` diskencrypt (lane A) | `aes`, `xts-mode` | the sector cipher: AES-256 in XTS mode, the sector number as the tweak (`aes-xts-plain64`, as LUKS2 and dm-crypt) -- `requests/a-e-vendor-aes-and-xts-mode-for-disk-encryption.md` |
+| `userspace/sshwire` (lane B) | `x25519-dalek` | `ssh`'s and `sshd`'s key exchange, `curve25519-sha256` (RFC 8731): X25519 (RFC 7748) in place of a Diffie-Hellman whose time gave its secret away -- `requests/b-e-vendor-x25519-for-ssh.md` |
 
 Use `seal` unless there is a reason not to: it is the one place the choice of
 cipher, nonce size and Argon2 variant is made, so two callers cannot drift into
-two formats. The kernel uses `argon2` directly because it needs no cipher.
+two formats. The kernel uses it too: it once took `argon2` alone, "because it
+needs no cipher", and then each key slot came to seal the volume's master key
+under the passphrase's key (`requests/a-e-the-kernel-links-seal-not-argon2-directly.md`).
+
+**The kernel's build.** `seal` and what it pulls in run in the kernel's
+`x86_64-unknown-none` target as they are: `cpufeatures` answers "no" on
+`target_os = "none"`, so `chacha20`, `poly1305` and `argon2` take their
+portable paths and the soft-float kernel never touches a vector register.
+Keep that true when updating any of them -- a backend that assumed SSE2, or
+chose AVX2 some other way, would corrupt user registers in the kernel. The
+kernel calls `derive_key`, `encrypt` and `decrypt`, with `KdfParams` of
+19 MiB x 2 x 1 for passphrases and 8 KiB x 1 x 1 for 256-bit recovery keys.
 
 ## What is here
 
@@ -54,6 +66,9 @@ cut from, from its own `.cargo_vcs_info.json`.
 | [`cmov`](cmov/) | 0.5.4 | constant-time conditional moves, under `ctutils` | https://github.com/RustCrypto/utils `5c7e4f9bb31af81bf766360e836b6d633b84dbff` | `0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a` |
 | [`cpubits`](cpubits/) | 0.1.1 | the target's word size as a cfg, which `aes` 0.9 selects its software backend by (2026-10-09) | https://github.com/RustCrypto/utils `bff92a8c33629ae8e9d1407f3b7fea604992dd0f` | `15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae` |
 | [`cpufeatures`](cpufeatures/) | 0.3.1 | run-time CPU feature detection (the AVX2 / SSE2 paths) | https://github.com/RustCrypto/utils `e3ac92bfd33051e146025baa2d0ce79891b7fc73` | `5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566` |
+| [`cpufeatures-0.2`](cpufeatures-0.2/) | 0.2.17 | the same, at the version `curve25519-dalek` 4 asks for: its AVX2 backend's choice, on x86_64 (2026-10-10) | https://github.com/RustCrypto/utils `9d92d5e95ab4c07c5d8bfd024bf2a17e96d20feb` | `59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280` |
+| [`curve25519-dalek`](curve25519-dalek/) | 4.1.3 | Curve25519 arithmetic, under X25519; constant-time throughout (2026-10-10) | https://github.com/dalek-cryptography/curve25519-dalek `5312a0311ec40df95be953eacfa8a11b9a34bc54` | `97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be` |
+| [`curve25519-dalek-derive`](curve25519-dalek-derive/) | 0.1.1 | the procedural macro that writes `curve25519-dalek`'s AVX2 backend's per-feature functions -- x86_64 only (2026-10-10) | https://github.com/dalek-cryptography/curve25519-dalek `72761ca6b4772af985f969db53faf7accbad9b36` | `f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3` |
 | [`crypto-common`](crypto-common/) | 0.2.2 | traits shared by the above | https://github.com/RustCrypto/traits `93dee26c6bde3741a197f1c5f6b7baac277705f3` | `ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453` |
 | [`ctutils`](ctutils/) | 0.4.2 | constant-time comparison and selection | https://github.com/RustCrypto/utils `53f7fc3fa806e6d4e9650675e7b97d3621cff340` | `7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e` |
 | [`digest`](digest/) | 0.11.3 | the hash traits | https://github.com/RustCrypto/traits `2fb9ed8922e244117040bb037a7d141a6a2b8228` | `f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2` |
@@ -63,14 +78,37 @@ cut from, from its own `.cargo_vcs_info.json`.
 | [`password-hash`](password-hash/) | 0.6.1 | PHC password-hash strings -- optional in `argon2`, not enabled | https://github.com/RustCrypto/traits `d1954d88cbde6b6ee839d3a2f78e5b03fd4eaa1d` | `aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b` |
 | [`phc`](phc/) | 0.6.1 | PHC string format under `password-hash` -- not enabled | https://github.com/RustCrypto/formats `02a43929d75c8f7a515dcc240648c26d2fe4ee5f` | `44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892` |
 | [`poly1305`](poly1305/) | 0.9.1 | the Poly1305 one-time authenticator | https://github.com/RustCrypto/universal-hashes `4f5691919d96ec0089ecca4492be7f1848c78fdf` | `6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c` |
+| [`rand_core`](rand_core/) | 0.6.4 | the random-generator traits `x25519-dalek` names; nothing here draws from it -- the caller passes the secret's bytes (2026-10-10) | https://github.com/rust-random/rand `89a1336b934c68ddce548127c6f8afd910b35a18` | `ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c` |
+| [`subtle`](subtle/) | 2.6.1 | constant-time choices and comparisons, under `curve25519-dalek` (2026-10-10) | https://github.com/dalek-cryptography/subtle `5457b5448b021d1da101ababbb854e6657233943` | `13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292` |
 | [`typenum`](typenum/) | 1.20.1 | type-level numbers for `hybrid-array` | https://github.com/paholg/typenum `0db9a0f731981f29266b63586c29fa07e4477b1a` | `b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20` |
 | [`universal-hash`](universal-hash/) | 0.6.1 | the universal-hash traits | https://github.com/RustCrypto/traits `82279a5a9ff2af5f10194b9147fe60050cda1851` | `f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96` |
+| [`x25519-dalek`](x25519-dalek/) | 2.0.1 | X25519 Diffie-Hellman (RFC 7748), for ssh's `curve25519-sha256`; features `static_secrets`, `zeroize`, `precomputed-tables` (2026-10-10) | https://github.com/dalek-cryptography/curve25519-dalek `4ac84dd0668b1d2e51654fcdffe4ae6a687bef00` | `c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277` |
 | [`xts-mode`](xts-mode/) | 0.6.0 | XTS (IEEE 1619) over a 128-bit block cipher, for disk sectors (2026-10-09) | https://github.com/pheki/xts-mode `ce5a8efae75b4bdfe43abf0c6e2b008771896668` | `e2acb658219ff8afdcedc1ea506709b2b32812719eb6ac36f47ae43f50404157` |
+| [`zeroize`](zeroize/) | 1.9.1 | wiping secrets from memory when they are dropped, which `x25519-dalek`'s secrets do (2026-10-10) | https://github.com/RustCrypto/utils `34a6ebcb9b920ec7ae5809e470fce94fe7c0cb55` | `e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879` |
+| [`zeroize_derive`](zeroize_derive/) | 1.5.0 | `#[derive(Zeroize)]`, the procedural macro `zeroize` uses for that (2026-10-10) | https://github.com/RustCrypto/utils `1ea42bb68f560a2909c856b20aa3c62901f6305c` | `3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328` |
 
 `aes`, `cpubits` and `xts-mode` were vendored on 2026-10-09 the same way, by
 `cargo vendor --versioned-dirs` on a scratch crate depending on `aes =
 "=0.9.3"` and `xts-mode = "=0.6.0"`; every other crate that pulled in was
 already here at the same version.
+
+`x25519-dalek` and what it needs were vendored on 2026-10-10 the same way, on
+a scratch crate depending on `x25519-dalek = "=2.0.1"` with
+`default-features = false` and the features `zeroize`, `static_secrets` and
+`precomputed-tables` -- `curve25519-dalek`, `curve25519-dalek-derive`,
+`subtle`, `zeroize`, `zeroize_derive`, `rand_core` and `cpufeatures` 0.2.17
+(beside the 0.3.1 already here, as `cpufeatures-0.2/`); `cfg-if` was already
+here.
+
+**What comes from crates.io instead: the compile-time tools.** Everything
+compiled *into a program* is vendored here. What runs only while compiling
+is not: the two procedural macros above are built with `proc-macro2`,
+`quote`, `syn` and `unicode-ident`, and `curve25519-dalek`'s build script with
+`rustc_version` and `semver`, all from crates.io as every other procedural
+macro and build script in the workspace is, pinned by checksum in
+`Cargo.lock`. (The first four were in the workspace's graph already.) They
+read source and emit source; the code that ends up in a program is the
+macros' own, which is here.
 
 **Two packages named `aes`.** The hand-written `/aes` (lane A's, version
 0.1.0, a workspace member) and this one (0.9.3, a dependency of `seal`'s
@@ -93,11 +131,30 @@ normalised manifest cargo generated when the crate was published.
 - A dependency on another crate in this directory gains `path = "../<name>"`
   beside its version requirement, so it resolves here and never over the
   network. The version requirement stays, so a copy of the wrong version is
-  refused rather than used.
+  refused rather than used. A *dev*-dependency on one gains it too
+  (`x25519-dalek`'s and `curve25519-dalek`'s `rand_core`, 2026-10-10): cargo
+  refuses a manifest whose dependency comes from two places by kind, though
+  nothing here builds those crates' own tests.
 - `cpufeatures` loses its four `libc` dependencies. They exist only for
   aarch64 (Android, Linux, Apple) and loongarch64 Linux; SlateOS is x86_64,
   and vendoring the 5 MB `libc` crate for code no build compiles was not worth
-  it. Those targets would not build from this copy.
+  it. Those targets would not build from this copy. `cpufeatures-0.2` loses
+  the same four, for the same reason (2026-10-10).
+- `curve25519-dalek` loses its `fiat-crypto` dependency, which exists only
+  under `--cfg curve25519_dalek_backend="fiat"` -- a backend nothing here
+  selects -- and would otherwise sit in `Cargo.lock` as a 2.5 MB crate no
+  build compiles (2026-10-10). That backend would not build from this copy.
+- `curve25519-dalek` and `x25519-dalek` lose their `[[bench]]` targets,
+  which need `criterion`, not vendored here (2026-10-10).
+- `curve25519-dalek`, `x25519-dalek` and `rand_core` gain a `[lints.rust]`
+  table for the lints of compilers newer than they are (2026-10-10). A path
+  dependency's warnings show in every build that uses it, and these would
+  have printed thirty-three in every build of `sshwire`:
+  `curve25519-dalek`'s `unused_unsafe` (an intrinsic inside a
+  `#[target_feature]` function needs no `unsafe` block since Rust 1.87) and
+  `stable_features` (on nightly, AVX-512 features stable since 1.89), and the
+  `cfg`s the other two test without declaring (`feature = "bench"`,
+  `doc_cfg`) -- declared, not silenced. The code is as published.
 - `base64ct`, `blake2`, `chacha20` and `poly1305` lose their `[[bench]]`
   target (2026-09-27). Each is `#![feature(test)]`, which only a nightly
   compiler accepts, and the published manifests name them explicitly --
@@ -152,6 +209,13 @@ has drifted.
   would choose at run time; AES-NI uses the XMM registers, which a soft-float
   target does not save. `xts-mode` has no backend of its own: it runs
   whichever `aes` has.
+- **`curve25519-dalek`'s backend.** On x86_64 it builds two -- the portable
+  64-bit one and an AVX2 one -- and chooses at run time through
+  `cpufeatures` 0.2, which says yes to AVX2 only when the CPU has it *and*
+  `XCR0` says the system saves its registers. Both are constant-time; X25519
+  needs neither for that. It is for programs (`sshwire`); it has not been
+  built for the kernel's target and should not be put there without
+  `--cfg curve25519_dalek_backend="serial"` and a check like `aes`'s above.
 
 ## Tests
 
@@ -174,10 +238,16 @@ NIST's `XTSTestVectors.zip` (zip SHA-256
 SHA-256 `8b72c26e9a9405524e4139bba36619fff80e1ef3ef1f317bf36f5e968a133fd1`),
 the form whose tweak is the data unit's number, as a disk's sector number is.
 
+X25519's run in [`seal/tests/x25519_vectors.rs`](seal/tests/x25519_vectors.rs):
+RFC 7748 §5.2 (the function on its two worked examples, and iterated once and
+a thousand times from the base point) and §6.1 (a whole exchange through the
+calls `sshwire` makes), and RFC 8731 §3's check that a small-order public
+key's all-zero secret is told apart (`SharedSecret::was_contributory`).
+
 ## Updating
 
 Re-run `cargo vendor --versioned-dirs` on a scratch crate that depends on
-`chacha20poly1305`, `argon2`, `aes` and `xts-mode` (and on `aead` with its
-`dev` feature, and on `hex-literal`, for the test readers), replace the
-directories, re-apply the `Cargo.toml` changes above, update the table, and
-run `seal`'s tests.
+`chacha20poly1305`, `argon2`, `aes`, `xts-mode` and `x25519-dalek` (and on
+`aead` with its `dev` feature, and on `hex-literal`, for the test readers),
+replace the directories, re-apply the `Cargo.toml` changes above, update the
+table, and run `seal`'s tests.

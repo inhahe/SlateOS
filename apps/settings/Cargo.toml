@@ -51,6 +51,10 @@ notifsettings = { path = "../../gui/notifsettings" }
 # reader the desktop's calendar popup uses.
 calendarstore = { path = "../calendarstore" }
 
+# Every drive's recycle bin and its limits (design-decisions §1238, §1240):
+# the Recycle Bin page reads and sets them, and the file manager applies them.
+recyclebin = { path = "../recyclebin" }
+
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program
 # names the socket layer.

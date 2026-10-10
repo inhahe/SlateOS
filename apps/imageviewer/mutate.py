@@ -646,6 +646,14 @@ MUTATIONS = [
         "",
         ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
     ),
+    (
+        # A bin on every drive (design-decisions §1238): the picture is put
+        # back from the bin it went to, which Delete remembered.
+        "Ctrl+Z looks in the home bin",
+        "        match went_to.bin.restore(&id) {",
+        "        match self.recycle.home().bin.restore(&id) {",
+        ["a_picture_on_a_stick_is_binned_and_put_back_on_the_stick"],
+    ),
 ]
 
 # The WebP half is tested with a hand-built animated WebP (solid-colour

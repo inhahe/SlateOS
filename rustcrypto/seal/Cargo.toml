@@ -30,6 +30,10 @@ blake2 = { path = "../blake2", default-features = false }
 aes = { path = "../aes" }
 xts-mode = { path = "../xts-mode", default-features = false }
 cipher = { path = "../cipher", features = ["dev"] }
+# X25519, which `seal` does not use either: lane B's ssh key exchange does
+# (`curve25519-sha256`, RFC 8731). RFC 7748's vectors run here for the same
+# reason, with the features `sshwire` builds it with.
+x25519-dalek = { path = "../x25519-dalek", default-features = false, features = ["static_secrets", "zeroize", "precomputed-tables"] }
 
 [lints]
 workspace = true

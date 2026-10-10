@@ -18,6 +18,21 @@
 //! - Deck shuffle
 //! - Import/export (simple text format)
 //! - Three sample decks pre-loaded
+//!
+//! # Two windows
+//!
+//! Flashcards may be open twice, and neither window loses the other's cards
+//! or reviews (design-decisions §1239). Each deck is a file of its own; a
+//! save of a deck reads its file first and puts in only what this window
+//! changed -- its name and description, and its cards merged by id -- and a
+//! window is woken to read the decks' folder again when another saves
+//! (`recordfile::Watch::start_folder`). A card's id is kept in the file
+//! (`I:`), random for a card made here and counted in order for one read
+//! without an id, so every window numbers an old deck's cards alike; a new
+//! deck's file has a random number, and the list is in the order the decks
+//! were made (`#@`). A study session holds its cards by id, so cards another
+//! window adds or deletes do not move its place; a card deleted elsewhere
+//! while being edited here is put back by the Save, history and all.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -38,6 +53,7 @@ use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -131,7 +147,7 @@ impl Rating {
 const ALL_RATINGS: [Rating; 4] = [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy];
 
 // ── SM-2 review data per card ───────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ReviewData {
     /// Number of consecutive correct reviews (quality >= 3).
     repetitions: u32,
@@ -349,17 +365,26 @@ pub struct Imported {
     pub history_unreadable: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Card {
-    id: u32,
+    /// Random, and kept in the deck's file (`I:`), so that two windows of the
+    /// program merging one deck know a card for the same card
+    /// (design-decisions §1239). Below 2^52, as every record id is.
+    id: u64,
     front: String,
     back: String,
     tags: Vec<String>,
     review: ReviewData,
 }
 
+impl recordfile::Record for Card {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 impl Card {
-    fn new(id: u32, front: &str, back: &str) -> Self {
+    fn new(id: u64, front: &str, back: &str) -> Self {
         Self {
             id,
             front: String::from(front),
@@ -394,14 +419,20 @@ impl Card {
 }
 
 // ── Deck ────────────────────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Deck {
     name: String,
     description: String,
     cards: Vec<Card>,
-    next_card_id: u32,
-    /// The number of the file it is kept in, once it has one.
-    file_id: Option<u32>,
+    /// The number of the file it is kept in, once it has one. Random (one
+    /// past the largest was what two windows both gave out), but for the
+    /// decks a first run starts on, which are 1, 2 and 3 in every window.
+    file_id: Option<u64>,
+    /// When it was made, in milliseconds since 1970 (`#@` in its file): the
+    /// deck list is in this order, then by file number. 0 for a deck the
+    /// program starts with, and for one kept before decks recorded it --
+    /// whose file numbers were counted, and so in the order they were made.
+    made: u64,
 }
 
 impl Deck {
@@ -410,9 +441,55 @@ impl Deck {
             name: String::from(name),
             description: String::from(description),
             cards: Vec::new(),
-            next_card_id: 1,
             file_id: None,
+            made: 0,
         }
+    }
+
+    /// Where the deck goes in the list: by when it was made, then by its
+    /// file's number.
+    fn order(&self) -> (u64, u64) {
+        (self.made, self.file_id.unwrap_or(u64::MAX))
+    }
+
+    /// A number for a new card that no card here has -- and, being random,
+    /// that another window of the program will not give out either
+    /// ([`recordfile::fresh_id`]). Counted from one, as it was, two windows
+    /// adding a card to one deck gave both the same number, and a merge took
+    /// them for one card.
+    fn fresh_card_id(&self) -> u64 {
+        recordfile::fresh_id(|id| self.cards.iter().any(|c| c.id == id))
+    }
+
+    /// The number a card read from a deck's text without one (`I:`) is
+    /// given: one past the largest here. Counted, not random, so that two
+    /// windows reading one deck written before cards had numbers -- or by
+    /// hand -- number its cards alike, and a merge knows them for the same.
+    fn next_counted_card_id(&self) -> u64 {
+        let next = self
+            .cards
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if next <= recordfile::MAX_ID {
+            next
+        } else {
+            self.fresh_card_id()
+        }
+    }
+
+    /// Number the cards 1, 2, 3 ... in order: the decks a first run starts
+    /// on, so that two windows opened on a first run have the same cards
+    /// (design-decisions §1241).
+    fn numbered_from_one(mut self) -> Self {
+        let mut next = 0_u64;
+        for card in &mut self.cards {
+            next = next.saturating_add(1);
+            card.id = next;
+        }
+        self
     }
 
     /// A deck read back from `export_text`'s format: its `#` name and `##`
@@ -424,34 +501,36 @@ impl Deck {
     fn from_text(text: &str, fallback: &str) -> (Self, Imported) {
         let mut name = None;
         let mut description = String::new();
+        let mut made = 0;
         for line in text.lines() {
             if let Some(about) = line.strip_prefix("## ") {
                 description = unescape_field(about);
             } else if let Some(title) = line.strip_prefix("# ") {
                 name.get_or_insert_with(|| unescape_field(title));
+            } else if let Some(when) = line.strip_prefix("#@ ") {
+                made = when.trim().parse().unwrap_or(0);
             }
         }
         let name = name.filter(|n| !n.trim().is_empty());
         let mut deck = Self::new(name.as_deref().unwrap_or(fallback), &description);
+        deck.made = made;
         let done = deck.import_text(text);
         (deck, done)
     }
 
-    fn add_card(&mut self, front: &str, back: &str) -> u32 {
-        let id = self.next_card_id;
-        self.next_card_id = self.next_card_id.saturating_add(1);
+    fn add_card(&mut self, front: &str, back: &str) -> u64 {
+        let id = self.fresh_card_id();
         self.cards.push(Card::new(id, front, back));
         id
     }
 
-    fn add_card_with_tags(&mut self, front: &str, back: &str, tags: &[&str]) -> u32 {
-        let id = self.next_card_id;
-        self.next_card_id = self.next_card_id.saturating_add(1);
+    fn add_card_with_tags(&mut self, front: &str, back: &str, tags: &[&str]) -> u64 {
+        let id = self.fresh_card_id();
         self.cards.push(Card::new(id, front, back).with_tags(tags));
         id
     }
 
-    fn remove_card(&mut self, card_id: u32) -> bool {
+    fn remove_card(&mut self, card_id: u64) -> bool {
         if let Some(pos) = self.cards.iter().position(|c| c.id == card_id) {
             self.cards.remove(pos);
             true
@@ -460,11 +539,11 @@ impl Deck {
         }
     }
 
-    fn find_card(&self, card_id: u32) -> Option<&Card> {
+    fn find_card(&self, card_id: u64) -> Option<&Card> {
         self.cards.iter().find(|c| c.id == card_id)
     }
 
-    fn find_card_mut(&mut self, card_id: u32) -> Option<&mut Card> {
+    fn find_card_mut(&mut self, card_id: u64) -> Option<&mut Card> {
         self.cards.iter_mut().find(|c| c.id == card_id)
     }
 
@@ -576,6 +655,9 @@ impl Deck {
         let mut out = String::new();
         out.push_str(&format!("# {}\n", escape_field(&self.name)));
         out.push_str(&format!("## {}\n", escape_field(&self.description)));
+        if self.made > 0 {
+            out.push_str(&format!("#@ {}\n", self.made));
+        }
         for card in &self.cards {
             out.push_str(&format!("Q: {}\n", escape_field(&card.front)));
             out.push_str(&format!("A: {}\n", escape_field(&card.back)));
@@ -588,6 +670,10 @@ impl Deck {
             if card.review.total_reviews > 0 {
                 out.push_str(&format!("R: {}\n", card.review.to_line()));
             }
+            // The card's number, so two windows merging the deck know which
+            // card is which (design-decisions §1239). A deck written by hand,
+            // or before this, has none, and its cards are numbered as read.
+            out.push_str(&format!("I: {}\n", card.id));
             out.push('\n');
         }
         out
@@ -607,15 +693,17 @@ impl Deck {
         let mut back: Option<String> = None;
         let mut tags: Vec<String> = Vec::new();
         let mut review = ReviewLine::Absent;
+        let mut id: Option<u64> = None;
 
         for line in text.lines() {
             if line.trim().is_empty() {
                 if let (Some(f), Some(b)) = (front.take(), back.take()) {
                     let seen = std::mem::replace(&mut review, ReviewLine::Absent);
-                    self.push_imported(&f, &b, &tags, seen, &mut done);
+                    self.push_imported(&f, &b, &tags, seen, id.take(), &mut done);
                     tags.clear();
                 }
                 review = ReviewLine::Absent;
+                id = None;
                 continue;
             }
             // Match the prefix on the raw line first so that leading and
@@ -634,12 +722,15 @@ impl Deck {
                     review = ReviewData::from_line(value)
                         .map_or(ReviewLine::Unreadable, ReviewLine::Present);
                 }
+                // A number that is not one is no number: the card is numbered
+                // as it is read, as one with no `I:` line is.
+                'I' => id = value.trim().parse::<u64>().ok(),
                 _ => {}
             }
         }
         // Handle last card if no trailing blank line
         if let (Some(f), Some(b)) = (front.take(), back.take()) {
-            self.push_imported(&f, &b, &tags, review, &mut done);
+            self.push_imported(&f, &b, &tags, review, id, &mut done);
         }
         done
     }
@@ -649,16 +740,24 @@ impl Deck {
     /// Factored out because the loop and the trailing-card case both do it,
     /// and the two copies had already drifted once: the loop cloned the tags
     /// and the tail moved them.
+    ///
+    /// `id` is the number the text gave the card, kept when it is one a card
+    /// can have and no card here has -- a deck read back keeps its numbers,
+    /// so two windows merging it know each card -- and a new one otherwise: a
+    /// card imported into a deck that already has its number is another card.
     fn push_imported(
         &mut self,
         front: &str,
         back: &str,
         tags: &[String],
         review: ReviewLine,
+        id: Option<u64>,
         done: &mut Imported,
     ) {
-        let id = self.next_card_id;
-        self.next_card_id = self.next_card_id.saturating_add(1);
+        let id = id
+            .filter(|id| (1..=recordfile::MAX_ID).contains(id))
+            .filter(|id| !self.cards.iter().any(|c| c.id == *id))
+            .unwrap_or_else(|| self.next_counted_card_id());
         let mut card = Card::new(id, front, back);
         card.tags = tags.to_vec();
         match review {
@@ -734,8 +833,10 @@ fn split_field(line: &str) -> Option<(char, &str)> {
     // 'R' joined the set when the format learned to carry review history.
     // Leaving it out here is why the first run of the round-trip test came
     // back with every schedule at zero: `import_text` matched on 'R', and this
-    // function never let one through to be matched.
-    if !matches!(tag, 'Q' | 'A' | 'T' | 'R') {
+    // function never let one through to be matched. 'I', a card's number,
+    // joined it when two windows of the program came to merge a deck card by
+    // card (design-decisions §1239).
+    if !matches!(tag, 'Q' | 'A' | 'T' | 'R' | 'I') {
         return None;
     }
     let rest = chars.as_str().strip_prefix(':')?;
@@ -812,7 +913,7 @@ enum Field {
 enum Doomed {
     Deck(usize),
     /// A card, by id: its position in the list moves when one before it goes.
-    Card(u32),
+    Card(u64),
 }
 
 /// Everything in the window a pointer can press, as the renderer records it.
@@ -951,8 +1052,11 @@ fn key_char(key: Key, shift: bool) -> Option<char> {
 // ── Study session state ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
 struct StudySession {
-    /// Indices into the deck's card list, in study order.
-    queue: Vec<usize>,
+    /// The cards to study, by id, in study order. By id, not by place in the
+    /// deck's list: another window's save can add cards to the deck or take
+    /// them out while a session runs (design-decisions §1239), which moves
+    /// every place after them.
+    queue: Vec<u64>,
     /// Current position in the queue.
     current_pos: usize,
     /// Whether the current card is flipped (showing the back).
@@ -964,7 +1068,7 @@ struct StudySession {
 }
 
 impl StudySession {
-    fn new(queue: Vec<usize>) -> Self {
+    fn new(queue: Vec<u64>) -> Self {
         Self {
             queue,
             current_pos: 0,
@@ -974,8 +1078,26 @@ impl StudySession {
         }
     }
 
-    fn current_card_idx(&self) -> Option<usize> {
+    fn current_card_id(&self) -> Option<u64> {
         self.queue.get(self.current_pos).copied()
+    }
+
+    /// Take out of the queue the cards `present` says are gone -- deleted in
+    /// another window -- keeping the place: the card shown stays shown, or,
+    /// when it is one of those gone, the next comes up, face down.
+    fn retain_cards(&mut self, present: impl Fn(u64) -> bool) {
+        let shown = self.current_card_id();
+        let gone_before = self
+            .queue
+            .iter()
+            .take(self.current_pos)
+            .filter(|id| !present(**id))
+            .count();
+        self.queue.retain(|id| present(*id));
+        self.current_pos = self.current_pos.saturating_sub(gone_before);
+        if self.current_card_id() != shown {
+            self.flipped = false;
+        }
     }
 
     fn is_complete(&self) -> bool {
@@ -1058,7 +1180,10 @@ struct FlashcardsApp {
     /// Selected card index in deck detail view.
     selected_card: usize,
     /// Card editor state: editing which card ID (None = new card).
-    editing_card_id: Option<u32>,
+    editing_card_id: Option<u64>,
+    /// The card as it was when the editor opened on it, to put back -- with
+    /// the change -- if another window deletes it meanwhile.
+    editing_original: Option<Card>,
     /// The editor's fields. They were strings nothing could type into: the
     /// editor's keys were Enter and Escape, so a card could be neither made
     /// nor changed -- every "New Card" was refused as empty.
@@ -1095,8 +1220,24 @@ struct FlashcardsApp {
     /// Whether the decks have been kept at all yet: the first change keeps
     /// every one, the included decks with it.
     library: bool,
-    /// The number the next kept deck's file gets.
-    next_file_id: u32,
+    /// Each kept deck as this window last read or wrote it, by its file's
+    /// number -- or, on a first run, as it started: what a save merges this
+    /// window's changes against, so another window's, saved since, are kept
+    /// rather than written over (design-decisions §1239).
+    base: HashMap<u64, Deck>,
+    /// Each deck file as this window last read or wrote it, to tell another
+    /// window's save from its own.
+    file_stamps: HashMap<u64, recordfile::Stamp>,
+    /// The watch on the decks' folder, which wakes the window when another
+    /// one saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
+    /// Why the last keep that failed did, while any deck holds a change no
+    /// keep has written: what the close question says. The status line says
+    /// it too, until the next thing it has to say.
+    keep_error: Option<String>,
+    /// The question asked when the window is closed while keeping a deck is
+    /// failing: closing then would lose what the failing keep holds.
+    question: Option<unsaved::Question<Pending>>,
     /// Scroll offset for card lists.
     scroll_offset: usize,
     /// Status message displayed at the bottom.
@@ -1163,11 +1304,20 @@ struct Fingerprint {
 
 impl FlashcardsApp {
     fn new() -> Self {
-        let decks = vec![
+        // Kept as files 1, 2 and 3 in every window, as a counter gave them:
+        // two windows opened on a first run then keep the same decks, which a
+        // merge takes for the same rather than writing each its own copy
+        // (design-decisions §1241).
+        let mut decks = vec![
             Self::sample_world_capitals(),
             Self::sample_programming(),
             Self::sample_science(),
         ];
+        let mut number = 0_u64;
+        for deck in &mut decks {
+            number = number.saturating_add(1);
+            deck.file_id = Some(number);
+        }
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
@@ -1185,6 +1335,7 @@ impl FlashcardsApp {
             tag_filter: None,
             selected_card: 0,
             editing_card_id: None,
+            editing_original: None,
             editor_front: TextInput::new(),
             editor_back: TextInput::new(),
             editor_tags: TextInput::new(),
@@ -1202,7 +1353,11 @@ impl FlashcardsApp {
             wheel: wheel::Accumulator::default(),
             persist: false,
             library: false,
-            next_file_id: 1,
+            base: HashMap::new(),
+            file_stamps: HashMap::new(),
+            watch: None,
+            keep_error: None,
+            question: None,
             scroll_offset: 0,
             status_msg: String::from("Welcome to Flashcards"),
             // Was `shuffle_seed: 42`, incremented by 7 per press, so every
@@ -1222,6 +1377,16 @@ impl FlashcardsApp {
         if let Some(dir) = library_dir() {
             app.load_library(&dir);
         }
+        if !app.library {
+            // A first run: what this window's changes are measured from is
+            // the decks it starts on, which are the decks another window's
+            // first save writes too.
+            app.base = app
+                .decks
+                .iter()
+                .filter_map(|d| Some((d.file_id?, d.clone())))
+                .collect();
+        }
         app
     }
 
@@ -1229,43 +1394,26 @@ impl FlashcardsApp {
     /// that cannot be read is left alone and counted; with none readable --
     /// or no library yet -- the included decks stay.
     fn load_library(&mut self, dir: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let files = deck_files(dir);
+        if files.is_empty() {
             return;
-        };
-        let mut files: Vec<(u32, std::path::PathBuf)> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter_map(|p| {
-                let id = p
-                    .file_name()?
-                    .to_str()?
-                    .strip_suffix(".deck")?
-                    .parse::<u32>()
-                    .ok()?;
-                Some((id, p))
-            })
-            .collect();
-        files.sort_unstable();
+        }
         let mut decks = Vec::new();
         let mut unreadable = 0u32;
         for (id, file) in &files {
-            let deck = safeio::read_to_string_capped(file, MAX_DECK_BYTES)
-                .ok()
-                .map(|read| Deck::from_text(&read.text, &deck_name_of(file)).0)
-                .filter(|deck| !deck.cards.is_empty() || !deck.name.is_empty());
-            match deck {
-                Some(mut deck) => {
+            match read_deck_file(file) {
+                Ok(Some(mut deck)) => {
                     deck.file_id = Some(*id);
+                    self.base.insert(*id, deck.clone());
+                    if let Ok(Some(stamp)) = recordfile::Stamp::of(file) {
+                        self.file_stamps.insert(*id, stamp);
+                    }
                     decks.push(deck);
                 }
-                None => unreadable = unreadable.saturating_add(1),
+                Ok(None) | Err(_) => unreadable = unreadable.saturating_add(1),
             }
         }
-        self.next_file_id = files
-            .iter()
-            .map(|(id, _)| id.saturating_add(1))
-            .max()
-            .unwrap_or(1);
+        decks.sort_by_key(Deck::order);
         if !decks.is_empty() {
             self.decks = decks;
             self.selected_deck = 0;
@@ -1291,11 +1439,16 @@ impl FlashcardsApp {
             return;
         }
         let Some(dir) = library_dir() else {
-            self.status_msg = String::from("Nowhere to keep decks: no home directory is set");
+            self.keep_failed(String::from(
+                "Nowhere to keep decks: no home directory is set",
+            ));
             return;
         };
         if let Err(err) = std::fs::create_dir_all(&dir) {
-            self.status_msg = format!("Could not keep your decks in {}: {err}", dir.shown());
+            self.keep_failed(format!(
+                "Could not keep your decks in {}: {err}",
+                dir.shown()
+            ));
             return;
         }
         let which: Vec<usize> = if self.library {
@@ -1305,24 +1458,312 @@ impl FlashcardsApp {
         };
         self.library = true;
         for i in which {
-            let id = match self.decks.get(i).and_then(|d| d.file_id) {
-                Some(id) => id,
-                None => {
-                    let id = self.next_file_id;
-                    self.next_file_id = self.next_file_id.saturating_add(1);
-                    if let Some(deck) = self.decks.get_mut(i) {
-                        deck.file_id = Some(id);
-                    }
-                    id
+            self.keep_deck(&dir, i);
+        }
+        if !self.unkept() {
+            self.keep_error = None;
+        }
+    }
+
+    /// Say why a keep failed, on the status line and to the close question.
+    fn keep_failed(&mut self, why: String) {
+        self.status_msg.clone_from(&why);
+        self.keep_error = Some(why);
+    }
+
+    /// Whether deck `i` holds a change no keep has written: it differs from
+    /// its file as last read or written, or has never had a file.
+    fn deck_unkept(&self, i: usize) -> bool {
+        self.decks.get(i).is_some_and(|d| match d.file_id {
+            Some(id) => self.base.get(&id) != Some(d),
+            None => true,
+        })
+    }
+
+    /// Whether any deck holds a change no keep has written: one a failing
+    /// keep could not, in a window that keeps its decks.
+    fn unkept(&self) -> bool {
+        self.persist && (0..self.decks.len()).any(|i| self.deck_unkept(i))
+    }
+
+    /// Keep every deck that holds a change no keep has written.
+    fn keep_unkept(&mut self) {
+        let unkept: Vec<usize> = (0..self.decks.len())
+            .filter(|&i| self.deck_unkept(i))
+            .collect();
+        for i in unkept {
+            self.keep(i);
+        }
+    }
+
+    /// Whether the window may close now: at once, unless a deck has changes
+    /// a keep is failing to write, which closing would lose -- a review
+    /// among them, the history this program exists to keep. Asked then, as
+    /// every editor here asks.
+    fn request_close(&mut self) -> bool {
+        if self.unkept() {
+            self.keep_unkept();
+        }
+        if !self.unkept() {
+            return true;
+        }
+        let names: Vec<&str> = (0..self.decks.len())
+            .filter(|&i| self.deck_unkept(i))
+            .filter_map(|i| self.decks.get(i).map(|d| d.name.as_str()))
+            .collect();
+        let message = match names.as_slice() {
+            [one] => format!("{one} has changes that are not saved."),
+            [init @ .., last] if !init.is_empty() => format!(
+                "{} decks have changes that are not saved: {} and {last}.",
+                names.len(),
+                init.join(", ")
+            ),
+            _ => String::from("Your latest changes to your decks are not saved."),
+        };
+        let detail = self
+            .keep_error
+            .clone()
+            .unwrap_or_else(|| String::from("They could not be written"));
+        self.question = Some(unsaved::Question::new(
+            &message,
+            &format!("{detail} -- try saving again before closing?"),
+            Pending::Close,
+        ));
+        false
+    }
+
+    /// Act on the close question's answer: whether the window goes.
+    fn answer(&mut self, choice: unsaved::Choice) -> bool {
+        match choice {
+            // Gone only if the keep now works; if it fails again the error is
+            // on screen and the window stays, which is what Save asked for.
+            unsaved::Choice::Save => {
+                self.keep_unkept();
+                !self.unkept()
+            }
+            unsaved::Choice::Discard => true,
+            unsaved::Choice::Cancel => false,
+        }
+    }
+
+    /// Keep deck `i` in its file in `dir` -- **into what the file holds
+    /// now**, not over it: another window may have saved the deck since this
+    /// one read it, so the file is read first and this window's changes are
+    /// put into it, card by card (design-decisions §1239). Written whole and
+    /// over, as it used to be, the window that saved last threw away the
+    /// other's new cards and every review it had recorded.
+    fn keep_deck(&mut self, dir: &std::path::Path, i: usize) {
+        let id = match self.decks.get(i).and_then(|d| d.file_id) {
+            Some(id) => id,
+            None => {
+                let id = self.fresh_file_id(dir);
+                if let Some(deck) = self.decks.get_mut(i) {
+                    deck.file_id = Some(id);
                 }
-            };
-            let Some(deck) = self.decks.get(i) else {
+                id
+            }
+        };
+        let Some(mine) = self.decks.get(i).cloned() else {
+            return;
+        };
+        let file = dir.join(format!("{id}.deck"));
+        // The file as this window last wrote or read it needs no reading.
+        let stamp_now = recordfile::Stamp::of(&file).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamps.get(&id).copied() {
+            Ok(self.base.get(&id).cloned())
+        } else {
+            read_deck_file(&file)
+        };
+        let theirs = match read {
+            Ok(theirs) => theirs,
+            Err(why) => {
+                self.keep_failed(format!(
+                    "{} was not kept: {} could not be read ({why}), so it is not written over",
+                    mine.name,
+                    file.shown()
+                ));
+                return;
+            }
+        };
+        let merged = match (self.base.get(&id), theirs) {
+            (Some(base), Some(theirs)) => merge_decks(base, &mine, &theirs),
+            // No file: a new deck, a first save, or one another window
+            // deleted while this one changed it -- which puts it back. Or a
+            // file this window never read, which a random number makes the
+            // odds of two 52-bit draws agreeing: this window's, whole.
+            (_, None) | (None, Some(_)) => mine.clone(),
+        };
+        match safeio::write_str_atomically(&file, &merged.export_text()) {
+            Ok(()) => {
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                match recordfile::Stamp::of(&file) {
+                    Ok(Some(stamp)) => {
+                        self.file_stamps.insert(id, stamp);
+                    }
+                    _ => {
+                        self.file_stamps.remove(&id);
+                    }
+                }
+                self.base.insert(id, merged.clone());
+                self.adopt_deck(i, merged);
+            }
+            Err(err) => self.keep_failed(format!("Could not keep {}: {err}", mine.name)),
+        }
+    }
+
+    /// A number for a new deck's file that no deck here has and no file in
+    /// `dir` is named by -- and, being random, that another window will not
+    /// give out either ([`recordfile::fresh_id`]).
+    fn fresh_file_id(&self, dir: &std::path::Path) -> u64 {
+        recordfile::fresh_id(|id| {
+            self.decks.iter().any(|d| d.file_id == Some(id))
+                || dir.join(format!("{id}.deck")).exists()
+        })
+    }
+
+    /// Show `deck` as deck `i`: what this window and the file hold together,
+    /// after a save or another window's. A study session of it loses the
+    /// cards that are gone and keeps its place; the chosen card stays in the
+    /// list.
+    fn adopt_deck(&mut self, i: usize, deck: Deck) {
+        if i == self.selected_deck
+            && let Some(session) = self.study_session.as_mut()
+        {
+            session.retain_cards(|id| deck.find_card(id).is_some());
+        }
+        if let Some(slot) = self.decks.get_mut(i) {
+            *slot = deck;
+        }
+        let cards = self
+            .decks
+            .get(self.selected_deck)
+            .map_or(0, |d| d.cards.len());
+        self.selected_card = self.selected_card.min(cards.saturating_sub(1));
+    }
+
+    /// Read the decks' folder again if another window has written in it since
+    /// this one last read or wrote it, and show what it holds, with this
+    /// window's changes not yet saved put in. Whether what is shown changed.
+    ///
+    /// A deck another window made comes in, in its place; one it deleted
+    /// goes, unless this window has changed it since -- this window's next
+    /// save of it puts it back. A file that cannot be read now -- caught
+    /// mid-write, or broken -- is left for the next notice.
+    fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(dir) = library_dir() else {
+            return false;
+        };
+        let files = deck_files(&dir);
+        if files.is_empty() && !self.library {
+            // Nothing kept anywhere yet.
+            return false;
+        }
+        let file_of = |i: Option<usize>, decks: &[Deck]| i.and_then(|i| decks.get(i)?.file_id);
+        let chosen = file_of(Some(self.selected_deck), &self.decks);
+        let editing = file_of(self.editing_deck, &self.decks);
+        let doomed = match self.pending_delete {
+            Some(Doomed::Deck(i)) => file_of(Some(i), &self.decks),
+            _ => None,
+        };
+        // A window that has kept nothing meets the files of another's first
+        // save: the decks it started on are those files' decks.
+        let first_sight = !self.library;
+        let mut changed = false;
+        for (id, file) in &files {
+            let stamp = recordfile::Stamp::of(file).ok().flatten();
+            if stamp.is_some() && stamp == self.file_stamps.get(id).copied() {
+                continue;
+            }
+            let Ok(Some(mut theirs)) = read_deck_file(file) else {
                 continue;
             };
-            let file = dir.join(format!("{id}.deck"));
-            if let Err(err) = safeio::write_str_atomically(&file, &deck.export_text()) {
-                self.status_msg = format!("Could not keep {}: {err}", deck.name);
+            theirs.file_id = Some(*id);
+            if let Some(i) = self.decks.iter().position(|d| d.file_id == Some(*id)) {
+                let shown = match (self.base.get(id), self.decks.get(i)) {
+                    (Some(base), Some(mine)) if mine != base => merge_decks(base, mine, &theirs),
+                    _ => theirs.clone(),
+                };
+                if self.decks.get(i) != Some(&shown) {
+                    self.adopt_deck(i, shown);
+                    changed = true;
+                }
+            } else {
+                self.decks.push(theirs.clone());
+                changed = true;
             }
+            self.base.insert(*id, theirs);
+            match stamp {
+                Some(stamp) => {
+                    self.file_stamps.insert(*id, stamp);
+                }
+                None => {
+                    self.file_stamps.remove(id);
+                }
+            }
+        }
+        let on_disk: std::collections::HashSet<u64> = files.iter().map(|(id, _)| *id).collect();
+        let gone: Vec<u64> = self
+            .decks
+            .iter()
+            .filter_map(|d| {
+                let id = d.file_id?;
+                let was_kept = self.file_stamps.contains_key(&id) || first_sight;
+                (was_kept && !on_disk.contains(&id) && self.base.get(&id) == Some(d)).then_some(id)
+            })
+            .collect();
+        if !gone.is_empty() {
+            self.decks
+                .retain(|d| d.file_id.is_none_or(|id| !gone.contains(&id)));
+            for id in &gone {
+                self.base.remove(id);
+                self.file_stamps.remove(id);
+            }
+            changed = true;
+        }
+        if !files.is_empty() {
+            self.library = true;
+        }
+        if changed {
+            self.decks.sort_by_key(Deck::order);
+            self.follow_decks(chosen, editing, doomed);
+        }
+        changed
+    }
+
+    /// After the deck list changed under it, put back what was chosen by
+    /// its file -- the list is counted from the top, so the same number names
+    /// another deck -- and let go of what is gone.
+    fn follow_decks(&mut self, chosen: Option<u64>, editing: Option<u64>, doomed: Option<u64>) {
+        let at = |id: Option<u64>, decks: &[Deck]| {
+            id.and_then(|id| decks.iter().position(|d| d.file_id == Some(id)))
+        };
+        match (chosen, at(chosen, &self.decks)) {
+            (_, Some(i)) => self.selected_deck = i,
+            (Some(_), None) => {
+                // Deleted in another window: back to the list, saying so.
+                self.selected_deck = self.selected_deck.min(self.decks.len().saturating_sub(1));
+                self.study_session = None;
+                self.editing_card_id = None;
+                self.editing_original = None;
+                if self.view != AppView::DeckList {
+                    self.view = AppView::DeckList;
+                    self.status_msg =
+                        String::from("The deck you had open was deleted in another window");
+                }
+            }
+            (None, None) => {
+                self.selected_deck = self.selected_deck.min(self.decks.len().saturating_sub(1));
+            }
+        }
+        if editing.is_some() {
+            self.editing_deck = at(editing, &self.decks);
+        }
+        if let Some(Doomed::Deck(_)) = self.pending_delete {
+            self.pending_delete = at(doomed, &self.decks).map(Doomed::Deck);
         }
     }
 
@@ -1340,6 +1781,8 @@ impl FlashcardsApp {
         {
             self.status_msg = format!("Could not remove {}: {err}", file.shown());
         }
+        self.base.remove(&id);
+        self.file_stamps.remove(&id);
     }
 
     /// A deck whose shuffles replay from `seed`, for tests.
@@ -1411,7 +1854,7 @@ impl FlashcardsApp {
             "New Delhi",
             &["asia", "south-asia"],
         );
-        deck
+        deck.numbered_from_one()
     }
 
     fn sample_programming() -> Deck {
@@ -1469,7 +1912,7 @@ impl FlashcardsApp {
             "TCP: reliable, ordered, connection-based. UDP: unreliable, fast, connectionless.",
             &["networking"],
         );
-        deck
+        deck.numbered_from_one()
     }
 
     fn sample_science() -> Deck {
@@ -1516,7 +1959,7 @@ impl FlashcardsApp {
             "Change in heritable characteristics of populations over successive generations",
             &["biology"],
         );
-        deck
+        deck.numbered_from_one()
     }
 
     // ── Deck operations ─────────────────────────────────────────────
@@ -1529,7 +1972,14 @@ impl FlashcardsApp {
     }
 
     fn add_deck(&mut self, name: &str, description: &str) {
-        self.decks.push(Deck::new(name, description));
+        let mut deck = Deck::new(name, description);
+        // When it was made: the list's order, in every window, now that file
+        // numbers are random rather than counted (`Deck::made`).
+        deck.made = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .max(1);
+        self.decks.push(deck);
         self.status_msg = format!("Created deck: {name}");
         self.keep(self.decks.len().saturating_sub(1));
     }
@@ -1562,7 +2012,11 @@ impl FlashcardsApp {
     // ── Study session ───────────────────────────────────────────────
     fn start_study(&mut self) {
         if let Some(deck) = self.decks.get(self.selected_deck) {
-            let due = deck.due_cards(self.current_day);
+            let due: Vec<u64> = deck
+                .due_cards(self.current_day)
+                .into_iter()
+                .filter_map(|i| deck.cards.get(i).map(|c| c.id))
+                .collect();
             if due.is_empty() {
                 self.status_msg = String::from("No cards due for review!");
                 return;
@@ -1579,7 +2033,7 @@ impl FlashcardsApp {
                 self.status_msg = String::from("Deck is empty!");
                 return;
             }
-            let all: Vec<usize> = (0..deck.cards.len()).collect();
+            let all: Vec<u64> = deck.cards.iter().map(|c| c.id).collect();
             self.study_session = Some(StudySession::new(all));
             self.view = AppView::StudyMode;
             self.status_msg = String::from("Studying all cards");
@@ -1596,8 +2050,8 @@ impl FlashcardsApp {
         let day = self.current_day;
         let deck_idx = self.selected_deck;
 
-        // Get the card index from the session, record rating in session
-        let card_idx = {
+        // Get the card from the session, record rating in session
+        let card_id = {
             let session = match &mut self.study_session {
                 Some(s) => s,
                 None => return,
@@ -1605,18 +2059,18 @@ impl FlashcardsApp {
             if !session.flipped {
                 return; // must flip first
             }
-            let idx = match session.current_card_idx() {
-                Some(i) => i,
+            let id = match session.current_card_id() {
+                Some(id) => id,
                 None => return,
             };
             session.record_rating(rating);
-            idx
+            id
         };
 
         // Apply SM-2 to the card in the deck, and keep it: a rating is the
         // history this program exists to keep.
         if let Some(deck) = self.decks.get_mut(deck_idx)
-            && let Some(card) = deck.cards.get_mut(card_idx)
+            && let Some(card) = deck.find_card_mut(card_id)
         {
             card.review.apply_rating(rating, day);
         }
@@ -1836,13 +2290,17 @@ impl FlashcardsApp {
         }
     }
 
-    fn open_edit_card(&mut self, card_id: u32) {
-        let card_data = self
+    fn open_edit_card(&mut self, card_id: u64) {
+        let card = self
             .current_deck()
             .and_then(|deck| deck.find_card(card_id))
+            .cloned();
+        let card_data = card
+            .as_ref()
             .map(|card| (card.front.clone(), card.back.clone(), card.tags.join(", ")));
         if let Some((front, back, tags)) = card_data {
             self.editing_card_id = Some(card_id);
+            self.editing_original = card;
             self.editor_front.set_text(&front);
             self.editor_back.set_text(&back);
             self.editor_tags.set_text(&tags);
@@ -1867,6 +2325,18 @@ impl FlashcardsApp {
             .collect();
 
         if let Some(card_id) = self.editing_card_id {
+            // Deleted by another window while this one was changing it: the
+            // change is the later one, so the card comes back with it -- its
+            // review history with it -- as an edit here beats a deletion
+            // elsewhere in a merge (design-decisions §1239). Nothing was
+            // saved, and nothing said.
+            let original = self.editing_original.clone();
+            if let Some(deck) = self.current_deck_mut()
+                && deck.find_card(card_id).is_none()
+                && let Some(original) = original
+            {
+                deck.cards.push(original);
+            }
             // Update existing card
             if let Some(deck) = self.current_deck_mut()
                 && let Some(card) = deck.find_card_mut(card_id)
@@ -3353,7 +3823,7 @@ impl FlashcardsApp {
             self.render_session_summary(f, session, top + 50.0, content_w);
             return;
         }
-        let Some(card) = session.current_card_idx().and_then(|i| deck.cards.get(i)) else {
+        let Some(card) = session.current_card_id().and_then(|id| deck.find_card(id)) else {
             return;
         };
 
@@ -4007,6 +4477,76 @@ fn library_dir() -> Option<std::path::PathBuf> {
     settingsfile::config_dir().map(|dir| dir.join("flashcards"))
 }
 
+/// Every deck file in `dir`, `<number>.deck`, with its number, in number
+/// order. A name that is not a number and the extension is not a deck file.
+fn deck_files(dir: &std::path::Path) -> Vec<(u64, std::path::PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(u64, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let id = p
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".deck")?
+                .parse::<u64>()
+                .ok()?;
+            Some((id, p))
+        })
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+/// The deck kept in the file at `path` now: `None` when there is no file.
+/// `Err` says why it cannot be read -- too big, or no deck in it -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only what was understood.
+fn read_deck_file(path: &std::path::Path) -> Result<Option<Deck>, String> {
+    let read = match safeio::read_to_string_capped(path, MAX_DECK_BYTES) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            MAX_DECK_BYTES / (1024 * 1024)
+        ));
+    }
+    let deck = Deck::from_text(&read.text, &deck_name_of(path)).0;
+    if deck.cards.is_empty() && deck.name.is_empty() {
+        return Err(String::from("it holds no deck"));
+    }
+    Ok(Some(deck))
+}
+
+/// `mine` if this window changed it since `base`, and `theirs` otherwise.
+fn pick<T: PartialEq + Clone>(base: &T, mine: &T, theirs: &T) -> T {
+    if mine == base {
+        theirs.clone()
+    } else {
+        mine.clone()
+    }
+}
+
+/// This window's changes to a deck since `base`, put into `theirs` -- the
+/// deck as its file holds it now (design-decisions §1239): its name and
+/// description each from this window if it changed them, and its cards
+/// merged by id, so each window's new cards and reviews stand. The same card
+/// reviewed or changed in both windows at once is the later save's.
+fn merge_decks(base: &Deck, mine: &Deck, theirs: &Deck) -> Deck {
+    Deck {
+        name: pick(&base.name, &mine.name, &theirs.name),
+        description: pick(&base.description, &mine.description, &theirs.description),
+        cards: recordfile::merge(&base.cards, &mine.cards, &theirs.cards),
+        file_id: mine.file_id,
+        made: mine.made,
+    }
+}
+
 /// Today, as days since 1970 — the unit `ReviewData` schedules on.
 ///
 /// Falls back to day 0 only if the system clock cannot be read at all. That is
@@ -4067,9 +4607,52 @@ impl App for FlashcardsApp {
         Some(Duration::from_mins(5))
     }
 
+    /// Watch the decks' folder, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its decks.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(dir) = library_dir() {
+            self.watch = recordfile::Watch::start_folder(
+                &dir,
+                |name| name.ends_with(b".deck"),
+                move || waker.wake_by_ref(),
+            );
+        }
+    }
+
+    /// The watch saw a deck file written: read the decks again if another
+    /// window wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
-            return Response::Exit;
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        // The close question takes every key and click while it is up: a
+        // keystroke reaching a deck under it would be a change made while
+        // being asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                if self.answer(choice) {
+                    return Response::Exit;
+                }
+            }
+            return Response::Redraw;
         }
         match self.handle_event(event) {
             EventResult::Consumed => Response::Redraw,
@@ -4085,8 +4668,22 @@ impl App for FlashcardsApp {
         self.height = height;
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // Over everything.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
+}
+
+/// What the close question is holding up. Only the close: everything else
+/// is kept the moment it is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    /// The window, asked to close while keeping a deck is failing.
+    Close,
 }
 
 fn main() -> ExitCode {
@@ -4831,23 +5428,25 @@ mod tests {
         let deck = Deck::new("Test", "A test deck");
         assert_eq!(deck.name, "Test");
         assert!(deck.cards.is_empty());
-        assert_eq!(deck.next_card_id, 1);
+        assert_eq!(deck.made, 0);
     }
 
     #[test]
     fn test_deck_add_card() {
         let mut deck = Deck::new("Test", "");
         let id = deck.add_card("Front", "Back");
-        assert_eq!(id, 1);
+        // Random, below 2^52 (design-decisions §1239), and the card's.
+        assert!((1..=recordfile::MAX_ID).contains(&id));
         assert_eq!(deck.cards.len(), 1);
-        assert_eq!(deck.next_card_id, 2);
+        assert_eq!(deck.cards[0].id, id);
+        assert_ne!(deck.add_card("Two", "B"), id, "two cards got one number");
     }
 
     #[test]
     fn test_deck_add_card_with_tags() {
         let mut deck = Deck::new("Test", "");
         let id = deck.add_card_with_tags("Q", "A", &["tag1", "tag2"]);
-        assert_eq!(id, 1);
+        assert_eq!(deck.cards[0].id, id);
         assert_eq!(deck.cards[0].tags.len(), 2);
     }
 
@@ -4980,9 +5579,9 @@ mod tests {
         for i in 0..20 {
             deck.add_card(&format!("Q{i}"), &format!("A{i}"));
         }
-        let original_ids: Vec<u32> = deck.cards.iter().map(|c| c.id).collect();
+        let original_ids: Vec<u64> = deck.cards.iter().map(|c| c.id).collect();
         deck.shuffle(&mut SeededRng::new(42));
-        let shuffled_ids: Vec<u32> = deck.cards.iter().map(|c| c.id).collect();
+        let shuffled_ids: Vec<u64> = deck.cards.iter().map(|c| c.id).collect();
         // Very unlikely that 20 cards stay in the same order
         assert_ne!(original_ids, shuffled_ids);
     }
@@ -5010,7 +5609,7 @@ mod tests {
     /// re-seeding between samples hides it behind the variety of the seeds
     /// themselves, and the test then passes on exactly the code it exists to
     /// catch.
-    fn consecutive_shuffles(cards: usize, presses: usize) -> Vec<Vec<u32>> {
+    fn consecutive_shuffles(cards: usize, presses: usize) -> Vec<Vec<u64>> {
         let mut deck = Deck::new("Test", "");
         for i in 0..cards {
             deck.add_card(&format!("Q{i}"), &format!("A{i}"));
@@ -5035,7 +5634,7 @@ mod tests {
         // of 20 at the same deck size and press count; the floor is 15, low
         // enough that honest sampling never trips it and far above 4.
         let orders = consecutive_shuffles(20, 40);
-        let mut last_slot: Vec<u32> = Vec::new();
+        let mut last_slot: Vec<u64> = Vec::new();
         for order in &orders {
             if let Some(id) = order.last() {
                 if !last_slot.contains(id) {
@@ -5056,7 +5655,7 @@ mod tests {
         // over 40 presses; the fix reaches 20, at the same deck size and the
         // same press count. The floor is 18.
         let orders = consecutive_shuffles(4, 40);
-        let mut distinct: Vec<Vec<u32>> = Vec::new();
+        let mut distinct: Vec<Vec<u64>> = Vec::new();
         for order in orders {
             if !distinct.contains(&order) {
                 distinct.push(order);
@@ -5267,9 +5866,9 @@ mod tests {
     }
 
     #[test]
-    fn test_study_session_current_card_idx() {
+    fn test_study_session_current_card_id() {
         let session = StudySession::new(vec![5, 10, 15]);
-        assert_eq!(session.current_card_idx(), Some(5));
+        assert_eq!(session.current_card_id(), Some(5));
     }
 
     #[test]
@@ -5277,7 +5876,7 @@ mod tests {
         let session = StudySession::new(vec![]);
         assert!(session.is_complete());
         assert_eq!(session.remaining(), 0);
-        assert_eq!(session.current_card_idx(), None);
+        assert_eq!(session.current_card_id(), None);
     }
 
     #[test]
@@ -5642,9 +6241,9 @@ mod tests {
     fn test_shuffle_key() {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
-        let ids_before: Vec<u32> = app.decks[0].cards.iter().map(|c| c.id).collect();
+        let ids_before: Vec<u64> = app.decks[0].cards.iter().map(|c| c.id).collect();
         app.handle_key("r", false, false);
-        let ids_after: Vec<u32> = app.decks[0].cards.iter().map(|c| c.id).collect();
+        let ids_after: Vec<u64> = app.decks[0].cards.iter().map(|c| c.id).collect();
         assert_ne!(ids_before, ids_after);
     }
 
@@ -5912,8 +6511,7 @@ mod tests {
             ("short", "brief"),
         ];
         for (front, back) in entries {
-            let id = deck.next_card_id;
-            deck.next_card_id += 1;
+            let id = deck.fresh_card_id();
             let mut card = Card::new(id, front, back);
             card.tags = vec![
                 String::from("语言"),
@@ -6252,18 +6850,22 @@ mod tests {
         // `save_card` used to allocate the id itself and push the card
         // directly, duplicating `Deck::add_card`.
         let mut app = FlashcardsApp::new();
-        let next = app.decks[app.selected_deck].next_card_id;
+        let before: Vec<u64> = app.decks[app.selected_deck]
+            .cards
+            .iter()
+            .map(|c| c.id)
+            .collect();
         app.open_new_card_editor();
         app.editor_front.set_text("Q");
         app.editor_back.set_text("A");
         assert!(app.save_card());
         let deck = &app.decks[app.selected_deck];
-        assert_eq!(deck.cards.last().map(|c| c.id), Some(next));
-        assert_eq!(
-            deck.next_card_id,
-            next.saturating_add(1),
-            "the counter moves on however the card was added"
+        let id = deck.cards.last().map(|c| c.id).unwrap();
+        assert!(
+            !before.contains(&id),
+            "the new card took a kept card's number"
         );
+        assert!((1..=recordfile::MAX_ID).contains(&id));
     }
 
     #[test]
@@ -7138,6 +7740,382 @@ mod tests {
         });
     }
 
+    /// **Two windows each add a card to one deck, and both are kept.** Each
+    /// wrote its own copy of the deck whole, so the last to save threw away
+    /// the other's cards (design-decisions §1239). Both opened on a first run:
+    /// the included decks are kept once each, in files 1 to 3.
+    #[test]
+    fn two_windows_each_add_a_card_to_one_deck_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("flashcards-two-windows", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            let mut second = FlashcardsApp::from_settings();
+            let one = first.decks[0].add_card("From the first", "a");
+            first.keep(0);
+            let two = second.decks[0].add_card("From the second", "b");
+            second.keep(0);
+            let again = FlashcardsApp::from_settings();
+            assert!(
+                again.decks[0].find_card(one).is_some(),
+                "the first's card went"
+            );
+            assert!(
+                again.decks[0].find_card(two).is_some(),
+                "the second's card went"
+            );
+            assert_eq!(again.decks.len(), 3, "an included deck is there twice");
+            assert_eq!(kept_files(), ["1.deck", "2.deck", "3.deck"]);
+        });
+    }
+
+    /// Each window's review of a different card is kept: the history is
+    /// what the program is for.
+    #[test]
+    fn two_windows_each_review_a_card_and_both_reviews_are_kept() {
+        settingsfile::testing::with_scratch_config("flashcards-two-reviews", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            let day = first.current_day;
+            let (a, b) = (first.decks[0].cards[0].id, first.decks[0].cards[1].id);
+            first.decks[0].cards[0]
+                .review
+                .apply_rating(Rating::Good, day);
+            first.keep(0);
+            second.decks[0].cards[1]
+                .review
+                .apply_rating(Rating::Easy, day);
+            second.keep(0);
+            let again = FlashcardsApp::from_settings();
+            assert_eq!(again.decks[0].find_card(a).unwrap().review.total_reviews, 1);
+            assert_eq!(again.decks[0].find_card(b).unwrap().review.total_reviews, 1);
+        });
+    }
+
+    /// **A window reads the decks again when another saves**: a deck another
+    /// window made comes in, a card it added is there; its own save is not
+    /// taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("flashcards-hear", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            first.add_deck("Made there", "");
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert!(second.decks.iter().any(|d| d.name == "Made there"));
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+            let card = second.decks[0].add_card("Added here", "h");
+            second.keep(0);
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert!(first.reread_if_changed());
+            assert!(first.decks[0].find_card(card).is_some());
+        });
+    }
+
+    /// A window opened on a first run that hears another's first save takes
+    /// the decks it wrote: the included ones are those decks, not a second
+    /// copy, and one the other deleted before saving is gone here too.
+    #[test]
+    fn a_first_run_window_takes_the_decks_another_kept() {
+        settingsfile::testing::with_scratch_config("flashcards-first-sight", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            let mut second = FlashcardsApp::from_settings();
+            first.decks[0].add_card("New", "n");
+            first.remove_deck(2);
+            first.keep(0);
+            assert!(second.reread_if_changed());
+            let names: Vec<&str> = second.decks.iter().map(|d| d.name.as_str()).collect();
+            let kept: Vec<&str> = first.decks.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(names, kept);
+            assert!(second.decks[0].cards.iter().any(|c| c.front == "New"));
+            // And this window's next save writes only what it changed.
+            second.decks[1].add_card("Here", "h");
+            second.keep(1);
+            assert_eq!(kept_files(), ["1.deck", "2.deck"]);
+        });
+    }
+
+    /// A deck another window deleted goes from this one -- and when this
+    /// window had it open, it goes back to the list and says why -- unless
+    /// this window changed it since, when its next save puts it back.
+    #[test]
+    fn a_deck_deleted_in_another_window_goes_unless_changed_here() {
+        settingsfile::testing::with_scratch_config("flashcards-deck-gone", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            let doomed = first.decks[1].file_id;
+            second.select_deck(1);
+            first.remove_deck(1);
+            assert!(second.reread_if_changed());
+            assert!(second.decks.iter().all(|d| d.file_id != doomed));
+            assert_eq!(second.view, AppView::DeckList);
+            assert!(
+                second.status_msg.contains("deleted in another window"),
+                "{}",
+                second.status_msg
+            );
+
+            // Changed here first: it stays, and goes back on disk.
+            let kept_here = second.decks[1].file_id;
+            second.decks[1].add_card("Mine", "m");
+            first.reread_if_changed();
+            let at = first
+                .decks
+                .iter()
+                .position(|d| d.file_id == kept_here)
+                .unwrap();
+            first.remove_deck(at);
+            second.reread_if_changed();
+            assert!(
+                second.decks.iter().any(|d| d.file_id == kept_here),
+                "a deck changed here went"
+            );
+            second.keep(1);
+            assert!(
+                FlashcardsApp::from_settings()
+                    .decks
+                    .iter()
+                    .any(|d| d.file_id == kept_here),
+                "a deck changed here was not put back"
+            );
+        });
+    }
+
+    /// A card another window deleted while this one was changing it is put
+    /// back by the Save, with the change and its history: an edit here beats
+    /// a deletion elsewhere. It was dropped without a word.
+    #[test]
+    fn a_card_deleted_elsewhere_while_changed_here_is_saved_back() {
+        settingsfile::testing::with_scratch_config("flashcards-card-back", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            let day = first.current_day;
+            first.decks[0].cards[0]
+                .review
+                .apply_rating(Rating::Good, day);
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            let card = second.decks[0].cards[0].id;
+            second.select_deck(0);
+            second.open_edit_card(card);
+            second.editor_back.set_text("Changed here");
+            first.decks[0].remove_card(card);
+            first.keep(0);
+            assert!(second.reread_if_changed());
+            assert!(
+                second.decks[0].find_card(card).is_none(),
+                "control: the other window's delete was heard"
+            );
+            assert!(second.save_card(), "the change was dropped");
+            let again = FlashcardsApp::from_settings();
+            let back = again.decks[0].find_card(card).expect("not put back");
+            assert_eq!(back.back, "Changed here");
+            assert_eq!(back.review.total_reviews, 1, "its history was lost");
+        });
+    }
+
+    /// A card another window deleted leaves a study session here in its
+    /// place: the card shown, gone, gives way to the next, face down; one
+    /// further on is just not reached.
+    #[test]
+    fn a_card_deleted_elsewhere_leaves_a_study_session_in_its_place() {
+        settingsfile::testing::with_scratch_config("flashcards-session", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            second.select_deck(0);
+            second.start_study_all();
+            // One reviewed, so the session is on its second card.
+            second.flip_card();
+            second.rate_card(Rating::Good);
+            second.flip_card();
+            let queue = second.study_session.as_ref().unwrap().queue.clone();
+            let (done, shown, next, later) = (queue[0], queue[1], queue[2], queue[4]);
+            for gone in [done, shown, later] {
+                first.decks[0].remove_card(gone);
+            }
+            first.keep(0);
+            assert!(second.reread_if_changed());
+            let session = second.study_session.as_ref().unwrap();
+            assert_eq!(session.current_card_id(), Some(next), "the place was lost");
+            assert!(!session.flipped, "the next card came up face up");
+            assert!(!session.queue.contains(&later));
+            assert_eq!(session.queue.len(), queue.len() - 3);
+        });
+    }
+
+    /// A card another window deleted stays deleted when this window saves
+    /// next -- one this window made, and one it heard of from the other's
+    /// save. A save compares with what the window last wrote or read; a card
+    /// it has that is not in that is taken for one made since, and kept.
+    #[test]
+    fn a_card_deleted_in_another_window_stays_deleted() {
+        settingsfile::testing::with_scratch_config("flashcards-stays-deleted", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+
+            let made_here = second.decks[0].add_card("Made here", "m");
+            second.keep(0);
+            assert!(first.reread_if_changed());
+            first.decks[0].remove_card(made_here);
+            first.keep(0);
+            second.decks[0].add_card("Later", "l");
+            second.keep(0);
+            assert!(
+                FlashcardsApp::from_settings().decks[0]
+                    .find_card(made_here)
+                    .is_none(),
+                "a card made here and deleted there came back"
+            );
+
+            let heard_of = first.decks[0].add_card("Heard of", "h");
+            first.keep(0);
+            assert!(second.reread_if_changed());
+            first.decks[0].remove_card(heard_of);
+            first.keep(0);
+            second.decks[0].add_card("Later still", "s");
+            second.keep(0);
+            assert!(
+                FlashcardsApp::from_settings().decks[0]
+                    .find_card(heard_of)
+                    .is_none(),
+                "a card heard of here and deleted there came back"
+            );
+        });
+    }
+
+    /// The deck chosen stays chosen when another window deletes one listed
+    /// before it: the list is counted from the top, so the same number names
+    /// the deck after it.
+    #[test]
+    fn the_chosen_deck_stays_chosen_when_one_before_it_goes() {
+        settingsfile::testing::with_scratch_config("flashcards-chosen-stays", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            second.select_deck(2);
+            let chosen = second.decks[2].file_id;
+            first.remove_deck(0);
+            assert!(second.reread_if_changed());
+            assert_eq!(second.decks[second.selected_deck].file_id, chosen);
+            assert_eq!(second.view, AppView::DeckDetail, "the open deck was shut");
+        });
+    }
+
+    /// A change this window could not save -- the write failed -- survives
+    /// another window's save being read, and goes in with the next save.
+    #[test]
+    fn a_change_not_yet_saved_survives_hearing_another_save() {
+        settingsfile::testing::with_scratch_config("flashcards-unsaved-heard", |_| {
+            let mut first = FlashcardsApp::from_settings();
+            first.keep(0);
+            let mut second = FlashcardsApp::from_settings();
+            let file = library_dir().unwrap().join("1.deck");
+            let Some(refusal) = safeio::testing::refuse_replacing(&file).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            let mine = second.decks[0].add_card("Not yet saved", "n");
+            second.keep(0);
+            assert!(
+                second.status_msg.starts_with("Could not keep "),
+                "control: the save went: {}",
+                second.status_msg
+            );
+            drop(refusal);
+            let theirs = first.decks[0].add_card("From the first", "f");
+            first.keep(0);
+            assert!(second.reread_if_changed());
+            assert!(
+                second.decks[0].find_card(mine).is_some(),
+                "a card not yet saved went"
+            );
+            assert!(second.decks[0].find_card(theirs).is_some());
+        });
+    }
+
+    /// A deck written before cards had numbers -- or by hand -- is numbered
+    /// alike in every window that reads it, so two windows' changes to it
+    /// merge rather than doubling every card.
+    #[test]
+    fn cards_without_numbers_are_numbered_alike_in_every_window() {
+        settingsfile::testing::with_scratch_config("flashcards-old-format", |_| {
+            let dir = library_dir().unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("1.deck"),
+                "# Old\n## \nQ: one\nA: 1\n\nQ: two\nA: 2\n\n",
+            )
+            .unwrap();
+            let mut first = FlashcardsApp::from_settings();
+            let mut second = FlashcardsApp::from_settings();
+            let ids = |app: &FlashcardsApp| -> Vec<u64> {
+                app.decks[0].cards.iter().map(|c| c.id).collect()
+            };
+            assert_eq!(ids(&first), ids(&second));
+            first.decks[0].add_card("three", "3");
+            first.keep(0);
+            let day = second.current_day;
+            second.decks[0].cards[0]
+                .review
+                .apply_rating(Rating::Good, day);
+            second.keep(0);
+            let again = FlashcardsApp::from_settings();
+            assert_eq!(again.decks[0].cards.len(), 3, "the cards were doubled");
+        });
+    }
+
+    /// The deck list is in the order the decks were made, though the files'
+    /// numbers are random now.
+    #[test]
+    fn the_decks_are_listed_in_the_order_they_were_made() {
+        settingsfile::testing::with_scratch_config("flashcards-order", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            // Eight, so the random file numbers come out in the order the
+            // decks were made one time in 40320.
+            for name in [
+                "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
+            ] {
+                app.add_deck(name, "");
+            }
+            let names: Vec<String> = FlashcardsApp::from_settings()
+                .decks
+                .iter()
+                .map(|d| d.name.clone())
+                .collect();
+            let made: Vec<String> = app.decks.iter().map(|d| d.name.clone()).collect();
+            assert_eq!(names, made);
+        });
+    }
+
+    /// A save that finds a deck's file broken -- another program wrote it --
+    /// leaves it as it is and says so, rather than writing this window's
+    /// deck over what it could not read.
+    #[test]
+    fn a_save_leaves_a_deck_file_it_cannot_read_as_it_is() {
+        settingsfile::testing::with_scratch_config("flashcards-save-unreadable", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            app.keep(0);
+            let file = library_dir().unwrap().join("1.deck");
+            std::fs::write(&file, b"\xff\xfe not text").unwrap();
+            app.decks[0].add_card("Another", "a");
+            app.keep(0);
+            assert_eq!(std::fs::read(&file).unwrap(), b"\xff\xfe not text");
+            assert!(
+                app.status_msg.contains("could not be read"),
+                "{}",
+                app.status_msg
+            );
+        });
+    }
+
     /// A window made with `new` -- every test's -- writes nothing.
     #[test]
     fn an_app_made_with_new_keeps_nothing() {
@@ -7172,7 +8150,15 @@ mod tests {
                 dir.join("9.deck").exists(),
                 "the unreadable file was removed"
             );
-            assert_eq!(again.next_file_id, 10, "a new deck would overwrite it");
+            // A new deck's number is none a file has, so it cannot be 9.
+            let mut again = again;
+            again.add_deck("New", "");
+            assert_ne!(again.decks.last().and_then(|d| d.file_id), Some(9));
+            assert_eq!(
+                std::fs::read(dir.join("9.deck")).unwrap(),
+                b"\xff\xfe not text",
+                "a new deck overwrote it"
+            );
         });
     }
 
@@ -7214,8 +8200,197 @@ mod tests {
                 "{}",
                 app.status_msg
             );
+            // A deck that never had a file is not kept: closing asks, and
+            // says why.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let asked = rendered_texts(&mut app).join(" ");
+            assert!(
+                asked.contains("Doomed has changes that are not saved."),
+                "{asked}"
+            );
+            // Why, in the question as well as on the status line: twice.
+            assert_eq!(
+                asked.matches("Could not keep your decks in").count(),
+                2,
+                "the question does not say why: {asked}"
+            );
         });
     }
+
+    /// A window that keeps nothing -- every test's, made with `new` -- has
+    /// nothing a close could lose, and goes at once.
+    #[test]
+    fn a_window_that_keeps_nothing_closes_at_once() {
+        let mut app = app_in_deck();
+        app.decks[0].add_card("Never kept", "back");
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    /// The question names every deck a keep is failing for.
+    #[test]
+    fn closing_names_every_deck_a_keep_is_failing_for() {
+        settingsfile::testing::with_scratch_config("flashcards-two-failing", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            app.add_deck("Alpha", "");
+            app.add_deck("Beta", "");
+            let mut refusals = Vec::new();
+            for name in ["Alpha", "Beta"] {
+                let at = app.decks.iter().position(|d| d.name == name).unwrap();
+                let id = app.decks[at].file_id.expect("a kept deck has a file");
+                let file = library_dir().unwrap().join(format!("{id}.deck"));
+                let Some(refusal) = safeio::testing::refuse_replacing(&file).unwrap() else {
+                    // Nothing can refuse this process (a Unix superuser).
+                    return;
+                };
+                refusals.push(refusal);
+                app.decks[at].add_card("Unwritten", "back");
+                app.keep(at);
+            }
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let asked = rendered_texts(&mut app).join(" ");
+            assert!(
+                asked.contains("2 decks have changes that are not saved: Alpha and Beta."),
+                "{asked}"
+            );
+            drop(refusals);
+        });
+    }
+
+    /// Every string the window draws, the close question over it included.
+    fn rendered_texts(app: &mut FlashcardsApp) -> Vec<String> {
+        let (w, h) = (app.width, app.height);
+        app.render(w, h)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A window with every deck kept, then one whose deck's file cannot be
+    /// replaced (it reads, so the keep fails at the write), holding a new
+    /// card in that deck. `None` where nothing can refuse this process.
+    fn failing_to_keep() -> Option<(FlashcardsApp, safeio::testing::NoReplacing)> {
+        let mut app = FlashcardsApp::from_settings();
+        app.add_deck("Kept", "");
+        assert!(!app.unkept(), "control: {}", app.status_msg);
+        let at = app.decks.len() - 1;
+        app.selected_deck = at;
+        let id = app.decks[at].file_id.expect("a kept deck has a file");
+        let file = library_dir().unwrap().join(format!("{id}.deck"));
+        let refusal = safeio::testing::refuse_replacing(&file).unwrap()?;
+        app.decks[at].add_card("Unwritten", "back");
+        app.keep(at);
+        assert!(app.unkept(), "control: the keep failed");
+        Some((app, refusal))
+    }
+
+    /// A window closed while keeping a deck is failing asks first, as every
+    /// editor here asks, rather than going and losing what the keep holds:
+    /// Save tries again and goes only if that works, and Cancel stays.
+    /// Closed with everything kept, it goes without a word.
+    #[test]
+    fn closing_while_a_keep_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("flashcards-closing", |_| {
+            let Some((mut app, refusal)) = failing_to_keep() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            // Wrapped to the dialog's width, so read as one run of words.
+            let asked = rendered_texts(&mut app).join(" ");
+            assert!(
+                asked.contains("Kept has changes that are not saved."),
+                "the question is not drawn: {asked}"
+            );
+            assert!(
+                asked.contains("-- try saving again before closing?"),
+                "{asked}"
+            );
+            // Why, in the question as well as on the status line: twice.
+            assert_eq!(
+                asked.matches("Could not keep Kept:").count(),
+                2,
+                "the question does not say why: {asked}"
+            );
+            // A key under the question reaches nothing: Escape cancels the
+            // question, and does not leave the deck.
+            let view = app.view;
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::Escape))),
+                Response::Redraw
+            ));
+            assert!(app.question.is_none());
+            assert_eq!(app.view, view, "the key reached the window");
+            assert!(app.unkept());
+            // Save while the write still fails: the window stays.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::S))),
+                Response::Redraw
+            ));
+            // Once it can be written, the close keeps it first and goes.
+            drop(refusal);
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+            let again = FlashcardsApp::from_settings();
+            assert!(
+                again
+                    .decks
+                    .iter()
+                    .any(|d| d.cards.iter().any(|c| c.front == "Unwritten"))
+            );
+            // And with everything kept, the close does not ask.
+            let mut kept = FlashcardsApp::from_settings();
+            assert!(kept.request_close());
+        });
+    }
+
+    /// Don't save, at the question, goes without the change.
+    #[test]
+    fn closing_without_saving_goes_without_the_change() {
+        settingsfile::testing::with_scratch_config("flashcards-discard", |_| {
+            let Some((mut app, refusal)) = failing_to_keep() else {
+                return;
+            };
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::D))),
+                Response::Exit
+            ));
+            drop(refusal);
+            let again = FlashcardsApp::from_settings();
+            assert!(
+                !again
+                    .decks
+                    .iter()
+                    .any(|d| d.cards.iter().any(|c| c.front == "Unwritten"))
+            );
+        });
+    }
+
     /// A press on the card turns it over, and so does a press on the button
     /// under it -- two boxes, and a test that pressed only the one on top
     /// could not tell the card's had gone.

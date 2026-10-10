@@ -8,6 +8,7 @@
 
 mod dyndns;
 mod lockscreen;
+mod recyclebins;
 mod remote;
 mod snapshots;
 
@@ -173,6 +174,7 @@ impl SettingsCategory {
                 SettingsPage::Notifications,
                 SettingsPage::DateTime,
                 SettingsPage::Power,
+                SettingsPage::RecycleBin,
                 SettingsPage::About,
             ],
             Self::Network => &[
@@ -221,6 +223,9 @@ pub enum SettingsPage {
     Notifications,
     DateTime,
     Power,
+    /// Every drive's recycle bin, and how long each keeps what is deleted
+    /// (design-decisions §1238, §1240).
+    RecycleBin,
     /// The system, and the notices of the code others wrote that it carries.
     About,
     // Network
@@ -278,6 +283,7 @@ impl SettingsPage {
             Self::Notifications => "notifications",
             Self::DateTime => "date-time",
             Self::Power => "power",
+            Self::RecycleBin => "recycle-bin",
             Self::About => "about",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
@@ -328,6 +334,7 @@ impl SettingsPage {
             Self::Notifications => "Notifications",
             Self::DateTime => "Date & Time",
             Self::Power => "Power",
+            Self::RecycleBin => "Recycle Bin",
             Self::About => "About",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
@@ -775,6 +782,14 @@ pub struct SettingsState {
     /// Where they are read from: the standard folders, or a scratch pair in a
     /// test, which must not read the machine's.
     theme_dirs: appearance::themes::ThemeDirs,
+    /// The installed cursor themes, the built-in one first: read with the
+    /// themes, on entering the Themes page.
+    cursor_themes: Vec<appearance::cursors::CursorThemeInfo>,
+    /// Where cursor themes are looked for after `theme_dirs`: other
+    /// desktops' folders (`~/.icons`, each `$XDG_DATA_DIRS/icons`), as the
+    /// environment names them -- or none in a test, which must not read the
+    /// machine's.
+    cursor_icon_dirs: Vec<PathBuf>,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -795,6 +810,19 @@ pub struct SettingsState {
     /// Without the telling, a delay the user just chose takes effect at the
     /// next sign-in -- the shell claims its idle watch once, at startup.
     session_dirty: bool,
+    /// The recycle-bin limits for a drive with none of its own:
+    /// `recyclebin.yaml`'s `default_limits` (design-decisions §1240).
+    bin_default: recyclebin::Limits,
+    /// Every drive's bin as the Recycle Bin page shows it: read on entry to
+    /// the page, and held rather than re-read while drawing.
+    bin_rows: Vec<recyclebins::DriveRow>,
+    /// Where the bins are found: the machine's, once
+    /// [`load_recycle_bins`](Self::load_recycle_bins) has run, and none
+    /// before -- `new` does no I/O. A test gives bins of its own making.
+    bins: Option<recyclebin::Bins>,
+    /// What the last change to a bin's limits could not do, said on the page
+    /// until the next change.
+    bin_error: Option<String>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -882,10 +910,13 @@ impl DropdownLayout {
 pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
-    /// When quiet hours begin.
+    /// How long notifications are kept, also across restarts
+    /// (`notifsettings::HistoryRetention`, design-decisions §1468).
+    NotifHistory,
     /// How long each picture in a rotation stays up.
     RotationInterval,
     LoginBackground,
+    /// When quiet hours begin.
     QuietStart,
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
@@ -900,6 +931,10 @@ pub enum DropdownId {
     ColorTheme,
     /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
     IconTheme,
+    /// The cursor theme: the pictures the pointer is drawn as, from any
+    /// installed XCursor theme -- a GNOME or KDE one included -- or the
+    /// built-in pointer (`cursor_theme`, design-decisions §1459).
+    CursorTheme,
     /// The shapes of the controls -- a theme's `widget-style`, chosen apart
     /// from its colours (`widget_theme`, design-decisions §1435).
     WidgetTheme,
@@ -907,6 +942,12 @@ pub enum DropdownId {
     /// colours and beside the animation speed, which scales it
     /// (`animation_theme`, §1446).
     AnimationTheme,
+    /// The shape of windows' frames -- a theme's `window-decorations`, chosen
+    /// apart from its colours (`decoration_theme`, design-decisions §1456).
+    DecorationTheme,
+    /// How the taskbar is finished -- a theme's `taskbar-panel`, its gloss and
+    /// its gaps, chosen apart from its colours (`panel_theme`, §1460).
+    PanelTheme,
     /// The clock's time zone, or the machine's own.
     TimeZone,
     /// A zone to add a world clock for.
@@ -940,6 +981,12 @@ pub enum DropdownId {
     DayWallpaperFrom,
     /// When the evening picture goes up.
     NightWallpaperFrom,
+    /// One of the default recycle-bin limits, for a drive with none of its
+    /// own (`recyclebin.yaml`, design-decisions §1240).
+    BinDefault(recyclebins::LimitKind),
+    /// One of the `n`-th drive's own limits, as the Recycle Bin page lists
+    /// the drives.
+    BinDrive(usize, recyclebins::LimitKind),
 }
 
 impl DropdownId {
@@ -951,9 +998,9 @@ impl DropdownId {
     /// rather than trust that whoever adds one also wires it.
     ///
     /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
-    /// `NotifImportance` is absent, and it is the only one: it is one dropdown
-    /// *per program*, in a list that may be empty, so there is no fixed value
-    /// to walk.
+    /// `NotifImportance` and `BinDrive` are absent, and they are the only
+    /// ones: each is one dropdown *per program* or *per drive*, in a list that
+    /// may be empty, so there is no fixed value to walk.
     ///
     /// **Five more used to be absent for no reason anybody had written down**
     /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
@@ -971,17 +1018,21 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 24] = [
+    pub const FIXED: [Self; 31] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::NotifHistory,
         Self::TimeZone,
         Self::AddClock,
         Self::AutoLightFrom,
         Self::AutoDarkFrom,
         Self::ColorTheme,
         Self::IconTheme,
+        Self::CursorTheme,
         Self::WidgetTheme,
         Self::AnimationTheme,
+        Self::DecorationTheme,
+        Self::PanelTheme,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
@@ -996,6 +1047,9 @@ impl DropdownId {
         Self::UiFont,
         Self::LockAfter,
         Self::MonoFont,
+        Self::BinDefault(recyclebins::LimitKind::Age),
+        Self::BinDefault(recyclebins::LimitKind::Size),
+        Self::BinDefault(recyclebins::LimitKind::Count),
     ];
 }
 
@@ -1046,6 +1100,25 @@ impl SettingsState {
     pub fn load_lock_delay(&mut self) {
         self.lock_after_minutes = lockscreen::stored_minutes();
         (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
+    }
+
+    /// Find this machine's recycle bins, and read the user's default limits.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it. The bins
+    /// themselves are read when the page is opened ([`refresh_bins`](Self::refresh_bins)).
+    pub fn load_recycle_bins(&mut self) {
+        self.bins = Some(recyclebin::Bins::system());
+        self.bin_default = recyclebin::Limits::user_default();
+    }
+
+    /// Read every drive's bin again: what it holds and whether it has limits
+    /// of its own. On entry to the page, and after every change to one.
+    fn refresh_bins(&mut self) {
+        self.bin_rows = self
+            .bins
+            .as_ref()
+            .map(recyclebins::drive_rows)
+            .unwrap_or_default();
     }
 
     /// Enumerate the font families installed on this machine.
@@ -1135,6 +1208,46 @@ impl SettingsState {
     /// I/O, and so on entering the Themes page rather than per frame.
     pub fn refresh_themes(&mut self) {
         self.themes = appearance::themes::available_in(&self.theme_dirs);
+        // Where a chosen cursor theme is looked for, in the order it is
+        // (`CursorTheme::cursor`): the theme folders, then other desktops'.
+        let roots: Vec<PathBuf> = self
+            .theme_dirs
+            .user
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.theme_dirs.system.clone()))
+            .chain(self.cursor_icon_dirs.iter().cloned())
+            .collect();
+        self.cursor_themes = appearance::cursors::available_in(&roots);
+    }
+
+    /// The chosen cursor theme's name as shown: its listed name, or its
+    /// folder's name drawn as text for one not installed (any more).
+    fn cursor_theme_name(&self) -> String {
+        let id = self.appearance.settings.cursor_theme.id();
+        self.cursor_themes
+            .iter()
+            .find(|t| t.id.as_os_str() == id)
+            .map_or_else(
+                || std::path::Path::new(id).shown().to_string(),
+                |t| t.name.clone(),
+            )
+    }
+
+    /// What the page says under the cursors: that a chosen theme is not
+    /// installed, so the built-in pointer is drawn -- the desktop says
+    /// nothing, and the row alone would show a name as if all were well.
+    fn cursor_theme_note(&self) -> Option<String> {
+        let theme = &self.appearance.settings.cursor_theme;
+        let id = theme.id();
+        (!theme.is_built_in() && !self.cursor_themes.iter().any(|t| t.id.as_os_str() == id)).then(
+            || {
+                format!(
+                    "No cursor theme called \"{}\" is installed, so the built-in pointer is drawn.",
+                    std::path::Path::new(id).shown()
+                )
+            },
+        )
     }
 
     /// The listed theme a chosen colour or icon theme is, by its id.
@@ -1207,6 +1320,30 @@ impl SettingsState {
             format!("{} -- cannot be used: it {problem}", info.name)
         } else {
             format!("{} -- no motion", info.name)
+        }
+    }
+
+    /// A theme's row in the Window frames list: its name, or why it cannot
+    /// be chosen -- unreadable, or with no `window-decorations` to offer.
+    fn decoration_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_decorations() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no window frames", info.name)
+        }
+    }
+
+    /// A theme's row in the Taskbar panel list: its name, or why it cannot
+    /// be chosen -- unreadable, or with no `taskbar-panel` to offer.
+    fn panel_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_panel() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no taskbar panel", info.name)
         }
     }
 
@@ -1341,6 +1478,12 @@ impl SettingsState {
         // what is installed now.
         if page == SettingsPage::About {
             self.refresh_notices();
+        }
+        // The bins, read on entry: a stick plugged in since the last look
+        // is there, and what each holds is what it holds now.
+        if page == SettingsPage::RecycleBin {
+            self.bin_error = None;
+            self.refresh_bins();
         }
     }
 
@@ -1637,6 +1780,10 @@ impl SettingsState {
             let before = self.lock_after_minutes;
             self.lock_after_minutes = lockscreen::stored_minutes();
             before != self.lock_after_minutes
+        } else if name == recyclebin::USER_SETTINGS {
+            let before = self.bin_default;
+            self.bin_default = recyclebin::Limits::user_default();
+            before != self.bin_default
         } else if name == lockscreen::CLOCK_CONFIG {
             let before = (self.lock_clock_seconds, self.lock_clock_date);
             (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
@@ -1895,11 +2042,19 @@ impl SettingsState {
             font_families: Vec::new(),
             themes: Vec::new(),
             theme_dirs: appearance::themes::ThemeDirs::standard(),
+            cursor_themes: Vec::new(),
+            // The environment's names, not a read of the folders: that is
+            // `refresh_themes`'s, on entering the page.
+            cursor_icon_dirs: appearance::cursors::icon_dirs(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
             lock_clock_date: true,
             session_dirty: false,
+            bin_default: recyclebin::Limits::default(),
+            bin_rows: Vec::new(),
+            bins: None,
+            bin_error: None,
         }
     }
 }
@@ -2677,6 +2832,11 @@ enum ToggleId {
     /// its picture alone. `appearance.yaml`'s `taskbar.labels`, beside
     /// auto-hide's key; the desktop watches the file and redraws the bar.
     TaskbarLabels,
+    /// Whether the `n`-th drive on the Recycle Bin page keeps limits of its
+    /// own. Not a field of `SettingsState`: the answer is whether the drive's
+    /// bin holds a `limits.yaml`, so flipping it writes or removes that file
+    /// ([`SettingsState::set_bin_own_limits`]) rather than a `bool`.
+    BinOwnLimits(usize),
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -3014,6 +3174,37 @@ const LOGIN_BACKGROUNDS: [&str; 4] = [
     "Same as my desktop",
     "A picture",
 ];
+
+/// The lengths of notification history the Notifications page offers, in
+/// days (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+/// The desktop keeps up to `notifsettings::HistoryRetention::MAX_DAYS`.
+const HISTORY_DAYS: [u16; 6] = [0, 1, 7, 30, 90, 365];
+
+/// The lengths offered for keeping notifications: [`HISTORY_DAYS`], with
+/// `current` among them, in its place, when it is none of them -- a value
+/// written into `notifications.yaml` by hand shows as itself, not as the
+/// nearest length on the list, and opening the list changes nothing.
+fn history_choices(current: u16) -> Vec<u16> {
+    let mut days = HISTORY_DAYS.to_vec();
+    if !days.contains(&current) {
+        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());
+        days.insert(at, current);
+    }
+    days
+}
+
+/// How a length of notification history reads on the page.
+fn history_label(days: u16) -> String {
+    match days {
+        0 => String::from("Don't keep"),
+        1 => String::from("1 day"),
+        7 => String::from("1 week"),
+        30 => String::from("1 month"),
+        90 => String::from("3 months"),
+        365 => String::from("1 year"),
+        n => format!("{n} days"),
+    }
+}
 
 /// The Date & Time page's row for the machine's own zone -- the default, and
 /// what the C library and `date` use.
@@ -3897,6 +4088,7 @@ impl SettingsState {
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
             SettingsPage::About => self.build_about_page(sink),
+            SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
@@ -4556,12 +4748,35 @@ impl SettingsState {
         }
         let icon_name = self.theme_name(self.appearance.settings.icon_theme.id());
         s.dropdown_row("Icons", DropdownId::IconTheme, &icon_name);
+        // The pointer's pictures, from any cursor theme installed -- one made
+        // for GNOME or KDE included (lane C, c-e-choose-the-cursor-theme-in-
+        // settings). Its size and colours are on the Visual page, beside the
+        // other things that make the pointer easier to see.
+        let cursor_name = self.cursor_theme_name();
+        s.dropdown_row("Cursors", DropdownId::CursorTheme, &cursor_name);
+        if let Some(note) = self.cursor_theme_note() {
+            s.note(&note, 28.0);
+        }
         // The controls' shapes, a theme's own axis as icons are (lane C,
         // c-e-a-theme-can-shape-the-controls): a theme that sets colours and
         // controls is offered in both lists, and chosen in each apart.
         let widget_name = self.theme_name(self.appearance.settings.widget_theme.id());
         s.dropdown_row("Controls", DropdownId::WidgetTheme, &widget_name);
         if let Some(problem) = self.appearance.settings.widget_theme.problem() {
+            s.note(problem, 28.0);
+        }
+        // Windows' frames and the taskbar's finish, two more axes chosen
+        // apart from the colours (lane C, c-e-choose-the-window-frames-in-
+        // settings and c-e-choose-the-taskbar-panel-in-settings): set before
+        // only by editing `appearance.yaml` by hand.
+        let frames_name = self.theme_name(self.appearance.settings.decoration_theme.id());
+        s.dropdown_row("Window frames", DropdownId::DecorationTheme, &frames_name);
+        if let Some(problem) = self.appearance.settings.decoration_theme.problem() {
+            s.note(problem, 28.0);
+        }
+        let panel_name = self.theme_name(self.appearance.settings.panel_theme.id());
+        s.dropdown_row("Taskbar panel", DropdownId::PanelTheme, &panel_name);
+        if let Some(problem) = self.appearance.settings.panel_theme.problem() {
             s.note(problem, 28.0);
         }
         s.gap();
@@ -5464,6 +5679,116 @@ impl SettingsState {
         );
     }
 
+    /// Every drive's recycle bin, what it holds, and how long it keeps what
+    /// is deleted (design-decisions §1238, §1240).
+    ///
+    /// When the limits are applied is said on the page -- when the file
+    /// manager's Recycle Bin is opened -- so a limit set here is not taken for
+    /// one that deletes the moment it is set, nor one that never does.
+    fn build_recycle_bin_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("Every Drive");
+        s.note(
+            "Each drive keeps what is deleted from it in a bin of its own.",
+            24.0,
+        );
+        s.note(
+            "A bin over a limit loses its oldest items when the Recycle Bin is opened.",
+            28.0,
+        );
+        for kind in recyclebins::LimitKind::ALL {
+            s.dropdown_row(
+                kind.row_label(),
+                DropdownId::BinDefault(kind),
+                &kind.label(kind.get(&self.bin_default)),
+            );
+        }
+        if let Some(error) = &self.bin_error {
+            s.value_row("Not kept", error, pal.ink(pal.red));
+        }
+
+        for (index, row) in self.bin_rows.iter().enumerate() {
+            s.gap();
+            s.section(&row.drive.label());
+            s.value_row("Holds", &row.holds(), pal.text);
+            match &row.own {
+                Ok(own) => {
+                    s.toggle_row(
+                        "Limits of its own",
+                        ToggleId::BinOwnLimits(index),
+                        own.is_some(),
+                    );
+                    match own {
+                        Some(own) => {
+                            for kind in recyclebins::LimitKind::ALL {
+                                s.dropdown_row(
+                                    kind.row_label(),
+                                    DropdownId::BinDrive(index, kind),
+                                    &kind.label(kind.get(own)),
+                                );
+                            }
+                            s.note("These go with the drive to any computer.", 28.0);
+                        }
+                        None => s.note("Keeps to the limits above.", 28.0),
+                    }
+                }
+                // Unreadable limits keep everything (`RecycleBin::limits`):
+                // said, rather than shown as a switch that is off.
+                Err(e) => {
+                    s.value_row("Limits", "Could not be read", pal.ink(pal.red));
+                    s.note(
+                        &format!("Nothing is deleted from it until they can be: {e}"),
+                        28.0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Give the `index`-th drive's bin limits of its own, or take them away
+    /// so it keeps to the default -- the "Limits of its own" switch.
+    ///
+    /// Turned on, its limits start as the default's, so nothing it keeps
+    /// changes until one is chosen.
+    fn set_bin_own_limits(&mut self, index: usize) {
+        let Some(row) = self.bin_rows.get(index) else {
+            return;
+        };
+        let (bin, label) = (row.drive.bin.clone(), row.drive.label());
+        let result = match &row.own {
+            Ok(Some(_)) => bin.set_limits(None),
+            Ok(None) => bin.set_limits(Some(&self.bin_default)),
+            // Unreadable: no switch is drawn for it.
+            Err(_) => return,
+        };
+        self.bin_error = result
+            .err()
+            .map(|e| format!("{label}: its limits could not be changed: {e}"));
+        self.refresh_bins();
+    }
+
+    /// Set one of the `drive`-th bin's own limits to the `index`-th value its
+    /// dropdown offers.
+    fn set_bin_drive_limit(&mut self, drive: usize, kind: recyclebins::LimitKind, index: usize) {
+        let Some(row) = self.bin_rows.get(drive) else {
+            return;
+        };
+        let Ok(Some(mut own)) = row.own.clone() else {
+            return;
+        };
+        let (values, _) = kind.options(&own);
+        let Some(value) = values.get(index).copied() else {
+            return;
+        };
+        kind.set(&mut own, value);
+        let (bin, label) = (row.drive.bin.clone(), row.drive.label());
+        self.bin_error = bin
+            .set_limits(Some(&own))
+            .err()
+            .map(|e| format!("{label}: its limits could not be kept: {e}"));
+        self.refresh_bins();
+    }
+
     /// The font the interface is drawn in.
     ///
     /// Two rows that look redundant and are not: what the user has *chosen*
@@ -5993,6 +6318,23 @@ impl SettingsState {
         s.pill_row("On", PillId::QuietDays, &days);
         s.gap();
 
+        // How long the pane keeps what arrived, also across restarts
+        // (`notifsettings::HistoryRetention`, design-decisions §1468): until
+        // now a choice made only by editing `notifications.yaml` by hand.
+        s.section("History");
+        s.note(
+            "Notifications are kept for this long after they arrive, also across \
+             restarts. Don't keep also clears the ones kept so far; those showing \
+             now stay until they are dismissed or the desktop restarts.",
+            44.0,
+        );
+        s.dropdown_row(
+            "Keep for",
+            DropdownId::NotifHistory,
+            &history_label(self.notif.settings.history.days),
+        );
+        s.gap();
+
         s.section("Programs");
         if self.notif.settings.apps.is_empty() {
             s.note(
@@ -6104,6 +6446,21 @@ impl SettingsState {
                         .unwrap_or(0),
                 )
             }
+            DropdownId::BinDefault(kind) => {
+                let (values, at) = kind.options(&self.bin_default);
+                (values.into_iter().map(|v| kind.label(v)).collect(), at)
+            }
+            DropdownId::BinDrive(drive, kind) => {
+                // A drive whose own limits are gone since the page was drawn
+                // shows the default's, which is what it now keeps to.
+                let limits = self
+                    .bin_rows
+                    .get(drive)
+                    .and_then(|row| row.own.as_ref().ok().copied().flatten())
+                    .unwrap_or(self.bin_default);
+                let (values, at) = kind.options(&limits);
+                (values.into_iter().map(|v| kind.label(v)).collect(), at)
+            }
             DropdownId::NotifImportance(index) => {
                 let items: Vec<String> = notifsettings::Importance::ALL
                     .iter()
@@ -6121,6 +6478,12 @@ impl SettingsState {
                     })
                     .unwrap_or(0);
                 (items, at)
+            }
+            DropdownId::NotifHistory => {
+                let current = self.notif.settings.history.days;
+                let choices = history_choices(current);
+                let at = choices.iter().position(|d| *d == current).unwrap_or(0);
+                (choices.into_iter().map(history_label).collect(), at)
             }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
                 let window = self.notif.settings.quiet_hours.window;
@@ -6183,6 +6546,15 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, at)
             }
+            DropdownId::CursorTheme => {
+                let items = self.cursor_themes.iter().map(|t| t.name.clone()).collect();
+                let at = self
+                    .cursor_themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.cursor_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
             DropdownId::WidgetTheme => {
                 let items = self.themes.iter().map(Self::widget_theme_item).collect();
                 let at = self
@@ -6198,6 +6570,30 @@ impl SettingsState {
                     .themes
                     .iter()
                     .position(|t| t.id.as_os_str() == self.appearance.settings.animation_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::DecorationTheme => {
+                let items = self
+                    .themes
+                    .iter()
+                    .map(Self::decoration_theme_item)
+                    .collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| {
+                        t.id.as_os_str() == self.appearance.settings.decoration_theme.id()
+                    })
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::PanelTheme => {
+                let items = self.themes.iter().map(Self::panel_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.panel_theme.id())
                     .unwrap_or(0);
                 (items, at)
             }
@@ -6946,6 +7342,7 @@ impl SettingsState {
                 self.dragging = Some(id);
                 self.drag_slider_to(id, mx);
             }
+            RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),
             RowHit::Toggle(id) => {
                 // Saved, where it is one of the lock screen's two, by the
                 // whole-snapshot comparison in `handle_event`, as every other
@@ -7216,6 +7613,9 @@ impl SettingsState {
             ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,
             ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
             ToggleId::LockClockDate => &mut self.lock_clock_date,
+            // Not a `bool` of this state's: whether the drive's bin holds a
+            // `limits.yaml`, flipped by `set_bin_own_limits`.
+            ToggleId::BinOwnLimits(_) => return None,
         })
     }
 
@@ -7395,6 +7795,12 @@ impl SettingsState {
                         };
                 }
             }
+            DropdownId::CursorTheme => {
+                if let Some(info) = self.cursor_themes.get(index) {
+                    self.appearance.settings.cursor_theme =
+                        appearance::cursors::CursorTheme::load(&info.id);
+                }
+            }
             DropdownId::WidgetTheme => {
                 if let Some(info) = self.themes.get(index)
                     && info.provides_widget_style()
@@ -7409,6 +7815,22 @@ impl SettingsState {
                 {
                     self.appearance.settings.animation_theme =
                         appearance::themes::AnimationTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::DecorationTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_decorations()
+                {
+                    self.appearance.settings.decoration_theme =
+                        appearance::themes::DecorationTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::PanelTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_panel()
+                {
+                    self.appearance.settings.panel_theme =
+                        appearance::themes::PanelTheme::load_from(&self.theme_dirs, &info.id);
                 }
             }
             DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
@@ -7437,6 +7859,12 @@ impl SettingsState {
                         };
                 }
             }
+            DropdownId::NotifHistory => {
+                let current = self.notif.settings.history.days;
+                if let Some(days) = history_choices(current).get(index) {
+                    self.notif.settings.history.days = *days;
+                }
+            }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
                 let window = self.notif.settings.quiet_hours.window;
                 let start = dropdown_id == DropdownId::QuietStart;
@@ -7449,6 +7877,18 @@ impl SettingsState {
                     };
                 }
             }
+            DropdownId::BinDefault(kind) => {
+                let (values, _) = kind.options(&self.bin_default);
+                if let Some(value) = values.get(index).copied() {
+                    kind.set(&mut self.bin_default, value);
+                    self.bin_error = self
+                        .bin_default
+                        .store_as_user_default()
+                        .err()
+                        .map(|e| format!("The default could not be kept: {e}"));
+                }
+            }
+            DropdownId::BinDrive(drive, kind) => self.set_bin_drive_limit(drive, kind, index),
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
@@ -7892,6 +8332,10 @@ fn main() -> ExitCode {
 
     // The screen-lock delay, for the Lock Screen page.
     state.load_lock_delay();
+
+    // The machine's recycle bins and the default limits, for the Recycle Bin
+    // page; each bin is read when the page is opened.
+    state.load_recycle_bins();
 
     if let Some(page) = page {
         state.open_on(page);
@@ -9042,6 +9486,35 @@ mod tests {
             Some("meta:\n  name: Still\nanimation:\n  enabled: false\n"),
             false,
         );
+        // The other two ways of moving, so each has a theme to describe.
+        theme(
+            "even",
+            Some("meta:\n  name: Even\nanimation:\n  duration-ms: 120\n  easing: linear\n"),
+            false,
+        );
+        theme(
+            "glide",
+            Some("meta:\n  name: Glide\nanimation:\n  duration-ms: 250\n  easing: ease-out\n"),
+            false,
+        );
+        // One whose file cannot be read at all: it is not text.
+        theme("broken", None, false);
+        std::fs::write(
+            dir.dir().join("broken").join("theme.yaml"),
+            b"meta:\n  name: \xff\xfe\n",
+        )
+        .expect("theme file");
+        // And one each of windows' frames and the taskbar's finish.
+        theme(
+            "framed",
+            Some("meta:\n  name: Framed\nwindow-decorations:\n  title-bar:\n    height: 40\n"),
+            false,
+        );
+        theme(
+            "flatbar",
+            Some("meta:\n  name: Flat Bar\ntaskbar-panel:\n  gloss: 0\n"),
+            false,
+        );
         dir
     }
 
@@ -9051,8 +9524,145 @@ mod tests {
             user: Some(dir.dir().to_path_buf()),
             system: dir.dir().join("no-system-themes"),
         };
+        // Nor other desktops' cursor themes: a test that wants some names a
+        // scratch folder of them.
+        app.cursor_icon_dirs = Vec::new();
         app.go_to_page(SettingsPage::Themes);
         app
+    }
+
+    /// Other desktops' cursor themes, as `~/.icons` holds them: Adwaita,
+    /// named by its folder, and one whose `index.theme` names it.
+    fn scratch_cursor_icons() -> scratchdir::ScratchDir {
+        let icons = scratchdir::ScratchDir::new("settings-cursor-icons");
+        for id in ["Adwaita", "Pointy"] {
+            std::fs::create_dir_all(icons.dir().join(id).join("cursors")).expect("cursors folder");
+        }
+        std::fs::write(
+            icons.dir().join("Pointy").join("index.theme"),
+            "[Icon Theme]\nName=Pointy Pointer\n",
+        )
+        .expect("index.theme");
+        icons
+    }
+
+    /// The Themes page over the scratch themes, with the scratch cursor
+    /// themes as other desktops' -- and, in the theme folders, Nord's own
+    /// cursors.
+    fn cursors_state(
+        dir: &scratchdir::ScratchDir,
+        icons: &scratchdir::ScratchDir,
+    ) -> SettingsState {
+        std::fs::create_dir_all(dir.dir().join("nord").join("cursors")).expect("cursors folder");
+        let mut app = themes_state(dir);
+        app.cursor_icon_dirs = vec![icons.dir().to_path_buf()];
+        app.refresh_themes();
+        app
+    }
+
+    /// Every installed cursor theme is listed -- the built-in pointer first,
+    /// then by name, a theme folder's own and other desktops' alike, each by
+    /// the name its `index.theme` gives it, else its folder's -- and the one
+    /// chosen is the pointer's, written as `theme.cursors`
+    /// (c-e-choose-the-cursor-theme-in-settings).
+    #[test]
+    fn the_cursor_theme_is_chosen_from_every_installed_one() {
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let icons = scratch_cursor_icons();
+        let mut app = cursors_state(&dir, &icons);
+        app.show_dropdown(DropdownId::CursorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        assert_eq!(
+            items,
+            [
+                appearance::themes::BUILT_IN_NAME,
+                "Adwaita",
+                "nord",
+                "Pointy Pointer"
+            ],
+        );
+        let at = items.iter().position(|i| i == "Pointy Pointer").unwrap();
+        app.apply_dropdown_selection(at);
+        assert_eq!(
+            app.appearance.settings.cursor_theme.id(),
+            OsStr::new("Pointy")
+        );
+        assert_eq!(
+            ticked_in(&mut app, DropdownId::CursorTheme),
+            "Pointy Pointer"
+        );
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Pointy Pointer"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("is installed")),
+            "an installed theme is said not to be: {texts:?}"
+        );
+        // And back to the built-in pointer.
+        app.show_dropdown(DropdownId::CursorTheme);
+        app.apply_dropdown_selection(0);
+        assert!(app.appearance.settings.cursor_theme.is_built_in());
+    }
+
+    /// A cursor theme chosen as a person chooses it -- a press on the row, a
+    /// press on the entry -- is written to `appearance.yaml`.
+    #[test]
+    fn a_cursor_theme_chosen_is_written() {
+        with_scratch_config("settings-cursor-theme", |_root| {
+            let dir = scratch_themes();
+            let icons = scratch_cursor_icons();
+            let mut app = cursors_state(&dir, &icons);
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(DropdownId::CursorTheme))
+                .expect("the page draws no cursors row");
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(DropdownId::CursorTheme));
+            let at = app
+                .dropdown_layout()
+                .expect("a layout")
+                .items
+                .iter()
+                .position(|i| i == "Adwaita")
+                .expect("Adwaita is listed");
+            press_dropdown_item(&mut app, at);
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.cursor_theme.id(), std::ffi::OsStr::new("Adwaita"));
+        });
+    }
+
+    /// A cursor theme chosen and then removed -- or written by hand and never
+    /// installed -- is shown by its name and said not to be installed: the
+    /// desktop draws the built-in pointer and says nothing.
+    #[test]
+    fn a_cursor_theme_not_installed_says_so() {
+        let dir = scratch_themes();
+        let icons = scratch_cursor_icons();
+        let mut app = cursors_state(&dir, &icons);
+        app.appearance.settings.cursor_theme =
+            appearance::cursors::CursorTheme::load(std::ffi::OsStr::new("Bibata"));
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Bibata"), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t
+                == "No cursor theme called \"Bibata\" is installed, so the built-in pointer is drawn."),
+            "{texts:?}"
+        );
+        // The list opens on the built-in pointer, which is what is drawn.
+        assert_eq!(
+            ticked_in(&mut app, DropdownId::CursorTheme),
+            appearance::themes::BUILT_IN_NAME
+        );
+        // The built-in pointer is never "not installed".
+        app.appearance.settings.cursor_theme = appearance::cursors::CursorTheme::built_in();
+        let texts = drawn_texts(&app);
+        assert!(
+            !texts.iter().any(|t| t.contains("is installed")),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -9183,6 +9793,23 @@ mod tests {
             "the motion is not described: {texts:?}"
         );
         assert!(texts.iter().any(|t| t == "Bouncy"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Rounded"), "{texts:?}");
+
+        // Each way of moving is described as itself, with its own time.
+        for (name, said) in [
+            (
+                "Even",
+                "Moves at an even pace, 120 ms a move at Normal speed.",
+            ),
+            (
+                "Glide",
+                "Glides in and settles, 250 ms a move at Normal speed.",
+            ),
+        ] {
+            pick(&mut app, DropdownId::AnimationTheme, name);
+            let texts = drawn_texts(&app);
+            assert!(texts.iter().any(|t| t == said), "{said:?}: {texts:?}");
+        }
 
         pick(&mut app, DropdownId::AnimationTheme, "Still");
         let texts = drawn_texts(&app);
@@ -9190,13 +9817,245 @@ mod tests {
             texts.iter().any(|t| t.starts_with("Nothing moves")),
             "{texts:?}"
         );
+        // A theme with no motion changes nothing chosen from this list.
+        pick(&mut app, DropdownId::AnimationTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.animation_theme.id(),
+            OsStr::new("still")
+        );
 
-        // Each list chose its own axis only.
+        // Each list chose its own axis only, and opens on the one chosen.
         assert_eq!(app.appearance.settings.color_theme.id(), colors.as_os_str());
         assert_eq!(
             app.appearance.settings.widget_theme.id(),
             OsStr::new("rounded")
         );
+        assert_eq!(ticked_in(&mut app, DropdownId::WidgetTheme), "Rounded");
+        assert_eq!(ticked_in(&mut app, DropdownId::AnimationTheme), "Still");
+    }
+
+    /// The item a dropdown opens on, ticked; the dropdown is put away again.
+    fn ticked_in(app: &mut SettingsState, id: DropdownId) -> String {
+        app.show_dropdown(id);
+        let layout = app.dropdown_layout().expect("a layout");
+        app.open_dropdown = None;
+        layout
+            .items
+            .get(layout.selected)
+            .cloned()
+            .unwrap_or_else(|| panic!("{} is past the list's end", layout.selected))
+    }
+
+    /// Each of a theme's axes has a row of its own on the Themes page, and a
+    /// press on the row opens that axis's list.
+    #[test]
+    fn each_theme_axis_row_opens_its_own_list() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        for id in [
+            DropdownId::CursorTheme,
+            DropdownId::WidgetTheme,
+            DropdownId::AnimationTheme,
+            DropdownId::DecorationTheme,
+            DropdownId::PanelTheme,
+        ] {
+            app.open_dropdown = None;
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(id))
+                .unwrap_or_else(|| panic!("the page draws no row for {id:?}"));
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(id));
+        }
+    }
+
+    /// Windows' frames and the taskbar's finish are chosen in lists of their
+    /// own, each apart from every other axis; a theme with nothing for a list
+    /// cannot be chosen from it (lane C, c-e-choose-the-window-frames-in-
+    /// settings and c-e-choose-the-taskbar-panel-in-settings). Both could be
+    /// set only by editing `appearance.yaml` by hand.
+    #[test]
+    fn window_frames_and_the_taskbar_panel_are_chosen_apart() {
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let colors = app.appearance.settings.color_theme.id().to_os_string();
+        let controls = app.appearance.settings.widget_theme.id().to_os_string();
+        let pick = |app: &mut SettingsState, id: DropdownId, row: &str| {
+            app.show_dropdown(id);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|i| i.starts_with(row))
+                .unwrap_or_else(|| panic!("{row} is not listed: {items:?}"));
+            app.apply_dropdown_selection(at);
+            items
+        };
+
+        let items = pick(&mut app, DropdownId::DecorationTheme, "Framed");
+        assert!(
+            items.contains(&"Nord -- no window frames".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed")
+        );
+        pick(&mut app, DropdownId::DecorationTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed"),
+            "a theme with no frames was chosen for them"
+        );
+
+        let items = pick(&mut app, DropdownId::PanelTheme, "Flat Bar");
+        assert!(
+            items.contains(&"Nord -- no taskbar panel".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.panel_theme.id(),
+            OsStr::new("flatbar")
+        );
+        pick(&mut app, DropdownId::PanelTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.panel_theme.id(),
+            OsStr::new("flatbar"),
+            "a theme with no taskbar panel was chosen for it"
+        );
+
+        // Each list chose its own axis only, opens on the one chosen, and the
+        // page names the choices.
+        assert_eq!(app.appearance.settings.color_theme.id(), colors.as_os_str());
+        assert_eq!(
+            app.appearance.settings.widget_theme.id(),
+            controls.as_os_str()
+        );
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed")
+        );
+        assert_eq!(ticked_in(&mut app, DropdownId::DecorationTheme), "Framed");
+        assert_eq!(ticked_in(&mut app, DropdownId::PanelTheme), "Flat Bar");
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Framed"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Flat Bar"), "{texts:?}");
+    }
+
+    /// A theme whose file cannot be read says why in every list it is in --
+    /// not that it has nothing for the list, which nobody can know -- and
+    /// cannot be chosen from any of them.
+    #[test]
+    fn a_theme_that_cannot_be_read_says_why_in_every_list() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let broken = app
+            .themes
+            .iter()
+            .find(|t| t.id.as_os_str() == std::ffi::OsStr::new("broken"))
+            .expect("control: the broken theme is listed");
+        let problem = broken
+            .problem
+            .as_ref()
+            .expect("control: the broken theme cannot be read");
+        let said = format!("{} -- cannot be used: it {problem}", broken.name);
+        for id in [
+            DropdownId::ColorTheme,
+            DropdownId::WidgetTheme,
+            DropdownId::AnimationTheme,
+            DropdownId::DecorationTheme,
+            DropdownId::PanelTheme,
+        ] {
+            let before = app.appearance.settings.clone();
+            app.show_dropdown(id);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|i| *i == said)
+                .unwrap_or_else(|| panic!("{id:?} does not say {said:?}: {items:?}"));
+            app.apply_dropdown_selection(at);
+            assert!(
+                app.appearance.settings == before,
+                "choosing the broken theme from {id:?} changed the settings"
+            );
+        }
+    }
+
+    /// A theme chosen for an axis that cannot serve it -- not there, or with
+    /// nothing for that axis -- says why under the axis's row: the desktop
+    /// draws the built-in one meanwhile and says nothing.
+    #[test]
+    fn a_theme_chosen_for_an_axis_it_cannot_serve_says_why() {
+        use appearance::themes::{AnimationTheme, DecorationTheme, PanelTheme, WidgetTheme};
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let dirs = app.theme_dirs.clone();
+        let settings = &mut app.appearance.settings;
+        settings.widget_theme = WidgetTheme::load_from(&dirs, OsStr::new("nord"));
+        settings.animation_theme = AnimationTheme::load_from(&dirs, OsStr::new("gone"));
+        settings.decoration_theme = DecorationTheme::load_from(&dirs, OsStr::new("lost"));
+        settings.panel_theme = PanelTheme::load_from(&dirs, OsStr::new("nord"));
+        let problems: Vec<String> = [
+            settings.widget_theme.problem(),
+            settings.animation_theme.problem(),
+            settings.decoration_theme.problem(),
+            settings.panel_theme.problem(),
+        ]
+        .into_iter()
+        .map(|p| p.expect("control: every axis has a problem").to_string())
+        .collect();
+        let distinct: std::collections::HashSet<&String> = problems.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "control: the problems differ: {problems:?}"
+        );
+        let texts = drawn_texts(&app);
+        for problem in &problems {
+            assert!(
+                texts.contains(problem),
+                "{problem:?} is not said: {texts:?}"
+            );
+        }
+    }
+
+    /// Window frames and a taskbar panel chosen as a person chooses them -- a
+    /// press on the row, a press on the entry -- are written to
+    /// `appearance.yaml`.
+    #[test]
+    fn window_frames_and_a_taskbar_panel_chosen_are_written() {
+        with_scratch_config("settings-frames-and-panel", |_root| {
+            let dir = scratch_themes();
+            let mut app = themes_state(&dir);
+            for (id, name) in [
+                (DropdownId::DecorationTheme, "Framed"),
+                (DropdownId::PanelTheme, "Flat Bar"),
+            ] {
+                let (cx, cy) = center_of(&app, RowHit::Dropdown(id))
+                    .unwrap_or_else(|| panic!("the page draws no row for {id:?}"));
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x: cx,
+                    y: cy,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+                assert_eq!(app.open_dropdown, Some(id));
+                let at = app
+                    .dropdown_layout()
+                    .expect("a layout")
+                    .items
+                    .iter()
+                    .position(|i| i == name)
+                    .unwrap_or_else(|| panic!("{name} is not listed"));
+                press_dropdown_item(&mut app, at);
+            }
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.decoration_theme.id(), std::ffi::OsStr::new("framed"));
+            assert_eq!(saved.panel_theme.id(), std::ffi::OsStr::new("flatbar"));
+        });
     }
 
     /// **Each look keeps its own accent** (§1421, the operator's answer to
@@ -9435,6 +10294,103 @@ mod tests {
                 "the desktop was never told to re-read the file"
             );
         });
+    }
+
+    /// Press the `item`-th entry of the open dropdown where the popup drew it.
+    fn press_dropdown_item(state: &mut SettingsState, item: usize) {
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        let row = item
+            .checked_sub(layout.window.start)
+            .expect("the entry is in the popup's window");
+        let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: layout.x + 20.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **How long notifications are kept is chosen on the Notifications
+    /// page**, and the choice is written to `notifications.yaml`, which the
+    /// desktop obeys (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+    /// It could be chosen only by editing the file by hand.
+    #[test]
+    fn how_long_notifications_are_kept_is_chosen_and_written() {
+        with_scratch_config("settings-notif-history", |_root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Notifications;
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(DropdownId::NotifHistory))
+                .expect("the page draws no row for the history");
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(DropdownId::NotifHistory));
+            let layout = app.dropdown_layout().expect("it has no layout");
+            assert_eq!(
+                layout.items,
+                [
+                    "Don't keep",
+                    "1 day",
+                    "1 week",
+                    "1 month",
+                    "3 months",
+                    "1 year"
+                ]
+            );
+            assert_eq!(layout.selected, 2, "the default week is not the one chosen");
+
+            press_dropdown_item(&mut app, 3);
+            assert_eq!(app.notif.settings.history.days, 30);
+            assert_eq!(
+                notifsettings::NotifFile::load().settings.history.days,
+                30,
+                "the choice was not written"
+            );
+            assert!(
+                app.take_notifications_change(),
+                "the desktop was never told to read the file again"
+            );
+
+            app.show_dropdown(DropdownId::NotifHistory);
+            press_dropdown_item(&mut app, 0);
+            assert_eq!(
+                notifsettings::NotifFile::load().settings.history.days,
+                0,
+                "Don't keep was not written"
+            );
+        });
+    }
+
+    /// A length written into the file by hand that is none on the list shows
+    /// as itself -- "12 days" -- in its place among them, and stays chosen;
+    /// the row says so too.
+    #[test]
+    fn a_history_length_not_on_the_list_is_shown_as_itself() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        app.notif.settings.history.days = 12;
+        app.show_dropdown(DropdownId::NotifHistory);
+        let layout = app.dropdown_layout().expect("it has no layout");
+        assert_eq!(
+            layout.items,
+            [
+                "Don't keep",
+                "1 day",
+                "1 week",
+                "12 days",
+                "1 month",
+                "3 months",
+                "1 year"
+            ]
+        );
+        assert_eq!(layout.selected, 3);
+        app.open_dropdown = None;
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "12 days"),
+            "the row does not say 12 days"
+        );
     }
 
     // ---- Measured widths ----
@@ -14078,6 +15034,163 @@ mod tests {
         let cut = elided(&long, 36);
         assert_eq!(cut.chars().count(), 36);
         assert!(cut.ends_with('\u{2026}'));
+    }
+
+    // -- The Recycle Bin page (design-decisions §1238, §1240) ----------------
+
+    /// Drives of a test's own making: folders standing for mount points.
+    struct PretendDrives(Vec<PathBuf>);
+
+    impl recyclebin::Drives for PretendDrives {
+        fn mounted(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+        fn mount_point_of(&self, path: &std::path::Path) -> Option<PathBuf> {
+            recyclebin::longest_mount(&self.0, path)
+        }
+    }
+
+    /// A machine whose system drive is `root` and which has a stick at
+    /// `root/stick`, one file deleted from each, and Settings showing the
+    /// Recycle Bin page for it.
+    fn bins_page(root: &std::path::Path) -> SettingsState {
+        let stick = root.join("stick");
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir_all(&stick).unwrap();
+        let bins = recyclebin::Bins::new(
+            root.join("home").join(".recycle"),
+            Box::new(PretendDrives(vec![root.to_path_buf(), stick.clone()])),
+            None,
+        );
+        for path in [root.join("home").join("a.txt"), stick.join("b.txt")] {
+            std::fs::write(&path, "x").unwrap();
+            bins.recycle(&path).unwrap();
+        }
+        let mut state = SettingsState::new();
+        state.bins = Some(bins);
+        state.go_to_page(SettingsPage::RecycleBin);
+        state
+    }
+
+    /// **Every drive's bin is listed, with what it holds**, the default
+    /// limits above them.
+    #[test]
+    fn the_recycle_bin_page_lists_every_drive_and_what_it_holds() {
+        with_scratch_config("settings-bins-list", |root| {
+            let state = bins_page(root);
+            assert_eq!(state.bin_rows.len(), 2);
+            let text = format!("{:?}", state.render_tree());
+            assert!(text.contains("Every Drive"), "{text}");
+            assert!(text.contains("Home drive"), "{text}");
+            assert!(text.contains("stick"), "the stick's bin is not listed");
+            assert!(text.contains("1 item"), "{text}");
+            assert!(text.contains("Keeps to the limits above."), "{text}");
+            assert!(text.contains("30 days"), "the default is not shown");
+        });
+    }
+
+    /// **The default limits are chosen and kept** in the user's settings.
+    #[test]
+    fn the_default_limits_are_chosen_and_kept() {
+        with_scratch_config("settings-bins-default", |root| {
+            let mut state = bins_page(root);
+            state.show_dropdown(DropdownId::BinDefault(recyclebins::LimitKind::Age));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "1 week")
+                .expect("a week is offered");
+            state.apply_dropdown_selection(at);
+            assert!(state.bin_error.is_none(), "{:?}", state.bin_error);
+            assert_eq!(
+                recyclebin::Limits::user_default().max_age,
+                Some(std::time::Duration::from_hours(7 * 24))
+            );
+            assert!(format!("{:?}", state.render_tree()).contains("1 week"));
+        });
+    }
+
+    /// **A drive given limits of its own keeps them in its bin**, starting
+    /// from the default's; taken away, it keeps to the default again.
+    #[test]
+    fn a_drive_given_limits_of_its_own_keeps_them_in_its_bin() {
+        with_scratch_config("settings-bins-own", |root| {
+            let mut state = bins_page(root);
+            let stick = state
+                .bin_rows
+                .iter()
+                .position(|row| !row.drive.home)
+                .expect("the stick");
+            let bin = state.bin_rows[stick].drive.bin.clone();
+            press_row(&mut state, RowHit::Toggle(ToggleId::BinOwnLimits(stick)));
+            assert_eq!(bin.own_limits().unwrap(), Some(state.bin_default));
+
+            state.show_dropdown(DropdownId::BinDrive(stick, recyclebins::LimitKind::Count));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "100 items")
+                .expect("offered");
+            state.apply_dropdown_selection(at);
+            assert_eq!(
+                bin.own_limits().unwrap().and_then(|l| l.max_items),
+                Some(100)
+            );
+            assert!(format!("{:?}", state.render_tree()).contains("100 items"));
+
+            press_row(&mut state, RowHit::Toggle(ToggleId::BinOwnLimits(stick)));
+            assert_eq!(bin.own_limits().unwrap(), None, "the switch left the file");
+        });
+    }
+
+    /// A drive whose limits cannot be read says so, and offers no switch
+    /// that would overwrite them.
+    #[test]
+    fn a_drive_whose_limits_cannot_be_read_says_so() {
+        with_scratch_config("settings-bins-unreadable", |root| {
+            let mut state = bins_page(root);
+            let stick = state
+                .bin_rows
+                .iter()
+                .position(|row| !row.drive.home)
+                .expect("the stick");
+            let bin_root = state.bin_rows[stick].drive.bin.root().to_path_buf();
+            std::fs::write(bin_root.join("limits.yaml"), "#".repeat(70 * 1024)).unwrap();
+            state.go_to_page(SettingsPage::RecycleBin);
+            let text = format!("{:?}", state.render_tree());
+            assert!(text.contains("Could not be read"), "{text}");
+            assert!(
+                center_of(&state, RowHit::Toggle(ToggleId::BinOwnLimits(stick))).is_none(),
+                "a switch would write over limits nobody can read"
+            );
+        });
+    }
+
+    /// The values a limit offers include one written by hand, where it falls,
+    /// so opening the page never changes what a bin keeps.
+    #[test]
+    fn a_limit_written_by_hand_is_offered_as_it_is() {
+        let limits = recyclebin::Limits {
+            max_age: Some(std::time::Duration::from_hours(45 * 24)),
+            ..recyclebin::Limits::NONE
+        };
+        let (values, at) = recyclebins::LimitKind::Age.options(&limits);
+        let labels: Vec<String> = values
+            .iter()
+            .map(|v| recyclebins::LimitKind::Age.label(*v))
+            .collect();
+        assert_eq!(labels[at], "45 days");
+        assert_eq!(labels[at - 1], "30 days");
+        assert_eq!(labels[at + 1], "60 days");
+        assert_eq!(
+            recyclebins::LimitKind::Size.label(Some(2048 * 1024 * 1024)),
+            "2 GB"
+        );
+        assert_eq!(
+            recyclebins::LimitKind::Size.label(Some(500 * 1024 * 1024)),
+            "500 MB"
+        );
+        assert_eq!(recyclebins::LimitKind::Count.label(None), "Any number");
     }
 }
 

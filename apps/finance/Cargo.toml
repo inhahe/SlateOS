@@ -29,10 +29,22 @@ settingsfile = { path = "../../gui/settingsfile" }
 # four escapes, which the spreadsheet's workbook and the notes library share.
 textfmt = { path = "../../textfmt" }
 
+# Two windows of Finance save into one ledger without losing each other's
+# entries: random ids, a merge by id, and a watch on the file
+# (design-decisions §1239).
+recordfile = { path = "../recordfile" }
+
+# "Your latest changes are not saved", asked the way every editor here asks,
+# when the window is closed while a save is failing.
+unsaved = { path = "../unsaved" }
+
 [dev-dependencies]
 # `with_scratch_config`, so the tests that keep a ledger keep it in a scratch
 # directory and never in the developer's own.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# `refuse_replacing`, so a test can fail a save at the write with the ledger
+# still readable: a save reads the file first (design-decisions §1239).
+safeio = { path = "../safeio", features = ["testing"] }
 
 [lints]
 workspace = true

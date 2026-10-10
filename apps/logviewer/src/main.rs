@@ -252,8 +252,23 @@ fn parse_json_line(line: &str, line_number: usize) -> Option<LogEntry> {
         return None;
     }
 
-    // Simple JSON object parser
-    let fields = parse_json_object(trimmed)?;
+    // The applications' one JSON reader (`apps/jsonvalue`), each value as the
+    // line wrote it: a string as its text, anything else as written. A 64-bit
+    // id or a nanosecond time is shown as it is, not as the nearest `f64` to
+    // it, and `1.50` stays `1.50`. A line that is not one object -- a comma
+    // left out, more after it, cut off part-way -- is not read as one; the
+    // caller shows it as a plain line.
+    let fields: Vec<(String, String)> = jsonvalue::object_members(trimmed)
+        .ok()?
+        .into_iter()
+        .map(|member| {
+            let shown = match member.value {
+                jsonvalue::JsonValue::Str(text) => text,
+                _ => member.text.to_owned(),
+            };
+            (member.key, shown)
+        })
+        .collect();
 
     let timestamp = fields
         .iter()
@@ -338,192 +353,6 @@ fn as_millis(t: u64) -> u64 {
         t.saturating_mul(1000)
     } else {
         t
-    }
-}
-
-fn parse_json_object(s: &str) -> Option<Vec<(String, String)>> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-
-    // Skip whitespace and opening brace
-    skip_ws(&chars, &mut i);
-    if chars.get(i) != Some(&'{') {
-        return None;
-    }
-    i = i.saturating_add(1);
-
-    let mut fields = Vec::new();
-
-    loop {
-        skip_ws(&chars, &mut i);
-        if chars.get(i) == Some(&'}') {
-            break;
-        }
-
-        // Parse key
-        let key = parse_json_string(&chars, &mut i)?;
-        skip_ws(&chars, &mut i);
-        if chars.get(i) != Some(&':') {
-            return None;
-        }
-        i = i.saturating_add(1);
-        skip_ws(&chars, &mut i);
-
-        // Parse value
-        let value = parse_json_value(&chars, &mut i)?;
-        fields.push((key, value));
-
-        skip_ws(&chars, &mut i);
-        if chars.get(i) == Some(&',') {
-            i = i.saturating_add(1);
-        }
-    }
-
-    Some(fields)
-}
-
-fn skip_ws(chars: &[char], i: &mut usize) {
-    // `get` rather than a length test plus an index: one expression that
-    // cannot disagree with itself, over input this program did not write.
-    while chars.get(*i).is_some_and(char::is_ascii_whitespace) {
-        *i = i.saturating_add(1);
-    }
-}
-
-fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
-    if chars.get(*i) != Some(&'"') {
-        return None;
-    }
-    *i = i.saturating_add(1);
-
-    let mut s = String::new();
-    while let Some(&ch) = chars.get(*i) {
-        match ch {
-            '"' => {
-                *i = i.saturating_add(1);
-                return Some(s);
-            }
-            '\\' => {
-                *i = i.saturating_add(1);
-                match chars.get(*i) {
-                    Some('n') => s.push('\n'),
-                    Some('r') => s.push('\r'),
-                    Some('t') => s.push('\t'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some('/') => s.push('/'),
-                    Some('u') => {
-                        // Parse 4 hex digits
-                        *i = i.saturating_add(1);
-                        let mut hex = String::new();
-                        for _ in 0..4 {
-                            if let Some(&c) = chars.get(*i) {
-                                hex.push(c);
-                                *i = i.saturating_add(1);
-                            }
-                        }
-                        if let Ok(code) = u32::from_str_radix(&hex, 16)
-                            && let Some(ch) = char::from_u32(code)
-                        {
-                            s.push(ch);
-                        }
-                        continue;
-                    }
-                    Some(&c) => s.push(c),
-                    None => return None,
-                }
-            }
-            c => s.push(c),
-        }
-        *i = i.saturating_add(1);
-    }
-    None
-}
-
-fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
-    skip_ws(chars, i);
-    match chars.get(*i) {
-        Some('"') => parse_json_string(chars, i),
-        Some(c) if c.is_ascii_digit() || *c == '-' => {
-            let mut n = String::new();
-            while let Some(&ch) = chars.get(*i) {
-                if !(ch.is_ascii_digit() || matches!(ch, '.' | '-' | 'e' | 'E' | '+')) {
-                    break;
-                }
-                n.push(ch);
-                *i = i.saturating_add(1);
-            }
-            Some(n)
-        }
-        Some('t') => {
-            // true
-            if chars
-                .get(*i..i.saturating_add(4))
-                .map(|s| s.iter().collect::<String>())
-                == Some("true".into())
-            {
-                *i = i.saturating_add(4);
-                Some("true".into())
-            } else {
-                None
-            }
-        }
-        Some('f') => {
-            // false
-            if chars
-                .get(*i..i.saturating_add(5))
-                .map(|s| s.iter().collect::<String>())
-                == Some("false".into())
-            {
-                *i = i.saturating_add(5);
-                Some("false".into())
-            } else {
-                None
-            }
-        }
-        Some('n') => {
-            // null
-            if chars
-                .get(*i..i.saturating_add(4))
-                .map(|s| s.iter().collect::<String>())
-                == Some("null".into())
-            {
-                *i = i.saturating_add(4);
-                Some("null".into())
-            } else {
-                None
-            }
-        }
-        Some('[' | '{') => {
-            // Skip nested structures (arrays/objects) as a single string
-            let start = *i;
-            let open = *chars.get(*i)?;
-            let close = if open == '[' { ']' } else { '}' };
-            let mut depth: u32 = 1;
-            *i = i.saturating_add(1);
-            while depth > 0 {
-                let Some(&ch) = chars.get(*i) else {
-                    // Ran off the end with the structure still open: the line
-                    // is truncated, which is a thing a log file being written
-                    // to genuinely is at the moment it is read.
-                    break;
-                };
-                match ch {
-                    c if c == open => depth = depth.saturating_add(1),
-                    c if c == close => depth = depth.saturating_sub(1),
-                    '"' => {
-                        // The nested string moves `i` past its closing quote,
-                        // so this must not advance again.
-                        let _ = parse_json_string(chars, i);
-                        continue;
-                    }
-                    _ => {}
-                }
-                *i = i.saturating_add(1);
-            }
-            Some(chars.get(start..*i)?.iter().collect())
-        }
-        _ => None,
     }
 }
 
@@ -4127,7 +3956,7 @@ mod tests {
 
     #[test]
     fn a_string_containing_braces_does_not_end_a_nested_value_early() {
-        // The scanner hands a quote to `parse_json_string`, which is what
+        // The reader (`jsonvalue`) takes a string whole, which is what
         // stops a `}` inside a message from closing the object around it.
         let mut file = LogFile::new("t.log", "/t.log");
         file.parse_content(
@@ -4722,44 +4551,52 @@ mod tests {
         assert!(parse_json_line("plain text log line", 1).is_none());
     }
 
+    /// A string is read with its escapes, a character outside the BMP from
+    /// its two halves among them -- which the log viewer's own reader
+    /// dropped, both halves, so an emoji in a message vanished.
     #[test]
-    fn test_parse_json_string_escapes() {
-        let chars: Vec<char> = r#""hello \"world\"""#.chars().collect();
-        let mut i = 0;
-        let result = parse_json_string(&chars, &mut i).unwrap();
-        assert_eq!(result, "hello \"world\"");
+    fn a_string_value_is_read_with_its_escapes() {
+        let line = r#"{"message":"say \"hi\" A 😀","level":"INFO"}"#;
+        let entry = parse_json_line(line, 1).unwrap();
+        assert_eq!(entry.message, "say \"hi\" A \u{1F600}");
     }
 
+    /// **A value is shown as the line wrote it**: a 64-bit id past what an
+    /// `f64` holds exactly, and a number with a trailing zero, are not
+    /// rewritten, and a nested value is its whole text.
     #[test]
-    fn test_parse_json_unicode_escape() {
-        let chars: Vec<char> = r#""hello\u0041""#.chars().collect();
-        let mut i = 0;
-        let result = parse_json_string(&chars, &mut i).unwrap();
-        assert_eq!(result, "helloA");
+    fn a_value_is_shown_as_the_line_wrote_it() {
+        let line = r#"{"msg":"m","trace":12345678901234567891,"ratio":1.50,"ok":true,"none":null,"tags":["a", "b"]}"#;
+        let entry = parse_json_line(line, 1).unwrap();
+        let field = |name: &str| {
+            entry
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("trace"), Some("12345678901234567891"));
+        assert_eq!(field("ratio"), Some("1.50"));
+        assert_eq!(field("ok"), Some("true"));
+        assert_eq!(field("none"), Some("null"));
+        assert_eq!(field("tags"), Some(r#"["a", "b"]"#));
     }
 
+    /// **A line that is not one object is a plain line**, shown as it is,
+    /// rather than half-read: the old reader took a missing comma in its
+    /// stride and anything after the closing brace as nothing at all.
     #[test]
-    fn test_parse_json_value_number() {
-        let chars: Vec<char> = "42".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "42");
-    }
-
-    #[test]
-    fn test_parse_json_value_true() {
-        let chars: Vec<char> = "true".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "true");
-    }
-
-    #[test]
-    fn test_parse_json_value_null() {
-        let chars: Vec<char> = "null".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "null");
+    fn a_line_that_is_not_one_object_is_read_as_plain_text() {
+        for line in [
+            r#"{"msg":"a" "level":"ERROR"}"#,
+            r#"{"msg":"a"} {"msg":"b"}"#,
+        ] {
+            assert!(parse_json_line(line, 1).is_none(), "{line}");
+            let mut file = LogFile::new("t.log", "/t.log");
+            file.parse_content(line);
+            assert_eq!(file.entries.len(), 1);
+            assert_eq!(file.entries[0].message, line, "not shown as it is");
+        }
     }
 
     // --- Plain text parser tests ---

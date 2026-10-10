@@ -121,17 +121,38 @@ pub fn parse(text: &str) -> Result<Vec<Shelved>, String> {
     Ok(books)
 }
 
-/// Read the shelf at `path`: none there is an empty shelf.
+/// The largest shelf file that is read: a line a book, so this is some
+/// hundred thousand books. A larger file is refused whole rather than read in
+/// part -- saving what was read would throw the rest away -- and it was read
+/// without any limit at all.
+pub const MAX_SHELF_BYTES: usize = 16 << 20;
+
+/// Read the shelf at `path`: `None` when there is no file there yet.
+///
+/// "No file" and "an empty shelf" are different answers here because a save
+/// merges this window's books into what the file holds (design-decisions
+/// §1239): a file that is not there has had nothing taken out of it.
 ///
 /// # Errors
 ///
-/// The file is there and does not read, or does not parse.
-pub fn load(path: &Path) -> Result<Vec<Shelved>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+/// The file is there and does not read, is too big to read whole, or does
+/// not parse.
+pub fn read(path: &Path) -> Result<Option<Vec<Shelved>>, String> {
+    match safeio::read_to_string_capped(path, MAX_SHELF_BYTES) {
+        Ok(read) if read.truncated => {
+            Err(format!("it is larger than {} MiB", MAX_SHELF_BYTES >> 20))
+        }
+        Ok(read) => parse(&read.text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The key a book is known by on the shelf, in a merge: its file. Two windows
+/// that open the same file have the same book.
+#[must_use]
+pub fn key(book: &Shelved) -> PathBuf {
+    book.path.clone()
 }
 
 /// Write the shelf to `path`, whole or not at all.
@@ -373,15 +394,29 @@ mod tests {
         assert_eq!(parse(&text).unwrap()[0].state.bookmarks, vec![10, 20, 30]);
     }
 
+    /// No file is told from an empty one -- a merge takes a file that is not
+    /// there as having had nothing taken out of it -- and a damaged one is an
+    /// error.
     #[test]
-    fn no_file_is_an_empty_library_and_a_damaged_one_is_an_error() {
+    fn no_file_an_empty_library_and_a_damaged_one_are_each_told_apart() {
         let scratch = scratchdir::ScratchDir::new("ebook_shelf_load");
         let path = scratch.dir().join("ebook").join("library.txt");
-        assert_eq!(load(&path).unwrap(), Vec::new());
+        assert_eq!(super::read(&path).unwrap(), None);
         save(&path, &[]).unwrap();
-        assert_eq!(load(&path).unwrap(), Vec::new());
+        assert_eq!(super::read(&path).unwrap(), Some(Vec::new()));
         std::fs::write(&path, "not a library").unwrap();
-        assert!(load(&path).is_err());
+        assert!(super::read(&path).is_err());
+    }
+
+    /// A shelf file too big to read whole is refused, not read in part.
+    #[test]
+    fn a_shelf_file_too_big_to_read_whole_is_refused() {
+        let scratch = scratchdir::ScratchDir::new("ebook_shelf_big");
+        let path = scratch.dir().join("library.txt");
+        let line = "/a.txt\t0\tMedium\t\n".repeat(MAX_SHELF_BYTES / 16);
+        std::fs::write(&path, format!("{HEADER}\n{line}")).unwrap();
+        let said = super::read(&path).unwrap_err();
+        assert!(said.contains("larger than"), "{said}");
     }
 
     fn read(bytes: &[u8]) -> ReadText {

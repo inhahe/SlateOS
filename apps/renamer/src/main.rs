@@ -5738,25 +5738,29 @@ mod tests {
         // The whole point of the preview is to show what changes. Both of
         // these names differ only in their tail, so a name cut the usual way
         // would render the two rows identically and hide the rename.
+        //
+        // Row 1 is found by its tail, which the cut must keep. It was found by
+        // "Episode 07", near the cut: how much of a name a column lets through
+        // depends on the face's widths, and with a wider face the cut fell
+        // inside "Episode" and no cell matched
+        // (`requests/b-ec-renamer-overlong-preview-test-fails.md`).
+        let tail = "The One With The Long Title.mkv";
         let originals = cells_in_column(&cmds, COL_ORIGINAL);
         let old = originals
             .iter()
-            .find(|t| t.contains("Episode 07"))
-            .unwrap_or_else(|| panic!("row 1's original name should be drawn, got {originals:?}"));
+            .find(|t| t.ends_with(tail))
+            .unwrap_or_else(|| {
+                panic!("row 1's original name should be drawn, its tail kept, got {originals:?}")
+            });
         assert!(
             old.starts_with('…'),
             "the cut should be marked at the front, got {old:?}"
         );
-        assert!(
-            old.ends_with("The One With The Long Title.mkv"),
-            "the tail identifies the file and must survive, got {old:?}"
-        );
 
         let news = cells_in_column(&cmds, COL_NEW);
-        let new = news
-            .iter()
-            .find(|t| t.contains("Ep 07"))
-            .unwrap_or_else(|| panic!("row 1's new name should be drawn, got {news:?}"));
+        let new = news.iter().find(|t| t.ends_with(tail)).unwrap_or_else(|| {
+            panic!("row 1's new name should be drawn, its tail kept, got {news:?}")
+        });
         assert!(
             new.ends_with(".mkv"),
             "a rename preview that drops the extension is unreviewable, got {new:?}"

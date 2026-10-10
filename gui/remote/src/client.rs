@@ -885,7 +885,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -913,7 +914,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -953,7 +955,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -977,7 +980,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 

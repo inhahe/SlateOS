@@ -104,6 +104,10 @@ pub use guiremote::{Pipe, pipe};
 // it starts, so the program's first window may take the keyboard. Re-exported
 // so a launcher names them through the toolkit it already uses.
 pub use guiremote::{ACTIVATION_TOKEN_ENV, ActivationToken};
+// A window lent to another program, and what a window belongs to
+// (design-decisions 1387): the file explorer's Open window over the program
+// that asked.
+pub use guiremote::{ExportedWindow, Parent};
 pub use guitk::event::{
     Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
     SettingsName,
@@ -659,6 +663,62 @@ impl<T: Transport> WindowHandle<'_, T> {
         self.events.confirm(RequestBody::Activate {
             window: self.id,
             token,
+        })
+    }
+
+    /// Lend this window to another program, so that a window of that
+    /// program's can belong to it -- kept above it, raised with it, placed
+    /// over it (design-decisions 1387). What a program does before asking the
+    /// file explorer for an Open or Save window: it sends the handle with its
+    /// request, and the explorer's window belongs to this one. Text, if it
+    /// travels as text: [`ExportedWindow::to_text`].
+    ///
+    /// The same window exported again gives the same handle; it is good
+    /// until the window closes, and whoever holds it can make a window belong
+    /// to this one, so hand it only to the program it is for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] when the
+    /// compositor cannot draw a handle (it has no random source), and
+    /// [`ClientError::Mismatched`] for an answer that is not one.
+    pub fn export(&mut self) -> Result<ExportedWindow, Error<T>> {
+        match self
+            .events
+            .conn
+            .round_trip(RequestBody::ExportWindow { window: self.id })?
+        {
+            ResponseBody::ExportedWindow(handle) => Ok(handle),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Make this window belong to another ([`Parent`]): kept above it and
+    /// raised with it, placed over it, given the keyboard if that window has
+    /// it, and the keyboard handed back to it when this one closes
+    /// (design-decisions 1387). [`Parent::Own`] names another of this
+    /// program's windows -- a dialog of its own; [`Parent::Exported`] a
+    /// window another program lent with [`Self::export`] -- the file
+    /// explorer's Open window over the program that asked. [`Parent::None`]
+    /// makes it an ordinary window again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]: refused for a handle no window was lent
+    /// under (or whose window has closed), a window in another band, or one
+    /// this window would end up above itself through.
+    pub fn set_parent(&mut self, parent: Parent) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::SetParent {
+            window: self.id,
+            parent,
         })
     }
 
@@ -1228,7 +1288,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1261,7 +1322,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1340,7 +1402,8 @@ impl<T: Transport> EventLoop<T> {
                 | ResponseBody::Modifiers(_)
                 | ResponseBody::Clipboard(_)
                 | ResponseBody::Picked(_)
-                | ResponseBody::ActivationToken(_),
+                | ResponseBody::ActivationToken(_)
+                | ResponseBody::ExportedWindow(_),
             ) => Err(ClientError::Mismatched),
         }
     }
@@ -1398,7 +1461,8 @@ impl<T: Transport> EventLoop<T> {
                 | ResponseBody::WorkArea { .. }
                 | ResponseBody::Modifiers(_)
                 | ResponseBody::Clipboard(_)
-                | ResponseBody::ActivationToken(_),
+                | ResponseBody::ActivationToken(_)
+                | ResponseBody::ExportedWindow(_),
             ) => Err(ClientError::Mismatched),
         }
     }
@@ -1435,7 +1499,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Picked(_)
-            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+            | ResponseBody::ActivationToken(_)
+            | ResponseBody::ExportedWindow(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -2915,6 +2980,18 @@ pub mod testing {
                                 bytes,
                             ))
                         }
+                        // The window's own id in the bytes: the same window
+                        // exported twice gives the same handle, as the
+                        // compositor's does.
+                        RequestBody::ExportWindow { window } => {
+                            let mut bytes = *b"exported        ";
+                            if let Some(tail) = bytes.get_mut(8..) {
+                                tail.copy_from_slice(&window.to_le_bytes());
+                            }
+                            ResponseBody::ExportedWindow(guiremote::ExportedWindow::from_bytes(
+                                bytes,
+                            ))
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -3119,6 +3196,8 @@ pub mod testing {
                 RequestBody::GetActivationToken => "GetActivationToken",
                 RequestBody::UseActivationToken { .. } => "UseActivationToken",
                 RequestBody::Activate { .. } => "Activate",
+                RequestBody::ExportWindow { .. } => "ExportWindow",
+                RequestBody::SetParent { .. } => "SetParent",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -4304,6 +4383,43 @@ mod tests {
             server.borrow_mut().asked(),
             vec!["UseActivationToken", "CreateWindow", "CreateWindow"]
         );
+    }
+
+    /// A program lends a window and makes another of its windows belong to
+    /// it (design-decisions 1387); the same window lent twice is the same
+    /// handle, and the requests carry what was asked.
+    #[test]
+    fn a_window_is_lent_and_another_made_to_belong_to_it() {
+        let (mut events, server) = wired();
+        let main = open(&mut events, "Main");
+        let dialog = open(&mut events, "Dialog");
+        let handle = events.window_mut(main).unwrap().export().unwrap();
+        assert_eq!(events.window_mut(main).unwrap().export().unwrap(), handle);
+        events
+            .window_mut(dialog)
+            .unwrap()
+            .set_parent(Parent::Own(main))
+            .unwrap();
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec![
+                "CreateWindow",
+                "CreateWindow",
+                "ExportWindow",
+                "ExportWindow",
+                "SetParent"
+            ]
+        );
+        let sent = server
+            .borrow()
+            .seen
+            .iter()
+            .find_map(|r| match r.body {
+                RequestBody::SetParent { window, parent } => Some((window, parent)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(sent, (dialog, Parent::Own(main)));
     }
 
     /// The launcher's token, as the environment carries it.

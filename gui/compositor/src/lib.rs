@@ -39,9 +39,11 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use appearance::decorations::{ButtonShape, DecorationStyle, TitleBarGeometry, TitleButton};
 pub use appearance::{AppearanceSettings, WindowCorners};
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -106,7 +108,9 @@ use repaint::{Change, DamageHistory, Region};
 // The mouse pointer: its artwork, and the plane it is drawn on over the frame
 // rather than into it. See the module docs.
 pub mod cursor;
-pub use cursor::{CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState};
+pub use cursor::{
+    CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState, ThemedCursor, ThemedImage,
+};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
 // The one piece of keyboard state that spans two events. `keymap` is a pure
@@ -145,9 +149,9 @@ pub use guiremote::control::CursorShape;
 pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
-use guiremote::ActivationToken;
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
+use guiremote::{ActivationToken, ExportedWindow};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -170,20 +174,45 @@ pub use guiremote::zones::{SnapLayoutPreset, SnapSlot};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Height of the window title bar in pixels.
-const TITLE_BAR_HEIGHT: u32 = 30;
+// The built-in frame style's numbers (`DecorationStyle::AERO`), for the tests
+// that measure a built-in frame. Taken from the style rather than written out
+// again, so they cannot drift from what is drawn; production code measures
+// every frame from its own window's style (`Window::frame_style`).
+/// The narrowest band, at 1x, around a resizable window's frame that a press
+/// catches to resize it ([`Window::input_rect`]): what a frame style with no
+/// border and no shadow still offers.
+const MIN_RESIZE_GRAB: u32 = 6;
 
-/// Width of the window border in pixels.
-const BORDER_WIDTH: u32 = 1;
-
-/// Size of the window shadow in pixels.
-const SHADOW_SIZE: u32 = 8;
-
-/// Width/height of title bar buttons (close, maximize, minimize).
-const TITLE_BUTTON_SIZE: u32 = 20;
-
-/// Spacing between title bar buttons.
-const TITLE_BUTTON_SPACING: u32 = 4;
+#[cfg(test)]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to u32 in a const; From is not const"
+)]
+const TITLE_BAR_HEIGHT: u32 = DecorationStyle::AERO.title_height as u32;
+#[cfg(test)]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to u32 in a const; From is not const"
+)]
+const BORDER_WIDTH: u32 = DecorationStyle::AERO.border as u32;
+#[cfg(test)]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to u32 in a const; From is not const"
+)]
+const SHADOW_SIZE: u32 = DecorationStyle::AERO.shadow as u32;
+#[cfg(test)]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to u32 in a const; From is not const"
+)]
+const TITLE_BUTTON_SIZE: u32 = DecorationStyle::AERO.button_size as u32;
+#[cfg(test)]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to u32 in a const; From is not const"
+)]
+const TITLE_BUTTON_SPACING: u32 = DecorationStyle::AERO.button_gap as u32;
 
 // The double-click window's default and its permitted range are taken from
 // `inputsettings`, which is the crate that owns the file the value is read
@@ -1049,6 +1078,24 @@ pub struct Window {
     /// of the window holding the keyboard is one the user has moved on from
     /// (design-decisions 1386).
     pub user_time: u64,
+    /// The window this one belongs to, if any (design-decisions 1387): a
+    /// dialog's parent, or the program's window the file explorer's Open
+    /// window was opened for. Kept above it and raised with it; the keyboard
+    /// goes back to it when this window leaves; minimised and restored with
+    /// it. Always a window in the same band, and never this window or one
+    /// that belongs to it. Cleared when the parent closes.
+    pub parent: Option<WindowId>,
+    /// Whether this window is minimised because the window it belongs to was,
+    /// and so comes back when that one does. A window the user minimised on
+    /// its own stays minimised.
+    pub minimized_with_parent: bool,
+    /// The shape of this window's frame: the user's window-decorations theme
+    /// (lane C's `appearance::decorations`, §1456) -- how tall the title bar
+    /// is, where its title and buttons go and what they look like, how wide
+    /// the border is and how far the shadow reaches. Given by the compositor
+    /// when the window opens and whenever the setting changes; every frame
+    /// measurement below is taken from it, for drawing and hit testing alike.
+    pub frame_style: DecorationStyle,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1230,7 +1277,7 @@ pub struct Window {
 /// Scale a decoration dimension to physical pixels, never rounding a visible
 /// dimension away to nothing.
 ///
-/// `BORDER_WIDTH` is 1, so any scale under 1.5 rounds it to 1 or 0 — and 0 is
+/// The built-in border is 1, so any scale under 1.5 rounds it to 1 or 0 — and 0 is
 /// not a thin border, it is a window whose edge cannot be grabbed to resize it,
 /// because hit testing derives from the same number. Anything the unscaled
 /// value made non-zero stays non-zero; anything already zero (the undecorated
@@ -1281,6 +1328,11 @@ impl Window {
             focused: false,
             demands_attention: false,
             user_time: 0,
+            parent: None,
+            minimized_with_parent: false,
+            // The built-in frame until the compositor gives the user's, as it
+            // does before the window is ever drawn.
+            frame_style: DecorationStyle::AERO,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
@@ -1357,7 +1409,7 @@ impl Window {
     /// pixels: `(top, side, bottom)`. All zero for an unframed window.
     ///
     /// Every piece of geometry below derives from this rather than reading
-    /// `TITLE_BAR_HEIGHT`/`BORDER_WIDTH` directly, so an undecorated window is
+    /// the frame style's title height and border directly, so an undecorated window is
     /// undecorated everywhere — hit testing, damage and drag detection
     /// included — instead of only where someone remembered to check.
     ///
@@ -1369,7 +1421,7 @@ impl Window {
     /// Nothing depended on it being one.
     pub fn frame_insets(&self) -> (u32, u32, u32) {
         if self.is_framed() {
-            let border = scale_dimension(BORDER_WIDTH, self.scale_factor);
+            let border = self.border_px();
             (
                 // Border *and* title bar. The top inset used to be the bar
                 // alone while `render_border` stroked a row above the frame to
@@ -1381,7 +1433,7 @@ impl Window {
                 // `scale(a) + scale(b)` can differ by one, and `title_bar_rect`
                 // below subtracts the border back out to get the bar's own
                 // height. Doing it this way makes that subtraction exact.
-                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor).saturating_add(border),
+                self.title_height_px().saturating_add(border),
                 border,
                 border,
             )
@@ -1390,11 +1442,52 @@ impl Window {
         }
     }
 
+    /// A length of this window's frame style, in physical pixels at its
+    /// display's scale -- never rounded away to nothing ([`scale_dimension`]).
+    fn style_px(&self, value: u16) -> u32 {
+        scale_dimension(u32::from(value), self.scale_factor)
+    }
+
+    /// The title bar's height, held to what a style may ask for.
+    fn title_height_px(&self) -> u32 {
+        self.style_px(self.frame_style.title_height.clamp(
+            DecorationStyle::MIN_TITLE_HEIGHT,
+            DecorationStyle::MAX_TITLE_HEIGHT,
+        ))
+    }
+
+    /// The border's width, held to what a style may ask for; zero for a
+    /// style with no border.
+    fn border_px(&self) -> u32 {
+        self.style_px(self.frame_style.border.min(DecorationStyle::MAX_BORDER))
+    }
+
+    /// The box a press hits this window in: the frame, and around it the
+    /// shadow -- or, for a framed window the user can resize, at least
+    /// [`MIN_RESIZE_GRAB`], where its edges are caught to resize it. A frame
+    /// style with no border and no shadow would otherwise draw an edge no
+    /// pointer could ever be on (Mutter's invisible borders do the same).
+    /// Input only: drawing reaches [`outer_rect`](Self::outer_rect).
+    pub fn input_rect(&self) -> Rect {
+        self.frame_rect().inflate(self.grab_margin())
+    }
+
+    /// How far outside the frame a press still hits this window: see
+    /// [`input_rect`](Self::input_rect).
+    fn grab_margin(&self) -> u32 {
+        let shadow = self.shadow_extent();
+        if self.resizable && self.is_framed() {
+            shadow.max(scale_dimension(MIN_RESIZE_GRAB, self.scale_factor))
+        } else {
+            shadow
+        }
+    }
+
     /// How far the drop shadow extends beyond the frame. Zero when unframed:
     /// the shadow is part of the decoration, not of the window.
     pub fn shadow_extent(&self) -> u32 {
         if self.is_framed() {
-            scale_dimension(SHADOW_SIZE, self.scale_factor)
+            self.style_px(self.frame_style.shadow.min(DecorationStyle::MAX_SHADOW))
         } else {
             0
         }
@@ -1517,54 +1610,55 @@ impl Window {
         ))
     }
 
-    /// The rectangle of the title-bar button in the given slot, counting from
-    /// the right-hand edge: slot 0 is the rightmost.
-    ///
-    /// Slots rather than a chain (`minimize` positioned off `maximize`, off
-    /// `close`) because a window that cannot be maximised has no maximize
-    /// button, and a chain would leave a hole where it used to be instead of
-    /// letting minimize move up into the vacated slot.
-    fn title_button_rect(&self, slot: u32) -> Option<Rect> {
-        let title_rect = self.title_bar_rect()?;
-        // The bar's width and origin are the client's to influence, so the
-        // whole chain is saturating: a button positioned off the coordinate
-        // space is one the user cannot click, where an overflow here is the
-        // display server dying while drawing a title bar.
-        //
-        // Scaled alongside the bar that contains them: buttons left at 20px
-        // inside a 60px title bar would sit in its top-left corner with the
-        // centring arithmetic below pushing them further off as the bar grows.
-        let size = scale_dimension(TITLE_BUTTON_SIZE, self.scale_factor);
-        let spacing = scale_dimension(TITLE_BUTTON_SPACING, self.scale_factor);
-        let step = (size.saturating_add(spacing)) as i32;
-        let btn_x = title_rect
-            .x
-            .saturating_add(title_rect.width as i32)
-            .saturating_sub(size as i32)
-            .saturating_sub(spacing as i32)
-            .saturating_sub((slot as i32).saturating_mul(step));
-        let btn_y = title_rect
-            .y
-            .saturating_add((title_rect.height as i32).saturating_sub(size as i32) / 2);
-        Some(Rect::new(btn_x, btn_y, size, size))
+    /// Where this window's buttons and title go on its bar: its frame style's
+    /// geometry (`DecorationStyle::title_bar`, lane C's, which a theme
+    /// preview in Settings draws from too), for the buttons it has -- close
+    /// and minimise always; maximise only for a window that can be resized,
+    /// since maximising is a resize and a button that refuses to work is
+    /// worse than none. The buttons it has are packed without a gap where one
+    /// it lacks would be. `None` without a title bar.
+    pub fn title_bar_geometry(&self) -> Option<TitleBarGeometry> {
+        let bar = self.title_bar_rect()?;
+        let resizable = self.resizable;
+        Some(
+            self.frame_style
+                .title_bar(frame_rect_of(bar), self.scale_factor, |button| {
+                    button != TitleButton::Maximize || resizable
+                }),
+        )
+    }
+
+    /// A title-bar button's rectangle in whole pixels, or `None` when the
+    /// window has no title bar or no such button. Every button rectangle the
+    /// compositor draws or hit-tests comes through here.
+    fn title_button_rect(&self, button: TitleButton) -> Option<Rect> {
+        self.title_bar_geometry()?.button(button).map(pixel_rect)
+    }
+
+    /// The title-bar button at `(x, y)`, if there is one: what a press there
+    /// acts on, and what is lit while the pointer is there. Found among the
+    /// rectangles [`title_button_rect`](Self::title_button_rect) draws, in
+    /// whole pixels, so that the button that lights is always the one a press
+    /// would work -- not one a fraction of a pixel away from it at a
+    /// fractional display scale.
+    pub fn title_button_at(&self, x: i32, y: i32) -> Option<TitleButton> {
+        let geometry = self.title_bar_geometry()?;
+        geometry
+            .buttons
+            .iter()
+            .find(|&&(_, r)| pixel_rect(r).contains(x, y))
+            .map(|&(button, _)| button)
     }
 
     /// Get the close button rectangle, or `None` when there is no title bar.
     pub fn close_button_rect(&self) -> Option<Rect> {
-        self.title_button_rect(0)
+        self.title_button_rect(TitleButton::Close)
     }
 
     /// Get the maximize button rectangle, or `None` when there is no title bar
     /// or the window cannot be resized.
-    ///
-    /// Maximising is a resize, so a window that declared itself non-resizable
-    /// does not get the button at all — drawing one that refuses to work is
-    /// worse than not drawing it.
     pub fn maximize_button_rect(&self) -> Option<Rect> {
-        if !self.resizable {
-            return None;
-        }
-        self.title_button_rect(1)
+        self.title_button_rect(TitleButton::Maximize)
     }
 
     /// Get the minimize button rectangle, or `None` when there is no title bar.
@@ -1572,7 +1666,7 @@ impl Window {
     /// Minimising is always available: it does not change the window's size,
     /// only whether it is on screen.
     pub fn minimize_button_rect(&self) -> Option<Rect> {
-        self.title_button_rect(if self.resizable { 2 } else { 1 })
+        self.title_button_rect(TitleButton::Minimize)
     }
 
     /// The title bar and the buttons on it, as one value.
@@ -1582,13 +1676,19 @@ impl Window {
     /// compositor's render methods take `&mut self`, and the window lives in
     /// `self.windows`.
     pub fn title_bar_layout(&self) -> Option<TitleBarLayout> {
+        let geometry = self.title_bar_geometry()?;
+        let button = |b| geometry.button(b).map(pixel_rect);
         Some(TitleBarLayout {
             frame: self.frame_rect(),
             bar: self.title_bar_rect()?,
-            close: self.close_button_rect(),
-            maximize: self.maximize_button_rect(),
-            minimize: self.minimize_button_rect(),
+            close: button(TitleButton::Close),
+            maximize: button(TitleButton::Maximize),
+            minimize: button(TitleButton::Minimize),
             scale: self.scale_factor,
+            style: self.frame_style,
+            border: self.border_px(),
+            shadow: self.shadow_extent(),
+            geometry,
         })
     }
 
@@ -1617,8 +1717,8 @@ impl Window {
 ///
 /// One value so that drawing and hit testing cannot drift apart: both read
 /// these rectangles, rather than each deriving the same arithmetic from the
-/// window's origin and the button constants.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// window's origin and its frame style.
+#[derive(Clone, Debug, PartialEq)]
 pub struct TitleBarLayout {
     /// The whole decorated box — [`Window::frame_rect`] — that the bar sits at
     /// the top of. Carried alongside the bar so the shadow, the border and the
@@ -1642,6 +1742,120 @@ pub struct TitleBarLayout {
     /// and threading it as a second argument would let a caller hand one
     /// function's rectangles to another function's scale.
     pub scale: f32,
+    /// The window's frame style: the title's weight and how it is cut, and
+    /// what the buttons look like.
+    pub style: DecorationStyle,
+    /// The border's width, in physical pixels; zero for a style with none.
+    pub border: u32,
+    /// How far the shadow reaches past the frame, in physical pixels.
+    pub shadow: u32,
+    /// The bar's geometry as the style computed it, unrounded: where a title
+    /// of a given width starts (`TitleBarGeometry::title_x`) and the room it
+    /// has. The button rectangles above are its buttons, rounded.
+    pub geometry: TitleBarGeometry,
+}
+
+/// A compositor rectangle as the toolkit's: what lane C's
+/// `DecorationStyle::title_bar` measures in.
+fn frame_rect_of(r: Rect) -> guitk::frame::Rect {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen coordinates, well inside f32's exact range"
+    )]
+    guitk::frame::Rect::new(r.x as f32, r.y as f32, r.width as f32, r.height as f32)
+}
+
+/// A toolkit rectangle in whole pixels: each edge rounded, rather than the
+/// origin and the size apart, so that neighbouring buttons keep the gap the
+/// style put between them.
+fn pixel_rect(r: guitk::frame::Rect) -> Rect {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "rounded screen coordinates; the cast saturates at the ends of i32"
+    )]
+    let edge = |v: f32| v.round() as i32;
+    let (left, top) = (edge(r.x), edge(r.y));
+    let (right, bottom) = (edge(r.x + r.w), edge(r.y + r.h));
+    Rect::new(
+        left,
+        top,
+        u32::try_from(right.saturating_sub(left)).unwrap_or(0),
+        u32::try_from(bottom.saturating_sub(top)).unwrap_or(0),
+    )
+}
+
+/// What a glyph-style title-bar button's mark is drawn as: which button, the
+/// window's maximised state (the maximise mark becomes restore), the ink, and
+/// the colour under the mark.
+#[derive(Clone, Copy, Debug)]
+struct ButtonMark {
+    button: TitleButton,
+    maximized: bool,
+    ink: u32,
+    under: u32,
+}
+
+/// A window title cut to `room` pixels as the frame style's `overflow` says,
+/// in the face `measure` measures by: the text to draw, and how the renderer
+/// is to cut what of it still overruns.
+///
+/// A window title is chosen by the window, is as long as it likes, and is the
+/// one string on screen a reader uses to tell two windows apart. Cutting it
+/// without a mark is how "Save invoice-final" and "Save invoice-final-2"
+/// become the same title -- so only `Clip` cuts with no mark. `KeepTail` is
+/// cut here, from the start, because the renderer cuts only the end; what it
+/// leaves fits `room` as `measure` measures, so the renderer, measuring the
+/// same face the same way, does not cut it again.
+fn cut_title(
+    overflow: guitk::text::Overflow,
+    title: &str,
+    room: f32,
+    measure: impl Fn(&str) -> f32,
+) -> (String, TextOverflow) {
+    match overflow {
+        guitk::text::Overflow::Clip => (title.to_owned(), TextOverflow::Clip),
+        guitk::text::Overflow::Ellipsis => (title.to_owned(), TextOverflow::Ellipsis),
+        guitk::text::Overflow::KeepTail => {
+            (keep_tail(measure, title, room), TextOverflow::Ellipsis)
+        }
+    }
+}
+
+/// `text` cut from its start to fit `room`, marked with `…` -- keeping the
+/// end, which for a path or a file name is the part that differs
+/// (`guitk::text::Overflow::KeepTail`) -- as `measure`, the face that draws
+/// it, measures. The whole text when it fits; the bare mark when only it
+/// does, as the renderer's own cut draws it (a title is there that cannot be
+/// read, which is true, rather than one character of it, which says the
+/// title is that character); nothing when not even the mark fits.
+fn keep_tail(measure: impl Fn(&str) -> f32, text: &str, room: f32) -> String {
+    const MARK: &str = "…";
+    if measure(text) <= room {
+        return text.to_owned();
+    }
+    let room = room - measure(MARK);
+    if room < 0.0 {
+        return String::new();
+    }
+    // The longest tail that fits. A tail only narrows as its start moves
+    // right, so the first character boundary whose tail fits is found by
+    // halving.
+    let starts: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let (mut lo, mut hi) = (0usize, starts.len());
+    while lo < hi {
+        let mid = lo.midpoint(hi);
+        let fits = starts
+            .get(mid)
+            .and_then(|&at| text.get(at..))
+            .is_some_and(|tail| measure(tail) <= room);
+        if fits {
+            hi = mid;
+        } else {
+            lo = mid.saturating_add(1);
+        }
+    }
+    let start = starts.get(lo).copied().unwrap_or(text.len());
+    format!("{MARK}{}", text.get(start..).unwrap_or(""))
 }
 
 impl TitleBarLayout {
@@ -5551,6 +5765,14 @@ fn color_to_argb(color: &Color) -> u32 {
     (color.a as u32) << 24 | (color.r as u32) << 16 | (color.g as u32) << 8 | color.b as u32
 }
 
+/// [`color_to_argb`]'s inverse, for the toolkit's colour arithmetic
+/// (`guitk::palette::emphasized`, `readable_on`) on a frame colour.
+#[inline]
+fn argb_to_color(argb: u32) -> Color {
+    let [a, r, g, b] = argb.to_be_bytes();
+    Color::rgba(r, g, b, a)
+}
+
 // ---------------------------------------------------------------------------
 // Theme colors for window decorations
 // ---------------------------------------------------------------------------
@@ -5786,6 +6008,23 @@ struct Thumbnail {
     image: ImageAsset,
 }
 
+/// The user's cursor theme's pictures, by pointer shape and size in pixels:
+/// `None` where the theme has no picture and the built-in art is drawn.
+#[derive(Debug, Default)]
+struct ThemedCursors {
+    /// The theme they were read from. A different one -- the user chose
+    /// another -- empties the rest before it is looked in.
+    theme: Option<appearance::cursors::CursorTheme>,
+    pictures: HashMap<(CursorShape, u32), Option<Arc<cursor::ThemedCursor>>>,
+}
+
+impl ThemedCursors {
+    /// Pictures held before starting again from empty: thirteen shapes at a
+    /// few sizes is far below it, so reaching it means the size is changing
+    /// continuously, and starting over is the right response.
+    const CAPACITY: usize = 64;
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -5809,6 +6048,16 @@ pub struct Compositor {
     /// the user's actions, the activation tokens outstanding, what each
     /// connection presented. See the [`activation`] module.
     activation: activation::Activations,
+    /// Windows lent to other programs, by the handle each was lent under
+    /// (design-decisions 1387). One entry per window at most -- exporting a
+    /// window again gives the same handle -- and a window's entry goes when it
+    /// closes, so this is bounded by the window count.
+    exports: Vec<(ExportedWindow, WindowId)>,
+    /// The user's cursor theme's pictures, as the pointer has needed them
+    /// (lane C's cursor themes, §1459): a lookup reads a file, so each is
+    /// read once. Behind a lock because the pointer is asked for through
+    /// `&self` -- the server's `show` holds the compositor shared.
+    themed_cursors: std::sync::Mutex<ThemedCursors>,
     /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
     /// made at the size they are drawn at: keyed by the viewer, the pictured
     /// window and that size, and remade when the pictured window's content
@@ -5860,6 +6109,10 @@ pub struct Compositor {
     /// the one owed a `Leave` when that stops being true. See
     /// [`track_pointer_window`](Self::track_pointer_window).
     pointer_window: Option<WindowId>,
+    /// The title-bar button the pointer is on, and whose window -- drawn lit
+    /// (`ButtonShape::face_radius`'s `lit`). See
+    /// [`track_hovered_button`](Self::track_hovered_button).
+    hovered_button: Option<(WindowId, TitleButton)>,
     /// The window the held buttons were pressed in, and which are held: see
     /// [`PointerGrab`].
     ///
@@ -6277,6 +6530,8 @@ impl Compositor {
             focused_window: None,
             focus_history: Vec::new(),
             activation: activation::Activations::new(),
+            exports: Vec::new(),
+            themed_cursors: std::sync::Mutex::new(ThemedCursors::default()),
             thumbnails: HashMap::new(),
             backend,
             display_manager,
@@ -6289,6 +6544,7 @@ impl Compositor {
             cursor_shape: CursorShape::Arrow,
             pointer_on_output: true,
             pointer_window: None,
+            hovered_button: None,
             pointer_grab: None,
             drag: None,
             drag_preview: None,
@@ -6418,7 +6674,41 @@ impl Compositor {
             .fonts
             .set_rendering(font_rendering(&self.fonts_in_use, &self.palette));
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
+        self.adopt_frame_style(self.appearance.decorations());
         self.full_recomposite = true;
+    }
+
+    /// Measure every window's frame by `style` (lane C's window-decorations
+    /// theme, §1456) -- and fit every maximised or snapped window again, since
+    /// it is a tiled window's *frame*, not its client area, that is flush with
+    /// the work area, and a taller title bar would otherwise push it past the
+    /// edge. Nothing when no window's style changes.
+    fn adopt_frame_style(&mut self, style: DecorationStyle) {
+        let mut changed = false;
+        for win in &mut self.windows {
+            if win.frame_style != style {
+                win.frame_style = style;
+                win.dirty = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let mut tiled: Vec<Rect> = Vec::new();
+        for win in self
+            .windows
+            .iter()
+            .filter(|w| !w.fullscreen && (w.maximized || w.snapped.is_some()))
+        {
+            let bounds = self.work_bounds_for(win.frame_rect());
+            if !tiled.contains(&bounds) {
+                tiled.push(bounds);
+            }
+        }
+        for bounds in tiled {
+            self.retile_for_work_area_change(bounds);
+        }
     }
 
     /// Tell a program that its tray icon was clicked.
@@ -6833,6 +7123,12 @@ impl Compositor {
     /// a user who has never opened the Personalization page is the ordinary
     /// case, not a failure to report.
     pub fn reload_appearance(&mut self) {
+        // The cursor theme's pictures are read again: a theme installed again
+        // under the same name -- a new version -- would otherwise go on
+        // showing the old pictures until the compositor restarted.
+        if let Ok(mut cache) = self.themed_cursors.lock() {
+            *cache = ThemedCursors::default();
+        }
         self.set_appearance(appearance::AppearanceFile::load().settings);
     }
 
@@ -7036,6 +7332,8 @@ impl Compositor {
         });
 
         let mut window = Window::from_spec(spec, x, y, client_pid);
+        // The user's frame, before anything measures the window by it.
+        window.frame_style = self.appearance.decorations();
         let (w, h) = window.clamp_size(window.width, window.height);
         window.width = w;
         window.height = h;
@@ -7117,10 +7415,22 @@ impl Compositor {
             .retain(|&(viewer, pictured, _, _), _| viewer != window_id && pictured != window_id);
 
         let closed_layer = self.layer_of(window_id);
+        let closed_parent = self.window_ref(window_id).and_then(|w| w.parent);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
         self.focus_history.retain(|&id| id != window_id);
         self.update_z_orders();
+
+        // Lent to nobody any more, and what belonged to it belongs to nothing
+        // now: an ordinary window, as a transient whose parent closed is
+        // (design-decisions 1387).
+        self.exports.retain(|&(_, w)| w != window_id);
+        for win in &mut self.windows {
+            if win.parent == Some(window_id) {
+                win.parent = None;
+                win.minimized_with_parent = false;
+            }
+        }
 
         // The keyboard goes back to the window that had it before, by the one
         // rule every other way of leaving the screen follows. No `FocusLost`:
@@ -7131,7 +7441,7 @@ impl Compositor {
             // the next one; `focus_window` disarms it only when it takes the
             // keyboard *from* a window, and none holds it now.
             self.dead_keys.cancel();
-            self.hand_keyboard_back(closed_layer, window_id);
+            self.hand_keyboard_back(closed_layer, window_id, closed_parent);
         }
 
         self.full_recomposite = true;
@@ -7194,22 +7504,63 @@ impl Compositor {
         Ok(())
     }
 
-    /// Minimize a window.
+    /// Minimize a window -- and the windows that belong to it, which come
+    /// back when it does (design-decisions 1387): a dialog left floating over
+    /// the desktop after its program was minimised is a dialog for nothing on
+    /// screen.
     pub fn minimize_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        // Its own first, so that the keyboard leaving the window is not handed
+        // for a moment to a dialog about to go with it.
+        let belonging = self.belonging_to(window_id);
+        for &child in &belonging {
+            if let Some(win) = self.window_mut(child)
+                && !win.minimized
+            {
+                win.minimized = true;
+                win.visible = false;
+                win.dirty = true;
+                win.minimized_with_parent = true;
+                self.damage_window(child);
+                self.damage_viewers(child);
+            }
+        }
+
         self.damage_window(window_id);
-
-        let window = self
-            .window_mut(window_id)
-            .ok_or(CompositorError::WindowNotFound(window_id))?;
-        window.minimized = true;
-        window.visible = false;
-        window.dirty = true;
-
+        if let Some(window) = self.window_mut(window_id) {
+            window.minimized = true;
+            window.visible = false;
+            window.dirty = true;
+        }
         self.damage_viewers(window_id);
-        self.release_keyboard(window_id);
+
+        for id in belonging.into_iter().chain(std::iter::once(window_id)) {
+            self.release_keyboard(id);
+        }
 
         self.full_recomposite = true;
         Ok(())
+    }
+
+    /// Show again the windows minimised along with `window_id`, now that it
+    /// is back (design-decisions 1387). The ones the user minimised on their
+    /// own stay minimised.
+    fn unminimize_belonging(&mut self, window_id: WindowId) {
+        for child in self.belonging_to(window_id) {
+            if let Some(win) = self.window_mut(child)
+                && win.minimized_with_parent
+            {
+                win.minimized = false;
+                win.visible = true;
+                win.dirty = true;
+                win.minimized_with_parent = false;
+                self.damage_window(child);
+                self.damage_viewers(child);
+                self.full_recomposite = true;
+            }
+        }
     }
 
     /// Maximize a window to fill the monitor it is on.
@@ -7749,7 +8100,8 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
 
-        if unminimize && window.minimized {
+        let unminimized = unminimize && window.minimized;
+        if unminimized {
             window.minimized = false;
             window.visible = true;
         }
@@ -7777,6 +8129,9 @@ impl Compositor {
         window.dirty = true;
         // Shown again, perhaps at another size: its pictures change too.
         self.content_changed(window_id);
+        if unminimized {
+            self.unminimize_belonging(window_id);
+        }
         self.full_recomposite = true;
 
         Ok(())
@@ -8013,8 +8368,10 @@ impl Compositor {
 
         // Bring to the top of its own band — not to the top of the whole
         // stack, which would let any application window climb over the
-        // taskbar simply by being clicked.
-        self.raise_within_layer(window_id);
+        // taskbar simply by being clicked -- and with it the windows it
+        // belongs to and that belong to it, so a dialog is never left behind
+        // the window it is for (design-decisions 1387).
+        self.raise_family(window_id);
 
         self.damage_window(window_id);
         self.pending_notifications
@@ -8036,6 +8393,7 @@ impl Compositor {
             return;
         }
         let band = self.layer_of(window_id);
+        let parent = self.window_ref(window_id).and_then(|w| w.parent);
         if let Some(win) = self.window_mut(window_id) {
             win.focused = false;
             win.dirty = true;
@@ -8047,7 +8405,7 @@ impl Compositor {
         self.dead_keys.cancel();
         self.pending_notifications
             .push_back(EventNotification::FocusLost { window_id });
-        self.hand_keyboard_back(band, window_id);
+        self.hand_keyboard_back(band, window_id, parent);
     }
 
     /// Give the keyboard, which no window holds, back to the window that held
@@ -8070,19 +8428,26 @@ impl Compositor {
     /// **Never to `leaving`**, the window that gave it up. Every other way of
     /// giving it up also takes the window off the screen, which already rules
     /// it out; [`return_keyboard`](Self::return_keyboard) leaves it there.
-    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId) {
+    ///
+    /// **First to `parent`**, the window `leaving` belonged to, if it can
+    /// take it: a dialog closing gives the keyboard back to the window it was
+    /// for, whatever the user touched in between (design-decisions 1387).
+    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId, parent: Option<WindowId>) {
         let workspace = self.current_workspace;
         let can = |comp: &Self, id: WindowId| {
             id != leaving
                 && comp.layer_of(id) <= band
                 && comp.window_ref(id).is_some_and(|w| w.is_showing(workspace))
         };
-        let next = self
-            .focus_history
-            .iter()
-            .rev()
-            .copied()
-            .find(|&id| can(self, id))
+        let next = parent
+            .filter(|&p| can(self, p))
+            .or_else(|| {
+                self.focus_history
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&id| can(self, id))
+            })
             .or_else(|| self.z_stack.iter().rev().copied().find(|&id| can(self, id)));
         if let Some(id) = next {
             self.focus_window(id);
@@ -8229,6 +8594,197 @@ impl Compositor {
         self.activation.new_windows
     }
 
+    // -----------------------------------------------------------------------
+    // Windows that belong to others (design-decisions 1387)
+    // -----------------------------------------------------------------------
+
+    /// The window at the top of `id`'s chain of parents: `id` itself if it
+    /// belongs to none. Walks at most as many steps as there are windows, so
+    /// a loop -- which [`Self::set_parent`] refuses to make -- could not hang
+    /// it.
+    fn root_of(&self, id: WindowId) -> WindowId {
+        let mut at = id;
+        for _ in 0..self.windows.len() {
+            match self.window_ref(at).and_then(|w| w.parent) {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// Whether `id` is `ancestor` or belongs to it, near or far.
+    fn belongs_to(&self, id: WindowId, ancestor: WindowId) -> bool {
+        let mut at = Some(id);
+        for _ in 0..=self.windows.len() {
+            match at {
+                Some(w) if w == ancestor => return true,
+                Some(w) => at = self.window_ref(w).and_then(|win| win.parent),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The windows that belong to `id`, near or far, bottom to top.
+    fn belonging_to(&self, id: WindowId) -> Vec<WindowId> {
+        self.z_stack
+            .iter()
+            .copied()
+            .filter(|&w| w != id && self.belongs_to(w, id))
+            .collect()
+    }
+
+    /// Raise `id` with its family -- the windows in its chain of parents and
+    /// everything belonging to any of them -- keeping each window above the
+    /// one it belongs to, and `id`'s own branch above its siblings'. A window
+    /// with no family is raised alone, as [`Self::raise_within_layer`] does.
+    fn raise_family(&mut self, id: WindowId) {
+        if !self.z_stack.contains(&id) {
+            self.raise_within_layer(id);
+        }
+        let root = self.root_of(id);
+        // Bottom to top, as they stand now; each raise puts a window at the
+        // top of its band, so raising them in this order keeps it.
+        let family: Vec<WindowId> = self
+            .z_stack
+            .iter()
+            .copied()
+            .filter(|&w| self.root_of(w) == root)
+            .collect();
+        let (branch, rest): (Vec<WindowId>, Vec<WindowId>) =
+            family.into_iter().partition(|&w| self.belongs_to(w, id));
+        for w in rest.into_iter().chain(branch) {
+            self.raise_within_layer(w);
+        }
+    }
+
+    /// Lend `window_id` to another program (design-decisions 1387): the
+    /// handle a window of that program's names, with [`Self::set_parent`], to
+    /// belong to it. The same handle for the same window every time, so a
+    /// program exporting before every dialog does not fill a table; gone when
+    /// the window closes.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window;
+    /// [`CompositorError::Refused`] when no unguessable handle can be drawn.
+    pub fn export_window(&mut self, window_id: WindowId) -> CompositorResult<ExportedWindow> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        if let Some(&(handle, _)) = self.exports.iter().find(|(_, w)| *w == window_id) {
+            return Ok(handle);
+        }
+        let bytes = self.activation.draw_bytes().map_err(|_| {
+            CompositorError::Refused("the compositor has no random source to draw a handle from")
+        })?;
+        let handle = ExportedWindow::from_bytes(bytes);
+        self.exports.push((handle, window_id));
+        Ok(handle)
+    }
+
+    /// The window lent under `handle`, while it is open.
+    #[must_use]
+    pub fn exported(&self, handle: ExportedWindow) -> Option<WindowId> {
+        self.exports
+            .iter()
+            .find(|(h, _)| *h == handle)
+            .map(|&(_, w)| w)
+    }
+
+    /// Make `window_id` belong to `parent`, or to nothing with `None`
+    /// (design-decisions 1387): kept above it and raised with it, moved to
+    /// its desktop and placed centred over it, given the keyboard if `parent`
+    /// has it -- the parent's program lent it for this -- and the keyboard
+    /// handed back to it when `window_id` leaves the screen.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for either window gone;
+    /// [`CompositorError::Refused`] for a parent in another band, or one that
+    /// is `window_id` itself or belongs to it, which would put a window above
+    /// itself.
+    pub fn set_parent(
+        &mut self,
+        window_id: WindowId,
+        parent: Option<WindowId>,
+    ) -> CompositorResult<()> {
+        let layer = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .layer;
+        let Some(parent) = parent else {
+            if let Some(win) = self.window_mut(window_id) {
+                win.parent = None;
+                win.minimized_with_parent = false;
+            }
+            return Ok(());
+        };
+        let (parent_layer, parent_workspace) = self
+            .window_ref(parent)
+            .map(|w| (w.layer, w.workspace))
+            .ok_or(CompositorError::WindowNotFound(parent))?;
+        if parent_layer != layer {
+            return Err(CompositorError::Refused(
+                "a window can belong only to a window in its own band",
+            ));
+        }
+        if self.belongs_to(parent, window_id) {
+            return Err(CompositorError::Refused(
+                "a window cannot belong to itself, or to a window that belongs to it",
+            ));
+        }
+        if let Some(win) = self.window_mut(window_id) {
+            win.parent = Some(parent);
+            // It goes where the window it is for is: a dialog on another
+            // desktop than its program is lost to the user twice over.
+            win.workspace = parent_workspace;
+        }
+        self.center_over(window_id, parent)?;
+        self.raise_family(window_id);
+        if self.focused_window == Some(parent) {
+            self.focus_window(window_id);
+        }
+        self.full_recomposite = true;
+        Ok(())
+    }
+
+    /// Place `child` centred over `parent`'s frame, as a dialog opens over the
+    /// window it is for -- kept where it can be reached, as a restored window
+    /// is ([`kept_reachable`]).
+    fn center_over(&mut self, child: WindowId, parent: WindowId) -> CompositorResult<()> {
+        let parent_frame = self
+            .window_ref(parent)
+            .map(Window::frame_rect)
+            .ok_or(CompositorError::WindowNotFound(parent))?;
+        let child_frame = self
+            .window_ref(child)
+            .map(Window::frame_rect)
+            .ok_or(CompositorError::WindowNotFound(child))?;
+        let centred = |origin: i32, outer: u32, inner: u32| {
+            let offset = i64::from(outer)
+                .saturating_sub(i64::from(inner))
+                .checked_div(2)
+                .unwrap_or(0);
+            i32::try_from(i64::from(origin).saturating_add(offset)).unwrap_or(origin)
+        };
+        let target = Rect::new(
+            centred(parent_frame.x, parent_frame.width, child_frame.width),
+            centred(parent_frame.y, parent_frame.height, child_frame.height),
+            child_frame.width,
+            child_frame.height,
+        );
+        let desktop = self.display_manager.virtual_bounds();
+        let home = self.work_bounds_for(parent_frame);
+        let placed = kept_reachable(target, desktop, home);
+        let (x, y, _, _) = self
+            .window_ref(child)
+            .map(|w| w.client_geometry_for_frame(placed))
+            .ok_or(CompositorError::WindowNotFound(child))?;
+        self.move_window(child, x, y)
+    }
+
     /// Mark a window as asking for the user's attention (`wanted`), or withdraw
     /// the request.
     ///
@@ -8283,11 +8839,13 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
         let (layer, workspace) = (window.layer, window.workspace);
-        if window.minimized {
+        let was_minimized = window.minimized;
+        if was_minimized {
             window.minimized = false;
             window.visible = true;
             window.dirty = true;
             self.full_recomposite = true;
+            self.unminimize_belonging(window_id);
         }
         if matches!(layer, Layer::Normal) {
             self.switch_workspace(workspace);
@@ -9286,25 +9844,28 @@ impl Compositor {
 
                 // Check if we hit a decoration element.
                 if let Some(win) = self.window_ref(window_id) {
-                    // Close button?
-                    if win.close_button_rect().is_some_and(|r| r.contains(x, y)) {
-                        self.pending_notifications
-                            .push_back(EventNotification::WindowClose { window_id });
-                        return;
-                    }
-                    // Maximize button?
-                    if win.maximize_button_rect().is_some_and(|r| r.contains(x, y)) {
-                        if win.maximized {
-                            let _ = self.restore_window(window_id);
-                        } else {
-                            let _ = self.maximize_window(window_id);
+                    // A title-bar button: found as the lit one is
+                    // (`Window::title_button_at`), so the button that lights
+                    // under the pointer is the one a press works.
+                    match win.title_button_at(x, y) {
+                        Some(TitleButton::Close) => {
+                            self.pending_notifications
+                                .push_back(EventNotification::WindowClose { window_id });
+                            return;
                         }
-                        return;
-                    }
-                    // Minimize button?
-                    if win.minimize_button_rect().is_some_and(|r| r.contains(x, y)) {
-                        let _ = self.minimize_window(window_id);
-                        return;
+                        Some(TitleButton::Maximize) => {
+                            if win.maximized {
+                                let _ = self.restore_window(window_id);
+                            } else {
+                                let _ = self.maximize_window(window_id);
+                            }
+                            return;
+                        }
+                        Some(TitleButton::Minimize) => {
+                            let _ = self.minimize_window(window_id);
+                            return;
+                        }
+                        None => {}
                     }
                     // Title bar: a double-click toggles maximize, a single one
                     // begins a move.
@@ -9616,8 +10177,8 @@ impl Compositor {
     }
 
     /// When something the compositor is waiting on by the clock next comes
-    /// due: a keystroke's slow-keys threshold, or a window's idle deadline.
-    /// `None` if nothing is.
+    /// due: a keystroke's slow-keys threshold, a window's idle deadline, or
+    /// the next frame of an animated theme pointer. `None` if nothing is.
     ///
     /// Nothing else would wake a loop for these. To a loop that waits for
     /// input, a key waiting out its threshold is perfect quiet — no input, no
@@ -9642,7 +10203,8 @@ impl Compositor {
             .filter(|watch| !watch.fired)
             .filter_map(|watch| self.last_input.checked_add(watch.after))
             .min();
-        present::earliest(key, idle)
+        let frame = self.pointer_frame_due(Instant::now());
+        present::earliest(present::earliest(key, idle), frame)
     }
 
     /// Replace the accessibility settings.
@@ -10302,7 +10864,10 @@ impl Compositor {
             if win.client_rect().contains(x, y) {
                 return PointerTarget::Client(window_id);
             }
-            if win.outer_rect().contains(x, y) {
+            // The box a press hits it in (`Window::input_rect`): a band a
+            // press would resize this window from is not somewhere the wheel
+            // or the motion goes to the window beneath.
+            if win.input_rect().contains(x, y) {
                 return PointerTarget::Frame(window_id);
             }
         }
@@ -10339,9 +10904,44 @@ impl Compositor {
         }
     }
 
+    /// Note which title-bar button the pointer is on, and when that changes,
+    /// damage the button it left and the one it reached, so that the lit
+    /// face comes and goes with the pointer (lane C's window-decorations
+    /// theme, §1456). Pointer motion is no change to the scene otherwise, so
+    /// without this a button would light only when something else happened
+    /// to repaint it.
+    ///
+    /// Nothing is lit while a client holds the pointer (a grab) -- a press
+    /// then is the client's wherever it lands, so a button the pointer
+    /// crosses is not one a press would work -- or while the pointer is
+    /// carrying a window it is moving or resizing, with its button held down.
+    fn track_hovered_button(&mut self, x: i32, y: i32) {
+        let now = if self.pointer_on_output && self.pointer_grab.is_none() && self.drag.is_none() {
+            self.window_at_with_decorations(x, y).and_then(|id| {
+                let button = self.window_ref(id)?.title_button_at(x, y)?;
+                Some((id, button))
+            })
+        } else {
+            None
+        };
+        if now == self.hovered_button {
+            return;
+        }
+        for (id, button) in [self.hovered_button, now].into_iter().flatten() {
+            if let Some(rect) = self
+                .window_ref(id)
+                .and_then(|w| w.title_button_rect(button))
+            {
+                self.damage.add(rect);
+            }
+        }
+        self.hovered_button = now;
+    }
+
     /// Bring [`pointer_window`](Self::pointer_window) up to date with a
     /// pointer at `(x, y)`: a `Leave` to the window it was in, an `Enter` to
-    /// the one it is in now.
+    /// the one it is in now -- and the lit title-bar button with it
+    /// ([`track_hovered_button`](Self::track_hovered_button)).
     ///
     /// These were never sent, although the protocol carries both and a dozen
     /// places in the toolkit and the applications act on them. A hover
@@ -10352,6 +10952,7 @@ impl Compositor {
     /// Held still during a grab: the pointer is inside the grabbing window for
     /// as long as the button is down, wherever it is on the screen.
     fn track_pointer_window(&mut self, x: i32, y: i32) {
+        self.track_hovered_button(x, y);
         if self.pointer_grab.is_some() {
             return;
         }
@@ -10384,7 +10985,7 @@ impl Compositor {
             if let Some(win) = self.window_ref(window_id)
                 && win.is_showing(self.current_workspace)
                 && !win.input_transparent
-                && win.outer_rect().contains(x, y)
+                && win.input_rect().contains(x, y)
             {
                 return Some(window_id);
             }
@@ -10402,8 +11003,8 @@ impl Compositor {
             return None;
         }
         let side = win.frame_insets().1;
-        let grab = i32::try_from(side.saturating_add(win.shadow_extent())).unwrap_or(i32::MAX);
-        let outer = win.outer_rect();
+        let grab = i32::try_from(side.saturating_add(win.grab_margin())).unwrap_or(i32::MAX);
+        let outer = win.input_rect();
 
         // Don't detect border drag if the point is inside the client area or title bar.
         if win.client_rect().contains(x, y)
@@ -10477,7 +11078,7 @@ impl Compositor {
             if win.client_rect().contains(x, y) {
                 return win.cursor;
             }
-            if win.outer_rect().contains(x, y) {
+            if win.input_rect().contains(x, y) {
                 // On the frame but not on a resize edge: the title bar and its
                 // buttons are the compositor's furniture.
                 return CursorShape::Arrow;
@@ -10577,6 +11178,14 @@ impl Compositor {
         // "is there anything to draw?" first would answer no and leave the
         // frame at the old size until something else happened to dirty it.
         self.refresh_window_scales();
+        // The lit title-bar button, against the scene as it now stands: a
+        // window maximised, restored, moved or closed by a click leaves a
+        // pointer that has not moved since on some other part of the screen,
+        // and a button must not stay lit that the pointer has left -- nor wait
+        // for the pointer to move to light the one it is now on. Before the
+        // damage check, for the reason above: the change is damage.
+        let (x, y) = (self.cursor_x, self.cursor_y);
+        self.track_hovered_button(x, y);
 
         // Check if we should compose (frame timing).
         if !self.frame_stats.should_compose() {
@@ -11188,7 +11797,7 @@ impl Compositor {
             //    Fullscreen needs no test here — `Window::has_title_bar` is
             //    false for it, so a fullscreen window never reaches this branch.
             if self.appearance.drop_shadows && !maximized {
-                self.render_shadow(bar.frame, bar.scale, opacity);
+                self.render_shadow(bar.frame, bar.shadow, bar.scale, opacity);
             }
 
             // 2. Draw window border.
@@ -11197,10 +11806,14 @@ impl Compositor {
             } else {
                 self.theme.border_unfocused
             };
-            self.render_border(bar.frame, bar.scale, border_color, opacity);
+            self.render_border(bar.frame, bar.border, bar.scale, border_color, opacity);
 
             // 3. Draw title bar.
-            self.render_title_bar(&bar, focused, &title, opacity);
+            let lit = self
+                .hovered_button
+                .filter(|&(id, _)| id == window_id)
+                .map(|(_, button)| button);
+            self.render_title_bar(&bar, focused, maximized, lit, &title, opacity);
         }
 
         if has_buffer {
@@ -11414,7 +12027,7 @@ impl Compositor {
     /// outlines at increasing sizes, and its corners would bulge squarer the
     /// further out they went until the outermost ring poked past the curve it
     /// is supposed to be sitting behind.
-    fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
+    fn render_shadow(&mut self, frame: Rect, extent: u32, scale: f32, opacity: f32) {
         /// How far down and right the shadow is cast from the frame, at 1×.
         const SHADOW_OFFSET: u32 = 3;
 
@@ -11425,7 +12038,8 @@ impl Compositor {
         let shadow_rgb = self.theme.shadow_color & 0x00FF_FFFF;
         let shadow_alpha = self.theme.shadow_color >> 24;
 
-        let extent = scale_dimension(SHADOW_SIZE, scale);
+        // How far the frame style's shadow reaches, already scaled
+        // (`Window::shadow_extent`); zero draws none.
         let offset = scale_dimension(SHADOW_OFFSET, scale);
         // The falloff is derived from the layer count rather than being a
         // constant per-layer step, because the count now varies: a fixed step
@@ -11475,16 +12089,18 @@ impl Compositor {
         }
     }
 
-    /// Render the window border: a stroke around the frame box.
-    ///
-    /// The stroke sits one border *above* the frame box, because
-    /// [`Window::frame_insets`] reserves no room above the title bar for it —
-    /// so the top edge is drawn into the shadow band rather than into space the
-    /// layout set aside. Harmless (the band is 8 px of shadow) but a real
-    /// inconsistency; see `known-issues.md`
-    /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
-    fn render_border(&mut self, frame: Rect, scale: f32, color: u32, opacity: f32) {
-        let width = scale_dimension(BORDER_WIDTH, scale);
+    /// Render the window border: a stroke `width` physical pixels wide (the
+    /// frame style's, scaled -- [`Window::frame_insets`]) around the inside of
+    /// the frame box, in the room the insets set aside for it on every side,
+    /// the top included (`TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`,
+    /// resolved: the stroke used to sit a border above the frame, in the
+    /// shadow).
+    fn render_border(&mut self, frame: Rect, width: u32, scale: f32, color: u32, opacity: f32) {
+        // The frame style's border, already scaled; a style with none has
+        // nothing to stroke.
+        if width == 0 {
+            return;
+        }
         // The frame as measured. `frame_insets` now reserves the border row
         // above the title bar, so the outline has somewhere of its own to be
         // drawn and no longer has to be pushed outside the frame to avoid
@@ -11508,14 +12124,25 @@ impl Compositor {
         );
     }
 
-    /// Render the title bar with title text and buttons.
+    /// Render the title bar with title text and buttons, in the shape the
+    /// window's frame style gives (lane C's window-decorations theme, §1456).
     ///
     /// The button rectangles are passed in rather than recomputed here: hit
     /// testing reads them from [`Window::close_button_rect`] and friends, and a
     /// second copy of the arithmetic is a button that is drawn in one place and
     /// clicked in another the moment either changes. `None` means the window
     /// does not have that button — a non-resizable window has no maximize.
-    fn render_title_bar(&mut self, bar: &TitleBarLayout, focused: bool, title: &str, opacity: f32) {
+    /// `lit` is the button the pointer is on; `maximized` picks the maximise
+    /// button's mark (a window that is maximised offers to restore).
+    fn render_title_bar(
+        &mut self,
+        bar: &TitleBarLayout,
+        focused: bool,
+        maximized: bool,
+        lit: Option<TitleButton>,
+        title: &str,
+        opacity: f32,
+    ) {
         let tb_x = bar.bar.x;
         let tb_y = bar.bar.y;
         let tb_width = bar.bar.width;
@@ -11547,9 +12174,6 @@ impl Compositor {
         } else {
             self.theme.title_text_unfocused
         };
-        /// Gap between the left edge of the title bar and the title text, at 1×.
-        const TITLE_TEXT_INSET: u32 = 8;
-        let inset = scale_dimension(TITLE_TEXT_INSET, bar.scale);
         // The user's UI size, not a constant: a title bar is interface text,
         // and someone who enlarged the interface font because they cannot read
         // 13pt has said something about window titles too. Scaled on top of
@@ -11559,77 +12183,233 @@ impl Compositor {
         // before anyone measures the pixels. `max` keeps a fractional scale, or
         // a font size a config file made tiny, from producing zero.
         let font_size = (self.fonts_in_use.ui_size * bar.scale).max(1.0);
-        let text_x = tb_x.saturating_add(inset as i32);
+        let (weight, hint) = if bar.style.title_bold {
+            (Weight::Bold, FontWeightHint::Bold)
+        } else {
+            (Weight::Regular, FontWeightHint::Regular)
+        };
+        // The title's room is what the style's geometry leaves beside the
+        // buttons this window actually has, so a window with no maximize
+        // button gets that space for its title instead of eliding text to
+        // make room for nothing. In whole pixels, because it is both the
+        // width the text is cut to here and the width the renderer is given
+        // below: a tail cut to fit a fraction more than the renderer allows
+        // would be cut again at its end.
+        let room = bar.geometry.title.w.max(0.0).floor();
+        // Measured, cut and placed in the face that draws it -- this process's
+        // own font cache, not the toolkit's process-global one, which the
+        // compositor does not configure -- so that the cut and the mark land
+        // where the text really runs out.
+        let (line_height, text, overflow, width) = {
+            let font = self.render_engine.fonts.get(font_size, weight, Family::Ui);
+            let (text, overflow) =
+                cut_title(bar.style.title_overflow, title, room, |s| font.measure(s));
+            let width = font.measure(&text).min(room);
+            (font.line_height(), text, overflow, width)
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a screen position, rounded; the cast saturates at the ends of i32"
+        )]
+        let text_x = bar.geometry.title_x(width).round() as i32;
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
-        let line_height = self
-            .render_engine
-            .fonts
-            .get(font_size, Weight::Regular, Family::Ui)
-            .line_height();
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a line height of a few dozen pixels"
+        )]
         let text_y =
             tb_y.saturating_add((bar.bar.height as i32).saturating_sub(line_height as i32) / 2);
-        // Reserve exactly the buttons this window actually has, so a window
-        // with no maximize button gets that space for its title instead of
-        // eliding text to make room for nothing. Measured from the drawn
-        // rectangles rather than from the constants, so the reservation cannot
-        // disagree with the buttons it is reserving for.
-        let buttons = scale_dimension(TITLE_BUTTON_SIZE, bar.scale)
-            .saturating_add(scale_dimension(TITLE_BUTTON_SPACING, bar.scale))
-            .saturating_mul(bar.button_count());
-        let max_text_width =
-            tb_width.saturating_sub(buttons.saturating_add(inset.saturating_mul(2)));
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole, non-negative width of at most the bar's"
+        )]
+        let max_text_width = room as u32;
         self.render_engine.draw_text(
             &mut self.backend,
             text_x,
             text_y,
-            title,
+            &text,
             text_color,
             &[],
             opacity,
             Some(max_text_width),
             font_size,
-            FontWeightHint::Regular,
-            // A window title is chosen by the window, is as long as it likes,
-            // and is the one string on screen a reader uses to tell two windows
-            // apart. Cutting it without a mark is how "Save invoice-final" and
-            // "Save invoice-final-2" become the same title.
-            TextOverflow::Ellipsis,
+            hint,
+            overflow,
         );
 
         // Buttons: close (red), maximize (green), minimize (yellow). Each is
         // drawn exactly where the hit test will look for it, and skipped
         // entirely when the window does not have it.
         //
-        // The buttons are round when the windows are: a square close button
-        // beside a curved corner is the mismatch, not the consistency. Capped at
-        // half the button, which is the radius at which it becomes a circle —
-        // past that the clamp inside the rasterizer would take over anyway, and
-        // capping here means the three buttons agree with each other even when
-        // they are not all the same size.
-        let button_size = scale_dimension(TITLE_BUTTON_SIZE, bar.scale);
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "a title-bar button is tens of pixels; exact in f32"
-        )]
-        let button_radius = radius.min(button_size as f32 / 2.0);
-        let button_radii = CornerRadii::all(button_radius);
-        for (rect, color) in [
-            (bar.close, self.theme.close_button),
-            (bar.maximize, self.theme.maximize_button),
-            (bar.minimize, self.theme.minimize_button),
+        // The face in the style's shape (`ButtonShape::face_radius`, which a
+        // shell dialog's close button draws from too, so the two agree):
+        // rounded as the windows are -- a square close button beside a curved
+        // corner is the mismatch, not the consistency -- a circle, a square,
+        // or none at all for a glyph at rest. Lit under the pointer, as the
+        // dialog's is: a shade nearer the readable extreme.
+        for (button, rect, color) in [
+            (TitleButton::Close, bar.close, self.theme.close_button),
+            (
+                TitleButton::Maximize,
+                bar.maximize,
+                self.theme.maximize_button,
+            ),
+            (
+                TitleButton::Minimize,
+                bar.minimize,
+                self.theme.minimize_button,
+            ),
         ] {
-            if let Some(r) = rect {
+            let Some(r) = rect else {
+                continue;
+            };
+            let is_lit = lit == Some(button);
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a title-bar button is tens of pixels; exact in f32"
+            )]
+            let size = r.width as f32;
+            if let Some(face) = bar.style.button_shape.face_radius(size, radius, is_lit) {
+                let fill = if is_lit {
+                    color_to_argb(&guitk::palette::emphasized(argb_to_color(color)))
+                } else {
+                    color
+                };
                 self.render_engine.fill_round_rect(
                     &mut self.backend,
                     r.x,
                     r.y,
                     r.width,
                     r.height,
-                    &button_radii,
-                    color,
+                    &CornerRadii::all(face),
+                    fill,
                     opacity,
                 );
+            }
+            if bar.style.button_shape == ButtonShape::Glyph {
+                // The mark is the button: in the title's colour at rest, and
+                // in the face's readable ink when lit, on the face.
+                let (ink, under) = if is_lit {
+                    let face = color_to_argb(&guitk::palette::emphasized(argb_to_color(color)));
+                    (
+                        color_to_argb(&guitk::palette::readable_on(argb_to_color(face))),
+                        face,
+                    )
+                } else {
+                    (text_color, bg_color)
+                };
+                let mark = ButtonMark {
+                    button,
+                    maximized,
+                    ink,
+                    under,
+                };
+                self.draw_button_mark(r, mark, bar.scale, opacity);
+            }
+        }
+    }
+
+    /// A title-bar button's mark, for the glyph style that has no face at
+    /// rest: a cross for close, a dash for minimise, a square for maximise --
+    /// two, overlapping, for a maximised window's restore -- in the middle
+    /// two-fifths of the button, as a shell dialog draws its close mark.
+    fn draw_button_mark(&mut self, r: Rect, mark: ButtonMark, scale: f32, opacity: f32) {
+        let ButtonMark {
+            button,
+            maximized,
+            ink,
+            under,
+        } = mark;
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a button tens of pixels across, and a stroke of a pixel or two"
+        )]
+        let (arm, stroke) = (
+            ((r.width as f32) * 0.2).round().max(2.0) as i32,
+            (1.5 * scale).round().max(1.0) as i32,
+        );
+        let cx = r.x.saturating_add(i32::try_from(r.width / 2).unwrap_or(0));
+        let cy = r.y.saturating_add(i32::try_from(r.height / 2).unwrap_or(0));
+        let (left, right) = (cx.saturating_sub(arm), cx.saturating_add(arm));
+        let (top, bottom) = (cy.saturating_sub(arm), cy.saturating_add(arm));
+        let side = u32::try_from(arm.saturating_mul(2)).unwrap_or(0);
+        let thickness = u32::try_from(stroke).unwrap_or(1);
+        match button {
+            TitleButton::Close => {
+                // Two diagonals, thickened by drawing each `stroke` times a
+                // pixel apart: the engine's lines are a pixel wide.
+                for k in 0..stroke {
+                    let (from, to) = (left.saturating_add(k), right.saturating_add(k));
+                    self.render_engine.draw_line(
+                        &mut self.backend,
+                        from,
+                        top,
+                        to,
+                        bottom,
+                        ink,
+                        opacity,
+                    );
+                    self.render_engine.draw_line(
+                        &mut self.backend,
+                        from,
+                        bottom,
+                        to,
+                        top,
+                        ink,
+                        opacity,
+                    );
+                }
+            }
+            TitleButton::Minimize => {
+                self.render_engine.fill_rect(
+                    &mut self.backend,
+                    left,
+                    cy,
+                    side,
+                    thickness,
+                    ink,
+                    opacity,
+                );
+            }
+            TitleButton::Maximize => {
+                let square = |comp: &mut Self, x: i32, y: i32| {
+                    comp.render_engine.stroke_round_rect(
+                        &mut comp.backend,
+                        x,
+                        y,
+                        side,
+                        side,
+                        thickness,
+                        &CornerRadii::all(0.0),
+                        ink,
+                        opacity,
+                    );
+                };
+                if maximized {
+                    // Restore: the window behind, offset up and right, then
+                    // the window in front over it -- its inside filled with
+                    // what is under the mark, so the one behind shows only
+                    // where it is not covered.
+                    let step = (arm / 2).max(1);
+                    square(self, left.saturating_add(step), top.saturating_sub(step));
+                    self.render_engine.fill_rect(
+                        &mut self.backend,
+                        left,
+                        top,
+                        side,
+                        side,
+                        under,
+                        opacity,
+                    );
+                    square(self, left, top);
+                } else {
+                    square(self, left, top);
+                }
             }
         }
     }
@@ -12481,8 +13261,19 @@ impl Compositor {
     /// size is scaled by the display the pointer is on, so a pointer crossing
     /// onto a 2x monitor doubles as it crosses, exactly as the window
     /// decorations there do.
+    ///
+    /// With a cursor theme chosen, the state carries the theme's picture for
+    /// the shape and size -- for an animated pointer, the frame showing now
+    /// (lane C's cursor themes, §1459) -- and the built-in art otherwise.
     #[must_use]
     pub fn pointer(&self) -> Option<PointerState> {
+        self.pointer_at(Instant::now())
+    }
+
+    /// [`Self::pointer`] as it is at `now`, which decides the frame an
+    /// animated theme pointer shows.
+    #[must_use]
+    pub fn pointer_at(&self, now: Instant) -> Option<PointerState> {
         // A crosshair while a pick is open, over whatever window: the
         // compositor's own mark that the next click is not the window's, so
         // no program can draw it to fake the mode, nor hide it.
@@ -12505,6 +13296,11 @@ impl Compositor {
         )]
         let size_px = (size.pixels() as f32 * scale).round() as u32;
         let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
+        let themed = self.themed_cursor(shape, size_px).and_then(|cursor| {
+            cursor
+                .frame_at(self.ms_since_start(now))
+                .map(|(image, _)| ThemedImage(Arc::clone(image)))
+        });
         Some(PointerState {
             shape,
             x,
@@ -12514,7 +13310,60 @@ impl Compositor {
                 fill,
                 outline,
             },
+            themed,
         })
+    }
+
+    /// Milliseconds from this compositor's start to `now`: the clock an
+    /// animated theme pointer's frames are counted on, so every animated
+    /// pointer runs in step whenever it appears.
+    fn ms_since_start(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.started_at).as_millis())
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The user's cursor theme's pictures for `shape` at `size_px`, read the
+    /// first time they are wanted and kept: `None` for the built-in theme --
+    /// the compositor's own art -- and for a shape the theme does not draw.
+    fn themed_cursor(&self, shape: CursorShape, size_px: u32) -> Option<Arc<ThemedCursor>> {
+        let theme = &self.appearance.cursor_theme;
+        if theme.is_built_in() {
+            return None;
+        }
+        let name = cursor::css_name(shape)?;
+        // A poisoned lock -- a lookup panicked -- draws the art rather than
+        // trusting what the panic left behind.
+        let mut cache = self.themed_cursors.lock().ok()?;
+        if cache.theme.as_ref() != Some(theme) {
+            cache.pictures.clear();
+            cache.theme = Some(theme.clone());
+        }
+        if let Some(found) = cache.pictures.get(&(shape, size_px)) {
+            return found.clone();
+        }
+        let found = theme
+            .cursor(name, size_px)
+            .and_then(|images| ThemedCursor::new(&images, size_px))
+            .map(Arc::new);
+        if cache.pictures.len() >= ThemedCursors::CAPACITY {
+            cache.pictures.clear();
+        }
+        cache.pictures.insert((shape, size_px), found.clone());
+        found
+    }
+
+    /// When an animated theme pointer showing at `now` changes frame -- a
+    /// deadline the loop wakes for, so the next frame is shown without any
+    /// input to prompt it. `None` when no pointer, or a still one, is up.
+    fn pointer_frame_due(&self, now: Instant) -> Option<Instant> {
+        let state = self.pointer_at(now)?;
+        state.themed.as_ref()?;
+        let cursor = self.themed_cursor(state.shape, state.style.size_px)?;
+        if !cursor.is_animated() {
+            return None;
+        }
+        let (_, left) = cursor.frame_at(self.ms_since_start(now))?;
+        now.checked_add(Duration::from_millis(left))
     }
 
     /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
@@ -20682,6 +21531,274 @@ mod tests {
         assert_eq!(comp.focused_window, None);
     }
 
+    // -----------------------------------------------------------------------
+    // Cursor themes (lane C's §1459)
+    // -----------------------------------------------------------------------
+
+    /// An XCursor file of `frames` -- each `(side, delay_ms, colour)`, a
+    /// square of one colour at nominal size `side`, hot spot at the corner --
+    /// in the layout `appearance::cursors::xcursor` reads.
+    fn xcursor(frames: &[(u32, u32, u32)]) -> Vec<u8> {
+        const IMAGE: u32 = 0xfffd_0002;
+        let mut out = b"Xcur".to_vec();
+        let push = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        let count = frames.len() as u32;
+        push(&mut out, 16);
+        push(&mut out, 0x0001_0000);
+        push(&mut out, count);
+        let mut position = 16 + 12 * count;
+        for &(side, _, _) in frames {
+            push(&mut out, IMAGE);
+            push(&mut out, side);
+            push(&mut out, position);
+            position += 36 + 4 * side * side;
+        }
+        for &(side, delay, colour) in frames {
+            for word in [36, IMAGE, side, 1, side, side, 0, 0, delay] {
+                push(&mut out, word);
+            }
+            for _ in 0..side * side {
+                push(&mut out, colour);
+            }
+        }
+        out
+    }
+
+    /// A cursor theme in a scratch folder: `cursors` is (file name, file).
+    struct ScratchTheme {
+        root: std::path::PathBuf,
+    }
+
+    impl ScratchTheme {
+        fn new(tag: &str, theme: &str, cursors: &[(&str, Vec<u8>)]) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("slateos-compositor-{tag}-{}", std::process::id()));
+            let dir = root.join("icons").join(theme).join("cursors");
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, bytes) in cursors {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+            Self { root }
+        }
+
+        fn theme(&self, id: &str) -> appearance::cursors::CursorTheme {
+            appearance::cursors::CursorTheme::named(
+                std::ffi::OsStr::new(id),
+                appearance::themes::ThemeDirs {
+                    user: None,
+                    system: self.root.join("system"),
+                },
+                vec![self.root.join("icons")],
+            )
+        }
+    }
+
+    impl Drop for ScratchTheme {
+        fn drop(&mut self) {
+            // Scratch only: a leftover folder in the temp directory is
+            // harmless, and a test must not fail on tidying up.
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The theme's picture is drawn instead of the art, an animated one
+    /// frame by frame -- each frame a different pointer, so a frame change
+    /// is a frame owed -- and the loop is woken for the next frame; a shape
+    /// the theme does not draw is the art; and another theme chosen is
+    /// looked in afresh, not served the last one's pictures.
+    #[test]
+    fn a_cursor_themes_pictures_are_drawn_and_animated() {
+        let scratch = ScratchTheme::new(
+            "busy-theme",
+            "Busy",
+            &[(
+                "default",
+                xcursor(&[(24, 100, 0xFF00_00FF), (24, 100, 0xFF00_FF00)]),
+            )],
+        );
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.appearance.cursor_theme = scratch.theme("Busy");
+        comp.handle_input(InputEvent::MouseMove { x: 10, y: 10 });
+
+        let start = comp.started_at;
+        let first = comp.pointer_at(start).unwrap();
+        let picture = first.themed.clone().expect("the theme's picture");
+        assert_eq!(picture.0.pixels[0], 0xFF00_00FF);
+        let second = comp.pointer_at(start + Duration::from_millis(150)).unwrap();
+        assert_eq!(second.themed.as_ref().unwrap().0.pixels[0], 0xFF00_FF00);
+        assert_ne!(first, second, "a frame change is a pointer change");
+        assert_eq!(
+            comp.pointer_at(start + Duration::from_millis(210)).unwrap(),
+            first,
+            "round again, and the very same picture"
+        );
+        assert!(
+            comp.pointer_frame_due(start).is_some(),
+            "nothing wakes the loop for the next frame"
+        );
+
+        comp.cursor_shape = CursorShape::Text;
+        assert_eq!(comp.pointer_at(start).unwrap().themed, None, "the art");
+
+        comp.cursor_shape = CursorShape::Arrow;
+        comp.appearance.cursor_theme = scratch.theme("Other");
+        assert_eq!(
+            comp.pointer_at(start).unwrap().themed,
+            None,
+            "another theme was served the last one's picture"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Windows that belong to others (design-decisions 1387)
+    // -----------------------------------------------------------------------
+
+    fn depth(comp: &Compositor, id: WindowId) -> usize {
+        comp.z_stack.iter().position(|&w| w == id).unwrap()
+    }
+
+    /// The file explorer's Open window over the program that asked: clicking
+    /// the program brings the dialog up with it, above it, every time.
+    #[test]
+    fn a_dialog_stays_above_the_window_it_belongs_to() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let dialog = opened(&mut comp, "Open", 2);
+        let other = opened(&mut comp, "Other", 3);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        comp.focus_window(program);
+        assert!(
+            depth(&comp, dialog) > depth(&comp, program),
+            "the dialog went behind the program it belongs to"
+        );
+        assert!(depth(&comp, program) > depth(&comp, other));
+
+        comp.focus_window(other);
+        assert!(depth(&comp, other) > depth(&comp, dialog));
+        comp.focus_window(program);
+        assert!(depth(&comp, dialog) > depth(&comp, program));
+        assert!(depth(&comp, program) > depth(&comp, other));
+    }
+
+    /// Attaching places the dialog centred over its window and gives it the
+    /// keyboard, the window it belongs to having had it.
+    #[test]
+    fn attaching_a_dialog_centres_it_over_its_window_and_gives_it_the_keyboard() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        comp.move_window(program, 100, 120).unwrap();
+        let dialog = comp.create_window("Open".to_string(), 80, 40, 2);
+        comp.focus_window(program);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        let outer = comp.window_ref(program).unwrap().frame_rect();
+        let inner = comp.window_ref(dialog).unwrap().frame_rect();
+        let left = inner.x - outer.x;
+        let right = (outer.x + outer.width as i32) - (inner.x + inner.width as i32);
+        let top = inner.y - outer.y;
+        let bottom = (outer.y + outer.height as i32) - (inner.y + inner.height as i32);
+        assert!(
+            (left - right).abs() <= 1,
+            "not centred across: {left} / {right}"
+        );
+        assert!(
+            (top - bottom).abs() <= 1,
+            "not centred down: {top} / {bottom}"
+        );
+        assert_eq!(comp.focused_window, Some(dialog));
+    }
+
+    /// Closing a dialog gives the keyboard back to the window it was for --
+    /// not to whatever the user touched most recently before coming back.
+    #[test]
+    fn a_closing_dialog_gives_the_keyboard_back_to_its_window() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let elsewhere = opened(&mut comp, "Elsewhere", 3);
+        let dialog = opened(&mut comp, "Open", 2);
+        comp.set_parent(dialog, Some(program)).unwrap();
+        comp.focus_window(elsewhere);
+        comp.focus_window(dialog);
+        comp.destroy_window(dialog).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(program),
+            "the keyboard went to the most recent window, not the dialog's"
+        );
+    }
+
+    /// Minimising the program takes its dialog with it, and restoring brings
+    /// it back -- but not a dialog the user minimised on its own.
+    #[test]
+    fn a_dialog_is_minimised_and_restored_with_its_window() {
+        let mut comp = activating();
+        let program = opened(&mut comp, "Editor", 1);
+        let dialog = opened(&mut comp, "Open", 2);
+        comp.set_parent(dialog, Some(program)).unwrap();
+
+        comp.minimize_window(program).unwrap();
+        assert!(comp.window_ref(dialog).unwrap().minimized);
+        assert_eq!(comp.focused_window, None);
+        comp.restore_window(program).unwrap();
+        assert!(!comp.window_ref(dialog).unwrap().minimized);
+        assert!(depth(&comp, dialog) > depth(&comp, program));
+
+        comp.minimize_window(dialog).unwrap();
+        comp.minimize_window(program).unwrap();
+        comp.activate_window(program).unwrap();
+        assert!(
+            comp.window_ref(dialog).unwrap().minimized,
+            "a dialog the user minimised came back with its window"
+        );
+    }
+
+    /// No loops, no parent in another band; and a closed parent leaves an
+    /// ordinary window.
+    #[test]
+    fn a_window_cannot_belong_to_itself_or_across_bands_and_outlives_its_parent() {
+        let mut comp = activating();
+        let a = opened(&mut comp, "A", 1);
+        let b = opened(&mut comp, "B", 1);
+        let c = opened(&mut comp, "C", 1);
+        comp.set_parent(b, Some(a)).unwrap();
+        comp.set_parent(c, Some(b)).unwrap();
+        for (child, parent) in [(a, c), (a, b), (a, a)] {
+            assert!(
+                matches!(
+                    comp.set_parent(child, Some(parent)),
+                    Err(CompositorError::Refused(_))
+                ),
+                "a loop through {parent:?} was allowed"
+            );
+        }
+        let panel = layered(&mut comp, "Panel", Layer::Overlay);
+        assert!(matches!(
+            comp.set_parent(a, Some(panel)),
+            Err(CompositorError::Refused(_))
+        ));
+
+        comp.destroy_window(b).unwrap();
+        assert_eq!(comp.window_ref(c).unwrap().parent, None);
+        comp.set_parent(c, Some(a)).unwrap();
+        comp.set_parent(c, None).unwrap();
+        assert_eq!(comp.window_ref(c).unwrap().parent, None);
+    }
+
+    /// The same window exported twice is the same handle, and the handle
+    /// goes with the window.
+    #[test]
+    fn a_window_is_lent_under_one_handle_that_closes_with_it() {
+        let mut comp = activating();
+        let w = opened(&mut comp, "W", 1);
+        let handle = comp.export_window(w).unwrap();
+        assert_eq!(comp.export_window(w).unwrap(), handle);
+        assert_eq!(comp.exported(handle), Some(w));
+        comp.destroy_window(w).unwrap();
+        assert_eq!(comp.exported(handle), None);
+        assert!(comp.exports.is_empty());
+    }
+
     /// The user's action belongs to the window that took the keyboard for
     /// it, before a key is typed there: a token drawn earlier is stale
     /// against a window the user just clicked into.
@@ -22038,6 +23155,711 @@ mod tests {
             "the close button stayed square ({round_ink} painted pixels) while the \
              frame rounded; square's was {square_ink}"
         );
+    }
+
+    // -- the user's frame theme (lane C's window decorations, §1456) ---------
+
+    /// Settings that differ from the defaults only in the shape of the window
+    /// frames.
+    fn with_frame(style: DecorationStyle) -> AppearanceSettings {
+        AppearanceSettings {
+            decoration_theme: appearance::themes::DecorationTheme::from_style("test-frame", style),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// A window titled `title`, alone, rendered once onto a cleared desktop
+    /// under `settings` -- [`decorated`] with a title of the test's choosing.
+    fn decorated_titled(settings: AppearanceSettings, title: &str) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+        comp.set_appearance(settings);
+        let mut spec = WindowSpec::new(title, 160, 120);
+        spec.position = Some((120, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+        (comp, id)
+    }
+
+    /// One pixel of the frame being composited, by signed coordinates -- the
+    /// windows in these tests sit well inside the buffer.
+    fn frame_pixel(comp: &Compositor, x: i32, y: i32) -> Option<u32> {
+        working_pixel(
+            &comp.backend,
+            u32::try_from(x).ok()?,
+            u32::try_from(y).ok()?,
+        )
+    }
+
+    /// The middle of a rectangle.
+    fn centre_of(r: Rect) -> (i32, i32) {
+        (r.x + r.width as i32 / 2, r.y + r.height as i32 / 2)
+    }
+
+    /// The face a title-bar button of colour `color` is drawn with while the
+    /// pointer is on it.
+    fn lit_face(color: u32) -> u32 {
+        color_to_argb(&guitk::palette::emphasized(argb_to_color(color)))
+    }
+
+    /// The columns of the title bar, between its left end and its first
+    /// button, that the title inked -- `(first, last)` -- read off the middle
+    /// third of the bar's rows, which nothing but the title draws on.
+    fn title_ink(comp: &Compositor, id: WindowId) -> Option<(i32, i32)> {
+        let layout = comp.window_ref(id)?.title_bar_layout()?;
+        let bar = layout.bar;
+        let first_button = [layout.close, layout.maximize, layout.minimize]
+            .into_iter()
+            .flatten()
+            .map(|r| r.x)
+            .min()?;
+        let bg = comp.theme.title_bar_focused;
+        let rows = bar.y + bar.height as i32 / 3..bar.y + 2 * bar.height as i32 / 3;
+        let mut ink: Option<(i32, i32)> = None;
+        for x in bar.x + 2..first_button {
+            if rows.clone().any(|y| frame_pixel(comp, x, y) != Some(bg)) {
+                ink = Some(ink.map_or((x, x), |(first, _)| (first, x)));
+            }
+        }
+        ink
+    }
+
+    /// How many pixels of the title bar's text rows the title inked.
+    fn title_ink_count(comp: &Compositor, id: WindowId) -> usize {
+        let layout = comp
+            .window_ref(id)
+            .and_then(Window::title_bar_layout)
+            .expect("a decorated window has a bar");
+        let bar = layout.bar;
+        let bg = comp.theme.title_bar_focused;
+        let first_button = layout.minimize.map_or(bar.right(), |r| r.x);
+        (bar.y + 2..bar.bottom() - 2)
+            .flat_map(|y| (bar.x + 2..first_button).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame_pixel(comp, x, y) != Some(bg))
+            .count()
+    }
+
+    /// **A frame is measured by the user's frame theme**: a taller title bar,
+    /// a wider border, no shadow and bigger buttons further apart are what
+    /// the window's insets, its bar and its buttons say -- and so what drawing
+    /// and hit testing both go by.
+    #[test]
+    fn a_frame_is_measured_by_the_users_frame_theme() {
+        let style = DecorationStyle {
+            title_height: 40,
+            border: 3,
+            shadow: 0,
+            button_size: 24,
+            button_gap: 6,
+            ..DecorationStyle::AERO
+        };
+        let (comp, id) = decorated(with_frame(style));
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(
+            win.frame_style, style,
+            "the window was not given the theme's frame"
+        );
+        assert_eq!(
+            win.frame_insets(),
+            (43, 3, 3),
+            "the bar and the border, measured"
+        );
+        assert_eq!(win.shadow_extent(), 0);
+        let bar = win.title_bar_rect().expect("a decorated window has a bar");
+        assert_eq!(bar.height, 40);
+        let close = win.close_button_rect().expect("close");
+        assert_eq!((close.width, close.height), (24, 24));
+        assert_eq!(close.right(), bar.right() - 6, "the gap from the bar's end");
+        assert_eq!(close.y, bar.y + 8, "centred down the bar: (40 - 24) / 2");
+        let maximize = win.maximize_button_rect().expect("maximize");
+        assert_eq!(maximize.right(), close.x - 6, "the gap between buttons");
+        // The client area is where the window asked for it; the frame is
+        // built out from it.
+        assert_eq!(win.client_rect(), Rect::new(120, 100, 160, 120));
+    }
+
+    /// **The frame is drawn to those measurements**: a border three pixels
+    /// wide all the way across, and no shadow on the desktop beside the
+    /// window.
+    #[test]
+    fn a_frame_is_drawn_to_the_users_frame_theme() {
+        let square = |style| AppearanceSettings {
+            window_corners: WindowCorners::Square,
+            ..with_frame(style)
+        };
+        let thick = DecorationStyle {
+            border: 3,
+            shadow: 0,
+            ..DecorationStyle::AERO
+        };
+        let (comp, id) = decorated(square(thick));
+        let win = comp.window_ref(id).expect("window");
+        let frame = win.frame_rect();
+        let border = comp.theme.border_focused;
+        assert!(win.focused, "the border colour below is the focused one");
+        let mid = frame.y + frame.height as i32 / 2;
+        for dx in 0..3 {
+            assert_eq!(
+                frame_pixel(&comp, frame.x + dx, mid),
+                Some(border),
+                "column {dx} of a 3-pixel border"
+            );
+        }
+        let bg = comp.theme.desktop_background;
+        for dx in 0..SHADOW_SIZE as i32 {
+            assert_eq!(
+                frame_pixel(&comp, frame.right() + dx, mid),
+                Some(bg),
+                "a shadow was drawn {dx} pixels beside a frame whose theme has none"
+            );
+        }
+        // The probe can tell: the built-in frame's 1-pixel border leaves the
+        // third column to the window.
+        let (aero, id) = decorated(square(DecorationStyle::AERO));
+        let frame = aero.window_ref(id).expect("window").frame_rect();
+        assert_ne!(
+            frame_pixel(&aero, frame.x + 2, frame.y + frame.height as i32 / 2),
+            Some(border)
+        );
+    }
+
+    /// **Buttons on the left are drawn there and work there**: close at the
+    /// bar's left end and the title after the buttons; a press on the close
+    /// button asks the window to close, and where the built-in frame's close
+    /// button would have been is plain title bar.
+    #[test]
+    fn buttons_on_the_left_are_drawn_and_pressed_there() {
+        let style = DecorationStyle {
+            button_side: appearance::decorations::ButtonSide::Left,
+            buttons: [
+                TitleButton::Close,
+                TitleButton::Minimize,
+                TitleButton::Maximize,
+            ],
+            ..DecorationStyle::AERO
+        };
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_appearance(with_frame(style));
+        let id = window_at_point(&mut comp, 200, 200, 300, 200);
+        let win = comp.window_ref(id).expect("window");
+        let layout = win
+            .title_bar_layout()
+            .expect("a decorated window has a bar");
+        let bar = layout.bar;
+        let close = layout.close.expect("close");
+        assert_eq!(
+            close.x,
+            bar.x + 4,
+            "close first, a gap from the bar's left end"
+        );
+        let maximize = layout.maximize.expect("maximize");
+        assert!(maximize.x > close.x, "the order the theme gave is not kept");
+        #[allow(clippy::cast_precision_loss, reason = "a few hundred pixels")]
+        let after_buttons = (maximize.right() + 8) as f32;
+        assert!(
+            layout.geometry.title.x >= after_buttons - 1.0,
+            "the title's room starts at {} -- among the buttons",
+            layout.geometry.title.x
+        );
+
+        // Where the built-in close button would be: title bar, which a
+        // press focuses and starts to drag and does not close.
+        let _ = comp.drain_notifications();
+        let (x, y) = (bar.right() - 14, bar.y + bar.height as i32 / 2);
+        button_down(&mut comp, MouseButton::Left, x, y);
+        button_up(&mut comp, MouseButton::Left, x, y);
+        assert!(
+            !comp
+                .drain_notifications()
+                .iter()
+                .any(|n| matches!(n, EventNotification::WindowClose { .. })),
+            "a press where the theme put no button closed the window"
+        );
+        // On the close button where the theme put it.
+        let (x, y) = centre_of(close);
+        button_down(&mut comp, MouseButton::Left, x, y);
+        assert!(
+            comp.drain_notifications().iter().any(
+                |n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)
+            ),
+            "a press on the close button did not ask the window to close"
+        );
+    }
+
+    /// **Each button shape draws its face**: a square face fills its
+    /// corners, a circle does not, and a glyph has no face until the pointer
+    /// is on it -- only its mark, in the title's colour -- and then the face
+    /// lit.
+    #[test]
+    fn each_button_shape_draws_its_face() {
+        let shaped = |button_shape| {
+            let (comp, id) = decorated(with_frame(DecorationStyle {
+                button_shape,
+                ..DecorationStyle::AERO
+            }));
+            let close = comp
+                .window_ref(id)
+                .and_then(Window::close_button_rect)
+                .expect("close");
+            (comp, id, close)
+        };
+
+        let (square, _, r) = shaped(ButtonShape::Square);
+        let red = square.theme.close_button;
+        assert_eq!(
+            frame_pixel(&square, r.x, r.y),
+            Some(red),
+            "a square button left its corner unpainted"
+        );
+
+        let (circle, _, r) = shaped(ButtonShape::Circle);
+        assert_ne!(
+            frame_pixel(&circle, r.x, r.y),
+            Some(red),
+            "a round button painted its corner"
+        );
+        let (cx, cy) = centre_of(r);
+        assert_eq!(frame_pixel(&circle, cx, cy), Some(red));
+        assert_eq!(frame_pixel(&circle, r.x + 2, cy), Some(red));
+
+        let (mut glyph, id, r) = shaped(ButtonShape::Glyph);
+        let (cx, cy) = centre_of(r);
+        assert_eq!(
+            frame_pixel(&glyph, r.x + 2, cy),
+            Some(glyph.theme.title_bar_focused),
+            "a glyph at rest was drawn with a face"
+        );
+        assert_eq!(
+            frame_pixel(&glyph, cx, cy),
+            Some(glyph.theme.title_text_focused),
+            "the close mark's cross is not drawn through the button's middle"
+        );
+        glyph.hovered_button = Some((id, TitleButton::Close));
+        glyph.backend.clear(glyph.theme.desktop_background);
+        glyph.render_window(id);
+        assert_eq!(
+            frame_pixel(&glyph, r.x + 2, cy),
+            Some(lit_face(red)),
+            "a glyph under the pointer was drawn without its lit face"
+        );
+    }
+
+    /// **The button under the pointer is lit, and only while it is there**:
+    /// moving onto a button repaints it lit, moving about on it repaints
+    /// nothing, and moving off repaints it at rest.
+    #[test]
+    fn the_button_under_the_pointer_is_lit() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let id = window_at_point(&mut comp, 200, 200, 300, 200);
+        assert!(comp.compose_frame());
+        let close = comp
+            .window_ref(id)
+            .and_then(Window::close_button_rect)
+            .expect("close");
+        let (cx, cy) = centre_of(close);
+        let red = comp.theme.close_button;
+        assert_ne!(
+            lit_face(red),
+            red,
+            "a lit face that cannot be told from one at rest proves nothing"
+        );
+        assert_eq!(presented_pixel(&comp, cx, cy), red);
+
+        move_to(&mut comp, cx, cy);
+        assert_eq!(comp.hovered_button, Some((id, TitleButton::Close)));
+        assert!(
+            comp.compose_frame(),
+            "the pointer reached the close button and nothing was repainted"
+        );
+        assert_eq!(presented_pixel(&comp, cx, cy), lit_face(red));
+
+        move_to(&mut comp, cx + 1, cy + 1);
+        assert!(
+            !comp.compose_frame(),
+            "moving about on one button repainted it"
+        );
+
+        let bar = comp
+            .window_ref(id)
+            .and_then(Window::title_bar_rect)
+            .expect("bar");
+        move_to(&mut comp, bar.x + 40, cy);
+        assert_eq!(comp.hovered_button, None);
+        assert!(
+            comp.compose_frame(),
+            "the button left lit was not repainted"
+        );
+        assert_eq!(presented_pixel(&comp, cx, cy), red);
+    }
+
+    /// **A button that moves out from under a still pointer goes out**: a
+    /// window maximised from the keyboard takes its buttons to the screen's
+    /// corner, and the one the pointer was on must not be drawn lit there,
+    /// with no pointer on it, until the pointer happens to move.
+    #[test]
+    fn a_button_that_moves_out_from_under_a_still_pointer_goes_out() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let id = window_at_point(&mut comp, 200, 200, 300, 200);
+        let maximize = comp
+            .window_ref(id)
+            .and_then(Window::maximize_button_rect)
+            .expect("maximize");
+        let (x, y) = centre_of(maximize);
+        move_to(&mut comp, x, y);
+        assert_eq!(comp.hovered_button, Some((id, TitleButton::Maximize)));
+        assert!(comp.compose_frame());
+
+        comp.maximize_window(id).expect("maximise");
+        assert!(comp.compose_frame());
+        let moved = comp
+            .window_ref(id)
+            .and_then(Window::maximize_button_rect)
+            .expect("maximize");
+        assert_ne!(
+            moved, maximize,
+            "the button did not move; this proves nothing"
+        );
+        assert_eq!(comp.hovered_button, None);
+        let (mx, my) = centre_of(moved);
+        assert_eq!(
+            presented_pixel(&comp, mx, my),
+            comp.theme.maximize_button,
+            "the button was drawn lit where no pointer is"
+        );
+    }
+
+    /// **At a fractional display scale, the button that lights is the one a
+    /// press works**: the buttons' edges fall between pixels there, and a
+    /// button lit by its unrounded edges lights a pixel away from where it is
+    /// drawn and pressed.
+    #[test]
+    fn at_a_fractional_scale_the_lit_button_is_the_drawn_one() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 1.2;
+        }
+        let id = window_at_point(&mut comp, 200, 200, 300, 200);
+        comp.refresh_window_scales();
+        let win = comp.window_ref(id).expect("window");
+        let bar = win.title_bar_rect().expect("bar");
+        let geometry = win.title_bar_geometry().expect("geometry");
+        let drawn = |win: &Window, x: i32, y: i32| {
+            TitleButton::ALL
+                .into_iter()
+                .find(|&b| win.title_button_rect(b).is_some_and(|r| r.contains(x, y)))
+        };
+        // The pixels where the unrounded edges and the drawn ones disagree.
+        #[allow(clippy::cast_precision_loss, reason = "screen coordinates")]
+        let seams: Vec<(i32, i32)> = (bar.x..bar.right())
+            .flat_map(|x| (bar.y..bar.bottom()).map(move |y| (x, y)))
+            .filter(|&(x, y)| geometry.button_at(x as f32, y as f32) != drawn(win, x, y))
+            .collect();
+        assert!(
+            !seams.is_empty(),
+            "at 1.2 no button edge falls between pixels; this proves nothing"
+        );
+        for &(x, y) in &seams {
+            move_to(&mut comp, x, y);
+            let win = comp.window_ref(id).expect("window");
+            assert_eq!(
+                comp.hovered_button.map(|(_, b)| b),
+                drawn(win, x, y),
+                "at ({x}, {y}) the lit button is not the one drawn there"
+            );
+        }
+        // And a press there works the drawn one.
+        let &(x, y) = seams
+            .iter()
+            .find(|&&(x, y)| {
+                drawn(comp.window_ref(id).expect("window"), x, y) == Some(TitleButton::Close)
+            })
+            .expect("a seam on the close button's edge");
+        let _ = comp.drain_notifications();
+        button_down(&mut comp, MouseButton::Left, x, y);
+        assert!(
+            comp.drain_notifications()
+                .iter()
+                .any(|n| matches!(n, EventNotification::WindowClose { .. })),
+            "a press on the close button's drawn edge did not close"
+        );
+    }
+
+    /// **A title too long for its bar is cut as the theme says**: the end
+    /// kept, after a mark, by a theme that keeps tails -- drawn exactly as a
+    /// window whose title was that tail all along.
+    #[test]
+    fn a_title_cut_to_keep_its_end_is_drawn_so() {
+        let long = "C:/Users/someone/Documents/Invoices/2026/invoice-final-2.pdf";
+        let tails = DecorationStyle {
+            title_overflow: guitk::text::Overflow::KeepTail,
+            ..DecorationStyle::AERO
+        };
+        let (mut cut, id) = decorated_titled(with_frame(tails), long);
+        let layout = cut
+            .window_ref(id)
+            .and_then(Window::title_bar_layout)
+            .expect("bar");
+        let room = layout.geometry.title.w.floor();
+        let size = (cut.fonts_in_use.ui_size * layout.scale).max(1.0);
+        let font = cut
+            .render_engine
+            .fonts
+            .get(size, Weight::Regular, Family::Ui);
+        let kept = keep_tail(|s| font.measure(s), long, room);
+        assert!(
+            kept.starts_with('…') && kept.ends_with(".pdf") && kept.len() < long.len(),
+            "the title was not cut to its tail: {kept:?}"
+        );
+        let (whole, id_whole) = decorated_titled(with_frame(DecorationStyle::AERO), &kept);
+        let bar = layout.bar;
+        let rows = |comp: &Compositor| -> Vec<Option<u32>> {
+            (bar.y..bar.bottom())
+                .flat_map(|y| (bar.x..bar.right()).map(move |x| (x, y)))
+                .map(|(x, y)| frame_pixel(comp, x, y))
+                .collect()
+        };
+        assert_eq!(
+            whole
+                .window_ref(id_whole)
+                .and_then(Window::title_bar_layout)
+                .map(|l| l.bar),
+            Some(bar)
+        );
+        assert!(
+            rows(&cut) == rows(&whole),
+            "the bar of a title cut to keep its end is not drawn as that end"
+        );
+    }
+
+    /// **Every way of cutting a title**, as the face measures: clipped with
+    /// no mark, its end cut for a mark, or its start cut -- keeping as much
+    /// of the end as fits, never splitting a character, the whole title when
+    /// it fits and the bare mark when only that does.
+    #[test]
+    fn a_title_is_cut_as_the_theme_says() {
+        #[allow(clippy::cast_precision_loss, reason = "a few characters")]
+        let mono = |s: &str| 10.0 * s.chars().count() as f32;
+        let title = "invoice-final-2.pdf"; // 19 characters: 190 pixels
+        assert_eq!(
+            cut_title(guitk::text::Overflow::Clip, title, 50.0, mono),
+            (title.to_owned(), TextOverflow::Clip)
+        );
+        assert_eq!(
+            cut_title(guitk::text::Overflow::Ellipsis, title, 50.0, mono),
+            (title.to_owned(), TextOverflow::Ellipsis)
+        );
+        assert_eq!(
+            cut_title(guitk::text::Overflow::KeepTail, title, 60.0, mono),
+            ("…2.pdf".to_owned(), TextOverflow::Ellipsis)
+        );
+        assert_eq!(keep_tail(mono, title, 190.0), title, "it fits exactly");
+        assert_eq!(keep_tail(mono, title, 189.0), "…voice-final-2.pdf");
+        assert_eq!(keep_tail(mono, title, 10.0), "…", "room for the mark alone");
+        assert_eq!(keep_tail(mono, title, 9.0), "", "no room even for the mark");
+        assert_eq!(
+            keep_tail(mono, "ééééé", 35.0),
+            "…éé",
+            "characters, not bytes"
+        );
+        // Proportional: narrow i, wide W.
+        #[allow(clippy::cast_precision_loss, reason = "a few characters")]
+        let varied = |s: &str| {
+            s.chars()
+                .map(|c| match c {
+                    'i' => 3.0,
+                    'W' => 15.0,
+                    _ => 10.0,
+                })
+                .sum::<f32>()
+        };
+        assert_eq!(keep_tail(varied, "iiiiWWWW", 50.0), "…WW");
+        assert_eq!(keep_tail(varied, "WWWWiiii", 50.0), "…Wiiii");
+    }
+
+    /// **A centred title sits in the middle of the bar** -- moved over only
+    /// as far as it must be to keep clear of the buttons, on a bar too narrow
+    /// for the middle; a left one starts an inset from the bar's left end.
+    #[test]
+    fn a_centred_title_is_drawn_in_the_middle_of_the_bar() {
+        let centred = DecorationStyle {
+            title_align: appearance::decorations::TitleAlign::Center,
+            ..DecorationStyle::AERO
+        };
+        // A bar wide enough that the middle is clear of the buttons.
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+        comp.set_appearance(with_frame(centred));
+        let mut spec = WindowSpec::new("Mid", 300, 120);
+        spec.position = Some((40, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        comp.backend.clear(comp.theme.desktop_background);
+        comp.render_window(id);
+        let bar = comp
+            .window_ref(id)
+            .and_then(Window::title_bar_rect)
+            .expect("bar");
+        let (first, last) = title_ink(&comp, id).expect("the title drew nothing");
+        let middle = bar.x + bar.width as i32 / 2;
+        assert!(
+            (first.midpoint(last) - middle).abs() <= 3,
+            "a centred title ran from {first} to {last}; the bar's middle is {middle}"
+        );
+        // A narrow bar: the middle would put the title among the buttons, so
+        // it ends where its room does.
+        let (narrow, id) = decorated_titled(with_frame(centred), "Mid");
+        let room = narrow
+            .window_ref(id)
+            .and_then(Window::title_bar_layout)
+            .expect("bar")
+            .geometry
+            .title;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a screen coordinate, rounded"
+        )]
+        let room_end = (room.x + room.w).round() as i32;
+        let (first, last) = title_ink(&narrow, id).expect("the title drew nothing");
+        // A pixel either way of the end: the title starts on a whole pixel,
+        // and its last letter's edge is shaded into the pixel it ends in.
+        assert!(
+            (room_end - 3..=room_end + 1).contains(&last),
+            "a centred title on a narrow bar ran from {first} to {last}; its room \
+             ends at {room_end}, and it should end there"
+        );
+        let (left, id) = decorated_titled(with_frame(DecorationStyle::AERO), "Mid");
+        let bar = left
+            .window_ref(id)
+            .and_then(Window::title_bar_rect)
+            .expect("bar");
+        let (first, _) = title_ink(&left, id).expect("the title drew nothing");
+        assert!(
+            (bar.x + 8..=bar.x + 11).contains(&first),
+            "a left title starts at {first}, not an inset from the bar's start at {}",
+            bar.x
+        );
+    }
+
+    /// **A bold title is drawn bold**: heavier than the same title regular.
+    #[test]
+    fn a_bold_title_is_drawn_bold() {
+        let ink = |title_bold| {
+            let (comp, id) = decorated_titled(
+                with_frame(DecorationStyle {
+                    title_bold,
+                    ..DecorationStyle::AERO
+                }),
+                "Heavy",
+            );
+            title_ink_count(&comp, id)
+        };
+        let (regular, bold) = (ink(false), ink(true));
+        assert!(regular > 0, "the title drew nothing");
+        assert!(
+            bold > regular,
+            "a bold title inked {bold} pixels, a regular one {regular}"
+        );
+    }
+
+    /// **A theme with a taller title bar refits a maximised window**: it is
+    /// the frame, not the client area, that is flush with the screen's edges,
+    /// so the client area moves down and shrinks rather than the bar rising
+    /// off the top of the screen. A window that is not tiled keeps its client
+    /// area where it was, and its frame grows around it.
+    #[test]
+    fn a_taller_title_bar_refits_a_maximised_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let tiled = window_at_point(&mut comp, 100, 100, 300, 200);
+        comp.maximize_window(tiled).expect("maximise");
+        let free = window_at_point(&mut comp, 150, 150, 200, 100);
+        let frame = comp.window_ref(tiled).expect("window").frame_rect();
+        let client = comp.window_ref(free).expect("window").client_rect();
+
+        comp.set_appearance(with_frame(DecorationStyle {
+            title_height: 44,
+            ..DecorationStyle::AERO
+        }));
+        let win = comp.window_ref(tiled).expect("window");
+        assert_eq!(
+            win.title_bar_rect().map(|r| r.height),
+            Some(44),
+            "the open window was not given the new frame"
+        );
+        assert_eq!(
+            win.frame_rect(),
+            frame,
+            "the maximised frame no longer fills the screen"
+        );
+        let win = comp.window_ref(free).expect("window");
+        assert_eq!(win.client_rect(), client);
+        assert_eq!(win.frame_insets().0, 45);
+    }
+
+    /// **A frame with neither border nor shadow can still be resized from
+    /// its edge**: a band [`MIN_RESIZE_GRAB`] wide outside it catches a
+    /// press, as Mutter's invisible borders do -- for a window that can be
+    /// resized. One that cannot is hit only where it is drawn.
+    #[test]
+    fn a_frame_with_no_border_or_shadow_can_still_be_resized_from_its_edge() {
+        let bare = DecorationStyle {
+            border: 0,
+            shadow: 0,
+            ..DecorationStyle::AERO
+        };
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_appearance(with_frame(bare));
+        // A window beneath, whose client area the band lies over.
+        let lower = window_at_point(&mut comp, 100, 150, 400, 300);
+        let id = window_at_point(&mut comp, 200, 200, 300, 200);
+        let win = comp.window_ref(id).expect("window");
+        let frame = win.frame_rect();
+        assert_eq!(win.frame_insets().1, 0);
+        assert_eq!(win.input_rect(), frame.inflate(MIN_RESIZE_GRAB));
+
+        let (x, y) = (frame.x - 3, frame.y + frame.height as i32 / 2);
+        assert!(
+            comp.window_ref(lower)
+                .expect("lower")
+                .client_rect()
+                .contains(x, y),
+            "the band is not over the lower window, so this proves nothing"
+        );
+        let _ = pointer_news(&mut comp);
+        move_to(&mut comp, x, y);
+        assert_eq!(
+            comp.cursor_shape,
+            CursorShape::ResizeEW,
+            "the band does not say the edge can be dragged"
+        );
+        comp.handle_input(InputEvent::MouseScroll {
+            dx: 0.0,
+            dy: 1.0,
+            x,
+            y,
+        });
+        assert_eq!(
+            pointer_news(&mut comp)
+                .into_iter()
+                .filter(|(w, _)| *w == lower)
+                .collect::<Vec<_>>(),
+            Vec::new(),
+            "the pointer in the band reached the window beneath it"
+        );
+        button_down(&mut comp, MouseButton::Left, x, y);
+        assert_eq!(
+            comp.drag.as_ref().map(|d| d.mode),
+            Some(DragMode::ResizeLeft),
+            "a press just outside a borderless frame did not take its edge"
+        );
+        button_up(&mut comp, MouseButton::Left, x, y);
+
+        let mut spec = WindowSpec::new("Fixed", 200, 100);
+        spec.position = Some((100, 450));
+        spec.resizable = false;
+        let fixed = comp.create_window_from_spec(&spec, 1);
+        let win = comp.window_ref(fixed).expect("window");
+        assert_eq!(win.input_rect(), win.frame_rect());
     }
 
     #[test]

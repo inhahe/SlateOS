@@ -4852,6 +4852,12 @@ lane C's `guitk`.
   named family with the toolkit's own `ensure_family`, so a run is drawn in
   the face it was measured in, at most four new families a frame.
 
+- `[x]` `[F]` **A shaped glyph's outline** -- done 2026-10-10, for lane C's
+  `requests/c-f-an-outline-for-each-shaped-glyph.md` (SVG text drawn as
+  paths: a gradient, a stroke, a clip on the letters). `SystemFont::outline`
+  gives any glyph the font shaped as a path in pixels, y up, from whichever
+  face drew it and at that face's weight, unhinted.
+
 - `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
   F's part** (the operator's rule, `design-decisions.md` §1242;
   `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).
@@ -4893,6 +4899,43 @@ lane C's `guitk`.
   KDE's default) -- refusing them too is F-Q12. Launchers asked to hand
   tokens on: `requests/f-c-hand-a-started-program-an-activation-token.md`,
   `requests/f-e-hand-a-started-program-an-activation-token.md`.
+
+- `[x]` `[F]` **A window can belong to another, and is kept above it** --
+  done 2026-10-10 (§1387), the window system's part of the operator's §1415
+  (the file explorer shows every program's Open and Save window, which
+  belongs to the program that asked) and lane C's
+  `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`.
+  `SetParent` with a program's own window, or with one another program lent
+  by `ExportWindow` (Wayland's xdg-foreign: a handle, never the raw id, so no
+  program can pin a window over someone else's uninvited). A window that
+  belongs to another stays above it and rises with it, opens centred over it
+  on its desktop, takes the keyboard if its parent has it and gives it back
+  to its parent on leaving, and is minimised and restored with it. Not yet:
+  keeping such windows off the taskbar (a window-list field).
+
+- `[x]` `[F]` **The pointer is drawn from the user's cursor theme** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-draw-the-pointer-from-the-cursor-theme.md` (§1459: Adwaita,
+  Breeze, Bibata install as they are). The theme's picture for each shape at
+  the user's size times the display's scale, read once and kept; scaled when
+  the theme's nearest size is not the one asked for; animated pointers frame
+  by frame on the compositor's clock, the loop woken for each frame with no
+  damage; the colour scheme for the built-in art only; the pictures dropped
+  on every `ReloadAppearance`. A shape the theme lacks is the built-in art.
+
+- `[x]` `[F]` **Window frames are drawn from the user's frame theme** -- done
+  2026-10-10 (§1388), for lane C's
+  `requests/c-f-draw-window-frames-from-the-theme.md` (§1456). Every window's
+  frame is measured by the chosen window-decorations theme: the title bar's
+  height, the border and the shadow. Its buttons and title are placed by the
+  same geometry the shell's run box uses, rounded to whole pixels, and drawn
+  and clicked in the same places. Titles go at the left or in the middle,
+  regular or bold, and are cut by clipping, by a mark at the end, or by
+  keeping the end. Buttons are rounded, round, square or bare marks, and the
+  one under the pointer lights up, whatever its shape. A theme change
+  re-measures every open window and refits the maximised and snapped ones. A
+  frame with neither border nor shadow keeps an invisible 6-pixel band to
+  resize it by.
 
 - `[F]` Port FreeRDP (line ~5058)
 

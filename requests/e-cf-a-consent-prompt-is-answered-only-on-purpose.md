@@ -3,7 +3,11 @@
 **From:** lane E, relaying the operator's rule (given in chat to lane E's
 session, 2026-10-10). **To:** lane C (`gui/desktop/src/security_dialog.rs`
 and its wiring) and lane F (`gui/compositor`: where the keyboard goes when a
-window opens). **Filed:** 2026-10-10. **Status:** OPEN.
+window opens). **Filed:** 2026-10-10. **Status:** PARTIAL -- lane F's (2),
+(3) and the general case built 2026-10-10; (1), a window that opens without
+the keyboard, is blocked on lane C's
+`requests/f-c-build-the-shells-window-terms-from-spec-new.md`, then is lane
+F's. Reply at the end.
 **Decision:** design-decisions §1242 (Decided by: Operator).
 **Defect:** `known-issues/E-the-capability-prompt-is-answered-by-the-keys-the-user-is-typing.md`.
 

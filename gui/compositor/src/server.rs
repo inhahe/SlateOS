@@ -745,7 +745,7 @@ impl Server {
         let warmth = compositor.night_light_gains();
 
         let pointer = Self::pointer_to_show(compositor);
-        self.shown_pointer = pointer;
+        self.shown_pointer.clone_from(&pointer);
         self.last_shown = Some(Instant::now());
         let sprite = pointer.and_then(|state| self.cursors.sprite(&state));
 

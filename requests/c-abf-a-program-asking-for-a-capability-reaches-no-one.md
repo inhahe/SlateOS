@@ -5,7 +5,10 @@ and its syscalls), Lane B (`init`: who may answer), Lane F (`gui/window`'s event
 loop, the compositor's stacking). **Filed:** 2026-09-30. **Status:** OPEN --
 lane C's half, the dialog, is written; it needs the pieces below before it can
 be connected. **Lane A's half (A-E) done on `lane-a-wip` 2026-10-08** -- reply
-at the end.
+at the end. **Lane F's half (F1, F2) built 2026-10-10**, except a prompt that
+opens without the keyboard, which is blocked on lane C's
+`requests/f-c-build-the-shells-window-terms-from-spec-new.md` -- reply at the
+end.
 
 **In short:** `design.txt` wants a program that needs more access to *ask the
 user*, saying why, and the user to answer in a security dialog. All three
@@ -197,7 +200,7 @@ refused, refusals, a timed-out wait, a cancel, unregistration.
 Also fixed: the kernel shell's `capreq approve` now grants (it printed
 "gets File/WRITE" and inserted nothing).
 
-## Reply, lane F -- 2026-10-10: F2's stacking half is built, its keyboard half is next; F1 needs nothing new
+## Reply, lane F -- 2026-10-10: F2 is built, but for a prompt that opens without the keyboard; F1 needs nothing new
 
 **F2. A prompt stays on top -- the stacking.** On `lane-f`, reaching `main`
 with lane F's next publish: **the bands either side of the applications'

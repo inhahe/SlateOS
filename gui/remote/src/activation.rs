@@ -29,7 +29,8 @@
 //! [`RequestBody::Activate`]: crate::control::RequestBody::Activate
 
 use std::fmt;
-use std::fmt::Write as _;
+
+use crate::hex16;
 
 /// The environment variable a launcher hands a program its activation token
 /// in, as [`ActivationToken::to_text`] writes it.
@@ -37,9 +38,6 @@ use std::fmt::Write as _;
 /// A launcher sets it on the command it starts, never in its own environment;
 /// a program reads it once, when it opens its first window.
 pub const ACTIVATION_TOKEN_ENV: &str = "SLATE_ACTIVATION_TOKEN";
-
-/// Length of a token's text form: two hexadecimal digits a byte.
-const TEXT_LEN: usize = 32;
 
 /// The compositor's word that the user started a program, or asked for one of
 /// its windows: sixteen bytes it drew from the kernel's random source.
@@ -70,13 +68,7 @@ impl ActivationToken {
     /// hexadecimal digits.
     #[must_use]
     pub fn to_text(self) -> String {
-        let mut text = String::with_capacity(TEXT_LEN);
-        for byte in self.0 {
-            // Writing into a `String` cannot fail; `fmt::Write` only says it
-            // might because other writers can.
-            let _ = write!(text, "{byte:02x}");
-        }
-        text
+        hex16::to_text(self.0)
     }
 
     /// Read a token's text form: exactly 32 hexadecimal digits, either case.
@@ -87,17 +79,7 @@ impl ActivationToken {
     /// token.
     #[must_use]
     pub fn from_text(text: &[u8]) -> Option<Self> {
-        if text.len() != TEXT_LEN || !text.iter().all(u8::is_ascii_hexdigit) {
-            return None;
-        }
-        let mut bytes = [0u8; Self::LEN];
-        for (byte, pair) in bytes.iter_mut().zip(text.chunks_exact(2)) {
-            // Both checked above: two ASCII hex digits are UTF-8, and parse.
-            // `from_str_radix` alone would also take a leading `+`.
-            let pair = std::str::from_utf8(pair).ok()?;
-            *byte = u8::from_str_radix(pair, 16).ok()?;
-        }
-        Some(Self(bytes))
+        hex16::from_text(text).map(Self)
     }
 }
 
@@ -107,11 +89,7 @@ impl PartialEq for ActivationToken {
     /// The compositor compares a presented token against each it has
     /// outstanding.
     fn eq(&self, other: &Self) -> bool {
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .fold(0u8, |differ, (a, b)| differ | (a ^ b))
-            == 0
+        hex16::same(&self.0, &other.0)
     }
 }
 

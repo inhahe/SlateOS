@@ -16,6 +16,10 @@ oswindow = { path = "../../gui/window" }
 # Ctrl+E writes through `safeio::write_str_atomically`, not `fs::write`, which
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
+# Two windows of the board save into one file without losing each other's
+# cards: random ids, a merge by id, and a watch on the file
+# (design-decisions §1239).
+recordfile = { path = "../recordfile" }
 
 # The boards are kept in the user's settings directory
 # (`settingsfile::config_dir`), as the notes library and the address book are.
@@ -35,6 +39,9 @@ unsaved = { path = "../unsaved" }
 # `with_scratch_config`, so the tests that keep boards keep them in a scratch
 # directory and never in the developer's own.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# `refuse_replacing`, so a test can fail a save at the write with the boards
+# still readable: a save reads the file first (design-decisions §1239).
+safeio = { path = "../safeio", features = ["testing"] }
 
 [lints]
 workspace = true

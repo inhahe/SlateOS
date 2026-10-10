@@ -14,6 +14,18 @@
 //! record a line (`boards_text`, `parse_boards`), read whole or not at all.
 //! The window compares the boards' text after each event with what it last
 //! wrote, so no change can go unkept whichever path made it.
+//!
+//! # Two windows
+//!
+//! The board may be open twice, and neither window loses the other's work
+//! (design-decisions §1239): a save reads the file first and puts in only
+//! what this window changed since it last read or wrote it (`merge`), and the
+//! window is woken to read the file again when another saves
+//! (`recordfile::Watch`). A board is merged inside -- its columns, cards and
+//! labels by id -- so two windows working on different cards of one board
+//! each keep theirs; two windows changing the same card at once is the one
+//! case where the later save wins, for that card alone. Ids are random, so
+//! two windows do not give out the same one.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -35,15 +47,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
 
-// =============================================================================
-// Catppuccin Mocha palette
-// =============================================================================
-
-mod palette {}
+mod merge;
 
 // =============================================================================
 // Domain types
@@ -53,10 +60,6 @@ mod palette {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Id(u64);
 
-/// The next id [`Id::new`] hands out. Every id read from a file moves it past
-/// that id ([`Id::from_stored`]).
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
 impl Id {
     /// The identifier a file says a thing has.
     ///
@@ -64,17 +67,19 @@ impl Id {
     /// from the counter: a column stores `card_ids`, so renumbering the cards
     /// would leave every column pointing at nothing while the board still
     /// looked whole.
-    ///
-    /// And the counter is moved past it. It was not, so after an import the
-    /// next card made could be given the id of one just read -- and cards are
-    /// kept in a map by id, so the new card replaced the imported one.
-    fn from_stored(raw: u64) -> Self {
-        NEXT_ID.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
+    const fn from_stored(raw: u64) -> Self {
         Self(raw)
     }
 
+    /// A new id: random, below 2^52 ([`recordfile::fresh_id`]), so that
+    /// two windows of the board -- two processes -- do not give out the same
+    /// one, which a counter in each would (design-decisions §1239). Nor does
+    /// the next card made after an import take an imported card's id, which
+    /// a counter not moved past every id read did, replacing that card in
+    /// the map. It knows nothing of the board, so what goes onto one is
+    /// checked against what is there ([`Board::unclaimed`]).
     fn new() -> Self {
-        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+        Self(recordfile::fresh_id(|_| false))
     }
 }
 
@@ -512,18 +517,59 @@ impl Board {
         board.columns.push(Column::new("Review").with_wip_limit(3));
         board.columns.push(Column::new("Done"));
 
+        // Numbered from one, the same in every window: two windows opened on
+        // a first run have the same board, and a merge takes it for one.
+        // Random numbers, as everything made later has (`Id::new`), would
+        // give each window a "My Project" of its own (design-decisions §1241).
+        let mut last = 0_u64;
+        let mut number = || {
+            last = last.saturating_add(1);
+            Id::from_stored(last)
+        };
+        board.id = number();
+        for label in &mut board.labels {
+            label.id = number();
+        }
+        for column in &mut board.columns {
+            column.id = number();
+        }
+
         board
     }
 
-    fn add_card_to_column(&mut self, card: Card, column_idx: usize) -> Option<Id> {
-        let card_id = card.id;
-        self.cards.insert(card_id, card);
-        if let Some(col) = self.columns.get_mut(column_idx) {
-            col.card_ids.push(card_id);
-            Some(card_id)
+    /// `id`, or a new one if a card, column or label of this board has it.
+    ///
+    /// [`Id::new`] is random and knows nothing of the board, so what it gives
+    /// is new here but for two random 52-bit numbers agreeing -- rare, and
+    /// silent when it happens: the cards are a map by id, and a new card with
+    /// an old card's id would replace that card.
+    fn unclaimed(&self, id: Id) -> Id {
+        let taken = |raw: u64| {
+            let raw = Id(raw);
+            self.cards.contains_key(&raw)
+                || self.columns.iter().any(|c| c.id == raw)
+                || self.labels.iter().any(|l| l.id == raw)
+        };
+        if taken(id.0) {
+            Id(recordfile::fresh_id(taken))
         } else {
-            None
+            id
         }
+    }
+
+    /// Put a new card at the bottom of column `column_idx`, answering the id
+    /// it has on the board; `None`, with the board unchanged, when there is
+    /// no such column.
+    ///
+    /// The card used to go into the board's cards first and the column was
+    /// looked for after, so a column that was not there left a card in no
+    /// column and not archived -- kept, and nowhere to be seen.
+    fn add_card_to_column(&mut self, mut card: Card, column_idx: usize) -> Option<Id> {
+        card.id = self.unclaimed(card.id);
+        let card_id = card.id;
+        self.columns.get_mut(column_idx)?.card_ids.push(card_id);
+        self.cards.insert(card_id, card);
+        Some(card_id)
     }
 
     fn move_card(&mut self, card_id: Id, from_col: usize, to_col: usize, to_pos: usize) -> bool {
@@ -610,7 +656,9 @@ impl Board {
     }
 
     fn add_column(&mut self, name: &str) {
-        self.columns.push(Column::new(name));
+        let mut column = Column::new(name);
+        column.id = self.unclaimed(column.id);
+        self.columns.push(column);
     }
 
     /// Take column `col_idx` off the board. Shift+Delete asks for it only for
@@ -1154,6 +1202,27 @@ fn boards_text(boards: &[Board], active: usize) -> String {
         }
     }
     out
+}
+
+/// The boards the file at `path` holds now, and which was up: `None` when
+/// there is no file yet. `Err` says why it was not read -- too big, or not
+/// a boards file -- and nothing is saved over a file in that state.
+fn read_boards_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Option<(Vec<Board>, usize)>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_boards(&read.text).map(Some)
 }
 
 /// Every board read from its text, and the one that was open -- or why they
@@ -2060,6 +2129,16 @@ struct KanbanApp {
     /// compared with it after every key or click, and written when it
     /// differs.
     kept_text: String,
+    /// The boards as this window last read or wrote them: what a save
+    /// merges this window's changes against, so another window's, saved
+    /// since, are kept rather than written over (design-decisions §1239).
+    base: Vec<Board>,
+    /// The boards' file as this window last read or wrote it, to tell
+    /// another window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the boards' file, which wakes the window when another
+    /// one saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// Why the boards are not being kept, drawn for as long as it is true:
     /// the file could not be read (and so is left exactly as it is), there is
     /// nowhere to keep it, or the last save failed.
@@ -2131,6 +2210,9 @@ impl KanbanApp {
             last_stamp: 0,
             persist: false,
             kept_text: String::new(),
+            base: Vec::new(),
+            file_stamp: None,
+            watch: None,
             store_error: None,
             question: None,
             quit: false,
@@ -2175,56 +2257,115 @@ impl KanbanApp {
     /// [`load_boards`](Self::load_boards) with the size limit given, so a
     /// test can reach it without writing sixty-four megabytes.
     fn load_boards_within(&mut self, path: &std::path::Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
-            }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_boards(&read.text) {
-            Ok((boards, active)) => {
-                // Every time on a card or a comment, so a change made now is
-                // later than all of them even if the clock has been set back.
-                let latest = boards
-                    .iter()
-                    .flat_map(|b| b.cards.values())
-                    .flat_map(|c| {
-                        std::iter::once(c.created_at).chain(c.comments.iter().map(|m| m.timestamp))
-                    })
-                    .max()
-                    .unwrap_or(0);
-                self.last_stamp = self.last_stamp.max(latest);
-                self.boards = boards;
-                self.active_board_idx = active;
+        match read_boards_file(path, max_bytes) {
+            // None there yet: a first run, on the board `new` starts with --
+            // which is what this window's changes are measured from, so the
+            // first save is it and those changes.
+            Ok(None) => self.base = self.boards.clone(),
+            Ok(Some((boards, active))) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = boards.clone();
                 self.selected_card = None;
                 self.selected_column = 0;
+                self.adopt(boards, active);
             }
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
     }
 
+    /// Show `boards`, with board `active` up: what this window and the file
+    /// hold together, after a save or another window's. What is chosen stays
+    /// chosen while it is there.
+    fn adopt(&mut self, boards: Vec<Board>, active: usize) {
+        // Every time on a card or a comment, so a change made now is later
+        // than all of them even if the clock has been set back.
+        let latest = boards
+            .iter()
+            .flat_map(|b| b.cards.values())
+            .flat_map(|c| {
+                std::iter::once(c.created_at).chain(c.comments.iter().map(|m| m.timestamp))
+            })
+            .max()
+            .unwrap_or(0);
+        self.last_stamp = self.last_stamp.max(latest);
+        self.boards = boards;
+        self.active_board_idx = active.min(self.boards.len().saturating_sub(1));
+        let board = self.boards.get(self.active_board_idx);
+        if self
+            .selected_card
+            .is_some_and(|id| !board.is_some_and(|b| b.cards.contains_key(&id)))
+        {
+            self.selected_card = None;
+        }
+        let columns = board.map_or(0, |b| b.columns.len());
+        self.selected_column = self.selected_column.min(columns.saturating_sub(1));
+    }
+
+    /// The board up after a merge: the one this window had up, by id, wherever
+    /// the merge put it -- an index into one list names a different board in
+    /// another.
+    fn active_in(&self, boards: &[Board]) -> usize {
+        self.boards
+            .get(self.active_board_idx)
+            .and_then(|up| boards.iter().position(|b| b.id == up.id))
+            .unwrap_or(0)
+    }
+
+    /// Read the boards again if something has written them since this window
+    /// last read or wrote them -- another window's save -- and show what the
+    /// file holds, with this window's unsaved changes put into it. Whether
+    /// what is shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case.
+    fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = boards_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(Some((theirs, _))) = read_boards_file(&path, MAX_BOARDS_BYTES) else {
+            return false;
+        };
+        let unsaved = self.unkept();
+        let shown = if unsaved {
+            merge::merge_boards(&self.base, &self.boards, &theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown != self.boards;
+        let active = self.active_in(&shown);
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown, active);
+        if !unsaved {
+            // What the window shows now is what is kept: nothing to write.
+            self.kept_text = boards_text(&self.boards, self.active_board_idx);
+        }
+        changed
+    }
+
     /// Write the boards, if they have changed since they were last written
     /// and this window keeps anything.
+    ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it (design-decisions §1239,
+    /// [`merge::merge_boards`]). Written whole and over, as it used to be,
+    /// the window that saved last threw away the other's cards.
     ///
     /// A failure is kept in `store_error`, drawn on the status line, and the
     /// next event tries again.
@@ -2240,6 +2381,31 @@ impl KanbanApp {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`. A save follows every key and click that changes
+        // something, so the read is kept for when something else has written.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some((self.base.clone(), 0)))
+        } else {
+            read_boards_file(&path, MAX_BOARDS_BYTES)
+        };
+        let theirs = match read {
+            Ok(Some((boards, _))) => boards,
+            // None there -- a first run, or gone since: nothing has been
+            // deleted from it, so it is what this window started from.
+            Ok(None) => self.base.clone(),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Not saved: {} could not be read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = merge::merge_boards(&self.base, &self.boards, &theirs);
+        let active = self.active_in(&merged);
+        let text = boards_text(&merged, active);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
@@ -2248,6 +2414,11 @@ impl KanbanApp {
             Ok(()) => {
                 self.kept_text = text;
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged, active);
             }
             Err(err) => {
                 self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
@@ -5467,6 +5638,27 @@ impl App for KanbanApp {
         None
     }
 
+    /// Watch the boards' file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its boards.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = boards_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the boards' file written: read it again if another
+    /// window wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return if self.request_close() {
@@ -6632,12 +6824,43 @@ mod tests {
         assert_eq!(board.cards.len(), 1);
     }
 
+    /// A card for a column there is not is not kept either: it went into the
+    /// board's cards before the column was looked for, and was then in no
+    /// column -- kept, and nowhere to be seen.
     #[test]
     fn test_board_add_card_invalid_column() {
         let mut board = Board::default_board();
         let card = Card::new("Test");
         let id = board.add_card_to_column(card, 99);
         assert!(id.is_none());
+        assert!(board.cards.is_empty(), "a card was kept in no column");
+    }
+
+    /// **A new card given an id the board already has replaces nothing.**
+    /// Ids are random and know nothing of the board (design-decisions §1239),
+    /// so two can agree, however rarely; the cards are a map by id.
+    #[test]
+    fn a_new_card_with_an_id_the_board_has_replaces_nothing() {
+        let mut board = Board::default_board();
+        let first = board.add_card_to_column(Card::new("First"), 0).unwrap();
+        let mut second = Card::new("Second");
+        second.id = first;
+        let second = board.add_card_to_column(second, 1).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(board.cards[&first].title, "First");
+        assert_eq!(board.cards[&second].title, "Second");
+        assert_eq!(board.columns[1].card_ids, [second]);
+
+        // Nor one with a column's or a label's.
+        let column = board.columns[2].id;
+        let mut third = Card::new("Third");
+        third.id = column;
+        assert_ne!(board.add_card_to_column(third, 2), Some(column));
+        let label = board.labels[0].id;
+        let mut fourth = Card::new("Fourth");
+        fourth.id = label;
+        assert_ne!(board.add_card_to_column(fourth, 2), Some(label));
+        assert_eq!(board.cards.len(), 4);
     }
 
     #[test]
@@ -9384,6 +9607,314 @@ mod tests {
         });
     }
 
+    /// The card titled `title` on `app`'s board, and the column it is in.
+    fn card_named(app: &KanbanApp, title: &str) -> (Id, Option<usize>) {
+        let board = app.active_board();
+        let card = board
+            .cards
+            .values()
+            .find(|c| c.title == title)
+            .unwrap_or_else(|| panic!("no card {title:?}"));
+        let column = board
+            .columns
+            .iter()
+            .position(|col| col.card_ids.contains(&card.id));
+        (card.id, column)
+    }
+
+    /// **Two windows each put a card on one board, and both are kept.** Each
+    /// wrote its own copy of the boards whole, so the last to save threw away
+    /// the other's cards (design-decisions §1239).
+    #[test]
+    fn two_windows_each_add_a_card_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("kanban-two-windows", |_| {
+            let mut first = KanbanApp::from_settings();
+            first.add_card("Started here", 0).unwrap();
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+            first.add_card("From the first", 0).unwrap();
+            first.keep();
+            second.add_card("From the second", 1).unwrap();
+            second.keep();
+            let again = KanbanApp::from_settings();
+            assert_eq!(card_named(&again, "From the first").1, Some(0));
+            assert_eq!(card_named(&again, "From the second").1, Some(1));
+            assert_eq!(card_named(&again, "Started here").1, Some(0));
+            assert_eq!(again.active_board().cards.len(), 3);
+        });
+    }
+
+    /// **A card moved in one window and renamed in the other is both**; and
+    /// a card each window moves somewhere else ends in one column -- the
+    /// later save's -- not in two.
+    #[test]
+    fn a_card_moved_in_one_window_and_changed_in_the_other_is_both() {
+        settingsfile::testing::with_scratch_config("kanban-move-edit", |_| {
+            let mut first = KanbanApp::from_settings();
+            let card = first.add_card("Report", 0).unwrap();
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+
+            first.active_board_mut().move_card(card, 0, 1, 0);
+            first.keep();
+            second
+                .active_board_mut()
+                .cards
+                .get_mut(&card)
+                .unwrap()
+                .title = String::from("Final report");
+            second.keep();
+            let again = KanbanApp::from_settings();
+            assert_eq!(card_named(&again, "Final report"), (card, Some(1)));
+
+            // Now each moves it somewhere else.
+            let mut first = KanbanApp::from_settings();
+            let mut second = KanbanApp::from_settings();
+            first.active_board_mut().move_card(card, 1, 0, 0);
+            first.keep();
+            second.active_board_mut().move_card(card, 1, 2, 0);
+            second.keep();
+            let again = KanbanApp::from_settings();
+            let board = again.active_board();
+            let homes: Vec<usize> = board
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, col)| col.card_ids.contains(&card))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                homes,
+                [2],
+                "the card is in more than one column, or the wrong one"
+            );
+        });
+    }
+
+    /// **A window reads the boards again when another saves**, keeping what
+    /// it has not saved; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("kanban-hear", |_| {
+            let mut first = KanbanApp::from_settings();
+            first.add_card("One", 0).unwrap();
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+            first.add_card("Two", 0).unwrap();
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert_eq!(second.active_board().cards.len(), 2);
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+            assert!(
+                !second.unkept(),
+                "a reread with nothing unsaved left something to save"
+            );
+
+            let mine = second.add_card("Not yet saved", 1).unwrap();
+            first.add_card("Three", 0).unwrap();
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.active_board().cards.contains_key(&mine),
+                "an unsaved card went"
+            );
+            assert_eq!(second.active_board().cards.len(), 4);
+            assert!(second.unkept(), "the unsaved card is taken for saved");
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert_eq!(KanbanApp::from_settings().active_board().cards.len(), 4);
+        });
+    }
+
+    /// A card another window deleted is no longer the chosen one, and a
+    /// column another window took away is no longer the chosen column.
+    #[test]
+    fn what_another_window_took_away_is_no_longer_chosen() {
+        settingsfile::testing::with_scratch_config("kanban-chosen-gone", |_| {
+            let mut first = KanbanApp::from_settings();
+            let card = first.add_card("Doomed", 0).unwrap();
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+            let last = second.active_board().columns.len() - 1;
+            second.selected_card = Some(card);
+            second.selected_column = last;
+
+            assert!(first.active_board_mut().delete_card(card));
+            assert!(first.active_board_mut().remove_column(last).is_some());
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert_eq!(second.selected_card, None, "a deleted card is chosen");
+            assert_eq!(second.selected_column, last - 1);
+        });
+    }
+
+    /// The board this window has up stays up when another window deletes a
+    /// board before it: the boards are counted from the start, so the same
+    /// number names the board after it.
+    #[test]
+    fn the_board_up_stays_up_when_another_window_deletes_one_before_it() {
+        settingsfile::testing::with_scratch_config("kanban-board-up", |_| {
+            let mut first = KanbanApp::from_settings();
+            first.boards.push(Board::new("Second"));
+            first.boards.push(Board::new("Third"));
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+            second.active_board_idx = 1;
+
+            first.boards.remove(0);
+            first.active_board_idx = 0;
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert_eq!(second.active_board().name, "Second");
+
+            // And when this window saves into a file where the other has put
+            // a board before it since.
+            first.boards.insert(0, Board::new("New first"));
+            first.keep();
+            second.keep();
+            assert_eq!(second.active_board().name, "Second");
+        });
+    }
+
+    /// Two windows opened on a first run start on the same board, and a
+    /// merge takes it for one board: each window's change to it stands, and
+    /// there is one "My Project", not one a window. Each had a board of
+    /// random numbers of its own, so the second save added a second board.
+    #[test]
+    fn two_first_run_windows_share_the_starting_board() {
+        settingsfile::testing::with_scratch_config("kanban-first-run", |_| {
+            let mut first = KanbanApp::from_settings();
+            let mut second = KanbanApp::from_settings();
+            first.active_board_mut().columns[0].name = String::from("Ideas");
+            first.keep();
+            second.add_card("From the second", 1).unwrap();
+            second.keep();
+            let again = KanbanApp::from_settings();
+            assert_eq!(again.boards.len(), 1, "each window's board was kept");
+            assert_eq!(again.active_board().columns[0].name, "Ideas");
+            assert_eq!(card_named(&again, "From the second").1, Some(1));
+        });
+    }
+
+    /// A boards file deleted while the window is open is written back whole
+    /// at the next save: a file that is not there has had nothing deleted
+    /// from it, so no board this window has is taken for one another window
+    /// deleted.
+    #[test]
+    fn a_boards_file_deleted_while_open_is_written_back_whole() {
+        settingsfile::testing::with_scratch_config("kanban-file-deleted", |_| {
+            let mut app = KanbanApp::from_settings();
+            app.add_card("Kept", 0).unwrap();
+            app.boards.push(Board::new("Second"));
+            app.keep();
+            std::fs::remove_file(boards_path().unwrap()).unwrap();
+            app.boards[1].name = String::from("Second, renamed");
+            app.keep();
+            let again = KanbanApp::from_settings();
+            assert_eq!(again.boards.len(), 2, "a board went with the file");
+            assert!(again.boards[0].cards.values().any(|c| c.title == "Kept"));
+        });
+    }
+
+    /// A card another window deleted stays deleted when this window saves
+    /// next -- one this window made, and one it heard of from the other's
+    /// save. A save compares with what the window last wrote or read; a card
+    /// it has that is not in that is taken for one it made since, and kept.
+    #[test]
+    fn a_card_deleted_in_another_window_stays_deleted() {
+        settingsfile::testing::with_scratch_config("kanban-stays-deleted", |_| {
+            let mut first = KanbanApp::from_settings();
+            first.add_card("Start", 0).unwrap();
+            first.keep();
+            let mut second = KanbanApp::from_settings();
+
+            let made_here = second.add_card("Made here", 0).unwrap();
+            second.keep();
+            assert!(first.reread_if_changed());
+            assert!(first.active_board_mut().delete_card(made_here));
+            first.keep();
+            second.add_card("Later", 1).unwrap();
+            second.keep();
+            assert!(
+                !KanbanApp::from_settings()
+                    .active_board()
+                    .cards
+                    .contains_key(&made_here),
+                "a card made here and deleted there came back"
+            );
+
+            let heard_of = first.add_card("Heard of", 0).unwrap();
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(first.active_board_mut().delete_card(heard_of));
+            first.keep();
+            second.add_card("Later still", 1).unwrap();
+            second.keep();
+            let kept = KanbanApp::from_settings();
+            assert!(
+                !kept.active_board().cards.contains_key(&heard_of),
+                "a card heard of here and deleted there came back"
+            );
+            assert_eq!(kept.active_board().cards.len(), 3);
+        });
+    }
+
+    /// A save whose write fails -- the boards' file reads, and cannot be
+    /// replaced -- says so, and the next event tries again. A folder where
+    /// the file goes fails at the read, which a save does first
+    /// (design-decisions §1239), so the write's failure needs a file that
+    /// reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("kanban-unwritable", |_| {
+            let mut app = KanbanApp::from_settings();
+            app.add_card("First", 0).unwrap();
+            app.keep();
+            let path = boards_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.add_card("Unwritten", 0).unwrap();
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(app.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
+        });
+    }
+
+    /// A save that finds the boards' file broken -- another program wrote it
+    /// -- leaves it as it is and says so, rather than writing this window's
+    /// boards over what it could not read.
+    #[test]
+    fn a_save_leaves_a_file_it_cannot_read_as_it_is() {
+        settingsfile::testing::with_scratch_config("kanban-save-unreadable", |_| {
+            let mut app = KanbanApp::from_settings();
+            app.add_card("Mine", 0).unwrap();
+            app.keep();
+            let path = boards_path().unwrap();
+            std::fs::write(&path, "not a boards file\n").unwrap();
+            app.add_card("Another", 0).unwrap();
+            app.keep();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "not a boards file\n"
+            );
+            let error = app.store_error.clone().expect("the refusal said nothing");
+            assert!(error.contains("could not be read"), "{error}");
+        });
+    }
+
     #[test]
     fn a_window_made_by_new_keeps_nothing() {
         settingsfile::testing::with_scratch_config("kanban-quiet", |dir| {
@@ -9475,7 +10006,9 @@ mod tests {
             type_in(&mut app, "Unkept");
             app.on_event(&key_ev(Key::Enter, ""));
             let error = app.store_error.clone().expect("a failed save said nothing");
-            assert!(error.starts_with("Not saved to "), "{error}");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239).
+            assert!(error.starts_with("Not saved"), "{error}");
             assert!(matches!(
                 app.on_event(&Event::CloseRequested),
                 Response::KeepOpen
@@ -9514,25 +10047,20 @@ mod tests {
         });
     }
 
-    /// An import kept the ids the file carried and did not move the counter
-    /// past them, so the next card made could be given the id of one just
-    /// read -- and cards are kept in a map by id, so the new card replaced it.
+    /// An import kept the ids the file carried, and the counter ids then came
+    /// from handed the next card made the id of one just read -- and cards
+    /// are kept in a map by id, so the new card replaced it. Ids are random
+    /// now (design-decisions §1239): made where a counter would have landed,
+    /// nothing is replaced.
     #[test]
     fn a_card_made_after_an_import_replaces_nothing() {
-        // The counter moves past every id read, so nothing made later can be
-        // given one. Checked directly, because other tests take ids from the
-        // same counter at the same time: an id handed out after the read is
-        // later than it whatever else was handed out meanwhile.
-        let read = NEXT_ID.load(Ordering::Relaxed).saturating_add(10);
-        let _ = Id::from_stored(read);
-        assert!(
-            Id::new().0 > read,
-            "an id was handed out that a file already used"
-        );
+        let made: std::collections::HashSet<u64> = (0..1000).map(|_| Id::new().0).collect();
+        assert_eq!(made.len(), 1000, "an id was handed out twice");
+        assert!(made.iter().all(|id| (1..=recordfile::MAX_ID).contains(id)));
 
-        // And through the importer, with the imported card just ahead of the
-        // counter, where the next cards made would have landed on it.
-        let far = NEXT_ID.load(Ordering::Relaxed).saturating_add(2);
+        // Through the importer, with the imported card's id small, where a
+        // counter from 1 would have landed on it.
+        let far = 2_u64;
         let json = format!(
             "{{\"name\":\"Imported\",\"labels\":[],\"cards\":[{{\"id\":{far},\"title\":\"Theirs\"}}],\
              \"columns\":[{{\"id\":{},\"name\":\"Todo\",\"card_ids\":[{far}]}}]}}",

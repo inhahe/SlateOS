@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+Date: Sat, 10 Oct 2026 01:13:05 GMT
+Content-Type: application/json; charset=utf-8
+Transfer-Encoding: chunked
+Connection: close
+
+153
+{"latitude":52.528915,"longitude":13.423877,"generationtime_ms":0.0362396240234375,"utc_offset_seconds":7200,"timezone":"Europe/Berlin","timezone_abbreviation":"GMT+2","elevation":46.0,"current_units":{"time":"iso8601","interval":"seconds","temperature_2m":"°C"},"current":{"time":"2026-10-10T03:00","interval":900,"temperature_2m":11.9}}
+0
+

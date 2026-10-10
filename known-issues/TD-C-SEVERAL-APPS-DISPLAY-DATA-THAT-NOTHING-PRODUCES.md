@@ -33,7 +33,7 @@ promise to break.
 
 | app | what it shows | what it lacks | its `tick_interval` |
 |---|---|---|---|
-| `weather` | a full forecast for a city | any forecast source; the settings offer a 5–120 min update interval with nothing behind it | `None`, documented |
+| `weather` | a full forecast for a city | ~~any forecast source; the settings offer a 5–120 min update interval with nothing behind it~~ -- both, 2026-10-09 (lane E): Open-Meteo, off until the user turns it on (§1236), refreshed every half hour | ~~`None`, documented~~ the next refresh, or `None` with forecasts off |
 | `logviewer` | 21 log lines, filterable | any file; its header promises "real-time log tailing" and it draws an auto-scroll toggle | `None`, documented |
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
@@ -67,8 +67,8 @@ The four `apps/` ↔ `userspace/` pairs are not duplicates in general:
 hollow. `sysinfo` is the only pair where one side has what the other lacks.
 
 **Proper fix, per app.** Each needs its own source and they are not the same
-job: an HTTP client for `weather` (lane C has `net/` but no app makes an
-outbound request yet), a tailing file reader for `logviewer` (with rotation and
+job: an HTTP client for `weather` (done 2026-10-09: `net/httpclient` over a
+`TcpStream`, `apps/weather/src/fetch.rs`), a tailing file reader for `logviewer` (with rotation and
 half-written-line handling), the shared `/proc` readers for `sysinfo`, a process
 source for `sysmonitor`, and for `finance` a creation UI and a store — see
 `TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA`.

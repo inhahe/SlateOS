@@ -1,0 +1,2 @@
+# A raw HTTP reply, kept byte for byte: its header lines end in CR LF.
+*.http -text

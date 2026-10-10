@@ -3,8 +3,8 @@
 **Status:** OPEN (lane E, found 2026-10-09)
 
 **In short:** lane E's applications have one shared JSON reader now
-(`apps/jsonvalue`), which the backup tool and System Restore use and the
-weather app's forecasts will. Three programs still carry a reader of their own:
+(`apps/jsonvalue`), which the backup tool, System Restore and the weather
+app's forecasts use. Three programs still carry a reader of their own:
 the JSON viewer, the
 kanban board and the log viewer. Two readers of one format disagree somewhere
 -- one accepts what the other refuses, or reads a number or an escape

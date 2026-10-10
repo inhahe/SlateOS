@@ -4770,6 +4770,8 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "httpclient",
+ "jsonvalue",
  "oswindow",
  "settingsfile",
  "textline",

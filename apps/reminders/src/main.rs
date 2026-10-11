@@ -155,6 +155,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("D", "Show or hide the detail panel"),
     ("C", "Show or hide completed subtasks"),
     ("Escape", "Dismiss the notifications"),
+    ("Ctrl+F", "Search the reminders"),
     ("Ctrl+O / Ctrl+S", "Open / save"),
     ("F1 / ?", "This list"),
 ];
@@ -2025,6 +2026,12 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 
 /// The size a form field's text is drawn at, which moving its caret needs.
 const FORM_TEXT_SIZE: f32 = 13.0;
+
+/// The most characters the search box takes.
+const SEARCH_CAPACITY: usize = 256;
+
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 13.0;
 /// A form row's height.
 const FORM_ROW_H: f32 = 36.0;
 /// How wide the form's labels are, before each row's box.
@@ -2375,6 +2382,13 @@ pub struct RemindersApp {
     pub view: ViewFilter,
     pub sort_mode: SortMode,
     pub search_query: String,
+    /// Whether the search box has the keyboard.
+    search_focused: bool,
+    /// The search box's text, caret and selection. Loaded from
+    /// `search_query` when the box takes the keyboard; while it has it, the
+    /// box's keys are the only thing that changes the search, and they change
+    /// both.
+    search_editor: TextInput,
     pub selected_task_id: Option<u64>,
     pub notifications: Vec<Notification>,
     pub sidebar_visible: bool,
@@ -2421,8 +2435,6 @@ pub struct RemindersApp {
     pub form_error: Option<String>,
     /// The reminder a delete is waiting on its answer for.
     pub pending_delete: Option<u64>,
-    /// What was last copied or cut from a field of the form.
-    clipboard: String,
 }
 
 impl RemindersApp {
@@ -2442,6 +2454,8 @@ impl RemindersApp {
             view: ViewFilter::Today,
             sort_mode: SortMode::DueDate,
             search_query: String::new(),
+            search_focused: false,
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             selected_task_id: None,
             notifications: Vec::new(),
             sidebar_visible: true,
@@ -2459,7 +2473,6 @@ impl RemindersApp {
             form_field: TaskField::Title,
             form_error: None,
             pending_delete: None,
-            clipboard: String::new(),
         }
     }
 
@@ -3097,8 +3110,19 @@ impl RemindersApp {
                     self.open_file_dialog(false);
                     EventResult::Consumed
                 }
+                Key::F => {
+                    self.focus_search();
+                    EventResult::Consumed
+                }
+                // The search box's own chords: select all, copy, cut, paste.
+                _ if self.search_focused => self.search_key(key),
                 _ => EventResult::Ignored,
             };
+        }
+        // The search box takes every other key while it has the keyboard, so
+        // a letter typed is never also one of the list's keys.
+        if self.search_focused {
+            return self.search_key(key);
         }
         // Every other binding is on a key, taken plain -- nothing held but
         // Shift. A chord with Alt or the Windows key is the window's or the
@@ -3179,8 +3203,9 @@ impl RemindersApp {
                 self.show_completed_subtasks = !self.show_completed_subtasks;
                 EventResult::Consumed
             }
-            // The shortcut list. Nothing in this program turns a keystroke
-            // into text, so `?` is free as well as `F1`.
+            // The shortcut list. Outside the search box, which takes its keys
+            // before this, nothing turns a keystroke into text, so `?` is
+            // free as well as `F1`.
             Key::F1 => {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
@@ -3270,14 +3295,10 @@ impl RemindersApp {
                 }
             }
             _ => {
-                let clipboard = self.clipboard.clone();
                 let Some(input) = form.input(field) else {
                     return EventResult::Ignored;
                 };
-                let done = textline::apply_key(input, key, &clipboard, FORM_TEXT_SIZE);
-                if let Some(copied) = done.copied {
-                    self.clipboard = copied;
-                }
+                let done = textline::apply_key_on_clipboard(input, key, FORM_TEXT_SIZE);
                 if done.handled {
                     self.form_error = None;
                     EventResult::Consumed
@@ -3314,9 +3335,15 @@ impl RemindersApp {
             return EventResult::Ignored;
         }
         self.view = view;
-        // The selection is an id, so it survives the view change — but it can
-        // survive into a view that does not show it, where the highlight simply
-        // vanishes. Re-anchor to something on screen.
+        self.reanchor_selection();
+        EventResult::Consumed
+    }
+
+    /// The selection is an id, so it survives a change to what is listed --
+    /// another view, a search -- but it can survive into a list that does
+    /// not show it, where the highlight simply vanishes. Re-anchor it to
+    /// something on screen.
+    fn reanchor_selection(&mut self) {
         let visible: Vec<u64> = self.current_tasks().iter().map(|t| t.id).collect();
         if !self
             .selected_task_id
@@ -3324,7 +3351,48 @@ impl RemindersApp {
         {
             self.selected_task_id = visible.first().copied();
         }
-        EventResult::Consumed
+    }
+
+    /// Give the search box the keyboard, its caret at the end of the search.
+    fn focus_search(&mut self) {
+        self.search_focused = true;
+        self.search_editor.set_text(&self.search_query);
+    }
+
+    /// A key for the search box while it has the keyboard: Escape empties it
+    /// and leaves, Enter leaves keeping the search, and the rest is the box's
+    /// (`textline::apply_key_on_clipboard`), on the program's clipboard.
+    /// Answers whether the box did anything with the key.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
+        match key.key {
+            Key::Escape if plain => {
+                self.search_focused = false;
+                self.set_search("");
+                return EventResult::Consumed;
+            }
+            Key::Enter if plain => {
+                self.search_focused = false;
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
+        let typed = self.search_editor.text().to_owned();
+        self.set_search(&typed);
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// The search changed to `text`: the list follows it.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            text.clone_into(&mut self.search_query);
+            self.reanchor_selection();
+        }
     }
 
     /// Move the selection through the tasks currently listed.
@@ -4058,30 +4126,59 @@ impl RemindersApp {
             y: y_offset + 12.0,
             width: search_w,
             height: 32.0,
-            color: self.palette.surface1,
+            color: if self.search_focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
             line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
-        let search_text = if self.search_query.is_empty() {
-            "Search tasks...".to_string()
+        if self.search_focused {
+            // The box with the keyboard: its text, with the caret and the
+            // selection where they are.
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: self.search_editor.text(),
+                    cursor: self.search_editor.cursor(),
+                    selection_anchor: self.search_editor.selection_anchor(),
+                    focused: true,
+                    x: search_x + 12.0,
+                    y: y_offset + 19.0,
+                    width: search_w - 24.0,
+                    line_height: 18.0,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            cmds.extend(tree.commands);
         } else {
-            self.search_query.clone()
-        };
-        let search_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: search_x + 12.0,
-            y: y_offset + 20.0,
-            text: search_text,
-            font_size: 13.0,
-            color: search_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(search_w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            let empty = self.search_query.is_empty();
+            cmds.push(RenderCommand::Text {
+                x: search_x + 12.0,
+                y: y_offset + 20.0,
+                text: if empty {
+                    "Search tasks (Ctrl+F)".to_string()
+                } else {
+                    self.search_query.clone()
+                },
+                font_size: SEARCH_TEXT_SIZE,
+                color: if empty {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(search_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Sort indicator
         let sort_x = search_x + search_w + 20.0;
@@ -5661,6 +5758,224 @@ mod tests {
         app.view = ViewFilter::All;
         app.selected_task_id = app.current_tasks().first().map(|t| t.id);
         app
+    }
+
+    /// A key that types `text` under the key code of its own letter, so a
+    /// handler that read the key rather than the text -- the list's N for a
+    /// new reminder -- would act on it.
+    fn letter(key: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Type `text` a character at a time.
+    fn type_text(app: &mut RemindersApp, text: &str) {
+        for ch in text.chars() {
+            app.handle_event(&Event::Key(guitk::probe::typing(&ch.to_string())));
+        }
+    }
+
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(guitk::probe::ctrl(k))
+    }
+
+    /// **The search box can be reached, and it searches** (Ctrl+F). It was
+    /// drawn over a search the list already knew how to do, and no key could
+    /// type into it. While it has the keyboard a letter is the search's, not
+    /// one of the list's keys; it edits at a caret; the list follows it, and
+    /// the selection with it; Enter leaves it with the search kept, and Escape
+    /// empties it.
+    #[test]
+    fn ctrl_f_searches_the_reminders() {
+        let mut app = populated();
+        let all = app.current_tasks().len();
+        let hidden = app
+            .current_tasks()
+            .iter()
+            .find(|t| t.title == "Doctor appointment")
+            .map(|t| t.id);
+        assert!(
+            hidden.is_some(),
+            "control: the doctor's appointment is listed"
+        );
+        app.selected_task_id = hidden;
+
+        app.handle_event(&ctrl_key(Key::F));
+        assert!(
+            app.search_focused,
+            "Ctrl+F did not give the search the keyboard"
+        );
+        assert_eq!(
+            app.handle_event(&letter(Key::N, "n")),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered"
+        );
+        assert!(
+            app.form.is_none(),
+            "an n typed into the search started a new reminder"
+        );
+        assert_eq!(app.search_query, "n");
+        assert_eq!(
+            app.handle_event(&Event::Key(guitk::probe::press_with(
+                Key::F4,
+                Modifiers::alt()
+            ))),
+            EventResult::Ignored,
+            "the search box kept a chord of the window's"
+        );
+        app.handle_event(&press(Key::Backspace));
+        type_text(&mut app, "oc");
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&press(Key::Left));
+        type_text(&mut app, "gr");
+        assert_eq!(
+            app.search_query, "groc",
+            "the search does not type at its caret"
+        );
+
+        let found: Vec<String> = app
+            .current_tasks()
+            .iter()
+            .map(|t| t.title.clone())
+            .collect();
+        assert_eq!(
+            found,
+            ["Buy groceries"],
+            "the list does not follow the search"
+        );
+        assert_eq!(
+            app.selected_task_id,
+            app.current_tasks().first().map(|t| t.id),
+            "the selection was left on a reminder the search hides"
+        );
+
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.search_focused, "Enter did not leave the search");
+        assert_eq!(app.search_query, "groc", "Enter did not keep the search");
+        app.handle_event(&ctrl_key(Key::F));
+        type_text(&mut app, "e");
+        assert_eq!(
+            app.search_query, "groce",
+            "the box came back without its caret at the end of the search"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.search_focused, "Escape did not leave the search");
+        assert_eq!(app.search_query, "", "Escape did not empty the search");
+        assert_eq!(app.current_tasks().len(), all);
+        app.handle_event(&ctrl_key(Key::F));
+        type_text(&mut app, "tax");
+        assert_eq!(
+            app.search_query, "tax",
+            "the box came back holding the search Escape emptied"
+        );
+    }
+
+    /// **The search box's Ctrl chords are its own** while it has the
+    /// keyboard, on the program's clipboard: Ctrl+V pastes into it, and
+    /// Ctrl+A then Ctrl+X takes the whole search out onto the clipboard.
+    #[test]
+    fn the_search_box_pastes_and_cuts_on_the_programs_clipboard() {
+        let mut app = populated();
+        guitk::clipboard::set_text("groceries");
+        app.handle_event(&ctrl_key(Key::F));
+        app.handle_event(&ctrl_key(Key::V));
+        assert_eq!(
+            app.search_query, "groceries",
+            "Ctrl+V did not paste into the search"
+        );
+
+        guitk::clipboard::set_text("something else");
+        app.handle_event(&ctrl_key(Key::A));
+        app.handle_event(&ctrl_key(Key::X));
+        assert_eq!(
+            app.search_query, "",
+            "Ctrl+A and Ctrl+X did not cut the search"
+        );
+        assert_eq!(
+            guitk::clipboard::text(),
+            "groceries",
+            "the cut search did not go onto the program's clipboard"
+        );
+    }
+
+    /// **The search box shows that it has the keyboard**: its frame in the
+    /// accent colour, and the search drawn by the field editor, caret and
+    /// all. Left with Enter it is drawn as a box again, with the search kept;
+    /// and the empty box names the key that reaches it.
+    #[test]
+    fn the_search_box_shows_it_has_the_keyboard() {
+        let mut app = populated();
+        assert!(
+            drawn_help_text(&app).contains("Search tasks (Ctrl+F)"),
+            "the empty box does not say which key reaches it"
+        );
+        let edited = |app: &RemindersApp| {
+            app.render_commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "tax"))
+        };
+        let accent_frames = |app: &RemindersApp| {
+            app.render_commands()
+                .iter()
+                .filter(|c| {
+                    matches!(c, RenderCommand::StrokeRect { color, .. } if *color == app.palette.blue)
+                })
+                .count()
+        };
+        app.handle_event(&ctrl_key(Key::F));
+        type_text(&mut app, "tax");
+        assert!(edited(&app), "the search is not drawn by the field editor");
+        let focused = accent_frames(&app);
+
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            !edited(&app),
+            "the box is still drawn as edited after Enter left it"
+        );
+        assert!(
+            accent_frames(&app) < focused,
+            "the frame does not show which box has the keyboard"
+        );
+        assert!(
+            drawn_help_text(&app).contains("tax"),
+            "the kept search is not drawn"
+        );
+    }
+
+    /// **The form's fields copy and paste on the program's clipboard**, the
+    /// one the other programs' fields and right-click menus use: the form
+    /// kept a clipboard of its own, which nothing else could paste from.
+    #[test]
+    fn the_forms_fields_copy_and_paste_on_the_programs_clipboard() {
+        let mut app = populated();
+        app.handle_event(&press(Key::N));
+        assert!(app.form.is_some(), "control: N starts a reminder");
+        type_text(&mut app, "Water plants");
+        app.handle_event(&ctrl_key(Key::A));
+        app.handle_event(&ctrl_key(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            "Water plants",
+            "Ctrl+C did not copy to the program's clipboard"
+        );
+
+        guitk::clipboard::set_text("Feed the cat");
+        app.handle_event(&ctrl_key(Key::A));
+        app.handle_event(&ctrl_key(Key::V));
+        let title = app
+            .form
+            .as_ref()
+            .and_then(|form| form.input_ref(TaskField::Title))
+            .map(|input| input.text().to_owned());
+        assert_eq!(
+            title.as_deref(),
+            Some("Feed the cat"),
+            "Ctrl+V did not paste the program's clipboard"
+        );
     }
 
     /// An open picker takes the keyboard, and the window behind it does not.

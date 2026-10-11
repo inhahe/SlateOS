@@ -3888,7 +3888,10 @@ word; text inside them that says "lane C" is history.
   the flashcards' search box and card and deck fields, the finance
   program's and the calendar's search boxes and form fields (the three
   search boxes, typed only at their end until then, edit at a caret).
-  **Remaining:** jsonviewer, notes, paint, regextester, reminders,
+  Reminders takes no pointer, by design (examined 2026-09-18), so it has no
+  menu to give: its search box, drawn but reached by no key, takes Ctrl+F
+  and edits at a caret, and its form's fields copy and paste on the
+  program's clipboard. **Remaining:** jsonviewer, notes, paint, regextester,
   snippets, stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

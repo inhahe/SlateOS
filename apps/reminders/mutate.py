@@ -499,6 +499,114 @@ MUTATIONS += [
     ),
 ]
 
+# The search box is reached with Ctrl+F and edits at a caret, and the form's
+# fields copy and paste on the program's clipboard (2026-10-10).
+SEARCH = "ctrl_f_searches_the_reminders"
+SEARCH_DRAWN = "the_search_box_shows_it_has_the_keyboard"
+SEARCH_CLIP = "the_search_box_pastes_and_cuts_on_the_programs_clipboard"
+FORM_CLIP = "the_forms_fields_copy_and_paste_on_the_programs_clipboard"
+
+MUTATIONS += [
+    (
+        "Ctrl+F does not reach the search",
+        "                Key::F => {\n"
+        "                    self.focus_search();\n"
+        "                    EventResult::Consumed\n"
+        "                }\n",
+        "",
+        [SEARCH, SEARCH_DRAWN, SEARCH_CLIP],
+    ),
+    (
+        "the search box takes no plain keys",
+        "        if self.search_focused {\n            return self.search_key(key);\n        }\n",
+        "",
+        [SEARCH, SEARCH_DRAWN],
+    ),
+    (
+        "the search's chords are not the box's",
+        "                _ if self.search_focused => self.search_key(key),\n",
+        "",
+        [SEARCH_CLIP],
+    ),
+    (
+        "the box comes back holding an old search",
+        "        self.search_focused = true;\n        self.search_editor.set_text(&self.search_query);\n",
+        "        self.search_focused = true;\n",
+        [SEARCH],
+    ),
+    (
+        "Escape keeps the search",
+        "                self.search_focused = false;\n                self.set_search(\"\");\n",
+        "                self.search_focused = false;\n",
+        [SEARCH],
+    ),
+    (
+        "Enter does not leave the search",
+        "            Key::Enter if plain => {\n"
+        "                self.search_focused = false;\n"
+        "                return EventResult::Consumed;\n"
+        "            }\n",
+        "",
+        [SEARCH, SEARCH_DRAWN],
+    ),
+    (
+        "the search types only at its end",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let end = self.search_editor.text().len();\n"
+        "        self.search_editor.set_cursor(guitk::text::TextCursor::from(end));\n"
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        [SEARCH],
+    ),
+    (
+        "what is typed is not searched for",
+        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n",
+        "",
+        [SEARCH, SEARCH_CLIP],
+    ),
+    (
+        "the selection stays on a reminder the search hides",
+        "            text.clone_into(&mut self.search_query);\n            self.reanchor_selection();\n",
+        "            text.clone_into(&mut self.search_query);\n",
+        [SEARCH],
+    ),
+    (
+        "a key typed into the search is reported unanswered",
+        "        if edit.handled {\n            EventResult::Consumed\n",
+        "        if false {\n            EventResult::Consumed\n",
+        [SEARCH],
+    ),
+    (
+        "the search box answers the window's chords",
+        "        if edit.handled {\n            EventResult::Consumed\n",
+        "        if true {\n            EventResult::Consumed\n",
+        [SEARCH],
+    ),
+    (
+        "the box with the keyboard is drawn as any other",
+        "        if self.search_focused {\n            // The box with the keyboard:",
+        "        if false {\n            // The box with the keyboard:",
+        [SEARCH_DRAWN],
+    ),
+    (
+        "the frame does not show the keyboard",
+        "            color: if self.search_focused {\n                self.palette.blue\n",
+        "            color: if false {\n                self.palette.blue\n",
+        [SEARCH_DRAWN],
+    ),
+    (
+        "the empty box does not name its key",
+        "                    \"Search tasks (Ctrl+F)\".to_string()\n",
+        "                    \"Search tasks...\".to_string()\n",
+        [SEARCH_DRAWN],
+    ),
+    (
+        "the form keeps a clipboard of its own",
+        "                let done = textline::apply_key_on_clipboard(input, key, FORM_TEXT_SIZE);\n",
+        "                let done = textline::apply_key(input, key, \"\", FORM_TEXT_SIZE);\n",
+        [FORM_CLIP],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "reminders", timeout=900, only=only))

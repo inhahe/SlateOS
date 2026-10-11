@@ -91,6 +91,9 @@ pub(crate) struct Description {
     pub crop: Option<[u32; 4]>,
     /// FFmpeg's `r_frame_rate` rule's frame duration, in the track's ticks.
     pub frame_duration: Option<u32>,
+    /// FFmpeg's estimate of how many pictures H.264 holds back
+    /// (`codecpar->video_delay`).
+    pub video_delay: u32,
     pub channels: u32,
     pub sample_rate: u32,
     pub stsd_version: u8,
@@ -116,6 +119,7 @@ impl Description {
             matrix: self.matrix,
             crop: [left, top, right, bottom],
             frame_duration: self.frame_duration,
+            reorder_delay: self.video_delay,
         }
     }
 
@@ -471,6 +475,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         {
             picture_shape(d);
             d.frame_duration = frame_duration(sc);
+            d.video_delay = video_delay(sc, d.codec);
         }
         Ok(())
     }
@@ -2012,6 +2017,50 @@ fn frame_duration(sc: &Stream) -> Option<u32> {
     (sc.has_stts && middle.iter().all(|t| t.duration == first.duration)).then_some(first.duration)
 }
 
+/// How many pictures an H.264 track holds back to show them in order, as
+/// FFmpeg estimates it from the composition offsets
+/// (`mov_estimate_video_delay`), which its decoder then starts from: for
+/// each sample in decoding order, how many of the 16 before it are shown
+/// after it, the most any sample waits. 0 for another codec, a track
+/// without offsets, or a fragmented file's `moov`, which lists no samples.
+fn video_delay(sc: &Stream, codec: Codec) -> u32 {
+    const MAX_REORDER_DELAY: usize = 16;
+    if !(sc.has_ctts && codec == Codec::H264) {
+        return 0;
+    }
+    // A ring of the latest times shown, kept sorted by moving each new one
+    // back past those it is shown before.
+    let mut pts = [i64::MIN; MAX_REORDER_DELAY + 1];
+    let mut start = 0usize;
+    let (mut tts_at, mut in_tts) = (0usize, 0u32);
+    let mut delay = 0u32;
+    for entry in &sc.index {
+        let Some(tts) = sc.tts.get(tts_at) else {
+            break;
+        };
+        let mut j = start;
+        start = (start + 1) % (MAX_REORDER_DELAY + 1);
+        pts[j] = entry.timestamp.wrapping_add(i64::from(tts.offset));
+        let mut swaps = 0u32;
+        while j != start {
+            let r = j.checked_sub(1).unwrap_or(MAX_REORDER_DELAY);
+            if pts[j] >= pts[r] {
+                break;
+            }
+            pts.swap(j, r);
+            swaps += 1;
+            j = r;
+        }
+        delay = delay.max(swaps);
+        in_tts += 1;
+        if in_tts == tts.count {
+            tts_at += 1;
+            in_tts = 0;
+        }
+    }
+    delay
+}
+
 /// The pixel shape a display matrix gives (`mov_read_tkhd`): the ratio of
 /// how far it stretches the x axis to how far the y, where both are within
 /// reason and differ by more than 1%.
@@ -2120,6 +2169,51 @@ mod tests {
 
     fn run(first: u32, count: u32, id: u32) -> Stsc {
         Stsc { first, count, id }
+    }
+
+    /// A track of samples decoded one a tick, shown at `shown` (decoding
+    /// time plus each one's composition offset).
+    fn shown_at(shown: &[i64]) -> Stream {
+        let mut s = Stream {
+            has_ctts: true,
+            ..Stream::new()
+        };
+        for (dts, &pts) in (0i64..).zip(shown) {
+            s.index.push(crate::index::Entry {
+                pos: 0,
+                timestamp: dts,
+                size: 1,
+                min_distance: 0,
+                flags: 0,
+            });
+            s.tts.push(crate::index::Tts {
+                count: 1,
+                offset: i32::try_from(pts - dts).unwrap(),
+                duration: 1,
+            });
+        }
+        s
+    }
+
+    /// The delay is the most pictures any one is shown before: none for
+    /// pictures shown as decoded, one for I B B P's B pictures, two for a
+    /// B-pyramid's lowest; H.264 only, and only with composition offsets.
+    #[test]
+    fn the_reorder_delay_is_the_furthest_a_picture_moves_up() {
+        let in_order = shown_at(&[1, 2, 3, 4]);
+        assert_eq!(video_delay(&in_order, Codec::H264), 0);
+        // I0 P3 B1 B2 P6 B4 B5, shown a tick later than decoded at the least.
+        let ibbp = shown_at(&[1, 4, 2, 3, 7, 5, 6]);
+        assert_eq!(video_delay(&ibbp, Codec::H264), 1);
+        // I0 P4 B2 b1 b3: b1 is shown before B2 and P4.
+        let pyramid = shown_at(&[1, 5, 3, 2, 4]);
+        assert_eq!(video_delay(&pyramid, Codec::H264), 2);
+        assert_eq!(video_delay(&pyramid, Codec::Vp9), 0);
+        let no_offsets = Stream {
+            has_ctts: false,
+            ..pyramid
+        };
+        assert_eq!(video_delay(&no_offsets, Codec::H264), 0);
     }
 
     fn fixture(name: &str) -> Vec<u8> {

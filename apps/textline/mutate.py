@@ -26,8 +26,6 @@ DELETE = "backspace_and_delete_take_one_character_each_way"
 CLIP = "copy_and_cut_hand_back_the_selection_and_paste_types_the_clipboard"
 PASTE = "a_paste_leaves_line_breaks_out_and_stops_at_the_capacity_in_characters"
 NOTHING = "a_key_that_types_nothing_is_not_the_fields_and_keeps_the_selection"
-ALTGR = "altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste"
-COMMAND = "a_command_types_nothing_though_it_carries_its_letter"
 TABLE = "a_chord_a_command_and_typing_by_modifiers"
 
 # (name, old, new, [tests that must fail])
@@ -78,8 +76,9 @@ MUTATIONS = [
         [CLIP, PASTE],
     ),
     # A command's letter is kept out by the toolkit's own `KeyEvent::typed`,
-    # which `types_text` asks; TABLE and COMMAND check that the two still
-    # agree. No row here can break the toolkit's rule.
+    # which `types_text` asks; TABLE and
+    # a_command_types_nothing_though_it_carries_its_letter check that the two
+    # still agree. No row here can break the toolkit's rule.
     (
         "a key that types nothing is the field's",
         "    key.pressed && key.types_text()",
@@ -99,69 +98,14 @@ MUTATIONS = [
         [TABLE],
     ),
     (
-        "AltGr is a Ctrl chord",
-        "    modifiers.ctrl && !modifiers.alt && !modifiers.super_key\n}",
-        "    modifiers.ctrl && !modifiers.super_key\n}",
-        [ALTGR, TABLE],
-    ),
-    # This row, "a key held with Alt alone types" and "a key held with the
-    # Windows key types" name the modifier table alone: apply_key refuses
-    # Alt's and the Windows key's chords before it asks whether a key is a
-    # command, so the command test cannot see them.
-    (
-        "a Ctrl chord held with the Windows key is the program's",
-        "    modifiers.ctrl && !modifiers.alt && !modifiers.super_key\n}",
-        "    modifiers.ctrl && !modifiers.alt\n}",
-        [TABLE],
-    ),
-    (
-        "AltGr is a command",
-        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
-        "    modifiers.super_key || modifiers.ctrl || modifiers.alt",
-        [TABLE],
-    ),
-    (
-        "a key held with Alt alone types",
-        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
-        "    modifiers.super_key || (modifiers.ctrl && !modifiers.alt)",
-        [TABLE],
-    ),
-    (
-        "a key held with the Windows key types",
-        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
-        "    modifiers.ctrl != modifiers.alt",
-        [TABLE],
-    ),
-    (
         "a field without a capacity goes unnoticed",
         "    debug_assert!(\n        input.capacity().is_some(),",
         "    debug_assert!(\n        true || input.capacity().is_some(),",
         ["a_field_without_a_capacity_is_caught"],
     ),
-    (
-        'a key held with Ctrl is plain',
-        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
-        '    !modifiers.alt && !modifiers.super_key',
-        ['a_chord_a_command_and_typing_by_modifiers'],
-    ),
-    (
-        'a key held with Alt is plain',
-        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
-        '    !modifiers.ctrl && !modifiers.super_key',
-        ['a_chord_a_command_and_typing_by_modifiers'],
-    ),
-    (
-        'a key held with the Windows key is plain',
-        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
-        '    !modifiers.ctrl && !modifiers.alt',
-        ['a_chord_a_command_and_typing_by_modifiers'],
-    ),
-    (
-        'AltGr is plain',
-        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
-        '    modifiers.ctrl == modifiers.alt && !modifiers.super_key',
-        ['a_chord_a_command_and_typing_by_modifiers'],
-    ),
+    # The Ctrl-chord, command and plain rules are the toolkit's (`Modifiers`),
+    # which textline's functions call: its own table test covers them, and
+    # TABLE checks that textline's names still give the same answers.
     (
         "AltGr is Alt's",
         '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',

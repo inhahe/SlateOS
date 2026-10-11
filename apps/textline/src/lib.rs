@@ -34,51 +34,40 @@ use guitk::textinput::TextInput;
 
 /// Whether a key held with `modifiers` is a Ctrl chord -- Ctrl+S, Ctrl+A --
 /// rather than a character typed with AltGr: Ctrl without Alt, and without
-/// the Windows key.
+/// the Windows key. The toolkit's rule (`Modifiers::is_ctrl_chord`), the one
+/// its own fields keep to, by the name programs here ask it by.
 ///
-/// Windows reports AltGr as Ctrl+Alt, and so does a remote desktop client
-/// running on it, and AltGr on a letter is how several layouts type a
-/// character: Polish `ą` is AltGr+A and `ś` AltGr+S, German `@` is AltGr+Q.
-/// A program that took every Ctrl+S as "save" would save each time a Polish
-/// user typed `ś`, and one that took every Ctrl+Q as "quit" would close when
-/// a German user typed an address. The toolkit's own fields decide it the
-/// same way (`guitk::textinput::TextInput::edit_key`).
-///
-/// A key held with the Windows key is the desktop's, chord or not:
-/// Ctrl+Windows+D is a desktop's "new virtual desktop", not a program's
-/// Ctrl+D.
+/// AltGr arrives as Ctrl+Alt, and is how several layouts type a character:
+/// Polish `ś` is AltGr+S, so a program that took every Ctrl+S as "save"
+/// would save each time a Polish user typed it.
 #[must_use]
 pub const fn is_ctrl_chord(modifiers: Modifiers) -> bool {
-    modifiers.ctrl && !modifiers.alt && !modifiers.super_key
+    modifiers.is_ctrl_chord()
 }
 
 /// Whether a key held with `modifiers` is a command rather than typing: Ctrl
-/// or Alt on its own, or anything with the Windows key.
+/// or Alt on its own, or anything with the Windows key. The toolkit's rule
+/// (`Modifiers::is_command`), which `KeyEvent::typed` asks.
 ///
-/// Asked because the text does not say. The compositor hands a command its
-/// letter as text -- Ctrl+S arrives carrying `s`, Alt+F carrying `f` -- so a
-/// field that typed whatever text arrived would put an `s` in the document
-/// for every shortcut it did not itself know. The Windows key's chords are
-/// the desktop's. Ctrl and Alt held together are AltGr, as
-/// [`is_ctrl_chord`] explains, and type.
+/// Asked because the text does not say: the compositor hands a command its
+/// letter as text -- Ctrl+S arrives carrying `s` -- and Ctrl and Alt held
+/// together are AltGr ([`is_ctrl_chord`]), which types.
 #[must_use]
 pub const fn is_command(modifiers: Modifiers) -> bool {
-    modifiers.super_key || modifiers.ctrl != modifiers.alt
+    modifiers.is_command()
 }
 
 /// Whether a key held with `modifiers` is plain: nothing held with it but
 /// Shift, if anything. What a binding on the key itself answers -- the
-/// stopwatch's R, a game's N -- before it acts.
+/// stopwatch's R, a game's N -- before it acts. The toolkit's rule
+/// (`Modifiers::is_plain`).
 ///
 /// Stricter than `!`[`is_command`], which lets AltGr through because AltGr
-/// types: a binding on the *letter typed* counts AltGr+E by the `e` it
-/// typed. A binding on the *key* cannot tell what AltGr made of it -- AltGr+R
-/// is `®` on one layout and nothing on another -- so AltGr+R is not R. Alt's
-/// chords are the window's and the Windows key's the desktop's, and each
-/// arrives carrying its key: without this, Alt+R reset a running stopwatch.
+/// types: a binding on the *key* cannot tell what AltGr made of it -- AltGr+R
+/// is `®` on one layout and nothing on another -- so AltGr+R is not R.
 #[must_use]
 pub const fn is_plain(modifiers: Modifiers) -> bool {
-    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key
+    modifiers.is_plain()
 }
 
 /// Whether a key held with `modifiers` is Alt's or the Windows key's: Alt

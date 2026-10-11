@@ -4690,7 +4690,15 @@ lane C's `guitk`.
           dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
-        - `[ ]` AAC, which most MP4 files carry: FFmpeg's fixed-point decoder translated into `gui/video/aac` (F-Q9 answered B, §1377), included, LC and HE-AAC, held bit for bit to FFmpeg as Opus and Vorbis are to theirs.
+        - `[-]` AAC, which most MP4 files carry: FFmpeg's fixed-point decoder translated into `gui/video/aac` (F-Q9 answered B, §1377), included, LC and HE-AAC, held bit for bit to FFmpeg as Opus and Vorbis are to theirs. A module at a time, as H.264 was:
+          - `[x]` The oracle (2026-10-10): `tools/ffaac/build.sh` builds FFmpeg 8.1.3's `aac_fixed` in WSL without assembly, with a probe (`FFDBG_PCM`) that records how each decoder opens and every frame it gives, in its own format; `tools/pcm_expect.py` writes, for each of FATE's AAC samples, the packets as FFmpeg hands them over and that decoder's frames, untrimmed. 42 streams: LC, Main, LTP, SBR and PS, 5.1, 88 and 96 kHz, ER LD and ELD, a PCE, ADTS with ID3 tags, the conformance set (two more are USAC, which the fixed-point decoder refuses). `gui/video/ffbits` is the bit reader and VLC tables, shared with H.264.
+          - `[ ]` Tables: `aactab.c`'s and `aacdec_tab.c`'s through `gui/video/tools/ctables.py`; those FFmpeg computes when it starts from `double` maths (KBD and sine windows, cube roots, SBR and PS), which a different maths library can round differently, taken as FFmpeg's build computes them and checked against a recomputation within one unit.
+          - `[ ]` Configuration: the AudioSpecificConfig (`mpeg4audio.c`), its GA and ELD parts and PCE, ADTS headers, and the channel layouts FFmpeg orders its output by.
+          - `[ ]` Channel streams: ICS info, section data, scale factors, pulses, TNS, spectral data, M/S and intensity stereo, Main profile prediction, LTP, coupling.
+          - `[ ]` The fixed-point DSP: dequantization, TNS filtering, windowing and overlap for long, short, 960, LD and ELD frames, and libavutil's 32-bit integer MDCT.
+          - `[ ]` SBR and PS: HE-AAC versions 1 and 2.
+          - `[ ]` Damaged streams, as H.264's oracle has them.
+          - `[ ]` `videocodec`'s `Sound` plays it, trimmed and timed as §1351 says.
   - `[x]` Subtitles (2026-10-05, design-decisions §1360):
     `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
     cue by cue -- start, end, and the text as SRT markup whatever the

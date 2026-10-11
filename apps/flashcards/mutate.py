@@ -707,6 +707,23 @@ MUTATIONS += [
     ),
 ]
 
+# What the search box answers: Consumed for a key it acted on, so the window
+# redraws, and Ignored for one it did not (2026-10-10).
+MUTATIONS += [
+    (
+        "a key typed into the search is reported unanswered",
+        "        if edit.handled {\n            EventResult::Consumed\n",
+        "        if false {\n            EventResult::Consumed\n",
+        [CARET],
+    ),
+    (
+        "the search box answers the window's chords",
+        "        if edit.handled {\n            EventResult::Consumed\n",
+        "        if true {\n            EventResult::Consumed\n",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "flashcards", timeout=900, only=only))

@@ -2600,6 +2600,8 @@ impl FlashcardsApp {
                 _ => EventResult::Ignored,
             };
         }
+        // The search box takes every other key while it has the keyboard, so
+        // a letter typed is never also a command.
         if self.searching() {
             return self.search_key(key);
         }
@@ -2865,8 +2867,8 @@ impl FlashcardsApp {
     /// A key for the search box while it has the keyboard: Escape leaves it
     /// and shows the whole deck again, Enter leaves it keeping the filter,
     /// and the rest is the box's (`textline::apply_key_on_clipboard`), on
-    /// the program's clipboard. It takes every key but a chord of the
-    /// window's or the desktop's, so a letter is never also a command.
+    /// the program's clipboard. Answers whether the box did anything with
+    /// the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
         match key.key {
@@ -2887,7 +2889,7 @@ impl FlashcardsApp {
         let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
         let typed = self.search_editor.text().to_owned();
         self.set_search(&typed);
-        if edit.handled || plain || textline::types_into_field(key) {
+        if edit.handled {
             EventResult::Consumed
         } else {
             EventResult::Ignored
@@ -7015,7 +7017,20 @@ mod tests {
     fn the_search_box_edits_at_a_caret() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        type_text(&mut app, "abd");
+        assert_eq!(
+            app.handle_event(&Event::Key(guitk::probe::typing("a"))),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            app.handle_event(&Event::Key(guitk::probe::press_with(
+                Key::F4,
+                Modifiers::alt()
+            ))),
+            EventResult::Ignored,
+            "the search box answered a chord of the window's"
+        );
+        type_text(&mut app, "bd");
         app.handle_event(&press(Key::Left));
         type_text(&mut app, "c");
         assert_eq!(

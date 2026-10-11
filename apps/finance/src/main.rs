@@ -2111,8 +2111,7 @@ impl FinanceApp {
     /// and shows every transaction again, Enter leaves it keeping the
     /// search so the rows it found can be walked, and the rest is the
     /// box's (`textline::apply_key_on_clipboard`), on the program's
-    /// clipboard. It takes every key but a chord of the window's or the
-    /// desktop's.
+    /// clipboard. Answers whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
         match key.key {
@@ -2130,7 +2129,7 @@ impl FinanceApp {
                 );
                 let typed = self.search_editor.text().to_owned();
                 self.set_search(&typed);
-                if !(edit.handled || plain || textline::types_into_field(key)) {
+                if !edit.handled {
                     return EventResult::Ignored;
                 }
             }
@@ -6644,7 +6643,20 @@ mod tests {
         let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Transactions;
         probe::click(&mut app, Target::Search);
-        probe::type_str(&mut app, "grocry");
+        assert_eq!(
+            probe::key(&mut app, &probe::typing("g")),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            probe::key(
+                &mut app,
+                &probe::press_with(Key::F4, guitk::event::Modifiers::alt())
+            ),
+            EventResult::Ignored,
+            "the search box answered a chord of the window's"
+        );
+        probe::type_str(&mut app, "rocry");
         probe::key(&mut app, &probe::press(Key::Left));
         probe::key(&mut app, &probe::press(Key::Left));
         probe::type_str(&mut app, "e");

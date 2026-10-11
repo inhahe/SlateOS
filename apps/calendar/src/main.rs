@@ -3837,8 +3837,8 @@ fn track_pointer(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
 /// (`textline::apply_key_on_clipboard`), on the program's clipboard. A
 /// change searches again, on the agenda -- the one view that lists what
 /// a search finds, so a search left over a month grid has found nothing as
-/// far as the user can tell. It takes every key but a chord of the
-/// window's or the desktop's.
+/// far as the user can tell. Answers whether the box did anything with the
+/// key.
 fn search_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     let plain = textline::is_plain(key.modifiers);
     match key.key {
@@ -3859,7 +3859,7 @@ fn search_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);
     let typed = state.search_editor.text().to_owned();
     state.set_search(&typed);
-    if edit.handled || plain || textline::types_into_field(key) {
+    if edit.handled {
         EventResult::Consumed
     } else {
         EventResult::Ignored
@@ -6562,7 +6562,20 @@ mod tests {
     fn the_search_box_edits_at_a_caret() {
         let mut app = sample_app(june_2024());
         probe::click(&mut app, Target::SearchField);
-        probe::type_str(&mut app, "Lnch");
+        assert_eq!(
+            probe::key(&mut app, &probe::typing("L")),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            probe::key(
+                &mut app,
+                &probe::press_with(Key::F4, guitk::event::Modifiers::alt())
+            ),
+            EventResult::Ignored,
+            "the search box answered a chord of the window's"
+        );
+        probe::type_str(&mut app, "nch");
         for _ in 0..3 {
             probe::key(&mut app, &probe::press(Key::Left));
         }

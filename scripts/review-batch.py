@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Review a batch of commits at the level its contents call for; gate `main` on it.
 
-It also checks that what is published to `main` was reviewed so. Every batch of commits gets an independent review before it is published
+Every batch of commits gets an independent review before it is published
 (`claude-global.md`, "Code review"): Opus at `xhigh`, or -- where a miss is
 expensive -- Opus at `max` and then Fable at `xhigh`. This script makes that
 call from the batch itself, the same way every time, so that nobody has to
-watch for it:
+watch for it, and checks that what is published to `main` was reviewed so:
 
     python scripts/review-batch.py <base>..<tip>          review it, print the record
     python scripts/review-batch.py --tier <base>..<tip>   only say which level, and why
     python scripts/review-batch.py --check <sha>...       the pre-push gate for `main`
-    python scripts/review-batch.py --stats [--since DATE] real findings per changed line
+    python scripts/review-batch.py --stats [--since DATE] fixed findings per changed line
     python scripts/review-batch.py --self-test
+
+The batch is what `<base>..<tip>` adds that `<remote>/main` does not have, so
+the merges of `main` a lane makes before publishing bring nothing of the other
+lanes' into it. A merge's own conflict resolution is part of it.
 
 A review runs in a scratch worktree at the tip, so that the lane can go on
 working in its own while it runs; the scratch worktree and anything built in it
@@ -32,10 +36,13 @@ when nothing needed fixing -- to go in its message's last paragraph, beside
     Review-findings: <n> fixed, <m> dismissed
 
 `--check` reads them. A commit published to `main` that changes code must lie in
-some record's range, at a tier at least its own, and the reports the record
-names must be on this machine; the record's own commit is the follow-up, which
-is not reviewed again. `--stats` reads them to say whether the level code is
-written at shows in how much its reviews find.
+some record's range, at a tier at least its own, with a report on this machine
+for each review the tier runs (Fable's may be `unavailable`: when its allowance
+is spent the Opus review stands alone). The commits after the reviewed tip up to
+and including the record's own are the follow-up fixes, which are not reviewed
+again. `--stats` reads the records to say whether the effort level code is
+written at -- the session's, from `CLAUDE_EFFORT` when the review runs --
+shows in how much its reviews find.
 
 Exit status: 0 done (or, for `--check`, every commit reviewed); 1 a review that
 could not run, or a commit `--check` refuses; 2 a usage error.
@@ -59,72 +66,102 @@ import gitenv  # noqa: E402
 import selftestflag  # noqa: E402
 
 #: Where a missed bug is expensive, by the list in `claude-global.md`: kernel
-#: code, the C library, the system services and PID 1, the network stack,
-#: crypto and password handling, and the parsers of untrusted input --
-#: decoders, decompressors, the remote desktop's protocol. Repo-relative
-#: directory prefixes; a change to any code under one is reviewed at `max`.
+#: code; the C library; the system services and PID 1; logins, privilege and
+#: credentials; the network stack, its daemons and its clients; crypto; the
+#: parsers of untrusted input (decoders, decompressors, document viewers, the
+#: remote desktop's protocol); and the tools that destroy or rewrite data on
+#: disk. Repo-relative directory prefixes: a change to code under one is
+#: reviewed at `max`. Extend it when a lane adds such a crate.
 MAX_PATHS = (
-    "kernel/",
-    "posix/",
-    "services/",
-    "init/",
-    "net/",
-    "net80211/",
-    "netipc/",
-    "netproto/",
-    "netring/",
-    "aes/",
-    "hmac/",
-    "sha1/",
-    "sha2/",
-    "blake2/",
-    "sm3/",
-    "md5/",
-    "rustcrypto/",
-    "pwkdf/",
-    "readpass/",
-    "gui/video/",
-    "gui/imagecodec/",
-    "gui/font/",
-    "gui/remote/",
-    "deflate/",
-    "bzip2/",
-    "xz/",
-    "sevenz/",
-    "ziparchive/",
+    "kernel/", "posix/", "services/", "init/",
+    # Logins, privilege, credentials.
+    "userspace/authlib/", "userspace/chage/", "userspace/chpasswd/", "userspace/doas/",
+    "userspace/getty/", "userspace/login/", "userspace/logind/", "userspace/newgrp/",
+    "userspace/passwd/", "userspace/polkit/", "userspace/pwdb/", "userspace/su/",
+    "userspace/sudo/", "userspace/useradd/", "userspace/useradm/", "userspace/userdb/",
+    "gui/credentials/", "gui/credentialsd/", "gui/secret/", "gui/loginusers/",
+    "apps/credvault/", "apps/credmanager/", "apps/lockscreen/", "apps/passwordgen/",
+    "readpass/", "pwkdf/",
+    # Networking.
+    "net/", "net80211/", "netipc/", "netproto/", "netring/",
+    "userspace/ssh/", "userspace/sshd/", "userspace/sshwire/", "userspace/ssh-keygen/",
+    "userspace/scp/", "userspace/sftp/", "userspace/ftp/", "userspace/ftpd/",
+    "userspace/inetd/", "userspace/telnet/", "userspace/curl/", "userspace/wget/",
+    "userspace/dhcpcd/", "userspace/ntpd/", "userspace/iptables/", "userspace/nftables/",
+    "gui/remote/", "gui/compositor/", "apps/remotedesktop/", "apps/email/", "apps/torrent/",
+    # Crypto.
+    "aes/", "hmac/", "sha1/", "sha2/", "blake2/", "sm3/", "md5/", "rustcrypto/",
+    # Parsers of untrusted input.
+    "gui/video/", "gui/imagecodec/", "gui/font/", "apps/videoplayer/", "apps/pdfviewer/",
+    "deflate/", "bzip2/", "xz/", "sevenz/", "ziparchive/",
+    "userspace/gzip/", "userspace/zip/", "userspace/cpio/", "userspace/file/",
+    "userspace/libmagic/", "apps/archivemanager/", "apps/tararchive/",
+    # What destroys or rewrites data on disk.
+    "userspace/fsck/", "userspace/mkfs/", "userspace/fdisk/", "userspace/wipefs/",
+    "userspace/blkdiscard/", "userspace/mount/", "userspace/ulmount/", "userspace/losetup/",
+    "userspace/rsync/", "userspace/backup/", "apps/partmanager/", "apps/diskimager/",
+    "apps/systemrestore/", "apps/undelete/", "apps/backup/",
 )
 
 #: What makes a change high-stakes wherever it is, in an added line of code
-#: that is not a comment: unsafe Rust and inline assembly, shared mutable
-#: state and locking, and deleting or truncating files.
+#: that is not a comment: unsafe Rust and inline assembly; shared mutable
+#: state and locking; deleting or truncating files, in Rust, C, Python and
+#: the shells.
 MAX_CONTENT = re.compile(
     r"\bunsafe\b|\b(?:global_|naked_)?asm!|\bstatic\s+mut\b"
     r"|\bAtomic[A-Z]\w*|\bOrdering::(?:Relaxed|Acquire|Release|AcqRel|SeqCst)\b"
-    r"|\b(?:Mutex|RwLock|Condvar|SpinLock)\b|\bspin::"
-    r"|\bremove_(?:file|dir|dir_all)\b|\b(?:unlink|rmdir|ftruncate)\s*\("
-    r"|\.set_len\s*\(|\bshutil\.rmtree\b|\bos\.(?:remove|unlink|rmdir)\b"
+    r"|\b(?:Mutex|RwLock|Condvar|SpinLock)\b|\bspin::|\bthreading\.R?Lock\b|\bflock\b"
+    r"|\bremove_(?:file|dir|dir_all|tree)\b|\b(?:unlink|unlinkat|rmdir|ftruncate|truncate)\s*\("
+    r"|\.set_len\s*\(|\bshutil\.rmtree\b|\bos\.(?:remove|unlink|rmdir|removedirs)\b"
+    r"|\brm\s+-[A-Za-z]*[rf]|\bRemove-Item\b|\b(?:rd|rmdir)\s+/s\b|\bdel\s+/"
+    r"|\bworktree\s+remove\b|\bbranch\s+-D\b|\breset\s+--hard\b|\bpush\s+(?:-f|--force)\b"
 )
 
-#: A line that is only a comment, or a Rust attribute such as
-#: `#![forbid(unsafe_code)]`: what it says is not what the code does.
-COMMENT = re.compile(r"^\s*(?://|#|/\*|\*|--|;|REM\b|::)")
+#: Inside unsafe code already there: a change to a line of a function that
+#: contains this is as risky as adding it.
+UNSAFE = re.compile(r"\bunsafe\b")
+
+#: Comment syntax by suffix. A Rust lint attribute (`#![forbid(unsafe_code)]`)
+#: says what code may not do, so it counts as a comment too; Rust 2024's
+#: `#[unsafe(no_mangle)]` does not.
+LINE_COMMENT = {
+    ".rs": re.compile(r"^\s*(?://|/\*|\*(?:\s|/|$)|#!?\[\s*(?:forbid|deny|warn|allow)\s*\()"),
+    ".c": re.compile(r"^\s*(?://|/\*|\*(?:\s|/|$))"),
+    ".py": re.compile(r"^\s*#"),
+    ".sh": re.compile(r"^\s*#"),
+    ".ps1": re.compile(r"^\s*#"),
+    ".toml": re.compile(r"^\s*#"),
+    ".bat": re.compile(r"^\s*(?:@?REM\b|::)", re.I),
+    ".asm": re.compile(r"^\s*(?:;|#|//)"),
+    ".ada": re.compile(r"^\s*--"),
+}
+COMMENT_STYLE = {
+    ".rs": ".rs", ".c": ".c", ".h": ".c", ".cc": ".c", ".cpp": ".c", ".hpp": ".c",
+    ".js": ".c", ".ts": ".c", ".mjs": ".c", ".py": ".py", ".sh": ".sh", ".bash": ".sh",
+    ".ps1": ".ps1", ".toml": ".toml", ".bat": ".bat", ".cmd": ".bat", ".s": ".asm",
+    ".asm": ".asm", ".ld": ".c", ".adb": ".ada", ".ads": ".ada", ".gpr": ".ada",
+}
 
 #: Files that are code. Everything else -- documentation, data, test
 #: fixtures, generated reports -- is reviewed by nobody, as the rule says.
-CODE_SUFFIXES = {
-    ".rs", ".py", ".c", ".h", ".cc", ".cpp", ".hpp", ".s", ".asm", ".ld",
-    ".sh", ".bash", ".ps1", ".bat", ".cmd", ".toml", ".adb", ".ads", ".gpr",
-    ".js", ".ts", ".mjs",
-}
+CODE_SUFFIXES = set(COMMENT_STYLE)
 
 TIERS = ("none", "xhigh", "max")
 
 #: The reviews each tier runs, in order: (model, `/code-review` level).
 RUNS = {"xhigh": (("opus", "xhigh"),), "max": (("opus", "max"), ("fable", "xhigh"))}
 
-#: Reviews before this day were recorded in prose, which `--check` cannot
-#: read; commits authored before it are not checked.
-RECORDS_START = "2026-10-11"
+#: The review that may be missing from a record: Fable's, when its share of
+#: the allowance is spent (`claude-global.md`).
+OPTIONAL_RUNS = {("fable", "xhigh")}
+
+#: Fable's own words when it cannot review: its limit, or the usage credits a
+#: `claude -p` session cannot accept.
+FABLE_REFUSED = re.compile(r"fable limit reached|usage credits", re.I)
+
+#: Commits committed before this day were reviewed and recorded in prose,
+#: which `--check` cannot read; they are not checked.
+RECORDS_START = "2026-10-12"
 
 #: How long one reviewer may run before it is stopped, in seconds.
 REVIEW_TIMEOUT = 4 * 3600
@@ -139,8 +176,9 @@ QEMU_IMAGES = ("qemu-system-x86_64.exe", "qemu-system-x86_64w.exe")
 def git(*args: str, cwd: str | Path | None = None, check: bool = True) -> str:
     """`git args...`'s output, in `cwd`, with no inherited `GIT_DIR`."""
     r = subprocess.run(
-        ["git", *args], cwd=cwd, env=gitenv.clean_env(), capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
+        ["git", "-c", "core.quotePath=false", *args], cwd=cwd, env=gitenv.clean_env(),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        stdin=subprocess.DEVNULL,
     )
     if check and r.returncode != 0:
         raise SystemExit(f"review-batch: git {' '.join(args)}: {r.stderr.strip()}")
@@ -156,8 +194,15 @@ def reports_dir(cwd: str | Path | None = None) -> Path:
     return common_dir(cwd) / "reviews"
 
 
-def resolve(rev: str, cwd: str | Path | None = None) -> str:
-    return git("rev-parse", "--verify", f"{rev}^{{commit}}", cwd=cwd).strip()
+def resolve(rev: str, cwd: str | Path | None = None, check: bool = True) -> str:
+    return git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", cwd=cwd,
+               check=check).strip()
+
+
+def published(remote: str, cwd: str | Path | None = None) -> list[str]:
+    """`--not <remote>/main`, or nothing if this clone has no such ref."""
+    ref = f"refs/remotes/{remote}/main"
+    return ["--not", ref] if resolve(ref, cwd=cwd, check=False) else []
 
 
 # ---------------------------------------------------------------------------
@@ -173,31 +218,46 @@ def is_code(path: str) -> bool:
     return p.suffix == "" and path.startswith("scripts/")
 
 
-def judge(files: dict[str, list[str]]) -> tuple[str, list[str]]:
-    """The tier a change calls for, and why.
+def is_comment(path: str, line: str) -> bool:
+    style = COMMENT_STYLE.get(PurePosixPath(path).suffix.lower(), ".sh")
+    return bool(LINE_COMMENT[style].match(line))
 
-    `files` maps each path the change touches to the lines it adds there. The
-    answer is `none` when no code changes, `max` when code under `MAX_PATHS`
-    changes or an added line of code matches `MAX_CONTENT`, else `xhigh`.
-    """
+
+class Change:
+    """What a commit does to one file: the lines it adds, and the unchanged
+    lines of the functions it changes them in."""
+
+    def __init__(self) -> None:
+        self.added: list[str] = []
+        self.context: list[str] = []
+
+
+def judge(files: dict[str, Change]) -> tuple[str, list[str]]:
+    """The tier a change calls for, and why: `none` when no code changes;
+    `max` when code under `MAX_PATHS` changes, an added line of code matches
+    `MAX_CONTENT`, or a Rust function containing `unsafe` is changed; else
+    `xhigh`."""
     tier, why = "none", []
-    for path, added in files.items():
+    for path, ch in files.items():
         if not is_code(path):
             continue
         if tier == "none":
             tier = "xhigh"
-        if path.startswith(MAX_PATHS):
+        prefix = next((p for p in MAX_PATHS if path.startswith(p)), None)
+        if prefix:
             tier = "max"
-            why.append(f"{path}: under {next(p for p in MAX_PATHS if path.startswith(p))}")
+            why.append(f"{path}: under {prefix}")
             continue
-        for line in added:
-            if COMMENT.match(line):
-                continue
-            m = MAX_CONTENT.search(line)
-            if m:
-                tier = "max"
-                why.append(f"{path}: adds `{m.group(0)}`: {line.strip()[:100]}")
-                break
+        hit = next(((line, m) for line in ch.added if not is_comment(path, line)
+                    for m in [MAX_CONTENT.search(line)] if m), None)
+        if hit:
+            tier = "max"
+            why.append(f"{path}: adds `{hit[1].group(0)}`: {hit[0].strip()[:100]}")
+            continue
+        if path.endswith(".rs") and ch.added and any(
+                UNSAFE.search(line) and not is_comment(path, line) for line in ch.context):
+            tier = "max"
+            why.append(f"{path}: changes a function with unsafe code in it")
     return tier, why
 
 
@@ -206,97 +266,141 @@ def higher(a: str, b: str) -> str:
 
 
 class Commit:
-    """One non-merge commit: its sha, author date, message and added lines."""
+    """One commit: its sha, parents, committer date, message and changes. A
+    merge's changes are what its resolution added that neither side had."""
 
-    def __init__(self, sha: str, date: str, message: str):
-        self.sha, self.date, self.message = sha, date, message
-        self.files: dict[str, list[str]] = {}
+    def __init__(self, sha: str, parents: list[str], date: str, message: str):
+        self.sha, self.parents, self.date, self.message = sha, parents, date, message
+        self.files: dict[str, Change] = {}
 
     def tier(self) -> tuple[str, list[str]]:
         return judge(self.files)
 
+    def subject(self) -> str:
+        lines = self.message.strip().splitlines()
+        return lines[0][:70] if lines else ""
 
-SEP = "\x1e"  # a record separator: git prints it before each commit
+
+SEP = "\x1e"  # a record separator: git prints one before and after each header
 
 
 def commits(*revs: str, cwd: str | Path | None = None) -> list[Commit]:
-    """The non-merge commits `revs` names (`git log` arguments), each with the
-    lines it adds -- one `git log -p` for all of them."""
-    out = git("log", "--no-merges", "-p", "-U0", "--no-color", "--no-ext-diff",
-              f"--format={SEP}%H%n%aI%n%B{SEP}", *revs, "--", cwd=cwd)
-    # Each commit prints as SEP header SEP diff, so the pieces alternate.
-    return _parse(out.split(SEP)[1:])
+    """The commits `revs` names (`git log` arguments), with what each changes --
+    one `git log` for all of them. Every function a commit changes comes whole
+    (`-W`), so that a change inside unsafe code can be seen; a merge shows only
+    what its resolution adds (`--cc`)."""
+    out = git("log", "-p", "-W", "--cc", "--no-renames", "--no-color", "--no-ext-diff",
+              "--src-prefix=a/", "--dst-prefix=b/",
+              f"--format={SEP}%H%n%P%n%cI%n%B{SEP}", *revs, "--", cwd=cwd)
+    pieces = out.split(SEP)[1:]
+    result: list[Commit] = []
+    for head, diff in zip(pieces[0::2], pieces[1::2] + [""] * (len(pieces) % 2)):
+        sha, parents, date, message = (head.split("\n", 3) + ["", "", ""])[:4]
+        c = Commit(sha.strip(), parents.split(), date.strip(), message)
+        _read_diff(c, diff)
+        result.append(c)
+    return result
 
 
-def _parse(chunks: list[str]) -> list[Commit]:
-    """`commits`' output, which alternates header (sha, date, message) and diff."""
-    out: list[Commit] = []
-    i = 0
-    while i < len(chunks):
-        head = chunks[i]
-        sha, date, message = head.split("\n", 2) if head.count("\n") >= 2 else (head, "", "")
-        c = Commit(sha.strip(), date.strip(), message)
-        diff = chunks[i + 1] if i + 1 < len(chunks) else ""
-        path = None
-        for line in diff.splitlines():
-            if line.startswith("+++ "):
-                path = None if line == "+++ /dev/null" else line[6:] if line.startswith("+++ b/") else line[4:]
-                if path is not None:
-                    c.files.setdefault(path, [])
-            elif line.startswith("--- "):
-                old = line[4:]
-                if old != "/dev/null":
-                    # A deletion still touches the path; its lines are not added.
-                    c.files.setdefault(old[2:] if old.startswith("a/") else old, [])
-            elif line.startswith("+") and path is not None:
-                c.files[path].append(line[1:])
-        out.append(c)
-        i += 2
-    return out
+def _read_diff(c: Commit, diff: str) -> None:
+    """Fill `c.files` from its patch. A merge's combined diff has a column per
+    parent: a line is the resolution's own when every column says `+`."""
+    width = max(1, len(c.parents))
+    path, in_header, ch = None, False, None
+    for line in diff.splitlines():
+        if line.startswith("diff "):
+            in_header, path, ch = True, None, None
+            if line.startswith("diff --cc ") or line.startswith("diff --combined "):
+                path = line.split(" ", 2)[2]
+                ch = c.files.setdefault(path, Change())
+            continue
+        if in_header:
+            if line.startswith("--- ") and line != "--- /dev/null" and path is None:
+                # A path with a space in it ends with a tab here.
+                path = line[4:].rstrip("\t").removeprefix("a/")
+                ch = c.files.setdefault(path, Change())
+            elif line.startswith("+++ ") and line != "+++ /dev/null":
+                new = line[4:].rstrip("\t").removeprefix("b/")
+                if new != path:
+                    path = new
+                    ch = c.files.setdefault(path, Change())
+            elif line.startswith("@@"):
+                in_header = False
+            continue
+        if ch is None or line.startswith("@@") or line.startswith("\\"):
+            continue
+        cols, text = line[:width], line[width:]
+        if cols == "+" * width:
+            ch.added.append(text)
+        elif "-" not in cols:
+            ch.context.append(text)
 
 
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
 
-TRAILER = re.compile(r"^(Reviewed|Review-[A-Za-z-]+):\s*(.*?)\s*$", re.M)
+TRAILER = re.compile(r"^(Reviewed|Review-[A-Za-z-]+):[ \t]*(.*?)\s*$", re.M)
 
 
 class Record:
-    """A `Reviewed:` record, read from a commit message's trailers."""
+    """A `Reviewed: <base>..<tip>` record, read from a commit message."""
 
     def __init__(self, sha: str, fields: dict[str, str]):
         self.sha = sha
         base, _, tip = fields.get("Reviewed", "").partition("..")
         self.base, self.tip = base.strip(), tip.strip()
         self.tier = fields.get("Review-tier", "").strip()
-        self.runs = [r.strip() for r in fields.get("Review-runs", "").split(",") if r.strip()]
+        self.runs: dict[tuple[str, str], str] = {}
+        for run in fields.get("Review-runs", "").split(","):
+            name, _, report = run.strip().partition(" ")
+            model, _, level = name.partition("-")
+            if model and level:
+                self.runs[(model, level)] = report.strip()
         self.lane = fields.get("Review-lane", "-").strip() or "-"
         self.written_at = fields.get("Review-written-at", "unknown").strip() or "unknown"
         m = re.match(r"\s*(\d+)\s+fixed\D+(\d+)\s+dismissed", fields.get("Review-findings", ""))
         self.fixed, self.dismissed = (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
-    def reports(self) -> list[str]:
-        """The report files the record names (a run that could not happen
-        names none)."""
-        return [r.split(None, 1)[1] for r in self.runs
-                if len(r.split(None, 1)) == 2 and r.split(None, 1)[1] != "unavailable"]
-
 
 def record_of(c: Commit) -> Record | None:
-    """The review record `c`'s message carries, if any. Trailers are the
-    message's last paragraph, as `git interpret-trailers` reads them."""
-    last = c.message.strip().split("\n\n")[-1]
-    fields = {m.group(1): m.group(2) for m in TRAILER.finditer(last)}
-    return Record(c.sha, fields) if "Reviewed" in fields else None
+    """The review record `c`'s message carries, if any: the paragraph with a
+    `Reviewed: <base>..<tip>` line -- one without `..` is prose, not a
+    record."""
+    for para in c.message.split("\n\n"):
+        fields = {m.group(1): m.group(2) for m in TRAILER.finditer(para)}
+        if ".." in fields.get("Reviewed", ""):
+            return Record(c.sha, fields)
+    return None
+
+
+def record_problems(r: Record, reports: Path, cwd: str | Path | None) -> list[str]:
+    """What is wrong with a record, or nothing."""
+    if r.tier not in RUNS:
+        return [f"{r.sha[:10]}: its record's Review-tier is {r.tier!r}, not xhigh or max"]
+    for end in (r.base, r.tip):
+        if not resolve(end, cwd=cwd, check=False):
+            return [f"{r.sha[:10]}: its record names {end!r}, which is no commit here"]
+    out = []
+    for run in RUNS[r.tier]:
+        report = r.runs.get(run)
+        if report == "unavailable" and run in OPTIONAL_RUNS:
+            continue
+        if not report or report == "unavailable":
+            out.append(f"{r.sha[:10]}: its record has no {run[0]} review at {run[1]}")
+        elif not (reports / report).is_file():
+            out.append(f"{r.sha[:10]}: its record names a report this machine does not "
+                       f"have: {report}")
+    return out
 
 
 # ---------------------------------------------------------------------------
 # --tier and the review run
 # ---------------------------------------------------------------------------
 
-def batch_tier(rng: str, cwd: str | Path | None = None) -> tuple[str, list[str], list[Commit]]:
-    cs = commits(rng, cwd=cwd)
+def batch_tier(rng: str, remote: str = "origin",
+               cwd: str | Path | None = None) -> tuple[str, list[str], list[Commit]]:
+    cs = commits(rng, *published(remote, cwd), cwd=cwd)
     tier, why = "none", []
     for c in cs:
         t, w = c.tier()
@@ -306,8 +410,12 @@ def batch_tier(rng: str, cwd: str | Path | None = None) -> tuple[str, list[str],
 
 
 def lane_letter(top: Path) -> str:
-    m = re.match(r"os-lane-([a-f])\b", top.name)
-    return m.group(1).upper() if m else "-"
+    """This worktree's lane, as `which-lane.py` says."""
+    r = subprocess.run([sys.executable, str(top / "scripts" / "which-lane.py"), "--letter"],
+                       cwd=top, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", stdin=subprocess.DEVNULL, env=gitenv.clean_env())
+    letter = r.stdout.strip()
+    return letter if r.returncode == 0 and len(letter) == 1 else "-"
 
 
 def qemu_running() -> bool:
@@ -342,14 +450,13 @@ def review_commands(base: str, tip: str, tier: str) -> list[tuple[str, str, list
 
 def run_review(argv: list[str], cwd: Path, report: Path, header: str) -> tuple[int, str]:
     """Run one reviewer in `cwd` under `run-timeout.py` (which stops its whole
-    process tree), keep what it says in `report`, and answer its exit status
-    and output."""
+    process tree on timeout), keep all it says in `report`, and answer its
+    exit status and output."""
     runner = Path(__file__).resolve().parent / "run-timeout.py"
     r = subprocess.run([sys.executable, str(runner), str(REVIEW_TIMEOUT), *argv], cwd=cwd,
                        env=gitenv.clean_env(), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    said = "\n".join(line for line in (r.stdout + r.stderr).splitlines()
-                     if not line.startswith("[run-timeout]"))
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+    said = r.stdout + r.stderr
     report.parent.mkdir(parents=True, exist_ok=True)
     with open(report, "w", encoding="utf-8", newline="\n") as f:
         f.write(header + f"exit status: {r.returncode}\n\n" + said + "\n")
@@ -357,24 +464,29 @@ def run_review(argv: list[str], cwd: Path, report: Path, header: str) -> tuple[i
 
 
 def remove_scratch(top: Path, scratch: Path) -> None:
-    """Remove the scratch worktree and whatever was built in it."""
-    if (scratch / "target").exists() and os.name == "nt":
-        # A build directory is tens of gigabytes; `rd` is minutes faster.
-        subprocess.run(["cmd", "/c", "rd", "/s", "/q", str(scratch / "target")],
-                       capture_output=True)
-    git("worktree", "remove", "--force", str(scratch), cwd=top, check=False)
-    if scratch.exists():
-        gitenv.remove_tree(scratch)
-    git("worktree", "prune", cwd=top, check=False)
+    """Remove the scratch worktree and whatever was built in it. A failure is
+    reported, not raised: the reviews are done by now."""
+    try:
+        if (scratch / "target").exists() and os.name == "nt":
+            # A build directory is tens of gigabytes; `rd` is minutes faster.
+            subprocess.run(["cmd", "/c", "rd", "/s", "/q", str(scratch / "target")],
+                           capture_output=True, stdin=subprocess.DEVNULL)
+        git("worktree", "remove", "--force", str(scratch), cwd=top, check=False)
+        if scratch.exists():
+            gitenv.remove_tree(scratch)
+        git("worktree", "prune", cwd=top, check=False)
+    except OSError as e:
+        print(f"review-batch: could not remove the scratch worktree {scratch}: {e}; "
+              "remove it, and any target/ in it, by hand", flush=True)
 
 
-def review(rng: str, dry_run: bool, qemu_wait: int) -> int:
+def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str) -> int:
     top = Path(git("rev-parse", "--show-toplevel").strip())
     base_rev, _, tip_rev = rng.partition("..")
     if not tip_rev:
         raise SystemExit("review-batch: give the batch as <base>..<tip>")
     base, tip = resolve(base_rev), resolve(tip_rev)
-    tier, why, cs = batch_tier(f"{base}..{tip}")
+    tier, why, cs = batch_tier(f"{base}..{tip}", remote)
     print(f"review-batch: {len(cs)} commits, {base[:10]}..{tip[:10]}: tier {tier}")
     for w in why[:20]:
         print(f"  {w}")
@@ -388,12 +500,11 @@ def review(rng: str, dry_run: bool, qemu_wait: int) -> int:
         return 0
 
     wait_for_no_qemu(qemu_wait)
-    scratch = top.parent / f"{top.name}-review-{tip[:10]}"
-    if scratch.exists():
-        remove_scratch(top, scratch)
-    git("worktree", "add", "--detach", str(scratch), tip, cwd=top)
-    runs, failed = [], False
     stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+    scratch = top.parent / f"{top.name}-review-{tip[:10]}-{stamp}"
+    git("worktree", "prune", cwd=top, check=False)
+    git("worktree", "add", "--detach", str(scratch), tip, cwd=top)
+    runs: list[str] = []
     try:
         for model, level, argv in cmds:
             name = f"{stamp}-{tip[:12]}-{model}-{level}.md"
@@ -402,30 +513,27 @@ def review(rng: str, dry_run: bool, qemu_wait: int) -> int:
                       f"started: {dt.datetime.now().isoformat(timespec='seconds')}\n")
             print(f"review-batch: {model} at {level} -- started", flush=True)
             code, said = run_review(argv, scratch, report, header)
-            limited = model == "fable" and "limit" in said.lower() and code != 0
-            if limited:
+            if (model, level) in OPTIONAL_RUNS and (code != 0 or FABLE_REFUSED.search(said)):
                 runs.append(f"{model}-{level} unavailable")
-                print(f"review-batch: {model} could not run (its limit is reached); "
-                      "the record says so")
+                print(f"review-batch: {model} at {level} did not review (exit {code}); the "
+                      f"record says so -- see {report}. If it was not its limit, run the "
+                      "batch again later.", flush=True)
             elif code != 0:
-                failed = True
                 print(f"review-batch: {model} at {level} FAILED (exit {code}); see {report}")
-                break
+                return 1
             else:
                 runs.append(f"{model}-{level} {name}")
                 print(f"review-batch: {model} at {level} -- done; report {report}", flush=True)
-                print(said[-6000:])
+                print(said[-6000:], flush=True)
+        print("\nTrailers for the follow-up commit (fill in the findings after triage):\n")
+        print(f"Reviewed: {base}..{tip}")
+        print(f"Review-tier: {tier}")
+        print(f"Review-runs: {', '.join(runs)}")
+        print(f"Review-lane: {lane_letter(top)}")
+        print(f"Review-written-at: {written_at}")
+        print("Review-findings: <n> fixed, <m> dismissed", flush=True)
     finally:
         remove_scratch(top, scratch)
-    if failed:
-        return 1
-    print("\nTrailers for the follow-up commit (fill in the findings after triage):\n")
-    print(f"Reviewed: {base}..{tip}")
-    print(f"Review-tier: {tier}")
-    print(f"Review-runs: {', '.join(runs)}")
-    print(f"Review-lane: {lane_letter(top)}")
-    print(f"Review-written-at: {os.environ.get('CLAUDE_EFFORT', 'unknown')}")
-    print("Review-findings: <n> fixed, <m> dismissed")
     return 0
 
 
@@ -437,36 +545,35 @@ def check(shas: list[str], remote: str, cwd: str | Path | None = None,
           reports: Path | None = None, start: str = RECORDS_START) -> tuple[int, list[str]]:
     """Whether every commit `shas` would add to `<remote>/main` is reviewed:
     (exit status, what is wrong)."""
-    exclude = f"refs/remotes/{remote}/main"
-    revs = [*shas, "--not", exclude] if git("rev-parse", "--verify", "--quiet", exclude,
-                                              cwd=cwd, check=False).strip() else list(shas)
-    cs = commits(*revs, cwd=cwd)
+    cs = commits(*shas, *published(remote, cwd), cwd=cwd)
     reports = reports if reports is not None else reports_dir(cwd)
-    records = [r for r in (record_of(c) for c in cs) if r]
-    covers: list[tuple[Record, set[str]]] = []
+    covered: list[tuple[Record, set[str]]] = []
+    exempt: set[str] = set()
     problems: list[str] = []
-    for r in records:
-        missing = [p for p in r.reports() if not (reports / p).is_file()]
-        if not r.base or not r.tip or r.tier not in TIERS[1:]:
-            problems.append(f"{r.sha[:10]}: its review record is incomplete")
-            continue
-        if missing:
-            problems.append(f"{r.sha[:10]}: its record names reports this machine "
-                            f"does not have: {', '.join(missing)}")
-            continue
-        inside = git("rev-list", f"{r.base}..{r.tip}", cwd=cwd, check=False).split()
-        covers.append((r, set(inside)))
     for c in cs:
-        if c.date[:10] < start or record_of(c):
+        r = record_of(c)
+        if not r:
+            continue
+        exempt.add(c.sha)
+        wrong = record_problems(r, reports, cwd)
+        if wrong:
+            problems += wrong
+            continue
+        inside = set(git("rev-list", f"{r.base}..{r.tip}", cwd=cwd).split())
+        covered.append((r, inside))
+        # The follow-up fixes: after the reviewed tip, up to the record.
+        exempt |= set(git("rev-list", "--ancestry-path", f"{r.tip}..{r.sha}",
+                          cwd=cwd, check=False).split())
+    for c in cs:
+        if c.date[:10] < start or c.sha in exempt:
             continue
         need, why = c.tier()
         if need == "none":
             continue
         if not any(c.sha in inside and TIERS.index(r.tier) >= TIERS.index(need)
-                   for r, inside in covers):
+                   for r, inside in covered):
             reason = f" ({why[0]})" if why else ""
-            problems.append(f"{c.sha[:10]} needs a review at {need}{reason}: "
-                            f"{c.message.strip().splitlines()[0][:70] if c.message.strip() else ''}")
+            problems.append(f"{c.sha[:10]} needs a review at {need}{reason}: {c.subject()}")
     return (1 if problems else 0), problems
 
 
@@ -476,7 +583,8 @@ def check(shas: list[str], remote: str, cwd: str | Path | None = None,
 
 def code_lines(base: str, tip: str, cwd: str | Path | None = None) -> int:
     n = 0
-    for line in git("diff", "--numstat", base, tip, cwd=cwd, check=False).splitlines():
+    for line in git("diff", "--numstat", "--no-renames", base, tip, cwd=cwd,
+                    check=False).splitlines():
         parts = line.split("\t")
         if len(parts) == 3 and parts[0].isdigit() and is_code(parts[2]):
             n += int(parts[0]) + int(parts[1])
@@ -487,15 +595,18 @@ def stats(rev: str, since: str, cwd: str | Path | None = None) -> list[tuple]:
     """(lane, written-at, reviews, code lines, fixed, dismissed) for the
     records on `rev` since `since`, grouped by lane and writing level."""
     groups: dict[tuple[str, str], list[int]] = {}
-    for c in commits(rev, f"--since={since}", "--grep=^Reviewed: ", cwd=cwd):
-        r = record_of(c)
+    out = git("log", f"--since={since}", "--grep=^Reviewed: ", f"--format={SEP}%H%n%B",
+              rev, cwd=cwd)
+    for piece in out.split(SEP)[1:]:
+        sha, _, message = piece.partition("\n")
+        r = record_of(Commit(sha, [], "", message))
         if not r or r.fixed is None:
             continue
         g = groups.setdefault((r.lane, r.written_at), [0, 0, 0, 0])
         g[0] += 1
         g[1] += code_lines(r.base, r.tip, cwd=cwd)
         g[2] += r.fixed
-        g[3] += r.dismissed
+        g[3] += r.dismissed or 0
     return [(lane, at, *v) for (lane, at), v in sorted(groups.items())]
 
 
@@ -518,17 +629,34 @@ def self_test() -> int:
         if got != want:
             failures.append(f"{what}: got {got!r}, want {want!r}")
 
-    expect("docs only", judge({"README.md": ["text"]})[0], "none")
-    expect("plain code", judge({"apps/x/src/lib.rs": ["fn f() {}"]})[0], "xhigh")
-    expect("kernel path", judge({"kernel/src/a.rs": ["fn f() {}"]})[0], "max")
-    expect("unsafe added", judge({"apps/x/src/lib.rs": ["    unsafe { f() }"]})[0], "max")
-    expect("unsafe in a comment", judge({"apps/x/src/lib.rs": ["// not unsafe"]})[0], "xhigh")
-    expect("forbid attribute", judge({"apps/x/src/lib.rs": ["#![forbid(unsafe_code)]"]})[0],
-           "xhigh")
-    expect("atomics", judge({"gui/x.rs": ["x.load(Ordering::Acquire)"]})[0], "max")
-    expect("rmtree in a script", judge({"scripts/t.py": ["shutil.rmtree(p)"]})[0], "max")
-    expect("hook with no suffix", judge({"scripts/hooks/pre-push": ["echo"]})[0], "xhigh")
-    expect("a word inside another", judge({"apps/x.rs": ["let unsafety = 1;"]})[0], "xhigh")
+    def change(added: list[str], context: list[str] | None = None) -> Change:
+        ch = Change()
+        ch.added, ch.context = added, context or []
+        return ch
+
+    def tier(path: str, added: list[str], context: list[str] | None = None) -> str:
+        return judge({path: change(added, context)})[0]
+
+    expect("docs only", tier("README.md", ["text"]), "none")
+    expect("plain code", tier("apps/x/src/lib.rs", ["fn f() {}"]), "xhigh")
+    expect("kernel path", tier("kernel/src/a.rs", ["fn f() {}"]), "max")
+    expect("sudo path", tier("userspace/sudo/src/main.rs", ["fn f() {}"]), "max")
+    expect("unsafe added", tier("apps/x/src/lib.rs", ["    unsafe { f() }"]), "max")
+    expect("unsafe in a comment", tier("apps/x/src/lib.rs", ["// not unsafe"]), "xhigh")
+    expect("block comment line", tier("apps/x/src/lib.rs", [" * unsafe here"]), "xhigh")
+    expect("a deref that adds unsafe",
+           tier("apps/x/src/lib.rs", ["*dst = unsafe { p.read() };"]), "max")
+    expect("forbid attribute", tier("apps/x/src/lib.rs", ["#![forbid(unsafe_code)]"]), "xhigh")
+    expect("unsafe attribute", tier("apps/x/src/lib.rs", ["#[unsafe(no_mangle)]"]), "max")
+    expect("C define", tier("posixish/x.c", ["#define RM(p) unlink(p)"]), "max")
+    expect("atomics", tier("apps/x.rs", ["x.load(Ordering::Acquire)"]), "max")
+    expect("rmtree in a script", tier("scripts/t.py", ["shutil.rmtree(p)"]), "max")
+    expect("rm -rf in a hook", tier("scripts/hooks/pre-push", ['rm -rf "$wt"']), "max")
+    expect("Remove-Item", tier("scripts/x.ps1", ["Remove-Item -Recurse $p"]), "max")
+    expect("a word inside another", tier("apps/x.rs", ["let unsafety = 1;"]), "xhigh")
+    expect("inside existing unsafe",
+           tier("apps/x.rs", ["    p.add(i + 1)"], ["unsafe fn f(p: *const u8) {"]), "max")
+    expect("unsafe nearby, nothing added", tier("apps/x.rs", [], ["unsafe fn f() {"]), "xhigh")
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
@@ -536,25 +664,40 @@ def self_test() -> int:
         reports = Path(tmp) / "reports"
         reports.mkdir()
 
-        def run(*args: str, date: str = "2026-10-12T10:00:00") -> str:
+        def run(*args: str, date: str = "2026-10-13T10:00:00") -> str:
             env = gitenv.clean_env()
             env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date,
                        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
             r = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True,
-                               text=True, encoding="utf-8")
+                               text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
             if r.returncode:
                 raise SystemExit(f"self-test: git {args}: {r.stderr}")
             return r.stdout.strip()
 
-        def commit(path: str, text: str, msg: str, date: str = "2026-10-12T10:00:00") -> str:
+        def write(path: str, text: str) -> None:
             f = repo / path
             f.parent.mkdir(parents=True, exist_ok=True)
             with open(f, "a", encoding="utf-8", newline="\n") as h:
                 h.write(text + "\n")
-            run("add", path)
+
+        def commit(path: str, text: str, msg: str, date: str = "2026-10-13T10:00:00") -> str:
+            write(path, text)
+            run("add", "--", path)
             run("commit", "-q", "-m", msg, date=date)
             return run("rev-parse", "HEAD")
+
+        def report(name: str) -> str:
+            (reports / name).write_text("ok", encoding="utf-8", newline="\n")
+            return name
+
+        def record(base: str, tip: str, tier: str, runs: str, extra: str = "") -> str:
+            return (f"review fixes\n\nReviewed: {base}..{tip}\nReview-tier: {tier}\n"
+                    f"Review-runs: {runs}\nReview-lane: F\nReview-written-at: max\n"
+                    f"Review-findings: 2 fixed, 1 dismissed{extra}")
+
+        def refused(problems: list[str]) -> list[str]:
+            return sorted(p.split()[0] for p in problems)
 
         run("init", "-q", "-b", "main")
         root = commit("README.md", "hello", "docs")
@@ -564,51 +707,75 @@ def self_test() -> int:
         plain = commit("apps/b.rs", "fn b() {}", "plain")
         kern = commit("kernel/k.rs", "fn k() {}", "kernel")
         tip = commit("apps/c.rs", "fn c() { unsafe { x() } }", "unsafe")
+        expect("prose record ignored",
+               record_of(Commit("x", [], "", "m\n\nReviewed: 69a27c0ab by Opus")), None)
 
         status, problems = check([tip], "origin", cwd=repo, reports=reports)
-        expect("unreviewed: refused", status, 1)
-        flagged = sorted(p.split()[0] for p in problems)
-        expect("unreviewed: which", flagged, sorted(s[:10] for s in (plain, kern, tip)))
-        expect("old and docs pass", any(old[:10] in p or docs[:10] in p for p in problems), False)
+        expect("unreviewed: which are refused", refused(problems),
+               sorted(s[:10] for s in (plain, kern, tip)))
+        expect("old and docs pass", any(old[:10] in p or docs[:10] in p for p in problems),
+               False)
 
-        (reports / "r1.md").write_text("ok", encoding="utf-8", newline="\n")
-        rec_x = commit("apps/b.rs", "// fix", "review fixes\n\nReviewed: "
-                       f"{root}..{tip}\nReview-tier: xhigh\nReview-runs: opus-xhigh r1.md\n"
-                       "Review-lane: F\nReview-written-at: max\n"
-                       "Review-findings: 3 fixed, 1 dismissed")
+        rec_x = commit("apps/b.rs", "// fix", record(root, tip, "xhigh",
+                                                     f"opus-xhigh {report('r1.md')}"))
         status, problems = check([rec_x], "origin", cwd=repo, reports=reports)
-        expect("xhigh record: max commits still refused", sorted(p.split()[0] for p in problems),
+        expect("xhigh record: max commits still refused", refused(problems),
                sorted(s[:10] for s in (kern, tip)))
 
-        (reports / "r2.md").write_text("ok", encoding="utf-8", newline="\n")
-        rec_m = commit("apps/b.rs", "// fix 2", "more fixes\n\nReviewed: "
-                       f"{root}..{tip}\nReview-tier: max\nReview-runs: opus-max r2.md, "
-                       "fable-xhigh unavailable\nReview-lane: F\nReview-written-at: max\n"
-                       "Review-findings: 2 fixed, 0 dismissed\n"
-                       "Co-Authored-By: someone <x@y>")
+        fix1 = commit("apps/c.rs", "fn fix1() {}", "first fix, no record")
+        rec_m = commit("apps/b.rs", "// fix 2", record(
+            root, tip, "max", f"opus-max {report('r2.md')}, fable-xhigh unavailable",
+            "\nCo-Authored-By: someone <x@y>"))
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
-        expect("max record: all reviewed", (status, problems), (0, []))
+        expect("max record covers all, fixes split over two commits", (status, problems),
+               (0, []))
 
         (reports / "r2.md").unlink()
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
-        expect("a missing report is refused", status, 1)
         expect("a missing report is named", any("r2.md" in p for p in problems), True)
-        (reports / "r2.md").write_text("ok", encoding="utf-8", newline="\n")
+        report("r2.md")
 
         later = commit("apps/d.rs", "fn d() {}", "new work")
         status, problems = check([later], "origin", cwd=repo, reports=reports)
-        expect("work after the record is refused", [p.split()[0] for p in problems],
-               [later[:10]])
+        expect("work after the record is refused", refused(problems), [later[:10]])
+
+        bad = commit("apps/e.rs", "fn e() {}", record(later, later, "max", "opus-max unavailable"))
+        status, problems = check([bad], "origin", cwd=repo, reports=reports)
+        expect("Opus may not be unavailable", any("no opus review" in p for p in problems), True)
+
+        # A merge whose resolution adds code: what the resolution adds is
+        # judged, and what it keeps of one side is that side's, not new.
+        run("checkout", "-q", "-b", "side", root)
+        commit("apps/m.rs", "fn side() { std::fs::remove_file(p) }", "side")
+        run("checkout", "-q", "main")
+        commit("apps/m.rs", "fn main_side() {}", "main side")
+        r = subprocess.run(["git", "merge", "-q", "side", "-m", "merge"], cwd=repo,
+                           env=gitenv.clean_env(), capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        with open(repo / "apps/m.rs", "w", encoding="utf-8", newline="\n") as h:
+            h.write("fn side() { std::fs::remove_file(p) }\nstatic mut R: u8 = 0;\n")
+        run("add", "apps/m.rs")
+        run("commit", "-q", "--no-edit")
+        mc = commits("HEAD^!", cwd=repo)
+        t, why = mc[0].tier() if mc else ("", [])
+        expect("conflicted merge: its resolution judged",
+               (r.returncode != 0, len(mc), t, "static mut" in " ".join(why[:1])),
+               (True, 1, "max", True))
+
+        # Paths with a space, and a pure rename.
+        commit("apps/x y/src/lib.rs", "fn s() {}", "space")
+        expect("a path with a space is code", commits("HEAD^!", cwd=repo)[0].tier()[0], "xhigh")
+        run("mv", "apps/b.rs", "apps/b2.rs")
+        run("commit", "-q", "-m", "rename")
+        expect("a rename is a change", commits("HEAD^!", cwd=repo)[0].tier()[0], "xhigh")
 
         rows = stats("HEAD", "2026-01-01", cwd=repo)
-        # Both records cover root..tip, so its lines count once for each.
-        expect("stats", rows, [("F", "max", 2, 2 * code_lines(root, tip, cwd=repo), 5, 1)])
-
-        rec = record_of(commits(f"{rec_m}^!", cwd=repo)[0])
-        expect("record runs", rec.reports() if rec else None, ["r2.md"])
+        lines = code_lines(root, tip, cwd=repo)
+        # Three records: two of root..tip, and one of an empty range.
+        expect("stats", rows, [("F", "max", 3, 2 * lines, 6, 3)])
 
     cmds = review_commands("a" * 40, "b" * 40, "max")
-    expect("max runs", [(m, l) for m, l, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
+    expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
     expect("max prompt", cmds[0][2][-1], f"/code-review max commits {'a' * 40}..{'b' * 40}")
 
     for f in failures:
@@ -620,6 +787,9 @@ def self_test() -> int:
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str]) -> int:
+    # Reviewers write arrows and dashes; a redirected stdout is cp1252 here.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     if selftestflag.wants_selftest(argv):
         return self_test()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -628,11 +798,15 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--tier", action="store_true", help="only print the tier and why")
     mode.add_argument("--check", action="store_true", help="the pre-push gate for main")
     mode.add_argument("--stats", action="store_true", help="findings per changed line")
-    ap.add_argument("--remote", default="origin", help="the remote whose main --check compares with")
+    ap.add_argument("--remote", default="origin",
+                    help="the remote whose main is what is already published")
     ap.add_argument("--since", default=RECORDS_START, help="--stats: records from this date")
     ap.add_argument("--dry-run", action="store_true", help="print the reviews; run none")
     ap.add_argument("--qemu-wait", type=int, default=4 * 3600,
                     help="seconds to wait for a QEMU guest to finish before reviewing")
+    ap.add_argument("--written-at", default=os.environ.get("CLAUDE_EFFORT", "unknown"),
+                    help="the effort level the batch was written at (default: this "
+                         "session's, CLAUDE_EFFORT)")
     a = ap.parse_args(argv)
     if a.stats:
         print_stats(stats(f"refs/remotes/{a.remote}/main", a.since))
@@ -652,12 +826,12 @@ def main(argv: list[str]) -> int:
     if len(a.range) != 1:
         ap.error("give one range, <base>..<tip>")
     if a.tier:
-        tier, why, cs = batch_tier(a.range[0])
+        tier, why, cs = batch_tier(a.range[0], a.remote)
         print(f"{tier}  ({len(cs)} commits)")
         for w in why:
             print(f"  {w}")
         return 0
-    return review(a.range[0], a.dry_run, a.qemu_wait)
+    return review(a.range[0], a.remote, a.dry_run, a.qemu_wait, a.written_at)
 
 
 if __name__ == "__main__":

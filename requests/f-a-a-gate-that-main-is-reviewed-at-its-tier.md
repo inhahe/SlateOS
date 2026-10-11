@@ -48,14 +48,16 @@ fi
 
 A commit not yet on `<remote>/main` that:
 
-- changes code (documentation and data are never reviewed);
-- was authored on or after 2026-10-11 (earlier reviews were recorded in
+- changes code (documentation and data are never reviewed; a merge counts
+  only for what its conflict resolution adds);
+- was committed on or after 2026-10-12 (earlier reviews were recorded in
   prose);
 - and lies in no recorded review: no `Reviewed: <base>..<tip>` trailer, at
-  a `Review-tier` at least its own, whose reports are present under
-  `<git-common-dir>/reviews/`.
+  a `Review-tier` at least its own, with a report under
+  `<git-common-dir>/reviews/` for each review that tier runs.
 
-A record's own commit is the follow-up, and it is not reviewed again. The
+The commits after a reviewed tip, up to and including the record's own, are
+the follow-up fixes, and they are not reviewed again. The
 gate costs one `git log -p` over the pushed commits, plus one `rev-list`
 per record: seconds.
 

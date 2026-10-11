@@ -10,6 +10,24 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-10: B-Q23 answered, B-Q24 confirmed, answered questions out of sight
+
+- **Given:** 2026-10-10, in chat to lane F's session, after lane F showed the
+  operator which files in `open-questions/` were already answered and why
+  they were still there: B-Q23's answer (`answers.txt` had labelled it
+  "B-Q24"), B-Q24's confirmed, and a request about how the open questions
+  are shown.
+- **Processed:** 2026-10-10 by lane F: copied; lane B told by notice; the
+  request answered in chat with a proposal.
+- **Copy:** `operator-answers/2026-10-10-chat-to-lane-f.txt`
+- **Content:** sha256 `27ab410bb9d828ce4214a6ee4369b453fa2f788ec62f5a7d44946b468fd1624c`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| B-Q23: Claude's recommendation -- E, the installer's question decides what is installed, with B as what "desktop" means | B | -- | relayed 2026-10-10 |
+| B-Q24: A -- the second of `answers.txt`'s two "B-Q24" lines; the first was B-Q23's | B | §1070 | recorded (lane B took A on 2026-10-09) |
+| Questions already answered should not show among the open ones, though their lanes are rate-limited for days | F | `scripts/questions-for-you.py` | recorded: `questions-for-you/` in the integration tree, only the questions still waiting on you, rebuilt when you run the `update.bat` you keep there -- no scheduled task ("nah, i'll just run update.bat ... when i want it updated", later the same day: `operator-answers/2026-10-10-chat-to-lane-f-2.txt`) |
+
 ## chat, 2026-10-10: a consent prompt takes no keystrokes
 
 - **Given:** 2026-10-10, in chat to lane E's session -- a rule, not the answer

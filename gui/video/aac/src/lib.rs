@@ -14,6 +14,8 @@
 //!
 //! - [`mpeg4audio`]: the AudioSpecificConfig's common part
 //!   (`mpeg4audio.c`).
+//! - [`layout`]: which channel each element is, and the order FFmpeg's
+//!   output gives them in (`aacdec.c`, `aacdec_tab.c`).
 //!
 //! The oracle the crate is held to is `tools/ffaac/build.sh`'s FFmpeg and
 //! `tools/pcm_expect.py`'s record of what it decodes.
@@ -25,4 +27,5 @@
               decoder above it is in, and this allow goes then"
 )]
 
+pub(crate) mod layout;
 pub(crate) mod mpeg4audio;

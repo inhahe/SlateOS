@@ -31,8 +31,11 @@ STRUCT = "struct"
 
 
 def initializer(source: str, name: str) -> str:
-    """The text between the braces of `name`'s initializer."""
-    m = re.search(r"\b" + re.escape(name) + r"\s*\[[^=;]*=\s*\{", source)
+    """The text between the braces of `name`'s initializer: `name` the
+    array's C name -- as declared plainly, or inside `DECLARE_ALIGNED(...)`
+    -- or a declarator macro's call as written (FFmpeg's generated
+    `SINETABLE(96)`)."""
+    m = re.search(r"\b" + re.escape(name) + r"\s*\)?\s*(?:\[[^=;]*)?=\s*\{", source)
     if not m:
         raise SystemExit(f"{name}: not found")
     depth = 0

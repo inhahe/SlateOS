@@ -23,6 +23,10 @@ import ctables  # noqa: E402
 
 AACTAB = "libavcodec/aactab.c"
 
+#: Where tools/ffaac/tables.sh writes the tables FFmpeg computes as the
+#: decoder opens, from the FFmpeg tree: its default, beside the tree.
+GENERATED = "../tables"
+
 #: Each window length's scalefactor band tables, by the sample rates (in kHz)
 #: aactab.c names them for.
 SWB_OFFSETS = [
@@ -127,6 +131,24 @@ TABLES = [
 ] + [
     (AACTAB, "ff_aac_codebook_vector_idx", "CODEBOOK_VECTOR_IDX", "&[u16]", [11],
      "each spectral codebook's symbols"),
+] + [
+    # ER AAC ELD's windows, Q30 (aactab.c).
+    (AACTAB, f"ff_aac_eld_window_{n}_fixed", f"ELD_WINDOW_{n}", "i32%", [n * 15 // 4],
+     f"ER AAC ELD's {n}-line window, Q30")
+    for n in (512, 480)
+] + [
+    # What the decoder computes as it opens, as FFmpeg's build computes it
+    # (tools/ffaac/tables.sh).
+    (f"{GENERATED}/cbrt_fixed.c", "ff_cbrt_tab_fixed", "CBRT_TAB_FIXED", "u32", [8192],
+     "n to the power 4/3 for each n under 8192, Q13: dequantization's table"),
+] + [
+    (f"{GENERATED}/kbd_fixed.c", f"aac_kbd_{kind}_{n}_fixed", f"KBD_{kind.upper()}_{n}", "i32",
+     [n], f"the {n}-line Kaiser-Bessel-derived window's rising half, Q31")
+    for kind, n in (("long", 1024), ("short", 128), ("long", 960), ("short", 120))
+] + [
+    (f"{GENERATED}/sinewin_fixed.c", f"SINETABLE({n})", f"SINE_{n}", "i32%", [n],
+     f"the {n}-line sine window's rising half, Q31")
+    for n in (1024, 128, 960, 120, 512)
 ]
 
 HEADER = [
@@ -137,6 +159,9 @@ HEADER = [
     "//! Each table is read by its C name, filled by C's initializer rules and",
     "//! checked against the shape declared here, so a table that does not fit",
     "//! fails the generator instead of being cut short.",
+    "",
+    "#[cfg(test)]",
+    "mod tests;",
     "",
 ]
 

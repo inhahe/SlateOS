@@ -60,19 +60,25 @@ fn each_file<T: Send>(
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(file) = files.get(i) else { break };
-                    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(file)))
-                        .map_err(|e| {
-                            e.downcast_ref::<String>()
-                                .cloned()
-                                .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                                .unwrap_or_else(|| "a panic".to_owned())
-                        });
+                    let done =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(file)))
+                            .map_err(|e| {
+                                e.downcast_ref::<String>()
+                                    .cloned()
+                                    .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                                    .unwrap_or_else(|| "a panic".to_owned())
+                            });
                     results.lock().unwrap()[i] = Some(done);
                 }
             });
         }
     });
-    results.into_inner().unwrap().into_iter().map(Option::unwrap).collect()
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect()
 }
 
 /// A file's name under `pict`, as the tests name streams: `/`-separated,
@@ -413,7 +419,12 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
             .flatten()
             .map(|d| format!("{name}: {d}"))
             .collect();
-        (want_slices.len(), want_frames.len(), probed.is_some(), found)
+        (
+            want_slices.len(),
+            want_frames.len(),
+            probed.is_some(),
+            found,
+        )
     });
     let (mut slices, mut shown, mut probes) = (0, 0, 0);
     let mut failures = Vec::new();

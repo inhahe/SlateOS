@@ -99,9 +99,9 @@ mod output;
 mod picture;
 mod poc;
 mod pool;
+mod pred;
 #[cfg(test)]
 mod probe;
-mod pred;
 mod ps;
 mod queue;
 mod refs;

@@ -226,7 +226,7 @@ impl FontManager {
         Self {
             library,
             filter: Filter::All,
-            search: TextInput::new(),
+            search: textline::field_holding("", SEARCH_CAPACITY),
             search_focused: false,
             selected,
             list_scroll: 0.0,
@@ -548,8 +548,7 @@ impl FontManager {
     /// or copies.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         let before = self.search.text().to_owned();
-        let edit =
-            textline::apply_key_on_clipboard(&mut self.search, key, SEARCH_CAPACITY, TEXT_SIZE);
+        let edit = textline::apply_key_on_clipboard(&mut self.search, key, TEXT_SIZE);
         if !edit.handled {
             return EventResult::Ignored;
         }

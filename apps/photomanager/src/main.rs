@@ -1489,7 +1489,7 @@ impl PhotoApp {
             library_note: None,
             library_unread: 0,
             text_entry: None,
-            entry_editor: TextInput::new(),
+            entry_editor: textline::field_holding("", ENTRY_CAPACITY),
             entry_clipboard: String::new(),
             asking_tag: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -3075,7 +3075,6 @@ impl PhotoApp {
         let edit = textline::apply_key(
             &mut self.entry_editor,
             event,
-            ENTRY_CAPACITY,
             &self.entry_clipboard,
             target.text_size(),
         );

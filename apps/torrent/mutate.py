@@ -434,8 +434,8 @@ MAIN += [
     ),
     (
         "the keys keep a clipboard of their own",
-        "                let did_copy = textline::apply_key_on_clipboard(\n                    &mut self.magnet_input,\n                    key,\n                    MAX_MAGNET_CHARS,\n                    12.0,\n                )\n",
-        "                let did_copy = textline::apply_key(\n                    &mut self.magnet_input,\n                    key,\n                    MAX_MAGNET_CHARS,\n                    \"\",\n                    12.0,\n                )\n",
+        "textline::apply_key_on_clipboard(&mut self.magnet_input, key, 12.0)",
+        'textline::apply_key(&mut self.magnet_input, key, "", 12.0)',
         [TM_MENU],
     ),
     (

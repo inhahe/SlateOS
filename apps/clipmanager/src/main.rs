@@ -877,7 +877,7 @@ impl AppState {
             selected_template: None,
             show_help: false,
             focus: None,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", FIELD_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             status: String::new(),
@@ -2558,13 +2558,7 @@ impl AppState {
             editor.cursor(),
             editor.selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.editor,
-            key,
-            FIELD_CAPACITY,
-            &self.clipboard,
-            field.text_size(),
-        );
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, field.text_size());
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

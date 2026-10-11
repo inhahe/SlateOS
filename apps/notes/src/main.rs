@@ -1775,7 +1775,7 @@ impl NotesApp {
             store_error: None,
             question: None,
             asking: None,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_hovered: false,
             search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -3656,7 +3656,6 @@ impl NotesApp {
                 let edit = textline::apply_key(
                     &mut self.search_editor,
                     key,
-                    SEARCH_CAPACITY,
                     &self.search_clipboard,
                     SEARCH_TEXT_SIZE,
                 );

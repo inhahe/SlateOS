@@ -3217,13 +3217,26 @@ impl StickyNotesApp {
         }
     }
 
-    /// Reload the line's editor from the line, if the line changed under it.
+    /// The most characters the line the keyboard is in holds: the
+    /// search's or a title's. The two share one editor, so it takes the
+    /// capacity of whichever line it is editing.
+    fn line_capacity(&self) -> Option<usize> {
+        match self.focus? {
+            Focus::Search => Some(SEARCH_CAPACITY),
+            Focus::Title(_) => Some(MAX_TITLE_LEN),
+            Focus::Body(_) => None,
+        }
+    }
+
+    /// Reload the line's editor from the line, if the line changed under
+    /// it, and give it the line's capacity.
     fn sync_line_editor(&mut self) {
         if let Some(text) = self.line_text()
             && self.line_editor.text() != text
         {
             self.line_editor.set_text(&text);
         }
+        self.line_editor.set_capacity(self.line_capacity());
     }
 
     /// Put the keyboard in `focus` -- the search, or a note's title -- with
@@ -3271,24 +3284,13 @@ impl StickyNotesApp {
 
     /// `event` in the line the keyboard is in, through its editor
     /// (`textline::apply_key`) -- the caret keys with Shift to select,
-    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, at most
-    /// `capacity` characters -- the line's new text, if the key changed it,
-    /// and whether the key was the line's at all.
-    fn edit_line(
-        &mut self,
-        event: &KeyEvent,
-        capacity: usize,
-        size: f32,
-    ) -> (Option<String>, bool) {
+    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, up to the
+    /// line's capacity ([`Self::line_capacity`]) -- the line's new text, if
+    /// the key changed it, and whether the key was the line's at all.
+    fn edit_line(&mut self, event: &KeyEvent, size: f32) -> (Option<String>, bool) {
         self.sync_line_editor();
         let before = self.line_editor.text().to_owned();
-        let edit = textline::apply_key(
-            &mut self.line_editor,
-            event,
-            capacity,
-            &self.line_clipboard,
-            size,
-        );
+        let edit = textline::apply_key(&mut self.line_editor, event, &self.line_clipboard, size);
         if let Some(copied) = edit.copied {
             self.line_clipboard = copied;
         }
@@ -3779,7 +3781,7 @@ impl StickyNotesApp {
             self.focus = None;
             return Action::Redraw;
         }
-        let (changed, handled) = self.edit_line(event, SEARCH_CAPACITY, SEARCH_TEXT_SIZE);
+        let (changed, handled) = self.edit_line(event, SEARCH_TEXT_SIZE);
         if let Some(query) = changed {
             self.store.set_search(&query);
             self.sidebar_scroll = 0.0;
@@ -3804,7 +3806,7 @@ impl StickyNotesApp {
             self.write_in(id, TextPlace::Start);
             return Action::Redraw;
         }
-        let (changed, handled) = self.edit_line(event, MAX_TITLE_LEN, font);
+        let (changed, handled) = self.edit_line(event, font);
         if let Some(title) = changed {
             if let Some(note) = self.store.get_note_mut(id) {
                 note.title = title;
@@ -3909,7 +3911,7 @@ impl StickyNotesApp {
     fn would_insert(&self, event: &KeyEvent) -> Option<String> {
         let mods = event.modifiers;
         if mods.ctrl && !mods.alt {
-            return (event.key == Key::V).then(|| self.body.clipboard().to_owned());
+            return (event.key == Key::V).then(|| self.body.clipboard().clone());
         }
         event.types_text().then(|| event.typed().collect())
     }

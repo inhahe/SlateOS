@@ -359,11 +359,10 @@ fn step_index(at: usize, len: usize, forward: bool) -> usize {
     }
 }
 
-/// A text field holding `value`.
-fn field_with(value: &str) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_text(value);
-    input
+/// The text field for `which`, holding `value` and taking at most the
+/// field's capacity.
+fn field_with(which: FormField, value: &str) -> TextInput {
+    textline::field_holding(value, which.capacity())
 }
 
 /// The form an event is added or changed in.
@@ -406,16 +405,16 @@ impl EventForm {
     pub fn new_on(date: Date) -> Self {
         Self {
             id: None,
-            title: TextInput::new(),
-            date: field_with(&date_text(date)),
-            starts: field_with("09:00"),
-            ends: field_with("10:00"),
+            title: field_with(FormField::Title, ""),
+            date: field_with(FormField::Date, &date_text(date)),
+            starts: field_with(FormField::Starts, "09:00"),
+            ends: field_with(FormField::Ends, "10:00"),
             all_day: false,
             category: EventCategory::Personal,
             repeats: RecurrenceRule::None,
             other_repeat: None,
-            place: TextInput::new(),
-            notes: TextInput::new(),
+            place: field_with(FormField::Place, ""),
+            notes: field_with(FormField::Notes, ""),
             reminder: Reminder::None,
             color_override: None,
             other_colour: None,
@@ -426,17 +425,17 @@ impl EventForm {
     pub fn editing(e: &CalendarEvent) -> Self {
         Self {
             id: Some(e.id),
-            title: field_with(&e.title),
-            date: field_with(&date_text(e.start.date)),
-            starts: field_with(&e.start.time.format_24h()),
-            ends: field_with(&e.end.time.format_24h()),
+            title: field_with(FormField::Title, &e.title),
+            date: field_with(FormField::Date, &date_text(e.start.date)),
+            starts: field_with(FormField::Starts, &e.start.time.format_24h()),
+            ends: field_with(FormField::Ends, &e.end.time.format_24h()),
             all_day: e.all_day,
             category: e.category,
             repeats: e.recurrence.clone(),
             other_repeat: (!standard_repeats().contains(&e.recurrence))
                 .then(|| e.recurrence.clone()),
-            place: field_with(e.location.as_deref().unwrap_or("")),
-            notes: field_with(&e.description),
+            place: field_with(FormField::Place, e.location.as_deref().unwrap_or("")),
+            notes: field_with(FormField::Notes, &e.description),
             reminder: e.reminder,
             color_override: e.color_override,
             other_colour: e.color_override,
@@ -3661,8 +3660,7 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             let Some(input) = state.form.as_mut().and_then(|f| f.input(field)) else {
                 return EventResult::Ignored;
             };
-            let done =
-                textline::apply_key(input, key, field.capacity(), &clipboard, FORM_TEXT_SIZE);
+            let done = textline::apply_key(input, key, &clipboard, FORM_TEXT_SIZE);
             if let Some(copied) = done.copied {
                 state.clipboard = copied;
             }

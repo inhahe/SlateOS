@@ -1556,7 +1556,7 @@ impl DefragUI {
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
-            exclude_editor: TextInput::new(),
+            exclude_editor: textline::field_holding("", EXCLUDE_CAPACITY),
             exclude_clipboard: String::new(),
             exclude_input_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2159,7 +2159,6 @@ impl DefragUI {
         let edit = textline::apply_key(
             &mut self.exclude_editor,
             key,
-            EXCLUDE_CAPACITY,
             &self.exclude_clipboard,
             FONT_SIZE,
         );

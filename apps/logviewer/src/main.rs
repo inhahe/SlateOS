@@ -1141,7 +1141,7 @@ impl App {
             search_results: Vec::new(),
             current_search_result: 0,
             search_focused: false,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
         }
     }
@@ -1534,7 +1534,6 @@ impl App {
         let edit = textline::apply_key(
             &mut self.search_editor,
             key,
-            SEARCH_CAPACITY,
             &self.search_clipboard,
             SMALL_TEXT,
         );

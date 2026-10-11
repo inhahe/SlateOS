@@ -302,8 +302,8 @@ MAIN = [
     ),
     (
         "the search box keeps a clipboard of its own",
-        "            textline::apply_key_on_clipboard(&mut self.search, key, SEARCH_CAPACITY, TEXT_SIZE);\n",
-        "            textline::apply_key(&mut self.search, key, SEARCH_CAPACITY, \"\", TEXT_SIZE);\n",
+        "textline::apply_key_on_clipboard(&mut self.search, key, TEXT_SIZE);",
+        'textline::apply_key(&mut self.search, key, "", TEXT_SIZE);',
         [W_CLIPBOARD],
     ),
     (

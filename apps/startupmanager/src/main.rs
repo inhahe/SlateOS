@@ -1566,7 +1566,7 @@ impl StartupUI {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             search_focused: false,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", BOX_CAPACITY),
             editor_for: Option::None,
             clipboard: String::new(),
             status: String::new(),
@@ -2194,13 +2194,7 @@ impl StartupUI {
     /// box does not answer, else whether the text changed.
     fn box_key(&mut self, target: Target, key: &KeyEvent) -> Option<bool> {
         self.load_editor(target);
-        let edit = textline::apply_key(
-            &mut self.editor,
-            key,
-            BOX_CAPACITY,
-            &self.clipboard,
-            FONT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FONT_SIZE);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

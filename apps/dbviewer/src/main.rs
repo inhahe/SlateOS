@@ -3691,7 +3691,7 @@ impl DbViewerApp {
             filter_op_idx: 0,
             filter_value: String::new(),
             focus: Focus::Editor,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", BOX_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             status: String::from("Ready"),
@@ -5837,8 +5837,7 @@ impl DbViewerApp {
         } else {
             SQL_TEXT_SIZE
         };
-        let edit =
-            textline::apply_key(&mut self.editor, event, BOX_CAPACITY, &self.clipboard, size);
+        let edit = textline::apply_key(&mut self.editor, event, &self.clipboard, size);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

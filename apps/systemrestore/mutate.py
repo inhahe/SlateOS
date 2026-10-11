@@ -200,12 +200,16 @@ MAIN = [
     # is handing the editor the key as it came -- chord and all.
     (
         "the form's editor is given the key without its chord",
-        '            &mut self.form_editor,\n            key,\n',
-        '            &mut self.form_editor,\n'
-        '            &KeyEvent {\n'
-        '                modifiers: guitk::event::Modifiers::NONE,\n'
-        '                ..key.clone()\n'
-        '            },\n',
+        "textline::apply_key(&mut self.form_editor, key, &self.form_clipboard, FONT_SIZE);",
+        "textline::apply_key(\n"
+        "            &mut self.form_editor,\n"
+        "            &KeyEvent {\n"
+        "                modifiers: guitk::event::Modifiers::NONE,\n"
+        "                ..key.clone()\n"
+        "            },\n"
+        "            &self.form_clipboard,\n"
+        "            FONT_SIZE,\n"
+        "        );",
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
 ]
@@ -316,7 +320,7 @@ MAIN += [
         "        if self.form_editor.text() != text {\n"
         "            self.form_editor.set_text(&text);\n"
         "        }\n"
-        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(",
         "        if textline::types_into_field(key) {\n"
         "            self.form_text_mut(field).push_str(&key.text);\n"
         "            return EventResult::Consumed;\n"
@@ -324,7 +328,7 @@ MAIN += [
         "        if self.form_editor.text() != text {\n"
         "            self.form_editor.set_text(&text);\n"
         "        }\n"
-        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(",
         [EDITS],
     ),
     (
@@ -332,14 +336,14 @@ MAIN += [
         "        if self.form_editor.text() != text {\n"
         "            self.form_editor.set_text(&text);\n"
         "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(",
+        "        let edit = textline::apply_key(",
         [EDITS],
     ),
     (
         "a box holds any length",
-        "            FORM_CAPACITY,\n            &self.form_clipboard,\n",
-        "            usize::MAX,\n            &self.form_clipboard,\n",
+        'form_editor: textline::field_holding("", FORM_CAPACITY),',
+        'form_editor: textline::field_holding("", usize::MAX),',
         [EDITS],
     ),
     (

@@ -928,7 +928,7 @@ impl DeviceManagerState {
             active_tab: PropertiesTab::General,
             search_query: String::new(),
             search_focused: false,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             show_help: false,
             event_history: Vec::new(),
@@ -1183,7 +1183,6 @@ impl DeviceManagerState {
         let edit = textline::apply_key(
             &mut self.search_editor,
             key,
-            SEARCH_CAPACITY,
             &self.search_clipboard,
             SEARCH_TEXT_SIZE,
         );

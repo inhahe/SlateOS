@@ -594,7 +594,7 @@ impl SysInfoState {
             search_text: String::new(),
             show_help: false,
             search_focused: false,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             search_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -1916,7 +1916,6 @@ impl SysInfoState {
                 let edit = textline::apply_key(
                     &mut self.search_editor,
                     key,
-                    SEARCH_CAPACITY,
                     &self.search_clipboard,
                     SEARCH_TEXT_SIZE,
                 );

@@ -170,7 +170,7 @@ MUTATIONS = [
     # -- the boxes -------------------------------------------------------------------------------------------------------
     (
         "the field is given no keys",
-        "        let done = textline::apply_key_on_clipboard(&mut self.editor, key, MAX_FIELD_CHARS, 12.0);",
+        "        let done = textline::apply_key_on_clipboard(&mut self.editor, key, 12.0);",
         "        let done = textline::LineEdit::default();",
         ["the_caret_moves_and_typing_goes_where_it_is", "every_advertised_key_does_something"],
     ),

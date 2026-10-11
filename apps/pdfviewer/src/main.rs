@@ -430,7 +430,7 @@ fn edit_box(
         editor.set_text(text);
     }
     let before = (editor.cursor(), editor.selection_anchor());
-    let edit = textline::apply_key(editor, key, BOX_CAPACITY, clipboard.as_str(), size);
+    let edit = textline::apply_key(editor, key, clipboard.as_str(), size);
     if let Some(copied) = edit.copied {
         *clipboard = copied;
     }
@@ -1582,8 +1582,8 @@ impl PdfViewerApp {
             search: SearchState::new(),
             search_focused: false,
             print_dialog: PrintDialog::default(),
-            search_editor: TextInput::new(),
-            range_editor: TextInput::new(),
+            search_editor: textline::field_holding("", BOX_CAPACITY),
+            range_editor: textline::field_holding("", BOX_CAPACITY),
             clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             recent_files: RecentFilesList::default(),

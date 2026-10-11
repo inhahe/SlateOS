@@ -1,6 +1,12 @@
 ### [E] A text field's limit is held in two places -- 2026-10-10
 
-**Status:** OPEN -- the batch after lane E's publish of 2026-10-10.
+**Status:** OPEN -- fixed on lane E's branch, 2026-10-10: `apply_key`,
+`apply_key_on_clipboard` and `apply_masked_key` lost their `capacity`
+argument and type through the field's own capacity
+(`TextInput::insert_text`); `insert_limited` is gone; every program builds
+its fields with their limits; and `apply_key` asserts, in debug builds,
+that the field it edits has one. Stamped FIXED once that has passed a boot
+test on `main`.
 
 **In short:** A one-line text field knows how many characters it may hold:
 the limit it was built with (`textline::field_holding`, `TextInput`'s own

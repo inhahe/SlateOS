@@ -2121,7 +2121,7 @@ impl QrApp {
         );
         // On the program's clipboard, which the box's right-click menu
         // copies to and pastes from too.
-        let done = textline::apply_key_on_clipboard(&mut self.editor, key, MAX_FIELD_CHARS, 12.0);
+        let done = textline::apply_key_on_clipboard(&mut self.editor, key, 12.0);
         let copied = done.copied.is_some();
         let typed = self.editor.text() != before.0;
         if typed {

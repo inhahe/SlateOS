@@ -1081,7 +1081,7 @@ impl IrcClientApp {
             channel_list_filter: String::new(),
             chat_scroll: 0,
             input_text: String::new(),
-            input_editor: TextInput::new(),
+            input_editor: textline::field_holding("", INPUT_CAPACITY),
             input_clipboard: String::new(),
             input_history: Vec::new(),
             input_history_idx: None,
@@ -2092,7 +2092,6 @@ impl IrcClientApp {
         let edit = textline::apply_key(
             &mut self.input_editor,
             event,
-            INPUT_CAPACITY,
             &self.input_clipboard,
             INPUT_TEXT_SIZE,
         );

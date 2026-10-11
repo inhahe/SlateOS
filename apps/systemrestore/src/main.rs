@@ -2121,7 +2121,7 @@ impl SystemRestoreUI {
             form_type: SnapshotType::Manual,
             current_timestamp: 0,
             form_focus: FormFocus::Text(FormField::Name),
-            form_editor: TextInput::new(),
+            form_editor: textline::field_holding("", FORM_CAPACITY),
             form_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             locations,
@@ -3153,13 +3153,7 @@ impl SystemRestoreUI {
         if self.form_editor.text() != text {
             self.form_editor.set_text(&text);
         }
-        let edit = textline::apply_key(
-            &mut self.form_editor,
-            key,
-            FORM_CAPACITY,
-            &self.form_clipboard,
-            FONT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.form_editor, key, &self.form_clipboard, FONT_SIZE);
         if let Some(copied) = edit.copied {
             self.form_clipboard = copied;
         }

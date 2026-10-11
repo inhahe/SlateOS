@@ -1882,7 +1882,7 @@ impl SchedulerUI {
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: None,
             show_help: false,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", FIELD_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             tab: UiTab::Tasks,
@@ -2253,13 +2253,7 @@ impl SchedulerUI {
         self.sync_editor(field);
         let before = self.field_text(field);
         let kept = self.editor.clone();
-        let edit = textline::apply_key(
-            &mut self.editor,
-            key,
-            FIELD_CAPACITY,
-            &self.clipboard,
-            FONT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FONT_SIZE);
         let typed = self.editor.text().to_owned();
         if typed != before && !self.set_field_text(field, &typed) {
             self.editor = kept;

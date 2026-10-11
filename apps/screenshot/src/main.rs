@@ -920,7 +920,7 @@ impl ScreenshotApp {
             annotations: Vec::new(),
             pending_annotation: None,
             annotation_text_input: String::new(),
-            annotation_text_editor: TextInput::new(),
+            annotation_text_editor: textline::field_holding("", TEXT_CAPACITY),
             annotation_text_clipboard: String::new(),
             annotation_text_focused: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -1258,7 +1258,6 @@ impl ScreenshotApp {
         let edit = textline::apply_key(
             &mut self.annotation_text_editor,
             event,
-            TEXT_CAPACITY,
             &self.annotation_text_clipboard,
             TEXT_BOX_SIZE,
         );

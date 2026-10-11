@@ -1022,7 +1022,7 @@ impl Multiplexer {
             prefix_state: PrefixState::Normal,
             command_mode: false,
             command_input: String::new(),
-            command_editor: TextInput::new(),
+            command_editor: textline::field_holding("", PROMPT_CAPACITY),
             command_clipboard: String::new(),
             confirm: None,
             status_message: String::new(),
@@ -2112,7 +2112,6 @@ impl Multiplexer {
                 let edit = textline::apply_key(
                     &mut self.command_editor,
                     key,
-                    PROMPT_CAPACITY,
                     &self.command_clipboard,
                     SMALL_TEXT,
                 );

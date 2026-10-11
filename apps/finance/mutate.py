@@ -87,8 +87,8 @@ MUTATIONS = [
     ),
     (
         "a field takes no typing",
-        "                let done = textline::apply_key(input, key, 200, &clipboard, 13.0);",
-        "                let done = textline::apply_key(&mut TextInput::new(), key, 200, &clipboard, 13.0);\n"
+        "                let done = textline::apply_key(input, key, &clipboard, 13.0);",
+        '                let done = textline::apply_key(&mut form_field(""), key, &clipboard, 13.0);\n'
         "                let _ = input;",
         [
             "a_transaction_is_entered_from_the_keyboard",

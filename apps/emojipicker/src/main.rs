@@ -1258,7 +1258,7 @@ impl EmojiPickerState {
             active_tab: Tab::Category(EmojiCategory::SmileysAndPeople),
             selected_category: EmojiCategory::SmileysAndPeople,
             search_query: String::new(),
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             hovered_emoji: Option::None,
             scroll_offset: 0.0,
@@ -1467,7 +1467,6 @@ impl EmojiPickerState {
         let edit = textline::apply_key(
             &mut self.search_editor,
             key,
-            SEARCH_CAPACITY,
             &self.search_clipboard,
             LABEL_FONT_SIZE,
         );

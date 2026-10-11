@@ -2748,7 +2748,7 @@ impl AppState {
             filtered_ids: Vec::new(),
             audit_issues: Vec::new(),
             master_input: String::new(),
-            editor: TextInput::new(),
+            editor: textline::field_holding("", BOX_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             unlock_failed: false,
@@ -2893,15 +2893,9 @@ impl AppState {
             editor.selection_anchor(),
         );
         let edit = if self.box_masked(target) {
-            textline::apply_masked_key(&mut self.editor, key, BOX_CAPACITY, &self.clipboard)
+            textline::apply_masked_key(&mut self.editor, key, &self.clipboard)
         } else {
-            textline::apply_key(
-                &mut self.editor,
-                key,
-                BOX_CAPACITY,
-                &self.clipboard,
-                DEFAULT_FONT_SIZE,
-            )
+            textline::apply_key(&mut self.editor, key, &self.clipboard, DEFAULT_FONT_SIZE)
         };
         if let Some(copied) = edit.copied {
             self.clipboard = copied;

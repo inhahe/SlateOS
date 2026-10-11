@@ -40,9 +40,7 @@
 //! but Ctrl chords it does not use fall through to the document's, so Ctrl+S
 //! still saves with the bar open.
 
-use crate::{
-    Document, EditorState, ExternalChoice, FIND_CAPACITY, FIND_TEXT_INSET, FIND_TEXT_SIZE,
-};
+use crate::{Document, EditorState, ExternalChoice, FIND_TEXT_INSET, FIND_TEXT_SIZE};
 use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::EventResult;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -567,13 +565,7 @@ impl EditorState {
             self.find_editor.cursor(),
             self.find_editor.selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.find_editor,
-            key,
-            FIND_CAPACITY,
-            &self.clipboard,
-            FIND_TEXT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.find_editor, key, &self.clipboard, FIND_TEXT_SIZE);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

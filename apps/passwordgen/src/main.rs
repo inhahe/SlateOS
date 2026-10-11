@@ -1716,7 +1716,7 @@ impl PasswordApp {
             policy: PasswordPolicy::default(),
             rule_cursor: 0,
             analyzer_revealed: false,
-            analyzer_editor: TextInput::new(),
+            analyzer_editor: textline::field_holding("", ANALYZER_CAPACITY),
             clipboard: String::new(),
             keeps_settings: false,
             settings_problems: Vec::new(),
@@ -2278,17 +2278,11 @@ impl PasswordApp {
             textline::apply_key(
                 &mut self.analyzer_editor,
                 key,
-                ANALYZER_CAPACITY,
                 &self.clipboard,
                 PASSWORD_TEXT_SIZE,
             )
         } else {
-            textline::apply_masked_key(
-                &mut self.analyzer_editor,
-                key,
-                ANALYZER_CAPACITY,
-                &self.clipboard,
-            )
+            textline::apply_masked_key(&mut self.analyzer_editor, key, &self.clipboard)
         };
         if let Some(copied) = edit.copied {
             self.clipboard = copied;

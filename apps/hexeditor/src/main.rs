@@ -1673,7 +1673,7 @@ impl HexEditor {
             focused_panel: FocusedPanel::HexView,
             goto_visible: false,
             goto_text: String::new(),
-            box_editor: TextInput::new(),
+            box_editor: textline::field_holding("", BOX_CAPACITY),
             box_editor_for: None,
             box_clipboard: String::new(),
             query_hovered: false,
@@ -2275,13 +2275,8 @@ impl HexEditor {
     /// box does not answer, which goes on to the window.
     fn box_key(&mut self, panel: FocusedPanel, key: &KeyEvent) -> Option<EventResult> {
         self.load_box_editor(panel);
-        let edit = textline::apply_key(
-            &mut self.box_editor,
-            key,
-            BOX_CAPACITY,
-            &self.box_clipboard,
-            UI_FONT_SIZE,
-        );
+        let edit =
+            textline::apply_key(&mut self.box_editor, key, &self.box_clipboard, UI_FONT_SIZE);
         if let Some(copied) = edit.copied {
             self.box_clipboard = copied;
         }

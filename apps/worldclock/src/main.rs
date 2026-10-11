@@ -559,7 +559,7 @@ impl WorldClockApp {
             clock_style: ClockStyle::Digital,
             show_picker: false,
             picker_search: String::new(),
-            picker_editor: TextInput::new(),
+            picker_editor: textline::field_holding("", PICKER_SEARCH_CAPACITY),
             picker_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             picker_scroll: 0,
@@ -856,7 +856,6 @@ impl WorldClockApp {
         let edit = textline::apply_key(
             &mut self.picker_editor,
             key,
-            PICKER_SEARCH_CAPACITY,
             &self.picker_clipboard,
             PICKER_SEARCH_SIZE,
         );

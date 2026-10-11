@@ -144,8 +144,8 @@ MUTATIONS += [
     ),
     (
         "the filter holds any length",
-        "            FILTER_CAPACITY,\n            &self.filter_clipboard,\n",
-        "            usize::MAX,\n            &self.filter_clipboard,\n",
+        'filter_editor: textline::field_holding("", FILTER_CAPACITY),',
+        'filter_editor: textline::field_holding("", usize::MAX),',
         [EDITS],
     ),
     (

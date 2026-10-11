@@ -627,7 +627,7 @@ impl PomodoroApp {
             settings,
             current_task: String::new(),
             task_input_active: false,
-            task_editor: TextInput::new(),
+            task_editor: textline::field_holding("", TASK_CAPACITY),
             task_before: String::new(),
             clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -1147,13 +1147,7 @@ impl PomodoroApp {
                     self.task_editor.set_text(&self.current_task);
                 }
                 let size = self.layout().task_text_size();
-                let edit = textline::apply_key(
-                    &mut self.task_editor,
-                    key,
-                    TASK_CAPACITY,
-                    &self.clipboard,
-                    size,
-                );
+                let edit = textline::apply_key(&mut self.task_editor, key, &self.clipboard, size);
                 if let Some(copied) = edit.copied {
                     self.clipboard = copied;
                 }

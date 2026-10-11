@@ -1555,7 +1555,7 @@ impl MindMapApp {
             show_search: false,
             edit_buffer: String::new(),
             editing_node: None,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", BOX_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -3412,7 +3412,7 @@ impl MindMapApp {
     fn box_key(&mut self, which: TypedBox, key: &KeyEvent, size: f32) -> Option<bool> {
         self.load_box(which);
         let before = self.editor_state();
-        let edit = textline::apply_key(&mut self.editor, key, BOX_CAPACITY, &self.clipboard, size);
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, size);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

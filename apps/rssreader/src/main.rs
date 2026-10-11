@@ -2407,8 +2407,8 @@ impl RssReaderApp {
             text_entry: None,
             text_buffer: String::new(),
             search_results: Vec::new(),
-            search_editor: TextInput::new(),
-            entry_editor: TextInput::new(),
+            search_editor: textline::field_holding("", BOX_CAPACITY),
+            entry_editor: textline::field_holding("", BOX_CAPACITY),
             clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
@@ -6126,7 +6126,7 @@ fn edit_box(
     if editor.text() != text.as_str() {
         editor.set_text(text);
     }
-    let edit = textline::apply_key(editor, key, BOX_CAPACITY, clipboard.as_str(), BOX_TEXT_SIZE);
+    let edit = textline::apply_key(editor, key, clipboard.as_str(), BOX_TEXT_SIZE);
     if let Some(copied) = edit.copied {
         *clipboard = copied;
     }

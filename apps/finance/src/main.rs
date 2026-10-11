@@ -389,6 +389,15 @@ impl FormField {
     }
 }
 
+/// The most characters any of a form's boxes holds.
+const FIELD_CAPACITY: usize = 200;
+
+/// A form's box holding `text`, taking at most [`FIELD_CAPACITY`]
+/// characters.
+fn form_field(text: &str) -> TextInput {
+    textline::field_holding(text, FIELD_CAPACITY)
+}
+
 /// What a form is entering.
 ///
 /// There was no way to put a figure into this program: `add_account`,
@@ -1422,14 +1431,13 @@ impl FinanceApp {
             ));
             return;
         };
-        let mut date = TextInput::new();
-        date.set_text(&self.current_date.format());
+        let date = form_field(&self.current_date.format());
         self.form = Some(Form::Transaction {
             id: None,
             date,
-            description: TextInput::new(),
-            amount: TextInput::new(),
-            notes: TextInput::new(),
+            description: form_field(""),
+            amount: form_field(""),
+            notes: form_field(""),
             income: false,
             category: Category::Food,
             account: Some(account),
@@ -1444,18 +1452,13 @@ impl FinanceApp {
         let Some(tx) = self.transactions.iter().find(|t| t.id == id) else {
             return;
         };
-        let text = |s: &str| {
-            let mut input = TextInput::new();
-            input.set_text(s);
-            input
-        };
         let magnitude = Self::format_currency(tx.amount.saturating_abs());
         self.form = Some(Form::Transaction {
             id: Some(id),
-            date: text(&tx.date.format()),
-            description: text(&tx.description),
-            amount: text(magnitude.trim_start_matches('$')),
-            notes: text(&tx.notes),
+            date: form_field(&tx.date.format()),
+            description: form_field(&tx.description),
+            amount: form_field(magnitude.trim_start_matches('$')),
+            notes: form_field(&tx.notes),
             income: tx.amount > 0,
             category: tx.category,
             account: Some(tx.account_id),
@@ -1468,9 +1471,9 @@ impl FinanceApp {
     fn open_new_account(&mut self) {
         self.form = Some(Form::Account {
             id: None,
-            name: TextInput::new(),
+            name: form_field(""),
             kind: AccountType::Checking,
-            opening: TextInput::new(),
+            opening: form_field(""),
         });
         self.field = FormField::Name;
         self.form_error = None;
@@ -1480,14 +1483,8 @@ impl FinanceApp {
         let Some(account) = self.accounts.iter().find(|a| a.id == id) else {
             return;
         };
-        let mut name = TextInput::new();
-        name.set_text(&account.name);
-        let mut opening = TextInput::new();
-        opening.set_text(
-            Self::format_currency(account.initial_balance)
-                .replace('$', "")
-                .as_str(),
-        );
+        let name = form_field(&account.name);
+        let opening = form_field(&Self::format_currency(account.initial_balance).replace('$', ""));
         self.form = Some(Form::Account {
             id: Some(id),
             name,
@@ -1503,7 +1500,7 @@ impl FinanceApp {
         let Some(&category) = Category::EXPENSE_CATS.get(index) else {
             return;
         };
-        let mut limit = TextInput::new();
+        let mut limit = form_field("");
         if let Some(b) = self.budgets.iter().find(|b| b.category == category) {
             limit.set_text(Self::format_currency(b.monthly_limit).trim_start_matches('$'));
         }
@@ -1788,7 +1785,7 @@ impl FinanceApp {
                 let Some(input) = self.form.as_mut().and_then(|f| f.input(which)) else {
                     return EventResult::Ignored;
                 };
-                let done = textline::apply_key(input, key, 200, &clipboard, 13.0);
+                let done = textline::apply_key(input, key, &clipboard, 13.0);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }

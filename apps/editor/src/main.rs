@@ -1840,7 +1840,7 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
-            find_editor: TextInput::new(),
+            find_editor: textline::field_holding("", FIND_CAPACITY),
             find_editor_for: None,
             pointer: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,

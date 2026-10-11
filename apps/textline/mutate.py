@@ -73,32 +73,29 @@ MUTATIONS = [
     ),
     (
         "a paste types nothing",
-        "        Key::V if chord => insert_limited(input, clipboard, capacity),",
+        "        Key::V if chord => input.insert_text(clipboard),",
         "        Key::V if chord => {}",
         [CLIP, PASTE],
     ),
-    (
-        "a chord nobody bound types its letter",
-        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
-        "    key.pressed && key.types_text()",
-        [NOTHING, COMMAND, TABLE],
-    ),
+    # A command's letter is kept out by the toolkit's own `KeyEvent::typed`,
+    # which `types_text` asks; TABLE and COMMAND check that the two still
+    # agree. No row here can break the toolkit's rule.
     (
         "a key that types nothing is the field's",
-        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
-        "    key.pressed && !is_command(key.modifiers)",
+        "    key.pressed && key.types_text()",
+        "    key.pressed",
         [NOTHING, TABLE],
     ),
     (
-        "the field types a command's letter",
+        "the field types on a key's release",
         "            if !types_into_field(key) {",
         "            if !key.types_text() {",
-        [NOTHING, COMMAND],
+        ["a_release_types_nothing"],
     ),
     (
         "a release types",
-        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
-        "    !is_command(key.modifiers) && key.types_text()",
+        "    key.pressed && key.types_text()",
+        "    key.types_text()",
         [TABLE],
     ),
     (
@@ -121,7 +118,7 @@ MUTATIONS = [
         "AltGr is a command",
         "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
         "    modifiers.super_key || modifiers.ctrl || modifiers.alt",
-        [ALTGR, TABLE],
+        [TABLE],
     ),
     (
         "a key held with Alt alone types",
@@ -136,28 +133,10 @@ MUTATIONS = [
         [TABLE],
     ),
     (
-        "a paste of nothing eats the selection",
-        "    if typed.chars().all(char::is_control) {\n        return;\n    }\n",
-        "",
-        [NOTHING],
-    ),
-    (
-        "a line break is pasted into one line",
-        "        if ch.is_control() {\n            continue;\n        }\n",
-        "",
-        [PASTE],
-    ),
-    (
-        "the capacity counts bytes",
-        "        if input.text().chars().count() >= capacity {",
-        "        if input.text().len() >= capacity {",
-        [PASTE],
-    ),
-    (
-        "typing does not replace the selection",
-        "    if input.has_selection() {\n        input.delete_selection();\n    }\n    for ch in typed.chars() {",
-        "    for ch in typed.chars() {",
-        [TYPING],
+        "a field without a capacity goes unnoticed",
+        "    debug_assert!(\n        input.capacity().is_some(),",
+        "    debug_assert!(\n        true || input.capacity().is_some(),",
+        ["a_field_without_a_capacity_is_caught"],
     ),
     (
         'a key held with Ctrl is plain',

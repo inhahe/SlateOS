@@ -1032,7 +1032,7 @@ impl NetManagerApp {
             sidebar_scroll: 0,
             show_help: false,
             focus: None,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", ADDRESS_CAPACITY),
             clipboard: String::new(),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -4237,13 +4237,7 @@ impl NetManagerApp {
             self.editor.selection_anchor(),
         );
         let clipboard = self.clipboard.clone();
-        let done = textline::apply_key(
-            &mut self.editor,
-            key,
-            ADDRESS_CAPACITY,
-            &clipboard,
-            BOX_TEXT_SIZE,
-        );
+        let done = textline::apply_key(&mut self.editor, key, &clipboard, BOX_TEXT_SIZE);
         if let Some(copied) = done.copied {
             self.clipboard = copied;
         }

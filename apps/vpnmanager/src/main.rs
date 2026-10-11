@@ -729,7 +729,7 @@ impl VpnManager {
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", FIELD_CAPACITY),
             clipboard: String::new(),
             profiles,
             connections,
@@ -4248,13 +4248,7 @@ impl VpnManager {
             self.editor.set_text(&before);
         }
         let kept = self.editor.clone();
-        let edit = textline::apply_key(
-            &mut self.editor,
-            key,
-            FIELD_CAPACITY,
-            &self.clipboard,
-            FIELD_TEXT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FIELD_TEXT_SIZE);
         if self.number_field_mut(field).is_some()
             && !self.editor.text().chars().all(|c| c.is_ascii_digit())
         {

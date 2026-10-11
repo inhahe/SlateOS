@@ -347,8 +347,8 @@ MUTATIONS += [
     ),
     (
         "the keys keep a clipboard of their own",
-        "                    let _edit = textline::apply_key_on_clipboard(input, key, LABEL_CAPACITY, 13.0);\n",
-        "                    let _edit = textline::apply_key(input, key, LABEL_CAPACITY, \"\", 13.0);\n",
+        "let _edit = textline::apply_key_on_clipboard(input, key, 13.0);",
+        'let _edit = textline::apply_key(input, key, "", 13.0);',
         [SR_MENU],
     ),
     (

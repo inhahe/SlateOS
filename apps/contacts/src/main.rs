@@ -2856,7 +2856,7 @@ impl ContactsApp {
             store: ContactStore::new(),
             view: DetailView::Empty,
             search_query: String::new(),
-            editor: TextInput::new(),
+            editor: textline::field_holding("", BOX_CAPACITY),
             editor_for: None,
             clipboard: String::new(),
             sort_order: SortOrder::Name,
@@ -4966,13 +4966,7 @@ impl ContactsApp {
     /// one it does not answer, else whether its text changed.
     fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> Option<bool> {
         self.load_editor(focus);
-        let edit = textline::apply_key(
-            &mut self.editor,
-            event,
-            BOX_CAPACITY,
-            &self.clipboard,
-            BOX_TEXT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.editor, event, &self.clipboard, BOX_TEXT_SIZE);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

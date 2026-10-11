@@ -1958,7 +1958,7 @@ impl AlarmClockApp {
             lap_scroll: 0.0,
             editor: None,
             focus: None,
-            label_editor: TextInput::new(),
+            label_editor: textline::field_holding("", MAX_LABEL_LEN),
             label_clipboard: String::new(),
             custom: [String::new(), String::new(), String::new()],
             tick_accum_ms: 0,
@@ -3323,7 +3323,6 @@ impl AlarmClockApp {
                 let edit = textline::apply_key(
                     &mut self.label_editor,
                     event,
-                    MAX_LABEL_LEN,
                     &self.label_clipboard,
                     // The order the caret takes through text that runs both
                     // ways does not change with the size it is drawn at.

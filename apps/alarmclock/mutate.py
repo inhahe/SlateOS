@@ -186,8 +186,8 @@ MUTATIONS = [
     ),
     (
         "the label field takes as many characters as are typed into it",
-        "                    MAX_LABEL_LEN,\n                    &self.label_clipboard,\n",
-        "                    usize::MAX,\n                    &self.label_clipboard,\n",
+        'label_editor: textline::field_holding("", MAX_LABEL_LEN),',
+        'label_editor: textline::field_holding("", usize::MAX),',
         ["the_label_field_is_bounded"],
     ),
     # ---- the timer tab ----

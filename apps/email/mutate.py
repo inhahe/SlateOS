@@ -443,8 +443,8 @@ MUTATIONS += [
     ),
     (
         "the lines' keys keep a clipboard the menu does not share",
-        "                    let _edit = textline::apply_key_on_clipboard(input, key, FIELD_CAPACITY, 13.0);\n",
-        "                    let _edit = textline::apply_key(input, key, FIELD_CAPACITY, \"\", 13.0);\n",
+        "let _edit = textline::apply_key_on_clipboard(input, key, 13.0);",
+        'let _edit = textline::apply_key(input, key, "", 13.0);',
         [E_COPY],
     ),
     (

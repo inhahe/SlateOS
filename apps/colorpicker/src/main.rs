@@ -885,7 +885,7 @@ impl ColorPickerApp {
             contrast_bg: PickedColor::from_rgb(30, 30, 46), // Catppuccin Base
             clipboard: String::new(),
             hex_input: String::new(),
-            hex_editor: TextInput::new(),
+            hex_editor: textline::field_holding("", HEX_CAPACITY),
             show_help: false,
             editing: false,
             box_hovered: false,
@@ -1509,21 +1509,14 @@ impl ColorPickerApp {
                 .filter(|c| hex(*c))
                 .map(|c| c.to_ascii_uppercase())
                 .collect();
-            textline::insert_limited(&mut self.hex_editor, &typed, HEX_CAPACITY);
-        } else if key.key == Key::V && textline::is_ctrl_chord(key.modifiers) {
+            self.hex_editor.insert_text(&typed);
+        } else if textline::pastes(key) {
             let pasted = self.clipboard.trim();
             if !pasted.is_empty() && pasted.chars().all(hex) {
-                let pasted = pasted.to_ascii_uppercase();
-                textline::insert_limited(&mut self.hex_editor, &pasted, HEX_CAPACITY);
+                self.hex_editor.insert_text(&pasted.to_ascii_uppercase());
             }
         } else {
-            let edit = textline::apply_key(
-                &mut self.hex_editor,
-                key,
-                HEX_CAPACITY,
-                &self.clipboard,
-                FONT_SIZE,
-            );
+            let edit = textline::apply_key(&mut self.hex_editor, key, &self.clipboard, FONT_SIZE);
             if let Some(copied) = edit.copied {
                 self.clipboard = copied;
             }

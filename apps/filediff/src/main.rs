@@ -1171,7 +1171,7 @@ impl FileDiffApp {
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
             search: SearchState::default(),
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             dir_compare: None,
             dir_mode: false,
@@ -1886,7 +1886,6 @@ impl FileDiffApp {
         let edit = textline::apply_key(
             &mut self.search_editor,
             key,
-            SEARCH_CAPACITY,
             &self.search_clipboard,
             CONTENT_FONT_SIZE,
         );

@@ -1096,7 +1096,7 @@ impl PodcastApp {
             episode_filter: EpisodeFilter::All,
             selected_episode_id: None,
             search_query: String::new(),
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             detail_from: MainView::EpisodeList,
@@ -2443,7 +2443,6 @@ impl PodcastApp {
         let edit = textline::apply_key(
             &mut self.search_editor,
             event,
-            SEARCH_CAPACITY,
             &self.search_clipboard,
             SEARCH_TEXT_SIZE,
         );

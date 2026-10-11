@@ -1013,7 +1013,7 @@ impl WhiteboardApp {
             custom_g: 214,
             custom_b: 244,
             text_input_buffer: String::new(),
-            text_editor: TextInput::new(),
+            text_editor: textline::field_holding("", TEXT_CAPACITY),
             text_clipboard: String::new(),
             text_focused: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2779,7 +2779,6 @@ impl WhiteboardApp {
         let edit = textline::apply_key(
             &mut self.text_editor,
             event,
-            TEXT_CAPACITY,
             &self.text_clipboard,
             TEXT_BOX_SIZE,
         );

@@ -2283,7 +2283,7 @@ impl Default for NetScanApp {
             results_wheel: wheel::Accumulator::default(),
             ports_wheel: wheel::Accumulator::default(),
             focus: None,
-            editor: TextInput::new(),
+            editor: textline::field_holding("", FIELD_CAPACITY),
             clipboard: String::new(),
             show_help: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2986,13 +2986,7 @@ impl NetScanApp {
             }
         }
         self.sync_editor(field);
-        let edit = textline::apply_key(
-            &mut self.editor,
-            key,
-            FIELD_CAPACITY,
-            &self.clipboard,
-            FIELD_TEXT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FIELD_TEXT_SIZE);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

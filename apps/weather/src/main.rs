@@ -1052,7 +1052,7 @@ impl WeatherApp {
             // Off: nothing is sent anywhere until the user turns forecasts
             // on (design-decisions §1236).
             source: source::Source::default(),
-            search: TextInput::new(),
+            search: textline::field_holding("", SEARCH_CAPACITY),
             clipboard: String::new(),
         }
     }
@@ -1347,13 +1347,7 @@ impl WeatherApp {
                 self.search.set_text("");
                 return EventResult::Consumed;
             }
-            let edit = textline::apply_key(
-                &mut self.search,
-                key,
-                SEARCH_CAPACITY,
-                &self.clipboard,
-                SEARCH_FONT,
-            );
+            let edit = textline::apply_key(&mut self.search, key, &self.clipboard, SEARCH_FONT);
             if let Some(copied) = edit.copied {
                 self.clipboard = copied;
             }

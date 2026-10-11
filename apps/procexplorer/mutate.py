@@ -561,34 +561,30 @@ MUTATIONS += [
     ),
     (
         "the filter's keys keep a clipboard the menu does not share",
-        "                let _edit = textline::apply_key_on_clipboard(\n"
+        "let _edit = textline::apply_key_on_clipboard(\n"
         "                    &mut self.filter_editor,\n"
         "                    key,\n"
-        "                    FILTER_CAPACITY,\n"
         "                    FILTER_TEXT_SIZE,\n"
         "                );\n",
-        "                let _edit = textline::apply_key(\n"
+        "let _edit = textline::apply_key(\n"
         "                    &mut self.filter_editor,\n"
         "                    key,\n"
-        "                    FILTER_CAPACITY,\n"
-        "                    \"\",\n"
+        '                    "",\n'
         "                    FILTER_TEXT_SIZE,\n"
         "                );\n",
         [FM_FILTER],
     ),
     (
         "the New Task box's keys keep a clipboard the menu does not share",
-        "                    let edit = textline::apply_key_on_clipboard(\n"
+        "let edit = textline::apply_key_on_clipboard(\n"
         "                        &mut run_box.input,\n"
         "                        key,\n"
-        "                        RUN_BOX_CAPACITY,\n"
         "                        RUN_BOX_TEXT_SIZE,\n"
         "                    );\n",
-        "                    let edit = textline::apply_key(\n"
+        "let edit = textline::apply_key(\n"
         "                        &mut run_box.input,\n"
         "                        key,\n"
-        "                        RUN_BOX_CAPACITY,\n"
-        "                        \"\",\n"
+        '                        "",\n'
         "                        RUN_BOX_TEXT_SIZE,\n"
         "                    );\n",
         [FM_FILTER],

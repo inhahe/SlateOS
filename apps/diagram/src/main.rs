@@ -900,7 +900,7 @@ impl DiagramApp {
             groups: Vec::new(),
             selection: Selection::default(),
             editing: None,
-            label_editor: TextInput::new(),
+            label_editor: textline::field_holding("", LABEL_CAPACITY),
             label_clipboard: String::new(),
             mode: InteractionMode::Select,
             snap_to_grid: true,
@@ -1126,7 +1126,6 @@ impl DiagramApp {
                 let edit = textline::apply_key(
                     &mut self.label_editor,
                     key,
-                    LABEL_CAPACITY,
                     &self.label_clipboard,
                     // The order the caret takes through text that runs both
                     // ways does not change with the size it is drawn at.

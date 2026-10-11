@@ -425,8 +425,8 @@ MUTATIONS += [
     ),
     (
         "a box holds any length",
-        "            ENTRY_CAPACITY,\n            &self.entry_clipboard,\n",
-        "            usize::MAX,\n            &self.entry_clipboard,\n",
+        'entry_editor: textline::field_holding("", ENTRY_CAPACITY),',
+        'entry_editor: textline::field_holding("", usize::MAX),',
         [EDITS],
     ),
     (

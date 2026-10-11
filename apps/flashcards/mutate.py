@@ -28,8 +28,13 @@ MUTATIONS = [
     # -- the editors -------------------------------------------------------------------------------------
     (
         "a field takes no typing",
-        "                    textline::apply_key(self.input(which), key, FIELD_CAPACITY, &clipboard, 13.0);",
-        "                    textline::apply_key(&mut TextInput::new(), key, FIELD_CAPACITY, &clipboard, 13.0);\n"
+        "                let done = textline::apply_key(self.input(which), key, &clipboard, 13.0);",
+        "                let done = textline::apply_key(\n"
+        '                    &mut textline::field_holding("", FIELD_CAPACITY),\n'
+        "                    key,\n"
+        "                    &clipboard,\n"
+        "                    13.0,\n"
+        "                );\n"
         "                let _ = which;",
         ["a_card_can_be_typed_and_saved", "the_editor_answers_the_pointer"],
     ),

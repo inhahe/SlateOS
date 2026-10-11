@@ -1558,7 +1558,7 @@ impl Dictionary {
             pending: None,
             miss: None,
             waker: None,
-            query_editor: TextInput::new(),
+            query_editor: textline::field_holding("", QUERY_CAPACITY),
             clipboard: String::new(),
         }
     }
@@ -2043,13 +2043,7 @@ impl Dictionary {
     /// it searched for again.
     fn query_key(&mut self, ev: &KeyEvent, size: f32) -> bool {
         self.load_query();
-        let edit = textline::apply_key(
-            &mut self.query_editor,
-            ev,
-            QUERY_CAPACITY,
-            &self.clipboard,
-            size,
-        );
+        let edit = textline::apply_key(&mut self.query_editor, ev, &self.clipboard, size);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

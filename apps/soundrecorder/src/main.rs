@@ -2798,7 +2798,7 @@ impl SoundRecorderApp {
                 // On the program's clipboard, which the box's right-click menu
                 // copies to and pastes from too.
                 if let Some(input) = self.rename.as_mut() {
-                    let _edit = textline::apply_key_on_clipboard(input, key, LABEL_CAPACITY, 13.0);
+                    let _edit = textline::apply_key_on_clipboard(input, key, 13.0);
                 }
             }
         }

@@ -1073,7 +1073,7 @@ impl LockScreen {
             users,
             selected_user_index: 0,
             password_buffer: String::new(),
-            password_editor: TextInput::new(),
+            password_editor: textline::field_holding("", MAX_PASSWORD_LENGTH),
             failed_attempts: 0,
             show_error: false,
             shake: ShakeAnimation::new(),
@@ -1304,8 +1304,7 @@ impl LockScreen {
             editor.cursor(),
             editor.selection_anchor(),
         );
-        let edit =
-            textline::apply_masked_key(&mut self.password_editor, key, MAX_PASSWORD_LENGTH, "");
+        let edit = textline::apply_masked_key(&mut self.password_editor, key, "");
         if !edit.handled {
             return EventResult::Ignored;
         }

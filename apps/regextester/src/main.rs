@@ -1955,9 +1955,9 @@ impl App {
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
-            pattern: TextInput::new(),
+            pattern: textline::field_holding("", MAX_PATTERN_LEN),
             input: TextArea::new(NORMAL_TEXT),
-            replace: TextInput::new(),
+            replace: textline::field_holding("", MAX_REPLACE_LEN),
             flags: RegexFlags::default(),
             active_tab: ActiveTab::Tester,
             active_field: ActiveField::Pattern,
@@ -2219,7 +2219,7 @@ impl App {
             self.status = "Nothing to save: the pattern is empty".to_string();
             return true;
         }
-        let mut name = TextInput::new();
+        let mut name = textline::field_holding("", MAX_NAME_LEN);
         // Offered the name it was loaded under, when it was a saved one.
         if let Some(entry) = self
             .selected_library_entry
@@ -3994,7 +3994,6 @@ impl App {
                     }
                     _ => {}
                 }
-                let capacity = Self::capacity(field);
                 let clipboard = self.clipboard.clone();
                 let input = if field == ActiveField::Pattern {
                     &mut self.pattern
@@ -4006,7 +4005,7 @@ impl App {
                     input.cursor(),
                     input.selection_anchor(),
                 );
-                let edited = textline::apply_key(input, key, capacity, &clipboard, NORMAL_TEXT);
+                let edited = textline::apply_key(input, key, &clipboard, NORMAL_TEXT);
                 let typed = input.text() != before.0;
                 let moved = (input.cursor(), input.selection_anchor()) != (before.1, before.2);
                 let copied = edited.copied.is_some();
@@ -4109,7 +4108,7 @@ impl App {
                     name.cursor(),
                     name.selection_anchor(),
                 );
-                let edited = textline::apply_key(name, key, MAX_NAME_LEN, &clipboard, NORMAL_TEXT);
+                let edited = textline::apply_key(name, key, &clipboard, NORMAL_TEXT);
                 let changed = (
                     name.text().to_string(),
                     name.cursor(),

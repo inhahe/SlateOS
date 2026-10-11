@@ -1680,7 +1680,7 @@ impl FileSearchApp {
             launch: spawn_program,
             content: None,
             content_limit: MAX_CONTENT_BYTES,
-            query_editor: TextInput::new(),
+            query_editor: textline::field_holding("", QUERY_CAPACITY),
             clipboard: String::new(),
         }
     }
@@ -2202,7 +2202,6 @@ impl FileSearchApp {
         let edit = textline::apply_key(
             &mut self.query_editor,
             key,
-            QUERY_CAPACITY,
             &self.clipboard,
             QUERY_TEXT_SIZE,
         );

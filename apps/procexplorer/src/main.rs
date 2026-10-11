@@ -1669,7 +1669,6 @@ impl ProcessExplorerState {
                 let _edit = textline::apply_key_on_clipboard(
                     &mut self.filter_editor,
                     key,
-                    FILTER_CAPACITY,
                     FILTER_TEXT_SIZE,
                 );
                 if self.filter_editor.text() != before {
@@ -2056,7 +2055,6 @@ impl ProcessExplorerState {
                     let edit = textline::apply_key_on_clipboard(
                         &mut run_box.input,
                         key,
-                        RUN_BOX_CAPACITY,
                         RUN_BOX_TEXT_SIZE,
                     );
                     // An edit is a new attempt; the old complaint no longer

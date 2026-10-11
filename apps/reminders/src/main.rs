@@ -2145,11 +2145,10 @@ fn step_index(at: usize, len: usize, forward: bool) -> usize {
     }
 }
 
-/// A text field holding `value`.
-fn field_with(value: &str) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_text(value);
-    input
+/// The text field for `which`, holding `value` and taking at most the
+/// field's capacity.
+fn field_with(which: TaskField, value: &str) -> TextInput {
+    textline::field_holding(value, which.capacity())
 }
 
 /// The form a reminder is added or changed in.
@@ -2192,18 +2191,18 @@ impl TaskForm {
         Self {
             id: None,
             original: None,
-            title: TextInput::new(),
-            due_date: field_with(&due_at.date.format_short()),
-            due_time: field_with(&due_at.time.format_24h()),
+            title: field_with(TaskField::Title, ""),
+            due_date: field_with(TaskField::DueDate, &due_at.date.format_short()),
+            due_time: field_with(TaskField::DueTime, &due_at.time.format_24h()),
             priority: Priority::Medium,
             category: TaskCategory::Personal,
             repeats: RecurrenceRule::None,
             other_repeat: None,
-            description: TextInput::new(),
-            notes: TextInput::new(),
+            description: field_with(TaskField::Description, ""),
+            notes: field_with(TaskField::Notes, ""),
             steps: Vec::new(),
             step_at: 0,
-            new_step: TextInput::new(),
+            new_step: field_with(TaskField::NewStep, ""),
         }
     }
 
@@ -2212,19 +2211,25 @@ impl TaskForm {
         Self {
             id: Some(t.id),
             original: Some(t.clone()),
-            title: field_with(&t.title),
-            due_date: field_with(&t.due.map(|d| d.date.format_short()).unwrap_or_default()),
-            due_time: field_with(&t.due.map(|d| d.time.format_24h()).unwrap_or_default()),
+            title: field_with(TaskField::Title, &t.title),
+            due_date: field_with(
+                TaskField::DueDate,
+                &t.due.map(|d| d.date.format_short()).unwrap_or_default(),
+            ),
+            due_time: field_with(
+                TaskField::DueTime,
+                &t.due.map(|d| d.time.format_24h()).unwrap_or_default(),
+            ),
             priority: t.priority,
             category: t.category,
             repeats: t.recurrence.clone(),
             other_repeat: (!standard_repeats().contains(&t.recurrence))
                 .then(|| t.recurrence.clone()),
-            description: field_with(&t.description),
-            notes: field_with(&t.notes),
+            description: field_with(TaskField::Description, &t.description),
+            notes: field_with(TaskField::Notes, &t.notes),
             steps: t.subtasks.clone(),
             step_at: 0,
-            new_step: TextInput::new(),
+            new_step: field_with(TaskField::NewStep, ""),
         }
     }
 
@@ -3269,8 +3274,7 @@ impl RemindersApp {
                 let Some(input) = form.input(field) else {
                     return EventResult::Ignored;
                 };
-                let done =
-                    textline::apply_key(input, key, field.capacity(), &clipboard, FORM_TEXT_SIZE);
+                let done = textline::apply_key(input, key, &clipboard, FORM_TEXT_SIZE);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }

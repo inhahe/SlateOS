@@ -2702,8 +2702,8 @@ MUTATIONS += [
     ),
     (
         "the keys keep no clipboard the menu shares",
-        "        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled\n",
-        "        textline::apply_key(field, evt, capacity, \"\", FIELD_FONT_SIZE).handled\n",
+        "        textline::apply_key_on_clipboard(field, evt, FIELD_FONT_SIZE).handled\n",
+        '        textline::apply_key(field, evt, "", FIELD_FONT_SIZE).handled\n',
         [FM_CUT, FM_CHORD],
     ),
     (

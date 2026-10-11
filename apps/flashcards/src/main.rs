@@ -1336,11 +1336,11 @@ impl FlashcardsApp {
             selected_card: 0,
             editing_card_id: None,
             editing_original: None,
-            editor_front: TextInput::new(),
-            editor_back: TextInput::new(),
-            editor_tags: TextInput::new(),
-            deck_name: TextInput::new(),
-            deck_about: TextInput::new(),
+            editor_front: textline::field_holding("", FIELD_CAPACITY),
+            editor_back: textline::field_holding("", FIELD_CAPACITY),
+            editor_tags: textline::field_holding("", FIELD_CAPACITY),
+            deck_name: textline::field_holding("", FIELD_CAPACITY),
+            deck_about: textline::field_holding("", FIELD_CAPACITY),
             editing_deck: None,
             field: Field::Front,
             clipboard: String::new(),
@@ -2234,8 +2234,7 @@ impl FlashcardsApp {
                 }
                 let which = self.field;
                 let clipboard = self.clipboard.clone();
-                let done =
-                    textline::apply_key(self.input(which), key, FIELD_CAPACITY, &clipboard, 13.0);
+                let done = textline::apply_key(self.input(which), key, &clipboard, 13.0);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }

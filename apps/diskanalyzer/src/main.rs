@@ -1330,7 +1330,7 @@ impl DiskAnalyzerUI {
             path_input,
             show_help: false,
             path_focused: false,
-            path_editor: TextInput::new(),
+            path_editor: textline::field_holding("", MAX_PATH_INPUT),
             path_clipboard: String::new(),
             path_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2672,13 +2672,7 @@ impl DiskAnalyzerUI {
             self.path_editor.cursor(),
             self.path_editor.selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.path_editor,
-            key,
-            MAX_PATH_INPUT,
-            &self.path_clipboard,
-            FONT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.path_editor, key, &self.path_clipboard, FONT_SIZE);
         if let Some(copied) = edit.copied {
             self.path_clipboard = copied;
         }

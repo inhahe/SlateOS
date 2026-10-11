@@ -5073,14 +5073,9 @@ impl TorrentApp {
                 );
                 // On the program's clipboard, which the box's right-click
                 // menu copies to and pastes from too.
-                let did_copy = textline::apply_key_on_clipboard(
-                    &mut self.magnet_input,
-                    key,
-                    MAX_MAGNET_CHARS,
-                    12.0,
-                )
-                .copied
-                .is_some();
+                let did_copy = textline::apply_key_on_clipboard(&mut self.magnet_input, key, 12.0)
+                    .copied
+                    .is_some();
                 let changed = self.magnet_input.text() != before.0;
                 if changed {
                     self.magnet_error = None;

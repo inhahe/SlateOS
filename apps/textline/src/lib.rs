@@ -94,16 +94,17 @@ pub const fn is_alt_or_windows_chord(modifiers: Modifiers) -> bool {
     (modifiers.alt && !modifiers.ctrl) || modifiers.super_key
 }
 
-/// Whether `key` types into a text field: a press that is not a command
-/// ([`is_command`]) and produced a character other than a control character
-/// (`KeyEvent::types_text` -- Enter, Tab and Escape produce `\r`, `\t` and
-/// `\x1b` on most layouts, which are keys, not text).
+/// Whether `key` types into a text field: a press that types text
+/// (`KeyEvent::types_text`). That is the toolkit's rule for every field: no
+/// command's letter ([`is_command`]), and no control character -- Enter, Tab
+/// and Escape produce `\r`, `\t` and `\x1b` on most layouts, which are keys,
+/// not text.
 ///
 /// What a field of a program's own should ask before it appends
 /// `key.typed()`.
 #[must_use]
 pub fn types_into_field(key: &KeyEvent) -> bool {
-    key.pressed && !is_command(key.modifiers) && key.types_text()
+    key.pressed && key.types_text()
 }
 
 /// What one key did to a field.
@@ -117,12 +118,17 @@ pub struct LineEdit {
     pub copied: Option<String>,
 }
 
-/// Apply `key` to `input`, a field of one line holding at most `capacity`
-/// characters: the arrows move the caret (Shift extends the selection), Home
-/// and End go to the ends, Backspace and Delete delete, Ctrl+A selects
-/// everything, Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes `clipboard`, and
-/// typed text replaces the selection -- AltGr's among it, which arrives as
-/// Ctrl+Alt ([`is_ctrl_chord`]).
+/// Apply `key` to `input`, a field of one line: the arrows move the caret
+/// (Shift extends the selection), Home and End go to the ends, Backspace and
+/// Delete delete, Ctrl+A selects everything, Ctrl+C copies, Ctrl+X cuts,
+/// Ctrl+V pastes `clipboard`, and typed text replaces the selection -- AltGr's
+/// among it, which arrives as Ctrl+Alt ([`is_ctrl_chord`]).
+///
+/// What is typed or pasted stops at the field's own capacity
+/// (`TextInput::set_capacity`, which [`field_holding`] sets), the limit its
+/// right-click menu's Paste keeps to as well. Every field these keys edit has
+/// one: the assertion below is how a field built without it shows up in its
+/// program's tests.
 ///
 /// `font_size` is the size the field's text is drawn at, which the caret
 /// needs to move visually through text that runs both ways.
@@ -136,10 +142,13 @@ pub struct LineEdit {
 pub fn apply_key(
     input: &mut TextInput,
     key: &KeyEvent,
-    capacity: usize,
     clipboard: &str,
     font_size: f32,
 ) -> LineEdit {
+    debug_assert!(
+        input.capacity().is_some(),
+        "a one-line field without a capacity: build it with textline::field_holding"
+    );
     if is_alt_or_windows_chord(key.modifiers) {
         return LineEdit::default();
     }
@@ -165,12 +174,12 @@ pub fn apply_key(
                 input.delete_selection();
             }
         }
-        Key::V if chord => insert_limited(input, clipboard, capacity),
+        Key::V if chord => input.insert_text(clipboard),
         _ => {
             if !types_into_field(key) {
                 return LineEdit::default();
             }
-            insert_limited(input, &key.text, capacity);
+            input.insert_text(&key.text);
         }
     }
     LineEdit {
@@ -184,12 +193,7 @@ pub fn apply_key(
 /// handed back. It is the clipboard a field's right-click menu copies to and
 /// pastes from (`TextInput::edit_command`), so the keys and the menu agree;
 /// a window keeping a clipboard of its own for the keys has two that do not.
-pub fn apply_key_on_clipboard(
-    input: &mut TextInput,
-    key: &KeyEvent,
-    capacity: usize,
-    font_size: f32,
-) -> LineEdit {
+pub fn apply_key_on_clipboard(input: &mut TextInput, key: &KeyEvent, font_size: f32) -> LineEdit {
     // Read for the key that pastes alone: the clipboard may hold megabytes,
     // and every other key -- each letter typed -- would copy them for nothing.
     let clipboard = if pastes(key) {
@@ -197,7 +201,7 @@ pub fn apply_key_on_clipboard(
     } else {
         String::new()
     };
-    let edit = apply_key(input, key, capacity, &clipboard, font_size);
+    let edit = apply_key(input, key, &clipboard, font_size);
     if let Some(copied) = &edit.copied {
         guitk::clipboard::set_text(copied);
     }
@@ -212,38 +216,16 @@ pub fn pastes(key: &KeyEvent) -> bool {
 }
 
 /// A field holding `text`, which typing and pasting -- by key or from its
-/// right-click menu -- fill to at most `capacity` characters: how a program's
-/// one-line boxes start. The text it starts with is not cut, so a longer one
-/// a file holds is shown whole.
+/// right-click menu -- fill to at most `capacity` characters, counted in
+/// characters rather than bytes: how a program's one-line boxes start. The
+/// text it starts with is not cut, so a longer one a file holds is shown
+/// whole.
 #[must_use]
 pub fn field_holding(text: &str, capacity: usize) -> TextInput {
     let mut input = TextInput::new();
     input.set_text(text);
     input.set_capacity(Some(capacity));
     input
-}
-
-/// Type `typed` into `input` over its selection, stopping at `capacity`
-/// characters -- counted in characters, not bytes, so a limit cannot cut a
-/// character in half. A control character -- a newline in a paste -- is left
-/// out, since a field is one line; and text with nothing else in it types
-/// nothing, and so leaves the selection where it was.
-pub fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if typed.chars().all(char::is_control) {
-        return;
-    }
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
-    }
 }
 
 /// What a masked field shows for `text`: `mask` for each of its
@@ -295,12 +277,7 @@ pub fn unmasked(text: &str, at: usize, mask: char) -> usize {
 /// field's, doing nothing, so that neither reaches a window's own Ctrl+C. A
 /// paste is taken, as a password manager's paste is what keeps a password
 /// from being typed.
-pub fn apply_masked_key(
-    input: &mut TextInput,
-    key: &KeyEvent,
-    capacity: usize,
-    clipboard: &str,
-) -> LineEdit {
+pub fn apply_masked_key(input: &mut TextInput, key: &KeyEvent, clipboard: &str) -> LineEdit {
     let chord = is_ctrl_chord(key.modifiers);
     match key.key {
         Key::Left | Key::Right if !is_alt_or_windows_chord(key.modifiers) => {
@@ -316,7 +293,7 @@ pub fn apply_masked_key(
         },
         // No key left measures the text, so the size it is drawn at does
         // not matter to any of them.
-        _ => apply_key(input, key, capacity, clipboard, 0.0),
+        _ => apply_key(input, key, clipboard, 0.0),
     }
 }
 
@@ -388,10 +365,10 @@ mod tests {
         super_key: false,
     };
 
+    /// A field holding `text` and room for ten characters: more than any of
+    /// these tests types, except where one says otherwise.
     fn field(text: &str) -> TextInput {
-        let mut input = TextInput::new();
-        input.set_text(text);
-        input
+        field_holding(text, 10)
     }
 
     /// **`pastes` is the key `apply_key` pastes on, and no other**, whatever
@@ -412,7 +389,7 @@ mod tests {
             for (k, text) in [(Key::V, "v"), (Key::C, "c"), (Key::Unknown(0), "v")] {
                 let stroke = held(k, text, modifiers);
                 let mut input = field("");
-                apply_key(&mut input, &stroke, 100, "PASTED", 13.0);
+                apply_key(&mut input, &stroke, "PASTED", 13.0);
                 assert_eq!(
                     input.text() == "PASTED",
                     pastes(&stroke),
@@ -439,6 +416,17 @@ mod tests {
         assert_eq!(long.capacity(), Some(4));
     }
 
+    /// **Every field these keys edit has a capacity**: one built without it
+    /// would take a paste of any length, and its program's tests say so at
+    /// the first key.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "without a capacity")]
+    fn a_field_without_a_capacity_is_caught() {
+        let mut uncapped = TextInput::new();
+        let _edit = apply_key(&mut uncapped, &typed("a"), "", 13.0);
+    }
+
     /// **A key held with Alt or the Windows key is not the field's**: the
     /// editing keys answered it -- Alt+Backspace deleted, Windows+Left moved
     /// the caret -- though `LineEdit::handled` says such a key is the
@@ -463,7 +451,7 @@ mod tests {
                 let mut input = field("abc");
                 input.move_cursor_left(false, 13.0, FontWeightHint::Regular);
                 let at = input.cursor();
-                let edit = apply_key(&mut input, &held(k, "", modifiers), 10, "", 13.0);
+                let edit = apply_key(&mut input, &held(k, "", modifiers), "", 13.0);
                 assert!(!edit.handled, "{modifiers:?} {k:?} was the field's");
                 assert_eq!(input.text(), "abc", "{modifiers:?} {k:?} edited");
                 assert_eq!(input.cursor(), at, "{modifiers:?} {k:?} moved the caret");
@@ -471,82 +459,68 @@ mod tests {
         }
         // AltGr's and Ctrl's editing keys are the field's.
         let mut input = field("abc");
-        assert!(apply_key(&mut input, &held(Key::Backspace, "", ALTGR), 10, "", 13.0).handled);
+        assert!(apply_key(&mut input, &held(Key::Backspace, "", ALTGR), "", 13.0).handled);
         assert_eq!(input.text(), "ab");
-        assert!(apply_key(&mut input, &key(Key::Left, "", true, false), 10, "", 13.0).handled);
+        assert!(apply_key(&mut input, &key(Key::Left, "", true, false), "", 13.0).handled);
     }
 
     #[test]
     fn typing_goes_in_at_the_caret_and_replaces_a_selection() {
         let mut input = field("ab");
-        assert!(apply_key(&mut input, &key(Key::Left, "", false, false), 10, "", 13.0).handled);
-        assert!(apply_key(&mut input, &typed("X"), 10, "", 13.0).handled);
+        assert!(apply_key(&mut input, &key(Key::Left, "", false, false), "", 13.0).handled);
+        assert!(apply_key(&mut input, &typed("X"), "", 13.0).handled);
         assert_eq!(input.text(), "aXb");
-        apply_key(&mut input, &key(Key::A, "a", true, false), 10, "", 13.0);
-        apply_key(&mut input, &typed("z"), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::A, "a", true, false), "", 13.0);
+        apply_key(&mut input, &typed("z"), "", 13.0);
         assert_eq!(input.text(), "z");
         // A full field, all of it selected: what is typed replaces it, rather
         // than being refused for want of room the selection was about to free.
-        let mut full = field("abcd");
-        apply_key(&mut full, &key(Key::A, "a", true, false), 4, "", 13.0);
-        apply_key(&mut full, &typed("z"), 4, "", 13.0);
+        let mut full = field_holding("abcd", 4);
+        apply_key(&mut full, &key(Key::A, "a", true, false), "", 13.0);
+        apply_key(&mut full, &typed("z"), "", 13.0);
         assert_eq!(full.text(), "z");
+        // With nothing selected, a full field takes nothing more.
+        let mut at_capacity = field_holding("abcd", 4);
+        apply_key(&mut at_capacity, &typed("e"), "", 13.0);
+        assert_eq!(at_capacity.text(), "abcd", "typing went past the capacity");
     }
 
     #[test]
     fn shift_with_an_arrow_selects() {
         let mut input = field("abc");
-        apply_key(&mut input, &key(Key::Left, "", false, true), 10, "", 13.0);
-        apply_key(&mut input, &key(Key::Left, "", false, true), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::Left, "", false, true), "", 13.0);
+        apply_key(&mut input, &key(Key::Left, "", false, true), "", 13.0);
         assert_eq!(input.selected_text(), "bc");
-        apply_key(&mut input, &key(Key::Home, "", false, false), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::Home, "", false, false), "", 13.0);
         assert!(!input.has_selection());
-        apply_key(&mut input, &key(Key::End, "", false, true), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::End, "", false, true), "", 13.0);
         assert_eq!(input.selected_text(), "abc");
     }
 
     #[test]
     fn backspace_and_delete_take_one_character_each_way() {
         let mut input = field("abc");
-        apply_key(&mut input, &key(Key::Left, "", false, false), 10, "", 13.0);
-        apply_key(
-            &mut input,
-            &key(Key::Backspace, "", false, false),
-            10,
-            "",
-            13.0,
-        );
+        apply_key(&mut input, &key(Key::Left, "", false, false), "", 13.0);
+        apply_key(&mut input, &key(Key::Backspace, "", false, false), "", 13.0);
         assert_eq!(input.text(), "ac");
-        apply_key(
-            &mut input,
-            &key(Key::Delete, "", false, false),
-            10,
-            "",
-            13.0,
-        );
+        apply_key(&mut input, &key(Key::Delete, "", false, false), "", 13.0);
         assert_eq!(input.text(), "a");
     }
 
     #[test]
     fn copy_and_cut_hand_back_the_selection_and_paste_types_the_clipboard() {
         let mut input = field("hello");
-        apply_key(&mut input, &key(Key::A, "a", true, false), 10, "", 13.0);
-        let copied = apply_key(&mut input, &key(Key::C, "c", true, false), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::A, "a", true, false), "", 13.0);
+        let copied = apply_key(&mut input, &key(Key::C, "c", true, false), "", 13.0);
         assert_eq!(copied.copied.as_deref(), Some("hello"));
         assert_eq!(input.text(), "hello", "a copy changed the field");
-        let cut = apply_key(&mut input, &key(Key::X, "x", true, false), 10, "", 13.0);
+        let cut = apply_key(&mut input, &key(Key::X, "x", true, false), "", 13.0);
         assert_eq!(cut.copied.as_deref(), Some("hello"));
         assert_eq!(input.text(), "");
-        apply_key(
-            &mut input,
-            &key(Key::V, "v", true, false),
-            10,
-            "pasted",
-            13.0,
-        );
+        apply_key(&mut input, &key(Key::V, "v", true, false), "pasted", 13.0);
         assert_eq!(input.text(), "pasted");
         // With nothing selected, a copy takes nothing.
-        let none = apply_key(&mut input, &key(Key::C, "c", true, false), 10, "", 13.0);
+        let none = apply_key(&mut input, &key(Key::C, "c", true, false), "", 13.0);
         assert_eq!(none.copied, None);
     }
 
@@ -557,8 +531,8 @@ mod tests {
     fn the_keys_and_the_menu_share_the_programs_clipboard() {
         let mut from = field("hello");
         let mut to = field("");
-        apply_key_on_clipboard(&mut from, &key(Key::A, "a", true, false), 10, 13.0);
-        let copied = apply_key_on_clipboard(&mut from, &key(Key::C, "c", true, false), 10, 13.0);
+        apply_key_on_clipboard(&mut from, &key(Key::A, "a", true, false), 13.0);
+        let copied = apply_key_on_clipboard(&mut from, &key(Key::C, "c", true, false), 13.0);
         assert_eq!(
             copied.copied.as_deref(),
             Some("hello"),
@@ -575,8 +549,8 @@ mod tests {
         let mut other = field("world");
         other.select_all();
         let _copied = other.edit_command(guitk::editmenu::EditCommand::Copy.id());
-        let mut last = field("");
-        apply_key_on_clipboard(&mut last, &key(Key::V, "v", true, false), 3, 13.0);
+        let mut last = field_holding("", 3);
+        apply_key_on_clipboard(&mut last, &key(Key::V, "v", true, false), 13.0);
         assert_eq!(
             last.text(),
             "wor",
@@ -586,20 +560,18 @@ mod tests {
 
     #[test]
     fn a_paste_leaves_line_breaks_out_and_stops_at_the_capacity_in_characters() {
-        let mut input = field("");
+        let mut input = field_holding("", 4);
         apply_key(
             &mut input,
             &key(Key::V, "v", true, false),
-            4,
             "a\nbc\u{e9}\u{e9}",
             13.0,
         );
         assert_eq!(input.text(), "abc\u{e9}");
-        let mut accents = field("");
+        let mut accents = field_holding("", 3);
         apply_key(
             &mut accents,
             &key(Key::V, "v", true, false),
-            3,
             "\u{e9}\u{e9}\u{e9}\u{e9}",
             13.0,
         );
@@ -613,7 +585,7 @@ mod tests {
     #[test]
     fn a_key_that_types_nothing_is_not_the_fields_and_keeps_the_selection() {
         let mut input = field("keep");
-        apply_key(&mut input, &key(Key::A, "a", true, false), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::A, "a", true, false), "", 13.0);
         for k in [
             key(Key::Tab, "\t", false, false),
             key(Key::Enter, "\r", false, false),
@@ -621,14 +593,26 @@ mod tests {
             key(Key::F2, "", false, false),
             key(Key::S, "s", true, false),
         ] {
-            let done = apply_key(&mut input, &k, 10, "", 13.0);
+            let done = apply_key(&mut input, &k, "", 13.0);
             assert!(!done.handled, "{:?} was taken by the field", k.key);
             assert_eq!(input.text(), "keep", "{:?} changed the field", k.key);
             assert!(input.has_selection(), "{:?} dropped the selection", k.key);
         }
         // A paste of nothing but a line break types nothing either.
-        apply_key(&mut input, &key(Key::V, "v", true, false), 10, "\n", 13.0);
+        apply_key(&mut input, &key(Key::V, "v", true, false), "\n", 13.0);
         assert_eq!(input.text(), "keep");
+    }
+
+    /// **A key's release types nothing**: only its press does, so a program
+    /// that hands the field both does not type every letter twice.
+    #[test]
+    fn a_release_types_nothing() {
+        let mut input = field("ab");
+        let mut release = typed("c");
+        release.pressed = false;
+        let done = apply_key(&mut input, &release, "", 13.0);
+        assert!(!done.handled, "a release was the field's");
+        assert_eq!(input.text(), "ab", "a release typed");
     }
 
     /// AltGr arrives as Ctrl+Alt, and on the four letters the field takes
@@ -638,7 +622,7 @@ mod tests {
     fn altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste() {
         let mut input = field("ab");
         for (k, text) in [(Key::A, "\u{105}"), (Key::C, "\u{107}"), (Key::V, "@")] {
-            let done = apply_key(&mut input, &held(k, text, ALTGR), 10, "clip", 13.0);
+            let done = apply_key(&mut input, &held(k, text, ALTGR), "clip", 13.0);
             assert!(done.handled, "AltGr+{k:?} was not the field's");
             assert_eq!(done.copied, None, "AltGr+{k:?} copied");
             assert!(!input.has_selection(), "AltGr+{k:?} selected");
@@ -646,8 +630,8 @@ mod tests {
         assert_eq!(input.text(), "ab\u{105}\u{107}@");
         // Over a selection it types, as any letter does, and hands nothing
         // to the clipboard.
-        apply_key(&mut input, &key(Key::A, "a", true, false), 10, "", 13.0);
-        let done = apply_key(&mut input, &held(Key::X, "\u{17a}", ALTGR), 10, "", 13.0);
+        apply_key(&mut input, &key(Key::A, "a", true, false), "", 13.0);
+        let done = apply_key(&mut input, &held(Key::X, "\u{17a}", ALTGR), "", 13.0);
         assert_eq!((done.copied, input.text()), (None, "\u{17a}"));
     }
 
@@ -673,19 +657,13 @@ mod tests {
             held(Key::E, "e", windows),
             held(Key::E, "\u{20ac}", windows_altgr),
         ] {
-            let done = apply_key(&mut input, &k, 10, "", 13.0);
+            let done = apply_key(&mut input, &k, "", 13.0);
             assert!(!done.handled, "{:?} {:?} was taken", k.modifiers, k.key);
             assert_eq!(input.text(), "keep", "{:?} {:?} typed", k.modifiers, k.key);
         }
         // Alt on its own is not a chord of the field's either: Alt+A leaves
         // the selection alone.
-        let done = apply_key(
-            &mut input,
-            &held(Key::A, "a", Modifiers::alt()),
-            10,
-            "",
-            13.0,
-        );
+        let done = apply_key(&mut input, &held(Key::A, "a", Modifiers::alt()), "", 13.0);
         assert!(!done.handled);
         assert!(!input.has_selection());
         // Nor is Ctrl+A held with the Windows key: that is the desktop's.
@@ -693,7 +671,7 @@ mod tests {
             super_key: true,
             ..Modifiers::ctrl()
         };
-        let done = apply_key(&mut input, &held(Key::A, "a", windows_ctrl), 10, "", 13.0);
+        let done = apply_key(&mut input, &held(Key::A, "a", windows_ctrl), "", 13.0);
         assert!(!done.handled);
         assert!(!input.has_selection());
     }
@@ -809,22 +787,22 @@ mod tests {
         input.set_cursor(TextCursor::from(0));
         let right = key(Key::Right, "", false, false);
         let left = key(Key::Left, "", false, false);
-        assert!(apply_masked_key(&mut input, &right, 64, "").handled);
+        assert!(apply_masked_key(&mut input, &right, "").handled);
         assert_eq!(input.cursor().byte(), 1, "past the `a`");
-        apply_masked_key(&mut input, &right, 64, "");
+        apply_masked_key(&mut input, &right, "");
         assert_eq!(
             input.cursor().byte(),
             3,
             "past the Hebrew letter, one character"
         );
-        apply_masked_key(&mut input, &left, 64, "");
+        apply_masked_key(&mut input, &left, "");
         assert_eq!(input.cursor().byte(), 1, "back over it");
         // Two characters, so collapsing the selection and stepping back
         // from its end land in different places.
-        apply_masked_key(&mut input, &key(Key::Right, "", false, true), 64, "");
-        apply_masked_key(&mut input, &key(Key::Right, "", false, true), 64, "");
+        apply_masked_key(&mut input, &key(Key::Right, "", false, true), "");
+        apply_masked_key(&mut input, &key(Key::Right, "", false, true), "");
         assert_eq!(input.selection_range(), (1, 4), "Shift+Right selects");
-        apply_masked_key(&mut input, &left, 64, "");
+        apply_masked_key(&mut input, &left, "");
         assert_eq!(
             (input.cursor().byte(), input.has_selection()),
             (1, false),
@@ -833,7 +811,7 @@ mod tests {
 
         input.select_all();
         for k in [Key::C, Key::X] {
-            let edit = apply_masked_key(&mut input, &key(k, "", true, false), 64, "");
+            let edit = apply_masked_key(&mut input, &key(k, "", true, false), "");
             assert_eq!(
                 edit,
                 LineEdit {
@@ -845,14 +823,14 @@ mod tests {
         }
         assert_eq!(input.text(), "a\u{5d0}b", "Ctrl+X cut a hidden password");
         let paste = key(Key::V, "", true, false);
-        assert!(apply_masked_key(&mut input, &paste, 64, "secret").handled);
+        assert!(apply_masked_key(&mut input, &paste, "secret").handled);
         assert_eq!(input.text(), "secret", "a paste is taken");
         let alt_left = held(Key::Left, "", Modifiers::alt());
         assert!(
-            !apply_masked_key(&mut input, &alt_left, 64, "").handled,
+            !apply_masked_key(&mut input, &alt_left, "").handled,
             "Alt+Left"
         );
-        assert!(apply_masked_key(&mut input, &typed("!"), 64, "").handled);
+        assert!(apply_masked_key(&mut input, &typed("!"), "").handled);
         assert_eq!(input.text(), "secret!", "typing");
     }
 }

@@ -2306,7 +2306,7 @@ impl UndeleteApp {
             recovery_results: Vec::new(),
             show_filter_panel: false,
             active_category_filter: None,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             clipboard: String::new(),
         }
     }
@@ -2576,13 +2576,7 @@ impl UndeleteApp {
             editor.cursor(),
             editor.selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            key,
-            SEARCH_CAPACITY,
-            &self.clipboard,
-            FONT_SIZE,
-        );
+        let edit = textline::apply_key(&mut self.search_editor, key, &self.clipboard, FONT_SIZE);
         if let Some(copied) = edit.copied {
             self.clipboard = copied;
         }

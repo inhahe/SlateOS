@@ -3752,18 +3752,6 @@ impl FieldId {
         Self::RuleMinSize,
         Self::RuleMaxSize,
     ];
-
-    /// How many characters the field holds.
-    fn capacity(self) -> usize {
-        match self {
-            Self::ExclusionDraft => EXCLUSION_CAPACITY,
-            Self::RuleName => rules::NAME_CAPACITY,
-            Self::RuleMatch => rules::MATCH_CAPACITY,
-            Self::RulePlace | Self::RuleSize | Self::RuleMinSize | Self::RuleMaxSize => {
-                rules::NUMBERS_CAPACITY
-            }
-        }
-    }
 }
 
 /// The text field a right-click menu is up for.
@@ -5948,7 +5936,7 @@ impl SettingsState {
                     .rule_draft
                     .as_mut()
                     .and_then(|draft| rule_input(draft, field))?;
-                Self::edit_line(input, evt, field.capacity()).then_some(EventResult::Consumed)
+                Self::edit_line(input, evt).then_some(EventResult::Consumed)
             }
         }
     }
@@ -9524,7 +9512,7 @@ impl SettingsState {
                     return EventResult::Consumed;
                 }
                 _ => {
-                    if Self::edit_line(&mut self.exclusion_draft, evt, EXCLUSION_CAPACITY) {
+                    if Self::edit_line(&mut self.exclusion_draft, evt) {
                         return EventResult::Consumed;
                     }
                 }
@@ -9556,7 +9544,7 @@ impl SettingsState {
                 self.search_query.clear();
                 return EventResult::Consumed;
             }
-            if Self::edit_line(&mut self.search_query, evt, SEARCH_CAPACITY) {
+            if Self::edit_line(&mut self.search_query, evt) {
                 return EventResult::Consumed;
             }
         }
@@ -9630,8 +9618,8 @@ impl SettingsState {
     /// Whether the field answered the key: one it does not -- Tab, an arrow
     /// it has no use for, a Ctrl chord other than A, C, X and V -- is the
     /// page's.
-    fn edit_line(field: &mut TextInput, evt: &KeyEvent, capacity: usize) -> bool {
-        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled
+    fn edit_line(field: &mut TextInput, evt: &KeyEvent) -> bool {
+        textline::apply_key_on_clipboard(field, evt, FIELD_FONT_SIZE).handled
     }
 
     /// The text field `field` names, as the window holds it now: `None` for a

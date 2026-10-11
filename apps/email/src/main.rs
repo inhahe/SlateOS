@@ -3293,7 +3293,7 @@ impl EmailApp {
                     let Some(input) = compose.line_mut(field) else {
                         return EventResult::Ignored;
                     };
-                    let _edit = textline::apply_key_on_clipboard(input, key, FIELD_CAPACITY, 13.0);
+                    let _edit = textline::apply_key_on_clipboard(input, key, 13.0);
                 }
                 compose.confirm_close = false;
             }

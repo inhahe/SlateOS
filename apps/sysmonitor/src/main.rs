@@ -698,7 +698,7 @@ impl SysMonitorState {
             wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
             filter_focused: false,
-            filter_editor: TextInput::new(),
+            filter_editor: textline::field_holding("", FILTER_CAPACITY),
             filter_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             context_menu: None,
@@ -1342,7 +1342,6 @@ impl SysMonitorState {
         let edit = textline::apply_key(
             &mut self.filter_editor,
             key,
-            FILTER_CAPACITY,
             &self.filter_clipboard,
             FILTER_TEXT_SIZE,
         );

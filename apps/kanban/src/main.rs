@@ -2203,7 +2203,7 @@ impl KanbanApp {
             board_cursor: 0,
             show_filter_bar: false,
             input_buffer: String::new(),
-            input_editor: TextInput::new(),
+            input_editor: textline::field_holding("", INPUT_CAPACITY),
             input_clipboard: String::new(),
             input_mode: InputMode::None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -5463,7 +5463,6 @@ fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
     let edit = textline::apply_key(
         &mut app.input_editor,
         key,
-        INPUT_CAPACITY,
         &app.input_clipboard,
         INPUT_TEXT_SIZE,
     );

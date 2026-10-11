@@ -845,7 +845,7 @@ impl CharMapApp {
             max_recent: 64,
             favorites: Vec::new(),
             clipboard: None,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             status_message: "Select a character to view details".into(),
             active_panel: Panel::Grid,
             preview_size: PreviewSize::Medium,
@@ -1275,7 +1275,6 @@ impl CharMapApp {
         let edit = textline::apply_key(
             &mut self.search_editor,
             event,
-            SEARCH_CAPACITY,
             self.clipboard.as_deref().unwrap_or(""),
             SEARCH_TEXT_SIZE,
         );

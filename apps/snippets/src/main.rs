@@ -1274,21 +1274,17 @@ impl Editing {
     /// Snippet `sn`, to edit, its code measured at `font` in the fixed-pitch
     /// face it is drawn in.
     fn of(sn: &Snippet, font: f32) -> Self {
-        let line = |v: &str| {
-            let mut input = TextInput::new();
-            input.set_text(v);
-            input
-        };
+        let line = |which: SnippetField, v: &str| textline::field_holding(v, which.capacity());
         let mut content = TextArea::new(font).with_family(FontFamily::Mono);
         content.set_text(&sn.content);
         Self {
             id: sn.id,
             original: sn.clone(),
-            title: line(&sn.title),
+            title: line(SnippetField::Title, &sn.title),
             language: sn.language,
             folder: sn.folder_id,
-            tags: line(&sn.tags.join(", ")),
-            description: line(&sn.description),
+            tags: line(SnippetField::Tags, &sn.tags.join(", ")),
+            description: line(SnippetField::Description, &sn.description),
             content,
             field: SnippetField::Title,
             error: None,
@@ -2223,7 +2219,7 @@ impl App {
             search_query: String::new(),
             search_scope: SearchScope::All,
             search_focus: false,
-            search_editor: TextInput::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             code_scroll: 0,
@@ -2713,7 +2709,7 @@ impl App {
                 let Some(input) = ed.line_mut(field) else {
                     return EventResult::Ignored;
                 };
-                let done = textline::apply_key(input, ev, field.capacity(), &clipboard, 13.0);
+                let done = textline::apply_key(input, ev, &clipboard, 13.0);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }
@@ -3516,7 +3512,6 @@ impl App {
                 let edit = textline::apply_key(
                     &mut self.search_editor,
                     ev,
-                    SEARCH_CAPACITY,
                     &self.search_clipboard,
                     SEARCH_TEXT_SIZE,
                 );

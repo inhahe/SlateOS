@@ -178,16 +178,17 @@ def check_range(name, values, ty):
     while flat and isinstance(flat[0], list):
         flat = [x for sub in flat for x in sub]
     lo, hi = {"u8": (0, 255), "i8": (-128, 127), "i16": (-32768, 32767), "u16": (0, 65535),
-              "u64": (0, 2**64 - 1)}[ty]
+              "i32": (-2**31, 2**31 - 1), "u32": (0, 2**32 - 1), "u64": (0, 2**64 - 1)}[ty]
     for v in flat:
         if not lo <= v <= hi:
             raise SystemExit(f"{name}: {v} does not fit {ty}")
 
 
-def generate(root: str, tables, symbols: dict, header) -> bytes:
+def generate(root: str, tables, symbols: dict, header, source: str = "libvpx") -> bytes:
     """The Rust source for `tables`, each a tuple (C file under `root`, C name,
     Rust name, element type, shape, what it is), after the `//!` lines
-    `header`: formatted by rustfmt, with LF line ends."""
+    `header`: formatted by rustfmt, with LF line ends. `source` names the C
+    library in each table's doc comment."""
     sources = {}
     out = list(header)
     for path, cname, rname, ty, shape, doc in tables:
@@ -200,9 +201,9 @@ def generate(root: str, tables, symbols: dict, header) -> bytes:
         rust_shape = [n for n in shape if n != STRUCT]
         check_range(cname, values, ty)
         if doc:
-            out.append(f"/// {doc[0].upper() + doc[1:]}: libvpx's `{cname}`.")
+            out.append(f"/// {doc[0].upper() + doc[1:]}: {source}'s `{cname}`.")
         else:
-            out.append(f"/// libvpx's `{cname}`.")
+            out.append(f"/// {source}'s `{cname}`.")
         out.append(f"pub const {rname}: {rust_type(ty, rust_shape)} = "
                    f"{rust_array(values, rust_shape, ty)};")
         out.append("")

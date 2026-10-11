@@ -269,6 +269,64 @@ impl ColourHint {
         }
     }
 
+    /// What an H.264 picture says: its sequence parameter set's colour
+    /// (the VUI's, H.273's numbers with 2 for one it leaves unsaid) and the
+    /// HDR metadata its SEI messages carried, as FFmpeg's decoder attaches
+    /// them to the frame (mastering display chromaticities over 50000,
+    /// luminance over 10000).
+    pub(crate) fn h264(picture: &h264::Picture) -> Self {
+        let mut light = Light::default();
+        for side in picture.side_data() {
+            match side {
+                h264::SideData::MasteringDisplay(m) => {
+                    let q = |(n, d): (i32, i32)| {
+                        if d == 0 {
+                            0.0
+                        } else {
+                            f64::from(n) / f64::from(d)
+                        }
+                    };
+                    let xy = |p: [(i32, i32); 2]| p.map(q);
+                    let [red, green, blue] = m.display_primaries.map(xy);
+                    light.mastering = Some(MasteringDisplay {
+                        chromaticities: m.has_primaries.then(|| Chromaticities {
+                            red,
+                            green,
+                            blue,
+                            white: xy(m.white_point),
+                        }),
+                        luminance: m.has_luminance.then(|| Luminance {
+                            max: q(m.max_luminance),
+                            min: q(m.min_luminance),
+                        }),
+                    });
+                }
+                h264::SideData::ContentLight { max_cll, max_fall } => {
+                    light.content = Some(ContentLightLevel {
+                        max_cll: *max_cll,
+                        max_fall: *max_fall,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let (primaries, transfer, matrix, full_range) = picture.colour();
+        let code = |v: i32| u16::try_from(v).unwrap_or(UNSPECIFIED);
+        let (matrix, primaries, transfer) = (
+            said(code(matrix), true),
+            said(code(primaries), false),
+            said(code(transfer), false),
+        );
+        Self {
+            matrix,
+            primaries,
+            transfer,
+            full_range,
+            light,
+            whole: whole(matrix, primaries, transfer, full_range),
+        }
+    }
+
     /// What H.273's code points say where every part is given and
     /// "unspecified" is a code -- AV1's sequence header, an MP4's `colr`
     /// box, or a caller's own container (`guiremote::scene`'s
@@ -535,6 +593,7 @@ mod tests {
             matrix: None,
             crop: [0; 4],
             frame_duration: None,
+            reorder_delay: 0,
         }
     }
 

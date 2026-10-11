@@ -108,6 +108,10 @@ pub(crate) struct Track {
     pub frame_duration: Option<u64>,
     /// The track's tick: `num / den` seconds.
     pub time_base: (u64, u64),
+    /// How many pictures its decoder holds back to show them in order, as
+    /// the container estimates it: MP4's, from its composition offsets, for
+    /// H.264; 0 where the container says nothing.
+    pub reorder_delay: u32,
 }
 
 /// The shape a file asks its frames shown at.
@@ -590,6 +594,18 @@ impl<R: Read + Seek> Container<R> {
         }
     }
 
+    /// The time of the latest key frame of the track `key` names shown at or
+    /// before `ticks`, where [`Self::seek`] can land before it: in MP4,
+    /// whose seek, as FFmpeg's, goes by the decoding timeline, which
+    /// pictures shown out of order move away from the showing one. None
+    /// elsewhere, where the seek lands on that key frame itself.
+    pub(crate) fn key_time_before(&self, key: u64, ticks: i64) -> Option<i64> {
+        match self {
+            Self::Mp4(d) => d.key_time_before(usize::try_from(key).ok()?, ticks),
+            _ => None,
+        }
+    }
+
     /// Go to the latest key frame at or before `ticks` of the track `key`
     /// names ([`Track::key`]).
     ///
@@ -795,6 +811,7 @@ fn theora_track(index: usize, s: &ogg::Stream) -> Option<Track> {
         hint: ColourHint::default(),
         frame_duration: None,
         time_base: (1, 1000),
+        reorder_delay: 0,
     })
 }
 
@@ -880,6 +897,7 @@ fn matroska_track<R: Read + Seek>(
         hint: ColourHint::matroska(picture.colour.as_ref()),
         frame_duration: t.default_duration,
         time_base: demuxer.time_base(t.number)?,
+        reorder_delay: 0,
     })
 }
 
@@ -970,6 +988,7 @@ fn mp4_track(index: usize, t: &mp4::Track) -> Option<Track> {
             .filter(|&d| d > 0)
             .map(|d| time::duration_to_ns(u64::from(d), (1, u64::from(t.timescale)))),
         time_base: (1, u64::from(t.timescale.max(1))),
+        reorder_delay: picture.reorder_delay,
     })
 }
 
@@ -1029,6 +1048,7 @@ mod tests {
             hint: ColourHint::default(),
             frame_duration: None,
             time_base: (1, 1000),
+            reorder_delay: 0,
         }
     }
 

@@ -9,13 +9,18 @@
 //! wrapper decode it). AV1 goes
 //! through dav1d's queue: a packet in, a picture out when one is ready, each
 //! picture carrying the time of the packet it came from, since with frame
-//! threads it comes out a few packets later.
+//! threads it comes out a few packets later. H.264 decodes a packet at a
+//! time but shows pictures in display order, holding as many back as the
+//! stream reorders by -- from the start, as many as the container estimates
+//! ([`Decoder::with_reorder_delay`]), as FFmpeg's decoder starts -- so each
+//! picture carries the time of the packet that began it.
 //!
 //! A packet marked [`Packet::discard`] -- one an MP4 edit list leaves out,
 //! kept in the file only because those after it are coded from it -- is
 //! decoded like any other, and its picture dropped, as FFmpeg drops it
 //! (`AV_FRAME_FLAG_DISCARD`). An AV1 picture is matched to its packet by a
-//! tag dav1d carries for it, whatever order its threads finish in.
+//! tag dav1d carries for it, whatever order its threads finish in; an H.264
+//! one carries the mark itself from the packet that began it.
 
 use std::collections::VecDeque;
 
@@ -72,6 +77,9 @@ enum Inner {
         alpha: Option<Box<vp9::Decoder>>,
     },
     Av1(Av1),
+    // Boxed: the decoder's slots and tables are kept behind it, but its
+    // context is a few kilobytes.
+    H264(Box<h264::Decoder>),
 }
 
 /// The tag dav1d carries through to the picture of a packet marked
@@ -109,6 +117,27 @@ impl Decoder {
         hint: ColourHint,
         limits: Limits,
     ) -> Result<Self, Error> {
+        Self::with_reorder_delay(codec, config, hint, limits, 0)
+    }
+
+    /// [`Self::new`], for a track its container says holds back
+    /// `reorder_delay` pictures to show them in order -- an MP4 track's
+    /// estimate from its composition offsets -- which an H.264 decoder starts
+    /// from, as FFmpeg's does (`has_b_frames`), before the stream's own
+    /// parameter sets raise it. The other codecs show each picture as it is
+    /// decoded. `config` is an H.264 track's `avcC` record (its Matroska
+    /// `CodecPrivate`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_reorder_delay(
+        codec: Codec,
+        config: &[u8],
+        hint: ColourHint,
+        limits: Limits,
+        reorder_delay: u32,
+    ) -> Result<Self, Error> {
         let max_pixels = limits.max_pixels;
         let codec = match codec {
             Codec::Vp8 => Inner::Vp8 {
@@ -120,7 +149,13 @@ impl Decoder {
                 alpha: None,
             },
             Codec::Av1 => Inner::Av1(Av1::new(config, max_pixels)?),
-            Codec::H264 | Codec::Hevc | Codec::Mpeg4 | Codec::Theora | Codec::Other => {
+            Codec::H264 => {
+                let mut d = Box::new(h264::Decoder::new());
+                d.set_reorder_delay(reorder_delay);
+                d.configure(config);
+                Inner::H264(d)
+            }
+            Codec::Hevc | Codec::Mpeg4 | Codec::Theora | Codec::Other => {
                 return Err(Error::Codec(codec));
             }
         };
@@ -198,17 +233,33 @@ impl Decoder {
                 Ok(())
             }
             Inner::Av1(av1) => av1.send(packet, &mut self.ready, self.hint),
+            Inner::H264(d) => {
+                let decoded = if packet.discard {
+                    d.decode_discarded(packet.data, packet.time, packet.duration)
+                } else {
+                    d.decode(packet.data, packet.time, packet.duration)
+                };
+                if let Some(shown) = decoded.map_err(Error::H264)? {
+                    self.ready.push_back(Picture::h264(shown, self.hint));
+                }
+                Ok(())
+            }
         }
     }
 
     /// A new setup for the packets from the next on -- an MP4 track whose
     /// samples change to another sample entry: AV1's configuration record,
-    /// whose sequence header is sent before the next packet. VP8 and VP9
-    /// have none to take.
+    /// whose sequence header is sent before the next packet; H.264's `avcC`,
+    /// whose parameter sets are taken up before it (FFmpeg's new extradata).
+    /// VP8 and VP9 have none to take.
     pub fn configure(&mut self, config: &[u8]) {
-        if let Inner::Av1(av1) = &mut self.codec {
-            av1.config = config_obus(config).to_vec();
-            av1.configure = true;
+        match &mut self.codec {
+            Inner::Av1(av1) => {
+                av1.config = config_obus(config).to_vec();
+                av1.configure = true;
+            }
+            Inner::H264(d) => d.new_extradata(config),
+            Inner::Vp8 { .. } | Inner::Vp9 { .. } => {}
         }
     }
 
@@ -229,6 +280,12 @@ impl Decoder {
             // libvpx's decoders hold nothing back.
             Inner::Vp8 { .. } | Inner::Vp9 { .. } => Ok(()),
             Inner::Av1(av1) => av1.drain(&mut self.ready, self.hint),
+            Inner::H264(d) => {
+                while let Some(shown) = d.drain() {
+                    self.ready.push_back(Picture::h264(shown, self.hint));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -254,6 +311,10 @@ impl Decoder {
             Inner::Av1(av1) => {
                 av1.decoder.flush().map_err(Error::Av1)?;
                 av1.configure = true;
+                Ok(())
+            }
+            Inner::H264(d) => {
+                d.flush();
                 Ok(())
             }
         }

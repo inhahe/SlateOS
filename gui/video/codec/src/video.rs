@@ -36,7 +36,10 @@
 //! the time (the container's seek, each held to FFmpeg's), then either
 //! gives back frames from it ([`SeekMode::KeyFrame`], for scrubbing) or
 //! decodes quietly up to the frame showing at that time and gives back
-//! that one first ([`SeekMode::Exact`]).
+//! that one first ([`SeekMode::Exact`]). An MP4 file's seek goes, as
+//! FFmpeg's does, by the decoding timeline, and where pictures are shown
+//! out of order it can land a key frame early: a key frame seek then
+//! decodes quietly on to the key frame the time falls under.
 
 use std::io::{Read, Seek};
 
@@ -51,8 +54,8 @@ pub enum SeekMode {
     /// On the frame showing at the time sought: the latest frame at or
     /// before it (or the first, for a time before every frame).
     Exact,
-    /// On the key frame at or before the time, decoding from which costs
-    /// nothing extra: for following a seek bar as it is dragged.
+    /// On the latest key frame shown at or before the time, decoding from
+    /// which costs little: for following a seek bar as it is dragged.
     KeyFrame,
 }
 
@@ -150,12 +153,19 @@ impl<R: Read + Seek> Video<R> {
             // Decodable first, then enabled, then marked default; the
             // file's order among equals (`min_by_key` keeps the first).
             None => videos.iter().min_by_key(|t| {
-                let decodable = matches!(t.codec, Codec::Vp8 | Codec::Vp9 | Codec::Av1);
+                let decodable =
+                    matches!(t.codec, Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H264);
                 (!decodable, !t.enabled, !t.default)
             }),
         }
         .ok_or(Error::NoVideo)?;
-        let decoder = Decoder::new(chosen.codec, &chosen.config, chosen.hint, limits)?;
+        let decoder = Decoder::with_reorder_delay(
+            chosen.codec,
+            &chosen.config,
+            chosen.hint,
+            limits,
+            chosen.reorder_delay,
+        )?;
         let width = cropped(chosen.width, chosen.crop[0], chosen.crop[2]);
         let height = cropped(chosen.height, chosen.crop[1], chosen.crop[3]);
         let (width, height) = if chosen.orientation.swaps_sides() {
@@ -289,14 +299,26 @@ impl<R: Read + Seek> Video<R> {
     ///
     /// [`Error::Container`] when the source fails.
     pub fn seek(&mut self, time: i64, mode: SeekMode) -> Result<(), Error> {
-        let ticks = time::to_ticks(time, self.time_base);
+        let mut ticks = time::to_ticks(time, self.time_base);
+        // A key frame seek shows the key frame `time` falls under; where the
+        // container lands before it, the frames before it go as an exact
+        // seek's do.
+        let key_time = (mode == SeekMode::KeyFrame)
+            .then(|| self.demuxer.key_time_before(self.key, ticks))
+            .flatten();
+        if let Some(k) = key_time {
+            ticks = k;
+        }
         self.demuxer.seek(self.key, ticks)?;
         self.decoder.reset()?;
         self.held = None;
         self.after = None;
         self.ended = false;
         self.next_time = time;
-        self.target = (mode == SeekMode::Exact).then_some(time);
+        self.target = match mode {
+            SeekMode::Exact => Some(time),
+            SeekMode::KeyFrame => key_time.map(|k| time::to_ns(k, self.time_base)),
+        };
         Ok(())
     }
 

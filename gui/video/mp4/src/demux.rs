@@ -315,6 +315,41 @@ impl<R: Read + Seek> Demuxer<R> {
         self.seek_toward(track, timestamp, false)
     }
 
+    /// The time (in the track's timescale, as [`Packet::pts`] gives it) of
+    /// the latest key frame of track `track` shown at or before `timestamp`
+    /// -- a key sample not marked to be dropped -- or None when none shows
+    /// that early.
+    ///
+    /// [`Self::seek`] finds its key frame as FFmpeg does, on the decoding
+    /// timeline moved by one constant, which where pictures are reordered
+    /// can land a key frame early: decoding on from there to this time
+    /// shows the key frame that `timestamp` falls under.
+    pub fn key_time_before(&self, track: usize, timestamp: i64) -> Option<i64> {
+        let sc = self.streams.get(track)?;
+        // Each sample's composition offset, run by run as `finalize` reads it.
+        let mut offsets = sc
+            .tts
+            .iter()
+            .flat_map(|t| std::iter::repeat_n(t.offset, usize::try_from(t.count).unwrap_or(0)));
+        let mut best: Option<i64> = None;
+        for e in &sc.index {
+            let offset = offsets.next();
+            if e.flags & KEYFRAME == 0 || e.flags & DISCARD != 0 {
+                continue;
+            }
+            let pts = match offset {
+                Some(o) if sc.has_ctts => e
+                    .timestamp
+                    .saturating_add(i64::from(sc.dts_shift).saturating_add(i64::from(o))),
+                _ => e.timestamp,
+            };
+            if pts <= timestamp && best.is_none_or(|b| pts > b) {
+                best = Some(pts);
+            }
+        }
+        best
+    }
+
     fn seek_toward(&mut self, track: usize, timestamp: i64, backward: bool) -> Result<(), Error> {
         let sample = self.seek_stream(track, timestamp, backward)?;
         let (seek_ts, scale) = {

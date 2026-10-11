@@ -3884,9 +3884,11 @@ word; text inside them that says "lane C" is history.
   kept clipboards of their own for the keys. **Done:** Settings, the QR code
   maker, the torrent client's magnet box, the renamer's boxes, the sound
   recorder's marker names, the process explorer's filter and New Task
-  boxes, the mail client's compose form, the font manager's search box.
-  **Remaining:** calendar, finance, flashcards, jsonviewer, notes, paint,
-  regextester, reminders, snippets, stickynotes.
+  boxes, the mail client's compose form, the font manager's search box,
+  the flashcards' search box and card and deck fields (the search box,
+  typed only at its end until then, edits at a caret).
+  **Remaining:** calendar, finance, jsonviewer, notes, paint, regextester,
+  reminders, snippets, stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

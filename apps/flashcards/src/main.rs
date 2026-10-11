@@ -49,7 +49,7 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -908,6 +908,15 @@ enum Field {
     About,
 }
 
+/// The text field a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The deck view's search box.
+    Search,
+    /// A field of the card or deck editor.
+    Editor(Field),
+}
+
 /// What a delete waiting on its answer would remove.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Doomed {
@@ -990,6 +999,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
 /// The most characters a card's front, back or tags, or a deck's name or
 /// description, will take.
 const FIELD_CAPACITY: usize = 2000;
+
+/// The most characters the deck view's search box takes.
+const SEARCH_CAPACITY: usize = 256;
+
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 12.0;
 
 /// A deck row's height.
 const DECK_ROW_H: f32 = 72.0;
@@ -1169,11 +1184,8 @@ struct FlashcardsApp {
     /// Whether the keyboard is in the search box.
     ///
     /// Needed because every letter in the deck view is a command -- `s`
-    /// studies, `n` makes a card, `x` deletes one -- so there is no spare
-    /// letter for "and also type this into the search". `handle_search_text`
-    /// and `handle_search_backspace` have been here since the file was
-    /// written with nothing to call them, because the mode they belong to did
-    /// not exist.
+    /// studies, `n` makes a card, `x` deletes one -- so a letter is the
+    /// search's only while the box has the keyboard (`search_key`).
     search_active: bool,
     /// Tag filter (used in deck detail view).
     tag_filter: Option<String>,
@@ -1196,8 +1208,11 @@ struct FlashcardsApp {
     editing_deck: Option<usize>,
     /// The field the keyboard is in, in whichever editor is up.
     field: Field,
-    /// The fields' clipboard.
-    clipboard: String,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it.
+    search_editor: TextInput,
+    /// A text field's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// A delete waiting on its answer.
     pending_delete: Option<Doomed>,
     /// Whether the list of keys is up.
@@ -1343,7 +1358,8 @@ impl FlashcardsApp {
             deck_about: textline::field_holding("", FIELD_CAPACITY),
             editing_deck: None,
             field: Field::Front,
-            clipboard: String::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
             pending_delete: None,
             show_help: false,
             deck_scroll: 0,
@@ -2233,11 +2249,7 @@ impl FlashcardsApp {
                     self.field = fields.first().copied().unwrap_or(Field::Front);
                 }
                 let which = self.field;
-                let clipboard = self.clipboard.clone();
-                let done = textline::apply_key(self.input(which), key, &clipboard, 13.0);
-                if let Some(copied) = done.copied {
-                    self.clipboard = copied;
-                }
+                let done = textline::apply_key_on_clipboard(self.input(which), key, 13.0);
                 if done.handled {
                     EventResult::Consumed
                 } else {
@@ -2457,6 +2469,20 @@ impl FlashcardsApp {
     }
 
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A text field's right-click menu takes the presses, the keys, the
+        // pointer and the wheel while it is up, as any menu does -- a row
+        // chosen, a press outside putting it away and reaching nothing under
+        // it, a right press there opening that field's own -- and is put
+        // away by a resize.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => return self.do_menu_row(field, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         // The picker takes input first while it is up, or a filename is typed
         // at the study view -- where a bare digit rates the card in front of
         // you and changes its schedule.
@@ -2482,7 +2508,14 @@ impl FlashcardsApp {
         match event {
             Event::Key(key_ev) => self.handle_key_event(key_ev),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Tick { .. } => self.refresh_day(),
+            Event::Tick { elapsed_ms } => {
+                // The menu's wait beside the day's.
+                let menu = self.field_menu.tick(*elapsed_ms);
+                match self.refresh_day() {
+                    EventResult::Ignored if !menu => EventResult::Ignored,
+                    _ => EventResult::Consumed,
+                }
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -2562,8 +2595,13 @@ impl FlashcardsApp {
                     self.picker.open_to_read();
                     EventResult::Consumed
                 }
+                // The search box's own chords: select all, copy, cut, paste.
+                _ if self.searching() => self.search_key(key),
                 _ => EventResult::Ignored,
             };
+        }
+        if self.searching() {
+            return self.search_key(key);
         }
         // A chord with Alt alone or the Windows key is the window's or the
         // desktop's: Alt+S started studying. AltGr counts by what it types,
@@ -2679,24 +2717,6 @@ impl FlashcardsApp {
     }
 
     fn handle_key_deck_detail(&mut self, key: &str, _ctrl: bool) {
-        if self.search_active {
-            match key {
-                "Escape" => {
-                    // Out of the box and back to the whole deck: a filter you
-                    // cannot see the edge of is one you forget is on.
-                    self.search_active = false;
-                    self.search_query.clear();
-                    self.selected_card = 0;
-                    self.scroll_offset = 0;
-                }
-                "Enter" => self.search_active = false,
-                "Backspace" => self.handle_search_backspace(),
-                "Space" => self.handle_search_text(" "),
-                other if other.chars().count() == 1 => self.handle_search_text(other),
-                _ => {}
-            }
-            return;
-        }
         match key {
             "/" => {
                 self.search_active = true;
@@ -2820,20 +2840,150 @@ impl FlashcardsApp {
         }
     }
 
-    fn handle_search_text(&mut self, text: &str) {
-        if self.view == AppView::DeckDetail {
-            self.search_query.push_str(text);
+    /// Whether the deck view's search box has the keyboard.
+    fn searching(&self) -> bool {
+        self.view == AppView::DeckDetail && self.search_active
+    }
+
+    /// Reload the search box's editor from the search, if the search
+    /// changed underneath it.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: the list goes back to its first card.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            self.search_query = text.to_owned();
             self.selected_card = 0;
             self.scroll_offset = 0;
         }
     }
 
-    fn handle_search_backspace(&mut self) {
-        if self.view == AppView::DeckDetail && !self.search_query.is_empty() {
-            self.search_query.pop();
-            self.selected_card = 0;
-            self.scroll_offset = 0;
+    /// A key for the search box while it has the keyboard: Escape leaves it
+    /// and shows the whole deck again, Enter leaves it keeping the filter,
+    /// and the rest is the box's (`textline::apply_key_on_clipboard`), on
+    /// the program's clipboard. It takes every key but a chord of the
+    /// window's or the desktop's, so a letter is never also a command.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
+        match key.key {
+            Key::Escape if plain => {
+                // Out of the box and back to the whole deck: a filter you
+                // cannot see the edge of is one you forget is on.
+                self.search_active = false;
+                self.set_search("");
+                return EventResult::Consumed;
+            }
+            Key::Enter if plain => {
+                self.search_active = false;
+                return EventResult::Consumed;
+            }
+            _ => {}
         }
+        self.sync_search_editor();
+        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
+        let typed = self.search_editor.text().to_owned();
+        self.set_search(&typed);
+        if edit.handled || plain || textline::types_into_field(key) {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Where `target` was drawn in the last frame, or would be in this one
+    /// before the first is drawn (as [`Self::target_at`] reads them).
+    fn rect_of(&self, target: Target) -> Option<Rect> {
+        let find = |hits: &[(Target, Rect)]| {
+            hits.iter()
+                .rev()
+                .find(|(t, _)| *t == target)
+                .map(|(_, r)| *r)
+        };
+        if self.last_hits.is_empty() {
+            return find(self.frame().hits());
+        }
+        find(&self.last_hits)
+    }
+
+    /// A press in the search box at `x`: it takes the keyboard, with the
+    /// caret where the press landed.
+    fn press_search(&mut self, x: f32) -> EventResult {
+        let Some(rect) = self.rect_of(Target::Search) else {
+            return EventResult::Ignored;
+        };
+        let drawn = if self.search_active {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::default()
+        };
+        self.search_active = true;
+        self.sync_search_editor();
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 16.0).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - 8.0,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
+        EventResult::Consumed
+    }
+
+    /// A right press: over the search box or an editor's field, that
+    /// field's menu where the press landed, the field given the keyboard
+    /// and its caret and selection left as they are, so Cut and Copy act on
+    /// what the user selected (design-decisions 1454). Anywhere else, or
+    /// while the picker or the shortcut card is up, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        if self.picker.is_open() || self.show_help {
+            return EventResult::Ignored;
+        }
+        let field = match self.target_at(x, y) {
+            Some(Target::Search) if self.view == AppView::DeckDetail => {
+                self.search_active = true;
+                self.sync_search_editor();
+                MenuField::Search
+            }
+            Some(Target::Field(field))
+                if matches!(self.view, AppView::CardEditor | AppView::DeckEditor)
+                    && self.fields().contains(&field) =>
+            {
+                self.field = field;
+                MenuField::Editor(field)
+            }
+            _ => return EventResult::Ignored,
+        };
+        let rows = match field {
+            MenuField::Search => self.search_editor.edit_menu(),
+            MenuField::Editor(which) => self.input(which).edit_menu(),
+        };
+        let viewport = (self.width, self.height);
+        self.field_menu.open(field, rows, x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for `field`: done to it as its key would
+    /// be, the list following a change to the search.
+    fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
+        match field {
+            MenuField::Search => {
+                self.sync_search_editor();
+                if self.search_editor.edit_command(id) == KeyEdit::Changed {
+                    let typed = self.search_editor.text().to_owned();
+                    self.set_search(&typed);
+                }
+            }
+            MenuField::Editor(which) => {
+                let _edit = self.input(which).edit_command(id);
+            }
+        }
+        EventResult::Consumed
     }
 
     /// Where the deck list's rows start, the pitch between them, and how
@@ -3391,25 +3541,61 @@ impl FlashcardsApp {
             },
             self.focus_ring_width,
         );
-        let search_display = match (self.search_active, self.search_query.is_empty()) {
-            (true, true) => String::from("Type to filter..."),
-            (false, true) => String::from("Search [/]"),
-            (_, false) => self.search_query.clone(),
-        };
-        f.push(RenderCommand::Text {
-            x: search.x + 8.0,
-            y: search_y + 7.0,
-            text: search_display,
-            font_size: 12.0,
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(search.w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        if self.search_active && !self.search_query.is_empty() {
+            // The box with the keyboard: its text, with the caret and the
+            // selection where they are -- the end of the text if the search
+            // changed under the box's editor.
+            let synced = self.search_editor.text() == self.search_query;
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: true,
+                    x: search.x + 8.0,
+                    y: search_y + 6.0,
+                    width: (search.w - 16.0).max(0.0),
+                    line_height: 16.0,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            f.extend(tree.commands);
+        } else {
+            let search_display = match (self.search_active, self.search_query.is_empty()) {
+                (true, _) => String::from("Type to filter..."),
+                (false, true) => String::from("Search [/]"),
+                (false, false) => self.search_query.clone(),
+            };
+            f.push(RenderCommand::Text {
+                x: search.x + 8.0,
+                y: search_y + 7.0,
+                text: search_display,
+                font_size: SEARCH_TEXT_SIZE,
+                color: if self.search_query.is_empty() {
+                    self.palette.subtext0
+                } else {
+                    self.palette.text
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(search.w - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
         f.hit(Target::Search, search);
 
         // The tag filter: a chip that steps through the deck's tags as `T`
@@ -4327,8 +4513,12 @@ impl FlashcardsApp {
                 let Some(target) = self.frame().hit_test(event.x, event.y) else {
                     return EventResult::Ignored;
                 };
+                if target == Target::Search {
+                    return self.press_search(event.x);
+                }
                 self.press(target)
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             MouseEventKind::Move => {
                 let over = self.target_at(event.x, event.y);
                 if over == self.hover {
@@ -4603,7 +4793,12 @@ impl App for FlashcardsApp {
     /// day costs a clock read rather than a frame; only the one crossing
     /// midnight redraws.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_mins(5))
+        let day = Duration::from_mins(5);
+        Some(
+            self.field_menu
+                .due_in()
+                .map_or(day, |ms| Duration::from_millis(ms).min(day)),
+        )
     }
 
     /// Watch the decks' folder, so another window's save reaches this one
@@ -4668,6 +4863,7 @@ impl App for FlashcardsApp {
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
         let mut tree = frame.into_tree();
+        tree.commands.extend(self.field_menu.render(&self.palette));
         // Over everything.
         let palette = self.palette;
         if let Some(question) = self.question.as_mut() {
@@ -6220,23 +6416,6 @@ mod tests {
     }
 
     #[test]
-    fn test_search_text() {
-        let mut app = FlashcardsApp::new();
-        app.view = AppView::DeckDetail;
-        app.handle_search_text("cap");
-        assert_eq!(app.search_query, "cap");
-    }
-
-    #[test]
-    fn test_search_backspace() {
-        let mut app = FlashcardsApp::new();
-        app.view = AppView::DeckDetail;
-        app.search_query = String::from("test");
-        app.handle_search_backspace();
-        assert_eq!(app.search_query, "tes");
-    }
-
-    #[test]
     fn test_shuffle_key() {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
@@ -6714,10 +6893,6 @@ mod tests {
     }
 
     // == The search box ========================================================
-    //
-    // `handle_search_text` and `handle_search_backspace` were written when the
-    // file was and had no callers: every letter in the deck view is a command,
-    // so there was no mode in which a letter meant "search".
 
     /// An app sitting in a deck, which is where the search box is drawn.
     fn app_in_deck() -> FlashcardsApp {
@@ -6740,9 +6915,7 @@ mod tests {
         let all = app.matching_card_indices().len();
         assert!(all > 1, "the sample deck should have a few cards");
         app.handle_key("/", false, false);
-        for ch in "zzzz".chars() {
-            app.handle_key(&ch.to_string(), false, false);
-        }
+        type_text(&mut app, "zzzz");
         assert_eq!(app.search_query, "zzzz");
         assert!(
             app.matching_card_indices().len() < all,
@@ -6763,7 +6936,7 @@ mod tests {
     fn a_letter_is_text_once_the_search_box_is_open() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        app.handle_key("s", false, false);
+        app.handle_event(&typed('s'));
         assert!(
             app.study_session.is_none(),
             "a letter typed into the search box must not also run its shortcut"
@@ -6775,10 +6948,8 @@ mod tests {
     fn backspace_deletes_from_the_query() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        for ch in "abc".chars() {
-            app.handle_key(&ch.to_string(), false, false);
-        }
-        app.handle_key("Backspace", false, false);
+        type_text(&mut app, "abc");
+        app.handle_event(&press(Key::Backspace));
         assert_eq!(app.search_query, "ab");
     }
 
@@ -6786,9 +6957,14 @@ mod tests {
     fn space_is_typed_rather_than_ignored() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        app.handle_key("a", false, false);
-        app.handle_key("Space", false, false);
-        app.handle_key("b", false, false);
+        type_text(&mut app, "a");
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Space,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from(" "),
+        }));
+        type_text(&mut app, "b");
         assert_eq!(app.search_query, "a b");
     }
 
@@ -6796,8 +6972,8 @@ mod tests {
     fn enter_leaves_the_box_and_keeps_the_filter() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        app.handle_key("a", false, false);
-        app.handle_key("Enter", false, false);
+        type_text(&mut app, "a");
+        app.handle_event(&press(Key::Enter));
         assert!(!app.search_active);
         assert_eq!(app.search_query, "a", "the filter is still on");
     }
@@ -6807,10 +6983,8 @@ mod tests {
         let mut app = app_in_deck();
         let all = app.matching_card_indices().len();
         app.handle_key("/", false, false);
-        for ch in "zzzz".chars() {
-            app.handle_key(&ch.to_string(), false, false);
-        }
-        app.handle_key("Escape", false, false);
+        type_text(&mut app, "zzzz");
+        app.handle_event(&press(Key::Escape));
         assert!(!app.search_active);
         assert_eq!(app.search_query, "");
         assert_eq!(
@@ -6824,12 +6998,210 @@ mod tests {
     fn leaving_the_deck_leaves_the_search_with_it() {
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        app.handle_key("a", false, false);
-        app.handle_key("Escape", false, false);
-        app.handle_key("Escape", false, false);
+        type_text(&mut app, "a");
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::Escape));
         assert_eq!(app.view, AppView::DeckList);
         assert!(!app.search_active);
         assert_eq!(app.search_query, "");
+    }
+
+    /// **The search box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces. It
+    /// typed only at its end, and Backspace from the end was its only edit.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = app_in_deck();
+        app.handle_key("/", false, false);
+        type_text(&mut app, "abd");
+        app.handle_event(&press(Key::Left));
+        type_text(&mut app, "c");
+        assert_eq!(
+            app.search_query, "abcd",
+            "typing did not go in at the caret"
+        );
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            app.search_query, "bcd",
+            "Delete did not take the first character"
+        );
+        app.handle_event(&ctrl_press(Key::A));
+        type_text(&mut app, "x");
+        assert_eq!(
+            app.search_query, "x",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        app.handle_key("/", false, false);
+        type_text(&mut app, "abc");
+        App::render(&mut app, 1000.0, 700.0);
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: search.x + 8.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_text(&mut app, "z");
+        assert_eq!(
+            app.search_query, "zabc",
+            "the caret did not go where the press was"
+        );
+    }
+
+    /// **A text field's right-click menu cuts, copies and pastes on the
+    /// program's clipboard** (`requests/c-e-text-fields-have-a-right-click-menu.md`),
+    /// in the deck's search box and in an editor's fields alike: a right
+    /// press gives the field the keyboard and the menu; the menu takes the
+    /// keys while it is up; and what Ctrl+C takes in a field, the menu
+    /// pastes in the search.
+    #[test]
+    fn a_text_fields_right_click_menu_edits_it() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        guitk::clipboard::set_text("zzzz");
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the search offered nothing"
+        );
+        assert!(app.search_active, "the search was not given the keyboard");
+        assert_eq!(app.field_menu.row_lit(EditCommand::Copy), Some(false));
+        assert!(
+            rendered_texts(&mut app).iter().any(|t| t == "Paste"),
+            "the menu is not drawn"
+        );
+        type_text(&mut app, "q");
+        assert_eq!(
+            app.search_query, "",
+            "a key reached the box through the menu"
+        );
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.search_query, "zzzz",
+            "Paste did not paste into the search"
+        );
+        app.handle_event(&press(Key::Escape));
+
+        // An editor's field: what Ctrl+C takes is the program's clipboard.
+        app.open_new_card_editor();
+        type_text(&mut app, "front");
+        app.handle_event(&ctrl_press(Key::A));
+        app.handle_event(&ctrl_press(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            "front",
+            "Ctrl+C kept a clipboard of its own"
+        );
+        App::render(&mut app, 1000.0, 700.0);
+        probe::click_with(&mut app, Target::Field(Field::Back), MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on a field offered nothing"
+        );
+        assert_eq!(
+            app.field,
+            Field::Back,
+            "the field was not given the keyboard"
+        );
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.editor_back.text(),
+            "front",
+            "Paste did not paste into the field"
+        );
+
+        // Anywhere else, no menu.
+        let save = probe::rect_of(&app, Target::Save).expect("Save");
+        assert_eq!(
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: save.x + 2.0,
+                y: save.y + 2.0,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            })),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**,
+    /// which waits for the menu as well as for midnight -- and a paste from
+    /// the menu stops at the search box's capacity.
+    #[test]
+    fn the_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        let day = App::tick_interval(&app);
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            App::tick_interval(&app) < day,
+            "the clock does not wait for the menu"
+        );
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        app.handle_event(&press(Key::Escape));
+
+        guitk::clipboard::set_text(&"s".repeat(SEARCH_CAPACITY + 10));
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(app.search_query.chars().count(), SEARCH_CAPACITY);
     }
 
     #[test]
@@ -6883,10 +7255,8 @@ mod tests {
                 .map(|c| c.front.clone())
                 .expect("a second card")
         };
-        for ch in target.chars() {
-            app.handle_key(&ch.to_string(), false, false);
-        }
-        app.handle_key("Enter", false, false);
+        type_text(&mut app, &target);
+        app.handle_event(&press(Key::Enter));
         let matching = app.matching_card_indices();
         assert!(!matching.is_empty(), "the filter should match its own card");
         let doomed = {
@@ -6906,13 +7276,20 @@ mod tests {
 
     #[test]
     fn a_named_key_is_not_typed_into_the_search_box() {
-        // "Up", "Delete" and friends reach the same arm a letter does; without
-        // a length check the box would fill up with the words for arrow keys.
+        // A key that types nothing is an edit or nothing, never its name:
+        // the box does not fill up with the words for arrow keys.
         let mut app = app_in_deck();
         app.handle_key("/", false, false);
-        app.handle_key("a", false, false);
-        for named in ["Up", "Down", "Left", "Right", "Delete", "Tab"] {
-            app.handle_key(named, false, false);
+        type_text(&mut app, "a");
+        for named in [
+            Key::Up,
+            Key::Down,
+            Key::Left,
+            Key::Right,
+            Key::Delete,
+            Key::Tab,
+        ] {
+            app.handle_event(&press(named));
         }
         assert_eq!(app.search_query, "a");
     }
@@ -6937,26 +7314,12 @@ mod tests {
         let mut app = app_in_deck();
         app.selected_card = 2;
         app.handle_key("/", false, false);
-        app.handle_key("a", false, false);
+        type_text(&mut app, "a");
         assert_eq!(
             app.selected_card, 0,
             "a selection counted in the old list names a different card in \
              the filtered one, and may name none at all"
         );
-    }
-
-    #[test]
-    fn search_text_is_refused_outside_the_deck_view() {
-        // `handle_search_text` is public to the rest of the file and the box
-        // is a deck-view thing; the guard is what stops a stray call filtering
-        // a deck nobody is looking at.
-        let mut app = FlashcardsApp::new();
-        app.view = AppView::StudyMode;
-        app.handle_search_text("x");
-        assert_eq!(app.search_query, "");
-        app.search_query = String::from("ab");
-        app.handle_search_backspace();
-        assert_eq!(app.search_query, "ab");
     }
 
     // -- Following the user's theme -------------------------------------------

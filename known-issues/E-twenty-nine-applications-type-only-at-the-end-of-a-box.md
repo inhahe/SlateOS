@@ -22,6 +22,11 @@ and Backspace `pop`s it.
 
 **The twenty-nine:** none left -- every one is done (below).
 
+**A thirtieth, found 2026-10-10:** `flashcards`' search box, which the
+sweep missed because its typing came in by the key's name (`handle_key`)
+rather than as a key event. It edits at a caret on lane E's branch, the
+same day, with its right-click menu.
+
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
 and `launcher` and `spreadsheet`, which keep a caret of their own (no

@@ -28,11 +28,10 @@ MUTATIONS = [
     # -- the editors -------------------------------------------------------------------------------------
     (
         "a field takes no typing",
-        "                let done = textline::apply_key(self.input(which), key, &clipboard, 13.0);",
-        "                let done = textline::apply_key(\n"
+        "                let done = textline::apply_key_on_clipboard(self.input(which), key, 13.0);",
+        "                let done = textline::apply_key_on_clipboard(\n"
         '                    &mut textline::field_holding("", FIELD_CAPACITY),\n'
         "                    key,\n"
-        "                    &clipboard,\n"
         "                    13.0,\n"
         "                );\n"
         "                let _ = which;",
@@ -626,6 +625,85 @@ MUTATIONS += [
         "            question.render(&palette, width, height, &mut tree);",
         "            let _ = (question, palette);",
         [CLOSING, NEVER_KEPT, NAMES],
+    ),
+]
+
+# The search box edits at a caret, and every text field has a right-click
+# menu on the program's clipboard (2026-10-10).
+CARET = "the_search_box_edits_at_a_caret"
+PRESSED = "a_press_in_the_search_box_puts_the_caret_there"
+LETTER = "a_letter_is_text_once_the_search_box_is_open"
+MENU = "a_text_fields_right_click_menu_edits_it"
+MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MUTATIONS += [
+    (
+        "the search types only at its end",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let end = self.search_editor.text().len();\n"
+        "        self.search_editor.set_cursor(TextCursor::from(end));\n"
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        [CARET],
+    ),
+    (
+        "a letter in the search is also its command",
+        "        if self.searching() {\n            return self.search_key(key);\n        }\n",
+        "",
+        [LETTER],
+    ),
+    (
+        "the search's chords are not the box's",
+        "                _ if self.searching() => self.search_key(key),\n",
+        "",
+        [CARET],
+    ),
+    (
+        "a press in the search puts the caret nowhere",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "",
+        [PRESSED],
+    ),
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "            MouseEventKind::Press(MouseButton::Right) => EventResult::Ignored,\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "the keys reach a field through its menu",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "a row chosen does nothing to an editor's field",
+        "                let _edit = self.input(which).edit_command(id);\n",
+        "                let _edit = which;\n",
+        [MENU],
+    ),
+    (
+        "the menu is not drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [MENU],
+    ),
+    (
+        "the clock does not wait for the menu",
+        "                .map_or(day, |ms| Duration::from_millis(ms).min(day)),\n",
+        "                .map_or(day, |_| day),\n",
+        [MENU_CLOCK],
+    ),
+    (
+        "the menu's clock does not move",
+        "                let menu = self.field_menu.tick(*elapsed_ms);\n",
+        "                let menu = false;\n",
+        [MENU_CLOCK],
     ),
 ]
 

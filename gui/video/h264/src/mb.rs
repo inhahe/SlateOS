@@ -91,7 +91,7 @@ impl Context {
             AnyFrame::High(f) => self.hl_decode_mb_t(sl, f, nal),
         };
         #[cfg(test)]
-        if r.is_ok() && std::env::var_os("H264_MB").is_some() {
+        if r.is_ok() && crate::probe::PROBES.mb {
             self.debug_mb_sums(sl, frame);
         }
         r

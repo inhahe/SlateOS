@@ -416,10 +416,12 @@ pub(crate) struct Context {
     /// Gray stand-ins are not shown (`skip_gray`, off by default).
     pub(crate) skip_gray: i32,
     pub(crate) nb_slice_ctx_queued: usize,
-    /// The time and duration of the packet being decoded, which a frame
-    /// allocated for it carries (`last_pkt_props`).
+    /// The time and duration of the packet being decoded, and whether it
+    /// is marked to be discarded, which a frame allocated for it carries
+    /// (`last_pkt_props`).
     pub(crate) pkt_time: i64,
     pub(crate) pkt_duration: u64,
+    pub(crate) pkt_discard: bool,
 
     // The macroblock layer's tables (`ff_h264_alloc_tables`).
     /// Each macroblock's first motion vector entry (`mb2b_xy`), and its
@@ -547,6 +549,7 @@ impl Default for Context {
             nb_slice_ctx_queued: 0,
             pkt_time: 0,
             pkt_duration: 0,
+            pkt_discard: false,
             mb2b_xy: Vec::new(),
             mb2br_xy: Vec::new(),
             b_stride: 0,
@@ -1145,6 +1148,7 @@ impl Context {
         pic.props.chroma_location = a.chroma_sample_location;
         pic.props.time = self.pkt_time;
         pic.props.duration = self.pkt_duration;
+        pic.props.discard = self.pkt_discard;
         pic.put_tables(tables);
         pic.pps = self.ps.pps.clone();
         pic.mb_width = self.mb_width;

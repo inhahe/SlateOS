@@ -83,7 +83,7 @@ impl Context {
         let pps = self.ps.pps.clone().ok_or(DecodeError)?;
         let field_or_mbaff = self.picture_structure != PICT_FRAME || self.mb_aff_frame;
         #[cfg(test)]
-        if std::env::var_os("H264_REF").is_some() {
+        if crate::probe::PROBES.refs {
             self.debug_refs(sl);
         }
         if self.picture_structure == PICT_FRAME {
@@ -338,7 +338,7 @@ impl Context {
                     // in FFmpeg, for `tools/h264cmp.py`: the macroblock's
                     // own samples once its edges are filtered.
                     #[cfg(test)]
-                    if std::env::var_os("H264_LF").is_some() {
+                    if crate::probe::PROBES.lf {
                         let cols = 8 << usize::from(chroma444);
                         let wide = std::mem::size_of::<P>() > 1;
                         let sum =

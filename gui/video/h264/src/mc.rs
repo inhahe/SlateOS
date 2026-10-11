@@ -657,7 +657,7 @@ impl Context {
         // Under H264_MV the line `tools/ffdbg`'s FFDBG_MV prints in FFmpeg,
         // for `tools/h264cmp.py`.
         #[cfg(test)]
-        if std::env::var_os("H264_MV").is_some() {
+        if crate::probe::PROBES.mv {
             let mut line = format!(
                 "MV poc={} mb={},{} type={:x} sub={:x},{:x},{:x},{:x}",
                 self.cur_pic_ptr.map_or(-1, |c| self.pics[c].poc),

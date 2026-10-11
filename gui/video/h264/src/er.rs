@@ -354,7 +354,7 @@ impl Context {
             return 0;
         }
         #[cfg(test)]
-        if std::env::var_os("H264_ER").is_some() {
+        if crate::probe::PROBES.er {
             eprintln!(
                 "ER concealing: error_count={} mb_num={}",
                 self.er.error_count, self.er.mb_num

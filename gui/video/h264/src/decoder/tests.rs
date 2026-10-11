@@ -29,8 +29,62 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Decoder;
+
+/// `work` done on every file, as many at once as the machine has threads
+/// (`H264_JOBS` to say otherwise) -- one at a time while a probe prints, so
+/// its lines do not interleave. The results come in the files' order; a
+/// panic is its file's result, as its message, rather than the end of the
+/// run.
+fn each_file<T: Send>(
+    files: &[PathBuf],
+    work: impl Fn(&Path) -> T + Sync,
+) -> Vec<Result<T, String>> {
+    let jobs = if crate::probe::PROBES.any() {
+        1
+    } else {
+        std::env::var("H264_JOBS")
+            .ok()
+            .and_then(|j| j.parse().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+    };
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Result<T, String>>>> =
+        Mutex::new(files.iter().map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..jobs.clamp(1, files.len().max(1)) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(file) = files.get(i) else { break };
+                    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(file)))
+                        .map_err(|e| {
+                            e.downcast_ref::<String>()
+                                .cloned()
+                                .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                                .unwrap_or_else(|| "a panic".to_owned())
+                        });
+                    results.lock().unwrap()[i] = Some(done);
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap().into_iter().map(Option::unwrap).collect()
+}
+
+/// A file's name under `pict`, as the tests name streams: `/`-separated,
+/// without `.pict`.
+fn stream_name(pict: &Path, file: &Path) -> String {
+    file.strip_prefix(pict)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches(".pict")
+        .to_owned()
+}
 
 /// Every `.pict` file under `dir`.
 fn pict_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -75,6 +129,9 @@ struct Stream {
     extradata: Option<Vec<u8>>,
     /// The size it is opened with: what probing found (`.size`).
     size: Option<(u32, u32)>,
+    /// New extradata the demuxer gives with a packet, by the packet's index
+    /// (`.newextra`: an MP4 whose sample description changes).
+    new_extradata: Vec<(usize, Vec<u8>)>,
 }
 
 impl Stream {
@@ -104,12 +161,42 @@ impl Stream {
                 let (w, h) = s.trim().split_once(' ').unwrap();
                 (w.parse().unwrap(), h.parse().unwrap())
             });
+        // `<packet index> <hex>`, a line each.
+        let new_extradata = std::fs::read_to_string(sibling(&made, ".newextra"))
+            .map(|text| {
+                text.lines()
+                    .map(|l| {
+                        let (i, hex) = l.split_once(' ').unwrap();
+                        let bytes = (0..hex.len())
+                            .step_by(2)
+                            .map(|k| u8::from_str_radix(&hex[k..k + 2], 16).unwrap())
+                            .collect();
+                        (i.parse().unwrap(), bytes)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             data,
             packets,
             extradata,
             size,
+            new_extradata,
         }
+    }
+
+    /// Packet `i` decoded by `d`, with the new extradata the demuxer gives
+    /// with it, if any.
+    fn decode(
+        &self,
+        d: &mut Decoder,
+        i: usize,
+        packet: &[u8],
+    ) -> Result<Option<crate::Picture>, crate::Error> {
+        if let Some((_, config)) = self.new_extradata.iter().find(|(at, _)| *at == i) {
+            d.new_extradata(config);
+        }
+        d.decode(packet, i64::try_from(i).unwrap(), 1)
     }
 
     /// The decoder that shows the stream, opened as FFmpeg's command line
@@ -162,7 +249,7 @@ fn run(s: &Stream, delay: u32) -> (Vec<String>, Vec<String>, Vec<String>) {
     for (i, packet) in s.each() {
         // A packet with no picture in it is FFmpeg's "no frame!" error,
         // which the stream goes on past.
-        if let Ok(Some(p)) = d.decode(packet, i64::try_from(i).unwrap(), 1) {
+        if let Ok(Some(p)) = s.decode(&mut d, i, packet) {
             frames.push(row(p));
         }
     }
@@ -194,7 +281,7 @@ fn probe_delay(s: &Stream, read: usize, parser_b: &[bool]) -> i32 {
         if parameters && delay_guessed(&d, decoded) {
             continue;
         }
-        if let Ok(Some(_)) = d.decode(packet, i64::try_from(i).unwrap(), 1) {
+        if let Ok(Some(_)) = s.decode(&mut d, i, packet) {
             decoded += 1;
         }
     }
@@ -272,15 +359,10 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
     files.sort();
     assert!(!files.is_empty(), "no .pict files under {}", pict.display());
 
-    let mut failures = Vec::new();
-    let (mut slices, mut shown, mut probes) = (0, 0, 0);
-    for file in &files {
-        let rel = file.strip_prefix(&pict).unwrap();
-        let name = rel
-            .to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches(".pict")
-            .to_owned();
+    // Each stream: its slices and pictures shown, whether it was probed, and
+    // what differs.
+    let outcomes = each_file(&files, |file| {
+        let name = stream_name(&pict, file);
         let base = pict.join(&name);
         let stream = Stream::load(&fate, &pict, &name);
         let delay = number(&sibling(&base, ".delay")).unwrap_or(0);
@@ -304,15 +386,13 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
         let want_slices = lines(file);
         let want_frames = lines(&sibling(&base, ".frames"));
         let want_mmco = lines(&sibling(&base, ".mmco"));
-        slices += want_slices.len();
-        shown += want_frames.len();
         let mut found = vec![
             first_difference("slice", &want_slices, &got_slices),
             first_difference("picture shown", &want_frames, &got_frames),
             first_difference("marking line", &want_mmco, &got_mmco),
         ];
-        if let Ok(probe) = std::fs::read_to_string(sibling(&base, ".probe")) {
-            probes += 1;
+        let probed = std::fs::read_to_string(sibling(&base, ".probe")).ok();
+        if let Some(probe) = &probed {
             let mut probe = probe.lines();
             let read: usize = probe.next().unwrap().parse().unwrap();
             let parser_b: Vec<bool> = probe
@@ -328,7 +408,25 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
                 )));
             }
         }
-        failures.extend(found.into_iter().flatten().map(|d| format!("{name}: {d}")));
+        let found: Vec<String> = found
+            .into_iter()
+            .flatten()
+            .map(|d| format!("{name}: {d}"))
+            .collect();
+        (want_slices.len(), want_frames.len(), probed.is_some(), found)
+    });
+    let (mut slices, mut shown, mut probes) = (0, 0, 0);
+    let mut failures = Vec::new();
+    for (file, outcome) in files.iter().zip(outcomes) {
+        match outcome {
+            Ok((s, f, probed, found)) => {
+                slices += s;
+                shown += f;
+                probes += usize::from(probed);
+                failures.extend(found);
+            }
+            Err(panic) => failures.push(format!("{}: panicked: {panic}", stream_name(&pict, file))),
+        }
     }
     let report = failures.join("\n");
     assert!(
@@ -392,7 +490,7 @@ fn sums(s: &Stream, delay: u32, mut raw: Option<&mut Vec<u8>>) -> (Vec<String>, 
         }
     };
     for (i, packet) in s.each() {
-        if let Ok(Some(p)) = d.decode(packet, i64::try_from(i).unwrap(), 1) {
+        if let Ok(Some(p)) = s.decode(&mut d, i, packet) {
             take(p, &mut out);
         }
         cabac |= d.h.ps.pps.as_ref().is_some_and(|pps| pps.cabac != 0);
@@ -428,30 +526,27 @@ fn pictures_are_ffmpegs_sample_for_sample() {
         })
     });
     files.sort();
-    let (mut compared, mut cabac_streams, mut pictures, mut matching) = (0, 0, 0, 0);
-    let (mut undefined, mut cabac_differ) = (0, 0);
-    let mut failures = Vec::new();
-    for file in &files {
-        let rel = file.strip_prefix(&pict).unwrap();
-        let name = rel
-            .to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches(".pict")
-            .to_owned();
+    /// One stream compared: whether it is CABAC, its pictures, how many
+    /// match, how many FFmpeg leaves undefined, and its first difference.
+    struct Compared {
+        cabac: bool,
+        pictures: usize,
+        matching: usize,
+        undefined: usize,
+        difference: Option<String>,
+    }
+    let outcomes = each_file(&files, |file| {
+        let name = stream_name(&pict, file);
         let base = pict.join(&name);
-        let Ok(want) = std::fs::read_to_string(sibling(&base, ".crc")) else {
-            continue;
-        };
+        let want = std::fs::read_to_string(sibling(&base, ".crc")).ok()?;
         let want: Vec<String> = want.lines().map(str::to_owned).collect();
         let stream = Stream::load(&fate, &pict, &name);
         let delay = number(&sibling(&base, ".delay")).unwrap_or(0);
         let mut raw = Vec::new();
         let (mut got, cabac, errors) = sums(&stream, delay, dump.as_ref().map(|_| &mut raw));
-        if cabac {
-            cabac_streams += 1;
-        }
         // `<size>, ?`: a picture with samples FFmpeg never wrote, which it
         // leaves undefined -- any of that size will do.
+        let mut undefined = 0;
         for (w, g) in want.iter().zip(&mut got) {
             if let Some(size) = w.strip_suffix(", ?") {
                 undefined += 1;
@@ -460,22 +555,43 @@ fn pictures_are_ffmpegs_sample_for_sample() {
                 }
             }
         }
-        compared += 1;
-        pictures += want.len();
-        matching += want.iter().zip(&got).filter(|(w, g)| w == g).count();
-        if let Some(d) = first_difference("picture", &want, &got) {
+        let difference = first_difference("picture", &want, &got).map(|d| {
             let why = errors.first().map_or(String::new(), |e| {
                 format!(" ({} slices failed; first: {e})", errors.len())
             });
-            failures.push(format!("{name}: {d}{why}"));
-            if cabac {
-                cabac_differ += 1;
-            }
             if let Some(dump) = &dump {
                 let to = sibling(&dump.join(&name), ".yuv");
                 std::fs::create_dir_all(to.parent().unwrap()).unwrap();
                 std::fs::write(to, &raw).unwrap();
             }
+            format!("{name}: {d}{why}")
+        });
+        Some(Compared {
+            cabac,
+            pictures: want.len(),
+            matching: want.iter().zip(&got).filter(|(w, g)| w == g).count(),
+            undefined,
+            difference,
+        })
+    });
+    let (mut compared, mut cabac_streams, mut pictures, mut matching) = (0, 0, 0, 0);
+    let (mut undefined, mut cabac_differ) = (0, 0);
+    let mut failures = Vec::new();
+    for (file, outcome) in files.iter().zip(outcomes) {
+        match outcome {
+            Ok(None) => {}
+            Ok(Some(c)) => {
+                compared += 1;
+                cabac_streams += usize::from(c.cabac);
+                pictures += c.pictures;
+                matching += c.matching;
+                undefined += c.undefined;
+                if let Some(d) = c.difference {
+                    failures.push(d);
+                    cabac_differ += usize::from(c.cabac);
+                }
+            }
+            Err(panic) => failures.push(format!("{}: panicked: {panic}", stream_name(&pict, file))),
         }
     }
     let report = failures.join("\n");

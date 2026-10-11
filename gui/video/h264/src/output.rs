@@ -39,11 +39,13 @@ pub(crate) struct Output {
     pub(crate) stereo_mode: Option<&'static str>,
 }
 
-/// Reads whose result the decoder acts on, whatever the packet.
+/// A packet, and what its container says of it that the frames it begins
+/// carry (`AVPacket`'s pts, duration and `AV_PKT_FLAG_DISCARD`).
 pub(crate) struct Packet<'a> {
     pub(crate) data: &'a [u8],
     pub(crate) time: i64,
     pub(crate) duration: u64,
+    pub(crate) discard: bool,
 }
 
 /// What a frame packing arrangement says as FFmpeg's metadata names it
@@ -374,7 +376,7 @@ impl Context {
         }
         self.conceal(sl);
         #[cfg(test)]
-        if std::env::var_os("H264_PIC").is_some() {
+        if crate::probe::PROBES.pic {
             self.debug_pic();
         }
         ret
@@ -436,7 +438,7 @@ impl Context {
             }
         }
         #[cfg(test)]
-        if std::env::var_os("H264_OUT").is_some() {
+        if crate::probe::PROBES.out {
             self.debug_out(out);
         }
         self.output_frame(out)
@@ -558,6 +560,7 @@ impl Context {
         }
         self.pkt_time = packet.time;
         self.pkt_duration = packet.duration;
+        self.pkt_discard = packet.discard;
 
         if self.is_avc
             && buf.len() >= 9

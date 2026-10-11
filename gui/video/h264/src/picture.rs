@@ -279,6 +279,9 @@ pub(crate) struct FrameProps {
     /// The time and duration of the packet whose slices began it.
     pub(crate) time: i64,
     pub(crate) duration: u64,
+    /// That packet was marked to be discarded (`AV_FRAME_FLAG_DISCARD`):
+    /// decoded for the pictures after it, not shown.
+    pub(crate) discard: bool,
     /// `FF_DECODE_ERROR_*` bits: how decoding it went wrong.
     pub(crate) decode_error_flags: i32,
 }

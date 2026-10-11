@@ -99,6 +99,8 @@ mod output;
 mod picture;
 mod poc;
 mod pool;
+#[cfg(test)]
+mod probe;
 mod pred;
 mod ps;
 mod queue;
@@ -169,6 +171,18 @@ impl Decoder {
         self.h.flush_change();
     }
 
+    /// A new configuration the container gives with the next packet -- an
+    /// MP4 whose sample description changes partway, say (FFmpeg's
+    /// `AV_PKT_DATA_NEW_EXTRADATA`): its parameter sets taken up, as
+    /// `h264_decode_frame` takes them up before the packet's own units. Call
+    /// it just before [`decode`](Self::decode)s that packet. Unlike
+    /// [`configure`](Self::configure), nothing is flushed; one that cannot
+    /// be read is passed over, as FFmpeg passes it over.
+    pub fn new_extradata(&mut self, config: &[u8]) {
+        // h264_decode_frame does not look at how reading it went.
+        let _ = self.h.decode_extradata(config);
+    }
+
     /// One packet decoded: an access unit -- an MP4 sample, a Matroska
     /// block -- or, for a raw stream, whatever it was split into, with the
     /// time and duration its pictures are to carry. Returns the picture it
@@ -186,6 +200,33 @@ impl Decoder {
         time: i64,
         duration: u64,
     ) -> Result<Option<Picture>, Error> {
+        self.decode_packet(data, time, duration, false)
+    }
+
+    /// [`decode`](Self::decode) for a packet decoded only for those after
+    /// it -- one an MP4 edit list leaves out (FFmpeg's
+    /// `AV_PKT_FLAG_DISCARD`): the picture it begins is dropped when its
+    /// turn to be shown comes, whichever packet's decoding that is.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode`](Self::decode).
+    pub fn decode_discarded(
+        &mut self,
+        data: &[u8],
+        time: i64,
+        duration: u64,
+    ) -> Result<Option<Picture>, Error> {
+        self.decode_packet(data, time, duration, true)
+    }
+
+    fn decode_packet(
+        &mut self,
+        data: &[u8],
+        time: i64,
+        duration: u64,
+        discard: bool,
+    ) -> Result<Option<Picture>, Error> {
         if data.is_empty() {
             return Ok(None);
         }
@@ -193,10 +234,13 @@ impl Decoder {
             data,
             time,
             duration,
+            discard,
         };
         self.h
             .decode_frame(&mut self.sl, &mut self.pkt, &packet)
-            .map(|o| o.map(Picture::new))
+            // decode.c drops a frame marked to be discarded as it leaves
+            // the decoder.
+            .map(|o| o.filter(|o| !o.props.discard).map(Picture::new))
             .map_err(|_| Error::InvalidData)
     }
 
@@ -226,9 +270,15 @@ impl Decoder {
     }
 
     /// At the end of the stream, the next picture still held back: call
-    /// until it gives none.
+    /// until it gives none. Pictures of packets marked to be discarded are
+    /// passed over.
     pub fn drain(&mut self) -> Option<Picture> {
-        self.h.send_next_delayed_frame().map(Picture::new)
+        loop {
+            let out = self.h.send_next_delayed_frame()?;
+            if !out.props.discard {
+                return Some(Picture::new(out));
+            }
+        }
     }
 
     /// Every picture forgotten, as after a seek (`h264_decode_flush`):

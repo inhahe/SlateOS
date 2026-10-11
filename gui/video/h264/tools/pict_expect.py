@@ -1,12 +1,18 @@
 """Write what FFmpeg makes of H.264 streams' pictures, for
 src/decoder/tests.rs to hold the decoder's handling of pictures to.
 
-    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> [--jobs N]
-    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-crc [--crc-wsl DIR]
-    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-size
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> [--jobs N] [--ffmpeg DIR]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-crc [...]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-size [...]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-newextra [...]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-mmco [...]
 
-`ffmpeg` (built with libx264) and `ffprobe` must be on PATH. The streams,
-each named by its path under <out>:
+Everything written here is FFmpeg 8.1.3's -- the release the decoder is a
+translation of -- from its own build in WSL (`tools/ffdbg/build.sh`, in
+DIR, by default ~/ffdbg/src there), with ffprobe: what another build makes
+of a damaged or cut stream can differ. `ffmpeg` on PATH, built with
+libx264, only encodes the x264 streams. The streams, each named by its path
+under <out>:
 
   h264-conformance/...  every conformance stream FATE has, read from
                         <fate-suite>;
@@ -27,6 +33,10 @@ each named by its path under <out>:
                         late, recovers, and refuses to pair fields of two
                         frames: no stream that starts at an IDR shows any
                         of it.
+  damaged/...           each raw stream above with one picture damaged: a
+                        slice dropped, cut short, or with bytes changed
+                        (see `damages`). How the decoder finds the damage,
+                        stops, and conceals what it lost.
 
 Generated streams are written under <out> by their names. For each stream:
 
@@ -65,15 +75,20 @@ Generated streams are written under <out> by their names. For each stream:
   .mmco       FFmpeg's `-debug mmco` lines without their pointers: the
               short- and long-term reference lists as each slice's lists
               are built and after each picture is marked, and each marking
-              operation as it is carried out.
+              operation as it is carried out. `--add-mmco` writes them
+              afresh over streams already described.
   .crc        written by `--add-crc` over streams already described: each
-              picture FFmpeg hands out, summed as its `framecrc` muxer sums
-              it (see `framecrc`) -- from FFmpeg 8.1.3's own build in WSL
-              when `--crc-wsl` names its directory, and then `<size>, ?`
-              for a picture with samples FFmpeg never wrote, whose content
-              FFmpeg leaves undefined.
+              picture FFmpeg's decoder hands out, summed as its `framecrc`
+              muxer sums a picture (see `framecrcs`), and `<size>, ?` for a
+              picture with samples FFmpeg never wrote, whose content FFmpeg
+              leaves undefined.
   .size       written by `--add-size`: the width and height probing finds,
               which FFmpeg's command line opens the decoder with.
+  .newextra   written by `--add-newextra`, for a container stream that has
+              any: each packet that brings new extradata with it (an MP4
+              whose sample description changes), as the decoder that shows
+              the stream takes it up -- the packet's index, then the bytes
+              in hex, a line each (`FFDBG_NEWEXTRA`).
 """
 import base64
 import json
@@ -81,7 +96,6 @@ import re
 import shlex
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -94,8 +108,71 @@ START_CODE = b"\x00\x00\x00\x01"
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess:
+    """A program here (the x264 encoding), its output as text."""
     return subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", check=False)
+
+
+# Where FFmpeg 8.1.3's build is in WSL (`--ffmpeg`).
+FFMPEG = ""
+
+
+def wsl_path(p: Path) -> str:
+    s = p.resolve().as_posix()
+    return f"/mnt/{s[0].lower()}{s[2:]}"
+
+
+@dataclass
+class Result:
+    """What a command run in WSL wrote, as text, and how it exited."""
+    out: str
+    err: str
+    status: int
+
+
+ASSIGNMENT = re.compile(r"^[A-Z][A-Z0-9_]*=[A-Za-z0-9_]*$")
+
+
+def run_all(commands: list[list[str]], scratch: Path, jobs: int) -> list[Result]:
+    """Each of `commands` run in WSL: one bash script, `jobs` chains of
+    them at once, started by a single `wsl.exe` -- with ten `wsl.exe` at
+    once, some exit -1 partway through their output. A command may begin
+    with variable assignments (`FFDBG_FILL=0`). Each one's output goes to
+    files under `scratch`, read back and removed."""
+    if not commands:
+        return []
+    # A build that does not run would give nothing, which some streams also
+    # give -- FFmpeg shows none of a stream it never recovers in.
+    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", f"{FFMPEG}/ffprobe", "-hide_banner",
+                    "-version"], stdin=subprocess.DEVNULL, capture_output=True, check=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    chains: list[list[str]] = [[] for _ in range(jobs)]
+    for k, argv in enumerate(commands):
+        words, assigning = [], True
+        for a in argv:
+            assigning = assigning and bool(ASSIGNMENT.match(a))
+            words.append(a if assigning else shlex.quote(a))
+        target = wsl_path(scratch / str(k))
+        chains[k % jobs].append(f"{' '.join(words)} > {shlex.quote(target + '.out')} "
+                                f"2> {shlex.quote(target + '.err')}; "
+                                f"echo $? > {shlex.quote(target + '.rc')}")
+    script = ["#!/bin/bash"]
+    for chain in chains:
+        if chain:
+            script.append("(\n" + "\n".join(chain) + "\n) &")
+    script.append("wait")
+    script_file = scratch / "run.sh"
+    script_file.write_bytes(("\n".join(script) + "\n").encode())
+    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "bash", wsl_path(script_file)],
+                   stdin=subprocess.DEVNULL, check=True)
+    results = []
+    for k in range(len(commands)):
+        read = lambda ext: (scratch / f"{k}.{ext}").read_bytes().decode("utf-8", "replace")
+        results.append(Result(read("out"), read("err"), int(read("rc").strip() or "-1")))
+    for f in scratch.iterdir():
+        f.unlink()
+    scratch.rmdir()
+    return results
 
 
 def is_container(path: Path) -> bool:
@@ -109,22 +186,34 @@ def raw_format(path: Path) -> list[str]:
     return [] if is_container(path) else ["-f", "h264"]
 
 
-def ffprobe(path: Path, *args: str) -> dict:
-    out = run(["ffprobe", "-v", "error", *args, "-of", "json", *raw_format(path),
-               str(path)]).stdout
-    return json.loads(out or "{}")
+def ffprobe(path: Path, *args: str) -> list[str]:
+    """An ffprobe run on `path` writing JSON."""
+    return [f"{FFMPEG}/ffprobe", "-v", "error", *args, "-of", "json", *raw_format(path),
+            wsl_path(path)]
 
 
-def packets(path: Path, container: bool) -> tuple[list[tuple[int, int]], bytes]:
-    """Each video packet's size and position; for a container, also the
-    packets' bytes end to end. A raw stream's packets must tile the file."""
+def json_of(r: Result) -> dict:
+    """ffprobe's JSON; output it cut short fails the stream, not the run."""
+    try:
+        return json.loads(r.out or "{}")
+    except ValueError as e:
+        raise SystemExit(f"ffprobe wrote no JSON ({e}), exit {r.status}: {r.err[-300:]}") from e
+
+
+def packets_command(path: Path, container: bool) -> list[str]:
     entries = "packet=pos,size" + (",data" if container else "")
     args = ["-select_streams", "v:0", "-show_entries", entries]
     if container:
         args += ["-show_data", "-data_dump_format", "base64"]
+    return ffprobe(path, *args)
+
+
+def packets(path: Path, container: bool, r: Result) -> tuple[list[tuple[int, int]], bytes]:
+    """Each video packet's size and position; for a container, also the
+    packets' bytes end to end. A raw stream's packets must tile the file."""
     rows, data = [], bytearray()
     expect_pos = 0
-    for p in ffprobe(path, *args).get("packets", []):
+    for p in json_of(r).get("packets", []):
         size = int(p["size"])
         pos = int(p.get("pos", -1))
         if container:
@@ -139,9 +228,13 @@ def packets(path: Path, container: bool) -> tuple[list[tuple[int, int]], bytes]:
     return rows, bytes(data)
 
 
-def extradata(path: Path) -> bytes:
-    streams = ffprobe(path, "-select_streams", "v:0", "-show_entries", "stream=extradata",
-                      "-show_data", "-data_dump_format", "base64").get("streams", [])
+def extradata_command(path: Path) -> list[str]:
+    return ffprobe(path, "-select_streams", "v:0", "-show_entries", "stream=extradata",
+                   "-show_data", "-data_dump_format", "base64")
+
+
+def extradata(r: Result) -> bytes:
+    streams = json_of(r).get("streams", [])
     text = streams[0].get("extradata", "") if streams else ""
     return base64.b64decode("".join(text.split()))
 
@@ -152,22 +245,25 @@ PROBED = "After avformat_find_stream_info()"
 PROBE_READ = re.compile(r"frames:(\d+)")
 
 
-def decoder_lines(path: Path, debug: str) -> tuple[list[str], list[str], int]:
-    """What FFmpeg's H.264 decoders log with `-debug <debug>`, each line
-    without its `[h264 @ ...]` prefix: first the probe's -- the decoder
-    FFmpeg decodes the first pictures with to learn the stream's format,
-    which logs before FFmpeg says probing is over -- then the decoder's that
-    shows the stream; and how many packets probing read, each of which it
-    offered the probe (`count` in `avformat_find_stream_info`).
-
-    ffprobe, not ffmpeg, decodes for these lines: ffmpeg's demuxer,
+def decoder_lines_command(path: Path, debug: str) -> list[str]:
+    """ffprobe, not ffmpeg, decodes for these lines: ffmpeg's demuxer,
     decoder, filter and muxer are threads that log independently, and a
     message the decoder logs while another thread is part way through a
     line comes out without its prefix -- lost to any reading of the log.
     ffprobe decodes in one thread. Repeated lines are not folded."""
-    err = run(["ffprobe", "-loglevel", "repeat+debug", "-threads", "1", "-debug", debug,
-               *raw_format(path), "-i", str(path), "-select_streams", "v:0",
-               "-show_entries", "frame=pkt_pos", "-of", "csv"]).stderr.splitlines()
+    return [f"{FFMPEG}/ffprobe", "-loglevel", "repeat+debug", "-threads", "1", "-debug", debug,
+            *raw_format(path), "-i", wsl_path(path), "-select_streams", "v:0",
+            "-show_entries", "frame=pkt_pos", "-of", "csv"]
+
+
+def decoder_lines(path: Path, r: Result) -> tuple[list[str], list[str], int]:
+    """What FFmpeg's H.264 decoders logged with `-debug`, each line
+    without its `[h264 @ ...]` prefix: first the probe's -- the decoder
+    FFmpeg decodes the first pictures with to learn the stream's format,
+    which logs before FFmpeg says probing is over -- then the decoder's that
+    shows the stream; and how many packets probing read, each of which it
+    offered the probe (`count` in `avformat_find_stream_info`)."""
+    err = r.err.splitlines()
     start = next((i for i, l in enumerate(err) if PROBED in l), None)
     if start is None:
         raise SystemExit(f"{path}: FFmpeg did not log the end of probing")
@@ -185,26 +281,40 @@ def decoder_lines(path: Path, debug: str) -> tuple[list[str], list[str], int]:
     return own(err[:start]), own(err[start + 1:]), int(read.group(1))
 
 
-def frames(path: Path) -> list[str]:
-    out = ffprobe(path, "-threads", "1", "-select_streams", "v:0", "-show_frames",
-                  "-show_entries",
-                  "frame=pkt_pos,pict_type,key_frame,interlaced_frame,top_field_first,repeat_pict")
+def frames_command(path: Path) -> list[str]:
+    return ffprobe(path, "-threads", "1", "-select_streams", "v:0", "-show_frames",
+                   "-show_entries",
+                   "frame=pkt_pos,pict_type,key_frame,interlaced_frame,top_field_first,repeat_pict")
+
+
+def frames(r: Result) -> list[str]:
     return [" ".join(str(f.get(k, "-")) for k in (
         "pkt_pos", "pict_type", "key_frame", "interlaced_frame", "top_field_first",
-        "repeat_pict")) for f in out.get("frames", [])]
+        "repeat_pict")) for f in json_of(r).get("frames", [])]
 
 
 # The lines `-debug mmco` prints about references (h264_refs.c), the rest of
-# what that log level brings filtered out.
+# what that log level brings filtered out -- each without the picture's
+# address some end with, which `%p` prints as `0x55d5c3a0b1c0` or `(nil)` in
+# glibc and as `000001F2C3A0B1C0` on Windows.
 MMCO_LINE = re.compile(
     r"^(short term list:|long term list:|no mmco here|mmco:-?\d+ -?\d+ -?\d+|"
     r"mmco: unref short -?\d+ count \d+|mmco: unref long failure|"
-    r"remove short -?\d+ count \d+|\d+ fn:-?\d+ poc:-?\d+|\d+ -?\d+)( [0-9a-fA-F]+)?$")
+    r"remove short -?\d+ count \d+|\d+ fn:-?\d+ poc:-?\d+|\d+ -?\d+)"
+    r"(?: (?:(?:0x)?[0-9a-fA-F]+|\(nil\)))?$")
 
 
-def delay(path: Path) -> int:
-    streams = ffprobe(path, "-select_streams", "v:0", "-show_entries",
-                      "stream=has_b_frames").get("streams", [])
+def mmco_lines(main: list[str]) -> list[str]:
+    """The marking lines among a decoder's `-debug mmco` lines."""
+    return [m.group(1) for m in map(MMCO_LINE.match, main) if m]
+
+
+def delay_command(path: Path) -> list[str]:
+    return ffprobe(path, "-select_streams", "v:0", "-show_entries", "stream=has_b_frames")
+
+
+def delay(r: Result) -> int:
+    streams = json_of(r).get("streams", [])
     return int(streams[0].get("has_b_frames", 0)) if streams else 0
 
 
@@ -219,13 +329,34 @@ def sibling(dest: Path, suffix: str) -> Path:
 FAILED: list[str] = []
 
 
-def describe(name: str, path: Path, container: bool, out: Path) -> list[str]:
-    """Write FFmpeg's view of one stream under <out>/<name>; give back its
-    slice lines (those of the decoder that shows it). A stream FFmpeg makes
+def describe_commands(path: Path, container: bool) -> list[list[str]]:
+    """What `describe` asks FFmpeg of a stream, in the order it reads it."""
+    return [packets_command(path, container), extradata_command(path),
+            decoder_lines_command(path, "pict"), frames_command(path), delay_command(path),
+            decoder_lines_command(path, "mmco")]
+
+
+def describe_all(streams: list[tuple[str, Path, bool]], out: Path,
+                 jobs: int) -> dict[str, list[str]]:
+    """`describe` every stream, FFmpeg run for them all at once; each one's
+    slice lines by its name."""
+    commands = [describe_commands(path, container) for _, path, container in streams]
+    results = run_all([c for cs in commands for c in cs], out / ".describe-scratch", jobs)
+    found, at = {}, 0
+    for (name, path, container), cs in zip(streams, commands):
+        found[name] = describe(name, path, container, out, results[at:at + len(cs)])
+        at += len(cs)
+    return found
+
+
+def describe(name: str, path: Path, container: bool, out: Path, r: list[Result]) -> list[str]:
+    """Write FFmpeg's view of one stream under <out>/<name> from what it
+    made of it (`r`, as `describe_commands` asked); give back its slice
+    lines (those of the decoder that shows it). A stream FFmpeg makes
     nothing of is reported and left out, its partial lines removed, rather
     than ending the run."""
     try:
-        return describe_one(name, path, container, out)
+        return describe_one(name, path, container, out, r)
     except SystemExit as e:
         for leftover in (out / name).parent.glob(f"{(out / name).name}.*"):
             leftover.unlink()
@@ -234,20 +365,21 @@ def describe(name: str, path: Path, container: bool, out: Path) -> list[str]:
         return []
 
 
-def describe_one(name: str, path: Path, container: bool, out: Path) -> list[str]:
+def describe_one(name: str, path: Path, container: bool, out: Path,
+                 r: list[Result]) -> list[str]:
     dest = out / name
     dest.parent.mkdir(parents=True, exist_ok=True)
-    rows, data = packets(path, container)
+    rows, data = packets(path, container, r[0])
     if not container and sum(s for s, _ in rows) != path.stat().st_size:
         print(f"{name}: packets cover {sum(s for s, _ in rows)} of {path.stat().st_size} bytes",
               flush=True)
     write_lines(sibling(dest, ".packets"), [f"{s} {p}" for s, p in rows])
     if container:
         sibling(dest, ".data").write_bytes(data)
-    extra = extradata(path)
+    extra = extradata(r[1])
     if extra:
         sibling(dest, ".extradata").write_bytes(extra)
-    _, main, read = decoder_lines(path, "pict")
+    _, main, read = decoder_lines(path, r[2])
     slices = [l for l in main if l.startswith("slice:")]
     write_lines(sibling(dest, ".pict"), slices)
     if not container:
@@ -255,11 +387,10 @@ def describe_one(name: str, path: Path, container: bool, out: Path) -> list[str]
         seen_b = "".join("B" if parser_saw_b(raw[at:at + size]) else "."
                          for size, at in rows[:read])
         write_lines(sibling(dest, ".probe"), [str(read), seen_b])
-    write_lines(sibling(dest, ".frames"), frames(path))
-    write_lines(sibling(dest, ".delay"), [str(delay(path))])
-    _, main, _ = decoder_lines(path, "mmco")
-    write_lines(sibling(dest, ".mmco"),
-                [m.group(1) for m in map(MMCO_LINE.match, main) if m])
+    write_lines(sibling(dest, ".frames"), frames(r[3]))
+    write_lines(sibling(dest, ".delay"), [str(delay(r[4]))])
+    _, main, _ = decoder_lines(path, r[5])
+    write_lines(sibling(dest, ".mmco"), mmco_lines(main))
     print(f"{name}: {len(rows)} packets, {len(slices)} slices", flush=True)
     return slices
 
@@ -452,6 +583,81 @@ def cuts(name: str, data: bytes, sizes: list[int], slices: list[str],
     return made
 
 
+# Packets kept after a damaged one: enough to see what the damage passes on
+# through prediction, and where it ends.
+DAMAGE_LENGTH = 30
+
+
+def corrupt(raw: bytes) -> bytes:
+    """A NAL unit with a few bytes of its slice data changed, at a third,
+    a half and two thirds of its length. A zero byte is left alone, and so
+    is a byte after two zeros; no byte is made zero: the unit keeps its
+    escaping, and no start code appears in it."""
+    out = bytearray(raw)
+    for at in sorted({len(raw) // 3, len(raw) // 3 + 7, len(raw) // 2, 2 * len(raw) // 3}):
+        if at < 4 or at >= len(out) or out[at] == 0 or (out[at - 1] == 0 and out[at - 2] == 0):
+            continue
+        out[at] ^= 0x5A if out[at] != 0x5A else 0xA5
+    return bytes(out)
+
+
+def damages(name: str, data: bytes, sizes: list[int], slices: list[str],
+            out: Path) -> list[tuple[str, Path]]:
+    """Write damaged versions of a raw stream; give back their names and
+    paths. Damaged is one P or B picture past the first few -- with pictures
+    before it to conceal it from -- its second slice dropped (`d`), its
+    first slice cut to half (`t`), or a few bytes of its first slice changed
+    (`x`); and one I picture past the first, its first slice cut to half
+    (`t`), whose concealment weighs the picture before against the
+    neighbours. Each runs from the stream's start to `DAMAGE_LENGTH`
+    packets after the damage."""
+    pk = classify(data, sizes, slices)
+    if pk is None:
+        print(f"{name}: slices do not map onto packets; not damaged", flush=True)
+        return []
+    made = []
+
+    def write(kind: str, k: int, change) -> None:
+        vcl = [i for i, n in enumerate(pk[k].nals) if n.type in (1, 5)]
+        nals = change(list(pk[k].nals), vcl)
+        if nals is None:
+            return
+        end = pk[min(k + 1 + DAMAGE_LENGTH, len(pk)) - 1]
+        body = (data[:pk[k].pos] + b"".join(START_CODE + n.raw for n in nals)
+                + data[pk[k].pos + pk[k].size:end.pos + end.size])
+        damaged = f"damaged/{name}~{kind}{k}.h264"
+        (out / damaged).parent.mkdir(parents=True, exist_ok=True)
+        (out / damaged).write_bytes(body)
+        made.append((damaged, out / damaged))
+
+    def drop_second(nals: list[Nal], vcl: list[int]) -> list[Nal] | None:
+        return None if len(vcl) < 2 else nals[:vcl[1]] + nals[vcl[1] + 1:]
+
+    def halve_first(nals: list[Nal], vcl: list[int]) -> list[Nal] | None:
+        if not vcl:
+            return None
+        n = nals[vcl[0]]
+        nals[vcl[0]] = Nal(n.type, n.ref_idc, n.raw[:max(4, len(n.raw) // 2)])
+        return nals
+
+    def corrupt_first(nals: list[Nal], vcl: list[int]) -> list[Nal] | None:
+        if not vcl:
+            return None
+        n = nals[vcl[0]]
+        nals[vcl[0]] = Nal(n.type, n.ref_idc, corrupt(n.raw))
+        return nals
+
+    inter = next((k for k in range(3, len(pk)) if pk[k].types & {"P", "B"}), None)
+    if inter is not None:
+        write("d", inter, drop_second)
+        write("t", inter, halve_first)
+        write("x", inter, corrupt_first)
+    intra = next((k for k in range(1, len(pk)) if pk[k].types == {"I"}), None)
+    if intra is not None:
+        write("t", intra, halve_first)
+    return made
+
+
 # --- Streams made with libx264 ----------------------------------------------
 
 # x264's picture timing SEI with no HRD, after its start code: one byte,
@@ -524,48 +730,28 @@ def sources(fate: Path) -> list[tuple[str, Path, bool]]:
     return found
 
 
-# Where FFmpeg 8.1.3's own build is, in WSL, when `--crc-wsl <dir>` names
-# it: the `.crc` lines are then that build's (`tools/ffdbg/build.sh`).
-CRC_WSL: str | None = None
-
-
-def wsl_path(p: Path) -> str:
-    s = p.resolve().as_posix()
-    return f"/mnt/{s[0].lower()}{s[2:]}"
-
-
-# FFmpeg's options for summing a stream's pictures (see `framecrc`), around
-# its `-i`. -noautoscale: a picture of a new size is summed as the decoder
-# made it, not scaled back to the first picture's size for the encoder.
-CRC_HEAD = ["-hide_banner", "-cpuflags", "0", "-threads", "1", "-flags", "unaligned"]
-CRC_TAIL = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "framecrc", "-"]
-
-
-def crc_lines(out: str) -> list[str]:
-    """The size and sum of each picture in a `framecrc` muxer's output."""
-    return [", ".join(f.strip() for f in l.split(",")[4:6])
-            for l in out.splitlines() if l.strip() and not l.startswith("#")]
-
-
-def framecrc(path: Path) -> list[str]:
-    """Each picture FFmpeg decodes, as its `framecrc` muxer sums it: the
-    size and Adler-32 of its planes end to end, cropped, rows unpadded,
-    16-bit samples little-endian. FFmpeg's C routines only (`-cpuflags 0`),
-    one thread, every picture kept (`-fps_mode passthrough`) at the size it
-    was decoded (`-noautoscale`), and cropped exactly as the SPS says
-    (`-flags unaligned`: otherwise FFmpeg keeps a left crop that would
-    leave its planes unaligned short, and the picture wider). This is the
-    FFmpeg on PATH; `wsl_framecrc` is the one `.crc` comes from."""
-    return crc_lines(run(["ffmpeg", "-loglevel", "error", *CRC_HEAD, *raw_format(path),
-                          "-i", str(path), *CRC_TAIL]).stdout)
+# FFmpeg's options for summing a stream's pictures (see `framecrcs`), around
+# its `-i`; after it, every picture kept (`-fps_mode passthrough`) at the
+# size it was decoded (`-noautoscale`), written nowhere. FFmpeg's C routines
+# only (`-cpuflags 0`, which this build, without assembly, has anyway), one
+# thread, and cropped exactly as the SPS says (`-flags unaligned`: otherwise
+# FFmpeg keeps a left crop that would leave its planes unaligned short, and
+# the picture wider). It logs nothing (`-loglevel quiet`), so that the
+# probe's lines are its whole stderr: its messages come from other threads
+# too -- the demuxer's parser -- and one whose prefix lands in front of a
+# probe line hides it.
+CRC_HEAD = ["-nostdin", "-hide_banner", "-loglevel", "quiet", "-cpuflags", "0", "-threads", "1",
+            "-flags", "unaligned"]
+CRC_TAIL = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "rawvideo",
+            "-y", "/dev/null"]
 
 
 def decoder_crc_lines(err: str) -> list[str]:
     """The size and sum of each picture the main decoder handed out, from
-    the 8.1.3 build's `FFDBG_FRAMECRC` lines: `DECODER d=<n>` as each
-    decoder opens, `FRAMECRC d=<n> <size>, 0x<sum>` for each frame. The main
-    decoder is the last opened, after avformat_find_stream_info's -- which
-    may show pictures the main one never does."""
+    the build's `FFDBG_FRAMECRC` lines: `DECODER d=<n>` as each decoder
+    opens, `FRAMECRC d=<n> <size>, 0x<sum>` for each frame. The main decoder
+    is the last opened, after avformat_find_stream_info's -- which may show
+    pictures the main one never does."""
     main = 0
     lines: dict[int, list[str]] = {}
     for l in err.splitlines():
@@ -577,87 +763,50 @@ def decoder_crc_lines(err: str) -> list[str]:
     return lines.get(main, [])
 
 
-def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]:
-    """Each picture of each of `paths` as FFmpeg 8.1.3's own build in WSL
-    hands it out, in `CRC_WSL` (`tools/ffdbg/build.sh`): the release this
-    decoder is a translation of, built with no assembly at all. Another
-    build parts from it where FFmpeg has changed since -- the March 2026
-    snapshot `.crc` was first made with shows four cut streams' pictures
-    differently.
+def framecrcs(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]:
+    """Each picture of each of `paths` as FFmpeg hands it out, summed as
+    its `framecrc` muxer sums a picture: the size and Adler-32 of its planes
+    end to end, cropped, rows unpadded, 16-bit samples little-endian.
 
     The sums are taken as each picture leaves the decoder (`FFDBG_FRAMECRC`),
-    cropped exactly, summed as `framecrc` sums a picture -- not from what
-    the command line passes on: that converts every picture to the first
-    one's pixel format for its encoder, so a stream that changes depth or
-    chroma format midway would be summed converted.
+    cropped exactly -- not from what the command line passes on: that
+    converts every picture to the first one's pixel format for its encoder,
+    so a stream that changes depth or chroma format midway would be summed
+    converted.
 
-    That build fills every picture it starts with one byte; each stream is
+    The build fills every picture it starts with one byte; each stream is
     run with one byte and then with another. A picture whose sum moves with
     the byte holds samples FFmpeg never wrote -- handed out undecoded, or
     part of it reached by no slice -- which in an ordinary build are
     whatever memory its buffer pool hands back, and differ from run to run:
-    it is `<size>, ?`.
-
-    FFmpeg logs nothing in these runs, so the probe's lines are their whole
-    stderr: its messages come from other threads too -- the demuxer's
-    parser -- and one whose prefix lands in front of a probe line hides it.
-
-    The runs are one bash script, `jobs` chains of them at once, started by
-    a single `wsl.exe`: with ten `wsl.exe` at once, some exit -1 partway
-    through their output."""
-    # A build that does not run would sum nothing, which some streams also
-    # sum -- FFmpeg shows none of a stream it never recovers in.
-    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", f"{CRC_WSL}/ffmpeg", "-hide_banner",
-                    "-version"], stdin=subprocess.DEVNULL, capture_output=True, check=True)
-    scratch.mkdir(parents=True, exist_ok=True)
-    chains: list[list[str]] = [[] for _ in range(jobs)]
-    tail = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "rawvideo",
-            "-y", "/dev/null"]
+    it is `<size>, ?`."""
+    commands = [[f"FFDBG_FILL={fill}", "FFDBG_FRAMECRC=1", f"{FFMPEG}/ffmpeg", *CRC_HEAD,
+                 *raw_format(path), "-i", wsl_path(path), *CRC_TAIL]
+                for path in paths for fill in (0, 255)]
+    results = run_all(commands, scratch, jobs)
+    sums = []
     for i, path in enumerate(paths):
-        for fill in (0, 255):
-            args = [f"FFDBG_FILL={fill}", "FFDBG_FRAMECRC=1", f"{CRC_WSL}/ffmpeg", "-nostdin",
-                    "-loglevel", "quiet", *CRC_HEAD, *raw_format(path), "-i", wsl_path(path),
-                    *tail]
-            target = wsl_path(scratch / f"{i}.{fill}")
-            chains[i % jobs].append(" ".join(shlex.quote(a) if not a.startswith("FFDBG_") else a
-                                             for a in args) + f" 2> {shlex.quote(target)} >/dev/null")
-    script = ["#!/bin/bash"]
-    for chain in chains:
-        if chain:
-            script.append("(\n" + "\n".join(chain) + "\n) &")
-    script.append("wait")
-    script_file = scratch / "run.sh"
-    script_file.write_bytes(("\n".join(script) + "\n").encode())
-    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "bash", wsl_path(script_file)],
-                   stdin=subprocess.DEVNULL, check=True)
-    result = []
-    for i, path in enumerate(paths):
-        a, b = (decoder_crc_lines((scratch / f"{i}.{fill}").read_text(encoding="utf-8",
-                                                                        errors="replace"))
-                for fill in (0, 255))
+        a, b = (decoder_crc_lines(r.err) for r in results[2 * i:2 * i + 2])
         if len(a) != len(b):
             raise SystemExit(f"{path}: {len(a)} pictures with one fill, {len(b)} with the other")
-        result.append([x if x == y else f"{x.split(',')[0]}, ?" for x, y in zip(a, b)])
-    for f in scratch.iterdir():
-        f.unlink()
-    scratch.rmdir()
-    return result
+        sums.append([x if x == y else f"{x.split(',')[0]}, ?" for x, y in zip(a, b)])
+    return sums
 
 
-def add_crc(fate: Path, out: Path, jobs: int) -> None:
-    """`.crc` beside every stream already described under `out`: the
+def described(fate: Path, out: Path) -> tuple[list[str], list[Path]]:
+    """Every stream already described under `out`, and where it is: the
     stream made here if it is there, else the FATE sample of its name."""
     names = sorted(str(p.relative_to(out).as_posix())[:-len(".packets")]
                    for p in out.rglob("*.packets"))
-    paths = [(out / n) if (out / n).is_file() else fate / n for n in names]
-    if CRC_WSL:
-        sums = wsl_framecrc(paths, out / ".crc-scratch", jobs)
-    else:
-        with ThreadPoolExecutor(jobs) as pool:
-            sums = list(pool.map(framecrc, paths))
+    return names, [(out / n) if (out / n).is_file() else fate / n for n in names]
+
+
+def add_crc(fate: Path, out: Path, jobs: int) -> None:
+    """`.crc` beside every stream already described under `out`."""
+    names, paths = described(fate, out)
+    sums = framecrcs(paths, out / ".crc-scratch", jobs)
     # The pictures summed are the pictures ffprobe saw handed out (`.frames`):
-    # a count that differs is a run that failed, or a build that decodes
-    # differently from the one `.frames` came from.
+    # a count that differs is a run that failed.
     def shown(name: str) -> int:
         return len(sibling(out / name, ".frames").read_text(encoding="utf-8").splitlines())
 
@@ -674,21 +823,61 @@ def add_size(fate: Path, out: Path, jobs: int) -> None:
     """`.size` beside every stream already described under `out`: the
     width and height probing finds, which FFmpeg's command line opens the
     decoder that shows the stream with (`width_from_caller`)."""
-    names = sorted(str(p.relative_to(out).as_posix())[:-len(".packets")]
-                   for p in out.rglob("*.packets"))
-
-    def one(name: str) -> None:
-        made = out / name
-        path = made if made.is_file() else fate / name
-        got = run(["ffprobe", "-v", "error", *raw_format(path), "-select_streams", "v:0",
-                   "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)]).stdout
-        w, _, h = got.strip().partition(",")
+    names, paths = described(fate, out)
+    commands = [[f"{FFMPEG}/ffprobe", "-v", "error", *raw_format(path), "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0", wsl_path(path)]
+                for path in paths]
+    for name, r in zip(names, run_all(commands, out / ".size-scratch", jobs)):
+        w, _, h = r.out.strip().partition(",")
         if w.isdigit() and h.isdigit() and int(w) and int(h):
             write_lines(sibling(out / name, ".size"), [f"{w} {h}"])
-
-    with ThreadPoolExecutor(jobs) as pool:
-        list(pool.map(one, names))
     print(f"{len(names)} streams sized")
+
+
+def add_mmco(fate: Path, out: Path, jobs: int) -> None:
+    """`.mmco` written afresh beside every stream already described under
+    `out`: the marking lines of the decoder that shows it."""
+    names, paths = described(fate, out)
+    results = run_all([decoder_lines_command(p, "mmco") for p in paths], out / ".mmco-scratch",
+                      jobs)
+    for name, path, r in zip(names, paths, results):
+        _, main, _ = decoder_lines(path, r)
+        write_lines(sibling(out / name, ".mmco"), mmco_lines(main))
+    print(f"{len(names)} streams' marking lines written")
+
+
+NEWEXTRA_LINE = re.compile(r"^NEWEXTRA pos=(-?\d+) ([0-9a-f]*) h=(\d+)$")
+
+
+def add_newextra(fate: Path, out: Path, jobs: int) -> None:
+    """`.newextra` beside every container stream already described under
+    `out` that brings new extradata with a packet: the lines its decoder
+    that shows the stream -- the last FFmpeg opened, after probing's --
+    printed for it, each packet named by its index in `.packets`."""
+    names, paths = described(fate, out)
+    picked = [(n, p) for n, p in zip(names, paths) if is_container(p)]
+    commands = [["FFDBG_NEWEXTRA=1", f"{FFMPEG}/ffprobe", "-v", "quiet", "-threads", "1",
+                 "-select_streams", "v:0", "-show_entries", "frame=pkt_pos", "-of", "csv",
+                 wsl_path(p)] for _, p in picked]
+    written = 0
+    for (name, _), r in zip(picked, run_all(commands, out / ".newextra-scratch", jobs)):
+        found = [m for m in map(NEWEXTRA_LINE.match, r.err.splitlines()) if m]
+        if not found:
+            continue
+        main = max(int(m.group(3)) for m in found)
+        at = {int(l.split()[1]): k for k, l in enumerate(
+            sibling(out / name, ".packets").read_text(encoding="utf-8").splitlines())}
+        lines = []
+        for m in found:
+            if int(m.group(3)) != main:
+                continue
+            pos = int(m.group(1))
+            if pos not in at:
+                raise SystemExit(f"{name}: new extradata at {pos}, which is no packet's position")
+            lines.append(f"{at[pos]} {m.group(2)}")
+        write_lines(sibling(out / name, ".newextra"), lines)
+        written += 1
+    print(f"{len(picked)} container streams looked at, {written} with new extradata")
 
 
 def main() -> None:
@@ -698,42 +887,66 @@ def main() -> None:
         at = args.index("--jobs")
         jobs = int(args[at + 1])
         del args[at:at + 2]
+    global FFMPEG
+    if "--ffmpeg" in args:
+        at = args.index("--ffmpeg")
+        FFMPEG = args[at + 1]
+        del args[at:at + 2]
+    else:
+        home = subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "printenv", "HOME"],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              check=True).stdout.strip()
+        FFMPEG = f"{home}/ffdbg/src"
     crc_only = "--add-crc" in args
     if crc_only:
         args.remove("--add-crc")
-    if "--crc-wsl" in args:
-        global CRC_WSL
-        at = args.index("--crc-wsl")
-        CRC_WSL = args[at + 1]
-        del args[at:at + 2]
     size_only = "--add-size" in args
     if size_only:
         args.remove("--add-size")
+    newextra_only = "--add-newextra" in args
+    if newextra_only:
+        args.remove("--add-newextra")
+    mmco_only = "--add-mmco" in args
+    if mmco_only:
+        args.remove("--add-mmco")
     fate, out = Path(args[0]), Path(args[1])
+    if mmco_only:
+        add_mmco(fate, out, jobs)
+        return
     if crc_only:
         add_crc(fate, out, jobs)
         return
     if size_only:
         add_size(fate, out, jobs)
         return
+    if newextra_only:
+        add_newextra(fate, out, jobs)
+        return
     streams = sources(fate) + [(n, p, False) for n, p in make_x264(out)]
-
-    def base(item: tuple[str, Path, bool]) -> list[tuple[str, Path]]:
-        name, path, container = item
-        slices = describe(name, path, container, out)
+    slices = describe_all(streams, out, jobs)
+    cut_streams, damaged_streams = [], []
+    for name, path, container in streams:
         if container or name in FAILED:
-            return []
-        data = path.read_bytes()
+            continue
         sizes = [int(l.split()[0]) for l in
                  sibling(out / name, ".packets").read_text(encoding="utf-8").splitlines()]
-        return cuts(name, data, sizes, slices, out)
-
-    with ThreadPoolExecutor(jobs) as pool:
-        cut_streams = [c for made in pool.map(base, streams) for c in made]
-        list(pool.map(lambda c: describe(c[0], c[1], False, out), cut_streams))
-    print(f"{len(streams)} streams, {len(cut_streams)} cut from them")
+        data = path.read_bytes()
+        cut_streams += cuts(name, data, sizes, slices[name], out)
+        damaged_streams += damages(name, data, sizes, slices[name], out)
+    describe_all([(c, p, False) for c, p in cut_streams + damaged_streams], out, jobs)
+    # A damaged stream FFmpeg makes nothing of is one the damage went too
+    # far in: it goes, stream and all. Any other is an error.
+    for name in [n for n in FAILED if n.startswith("damaged/")]:
+        (out / name).unlink()
+        FAILED.remove(name)
+        print(f"{name}: dropped, FFmpeg makes nothing of it", flush=True)
+    print(f"{len(streams)} streams, {len(cut_streams)} cut from them, "
+          f"{len(damaged_streams)} damaged")
     if FAILED:
         raise SystemExit(f"{len(FAILED)} streams FFmpeg made nothing of: {', '.join(FAILED)}")
+    add_crc(fate, out, jobs)
+    add_size(fate, out, jobs)
+    add_newextra(fate, out, jobs)
 
 
 if __name__ == "__main__":

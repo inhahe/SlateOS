@@ -36,6 +36,10 @@
 #               frame to the first one's format for its encoder. What
 #               tools/pict_expect.py --crc-wsl reads.
 #   FFDBG_ER    when error concealment conceals anything.
+#   FFDBG_NEWEXTRA
+#               each packet's new extradata as the decoder takes it up:
+#               "NEWEXTRA pos=<packet position> <hex> h=N". What
+#               tools/pict_expect.py --add-newextra reads.
 #   FFDBG_FILL  every picture started filled with this byte (0-255), so
 #               samples FFmpeg never writes show as it rather than as
 #               whatever memory its buffer pool hands back.

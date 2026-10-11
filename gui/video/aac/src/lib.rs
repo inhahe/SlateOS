@@ -16,6 +16,9 @@
 //!   (`mpeg4audio.c`).
 //! - [`layout`]: which channel each element is, and the order FFmpeg's
 //!   output gives them in (`aacdec.c`, `aacdec_tab.c`).
+//! - [`config`]: the AudioSpecificConfig's GA and ELD parts, program
+//!   config elements and ADTS headers, as the decoder takes them up
+//!   (`aacdec.c`, `adts_header.c`).
 //! - [`context`]: the decoder's state and its channel elements, and how a
 //!   configuration sets them up (`aacdec.h`, `aacdec.c`).
 //! - [`softfloat`]: libavutil's integer floating point, which prediction,
@@ -33,6 +36,7 @@
               decoder above it is in, and this allow goes then"
 )]
 
+pub(crate) mod config;
 pub(crate) mod context;
 pub(crate) mod layout;
 pub(crate) mod mpeg4audio;

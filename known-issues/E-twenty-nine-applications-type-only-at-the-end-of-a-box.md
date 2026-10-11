@@ -22,10 +22,12 @@ and Backspace `pop`s it.
 
 **The twenty-nine:** none left -- every one is done (below).
 
-**A thirtieth, found 2026-10-10:** `flashcards`' search box, which the
-sweep missed because its typing came in by the key's name (`handle_key`)
-rather than as a key event. It edits at a caret on lane E's branch, the
-same day, with its right-click menu.
+**More found 2026-10-10:** `flashcards`' search box, which the sweep
+missed because its typing came in by the key's name (`handle_key`) rather
+than as a key event; and `finance`'s, whose typed text was pushed onto the
+search while its Backspace and Escape went by name. Both edit at a caret on
+lane E's branch, the same day, with their right-click menus. `calendar`'s
+and `reminders`' search boxes are next, the same shape.
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;

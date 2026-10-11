@@ -27,7 +27,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -392,6 +392,21 @@ impl FormField {
 /// The most characters any of a form's boxes holds.
 const FIELD_CAPACITY: usize = 200;
 
+/// The most characters the search box takes.
+const SEARCH_CAPACITY: usize = 256;
+
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 13.0;
+
+/// The text field a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The search box.
+    Search,
+    /// A text field of the form that is up.
+    Form(FormField),
+}
+
 /// A form's box holding `text`, taking at most [`FIELD_CAPACITY`]
 /// characters.
 fn form_field(text: &str) -> TextInput {
@@ -584,8 +599,11 @@ struct FinanceApp {
     form: Option<Form>,
     field: FormField,
     form_error: Option<String>,
-    /// The fields' clipboard.
-    clipboard: String,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it.
+    search_editor: TextInput,
+    /// A text field's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// A delete waiting on its answer.
     pending_delete: Option<Doomed>,
     /// The chosen account, by id, and budget, by its category's place in
@@ -707,7 +725,8 @@ impl FinanceApp {
             form: None,
             field: FormField::Date,
             form_error: None,
-            clipboard: String::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
             pending_delete: None,
             selected_account: None,
             selected_budget: 0,
@@ -1781,14 +1800,10 @@ impl FinanceApp {
             }
             _ => {
                 let which = self.field;
-                let clipboard = self.clipboard.clone();
                 let Some(input) = self.form.as_mut().and_then(|f| f.input(which)) else {
                     return EventResult::Ignored;
                 };
-                let done = textline::apply_key(input, key, &clipboard, 13.0);
-                if let Some(copied) = done.copied {
-                    self.clipboard = copied;
-                }
+                let done = textline::apply_key_on_clipboard(input, key, 13.0);
                 if done.handled {
                     self.form_error = None;
                     EventResult::Consumed
@@ -2030,25 +2045,6 @@ impl FinanceApp {
 
     // ── Key handling ────────────────────────────────────────────────
     fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
-        if self.search_active {
-            match key {
-                "Escape" => {
-                    self.search_active = false;
-                    self.search_query.clear();
-                    self.reanchor_selection();
-                }
-                "Backspace" => {
-                    self.search_query.pop();
-                    self.reanchor_selection();
-                }
-                // Out of the box with the search kept, so the rows it found
-                // can be walked.
-                "Return" => self.search_active = false,
-                _ => {}
-            }
-            self.keep_lists_in_view();
-            return;
-        }
         match key {
             "1" => self.screen = Screen::Dashboard,
             "2" => self.screen = Screen::Transactions,
@@ -2095,11 +2091,134 @@ impl FinanceApp {
         self.keep_lists_in_view();
     }
 
-    fn handle_search_text(&mut self, text: &str) {
-        if self.search_active {
-            self.search_query.push_str(text);
+    /// Reload the search box's editor from the search, if the search
+    /// changed underneath it.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: the list follows it.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            self.search_query = text.to_owned();
             self.reanchor_selection();
         }
+    }
+
+    /// A key for the search box while it has the keyboard: Escape leaves it
+    /// and shows every transaction again, Enter leaves it keeping the
+    /// search so the rows it found can be walked, and the rest is the
+    /// box's (`textline::apply_key_on_clipboard`), on the program's
+    /// clipboard. It takes every key but a chord of the window's or the
+    /// desktop's.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
+        match key.key {
+            Key::Escape if plain => {
+                self.search_active = false;
+                self.set_search("");
+            }
+            Key::Enter if plain => self.search_active = false,
+            _ => {
+                self.sync_search_editor();
+                let edit = textline::apply_key_on_clipboard(
+                    &mut self.search_editor,
+                    key,
+                    SEARCH_TEXT_SIZE,
+                );
+                let typed = self.search_editor.text().to_owned();
+                self.set_search(&typed);
+                if !(edit.handled || plain || textline::types_into_field(key)) {
+                    return EventResult::Ignored;
+                }
+            }
+        }
+        self.keep_lists_in_view();
+        EventResult::Consumed
+    }
+
+    /// A press in the search box at `x`: the caret where it landed.
+    fn place_search_caret(&mut self, rect: Rect, x: f32) {
+        let drawn = if self.search_active {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::default()
+        };
+        self.sync_search_editor();
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 110.0).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - 12.0,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
+    }
+
+    /// A right press: over the search box or one of the form's text
+    /// fields, that field's menu where the press landed, the field given
+    /// the keyboard and its caret and selection left as they are, so Cut
+    /// and Copy act on what the user selected (design-decisions 1454).
+    /// Anywhere else, or while the shortcut card or a question is up,
+    /// nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        if self.show_help || self.pending_delete.is_some() {
+            return EventResult::Ignored;
+        }
+        // The frame as it is now, as a left press reads it.
+        let field = match self.frame().hit_test(x, y) {
+            Some(Target::Search) if self.form.is_none() => {
+                self.screen = Screen::Transactions;
+                self.search_active = true;
+                self.sync_search_editor();
+                MenuField::Search
+            }
+            Some(Target::Field(field)) if field.is_text() && self.form.is_some() => {
+                self.field = field;
+                MenuField::Form(field)
+            }
+            _ => return EventResult::Ignored,
+        };
+        let rows = match field {
+            MenuField::Search => self.search_editor.edit_menu(),
+            MenuField::Form(which) => {
+                let Some(input) = self.form.as_mut().and_then(|form| form.input(which)) else {
+                    return EventResult::Ignored;
+                };
+                input.edit_menu()
+            }
+        };
+        let viewport = (self.width, self.height);
+        self.field_menu.open(field, rows, x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for `field`: done to it as its key would
+    /// be, the list following a change to the search and a form's
+    /// complaint put away by a change to the form.
+    fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
+        match field {
+            MenuField::Search => {
+                self.sync_search_editor();
+                if self.search_editor.edit_command(id) == KeyEdit::Changed {
+                    let typed = self.search_editor.text().to_owned();
+                    self.set_search(&typed);
+                    self.keep_lists_in_view();
+                }
+            }
+            MenuField::Form(which) => {
+                if let Some(input) = self.form.as_mut().and_then(|form| form.input(which))
+                    && input.edit_command(id) == KeyEdit::Changed
+                {
+                    self.form_error = None;
+                }
+            }
+        }
+        EventResult::Consumed
     }
 
     fn format_currency(cents: i64) -> String {
@@ -2156,16 +2275,39 @@ impl FinanceApp {
 
     /// Route a compositor event into the app.
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A text field's right-click menu takes the presses, the keys, the
+        // pointer and the wheel while it is up, as any menu does -- a row
+        // chosen, a press outside putting it away and reaching nothing under
+        // it, a right press there opening that field's own -- and is put
+        // away by a resize.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => return self.do_menu_row(field, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::Key(key_ev) => self.handle_key_event(key_ev),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            // Midnight, or near enough to check.
-            Event::Tick { .. } => {
+            // Midnight, or near enough to check -- and the menu's wait.
+            Event::Tick { elapsed_ms } => {
+                let menu = self.field_menu.tick(*elapsed_ms);
                 let Some(today) = today_from_clock() else {
-                    return EventResult::Ignored;
+                    return if menu {
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    };
                 };
                 if today == self.current_date {
-                    return EventResult::Ignored;
+                    return if menu {
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    };
                 }
                 // The view follows the month if it was on this one.
                 if self.view_month.same_month(&self.current_date) {
@@ -2235,13 +2377,13 @@ impl FinanceApp {
             return self.handle_form_key(key);
         }
 
-        // While searching, a typed character is search text and not a shortcut:
-        // a search for "1" must not be read as "switch to the dashboard". What
-        // a key typed: AltGr's among it -- refused, with Ctrl held -- and not a
-        // command's letter, which a chord carries.
-        if self.search_active && textline::types_into_field(key) {
-            self.handle_search_text(&key.text);
-            return EventResult::Consumed;
+        // While searching, the box takes its keys: a typed character is
+        // search text and not a shortcut -- a search for "1" must not be
+        // read as "switch to the dashboard" -- and the caret keys,
+        // Backspace, Delete and the clipboard's chords are the box's. Ctrl+D
+        // still asks to delete the transaction chosen.
+        if self.search_active && !(textline::is_ctrl_chord(key.modifiers) && key.key == Key::D) {
+            return self.search_key(key);
         }
 
         // Ctrl+D is the one Ctrl chord: Ctrl+C cycled the category filter
@@ -3199,34 +3341,59 @@ impl FinanceApp {
             self.focus_ring_width,
         );
         let room = (rect.w - 110.0).max(0.0);
-        let placeholder = self.search_query.is_empty() && !self.search_active;
-        f.push(RenderCommand::Text {
-            x: rect.x + 12.0,
-            y: rect.y + 8.0,
-            text: if placeholder {
-                String::from("Search every month  ( / )")
-            } else {
-                self.search_query.clone()
-            },
-            font_size: 13.0,
-            color: if placeholder {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(room),
-            overflow: TextOverflow::Ellipsis,
-        });
         if self.search_active {
-            let typed = guitk::text::measure(&self.search_query, 13.0, FontWeightHint::Regular);
-            f.push(RenderCommand::FillRect {
-                x: rect.x + 12.0 + typed.min(room),
-                y: rect.y + 7.0,
-                width: textedit::CARET_WIDTH,
-                height: 18.0,
-                color: self.palette.text,
-                corner_radii: CornerRadii::ZERO,
+            // The box with the keyboard: its text, with the caret and the
+            // selection where they are -- the end of the text if the search
+            // changed under the box's editor.
+            let synced = self.search_editor.text() == self.search_query;
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: true,
+                    x: rect.x + 12.0,
+                    y: rect.y + 7.0,
+                    width: room,
+                    line_height: 18.0,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            f.extend(tree.commands);
+        } else {
+            let placeholder = self.search_query.is_empty();
+            f.push(RenderCommand::Text {
+                x: rect.x + 12.0,
+                y: rect.y + 8.0,
+                text: if placeholder {
+                    String::from("Search every month  ( / )")
+                } else {
+                    self.search_query.clone()
+                },
+                font_size: SEARCH_TEXT_SIZE,
+                color: if placeholder {
+                    self.palette.subtext0
+                } else {
+                    self.palette.text
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(room),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         if !self.search_query.is_empty() {
@@ -4121,8 +4288,14 @@ impl FinanceApp {
                 {
                     self.place_caret(field, rect, event.x);
                 }
+                if target == Target::Search
+                    && let Some(rect) = frame.rect_of(|t| *t == target)
+                {
+                    self.place_search_caret(rect, event.x);
+                }
                 self.press(target)
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             MouseEventKind::Move => {
                 let over = self.target_at(event.x, event.y);
                 if over == self.hover {
@@ -4324,7 +4497,12 @@ impl App for FinanceApp {
     /// the same day answers `Ignored` and costs a clock read, not a frame.
     fn tick_interval(&self) -> Option<Duration> {
         let left = clock_now().map_or(3600, |(_, left)| left.saturating_add(1));
-        Some(Duration::from_secs(left.min(3600)))
+        let day = Duration::from_secs(left.min(3600));
+        Some(
+            self.field_menu
+                .due_in()
+                .map_or(day, |ms| Duration::from_millis(ms).min(day)),
+        )
     }
 
     /// Watch the ledger's file, so another window's save reaches this one
@@ -4386,6 +4564,7 @@ impl App for FinanceApp {
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
         let mut tree = frame.into_tree();
+        tree.commands.extend(self.field_menu.render(&self.palette));
         // Over everything.
         let palette = self.palette;
         if let Some(question) = self.question.as_mut() {
@@ -5296,7 +5475,7 @@ mod tests {
         let mut app = FinanceApp::with_sample_data();
         app.handle_key("/", false, false);
         assert!(app.search_active);
-        app.handle_key("Escape", false, false);
+        app.handle_event(&keyed(Key::Escape, ""));
         assert!(!app.search_active);
     }
 
@@ -5369,14 +5548,6 @@ mod tests {
         // At the top, Up stays put rather than wrapping to the bottom.
         app.handle_key("Up", false, false);
         assert_eq!(app.selected_id, visible.first().copied());
-    }
-
-    #[test]
-    fn test_handle_search_text() {
-        let mut app = FinanceApp::with_sample_data();
-        app.search_active = true;
-        app.handle_search_text("test");
-        assert_eq!(app.search_query, "test");
     }
 
     #[test]
@@ -6462,6 +6633,196 @@ mod tests {
             app.visible_ids().contains(&newest),
             "the filter still hides it"
         );
+    }
+
+    /// **The search box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces. It
+    /// typed only at its end, and Backspace from the end was its only edit.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        probe::click(&mut app, Target::Search);
+        probe::type_str(&mut app, "grocry");
+        probe::key(&mut app, &probe::press(Key::Left));
+        probe::key(&mut app, &probe::press(Key::Left));
+        probe::type_str(&mut app, "e");
+        assert_eq!(
+            app.search_query, "grocery",
+            "typing did not go in at the caret"
+        );
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.search_query, "rocery",
+            "Delete did not take the first character"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "rent");
+        assert_eq!(
+            app.search_query, "rent",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        probe::click(&mut app, Target::Search);
+        probe::type_str(&mut app, "ery");
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        press_at(&mut app, search.x + 12.0, search.y + search.h / 2.0);
+        probe::type_str(&mut app, "groc");
+        assert_eq!(
+            app.search_query, "grocery",
+            "the caret did not go where the press was"
+        );
+    }
+
+    /// **A text field's right-click menu cuts, copies and pastes on the
+    /// program's clipboard** (`requests/c-e-text-fields-have-a-right-click-menu.md`),
+    /// in the search box and in a form's fields alike: a right press gives
+    /// the field the keyboard and the menu; the menu takes the keys while it
+    /// is up; and what Ctrl+C takes in one field, the menu pastes in another.
+    #[test]
+    fn a_text_fields_right_click_menu_edits_it() {
+        use guitk::editmenu::EditCommand;
+        let choose = |app: &mut FinanceApp, command: EditCommand| {
+            let (x, y) = app.field_menu.row_middle(command).expect("the row");
+            press_at(app, x, y);
+        };
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        guitk::clipboard::set_text("grocery");
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the search offered nothing"
+        );
+        assert!(app.search_active, "the search was not given the keyboard");
+        assert_eq!(app.field_menu.row_lit(EditCommand::Copy), Some(false));
+        let (w, h) = (app.width, app.height);
+        assert!(
+            App::render(&mut app, w, h)
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Paste")),
+            "the menu is not drawn"
+        );
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "",
+            "a key reached the box through the menu"
+        );
+        choose(&mut app, EditCommand::Paste);
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.search_query, "grocery",
+            "Paste did not paste into the search"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        app.open_new_transaction();
+        probe::type_str(&mut app, "Rent");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            "Rent",
+            "Ctrl+C kept a clipboard of its own"
+        );
+        app.form_error = Some(String::from("a complaint"));
+        probe::click_with(
+            &mut app,
+            Target::Field(FormField::Notes),
+            MouseButton::Right,
+        );
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on a field offered nothing"
+        );
+        assert_eq!(
+            app.field,
+            FormField::Notes,
+            "the field was not given the keyboard"
+        );
+        choose(&mut app, EditCommand::Paste);
+        let notes = app
+            .form
+            .as_ref()
+            .and_then(|form| form.input_ref(FormField::Notes))
+            .map(|input| input.text().to_owned());
+        assert_eq!(
+            notes.as_deref(),
+            Some("Rent"),
+            "Paste did not paste into the field"
+        );
+        assert_eq!(app.form_error, None, "the complaint outlived the change");
+
+        let save = probe::rect_of(&app, Target::Save).expect("Save");
+        assert_eq!(
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: save.x + 2.0,
+                y: save.y + 2.0,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            })),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**,
+    /// which waits for the menu as well as for midnight -- and a paste from
+    /// the menu stops at the search box's capacity.
+    #[test]
+    fn the_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let day = App::tick_interval(&app);
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            App::tick_interval(&app) < day,
+            "the clock does not wait for the menu"
+        );
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        guitk::clipboard::set_text(&"g".repeat(SEARCH_CAPACITY + 10));
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        press_at(&mut app, x, y);
+        assert_eq!(app.search_query.chars().count(), SEARCH_CAPACITY);
     }
 
     #[test]

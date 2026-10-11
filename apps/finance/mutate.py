@@ -87,8 +87,8 @@ MUTATIONS = [
     ),
     (
         "a field takes no typing",
-        "                let done = textline::apply_key(input, key, &clipboard, 13.0);",
-        '                let done = textline::apply_key(&mut form_field(""), key, &clipboard, 13.0);\n'
+        "                let done = textline::apply_key_on_clipboard(input, key, 13.0);",
+        '                let done = textline::apply_key_on_clipboard(&mut form_field(""), key, 13.0);\n'
         "                let _ = input;",
         [
             "a_transaction_is_entered_from_the_keyboard",
@@ -315,7 +315,12 @@ MUTATIONS = [
     (
         "the window never wakes",
         "        let left = clock_now().map_or(3600, |(_, left)| left.saturating_add(1));\n"
-        "        Some(Duration::from_secs(left.min(3600)))",
+        "        let day = Duration::from_secs(left.min(3600));\n"
+        "        Some(\n"
+        "            self.field_menu\n"
+        "                .due_in()\n"
+        "                .map_or(day, |ms| Duration::from_millis(ms).min(day)),\n"
+        "        )",
         "        None",
         ["a_tick_on_the_same_day_draws_nothing"],
     ),
@@ -405,12 +410,6 @@ MUTATIONS = [
         'a chorded Y answers the delete question',
         '                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)',
         '                key.single_char().is_some_and(typed_y)',
-        ['a_chord_is_neither_a_finance_key_nor_typing'],
-    ),
-    (
-        "a command's letter is typed into the search",
-        '        if self.search_active && textline::types_into_field(key) {',
-        '        if self.search_active && !key.text.is_empty() {',
         ['a_chord_is_neither_a_finance_key_nor_typing'],
     ),
     (
@@ -661,6 +660,91 @@ MUTATIONS += [
         "            question.render(&palette, width, height, &mut tree);",
         "            let _ = (question, palette);",
         [CLOSING],
+    ),
+]
+
+# The search box edits at a caret, and every text field has a right-click
+# menu on the program's clipboard (2026-10-10).
+CARET = "the_search_box_edits_at_a_caret"
+PRESSED = "a_press_in_the_search_box_puts_the_caret_there"
+MENU = "a_text_fields_right_click_menu_edits_it"
+MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MUTATIONS += [
+    (
+        "the search types only at its end",
+        "                self.sync_search_editor();\n"
+        "                let edit = textline::apply_key_on_clipboard(\n"
+        "                    &mut self.search_editor,\n",
+        "                self.sync_search_editor();\n"
+        "                let end = self.search_editor.text().len();\n"
+        "                self.search_editor.set_cursor(TextCursor::from(end));\n"
+        "                let edit = textline::apply_key_on_clipboard(\n"
+        "                    &mut self.search_editor,\n",
+        [CARET],
+    ),
+    (
+        "the search box takes no keys",
+        "            return self.search_key(key);\n",
+        "            return EventResult::Ignored;\n",
+        [CARET, PRESSED],
+    ),
+    (
+        "a press in the search puts the caret nowhere",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "",
+        [PRESSED],
+    ),
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "            MouseEventKind::Press(MouseButton::Right) => EventResult::Ignored,\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "the keys reach a field through its menu",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "a row chosen does nothing to a form's field",
+        "                    && input.edit_command(id) == KeyEdit::Changed\n",
+        "                    && false\n",
+        [MENU],
+    ),
+    (
+        "a form's complaint outlives a change from the menu",
+        "                    && input.edit_command(id) == KeyEdit::Changed\n"
+        "                {\n"
+        "                    self.form_error = None;\n",
+        "                    && input.edit_command(id) == KeyEdit::Changed\n"
+        "                {\n",
+        [MENU],
+    ),
+    (
+        "the menu is not drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [MENU],
+    ),
+    (
+        "the clock does not wait for the menu",
+        "                .map_or(day, |ms| Duration::from_millis(ms).min(day)),\n",
+        "                .map_or(day, |_| day),\n",
+        [MENU_CLOCK],
+    ),
+    (
+        "the menu's clock does not move",
+        "                let menu = self.field_menu.tick(*elapsed_ms);\n",
+        "                let menu = false;\n",
+        [MENU_CLOCK],
     ),
 ]
 

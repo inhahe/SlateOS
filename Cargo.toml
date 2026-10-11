@@ -798,6 +798,13 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# h264 (`gui/video/h264`) is FFmpeg's H.264 decoder translated, without its
+# assembly: prediction, transforms, motion compensation and the loop filter
+# are loops over every sample, as in rav1d above.
+[profile.release.package.h264]
+opt-level = 3
+codegen-units = 1
+
 # vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
 # vectorise -- its filters' widths are constants so that loops unroll into
 # SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction

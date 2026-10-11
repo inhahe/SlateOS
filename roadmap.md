@@ -4496,8 +4496,9 @@ lane C's `guitk`.
         ffmpeg's own.
     - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
-  - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
-    write into MP4: `videocodec` refuses them by name today.
+  - `[-]` H.264 and HEVC video, which phones, cameras and most of the web
+    write into MP4: `videocodec` plays H.264 (2026-10-10) and refuses HEVC
+    by name.
     - `[-]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
       answered B, §1376), included, held picture for picture to FFmpeg and
       the conformance streams; every profile, interlaced, 10-bit and 4:2:2.
@@ -4533,7 +4534,7 @@ lane C's `guitk`.
         (`-debug mmco`), every shown picture's order and flags (ffprobe),
         and FFmpeg's probe emulated packet by packet for the reorder delay
         it finds. 27 of 27 mutants caught.
-      - `[-]` The macroblock layer, which turns the set-up pictures into
+      - `[x]` The macroblock layer, which turns the set-up pictures into
         samples.
         - `[x]` CAVLC, prediction, reconstruction and the loop filter
           (2026-10-10): `decode_slice`, `h264_cavlc.c`, `h264_mvpred.h`,
@@ -4581,6 +4582,29 @@ lane C's `guitk`.
           before the scan's start. `tools/h264cmp.py` now also compares
           each picture after concealment (`PIC`) and which picture each
           reference entry is (`REF`).
+        - `[x]` Damaged streams, and FFmpeg 8.1.3 throughout (2026-10-10):
+          the oracle is now that build's alone (`tools/pict_expect.py`, in
+          WSL), with 542 damaged copies of the raw streams added -- a slice
+          dropped, cut short or corrupted -- 1258 streams in all. Every one
+          matches FFmpeg in every picture (54,397), every slice's set-up,
+          every marking line and every probe. It took: a packet's new
+          extradata (`extradata-reload-multi-stsd.mov`), pictures of
+          discarded packets dropped, and a damaged CAVLC block's
+          coefficients stored past its end as FFmpeg stores them, with
+          the dequantization tables laid out as FFmpeg's. The two oracle
+          tests run their streams in parallel: about two minutes each.
+      - `[x]` `videocodec` plays it (2026-10-10): MP4 and Matroska, the
+        reorder delay an MP4's composition offsets imply (as FFmpeg's
+        demuxer sets it), new extradata midway, the bitstream's colour and
+        HDR metadata; six fixtures (4:2:0, a cut file, 4:2:2 10-bit,
+        interlaced, RGB, Matroska) held to FFmpeg and libavif's conversion.
+        A key frame seek in an MP4 lands on the key frame the time falls
+        under, where FFmpeg's seek, by the decoding timeline, can land one
+        early when pictures are shown out of order.
+      - `[ ]` Film grain: the SEI is read; FFmpeg applies it
+        (`h274.c`), and that is not translated yet.
+      - `[ ]` Speed: about half FFmpeg's C (without assembly) on a
+        720x480 conformance stream; no work on it yet.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point

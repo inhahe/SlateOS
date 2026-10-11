@@ -59327,15 +59327,3 @@ is still run by hand, not by `boot-test.sh`.
   H.264 film grain sample and x264 writes none. **Do it** after the loop
   filter: write film grain SEIs into conformance streams with the tests'
   `Syntax` writer and compare each picture with FFmpeg's.
-- **h264: no new extradata with a packet** (`gui/video/h264/src/lib.rs`,
-  `Decoder::decode`). A MOV with several sample descriptions hands the
-  decoder new parameter sets with the packet where the description changes
-  (`AV_PKT_DATA_NEW_EXTRADATA`, read at the top of `h264_decode_frame`,
-  which runs `ff_h264_decode_extradata` on it and nothing more). `decode`
-  takes no side data, so `h264/extradata-reload-multi-stsd.mov` decodes its
-  third picture with the old parameter sets and its slices fail. **Add**
-  `Decoder::new_extradata(&[u8])` (FFmpeg's call alone -- not `configure`,
-  which also flushes); and in `tools/pict_expect.py` record which packets
-  carry it, with its bytes, for the tests to hand over at the same packet;
-  and in the MP4 reader (`gui/video/mp4`) produce it where the sample
-  description changes.

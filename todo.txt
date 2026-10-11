@@ -59326,12 +59326,30 @@ is still run by hand, not by `boot-test.sh`.
   tests.
 
 - **h264: film grain synthesis** (`gui/video/h264/src/field.rs`,
-  `sei_to_frame`). FFmpeg adds H.274 film grain to a finished picture
-  that carries a film grain characteristics SEI (`h274.c`,
-  `ff_h274_apply_film_grain`, from `finalize_frame` in `h264dec.c`)
-  unless the caller asks for the parameters instead
-  (`AV_CODEC_EXPORT_DATA_FILM_GRAIN`). The SEI is read and its
-  persistence kept as FFmpeg keeps it, but no grain is added. FATE has no
-  H.264 film grain sample and x264 writes none. **Do it** after the loop
-  filter: write film grain SEIs into conformance streams with the tests'
-  `Syntax` writer and compare each picture with FFmpeg's.
+  `sei_to_frame`; `decoder.rs`, `frame_start`). FFmpeg adds H.274 film
+  grain to a finished picture that carries a film grain characteristics
+  SEI: `h264_field_start` sets `needs_fg` and gets a second frame,
+  `f_grain`; `ff_h264_field_end` synthesizes the grain into it
+  (`ff_h274_apply_film_grain`, `h274.c`) and `output_frame` hands it out
+  -- or, where synthesis fails, clears `needs_fg` and hands out the
+  picture as decoded. Here the SEI is read and its persistence kept as
+  FFmpeg keeps it, and every picture is handed out as decoded: what FFmpeg
+  shows when synthesis fails, or when the caller asks for the parameters
+  instead (`AV_CODEC_EXPORT_DATA_FILM_GRAIN`). FATE has no H.264 film
+  grain sample and x264 writes none. **Do it**: translate `h274.c`'s
+  synthesis and its tables, and `ff_h2645_sei_to_frame`'s film grain
+  parameters; put `needs_fg` and `f_grain` back as FFmpeg has them; write
+  film grain SEIs into conformance streams with the tests' `Syntax` writer
+  (`src/tests.rs` writes one) and compare each picture with FFmpeg's.
+
+- **h264: inter prediction allocates and recomputes** (`gui/video/h264/src/mc.rs`;
+  the Opus review of the H.264 batch, 2026-10-10). `Window::fetch`, `qpel`
+  and `chroma_block` allocate a `Vec` for every partition, plane and list --
+  hundreds of thousands per 1080p B picture -- and the centre quarter
+  positions (6, 9, 10, 11, 14) evaluate the horizontal six-tap six times a
+  sample instead of once a row: about 1,500 filters for a 16x16 block where
+  FFmpeg runs about 21x16 and 256. **Do it** next: scratch buffers kept in
+  the slice context (FFmpeg's `edge_emu_buffer` and `bipred_scratchpad`),
+  the block read in place where it and its filter's reach are inside the
+  picture, and the two-dimensional filter in two passes over a temporary of
+  `pixeltmp`'s width; with a benchmark, and the oracle tests unchanged.

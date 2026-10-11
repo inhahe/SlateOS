@@ -58,7 +58,7 @@ fn sets() -> ParamSets {
     let mut ps = ParamSets::default();
     read_unit(&sps, |gb, _| decode_sps(gb, &mut ps, false).unwrap());
     read_unit(&pps, |gb, nal| {
-        decode_pps(gb, &mut ps, nal.size_bits).unwrap()
+        decode_pps(gb, &mut ps, nal.size_bits).unwrap();
     });
     ps
 }

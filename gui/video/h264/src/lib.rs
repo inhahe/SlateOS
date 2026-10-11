@@ -192,8 +192,10 @@ impl Decoder {
     /// # Errors
     ///
     /// [`Error::InvalidData`] for a packet FFmpeg refuses, or one with no
-    /// picture in it (FFmpeg's "no frame!"). The decoder goes on with the
-    /// next packet either way, as FFmpeg's does.
+    /// picture in it (FFmpeg's "no frame!"); [`Error::TooLarge`] where that
+    /// is for a picture larger than [`set_max_pixels`](Self::set_max_pixels)
+    /// allows, or a packet larger than FFmpeg's sizes hold. The decoder goes
+    /// on with the next packet either way, as FFmpeg's does.
     pub fn decode(
         &mut self,
         data: &[u8],
@@ -236,23 +238,43 @@ impl Decoder {
             duration,
             discard,
         };
-        self.h
-            .decode_frame(&mut self.sl, &mut self.pkt, &packet)
+        self.h.refusal = None;
+        match self.h.decode_frame(&mut self.sl, &mut self.pkt, &packet) {
             // decode.c drops a frame marked to be discarded as it leaves
             // the decoder.
-            .map(|o| o.filter(|o| !o.props.discard).map(Picture::new))
-            .map_err(|_| Error::InvalidData)
+            Ok(o) => Ok(o.filter(|o| !o.props.discard).map(Picture::new)),
+            Err(_) => Err(self.h.refusal.take().unwrap_or(Error::InvalidData)),
+        }
     }
 
     /// How many pictures to hold back to put them in display order, from
     /// the start (FFmpeg's `has_b_frames` as its caller sets it, from the
-    /// container's `video_delay` or from probing the stream). A stream
-    /// whose parameter sets do not say how far it reorders otherwise shows
-    /// its first pictures in decoding order until the decoder sees it needs
-    /// the delay, and drops what it can then no longer show in order. The
-    /// decoder raises it as the stream asks; it is never lowered.
+    /// container's `video_delay` or from probing the stream), at most 16 --
+    /// as many as the decoder can hold. A stream whose parameter sets do not
+    /// say how far it reorders otherwise shows its first pictures in
+    /// decoding order until the decoder sees it needs the delay, and drops
+    /// what it can then no longer show in order. The decoder raises it as
+    /// the stream asks; it is never lowered.
     pub fn set_reorder_delay(&mut self, frames: u32) {
-        self.h.avctx.has_b_frames = i32::try_from(frames).unwrap_or(i32::MAX);
+        // FFmpeg's demuxers estimate no more, and its decoder asserts that
+        // no more pictures than this wait to be shown.
+        #[allow(
+            clippy::cast_possible_wrap,
+            clippy::cast_possible_truncation,
+            reason = "at most 16"
+        )]
+        let frames = frames.min(decoder::MAX_DPB_FRAMES as u32) as i32;
+        self.h.avctx.has_b_frames = frames;
+    }
+
+    /// Refuse pictures of more than `max_pixels` luma samples, as coded
+    /// (before cropping): the parameter sets that ask for them are refused
+    /// before anything is allocated for the size, and their packets fail
+    /// with [`Error::TooLarge`] (FFmpeg's `max_pixels`, which it checks as
+    /// each frame's buffers are got). A new decoder takes any size FFmpeg's
+    /// arithmetic can hold. Set it before the first packet.
+    pub fn set_max_pixels(&mut self, max_pixels: u64) {
+        self.h.max_pixels = max_pixels;
     }
 
     /// The picture size the caller has for the stream -- its container's,
@@ -453,11 +475,13 @@ pub enum Error {
     /// The data is not H.264 where FFmpeg needs it to be
     /// (`AVERROR_INVALIDDATA`).
     InvalidData,
-    /// A size past what FFmpeg's arithmetic can hold (`AVERROR(ERANGE)`,
+    /// A picture larger than [`Decoder::set_max_pixels`] allows, or a size
+    /// past what FFmpeg's arithmetic can hold (`AVERROR(ERANGE)`,
     /// `AVERROR(ENOMEM)` for an allocation that large).
     TooLarge,
     /// Valid H.264 that FFmpeg does not decode either -- slice groups, an
-    /// 11- or 13-bit depth (`AVERROR_PATCHWELCOME`).
+    /// 11- or 13-bit depth (`AVERROR_PATCHWELCOME`): slices whose picture
+    /// parameter set was refused for one.
     Unsupported,
 }
 
@@ -472,3 +496,6 @@ impl core::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests;

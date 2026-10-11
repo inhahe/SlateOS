@@ -325,6 +325,10 @@ impl Pps {
 pub(crate) struct ParamSets {
     pub(crate) sps_list: Vec<Option<Arc<Sps>>>,
     pub(crate) pps_list: Vec<Option<Arc<Pps>>>,
+    /// Which ids' last picture parameter set was refused as something
+    /// FFmpeg does not decode ([`PsError::Unsupported`]): what a slice that
+    /// finds no set under its id is told.
+    pub(crate) unsupported_pps: Vec<bool>,
     /// The picture parameter set in use.
     pub(crate) pps: Option<Arc<Pps>>,
     /// Its sequence parameter set.
@@ -336,6 +340,7 @@ impl Default for ParamSets {
         Self {
             sps_list: vec![None; MAX_SPS_COUNT],
             pps_list: vec![None; MAX_PPS_COUNT],
+            unsupported_pps: vec![false; MAX_PPS_COUNT],
             pps: None,
             sps: None,
         }
@@ -1014,6 +1019,7 @@ pub(crate) fn decode_pps(
     if sps.bit_depth_luma > 14 {
         return Err(PsError::Invalid);
     } else if sps.bit_depth_luma == 11 || sps.bit_depth_luma == 13 {
+        ps.unsupported_pps[pps_id as usize] = true;
         return Err(PsError::Unsupported);
     }
 
@@ -1025,6 +1031,7 @@ pub(crate) fn decode_pps(
         mb_slice_group_map_type = gb.ue();
         // Slice groups (FMO), which FFmpeg does not decode.
         let _ = mb_slice_group_map_type;
+        ps.unsupported_pps[pps_id as usize] = true;
         return Err(PsError::Unsupported);
     }
     let ref_count = [
@@ -1120,6 +1127,7 @@ pub(crate) fn decode_pps(
         sps,
     };
     ps.pps_list[pps_id as usize] = Some(Arc::new(pps));
+    ps.unsupported_pps[pps_id as usize] = false;
     Ok(())
 }
 

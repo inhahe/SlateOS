@@ -225,9 +225,17 @@ impl Context {
             first_slice,
             frame_num: self.poc.frame_num,
         };
-        sl.hdr
-            .parse(gb, nal, &self.ps, picture)
-            .map_err(|_| DecodeError)?;
+        if sl.hdr.parse(gb, nal, &self.ps, picture).is_err() {
+            // A slice whose picture parameter set was refused as something
+            // FFmpeg does not decode: the packet fails for that reason.
+            let id = sl.hdr.pps_id as usize;
+            if self.ps.pps_list.get(id).is_some_and(Option::is_none)
+                && self.ps.unsupported_pps.get(id) == Some(&true)
+            {
+                self.refusal = Some(crate::Error::Unsupported);
+            }
+            return Err(DecodeError);
+        }
 
         if sl.hdr.redundant_pic_count > 0 {
             sl.hdr.ref_count = [0, 0];

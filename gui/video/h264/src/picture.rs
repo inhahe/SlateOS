@@ -335,10 +335,6 @@ pub(crate) struct Picture {
     /// A stand-in for a frame-number gap the stream does not allow.
     pub(crate) invalid_gap: i32,
     pub(crate) sei_recovery_frame_cnt: i32,
-    /// Whether film grain is to be added before it is shown.
-    pub(crate) needs_fg: i32,
-    /// The grained frame shown in its place (`f_grain`).
-    pub(crate) f_grain: Option<Arc<AnyFrame>>,
     /// The PPS it was decoded with.
     pub(crate) pps: Option<Arc<Pps>>,
     pub(crate) mb_width: i32,

@@ -398,6 +398,16 @@ pub(crate) struct Context {
     pub(crate) slice_row: [i32; MAX_SLICES],
     pub(crate) width_from_caller: i32,
     pub(crate) height_from_caller: i32,
+    /// The most luma samples a coded picture may have: the caller's limit
+    /// (FFmpeg's `max_pixels`), checked before anything is allocated for a
+    /// size. Unlimited -- but for what FFmpeg's arithmetic can hold -- unless
+    /// the caller sets it.
+    pub(crate) max_pixels: u64,
+    /// Why the packet being decoded failed, where that is other than
+    /// damage: a size past the limit, or past what FFmpeg's ints hold.
+    /// FFmpeg's own codes stop at the slice they fail; the packet then fails
+    /// as "no frame!", and this tells the caller why.
+    pub(crate) refusal: Option<crate::Error>,
     /// Error concealment's tables and its account of the picture being
     /// decoded (`er`): always on, as FFmpeg's is without slice threads
     /// (`enable_er`).
@@ -539,6 +549,8 @@ impl Default for Context {
             slice_row: [0; MAX_SLICES],
             width_from_caller: 0,
             height_from_caller: 0,
+            max_pixels: u64::MAX,
+            refusal: None,
             er: crate::er::Er::default(),
             pool: crate::pool::TablePool::default(),
             holders: crate::pool::Holders::default(),
@@ -660,7 +672,8 @@ fn sar_valid(width: i32, height: i32, sar: (i32, i32)) -> bool {
     }
     #[allow(clippy::cast_sign_loss, reason = "FFmpeg takes the sizes as unsigned")]
     let (w, h) = (i64::from(width as u32), i64::from(height as u32));
-    let scaled = if w > h {
+    // The side the ratio shrinks, scaled by it, must keep a sample.
+    let scaled = if sar.0 < sar.1 {
         w * i64::from(sar.0) / i64::from(sar.1)
     } else {
         h * i64::from(sar.1) / i64::from(sar.0)
@@ -1048,6 +1061,17 @@ impl Context {
             if flush_changes {
                 self.flush_change();
             }
+            // The caller's limit, before the tables for the size are
+            // allocated. FFmpeg checks its `max_pixels` later, as each
+            // frame's buffers are got; either way no picture of the size is
+            // decoded.
+            #[allow(clippy::cast_sign_loss, reason = "macroblock counts from the SPS")]
+            let samples =
+                u64::from(16 * sps.mb_width as u32) * u64::from(16 * sps.mb_height as u32);
+            if samples > self.max_pixels {
+                self.refusal = Some(crate::Error::TooLarge);
+                return Err(DecodeError);
+            }
             self.avctx.pix_fmt = self.get_pixel_format(&sps)?;
             self.slice_header_init(sl, &sps)?;
         }
@@ -1095,7 +1119,6 @@ impl Context {
             sps.bit_depth_luma,
         )
         .ok_or(DecodeError)?;
-        let needs_fg = self.pics[slot].needs_fg != 0;
 
         #[allow(clippy::cast_sign_loss, reason = "a macroblock count from the SPS")]
         let (big_mb_num, mb_array_size, b4_array_size) = {
@@ -1135,9 +1158,6 @@ impl Context {
             (0, 1)
         };
         let pic = &mut self.pics[slot];
-        if needs_fg {
-            pic.f_grain = Some(Arc::new(frame.clone()));
-        }
         pic.f = Some(Arc::new(frame));
         pic.props.format = a.pix_fmt;
         pic.props.sample_aspect_ratio = sar;
@@ -1187,7 +1207,10 @@ impl Context {
             ]
             .map(|c| c as u32);
             pic.props.crop = crop;
-            pic.needs_fg = i32::from(self.sei.film_grain.as_ref().is_some_and(|f| f.present));
+            // A picture with film grain characteristics is shown without
+            // grain, as FFmpeg shows it when it cannot synthesize the grain
+            // or is asked for the parameters instead: no synthesis here yet
+            // (todo.txt, "h264: film grain synthesis"), so no `needs_fg`.
         }
         if self.alloc_picture(slot, &sps).is_err() {
             self.unref_pic(slot);

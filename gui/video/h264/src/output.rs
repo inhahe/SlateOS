@@ -107,31 +107,53 @@ fn stereo_mode(
     }
 }
 
-/// Whether `buf` is an `avcC` record sent in a packet rather than as the
-/// container's configuration (`is_avcc_extradata`): every parameter set it
-/// lists in bounds and of its kind.
-fn is_avcc_extradata(buf: &[u8]) -> bool {
+/// Walk the parameter sets an `avcC` record lists: its SPS list (units of
+/// kind 7), then its PPS list (kind 8). `list(kind, count)` is told each
+/// list's length before its units; `unit(kind, data, header)` is given each
+/// unit, its two length bytes in front, and the byte after them, its NAL
+/// header. Bytes past the record read as zeros, as FFmpeg reads its
+/// padding. Stops, answering false, at a unit that runs past the record or
+/// at a callback that answers false.
+fn walk_avcc(
+    buf: &[u8],
+    mut list: impl FnMut(u8, u8) -> bool,
+    mut unit: impl FnMut(u8, &[u8], u8) -> bool,
+) -> bool {
     let byte = |i: usize| buf.get(i).copied().unwrap_or(0);
     let mut p = 6;
-    for (count_at, kind) in [(5usize, 7u8), (usize::MAX, 8)] {
-        let cnt = if count_at == 5 {
+    for kind in [7u8, 8] {
+        let cnt = if kind == 7 {
             byte(5) & 0x1f
         } else {
             p += 1;
             byte(p - 1)
         };
-        if cnt == 0 {
+        if !list(kind, cnt) {
             return false;
         }
         for _ in 0..cnt {
             let nalsize = usize::from(u16::from_be_bytes([byte(p), byte(p + 1)])) + 2;
-            if nalsize > buf.len().saturating_sub(p) || byte(p + 2) & 0x9F != kind {
+            let Some(data) = buf.get(p..p + nalsize) else {
+                return false;
+            };
+            if !unit(kind, data, byte(p + 2)) {
                 return false;
             }
             p += nalsize;
         }
     }
     true
+}
+
+/// Whether `buf` is an `avcC` record sent in a packet rather than as the
+/// container's configuration (`is_avcc_extradata`): both lists have units,
+/// every one in bounds and of its list's kind.
+fn is_avcc_extradata(buf: &[u8]) -> bool {
+    walk_avcc(
+        buf,
+        |_, count| count != 0,
+        |kind, _, header| header & 0x9F == kind,
+    )
 }
 
 impl Context {
@@ -147,25 +169,14 @@ impl Context {
             if data.len() < 7 {
                 return Err(DecodeError);
             }
-            // Read as FFmpeg reads the padding past the end: zeros.
-            let byte = |i: usize| data.get(i).copied().unwrap_or(0);
-            let mut p = 6;
-            for count_at in [Some(5), None] {
-                let cnt = match count_at {
-                    Some(i) => byte(i) & 0x1f,
-                    None => {
-                        p += 1;
-                        byte(p - 1)
-                    }
-                };
-                for _ in 0..cnt {
-                    let nalsize = usize::from(u16::from_be_bytes([byte(p), byte(p + 1)])) + 2;
-                    if nalsize > data.len().saturating_sub(p) {
-                        return Err(DecodeError);
-                    }
-                    self.decode_extradata_ps_mp4(&data[p..p + nalsize])?;
-                    p += nalsize;
-                }
+            // Each set in turn: one that runs past the record, or that is
+            // refused, refuses the rest.
+            if !walk_avcc(
+                data,
+                |_, _| true,
+                |_, unit, _| self.decode_extradata_ps_mp4(unit).is_ok(),
+            ) {
+                return Err(DecodeError);
             }
             self.nal_length_size = usize::from(data[4] & 0x03) + 1;
         } else {
@@ -291,8 +302,10 @@ impl Context {
             nalff: self.is_avc,
             small_padding: false,
         };
-        pkt.split(buf, self.nal_length_size, flags)
-            .map_err(|_| DecodeError)?;
+        pkt.split(buf, self.nal_length_size, flags).map_err(|e| {
+            self.refusal = Some(e);
+            DecodeError
+        })?;
 
         let mut ret = Ok(());
         for nal in pkt.nals().to_vec() {
@@ -490,11 +503,7 @@ impl Context {
     /// The frame and its properties as handed out (`output_frame`).
     fn output_frame(&self, out: usize) -> Option<Output> {
         let pic = &self.pics[out];
-        let frame = if pic.needs_fg != 0 {
-            pic.f_grain.clone()
-        } else {
-            pic.f.clone()
-        }?;
+        let frame = pic.f.clone()?;
         let mut props = pic.props.clone();
         if pic.sei_recovery_frame_cnt == 0 {
             props.key = true;

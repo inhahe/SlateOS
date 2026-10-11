@@ -1,7 +1,7 @@
 # The Font Manager lists invented fonts, and installs nothing
 
-**Status:** OPEN (lane E, found 2026-10-10) -- fixed on lane-e-wip the same
-day, awaiting a boot on main: the program rewritten over the machine's real
+**Status:** FIXED 2026-10-10 (lane E; found the same day) -- on `main` with
+`57280b99d`, boot-tested green: the program rewritten over the machine's real
 fonts (the toolkit's font index, the same folders), Install copying the file
 into `~/.local/share/fonts` after reading it as a font, Remove deleting the
 user's own files after asking, the preview drawn in the family's own letters,

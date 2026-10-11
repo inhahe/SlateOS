@@ -1,11 +1,12 @@
 //! The keys that edit a one-line text field.
 //!
 //! `guitk::textinput::TextInput` holds a field's state -- its text, caret,
-//! selection and clipboard -- and deliberately leaves the keys to its caller:
-//! which key moves the caret, which deletes, which selects all, which copies,
-//! cuts and pastes, and that a control character in a paste has no place in a
-//! field of one line. Seven applications here wrote that table themselves
-//! (`regextester`, `flashcards`, `finance`, `qrcode`, `torrent`,
+//! selection and capacity -- and what an edit does to it: `insert_text` puts
+//! typing or a paste in over the selection, leaving out control characters
+//! (a field is one line) and stopping at the capacity. It leaves the keys to
+//! its caller: which key moves the caret, which deletes, which selects all,
+//! which copies, cuts and pastes. Seven applications here wrote that table
+//! themselves (`regextester`, `flashcards`, `finance`, `qrcode`, `torrent`,
 //! `soundrecorder`, `email`), in four slightly different versions: two
 //! reported whether a key was theirs and five did not, and five deleted the
 //! selection when a key typed nothing, which is a key that did nothing
@@ -127,11 +128,16 @@ pub struct LineEdit {
 /// What is typed or pasted stops at the field's own capacity
 /// (`TextInput::set_capacity`, which [`field_holding`] sets), the limit its
 /// right-click menu's Paste keeps to as well. Every field these keys edit has
-/// one: the assertion below is how a field built without it shows up in its
-/// program's tests.
+/// one. A field built without one stops its program's tests at the
+/// assertion below; a build without assertions gives it
+/// [`UNBUILT_FIELD_CAPACITY`] instead, so a paste is still held to a limit.
 ///
 /// `font_size` is the size the field's text is drawn at, which the caret
 /// needs to move visually through text that runs both ways.
+///
+/// Only a key's press edits. Its release is not the field's, so a program
+/// that hands the field both does not delete twice for one Backspace, or
+/// paste twice for one Ctrl+V.
 ///
 /// A key held with Alt or the Windows key is not the field's, whatever the
 /// key ([`is_alt_or_windows_chord`]): Alt's chords are the window's and the
@@ -149,6 +155,10 @@ pub fn apply_key(
         input.capacity().is_some(),
         "a one-line field without a capacity: build it with textline::field_holding"
     );
+    give_a_capacity(input);
+    if !key.pressed {
+        return LineEdit::default();
+    }
     if is_alt_or_windows_chord(key.modifiers) {
         return LineEdit::default();
     }
@@ -208,23 +218,42 @@ pub fn apply_key_on_clipboard(input: &mut TextInput, key: &KeyEvent, font_size: 
     edit
 }
 
-/// Whether `key` is [`apply_key`]'s paste: Ctrl+V as a chord
+/// Whether `key` is [`apply_key`]'s paste: the press of Ctrl+V as a chord
 /// ([`is_ctrl_chord`]).
 #[must_use]
 pub fn pastes(key: &KeyEvent) -> bool {
-    key.key == Key::V && is_ctrl_chord(key.modifiers)
+    key.pressed && key.key == Key::V && is_ctrl_chord(key.modifiers)
 }
+
+/// The capacity [`apply_key`] gives a field built without one, in a build
+/// without debug assertions -- one with them stops at its assertion
+/// instead. More than any one-line field here holds, and far less than a
+/// clipboard can.
+pub const UNBUILT_FIELD_CAPACITY: usize = 65_536;
+
+/// Give `input` [`UNBUILT_FIELD_CAPACITY`] if it was built without a
+/// capacity of its own.
+fn give_a_capacity(input: &mut TextInput) {
+    if input.capacity().is_none() {
+        input.set_capacity(Some(UNBUILT_FIELD_CAPACITY));
+    }
+}
+
+/// The largest capacity a `TextInput` keeps. It holds its limit in four
+/// bytes, and reads 4,294,967,295 or more as no limit at all.
+const MOST_A_FIELD_KEEPS: usize = 4_294_967_294;
 
 /// A field holding `text`, which typing and pasting -- by key or from its
 /// right-click menu -- fill to at most `capacity` characters, counted in
 /// characters rather than bytes: how a program's one-line boxes start. The
 /// text it starts with is not cut, so a longer one a file holds is shown
-/// whole.
+/// whole. A capacity past what a field can keep (4,294,967,294 characters)
+/// is held at that, rather than leaving the field with no limit.
 #[must_use]
 pub fn field_holding(text: &str, capacity: usize) -> TextInput {
     let mut input = TextInput::new();
     input.set_text(text);
-    input.set_capacity(Some(capacity));
+    input.set_capacity(Some(capacity.min(MOST_A_FIELD_KEEPS)));
     input
 }
 
@@ -387,14 +416,17 @@ mod tests {
         }
         for modifiers in combinations {
             for (k, text) in [(Key::V, "v"), (Key::C, "c"), (Key::Unknown(0), "v")] {
-                let stroke = held(k, text, modifiers);
-                let mut input = field("");
-                apply_key(&mut input, &stroke, "PASTED", 13.0);
-                assert_eq!(
-                    input.text() == "PASTED",
-                    pastes(&stroke),
-                    "{k:?} with {modifiers:?}"
-                );
+                for pressed in [true, false] {
+                    let mut stroke = held(k, text, modifiers);
+                    stroke.pressed = pressed;
+                    let mut input = field("");
+                    apply_key(&mut input, &stroke, "PASTED", 13.0);
+                    assert_eq!(
+                        input.text() == "PASTED",
+                        pastes(&stroke),
+                        "{k:?} with {modifiers:?}, pressed: {pressed}"
+                    );
+                }
             }
         }
     }
@@ -414,6 +446,24 @@ mod tests {
             "the text it starts with was cut"
         );
         assert_eq!(long.capacity(), Some(4));
+        // A capacity past what a field can keep is held at the most it can,
+        // not read as none.
+        let enormous = field_holding("", usize::MAX);
+        assert_eq!(enormous.capacity(), Some(MOST_A_FIELD_KEEPS));
+    }
+
+    /// **A field built without a capacity is given one at its first key**,
+    /// in a build without the assertion that stops it in tests: a paste is
+    /// held to [`UNBUILT_FIELD_CAPACITY`] rather than to nothing. A field
+    /// that has a capacity keeps its own.
+    #[test]
+    fn a_field_built_without_a_capacity_is_given_one() {
+        let mut uncapped = TextInput::new();
+        give_a_capacity(&mut uncapped);
+        assert_eq!(uncapped.capacity(), Some(UNBUILT_FIELD_CAPACITY));
+        let mut capped = field_holding("", 4);
+        give_a_capacity(&mut capped);
+        assert_eq!(capped.capacity(), Some(4));
     }
 
     /// **Every field these keys edit has a capacity**: one built without it
@@ -603,16 +653,38 @@ mod tests {
         assert_eq!(input.text(), "keep");
     }
 
-    /// **A key's release types nothing**: only its press does, so a program
-    /// that hands the field both does not type every letter twice.
+    /// **A key's release edits nothing**: only its press does, so a program
+    /// that hands the field both does not type every letter twice, delete
+    /// twice for one Backspace, or paste twice for one Ctrl+V.
     #[test]
-    fn a_release_types_nothing() {
-        let mut input = field("ab");
-        let mut release = typed("c");
-        release.pressed = false;
-        let done = apply_key(&mut input, &release, "", 13.0);
-        assert!(!done.handled, "a release was the field's");
-        assert_eq!(input.text(), "ab", "a release typed");
+    fn a_release_edits_nothing() {
+        for k in [
+            typed("c"),
+            key(Key::Backspace, "", false, false),
+            key(Key::Delete, "", false, false),
+            key(Key::V, "v", true, false),
+            key(Key::A, "a", true, false),
+            key(Key::Left, "", false, true),
+        ] {
+            let mut input = field("ab");
+            input.set_cursor(TextCursor::from(1));
+            let mut release = k.clone();
+            release.pressed = false;
+            let done = apply_key(&mut input, &release, "PASTED", 13.0);
+            assert!(!done.handled, "the release of {:?} was the field's", k.key);
+            assert_eq!(input.text(), "ab", "the release of {:?} edited", k.key);
+            assert!(
+                !input.has_selection(),
+                "the release of {:?} selected",
+                k.key
+            );
+            assert_eq!(
+                input.cursor().byte(),
+                1,
+                "the release of {:?} moved the caret",
+                k.key
+            );
+        }
     }
 
     /// AltGr arrives as Ctrl+Alt, and on the four letters the field takes

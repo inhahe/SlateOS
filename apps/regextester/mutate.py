@@ -418,6 +418,22 @@ MUTATIONS = [
     ),
 ]
 
+# The fields' limits (2026-10-10), built from the one table that holds them.
+MUTATIONS += [
+    (
+        "the pattern is built without its limit",
+        'pattern: textline::field_holding("", Self::capacity(ActiveField::Pattern)),',
+        'pattern: textline::field_holding("", usize::MAX),',
+        ["each_field_has_its_own_limit"],
+    ),
+    (
+        "the replacement is built without its limit",
+        'replace: textline::field_holding("", Self::capacity(ActiveField::Replace)),',
+        'replace: textline::field_holding("", usize::MAX),',
+        ["each_field_has_its_own_limit"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "regextester", timeout=900, only=only))

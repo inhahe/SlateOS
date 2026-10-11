@@ -104,7 +104,7 @@ MUTATIONS = [
     ),
     (
         "a paste is not capped",
-        "            return (event.key == Key::V).then(|| self.body.clipboard().to_owned());",
+        "            return (event.key == Key::V).then(|| self.body.clipboard().clone());",
         "            return None;",
         ["a_line_stops_at_the_cap"],
     ),
@@ -423,6 +423,31 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [SEARCH],
+    ),
+]
+
+# A line's limit (2026-10-10): the search and a title share one editor, which
+# takes the limit of the line the keyboard moves into.
+LIMITS = "the_search_and_a_title_each_stop_at_their_own_limit"
+
+MUTATIONS += [
+    (
+        "a line's editor is given no capacity",
+        "        self.line_editor.set_capacity(Some(capacity));\n",
+        "",
+        [LIMITS],
+    ),
+    (
+        "the search is held to a title's limit",
+        "            Focus::Search => SEARCH_CAPACITY,\n",
+        "            Focus::Search => MAX_TITLE_LEN,\n",
+        [LIMITS],
+    ),
+    (
+        "a title is held to the search's limit",
+        "            Focus::Title(_) | Focus::Body(_) => MAX_TITLE_LEN,\n",
+        "            Focus::Title(_) | Focus::Body(_) => SEARCH_CAPACITY,\n",
+        [LIMITS],
     ),
 ]
 

@@ -3217,34 +3217,29 @@ impl StickyNotesApp {
         }
     }
 
-    /// The most characters the line the keyboard is in holds: the
-    /// search's or a title's. The two share one editor, so it takes the
-    /// capacity of whichever line it is editing.
-    fn line_capacity(&self) -> Option<usize> {
-        match self.focus? {
-            Focus::Search => Some(SEARCH_CAPACITY),
-            Focus::Title(_) => Some(MAX_TITLE_LEN),
-            Focus::Body(_) => None,
-        }
-    }
-
-    /// Reload the line's editor from the line, if the line changed under
-    /// it, and give it the line's capacity.
+    /// Reload the line's editor from the line, if the line changed under it.
     fn sync_line_editor(&mut self) {
         if let Some(text) = self.line_text()
             && self.line_editor.text() != text
         {
             self.line_editor.set_text(&text);
         }
-        self.line_editor.set_capacity(self.line_capacity());
     }
 
     /// Put the keyboard in `focus` -- the search, or a note's title -- with
-    /// the caret at byte `at` of its text.
+    /// the caret at byte `at` of its text. The two share one editor, which
+    /// takes the capacity of the line it is given: the one place the
+    /// keyboard moves to a line.
     fn focus_line(&mut self, focus: Focus, at: usize) {
+        // A note's body is not a line, and is never given here.
+        let capacity = match focus {
+            Focus::Search => SEARCH_CAPACITY,
+            Focus::Title(_) | Focus::Body(_) => MAX_TITLE_LEN,
+        };
         self.focus = Some(focus);
         let text = self.line_text().unwrap_or_default();
         self.line_editor.set_text(&text);
+        self.line_editor.set_capacity(Some(capacity));
         self.line_editor
             .set_cursor(TextCursor::from(Note::snap_col(&text, at)));
     }
@@ -3285,7 +3280,7 @@ impl StickyNotesApp {
     /// `event` in the line the keyboard is in, through its editor
     /// (`textline::apply_key`) -- the caret keys with Shift to select,
     /// Backspace and Delete, Ctrl+A, C, X and V, and typing, up to the
-    /// line's capacity ([`Self::line_capacity`]) -- the line's new text, if
+    /// line's capacity ([`Self::focus_line`] gives it) -- the line's new text, if
     /// the key changed it, and whether the key was the line's at all.
     fn edit_line(&mut self, event: &KeyEvent, size: f32) -> (Option<String>, bool) {
         self.sync_line_editor();
@@ -5993,6 +5988,32 @@ mod tests {
             Some("Milk")
         );
         assert_eq!(app.store.all_tags(), vec![String::from("shopping")]);
+    }
+
+    /// **The search and a note's title each stop at their own limit**: the
+    /// two share one editor, which takes the limit of the line the keyboard
+    /// moves into -- the search's after a title's.
+    #[test]
+    fn the_search_and_a_title_each_stop_at_their_own_limit() {
+        let (mut app, id) = app_with_note();
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title.clear();
+        }
+        app.title_before = String::new();
+        app.focus_line(Focus::Title(id), 0);
+        probe::type_str(&mut app, &"t".repeat(MAX_TITLE_LEN + 5));
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.chars().count()),
+            Some(MAX_TITLE_LEN),
+            "a title went past its limit"
+        );
+        app.focus_line(Focus::Search, 0);
+        probe::type_str(&mut app, &"s".repeat(SEARCH_CAPACITY + 5));
+        assert_eq!(
+            app.store.search_query().chars().count(),
+            SEARCH_CAPACITY,
+            "the search did not stop at its own limit"
+        );
     }
 
     fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {

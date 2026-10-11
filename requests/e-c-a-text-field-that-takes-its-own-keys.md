@@ -18,6 +18,11 @@ bring that into every field moved.
 Previously: open — nothing in lane E is blocked. The copies are gone: since
 2026-09-26 the seven applications share one, the lane E crate `apps/textline`
 (below), which goes when this lands.
+**Since 2026-10-10 `apps/textline` takes no capacity either**: the field holds
+its own (`TextInput::set_capacity`), as `edit_key` reads it, and
+`insert_limited` is gone
+(`known-issues/E-a-text-fields-limit-is-held-in-two-places.md`). The
+signatures quoted below are as this was filed.
 
 ## In short
 

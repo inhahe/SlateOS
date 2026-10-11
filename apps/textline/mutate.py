@@ -87,10 +87,10 @@ MUTATIONS = [
         [NOTHING, TABLE],
     ),
     (
-        "the field types on a key's release",
-        "            if !types_into_field(key) {",
-        "            if !key.types_text() {",
-        ["a_release_types_nothing"],
+        "a key's release edits the field",
+        "    if !key.pressed {\n        return LineEdit::default();\n    }\n",
+        "",
+        ["a_release_edits_nothing"],
     ),
     (
         "a release types",
@@ -276,15 +276,35 @@ MUTATIONS += [
     ),
     (
         "pastes names another key than the paste",
+        "    key.pressed && key.key == Key::V && is_ctrl_chord(key.modifiers)\n",
+        "    key.pressed && key.key == Key::C && is_ctrl_chord(key.modifiers)\n",
+        ["pastes_is_the_key_apply_key_pastes_on"],
+    ),
+    (
+        "pastes counts a release",
+        "    key.pressed && key.key == Key::V && is_ctrl_chord(key.modifiers)\n",
         "    key.key == Key::V && is_ctrl_chord(key.modifiers)\n",
-        "    key.key == Key::C && is_ctrl_chord(key.modifiers)\n",
         ["pastes_is_the_key_apply_key_pastes_on"],
     ),
     (
         "a field holding a capacity holds none",
-        "    input.set_text(text);\n    input.set_capacity(Some(capacity));\n    input\n}\n",
+        "    input.set_text(text);\n"
+        "    input.set_capacity(Some(capacity.min(MOST_A_FIELD_KEEPS)));\n"
+        "    input\n}\n",
         "    input.set_text(text);\n    input\n}\n",
         ["a_field_holding_a_capacity_fills_to_it"],
+    ),
+    (
+        "an enormous capacity is read as none",
+        "    input.set_capacity(Some(capacity.min(MOST_A_FIELD_KEEPS)));\n",
+        "    input.set_capacity(Some(capacity));\n",
+        ["a_field_holding_a_capacity_fills_to_it"],
+    ),
+    (
+        "a field built without a capacity is given none",
+        "        input.set_capacity(Some(UNBUILT_FIELD_CAPACITY));\n",
+        "",
+        ["a_field_built_without_a_capacity_is_given_one"],
     ),
 ]
 

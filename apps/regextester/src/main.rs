@@ -1955,9 +1955,9 @@ impl App {
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
-            pattern: textline::field_holding("", MAX_PATTERN_LEN),
+            pattern: textline::field_holding("", Self::capacity(ActiveField::Pattern)),
             input: TextArea::new(NORMAL_TEXT),
-            replace: textline::field_holding("", MAX_REPLACE_LEN),
+            replace: textline::field_holding("", Self::capacity(ActiveField::Replace)),
             flags: RegexFlags::default(),
             active_tab: ActiveTab::Tester,
             active_field: ActiveField::Pattern,
@@ -5916,9 +5916,13 @@ mod tests {
 
     #[test]
     fn each_field_has_its_own_limit() {
-        assert_eq!(App::capacity(ActiveField::Pattern), MAX_PATTERN_LEN);
+        // Read from the fields as they are built, not from the table that
+        // builds them: a field built with another limit, or with none,
+        // fails here.
+        let app = App::new();
+        assert_eq!(app.pattern.capacity(), Some(MAX_PATTERN_LEN));
         assert_eq!(App::capacity(ActiveField::Input), MAX_INPUT_LEN);
-        assert_eq!(App::capacity(ActiveField::Replace), MAX_REPLACE_LEN);
+        assert_eq!(app.replace.capacity(), Some(MAX_REPLACE_LEN));
     }
 
     #[test]

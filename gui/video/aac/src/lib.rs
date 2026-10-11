@@ -21,6 +21,9 @@
 //!   (`aacdec.c`, `adts_header.c`).
 //! - [`context`]: the decoder's state and its channel elements, and how a
 //!   configuration sets them up (`aacdec.h`, `aacdec.c`).
+//! - [`fixed`]: the fixed-point arithmetic FFmpeg computes in -- libavutil's
+//!   fixed-point DSP, its integer square roots, the decoder's Q-format
+//!   products (`fixed_dsp.c`, `mathops.h`, `aac_defines.h`).
 //! - [`softfloat`]: libavutil's integer floating point, which prediction,
 //!   SBR and PS compute in (`softfloat.h`).
 //! - [`tables`]: FFmpeg's constant tables, generated from its source by
@@ -38,6 +41,7 @@
 
 pub(crate) mod config;
 pub(crate) mod context;
+pub(crate) mod fixed;
 pub(crate) mod layout;
 pub(crate) mod mpeg4audio;
 pub(crate) mod softfloat;

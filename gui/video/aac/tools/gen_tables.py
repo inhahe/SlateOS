@@ -21,6 +21,26 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))
 import ctables  # noqa: E402
 
+AACTAB = "libavcodec/aactab.c"
+
+#: Each window length's scalefactor band tables, by the sample rates (in kHz)
+#: aactab.c names them for.
+SWB_OFFSETS = [
+    (1024, (96, 64, 48, 32, 24, 16, 8)),
+    (960, (96, 64, 48, 24, 16, 8)),
+    (512, (48, 32, 24)),
+    (480, (48, 32, 24)),
+    (128, (96, 48, 24, 16, 8)),
+    (120, (96, 48, 24, 16, 8)),
+]
+
+#: The spectral codebooks and how many codes each has.
+SPECTRAL = [(1, 81), (2, 81), (3, 81), (4, 81), (5, 81), (6, 81), (7, 64), (8, 64),
+            (9, 169), (10, 169), (11, 289)]
+
+#: Macros aactab.c names one table by another with.
+ALIASES = {"swb_offset_960_32": "swb_offset_960_48"}
+
 #: (C file, C name, Rust name, element type, shape, what it is).
 TABLES = [
     # libavutil's soft-float (softfloat_tables.h).
@@ -42,6 +62,71 @@ TABLES = [
      "the cosines the last step of a soft-float angle interpolates between, Q30"),
     ("libavutil/softfloat_tables.h", "av_sintbl_4_sf", "SINTBL_4_SF", "i32%", [33],
      "the sines the last step of a soft-float angle interpolates between, Q30"),
+] + [
+    # libavcodec's integer square root (mathtables.c).
+    ("libavcodec/mathtables.c", "ff_sqrt_tab", "SQRT_TAB", "u8", [256],
+     "the square roots `ff_sqrt` starts from, by a number's top bits, scaled by 16"),
+    ("libavcodec/mathtables.c", "ff_inverse", "INVERSE", "u32", [257],
+     "2^32 divided by each number, rounded up: what `FASTDIV` multiplies by"),
+] + [
+    # How many scalefactor bands a window has, and where each starts, by
+    # sample rate index (aactab.c). The 120-line short window has the
+    # 128-line one's band count (`ff_aac_num_swb_120`, a macro).
+    (AACTAB, f"ff_aac_num_swb_{n}", f"NUM_SWB_{n}", "u8", [13],
+     f"scalefactor bands in a {n}-line window, by sample rate index")
+    for n in (1024, 960, 512, 480, 128)
+] + [
+    (AACTAB, f"swb_offset_{n}_{rate}", f"SWB_OFFSET_{n}_{rate}", "u16", [None],
+     f"where each scalefactor band of a {n}-line window starts at {rate} kHz, then the end")
+    for n, rates in SWB_OFFSETS for rate in rates
+] + [
+    (AACTAB, f"ff_swb_offset_{n}", f"SWB_OFFSET_{n}", "&[u16]", [13],
+     f"each sample rate index's {n}-line band offsets (none where it has none)")
+    for n, _ in SWB_OFFSETS
+] + [
+    (AACTAB, "ff_aac_pred_sfb_max", "PRED_SFB_MAX", "u8", [13],
+     "the scalefactor bands AAC Main's prediction covers, by sample rate index"),
+] + [
+    (AACTAB, f"ff_tns_max_bands_{n}", f"TNS_MAX_BANDS_{n}", "u8", [13],
+     f"the scalefactor bands TNS may cover in a {n}-line window, by sample rate index")
+    for n in (1024, 512, 480, 128)
+] + [
+    (AACTAB, "ff_ltp_coef", "LTP_COEF_FIXED", "q30", [8],
+     "long-term prediction's gains, Q30 as `decode_ltp` takes them"),
+] + [
+    (AACTAB, f"tns_tmp2_map_{m}", f"TNS_TMP2_MAP_{m}", "q31", [size],
+     f"TNS coefficients for coef_compress and coef_res {m.replace('_', ' and ')}, Q31 as "
+     "`ff_aac_decode_tns` takes them")
+    for m, size in (("0_3", 8), ("0_4", 16), ("1_3", 4), ("1_4", 8))
+] + [
+    (AACTAB, "ff_tns_tmp2_map", "TNS_TMP2_MAP", "&[i32]", [4],
+     "the TNS coefficient tables, by 2 * coef_compress + coef_res"),
+    (AACTAB, "ff_aac_scalefactor_code", "SCALEFACTOR_CODE", "u32", [121],
+     "the scalefactor codebook's codes, by difference plus 60"),
+    (AACTAB, "ff_aac_scalefactor_bits", "SCALEFACTOR_BITS", "u8", [121],
+     "the scalefactor codebook's code lengths"),
+] + [
+    (AACTAB, f"codes{i}", f"CODES{i}", "u16", [size], f"spectral codebook {i}'s codes")
+    for i, size in SPECTRAL
+] + [
+    (AACTAB, f"bits{i}", f"BITS{i}", "u8", [size], f"spectral codebook {i}'s code lengths")
+    for i, size in SPECTRAL
+] + [
+    (AACTAB, "ff_aac_spectral_codes", "SPECTRAL_CODES", "&[u16]", [11],
+     "the spectral codebooks' codes"),
+    (AACTAB, "ff_aac_spectral_bits", "SPECTRAL_BITS", "&[u8]", [11],
+     "the spectral codebooks' code lengths"),
+    (AACTAB, "ff_aac_spectral_sizes", "SPECTRAL_SIZES", "u16", [11],
+     "how many codes each spectral codebook has"),
+] + [
+    (AACTAB, f"codebook_vector{v}_idx", f"CODEBOOK_VECTOR{v}_IDX", "u16", [None],
+     f"each code's symbol in spectral codebooks {books}: its values, packed with how many "
+     "are not zero and where their signs go")
+    for v, books in (("02", "1 to 4"), ("4", "5 and 6"), ("6", "7 and 8"), ("8", "9 and 10"),
+                     ("10", "11"))
+] + [
+    (AACTAB, "ff_aac_codebook_vector_idx", "CODEBOOK_VECTOR_IDX", "&[u16]", [11],
+     "each spectral codebook's symbols"),
 ]
 
 HEADER = [
@@ -59,7 +144,7 @@ HEADER = [
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     sys.stdout.buffer.write(ctables.generate(root, TABLES, {}, HEADER, source="FFmpeg",
-                                             item="pub(crate) static"))
+                                             item="pub(crate) static", aliases=ALIASES))
     return 0
 
 

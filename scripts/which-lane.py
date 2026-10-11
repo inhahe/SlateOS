@@ -960,6 +960,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "q45_survey.py",
         "questions-for-you.py",
         "reintro-evdev.py",
+        "review-batch.py",
     ),
 }
 

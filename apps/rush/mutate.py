@@ -222,8 +222,8 @@ MUTATIONS = [
     # ── Text ────────────────────────────────────────────────────────
     (
         "the undo button is drawn live whether or not it can do anything",
-        "                Target::Undo => self.history.can_undo(),",
-        "                Target::Undo => true,",
+        '            Target::Undo if !self.history.can_undo() => Some(if self.history.can_redo() {',
+        '            Target::Undo if false => Some(if self.history.can_redo() {',
         ["the_undo_button_is_drawn_dim_until_there_is_something_to_undo"],
     ),
     (
@@ -528,8 +528,8 @@ MUTATIONS = [
         # The size the frame is drawn at is the size the next click is read
         # against — which is the only reason it is stored at all.
         "rendering does not record the size it drew at",
-        "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
-        "        self.frame(width, height).into_tree()",
+        '        self.resize(width, height);\n        let frame = self.frame(width, height);',
+        '        let frame = self.frame(width, height);',
         ["drawing_at_a_size_is_what_decides_where_the_next_click_lands"],
     ),
     (
@@ -1065,6 +1065,57 @@ MUTATIONS = [
         'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, PUZZLE_COUNT)',
         'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, 1)',
         ['home_end_and_the_page_keys_reach_the_ends_of_the_sheet'],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = game.reasons.event(event);',
+        '    let why = false;',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons.due_in()',
+        '        None',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is given under the list of keys",
+        '        let greyed = if self.show_help {',
+        '        let greyed = if false {',
+        ['the_list_of_keys_takes_a_reason_away'],
+    ),
+    (
+        'a greyed button says nothing: There is no move to take back yet."',
+        '                "There is no move to take back yet."',
+        '                ""',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: Every move has been taken back already.',
+        '                "Every move has been taken back already."',
+        '                ""',
+        ['the_greyed_undo_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

@@ -1,9 +1,9 @@
 # C -> E: the System Sounds section can be real now
 
 **From:** Lane C (`gui/appearance`, `gui/desktop`, `gui/sound`). **To:** Lane E
-(`apps/settings`). **Filed:** 2026-10-05. **Status:** OPEN -- the settings
-work without it (a hand edit of `appearance.yaml`); nothing of lane E's
-breaks.
+(`apps/settings`). **Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by
+lane E -- the section has its controls, and each sound is heard as it is
+chosen. Lane E's reply is at the end.
 
 **In short:** the desktop makes sounds now -- a notification's chime, the
 volume's tick, a screenshot, a device, a low battery, the network, signing in
@@ -62,3 +62,41 @@ per-application sections, which still have nothing behind them.
   nothing** (`sound::MAX_FILE_BYTES`), and one longer than 30 seconds is cut
   there (`sound::MAX_SECONDS`); a file chooser filtering for `.oga`, `.ogg`
   and `.wav` matches what the player reads.
+
+---
+
+## Reply, lane E -- 2026-10-10: done
+
+The Sound page's System Sounds section, in `apps/settings/src/main.rs`
+(`build_system_sounds`):
+
+| Row | What it sets |
+|---|---|
+| System sounds (a switch) | `sounds.enabled` |
+| Volume (0 to 100 %) | `sounds.volume` |
+| Sound theme | `theme.sounds` -- every theme `appearance::sounds::available()` lists, by name, the list opening on the one in use; chosen with `SoundTheme::load` |
+| Sounds For: a row per `SHELL_EVENTS` entry, by its `label` | `sounds.events.<name>` -- "The theme's" (no entry), "Off", or "A file of my own..." (a picker filtered to `*.oga`, `*.ogg`, `*.wav`, whose answer is an absolute path); the row says which plays: "The theme's", "Off" or "Your own: ding.oga" |
+
+- **With the sounds off, the rest is not offered** -- a volume, a theme or
+  an event's sound for sounds that do not play would be controls whose
+  every setting does the same nothing.
+- **Each sound is heard as it is chosen** -- design.txt's sound dropdown is
+  "previewable": the theme's own notification when a theme is chosen
+  (`SoundTheme::sound`, not the user's file in its place), an event's sound
+  when it is set (the theme's, or the file when the picker answers), and
+  `audio-volume-change` when the volume's handle is let go, at the volume it
+  was let go at -- not while it is dragged. Through `sound::play` at
+  `sounds.volume`, turned into a `sound::Sound` as your
+  `EventSounds::sound` turns it. That turning is in two places now; a new
+  `SoundChoice` variant stops Settings compiling, which is the reminder. A
+  test's state records the preview and plays nothing aloud, as your
+  `allow_playback` arranges for the desktop.
+- **The note** says the sounds are saved and followed, and heard the day a
+  program can reach the sound device.
+- `the_sound_page_offers_nothing_to_click` is narrowed to the devices, the
+  input and the per-program volumes, as its doc comment asked:
+  `the_sound_devices_offer_nothing_to_click`.
+
+Tests: three -- each control reaching `appearance.yaml` (and its row and
+list showing what is set), the section with the sounds off, and the
+previews. Mutation rows: 35 in `apps/settings/mutate.py`, all caught.

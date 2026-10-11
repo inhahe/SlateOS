@@ -38,7 +38,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::layout::Axis;
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
-use guitk::render::RenderTree;
+use guitk::render::{RenderCommand, RenderTree};
 use guitk::scroll_window;
 use guitk::scrollbar;
 use guitk::splitter;
@@ -88,10 +88,26 @@ pub struct FileEntry {
     pub modified: Option<SystemTime>,
     pub file_type: FileType,
     pub selected: bool,
-    pub icon_id: u32,
 }
 
 impl FileEntry {
+    /// The icon to draw this entry with, by the freedesktop scheme: a
+    /// folder's, or the name of the file's type -- `image/png` is
+    /// `image-png` -- which a theme may draw for that type alone. The kind's
+    /// stand-in ([`FileType::icon_stand_in`]) is drawn where it does not.
+    ///
+    /// No type's name shortens to a different built-in icon than its kind's:
+    /// the built-in names are `folder`, places, devices and the kinds'
+    /// generic names, none of them a prefix of a type's name.
+    fn icon_name(&self) -> std::borrow::Cow<'static, str> {
+        if self.is_dir {
+            return std::borrow::Cow::Borrowed("folder");
+        }
+        let ext = self.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mime = filetypes::detect_from_extension(ext).mime_type;
+        std::borrow::Cow::Owned(mime.replace('/', "-"))
+    }
+
     /// Label for the detail view's Type column.
     ///
     /// The category when the entry has a recognised one, and the bare
@@ -199,19 +215,23 @@ impl FileType {
         }
     }
 
-    /// Icon character for this file type (unicode placeholder).
-    pub fn icon_char(self) -> char {
+    /// The icon drawn for a file of this kind where the theme has no picture
+    /// for its exact type: one the built-in set draws, so every row has a
+    /// picture -- not an emoji, which no font here draws
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    ///
+    /// A video's, an archive's and source code's own generic names
+    /// (`video-x-generic`, `package-x-generic`, `text-x-script`) are not
+    /// built in yet (`requests/e-c-icon-names-lane-e-s-programs-need.md`).
+    pub fn icon_stand_in(self) -> &'static str {
         match self {
-            Self::Directory => '\u{1F4C1}', // folder
-            Self::Text => '\u{1F4C4}',      // page
-            Self::Image => '\u{1F5BC}',     // framed picture
-            Self::Audio => '\u{1F3B5}',     // musical note
-            Self::Video => '\u{1F3AC}',     // clapper board
-            Self::Archive => '\u{1F4E6}',   // package
-            Self::Executable => '\u{2699}', // gear
-            Self::Document => '\u{1F4D1}',  // bookmark tabs
-            Self::Code => '\u{1F4BB}',      // computer
-            Self::Unknown => '\u{1F4C3}',   // page with curl
+            Self::Directory => "folder",
+            Self::Image => "image-x-generic",
+            Self::Audio => "audio-x-generic",
+            Self::Video => "media-playback-start",
+            Self::Executable => "application-x-executable",
+            Self::Document => "x-office-document",
+            Self::Text | Self::Archive | Self::Code | Self::Unknown => "text-x-generic",
         }
     }
 }
@@ -237,6 +257,10 @@ const ROW_H: f32 = 22.0;
 
 /// Width reserved to the left of the first column for the entry's type icon.
 const ICON_GUTTER: f32 = 28.0;
+
+/// The side of a detail-view row's icon, in pixels: centred in the gutter
+/// and the row.
+const DETAIL_ICON_SIDE: u16 = 16;
 
 /// Width of one icon-view cell.
 const ICON_CELL_W: f32 = 96.0;
@@ -1255,6 +1279,10 @@ pub struct ExplorerState {
     /// The user's focus width, which the toolkit's dialogs and address bar
     /// are handed as they are made (`appearance_changed`).
     focus_ring_width: f32,
+    /// The pictures drawn from the user's icon theme -- each entry's kind in
+    /// the detail view -- and which of them the window holds, handed to the
+    /// loop after the thumbnails (`App::take_images`).
+    icons: themeicons::Icons,
     /// Whether the pointer is over the scrollbar's column: the bar lights
     /// under it, and a theme's overlay bar widens from a line only then.
     scrollbar_hovered: bool,
@@ -1318,12 +1346,37 @@ pub struct ExplorerState {
     /// row chosen starts the program it showed, whatever was installed
     /// since.
     open_with: Vec<desktopentry::App>,
+    /// What programs add to a file's right-click menu (`gui/servicemenus`,
+    /// design-decisions §1448): every service menu found, read again when a
+    /// file of one has changed (`service_seen`).
+    service_menus: servicemenus::Scan,
+    /// Which of them the user turned on or off: `context-menus.yaml`, read
+    /// again when Settings announces a change to it.
+    service_choices: servicemenus::Choices,
+    /// Where service menus are looked for. None in a window a test makes,
+    /// as `app_dirs`; `main` sets the environment's.
+    service_dirs: servicemenus::Dirs,
+    /// The service-menu files as they were when last read -- each one's
+    /// path, size and time -- so a right-click reads them again only after
+    /// one is installed, removed or rewritten.
+    service_seen: Option<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>>,
+    /// The service items of the menu open, at their numbers from
+    /// [`MENU_SERVICE_BASE`]: each one's menu and item by name -- `None` for
+    /// a submenu's own row -- and the files the menu was opened on.
+    service_offer: (Vec<Option<(OsString, String)>>, Vec<servicemenus::Target>),
+    /// How a service item's program is started: as [`launch`](Self::launch),
+    /// in the folder its command names, if it names one.
+    launch_in: fn(&OsStr, &[OsString], Option<&Path>) -> std::io::Result<()>,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
     /// uses that widget for the desktop menu and the tray overflow, and a
     /// second menu implementation in the file manager would be the third.
     menu: Option<ContextMenu>,
+    /// The context menu's clock, in milliseconds: every tick's `elapsed_ms`.
+    /// A greyed row's reason appears once the pointer has rested on it for
+    /// the toolkit's delay, which the menu counts by this.
+    menu_clock_ms: u64,
     /// The bulk file operations in flight.
     ///
     /// More than one, but never two that touch the same drive: that is the
@@ -1504,6 +1557,7 @@ impl ExplorerState {
             wheel: WheelAccumulator::default(),
             thumb_grab: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            icons: themeicons::Icons::new(appearance::icons::IconTheme::default()),
             scrollbar_hovered: false,
             history_back: VecDeque::new(),
             history_forward: VecDeque::new(),
@@ -1518,6 +1572,7 @@ impl ExplorerState {
             status_message: String::new(),
             hover_hint: String::new(),
             menu: None,
+            menu_clock_ms: 0,
             operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
@@ -1543,6 +1598,15 @@ impl ExplorerState {
             launch: start_program,
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
             open_with: Vec::new(),
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::Choices::default(),
+            service_dirs: servicemenus::Dirs {
+                user: None,
+                system: Vec::new(),
+            },
+            service_seen: None,
+            service_offer: (Vec::new(), Vec::new()),
+            launch_in: start_program_in,
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -1768,6 +1832,100 @@ impl ExplorerState {
         true
     }
 
+    /// Read the service menus again if a file of one has been installed,
+    /// removed or rewritten since the last read -- or for the first time.
+    fn refresh_service_menus(&mut self) {
+        let stamps = service_menu_stamps(&self.service_dirs);
+        if self.service_seen.as_ref() == Some(&stamps) {
+            return;
+        }
+        self.service_seen = Some(stamps);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        self.service_menus = servicemenus::scan(&self.service_dirs, locale.as_ref());
+    }
+
+    /// Put what programs add to a file's right-click menu into the file
+    /// menu, after Open and Open with and set off by lines
+    /// (design-decisions §1448): the service menus on for the files chosen,
+    /// laid out as KDE's file manager lays them out
+    /// (`servicemenus::Scan::rows`), each row's menu and item kept by name
+    /// for when it is chosen. A program ported from Linux that ships a
+    /// service menu adds its items here as it would there.
+    fn offer_service_menus(&mut self, items: &mut Vec<MenuItem>) {
+        self.refresh_service_menus();
+        let targets: Vec<servicemenus::Target> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&index| self.entries.get(index))
+            .map(|entry| service_target(&entry.path))
+            .collect();
+        let rows = self.service_menus.rows(&self.service_choices, &targets);
+        let mut offer = Vec::new();
+        let built = service_menu_items(&rows, &mut offer);
+        self.service_offer = (offer, targets);
+        if built.is_empty() {
+            return;
+        }
+        let at = items.len().min(2);
+        items.splice(
+            at..at,
+            std::iter::once(MenuItem::Separator)
+                .chain(built)
+                .chain(std::iter::once(MenuItem::Separator)),
+        );
+    }
+
+    /// Run the file menu's service item `id`, if it is one: its command for
+    /// the files the menu was opened on -- one program per file where the
+    /// command takes one at a time -- each in the folder it names, and say
+    /// so. Answers whether the id was one of these.
+    fn service_action(&mut self, id: u64) -> bool {
+        let Some(index) = id
+            .checked_sub(MENU_SERVICE_BASE)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return false;
+        };
+        let (offer, targets) = std::mem::take(&mut self.service_offer);
+        let Some(entry) = offer.get(index) else {
+            return false;
+        };
+        // A submenu's own row runs nothing.
+        let Some((menu_id, action_id)) = entry else {
+            return true;
+        };
+        // Looked up by name: the menus may have been read again since this
+        // one opened, and a menu gone since has nothing left to run.
+        let Some((menu, action)) = self.service_menus.find(menu_id, action_id) else {
+            self.status_message = String::from("That item's menu is no longer installed");
+            return true;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let name = action.name.clone();
+        let launch_in = self.launch_in;
+        self.status_message = match action.runs(&targets, menu, home.as_deref()) {
+            Ok(runs) => {
+                let mut failed: Option<std::io::Error> = None;
+                for run in runs {
+                    let mut argv = run.argv.into_iter();
+                    let Some(program) = argv.next() else {
+                        continue;
+                    };
+                    let args: Vec<OsString> = argv.collect();
+                    if let Err(e) = launch_in(&program, &args, run.dir.as_deref()) {
+                        failed.get_or_insert(e);
+                    }
+                }
+                match failed {
+                    None => format!("Started {name}"),
+                    Some(e) => format!("Could not start {name}: {e}"),
+                }
+            }
+            Err(e) => format!("Could not start {name}: {e}"),
+        };
+        true
+    }
+
     /// The program the user has chosen for this kind of file.
     ///
     /// Read from the File Associations program's own configuration, which
@@ -1818,7 +1976,6 @@ impl ExplorerState {
             modified,
             file_type,
             selected: false,
-            icon_id: 0,
         })
     }
 
@@ -3138,13 +3295,82 @@ impl ExplorerState {
             .map(|entry| self.programs_opening(&entry.path))
             .unwrap_or_default();
         let items = if on_row.is_some() {
-            self.file_menu_items()
+            let mut items = self.file_menu_items();
+            self.offer_service_menus(&mut items);
+            items
         } else {
             self.folder_menu_items()
         };
-        let mut menu = ContextMenu::new(items);
+        self.put_up_menu(ContextMenu::new(items), x, y);
+    }
+
+    /// Show `menu` at (`x`, `y`) as the window's context menu, each greyed
+    /// row in it saying why when the pointer rests on it ([`Self::explain_menu`]).
+    fn put_up_menu(&mut self, mut menu: ContextMenu, x: f32, y: f32) {
+        self.explain_menu(&mut menu);
         menu.show(x, y, (self.window_width as f32, self.window_height as f32));
         self.menu = Some(menu);
+    }
+
+    /// Say why each row a menu of this window can grey is greyed, in a
+    /// sentence: the toolkit shows a reason only while its row *is* greyed,
+    /// so every one is given whatever the rows' states. Open With with no
+    /// program for the file; your own order with none made yet; and the
+    /// bin's rows, in the words its buttons already use.
+    fn explain_menu(&self, menu: &mut ContextMenu) {
+        // A folder's Open With is greyed because a folder opens here; a
+        // file's, because nothing on the system claims its kind.
+        let folder = self
+            .selected_indices
+            .first()
+            .and_then(|&index| self.entries.get(index))
+            .is_some_and(|entry| entry.is_dir);
+        menu.explain(
+            MENU_OPEN_WITH_BASE,
+            if folder {
+                "A folder opens here, in the explorer: Open With is for files."
+            } else {
+                "No program on this system says it opens this kind of file."
+            },
+        );
+        if let Some(i) = SORTS.iter().position(|&(by, _)| by == SortBy::Custom) {
+            menu.explain(
+                sort_row_id(i),
+                "Drag a file to where you want it to make an order of your own.",
+            );
+        }
+        if let Some(bin) = &self.bin {
+            for (id, button) in [
+                (MENU_BIN_RESTORE, BinButton::Restore),
+                (MENU_BIN_DELETE, BinButton::DeleteForever),
+                (MENU_BIN_EMPTY, BinButton::Empty),
+            ] {
+                if let Some(why) = bin.button_state(button).reason() {
+                    menu.explain(id, why);
+                }
+            }
+        }
+    }
+
+    /// The pointer moved with a context menu up: the row under it is lit, a
+    /// submenu under it opens, and a greyed row it comes to rest on starts the
+    /// wait for its reason. Every move is a frame while the menu is up.
+    fn hover_menu(&mut self, x: f32, y: f32) -> bool {
+        match self.menu.as_mut() {
+            Some(menu) => {
+                menu.handle_mouse_move(x, y);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Let `elapsed_ms` pass for the open context menu: a greyed row's reason
+    /// appears once its wait is up. Returns whether one appeared.
+    fn tick_menu(&mut self, elapsed_ms: u64) -> bool {
+        self.menu_clock_ms = self.menu_clock_ms.saturating_add(elapsed_ms);
+        let now = self.menu_clock_ms;
+        self.menu.as_mut().is_some_and(|menu| menu.tick(now))
     }
 
     /// Sort by the column whose heading is under `x`, or the other way when
@@ -3364,7 +3590,7 @@ impl ExplorerState {
                 .iter()
                 .enumerate()
                 .map(|(i, &(by, label))| MenuItem::Action {
-                    id: MENU_SORT_BASE.saturating_add(1).saturating_add(i as u64),
+                    id: sort_row_id(i),
                     label: label.to_string(),
                     shortcut: None,
                     icon: None,
@@ -3532,9 +3758,7 @@ impl ExplorerState {
 
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
-        let mut menu = ContextMenu::new(self.heading_menu_items());
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        self.put_up_menu(ContextMenu::new(self.heading_menu_items()), x, y);
     }
 
     /// The headings' menu: how the listing is sorted, which columns it
@@ -3750,7 +3974,13 @@ impl ExplorerState {
             return false;
         };
         let chosen = menu.handle_click(x, y);
-        self.menu = None;
+        // Put away only when the press put it away -- a row chosen, or a
+        // press outside it. A press on a submenu's row opens the submenu and
+        // one on a greyed row does nothing, and both leave the menu up: put
+        // away then, a submenu a click opened would go with it.
+        if !menu.is_visible() {
+            self.menu = None;
+        }
         if let Some(id) = chosen {
             self.activate_menu_item(id);
         }
@@ -3769,6 +3999,7 @@ impl ExplorerState {
             || self.failure_action(id)
             || self.sort_action(id)
             || self.open_with_action(id)
+            || self.service_action(id)
         {
             return;
         }
@@ -5879,14 +6110,19 @@ impl ExplorerState {
                 tree.fill_rect(0.0, ey, w, ROW_H, self.palette.base);
             }
 
-            let mut icon = [0u8; 4];
-            tree.text(
-                8.0,
-                ey + 3.0,
-                entry.file_type.icon_char().encode_utf8(&mut icon),
-                self.palette.text,
-                12.0,
-            );
+            // The entry's icon from the user's icon theme, in the row's ink.
+            tree.push(RenderCommand::Image {
+                x: (ICON_GUTTER - f32::from(DETAIL_ICON_SIDE)) / 2.0,
+                y: ey + (ROW_H - f32::from(DETAIL_ICON_SIDE)) / 2.0,
+                width: f32::from(DETAIL_ICON_SIDE),
+                height: f32::from(DETAIL_ICON_SIDE),
+                image_id: self.icons.icon_or(
+                    entry.icon_name(),
+                    entry.file_type.icon_stand_in(),
+                    u32::from(DETAIL_ICON_SIDE),
+                    self.palette.text,
+                ),
+            });
 
             // Directory names stay visually distinct from file names, as they
             // were when this view drew its own three columns.
@@ -6220,6 +6456,10 @@ const MENU_SORT_BASE: u64 = 6000;
 /// The file menu's "Open with" submenu; its rows are the base plus one, plus
 /// their place in `ExplorerState::open_with`.
 const MENU_OPEN_WITH_BASE: u64 = 7000;
+/// The first id of the file menu's service items -- what programs add to it
+/// (`gui/servicemenus`) -- numbered in their order, a submenu's own row
+/// included.
+const MENU_SERVICE_BASE: u64 = 8000;
 /// The sorts the menu offers, in its order.
 const SORTS: [(SortBy, &str); 5] = [
     (SortBy::Name, "Name"),
@@ -6228,6 +6468,14 @@ const SORTS: [(SortBy, &str); 5] = [
     (SortBy::Type, "Type"),
     (SortBy::Custom, "Your own order"),
 ];
+/// The id of the sort menu's row for `SORTS[i]`: one id space above
+/// [`MENU_SORT_BASE`], for the menu and for the reason a greyed row gives.
+fn sort_row_id(i: usize) -> u64 {
+    MENU_SORT_BASE
+        .saturating_add(1)
+        .saturating_add(u64::try_from(i).unwrap_or(u64::MAX))
+}
+
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -6283,6 +6531,11 @@ impl oswindow::app::App for ExplorerState {
     /// keeps its own colours -- which here were a hardcoded *light* theme, so
     /// a dark desktop got a white file manager.
     fn theme_changed(&mut self, palette: &Palette) {
+        // An icon's colour is part of its picture: other colours draw every
+        // icon again, and drop the old ones from the window.
+        if self.palette != *palette {
+            self.icons.forget();
+        }
         self.palette = *palette;
     }
 
@@ -6292,6 +6545,8 @@ impl oswindow::app::App for ExplorerState {
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.focus_ring_width = settings.focus_ring_width();
         self.pathbar.set_focus_ring_width(self.focus_ring_width);
+        // And the icon theme the entries' pictures come from.
+        self.icons.set_theme(settings.icon_theme.clone());
     }
 
     /// The folder's name first, then the application's.
@@ -6366,11 +6621,26 @@ impl oswindow::app::App for ExplorerState {
         // should move as smoothly as anything else on screen. Named first
         // because it is the shorter of the two and this returns the one it
         // finds.
-        if self.work_moving() {
-            return Some(OPERATION_TICK);
+        //
+        // And whenever a greyed row of an open menu has a reason waiting to
+        // appear, the sooner of the two -- the menu says `Some(0)` until a
+        // tick has started the wait, which a tick of a millisecond does.
+        let own = if self.work_moving() {
+            Some(OPERATION_TICK)
+        } else {
+            let working =
+                self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
+            working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
+        };
+        let reason = self
+            .menu
+            .as_ref()
+            .and_then(|menu| menu.due_in(self.menu_clock_ms))
+            .map(|ms| std::time::Duration::from_millis(ms.max(1)));
+        match (own, reason) {
+            (Some(own), Some(reason)) => Some(own.min(reason)),
+            (own, reason) => own.or(reason),
         }
-        let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
-        working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
     }
 
     fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
@@ -6402,6 +6672,14 @@ impl oswindow::app::App for ExplorerState {
     fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
         use oswindow::app::ImageChange;
 
+        // The icons' changes split by kind: their drops -- queued when the
+        // colours or the icon theme changed -- go with the thumbnails' drops,
+        // ahead of every upload of either.
+        let (icon_drops, icon_uploads): (Vec<ImageChange>, Vec<ImageChange>) = self
+            .icons
+            .take_images()
+            .into_iter()
+            .partition(|change| matches!(change, ImageChange::Drop(_)));
         let mut changes = Vec::new();
         for id in self.thumbs.take_evicted_image_ids() {
             // Only announce a drop for something believed to be held. An id the
@@ -6412,6 +6690,7 @@ impl oswindow::app::App for ExplorerState {
                 changes.push(ImageChange::Drop(id));
             }
         }
+        changes.extend(icon_drops);
         for (id, thumb) in self.take_pending_uploads() {
             let Some(bytes) = thumb.to_wire_bytes() else {
                 continue;
@@ -6430,6 +6709,7 @@ impl oswindow::app::App for ExplorerState {
             // no frame in which this could be believed and be wrong.
             self.mark_uploaded(id);
         }
+        changes.extend(icon_uploads);
         changes
     }
 
@@ -6444,7 +6724,9 @@ impl oswindow::app::App for ExplorerState {
             self.window_width = width.clamp(1.0, 16384.0) as u32;
             self.window_height = height.clamp(1.0, 16384.0) as u32;
         }
-        ExplorerState::render(self)
+        let tree = ExplorerState::render(self);
+        self.icons.frame_drawn(&tree.commands);
+        tree
     }
 }
 
@@ -6468,6 +6750,12 @@ impl ExplorerState {
         // window while a dialog is up here is still what this window's next
         // save has to start from.
         if let Event::SettingsChanged { group } = event {
+            // Which service menus are on: Settings' Context Menus page, or a
+            // hand edit -- taken at the next right-click.
+            if group.file_name() == servicemenus::CONFIG_NAME {
+                self.service_choices = servicemenus::ChoicesFile::load().choices;
+                return false;
+            }
             return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();
         }
         // A modal owns the INPUT while it is up. Falling through to the
@@ -6538,7 +6826,7 @@ impl ExplorerState {
             // Each tick retires a batch. A tick that retires nothing has
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
-            Event::Tick { .. } => self.tick_work(),
+            Event::Tick { elapsed_ms } => self.tick_menu(*elapsed_ms) | self.tick_work(),
             // `ModifierChord` is here for another reason: this program never
             // asks for one, so the compositor never sends it. Named rather
             // than swept up in a `_ =>` because a wildcard here would also
@@ -6581,6 +6869,10 @@ impl ExplorerState {
             // An open menu owns the next press, whatever button it is and
             // wherever it lands.
             MouseEventKind::Press(_) if self.menu.is_some() => self.click_menu(m.x, m.y),
+            // The double click that follows a second press on a row that keeps
+            // the menu up -- a submenu's, a greyed one -- is the menu's too, as
+            // both presses were: it opens nothing under the menu.
+            MouseEventKind::DoubleClick(_) if self.menu.is_some() => false,
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
@@ -6604,6 +6896,9 @@ impl ExplorerState {
                 let divider = self.drop_divider();
                 was.is_some() || dropped || divider
             }
+            // With a menu up, the pointer lights its rows and opens its
+            // submenus.
+            MouseEventKind::Move if self.menu.is_some() => self.hover_menu(m.x, m.y),
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
             MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
             MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
@@ -7131,9 +7426,7 @@ impl ExplorerState {
                 Self::menu_action(MENU_REFRESH, "Refresh", true),
             ],
         };
-        let mut menu = ContextMenu::new(items);
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        self.put_up_menu(ContextMenu::new(items), x, y);
         true
     }
 
@@ -7854,6 +8147,101 @@ fn start_program(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
     process::Command::new(program).args(args).spawn().map(drop)
 }
 
+/// [`start_program`], in the folder `dir` where one is given: what a service
+/// menu's item runs in -- its file's folder, or the folder its menu names.
+fn start_program_in(program: &OsStr, args: &[OsString], dir: Option<&Path>) -> std::io::Result<()> {
+    let mut command = process::Command::new(program);
+    command.args(args);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    command.spawn().map(drop)
+}
+
+/// Every service-menu file where they are read from, with its size and the
+/// time it was last written, in order: what changes when a menu is
+/// installed, removed or edited -- the desktop's rule for reading them again
+/// (`gui/desktop/src/session.rs`, `service_menu_stamps`). The directories'
+/// own files only, as the scan reads them.
+fn service_menu_stamps(
+    dirs: &servicemenus::Dirs,
+) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    let mut stamps = Vec::new();
+    for dir in dirs.searched() {
+        // A directory that is not there has no menus -- the ordinary state
+        // of most of them.
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        // An entry the listing cannot give is one the scan cannot read
+        // either.
+        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+            if path.extension() != Some(OsStr::new("desktop")) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() {
+                stamps.push((path, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    stamps.sort();
+    stamps
+}
+
+/// `path` as a service menu sees it: its kind by its extension, and
+/// `text/plain` too when that kind is text -- a shell script is offered what
+/// a text file is. The desktop's `service_target`, for the same menus.
+fn service_target(path: &Path) -> servicemenus::Target {
+    let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+    let kind = filetypes::detect_from_extension(extension);
+    let mut target = servicemenus::Target::at(path, kind.mime_type);
+    if kind.is_text && !target.is_dir && target.mime != "text/plain" {
+        target.inherits.push(String::from("text/plain"));
+    }
+    target
+}
+
+/// The menu rows for `rows`, numbered from [`MENU_SERVICE_BASE`] in order,
+/// each item's menu and id recorded in `offer` at its number -- `None` for a
+/// submenu's own row. The desktop's `service_menu_items`, for the same rows.
+fn service_menu_items(
+    rows: &[servicemenus::Row<'_>],
+    offer: &mut Vec<Option<(OsString, String)>>,
+) -> Vec<MenuItem> {
+    let mut built = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = MENU_SERVICE_BASE.saturating_add(u64::try_from(offer.len()).unwrap_or(u64::MAX));
+        built.push(match row {
+            servicemenus::Row::Separator => MenuItem::Separator,
+            servicemenus::Row::Item { menu, action } => {
+                offer.push(Some((menu.id.clone(), action.id.clone())));
+                MenuItem::Action {
+                    id,
+                    label: action.name.clone(),
+                    shortcut: None,
+                    icon: action.icon.clone(),
+                    enabled: true,
+                    checked: None,
+                }
+            }
+            servicemenus::Row::Submenu { label, icon, rows } => {
+                offer.push(None);
+                MenuItem::Submenu {
+                    id,
+                    label: label.clone(),
+                    icon: icon.clone(),
+                    enabled: true,
+                    children: service_menu_items(rows, offer),
+                }
+            }
+        });
+    }
+    built
+}
+
 /// The programs this machine has: those installed here, read as the start
 /// menu reads them, with SlateOS's own (`programs::built_in`) behind them --
 /// an installed entry with the same id replaces SlateOS's. The rule
@@ -7891,6 +8279,10 @@ fn main() -> std::process::ExitCode {
     // Where installed programs' entries are, for opening a file nobody chose
     // a program for and for Open With: as the start menu reads them.
     explorer.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
+    // And what programs add to a file's right-click menu, with which of them
+    // the user turned on or off.
+    explorer.service_dirs = servicemenus::Dirs::standard();
+    explorer.service_choices = servicemenus::ChoicesFile::load().choices;
     oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
 }
 
@@ -10880,6 +11272,516 @@ mod tests {
         let mut state = state_at(root);
         let _ = state.render();
         state
+    }
+
+    // ---- what programs add to a file's menu (service menus) -------------
+
+    /// A program started in a folder: what, with what, and where.
+    type StartedIn = (OsString, Vec<OsString>, Option<PathBuf>);
+
+    thread_local! {
+        static LAUNCHED_IN: std::cell::RefCell<Vec<StartedIn>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A starter in a folder that starts nothing and writes down what it was
+    /// asked.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the launch_in field's, which the real spawn fills"
+    )]
+    fn record_launch_in(
+        program: &OsStr,
+        args: &[OsString],
+        dir: Option<&Path>,
+    ) -> std::io::Result<()> {
+        LAUNCHED_IN.with(|l| {
+            l.borrow_mut().push((
+                program.to_os_string(),
+                args.to_vec(),
+                dir.map(Path::to_path_buf),
+            ));
+        });
+        Ok(())
+    }
+
+    /// What was started in a folder since the last ask, clearing it.
+    fn launched_in() -> Vec<StartedIn> {
+        LAUNCHED_IN.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    // --- Pictures from the icon theme -----------------------------------------
+
+    /// **Each entry in the detail view is drawn with an icon from the icon
+    /// theme, uploaded before the frame that names it** -- its type's own
+    /// name, with its kind's stand-in where the theme has none, and a
+    /// folder's folder -- where an emoji was, which no font here draws
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    #[test]
+    fn each_entry_is_drawn_with_its_kinds_icon_from_the_theme() {
+        let dir = guarded_scratch("explorer-icons");
+        for name in ["a.png", "b.txt", "c.mp4", "d.zip", "e.rs"] {
+            std::fs::write(dir.dir().join(name), b"x").expect("a file");
+        }
+        std::fs::create_dir(dir.dir().join("sub")).expect("a folder");
+        let mut state = ExplorerState::new(dir.dir());
+        assert_eq!(state.view_mode, ViewMode::Details);
+        let tree = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let uploaded: Vec<u64> = oswindow::app::App::take_images(&mut state)
+            .iter()
+            .filter_map(|change| match change {
+                oswindow::app::ImageChange::Upload { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let drawn: Vec<u64> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => Some(*image_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(state.entries.len(), 6, "{:?}", state.entries);
+        let named = |name: &str| {
+            state
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(FileEntry::icon_name)
+                .unwrap_or_else(|| panic!("no entry {name}"))
+        };
+        assert_eq!(
+            named("a.png"),
+            "image-png",
+            "a type is not asked for by its own name"
+        );
+        assert_eq!(named("sub"), "folder");
+        for entry in &state.entries {
+            let id = state.icons.icon_or(
+                entry.icon_name(),
+                entry.file_type.icon_stand_in(),
+                u32::from(DETAIL_ICON_SIDE),
+                state.palette.text,
+            );
+            assert!(drawn.contains(&id), "{} is drawn with no icon", entry.name);
+            assert!(
+                uploaded.contains(&id),
+                "{}'s icon is drawn and never sent",
+                entry.name
+            );
+        }
+        let _again = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state).is_empty(),
+            "the icons were sent again"
+        );
+    }
+
+    /// **No file type's icon name shortens to a built-in icon other than its
+    /// kind's stand-in**: a name the theme lacks falls back by dropping its
+    /// last `-part` before the stand-in is tried, so a type whose name
+    /// shortened to, say, `audio-volume` would be drawn as a loudspeaker. Each
+    /// stand-in is one the built-in set draws.
+    #[test]
+    fn no_file_types_icon_name_shortens_to_another_built_in_icon() {
+        let built_in = appearance::icons::built_in_names();
+        for info in filetypes::all() {
+            let kind = FileType::from_extension(info.extension.trim_start_matches('.'));
+            let stand_in = kind.icon_stand_in();
+            assert!(
+                built_in.contains(&stand_in),
+                "{}'s stand-in {stand_in} is not built in",
+                info.extension
+            );
+            let name = info.mime_type.replace('/', "-");
+            let mut shorter = name.as_str();
+            loop {
+                assert!(
+                    !built_in.contains(&shorter) || shorter == stand_in,
+                    "{}: {name} would draw the built-in {shorter}, not {stand_in}",
+                    info.extension
+                );
+                match shorter.rfind('-') {
+                    Some(at) => shorter = &shorter[..at],
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// **Other colours draw every icon again**: the old ones are dropped from
+    /// the window, since an icon's colour is part of its picture; the same
+    /// colours again drop nothing.
+    #[test]
+    fn other_colours_drop_the_icons_and_draw_them_again() {
+        let dir = guarded_scratch("explorer-icons-colours");
+        std::fs::write(dir.dir().join("a.txt"), b"x").expect("a file");
+        let mut state = ExplorerState::new(dir.dir());
+        let light = Palette::for_mode(false);
+        oswindow::app::App::theme_changed(&mut state, &light);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let sent = oswindow::app::App::take_images(&mut state);
+        assert!(!sent.is_empty());
+
+        oswindow::app::App::theme_changed(&mut state, &light);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state).is_empty(),
+            "the same colours dropped the icons"
+        );
+
+        oswindow::app::App::theme_changed(&mut state, &Palette::for_mode(true));
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        let changes = oswindow::app::App::take_images(&mut state);
+        let dropped = changes
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .count();
+        let uploaded = changes
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!((dropped, uploaded), (sent.len(), sent.len()), "{changes:?}");
+
+        // Another icon theme likewise.
+        let settings = appearance::AppearanceSettings {
+            icon_theme: appearance::icons::IconTheme::load(std::ffi::OsStr::new("another")),
+            ..appearance::AppearanceSettings::default()
+        };
+        oswindow::app::App::appearance_changed(&mut state, &settings);
+        let _frame = oswindow::app::App::render(&mut state, 1000.0, 700.0);
+        assert!(
+            oswindow::app::App::take_images(&mut state)
+                .iter()
+                .any(|c| matches!(c, oswindow::app::ImageChange::Drop(_))),
+            "another icon theme kept the old icons"
+        );
+    }
+
+    /// A service menu for text, as a program ported from Linux might ship one.
+    const SHOUT: &str = "[Desktop Entry]\nType=Service\nMimeType=text/plain;\nActions=shout;\n\n[Desktop Action shout]\nName=Shout it\nExec=shout %f\n";
+
+    /// A window over `root`, holding `notes.txt`, looking for service menus in
+    /// the system data folder `share` -- the menu `text` in it as `name`,
+    /// unless `text` is empty.
+    fn with_service_menu(root: &Path, share: &Path, name: &str, text: &str) -> ExplorerState {
+        let dir = share.join("kio").join("servicemenus");
+        std::fs::create_dir_all(&dir).expect("the menus folder");
+        if !text.is_empty() {
+            std::fs::write(dir.join(name), text).expect("the menu");
+        }
+        std::fs::create_dir_all(root).expect("the folder shown");
+        let mut state = one_file(root, "notes.txt");
+        state.service_dirs = servicemenus::Dirs {
+            user: None,
+            system: vec![share.to_path_buf()],
+        };
+        state.launch_in = record_launch_in;
+        launched_in();
+        state
+    }
+
+    /// The top-level rows of the menu up, by label.
+    fn menu_labels(state: &ExplorerState) -> Vec<String> {
+        state
+            .menu
+            .as_ref()
+            .map(|menu| {
+                menu.items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        MenuItem::Action { label, .. } | MenuItem::Submenu { label, .. } => {
+                            Some(label.clone())
+                        }
+                        MenuItem::Separator => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **What a program adds to a file's right-click menu is offered there,
+    /// and starts the program on the file, in the file's folder**
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`): a menu in
+    /// the format KDE's file manager reads, as a program ported from Linux
+    /// ships one.
+    #[test]
+    fn a_service_menus_item_is_offered_and_starts_its_program_on_the_file() {
+        let scratch = temp_dir("service_menu");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        let labels = menu_labels(&state);
+        let at = labels
+            .iter()
+            .position(|l| l == "Shout it")
+            .unwrap_or_else(|| panic!("the item is not offered: {labels:?}"));
+        assert!(
+            at >= 2,
+            "the item comes before Open and Open with: {labels:?}"
+        );
+        let shout = menu_row(&state, "Shout it");
+        press_at(&mut state, shout);
+        let started = launched_in();
+        assert_eq!(started.len(), 1, "{started:?}");
+        let (program, args, dir) = &started[0];
+        assert_eq!(program, "shout");
+        assert_eq!(args, &[root.join("notes.txt").into_os_string()]);
+        assert_eq!(
+            dir.as_deref().and_then(|d| std::fs::canonicalize(d).ok()),
+            std::fs::canonicalize(&root).ok(),
+            "the program does not start in the file's folder"
+        );
+        assert_eq!(state.status_message, "Started Shout it");
+    }
+
+    /// **A service menu is offered only for the kinds of file it names, and
+    /// only while the user leaves it on.**
+    #[test]
+    fn a_service_menu_is_offered_only_for_its_kinds_and_while_it_is_on() {
+        let scratch = temp_dir("service_menu_kinds");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let pictures = SHOUT.replace("text/plain", "image/png");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", &pictures);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(
+            !menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu for pictures is offered for a text file"
+        );
+
+        // A kind of text is text: a menu for plain text is offered for
+        // Markdown, as the shared MIME database's sub-class says.
+        let scratch = temp_dir("service_menu_text");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        write(&root.join("readme.md"), "# Hello");
+        state.load_directory();
+        let _ = state.render();
+        let (x, y) = row_centre(&state, "readme.md");
+        state.open_context_menu(x, y);
+        assert!(
+            menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu for plain text is not offered for Markdown"
+        );
+
+        let scratch = temp_dir("service_menu_off");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        state.refresh_service_menus();
+        let menu = state.service_menus.menus.first().expect("read").clone();
+        state.service_choices.set(&menu, false);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(
+            !menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu the user turned off is offered"
+        );
+    }
+
+    /// **A menu installed while the window is open is offered at the next
+    /// right-click**, without a restart: the menus are read again when a
+    /// file of one changes.
+    #[test]
+    fn a_service_menu_installed_later_is_offered_at_the_next_right_click() {
+        let scratch = temp_dir("service_menu_later");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", "");
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(!menu_labels(&state).iter().any(|l| l == "Shout it"));
+        state.menu = None;
+        std::fs::write(
+            share.join("kio").join("servicemenus").join("shout.desktop"),
+            SHOUT,
+        )
+        .expect("installed");
+        state.open_context_menu(x, y);
+        assert!(
+            menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu installed since the window opened is not offered"
+        );
+    }
+
+    // ---- the context menu and the pointer -------------------------------
+
+    /// The middle of the open menu's row `label`, where the menu laid it out.
+    fn menu_row(state: &ExplorerState, label: &str) -> (f32, f32) {
+        let menu = state.menu.as_ref().expect("a menu is up");
+        let index = menu
+            .items()
+            .iter()
+            .position(|item| match item {
+                MenuItem::Action { label: l, .. } | MenuItem::Submenu { label: l, .. } => {
+                    l == label
+                }
+                MenuItem::Separator => false,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {label} row"));
+        menu.item_rect(index).expect("a row is laid out").centre()
+    }
+
+    /// A point on the row `label` as the open menu last drew it -- a
+    /// submenu's row included, which is drawn over the menu it opened from.
+    fn drawn_menu_row(state: &ExplorerState, label: &str) -> (f32, f32) {
+        state
+            .render_menu()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    ..
+                } if text == label => Some((*x + 4.0, *y + font_size / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    }
+
+    fn move_to(state: &mut ExplorerState, (x, y): (f32, f32)) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    fn press_at(state: &mut ExplorerState, (x, y): (f32, f32)) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// **A submenu is reached with the pointer**: moving onto Sort by opens
+    /// it, a press on Sort by opens it too and leaves the menu up, and a
+    /// press on a row in it chooses that row.
+    #[test]
+    fn a_submenu_is_reached_with_the_pointer() {
+        let scratch = temp_dir("menu_submenu");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "a.txt");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        press_at(&mut state, sort_by);
+        assert!(
+            state.menu.as_ref().is_some_and(ContextMenu::is_visible),
+            "a press on Sort by put the menu away"
+        );
+        let size = drawn_menu_row(&state, "Size");
+        press_at(&mut state, size);
+        assert_eq!(
+            state.sort_by,
+            SortBy::Size,
+            "the submenu's row was not chosen"
+        );
+        assert!(state.menu.is_none(), "choosing a row left the menu up");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        move_to(&mut state, sort_by);
+        let name = drawn_menu_row(&state, "Name");
+        press_at(&mut state, name);
+        assert_eq!(
+            state.sort_by,
+            SortBy::Name,
+            "moving onto Sort by did not open it"
+        );
+    }
+
+    /// **A greyed menu row says why**, while the pointer rests on it, after
+    /// the toolkit's delay, and the window asks for the ticks that show it:
+    /// your own order before there is one, and a folder's Open With.
+    #[test]
+    fn a_greyed_menu_row_says_why_while_the_pointer_rests_on_it() {
+        use oswindow::app::App;
+        let scratch = temp_dir("menu_why");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("folder")).expect("make a folder");
+        let mut state = one_file(&root, "a.txt");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        move_to(&mut state, sort_by);
+        let own = drawn_menu_row(&state, "Your own order");
+        move_to(&mut state, own);
+        assert!(
+            App::tick_interval(&state).is_some_and(|d| d <= std::time::Duration::from_millis(1)),
+            "the window does not ask for the tick that starts the wait"
+        );
+        send(&mut state, &Event::Tick { elapsed_ms: 1 });
+        assert!(
+            App::tick_interval(&state).is_some_and(|d| d <= std::time::Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        send(&mut state, &Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            state.menu.as_ref().and_then(ContextMenu::showing_reason),
+            Some("Drag a file to where you want it to make an order of your own.")
+        );
+        assert!(
+            state.render_menu().iter().any(|c| matches!(
+                c,
+                guitk::render::RenderCommand::Text { text, .. } if text.starts_with("Drag a file")
+            )),
+            "the reason is not drawn"
+        );
+
+        state.menu = None;
+        let (x, y) = row_centre(&state, "folder");
+        right_click(&mut state, x, y);
+        let open_with = menu_row(&state, "Open with");
+        move_to(&mut state, open_with);
+        send(&mut state, &Event::Tick { elapsed_ms: 1 });
+        send(&mut state, &Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            state.menu.as_ref().and_then(ContextMenu::showing_reason),
+            Some("A folder opens here, in the explorer: Open With is for files.")
+        );
+    }
+
+    /// **A double click on a menu row that keeps the menu up opens nothing
+    /// under it**: a folder's greyed Open with leaves the menu up, and the
+    /// double click that follows the second press is the menu's -- not a
+    /// double click on whichever folder lies behind the row.
+    #[test]
+    fn a_double_click_on_a_menu_row_opens_nothing_under_it() {
+        let scratch = temp_dir("menu_double_click");
+        let root = scratch.dir().to_path_buf();
+        for n in 0..30 {
+            fs::create_dir(root.join(format!("folder{n:02}"))).expect("make a folder");
+        }
+        let mut state = state_at(&root);
+        let _ = state.render();
+        let (x, y) = row_centre(&state, "folder03");
+        right_click(&mut state, x, y);
+        let open_with = menu_row(&state, "Open with");
+        press_at(&mut state, open_with);
+        press_at(&mut state, open_with);
+        send(&mut state, &double_click(open_with.0, open_with.1));
+        assert!(state.menu.is_some(), "the menu was put away");
+        assert_eq!(
+            state.current_path, root,
+            "the double click opened the folder under the menu"
+        );
     }
 
     /// A point on the row showing `name`.
@@ -13897,6 +14799,40 @@ mod tests {
         }
     }
 
+    /// **The icons' drops come before the thumbnails' uploads too**: a change
+    /// of colours or icon theme gives every icon back, and thumbnails made in
+    /// the same frame are not asked for before that room is freed.
+    #[test]
+    fn the_icons_drops_come_before_the_thumbnails_uploads() {
+        let scratch = dir_of("win_icon_order", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Details);
+        let _ = App::render(&mut state, 900.0, 600.0);
+        let held = state.take_images();
+        assert!(
+            held.iter().any(|c| matches!(c, ImageChange::Upload { .. })),
+            "no icon was drawn: {held:?}"
+        );
+        state.icons.forget();
+        state.set_view_mode(ViewMode::Icons);
+        while state.pump_thumbnails_default() > 0 {}
+        let batch = state.take_images();
+        let first_upload = batch
+            .iter()
+            .position(|c| matches!(c, ImageChange::Upload { .. }));
+        let last_drop = batch
+            .iter()
+            .rposition(|c| matches!(c, ImageChange::Drop(_)));
+        assert!(
+            first_upload.is_some() && last_drop.is_some(),
+            "the batch holds no drop and upload together: {batch:?}"
+        );
+        assert!(
+            last_drop < first_upload,
+            "an icon was given back after a thumbnail was asked for: {batch:?}"
+        );
+    }
+
     /// A drop is only announced for an id believed to be held. Announcing one
     /// for an id the compositor never took is not free: the id is derived from
     /// the file, so a later generation of the same file re-uses it, and a
@@ -14575,11 +15511,14 @@ mod tests {
                 texts.iter().any(|t| t.contains("alpha line")),
                 "the preview drew no line of the file: {texts:?}"
             );
+            // The detail view's rows draw their kinds as icons from the
+            // theme; any other picture is a thumbnail.
             assert!(
-                !tree
-                    .commands
-                    .iter()
-                    .any(|c| matches!(c, guitk::render::RenderCommand::Image { .. })),
+                !tree.commands.iter().any(|c| matches!(
+                    c,
+                    guitk::render::RenderCommand::Image { image_id, .. }
+                        if !state.icons.drew(*image_id)
+                )),
                 "the preview drew the thumbnail as well as the text"
             );
         });

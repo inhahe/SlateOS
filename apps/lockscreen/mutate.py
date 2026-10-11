@@ -176,9 +176,57 @@ MUTATIONS += [
     ),
     (
         "a shaken box is pressed where it stood",
-        "            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0 + self.shake.offset(),\n",
-        "            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0,\n",
+        "            x: home.x + self.shake.offset(),\n",
+        "            x: home.x,\n",
         ["a_shaken_password_box_is_pressed_where_it_is_drawn"],
+    ),
+    (
+        "the lockout's reason is asked where the shake has the box",
+        "                let field = self.password_field_home();\n",
+        "                let field = self.password_field_rect();\n",
+        ["the_lockouts_reason_waits_the_same_while_the_box_shakes"],
+    ),
+]
+
+
+# Why the password box is switched off, said while the pointer rests on
+# it during a lockout (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md).
+MUTATIONS += [
+    (
+        'the password box gives no reason during a lockout',
+        '        let locked = self.state == LockScreenState::PasswordEntry && self.lockout.is_active();',
+        '        let locked = false;',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the pointer is not followed for the password box's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => None,\n                _ => self.pointer,',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a pointer that left keeps the password box's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => self.pointer,\n                _ => Some((mouse.x, mouse.y)),',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the clock for the password box's reason does not move",
+        '            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);',
+        '            let _ = elapsed_ms;',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the password box's reason going asks for no frame",
+        '        if self.explain_disabled() {\n            result = EventResult::Consumed;\n        }',
+        '        self.explain_disabled();',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the password box's reason is not drawn",
+        '        tree.commands\n            .extend(self.why_disabled.render(&self.palette));',
+        '        let _ = self.why_disabled.render(&self.palette);',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

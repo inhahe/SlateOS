@@ -179,6 +179,50 @@ pub fn apply_key(
     }
 }
 
+/// [`apply_key`] on the program's clipboard (`guitk::clipboard`): Ctrl+V
+/// pastes it, and what Ctrl+C or Ctrl+X takes is put on it as well as
+/// handed back. It is the clipboard a field's right-click menu copies to and
+/// pastes from (`TextInput::edit_command`), so the keys and the menu agree;
+/// a window keeping a clipboard of its own for the keys has two that do not.
+pub fn apply_key_on_clipboard(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    font_size: f32,
+) -> LineEdit {
+    // Read for the key that pastes alone: the clipboard may hold megabytes,
+    // and every other key -- each letter typed -- would copy them for nothing.
+    let clipboard = if pastes(key) {
+        guitk::clipboard::text()
+    } else {
+        String::new()
+    };
+    let edit = apply_key(input, key, capacity, &clipboard, font_size);
+    if let Some(copied) = &edit.copied {
+        guitk::clipboard::set_text(copied);
+    }
+    edit
+}
+
+/// Whether `key` is [`apply_key`]'s paste: Ctrl+V as a chord
+/// ([`is_ctrl_chord`]).
+#[must_use]
+pub fn pastes(key: &KeyEvent) -> bool {
+    key.key == Key::V && is_ctrl_chord(key.modifiers)
+}
+
+/// A field holding `text`, which typing and pasting -- by key or from its
+/// right-click menu -- fill to at most `capacity` characters: how a program's
+/// one-line boxes start. The text it starts with is not cut, so a longer one
+/// a file holds is shown whole.
+#[must_use]
+pub fn field_holding(text: &str, capacity: usize) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(text);
+    input.set_capacity(Some(capacity));
+    input
+}
+
 /// Type `typed` into `input` over its selection, stopping at `capacity`
 /// characters -- counted in characters, not bytes, so a limit cannot cut a
 /// character in half. A control character -- a newline in a paste -- is left
@@ -350,6 +394,51 @@ mod tests {
         input
     }
 
+    /// **`pastes` is the key `apply_key` pastes on, and no other**, whatever
+    /// is held with it: the program's clipboard is read for that key alone,
+    /// so a key that pasted without being it would paste nothing.
+    #[test]
+    fn pastes_is_the_key_apply_key_pastes_on() {
+        let mut combinations = Vec::new();
+        for bits in 0_u8..16 {
+            combinations.push(Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            });
+        }
+        for modifiers in combinations {
+            for (k, text) in [(Key::V, "v"), (Key::C, "c"), (Key::Unknown(0), "v")] {
+                let stroke = held(k, text, modifiers);
+                let mut input = field("");
+                apply_key(&mut input, &stroke, 100, "PASTED", 13.0);
+                assert_eq!(
+                    input.text() == "PASTED",
+                    pastes(&stroke),
+                    "{k:?} with {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    /// **A field holding a capacity is filled to it and no further**, and
+    /// keeps whole a longer text it starts with -- a draft's or a rule's,
+    /// read from a file.
+    #[test]
+    fn a_field_holding_a_capacity_fills_to_it() {
+        let mut input = field_holding("ab", 4);
+        input.insert_text("cdef");
+        assert_eq!(input.text(), "abcd");
+        let long = field_holding("a long start", 4);
+        assert_eq!(
+            long.text(),
+            "a long start",
+            "the text it starts with was cut"
+        );
+        assert_eq!(long.capacity(), Some(4));
+    }
+
     /// **A key held with Alt or the Windows key is not the field's**: the
     /// editing keys answered it -- Alt+Backspace deleted, Windows+Left moved
     /// the caret -- though `LineEdit::handled` says such a key is the
@@ -459,6 +548,40 @@ mod tests {
         // With nothing selected, a copy takes nothing.
         let none = apply_key(&mut input, &key(Key::C, "c", true, false), 10, "", 13.0);
         assert_eq!(none.copied, None);
+    }
+
+    /// **On the program's clipboard, the keys and a field's right-click menu
+    /// agree**: Ctrl+C puts the selection there, the menu's Paste pastes it
+    /// into another field, and what the menu copies Ctrl+V pastes.
+    #[test]
+    fn the_keys_and_the_menu_share_the_programs_clipboard() {
+        let mut from = field("hello");
+        let mut to = field("");
+        apply_key_on_clipboard(&mut from, &key(Key::A, "a", true, false), 10, 13.0);
+        let copied = apply_key_on_clipboard(&mut from, &key(Key::C, "c", true, false), 10, 13.0);
+        assert_eq!(
+            copied.copied.as_deref(),
+            Some("hello"),
+            "the copy is not handed back"
+        );
+        assert_eq!(guitk::clipboard::text(), "hello");
+        let _pasted = to.edit_command(guitk::editmenu::EditCommand::Paste.id());
+        assert_eq!(
+            to.text(),
+            "hello",
+            "the menu did not paste what the key copied"
+        );
+
+        let mut other = field("world");
+        other.select_all();
+        let _copied = other.edit_command(guitk::editmenu::EditCommand::Copy.id());
+        let mut last = field("");
+        apply_key_on_clipboard(&mut last, &key(Key::V, "v", true, false), 3, 13.0);
+        assert_eq!(
+            last.text(),
+            "wor",
+            "the key did not paste what the menu copied, to the capacity"
+        );
     }
 
     #[test]

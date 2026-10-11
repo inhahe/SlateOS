@@ -2227,7 +2227,11 @@ live.
   turned on (`context-menus.yaml`); a menu that cannot be used is reported
   with why. **Lane E:** the file manager's menus and the Settings page that
   lists and switches them
-  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`) -- the file
+  manager's done 2026-10-10 (60fc1cd4a), but for the items' pictures, which
+  wait on it drawing from the icon theme at all; the Settings page done the
+  same day (Apps -> Context Menus: every menu with its switch, whose it is
+  and what it adds, and what is not offered with why). Menu rows
   draw their pictures since the same day -- an item's, a submenu's, a jump
   list action's (`ContextMenu::render_with_icons`).
 
@@ -3258,6 +3262,53 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
+- `[E]` **The operator's backup program, LithicBackup, on SlateOS**
+  (design-decisions §1050, the operator's answer to B-Q18: "a
+  reimplementation of `d:\visual studio projects\backup` in a language we
+  support, or if we get Mono ported, we can just run it on that"). Adopted
+  2026-10-10 from the list in lane B's backlog. The program is C# for .NET 8
+  (`net8.0-windows`): about 50,000 lines in 168 files, a WPF window, and
+  Windows underneath it -- the NTFS change journal says what changed, IMAPI2
+  burns the discs, Win32 names the volumes. Mono 6.14 cannot load a .NET 8
+  program, so the operator changed the .NET port to `dotnet/runtime` (§1246).
+  Even then, running it needs more than the runtime: WPF exists only on
+  Windows, and the journal and the burner are Windows calls. The operator's
+  two routes:
+  - **Run it on .NET:** its window rewritten (in Avalonia, itself a port, or
+    against our toolkit), and its Windows services swapped for SlateOS's own.
+  - **Reimplement it:**
+    - the engine on `apps/snapstore`, the store `apps/backup` and System
+      Restore share;
+    - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
+    - the window in our toolkit;
+    - the feature list from the program's own `design.md`, `roadmap.md` and
+      `known-issues.md`.
+
+  Which route is chosen when the work starts, depending on how far
+  `dotnet/runtime` has got by then. Either way, copying a file that is open
+  and changing waits on the VSS equivalent in `roadmap-detailed.md` (the
+  operator's request of 2026-08-21). The operator's whole list of ports is
+  `roadmap-detailed.md` §6.13.
+
+- `[E]` **The operator's WinDirStat fork on SlateOS** (design-decisions
+  §1050, B-Q18: "QDirStat, or better, port my own fork of WinDirStat that can
+  be found at d:\visual studio projects\dirsize\windirstat"). Adopted
+  2026-10-10 from the same list.
+  - **The fork:** C++ on MFC and Win32, about 39,000 lines. It has All
+    Files, Largest Files, Duplicate Files, Search Results, File Watcher,
+    Extension and Treemap views; logical against physical size; scans saved
+    and reloaded; and cleanup from the window. MFC is Windows-only, so a port
+    means a new window layer under the fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported: a treemap, a sortable file list and an
+    extension breakdown.
+  - **First step:** compare the fork's features with diskanalyzer's. Then
+    either port the fork's logic or bring its features to diskanalyzer; if
+    neither is clearly better, it is a question for the operator.
+
+  QDirStat, the other route the operator named, is built on Qt, which
+  nothing here has ported.
+
 - `[-]` `[E]` **Games and the theme** — **C-Q16**, answered by the operator
   (`design-decisions.md` §1422): every game's chrome follows the palette, and
   on the board a colour keeps its own value only where a player reads it --
@@ -3431,7 +3482,53 @@ word; text inside them that says "lane C" is history.
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
     2026-09-29** (3a7073848): a morning and an evening picture, each with
     its time, and the picture and the rotation saying when a schedule hides
-    them;
+    them (since 2026-10-10 the page shows one source at a time, below);
+  - ~~a theme's wallpapers on the Background page
+    (`c-e-a-themes-wallpapers-on-the-background-page.md`)~~ **done
+    2026-10-10**: the page asks one question first -- Show: a picture, a
+    theme's pictures, pictures by time of day, a folder in turn, or none --
+    and choosing a source clears those the desktop would show over it
+    (design-decisions §1243); themes chosen by their pictures, decoded off
+    the window's thread; the pictures themes bring offered as pictures;
+  - ~~window frames, the taskbar panel and the cursor theme chosen in
+    Settings (`c-e-choose-the-window-frames-in-settings.md`,
+    `c-e-choose-the-taskbar-panel-in-settings.md`,
+    `c-e-choose-the-cursor-theme-in-settings.md`)~~ **done 2026-10-10**:
+    three rows on the Themes page, each list holding every installed theme
+    and choosing that axis alone;
+  - ~~how long notifications are kept
+    (`c-e-a-setting-for-how-long-notifications-are-kept.md`)~~ **done
+    2026-10-10**: Keep for, on the Notifications page;
+  - ~~the password vault shared with the credential service
+    (`c-e-share-the-password-vault-with-the-credential-service.md`)~~
+    **done 2026-10-10**: `apps/credvault`, the vault's model and its file
+    format moved out of the password manager into a library both build on,
+    so the service reads the vault with the very code that writes it;
+  - ~~the System Sounds section on Settings' Sound page
+    (`c-e-a-sounds-page-for-the-sounds-axis.md`)~~ **done 2026-10-10**: on
+    or off, a volume, the sound theme -- every one installed, other
+    desktops' too -- and each event's sound (the theme's, none, or a file of
+    the user's), each heard as it is chosen; heard on SlateOS once the C
+    library reaches the sound device (lane D's half of
+    `e-ad-no-application-can-reach-the-sound-device.md`);
+  - ~~a Window Rules page in Settings
+    (`c-e-a-window-rules-page-in-settings.md`)~~ **done 2026-10-10**: the
+    rules in order, each switched, changed, moved and deleted, a new one
+    added, and the file's unreadable ones said and never saved over
+    (`e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`
+    asks lane C to keep them); the snap zones wait on lane F to be named
+    (`e-f-settings-could-name-the-snap-zones.md`). Settings' pages scroll
+    since the same day -- they did not, and what ran past the window's bottom
+    could not be reached;
+  - `[-]` a disabled control says why while the pointer rests on it
+    (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
+    (every dimmed button and unusable row), thirteen games through
+    `gamechrome::why`, the lock screen and System Restore's forms, and the
+    explorer's, notes' and the photo manager's context menus -- which never
+    saw the pointer, so their submenus could not be reached with it -- done
+    2026-10-10; hangman, gomoku, pinball and the network manager wait on
+    lane C's `Frame::greyed`, the editor's menu rows on the menu bar's
+    `explain`;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio
@@ -3758,6 +3855,37 @@ word; text inside them that says "lane C" is history.
   (`requests/e-a-the-sevenz-crate-is-ready-for-the-kernel-shim.md`: the
   kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
   shims.
+
+- `[-]` `[E]` **Programs draw their pictures from the icon theme, not as
+  emoji** -- 2026-10-10, lane C's
+  `requests/c-e-draw-pictures-from-the-icon-theme.md`. No font here draws
+  emoji, so each was a box. `apps/themeicons` is the piece every program
+  under `oswindow::app` uses: icons named while drawing, uploaded through
+  `App::take_images`, dropped and drawn again when the colours or the icon
+  theme change. **Done:** Settings (its sidebar, search field, open lists'
+  checks and placeholder card), the file manager's detail view (each file
+  by its type's own icon name, its kind's built-in icon where the theme has
+  none) and the archive manager's file list. **Remaining:** the file
+  manager's toolbar and transfer buttons and the world clock, which need
+  icons the built-in set does not draw
+  (`requests/e-c-icon-names-lane-e-s-programs-need.md`); the finance
+  categories, which no icon name describes; Settings' account pictures,
+  which wait on the picture being kept at all
+  (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+
+- `[-]` `[E]` **A text field's right-click menu in every program** --
+  2026-10-10, lane C's `requests/c-e-text-fields-have-a-right-click-menu.md`:
+  Cut, Copy, Paste, Delete and Select all (Undo and Redo in a box with a
+  history), each dimmed when it would do nothing. `apps/fieldmenu` holds the
+  menu, routes the presses, keys, pointer and clock to it and draws it, for
+  every program; `textline::apply_key_on_clipboard` puts the keys on the
+  program's clipboard, which the menu copies to and pastes from -- programs
+  kept clipboards of their own for the keys. **Done:** Settings, the QR code
+  maker, the torrent client's magnet box, the renamer's boxes, the sound
+  recorder's marker names, the process explorer's filter and New Task
+  boxes, the mail client's compose form. **Remaining:** calendar, finance,
+  flashcards, jsonviewer, notes, paint, regextester, reminders, snippets,
+  stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

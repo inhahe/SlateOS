@@ -93,6 +93,7 @@ dependencies = [
  "quoting",
  "sevenz",
  "tararchive",
+ "themeicons",
  "xz",
  "ziparchive",
 ]
@@ -783,16 +784,25 @@ name = "credmanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "credvault",
  "guitk",
  "oswindow",
  "pathtext",
+ "scratchdir",
+ "sha2",
+ "textfmt",
+ "textline",
+]
+
+[[package]]
+name = "credvault"
+version = "0.1.0"
+dependencies = [
  "safeio",
  "scratchdir",
  "seal",
  "settingsfile",
- "sha2",
  "textfmt",
- "textline",
 ]
 
 [[package]]
@@ -1222,6 +1232,7 @@ name = "email"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathcodec",
@@ -1285,10 +1296,12 @@ dependencies = [
  "programs",
  "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "tararchive",
  "textfind",
  "textline",
+ "themeicons",
  "thumbs",
  "yamldoc",
  "ziparchive",
@@ -1297,6 +1310,13 @@ dependencies = [
 [[package]]
 name = "fdisk"
 version = "0.1.0"
+
+[[package]]
+name = "fieldmenu"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
 
 [[package]]
 name = "file"
@@ -1480,7 +1500,12 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "osfont",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -3251,6 +3276,7 @@ name = "procexplorer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "libcall",
  "oswindow",
@@ -3301,6 +3327,7 @@ name = "qrcode"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -3489,6 +3516,7 @@ dependencies = [
  "appearance",
  "coreutils",
  "ere",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -3728,7 +3756,10 @@ dependencies = [
  "compositor",
  "datetimesettings",
  "desktopentry",
+ "fieldmenu",
  "guitk",
+ "hwquery",
+ "imagecodec",
  "inputsettings",
  "loginusers",
  "notices",
@@ -3739,8 +3770,12 @@ dependencies = [
  "quoting",
  "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
+ "sound",
  "textline",
+ "themeicons",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -3952,6 +3987,7 @@ name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -4426,6 +4462,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "themeicons"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "oswindow",
+]
+
+[[package]]
 name = "thumbs"
 version = "0.1.0"
 dependencies = [
@@ -4478,6 +4523,7 @@ name = "torrent"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",

@@ -28,8 +28,9 @@ Two tables:
   a number nothing set and a knob drawn for nothing: the toolkit's slider,
   showing and setting the vault's own time, keeping a drag only when let go,
   and dead under a dialog, another panel or the lock screen.
-* **vaultfile.rs** -- the file itself: a header that asks for too much work is
-  refused before any is done, and contents are read whole or not at all.
+
+The vault itself -- its model and its file's format -- is a library with its
+own tests and mutation rows: `apps/credvault/mutate.py`.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -52,11 +53,8 @@ CLEAR = "nothing_in_the_vault_file_is_in_the_clear"
 REOPEN = "a_vault_opens_again_only_with_its_master_password"
 NONCE = "every_change_is_saved_as_it_is_made_under_a_new_nonce"
 JUNK = "a_file_that_is_not_a_vault_is_left_alone"
-FORGETS = "locking_forgets_the_key_and_every_entry"
 ENTROPY = "without_secure_randomness_nothing_is_sealed_and_the_window_says_so"
 CLOSE = "a_close_that_could_not_save_says_so_once"
-REFUSED_WHOLE = "contents_that_are_not_understood_are_refused_whole"
-COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
 EXPORT_CHARS = "an_export_keeps_every_character_of_every_password"
 EXPORT_WARNING = "export_comes_only_after_the_warning_says_what_it_is"
 RESTORE = "a_restore_needs_the_backups_password_and_asks_before_replacing"
@@ -95,18 +93,6 @@ MAIN = [
         "    let Some((label, value)) = fields.get(index) else {\n        return false;\n    };",
         "    let Some((label, value)) = fields.get(index).or(fields.first()) else {\n        return false;\n    };",
         [PAST_END],
-    ),
-    (
-        "locking keeps the entries",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.key = None;\n",
-        [FORGETS],
-    ),
-    (
-        "locking keeps the key",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.entries.clear();\n",
-        [FORGETS],
     ),
     (
         "a change is not saved",
@@ -308,12 +294,6 @@ MAIN = [
         [LOCKS_ITSELF],
     ),
     (
-        "the auto-lock falls due at the last use, not a timeout after it",
-        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
-        '        let due = self.last_access;\n',
-        [LOCKS_ITSELF],
-    ),
-    (
         "a tick's part second is dropped",
         '                    let total = carry_ms.saturating_add(*elapsed_ms);\n',
         '                    let total = *elapsed_ms;\n',
@@ -477,7 +457,7 @@ MAIN = [
     (
         "the panel shows the slider's own time, not the vault's",
         '        if !shown.is_dragging() {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n'
         '        }\n',
         '',
         [SLIDER_SETS],
@@ -485,9 +465,9 @@ MAIN = [
     (
         "a drag's minutes are not shown as it goes",
         '        if !shown.is_dragging() {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n',
         '        if true {\n'
-        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes()));\n',
         [SLIDER_SETS],
     ),
     (
@@ -887,42 +867,11 @@ MAIN += [
     ),
 ]
 
-VAULTFILE = [
-    (
-        "a file asking any amount of memory is opened",
-        "        if kdf.memory_kib > MAX_MEMORY_KIB\n",
-        "        if false\n",
-        [COSTLY],
-    ),
-    (
-        "a record not understood is skipped",
-        '            _ => return Err(bad("a record this program does not know")),',
-        "            _ => {}",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "an escape never written is read anyway",
-        '            textfmt::tsv::unescape(raw).ok_or_else(|| bad("a field is not escaped as written"))',
-        "            Ok((*raw).to_string())",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "the next id may be one in use",
-        "    if contents.next_id <= highest {",
-        "    if false {",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "an entry may be in a folder that is not there",
-        "            if let Some(f) = folder_id\n                && !c.folders.iter().any(|folder| folder.id == f)\n",
-        "            if let Some(f) = folder_id\n                && false\n",
-        [REFUSED_WHOLE],
-    ),
-]
 
+# The vault's model, with its own tests and mutation rows, is apps/credvault
+# (apps/credvault/mutate.py).
 TABLES = {
     "main.rs": MAIN,
-    "vaultfile.rs": VAULTFILE,
 }
 
 if __name__ == "__main__":

@@ -170,14 +170,14 @@ MUTATIONS = [
     # -- the boxes -------------------------------------------------------------------------------------------------------
     (
         "the field is given no keys",
-        "        let done = textline::apply_key(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard, 12.0);",
-        "        let done = textline::LineEdit::default();\n        let _ = &clipboard;",
+        "        let done = textline::apply_key_on_clipboard(&mut self.editor, key, MAX_FIELD_CHARS, 12.0);",
+        "        let done = textline::LineEdit::default();",
         ["the_caret_moves_and_typing_goes_where_it_is", "every_advertised_key_does_something"],
     ),
     (
         "a box changed from outside is typed over",
-        "        if self.editor.text() != self.field_text(field) {",
-        "        if false {",
+        "        if self.editor.text() != self.field_text(field) {\n            // Changed from outside the box",
+        "        if false {\n            // Changed from outside the box",
         ["a_box_changed_from_outside_is_typed_onto"],
     ),
     (
@@ -197,8 +197,8 @@ MUTATIONS = [
     # -- the pointer -------------------------------------------------------------------------------------------------------
     (
         "a press in a box leaves the keys where they were",
-        "                self.focused_field = at;",
-        "                let _ = at;",
+        "        self.focused_field = at;\n",
+        "        let _ = at;\n",
         ["a_press_in_a_box_puts_the_keys_there"],
     ),
     (
@@ -333,6 +333,72 @@ MUTATIONS = [
         "                        TextCursor::from(value.len())\n"
         "                    },\n",
         ["a_press_in_an_idle_box_lands_on_the_character_drawn_under_it"],
+    ),
+]
+
+# A box's right-click menu (2026-10-10, requests/c-e-text-fields-have-a-
+# right-click-menu.md), through apps/fieldmenu: the box given the keys, a row
+# done to it and the code made again, the keys and the menu on the program's
+# clipboard, the box holding its capacity, the clock for a dimmed row's
+# reason.
+QR_MENU = "a_boxs_right_click_menu_edits_it_and_the_code_follows"
+QR_CAP = "a_paste_from_the_menu_stops_at_the_capacity"
+QR_CLOCK = "a_dimmed_row_of_the_menu_says_why_on_the_clock"
+
+MUTATIONS += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [QR_MENU, QR_CAP, QR_CLOCK],
+    ),
+    (
+        'a row chosen does nothing',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
+        '        if false {\n',
+        [QR_MENU, QR_CAP],
+    ),
+    (
+        'the code does not follow the menu',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n            *self.field_text_mut(field) = self.editor.text().to_owned();\n',
+        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
+        [QR_MENU, QR_CAP],
+    ),
+    (
+        "the right-click leaves the keys where they were",
+        "        if self.focus_field(field).is_none() {\n            return EventResult::Ignored;\n        }\n        let viewport",
+        "        let viewport",
+        [QR_MENU],
+    ),
+    (
+        'a press the menu took reaches the window too',
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
+        [QR_MENU],
+    ),
+    (
+        "the menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [QR_MENU],
+    ),
+    (
+        'the box holds no capacity',
+        '            editor: textline::field_holding("", MAX_FIELD_CHARS),\n',
+        '            editor: textline::field_holding("", usize::MAX),\n',
+        [QR_CAP],
+    ),
+    (
+        'no clock while the menu waits',
+        '        self.field_menu.due_in().map(Duration::from_millis)\n',
+        '        None\n',
+        [QR_CLOCK],
+    ),
+    (
+        'the clock does not move the menu',
+        '            && self.field_menu.tick(*elapsed_ms)\n',
+        '            && self.field_menu.tick(0)\n',
+        [QR_CLOCK],
     ),
 ]
 

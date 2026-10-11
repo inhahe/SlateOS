@@ -52,7 +52,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text::{self, TextCursor};
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::path::Path;
@@ -1784,8 +1784,10 @@ pub struct QrApp {
     /// edits the text of `focused_field()`, and is reloaded from it whenever
     /// the two differ, so the strings stay the one record of what is typed.
     editor: TextInput,
-    /// The boxes' clipboard.
-    clipboard: String,
+    /// The box's right-click menu -- Cut, Copy, Paste, Delete, Select all --
+    /// while it is up, and the box it is for
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<Field>,
     /// Whether the newest history entry is the code being typed, so the next
     /// change updates it rather than adding another.
     history_open: bool,
@@ -1842,8 +1844,8 @@ impl QrApp {
             waiting_for: Some(NOTHING_TYPED),
             window_width: 1100.0,
             window_height: 700.0,
-            editor: TextInput::new(),
-            clipboard: String::new(),
+            editor: textline::field_holding("", MAX_FIELD_CHARS),
+            field_menu: fieldmenu::FieldMenu::new(),
             history_open: false,
             history_scroll: 0,
             notice: None,
@@ -2117,12 +2119,10 @@ impl QrApp {
             self.editor.cursor(),
             self.editor.selection_anchor(),
         );
-        let clipboard = self.clipboard.clone();
-        let done = textline::apply_key(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard, 12.0);
+        // On the program's clipboard, which the box's right-click menu
+        // copies to and pastes from too.
+        let done = textline::apply_key_on_clipboard(&mut self.editor, key, MAX_FIELD_CHARS, 12.0);
         let copied = done.copied.is_some();
-        if let Some(text) = done.copied {
-            self.clipboard = text;
-        }
         let typed = self.editor.text() != before.0;
         if typed {
             *self.field_text_mut(field) = self.editor.text().to_owned();
@@ -2138,6 +2138,57 @@ impl QrApp {
         } else {
             EventResult::Ignored
         }
+    }
+
+    /// A right press: over a box, its menu where the press landed, the box
+    /// given the keys with its caret and selection left as they are, so Cut
+    /// and Copy act on what the user selected (design-decisions 1454).
+    /// Anywhere else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(Target::Field(field)) = self.target_at(x, y) else {
+            return EventResult::Ignored;
+        };
+        if self.focus_field(field).is_none() {
+            return EventResult::Ignored;
+        }
+        let viewport = (self.window_width, self.window_height);
+        self.field_menu
+            .open(field, self.editor.edit_menu(), x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// Give the box `field` the keys -- with what it holds, loaded afresh
+    /// when it is another box or was changed from outside -- as a press on it
+    /// does, with either button. The box that had them, or `None` for a box
+    /// this mode does not show.
+    fn focus_field(&mut self, field: Field) -> Option<Field> {
+        let at = self.input_mode.fields().iter().position(|f| *f == field)?;
+        let was = self.focused_field();
+        self.focused_field = at;
+        if was != field || self.editor.text() != self.field_text(field) {
+            self.load_editor();
+        }
+        Some(was)
+    }
+
+    /// The menu's row `id`, chosen for the box `field`: done to it as its key
+    /// would be, and the code made again from what it then holds.
+    fn do_menu_row(&mut self, field: Field, id: guitk::menu::MenuItemId) -> EventResult {
+        // The menu is modal, so the box it was opened on still has the keys;
+        // a box changed from outside meanwhile is reloaded first, as typing
+        // reloads it.
+        if self.focused_field() != field {
+            return EventResult::Consumed;
+        }
+        if self.editor.text() != self.field_text(field) {
+            self.load_editor();
+        }
+        if self.editor.edit_command(id) == KeyEdit::Changed {
+            *self.field_text_mut(field) = self.editor.text().to_owned();
+            self.notice = None;
+            self.generate();
+        }
+        EventResult::Consumed
     }
 
     /// Empty the box being typed into.
@@ -2350,6 +2401,22 @@ impl QrApp {
         if self.color_dialog.is_some() && !matches!(event, Event::Resize { .. }) {
             return self.color_dialog_event(event);
         }
+        // A box's right-click menu takes the presses and the keys while it
+        // is up, as any menu does.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => return self.do_menu_row(field, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
+        if let Event::Tick { elapsed_ms } = event
+            && self.field_menu.tick(*elapsed_ms)
+        {
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -2502,6 +2569,7 @@ impl QrApp {
                 let rect = frame.rect_of(|t| *t == target);
                 self.press(target, event.x, rect)
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             MouseEventKind::Move => {
                 let over = self.target_at(event.x, event.y);
                 if over == self.hover {
@@ -2536,14 +2604,9 @@ impl QrApp {
                 self.set_input_mode(mode);
             }
             Target::Field(field) => {
-                let Some(at) = self.input_mode.fields().iter().position(|f| *f == field) else {
+                let Some(was) = self.focus_field(field) else {
                     return EventResult::Ignored;
                 };
-                let was = self.focused_field();
-                self.focused_field = at;
-                if was != field || self.editor.text() != self.field_text(field) {
-                    self.load_editor();
-                }
                 if let Some(rect) = rect {
                     self.place_caret(rect, x, was == field);
                 }
@@ -3645,12 +3708,12 @@ impl App for QrApp {
         }
     }
 
-    /// No clock.
-    ///
-    /// A code is produced when the text changes. Nothing here ages, so a tick
-    /// would redraw an identical frame.
+    /// A clock only while a box's menu is up and a dimmed row the pointer
+    /// rests on is waiting to say why. A code is produced when the text
+    /// changes; nothing else here ages, so a tick would redraw an identical
+    /// frame.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.field_menu.due_in().map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3671,7 +3734,10 @@ impl App for QrApp {
         self.window_height = height;
         let frame = self.frame(width, height);
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // A box's right-click menu, over everything.
+        tree.commands.extend(self.field_menu.render(&self.palette));
+        tree
     }
 }
 
@@ -4712,7 +4778,7 @@ mod tests {
         // Ctrl+X and Ctrl+V.
         let mut selected = typed();
         selected.handle_key(&ctrl_key(Key::A));
-        selected.clipboard = String::from("pasted");
+        guitk::clipboard::set_text("pasted");
         vec![
             typed(),
             with_history,
@@ -5144,6 +5210,162 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         }))
+    }
+
+    /// **A right-click in a box offers Cut, Copy, Paste, Delete and Select
+    /// all, and a row chosen does it** -- the code made again from what the
+    /// box then holds -- the keys and the menu sharing the program's
+    /// clipboard (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    #[test]
+    fn a_boxs_right_click_menu_edits_it_and_the_code_follows() {
+        use guitk::editmenu::EditCommand;
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        probe::click(&mut app, Target::Field(Field::Ssid));
+        probe::type_str(&mut app, "home");
+        app.handle_key(&ctrl_key(Key::A));
+        app.handle_key(&ctrl_key(Key::C));
+
+        // The password's menu: the box gets the keys, nothing in it to copy.
+        probe::click_with(&mut app, Target::Field(Field::Password), MouseButton::Right);
+        assert_eq!(app.field_menu.field(), Some(Field::Password));
+        assert_eq!(
+            app.focused_field(),
+            Field::Password,
+            "the right-click did not give the box the keys"
+        );
+        assert_eq!(app.field_menu.row_lit(EditCommand::Copy), Some(false));
+        let (w, h) = (app.window_width, app.window_height);
+        let tree = App::render(&mut app, w, h);
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "Select all"
+            )),
+            "the menu is not drawn"
+        );
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        press_at(&mut app, x, y);
+        assert!(!app.field_menu.is_up(), "the menu stayed up");
+        assert_eq!(
+            app.field_text(Field::Password),
+            "home",
+            "Paste did not paste"
+        );
+        let encoded = format_qr_data(
+            app.input_mode,
+            &app.input_text,
+            &app.wifi_config,
+            &app.vcard_info,
+        );
+        assert!(
+            encoded.contains("P:home"),
+            "the code did not follow: {encoded}"
+        );
+
+        // Select all and Cut, from the menu: the box empties, the clipboard
+        // keeps what was cut.
+        probe::click_with(&mut app, Target::Field(Field::Password), MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::SelectAll)
+            .expect("Select all");
+        press_at(&mut app, x, y);
+        probe::click_with(&mut app, Target::Field(Field::Password), MouseButton::Right);
+        assert_eq!(app.field_menu.row_lit(EditCommand::Cut), Some(true));
+        let (x, y) = app.field_menu.row_middle(EditCommand::Cut).expect("Cut");
+        press_at(&mut app, x, y);
+        assert_eq!(app.field_text(Field::Password), "");
+        assert_eq!(guitk::clipboard::text(), "home");
+
+        // Escape puts the menu away and reaches no box: here it would have
+        // emptied the network name.
+        probe::click_with(&mut app, Target::Field(Field::Ssid), MouseButton::Right);
+        app.handle_event(&Event::Key(press_key(Key::Escape)));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.field_text(Field::Ssid),
+            "home",
+            "Escape reached the box"
+        );
+
+        // A press outside puts the menu away and works nothing under it.
+        probe::click_with(&mut app, Target::Field(Field::Ssid), MouseButton::Right);
+        probe::click(&mut app, Target::Mode(InputMode::Url));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.input_mode,
+            InputMode::Wifi,
+            "the press went through the menu"
+        );
+
+        // A right-click on no box offers nothing.
+        assert_eq!(
+            probe::click_with(&mut app, Target::Mode(InputMode::Url), MouseButton::Right),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**:
+    /// the window asks for a tick while it waits, and none once the menu is
+    /// away.
+    #[test]
+    fn a_dimmed_row_of_the_menu_says_why_on_the_clock() {
+        use guitk::editmenu::EditCommand;
+        let mut app = QrApp::new();
+        assert_eq!(App::tick_interval(&app), None, "a clock with no menu up");
+        let focused = app.focused_field();
+        probe::click_with(&mut app, Target::Field(focused), MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        app.handle_event(&Event::Key(press_key(Key::Escape)));
+        assert_eq!(App::tick_interval(&app), None, "a clock with the menu away");
+    }
+
+    /// **A paste from the menu stops at the box's capacity**, as one by key
+    /// does.
+    #[test]
+    fn a_paste_from_the_menu_stops_at_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = QrApp::new();
+        guitk::clipboard::set_text(&"q".repeat(MAX_FIELD_CHARS + 25));
+        let focused = app.focused_field();
+        probe::click_with(&mut app, Target::Field(focused), MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        press_at(&mut app, x, y);
+        assert_eq!(
+            app.field_text(app.focused_field()).chars().count(),
+            MAX_FIELD_CHARS
+        );
     }
 
     /// **Typing "Hello" added five entries**, "H" to "Hello": every

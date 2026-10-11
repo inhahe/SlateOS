@@ -28,10 +28,32 @@ guitk = { path = "../../gui/toolkit" }
 # whether a key is plain: the one table of them, where these two fields each
 # had a copy that took AltGr for Ctrl and typed a chord's letter.
 textline = { path = "../textline" }
+# The right-click menu of the text fields -- Cut, Copy, Paste, Delete,
+# Select all -- held, routed and drawn as every program's is.
+fieldmenu = { path = "../fieldmenu" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
 appearance = { path = "../../gui/appearance" }
+# The desktop's player, for the Sound page's previews: a sound chosen there is
+# heard as the desktop will play it, decoded and converted by the same code.
+sound = { path = "../../gui/sound" }
+# The window rules -- what happens to a program's windows as they open -- read
+# and written as the desktop reads them (lane C's `gui/windowrules`,
+# requests/c-e-a-window-rules-page-in-settings.md).
+windowrules = { path = "../../gui/windowrules" }
+# What programs add to a file's right-click menu -- service menus, in the
+# format KDE's file manager reads (lane C's `gui/servicemenus`, §1448) -- and
+# which of them the user turned on, for the Context Menus page.
+servicemenus = { path = "../../gui/servicemenus" }
+# The sidebar's and the pages' pictures, as icons from the user's icon theme
+# rather than emoji, which no font here draws: named while drawing, handed to
+# the loop with the thumbnails through `App::take_images`.
+themeicons = { path = "../themeicons" }
+# The machine's network interfaces for the Network page, read as the
+# Network Manager and System Information read them: from what the kernel
+# publishes (`/proc/net`).
+hwquery = { path = "../hwquery" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.
@@ -54,6 +76,10 @@ calendarstore = { path = "../calendarstore" }
 # Every drive's recycle bin and its limits (design-decisions §1238, §1240):
 # the Recycle Bin page reads and sets them, and the file manager applies them.
 recyclebin = { path = "../recyclebin" }
+
+# The Background page draws themes' pictures small (design-decisions §1243):
+# decoded scaled, on a thread of the page's own.
+imagecodec = { path = "../../gui/imagecodec" }
 
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program
@@ -78,6 +104,8 @@ datetimesettings = { path = "../../gui/datetimesettings" }
 # Settings binary does not link a display server.
 [dev-dependencies]
 compositor = { path = "../../gui/compositor" }
+# A fixture tree of the machine's interfaces (`SyscallProvider::at`).
+hwquery = { path = "../hwquery", features = ["testing"] }
 # Theme folders for the theme picker's tests, so none of the machine's is read.
 scratchdir = { path = "../../userspace/scratchdir" }
 

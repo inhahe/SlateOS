@@ -218,6 +218,16 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 s.skip_samples = s.start_pad;
             }
         }
+        // A fragmented file's moov lists no samples, so its trak gave no
+        // reorder estimate: one from the fragments, now read. FFmpeg's
+        // demuxer gives none there and its player probes the stream; this
+        // is what the probe finds where the stream reorders alike
+        // throughout.
+        for (s, d) in self.streams.iter().zip(&mut self.descriptions) {
+            if s.kind == Kind::Video && s.stts.is_empty() {
+                d.video_delay = video_delay(s, d.codec);
+            }
+        }
         Ok(())
     }
 
@@ -2021,8 +2031,10 @@ fn frame_duration(sc: &Stream) -> Option<u32> {
 /// FFmpeg estimates it from the composition offsets
 /// (`mov_estimate_video_delay`), which its decoder then starts from: for
 /// each sample in decoding order, how many of the 16 before it are shown
-/// after it, the most any sample waits. 0 for another codec, a track
-/// without offsets, or a fragmented file's `moov`, which lists no samples.
+/// after it, the most any sample waits. 0 for another codec, or a track
+/// without offsets. A fragmented file's `moov` lists no samples, so its
+/// tracks' estimates are made again once the fragments are read
+/// ([`Parser::read_header`]).
 #[allow(
     clippy::indexing_slicing,
     reason = "the ring's indices stay within it: each is 0 to MAX_REORDER_DELAY"

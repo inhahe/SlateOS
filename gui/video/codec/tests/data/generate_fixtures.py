@@ -570,6 +570,20 @@ def patch_colr(data, primaries, transfer, matrix, full_range):
                                    0x80 if full_range else 0) + data[at + 7:]
 
 
+def patch_height(data, height):
+    """The picture's height as the file states it -- in the first video
+    sample entry, and in the track header, so that the two still agree and
+    FFmpeg makes no pixel shape of a difference -- rewritten in place."""
+    stsd = data.index(b"stsd") - 4
+    entry = stsd + 16
+    data = data[:entry + 34] + struct.pack(">H", height) + data[entry + 36:]
+    tkhd = data.index(b"tkhd") - 4
+    # The height, 16.16, last in the header; version 1 widens three of the
+    # fields before it.
+    at = tkhd + (100 if data[tkhd + 8] == 1 else 88)
+    return data[:at] + struct.pack(">I", height << 16) + data[at + 4:]
+
+
 def clap_box(width, height, offset_x, offset_y):
     """A clean aperture: four fractions, each (numerator, denominator)."""
     body = b"".join(struct.pack(">i", v) for q in (width, height, offset_x, offset_y) for v in q)
@@ -733,6 +747,16 @@ def write_mp4s(tools):
                 (0, 1, "full"), None)
     mp4_fixture(tools, "h264_matroska.mkv", small, X264 + yuv420, *plain, (6, 1, "limited"),
                 None)
+    # Coded 144 rows, the file saying 140: the encoder's padding, as a
+    # broken muxer leaves it uncropped. FFmpeg's decoder, opened with the
+    # file's size, crops the last four rows off.
+    mp4_fixture(tools, "h264_container_crop.mp4", small, X264 + yuv420, *plain,
+                (6, 1, "limited"), None, change=lambda d: patch_height(d, 140))
+    # Fragmented, its moov listing no samples: the reorder delay from the
+    # fragments' composition offsets, where FFmpeg's player probes for it.
+    mp4_fixture(tools, "h264_fragmented.mp4", small,
+                X264 + yuv420 + ["-movflags", "frag_keyframe+empty_moov"], *plain,
+                (6, 1, "limited"), None, fragmented=True)
 
 
 def main():

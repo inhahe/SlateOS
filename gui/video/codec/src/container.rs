@@ -594,16 +594,26 @@ impl<R: Read + Seek> Container<R> {
         }
     }
 
-    /// The time of the latest key frame of the track `key` names shown at or
-    /// before `ticks`, where [`Self::seek`] can land before it: in MP4,
-    /// whose seek, as FFmpeg's, goes by the decoding timeline, which
-    /// pictures shown out of order move away from the showing one. None
-    /// elsewhere, where the seek lands on that key frame itself.
-    pub(crate) fn key_time_before(&self, key: u64, ticks: i64) -> Option<i64> {
-        match self {
-            Self::Mp4(d) => d.key_time_before(usize::try_from(key).ok()?, ticks),
-            _ => None,
+    /// Go to the latest key frame shown at or before `ticks` of the track
+    /// `key` names, and answer its time where the container finds it by
+    /// that: in MP4, by the key frame's own sample
+    /// ([`mp4::Demuxer::seek_key`]), as its seek by time, FFmpeg's, searches
+    /// the decoding timeline and can land before that key frame or past it.
+    /// Elsewhere, or where no key frame shows that early, a seek by time
+    /// ([`Self::seek`]), and None.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seek`].
+    pub(crate) fn seek_key(&mut self, key: u64, ticks: i64) -> Result<Option<i64>, ContainerError> {
+        if let Self::Mp4(d) = self
+            && let Ok(index) = usize::try_from(key)
+            && let Some(time) = d.seek_key(index, ticks)?
+        {
+            return Ok(Some(time));
         }
+        self.seek(key, ticks)?;
+        Ok(None)
     }
 
     /// Go to the latest key frame at or before `ticks` of the track `key`
@@ -1007,7 +1017,11 @@ fn segment_duration<R: Read + Seek>(demuxer: &matroska::Demuxer<R>) -> Option<u6
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing, reason = "a test: a failure should be loud")]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "a test: a failure should be loud"
+)]
 mod tests {
     use super::*;
 
@@ -1029,6 +1043,22 @@ mod tests {
         assert_eq!(opus_head(&five_one)[18..], [1, 4, 2, 0, 4, 1, 2, 3, 5]);
         // Too short to be one: nothing.
         assert!(opus_head(&dops[..10]).is_empty());
+    }
+
+    /// A fragmented MP4's moov lists no samples, so its H.264 track's reorder
+    /// delay comes from its fragments' composition offsets: what the same
+    /// pictures give where the moov lists them (`h264.mp4` is the same
+    /// encode, unfragmented).
+    #[test]
+    fn a_fragmented_mp4s_reorder_delay_is_its_fragments() {
+        let delay = |name: &str| {
+            let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+            let file = std::fs::File::open(path).expect("the fixture");
+            Container::open(file).expect("an MP4").videos()[0].reorder_delay
+        };
+        let listed = delay("h264.mp4");
+        assert!(listed > 0, "h264.mp4 reorders");
+        assert_eq!(delay("h264_fragmented.mp4"), listed);
     }
 
     fn track(aspect: Aspect) -> Track {

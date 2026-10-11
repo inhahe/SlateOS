@@ -26,7 +26,7 @@ use std::io::Cursor;
 use videocodec::{Frame, SeekMode, Video};
 
 /// Every fixture, each a path the conversion or the file can take.
-const FIXTURES: [&str; 41] = [
+const FIXTURES: [&str; 43] = [
     "vp8_sd.webm",
     "vp8_hd.webm",
     "vp8_odd.webm",
@@ -68,6 +68,8 @@ const FIXTURES: [&str; 41] = [
     "h264_interlaced.mp4",
     "h264_gbr.mp4",
     "h264_matroska.mkv",
+    "h264_fragmented.mp4",
+    "h264_container_crop.mp4",
 ];
 
 /// The fixtures whose colour Chrome converts to sRGB's, as it reads them:

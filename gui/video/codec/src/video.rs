@@ -32,14 +32,15 @@
 //! and not shown (`gui/video/mp4` marks them, as FFmpeg's demuxer does), and
 //! the times are the edit list's.
 //!
-//! **Seeking** ([`Video::seek`]) goes to the latest key frame at or before
-//! the time (the container's seek, each held to FFmpeg's), then either
-//! gives back frames from it ([`SeekMode::KeyFrame`], for scrubbing) or
-//! decodes quietly up to the frame showing at that time and gives back
-//! that one first ([`SeekMode::Exact`]). An MP4 file's seek goes, as
-//! FFmpeg's does, by the decoding timeline, and where pictures are shown
-//! out of order it can land a key frame early: a key frame seek then
-//! decodes quietly on to the key frame the time falls under.
+//! **Seeking** ([`Video::seek`]) goes to the latest key frame shown at or
+//! before the time, then either gives back frames from it
+//! ([`SeekMode::KeyFrame`], for scrubbing) or decodes quietly up to the
+//! frame showing at that time and gives back that one first
+//! ([`SeekMode::Exact`]). In an MP4 file that key frame is found by the
+//! times pictures are shown at and gone to by its own sample: FFmpeg's seek
+//! searches the decoding timeline instead, which where pictures are shown
+//! out of order can land before that key frame or past it. Matroska's seek,
+//! held to FFmpeg's, finds it by its time.
 
 use std::io::{Read, Seek};
 
@@ -87,6 +88,18 @@ pub struct VideoInfo {
     pub orientation: Orientation,
 }
 
+/// Where the pictures resume after a seek (times in nanoseconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// An exact seek's: the picture showing at the time -- the latest at or
+    /// before it, known once one after it is decoded.
+    At(i64),
+    /// A key frame seek's: the key frame shown at the time. Pictures before
+    /// it, decoded because the container's seek landed on an earlier key
+    /// frame, are passed by; the first from it on shows at once.
+    From(i64),
+}
+
 /// A file's video track, decoded frame by frame.
 pub struct Video<R> {
     demuxer: Container<R>,
@@ -101,8 +114,9 @@ pub struct Video<R> {
     /// When the next packet without a time of its own is shown: the last
     /// packet's time plus its duration.
     next_time: i64,
-    /// An exact seek's time, while the pictures before it are passed by.
-    target: Option<i64>,
+    /// Where a seek wants the pictures to resume, while those before it are
+    /// passed by.
+    target: Option<Target>,
     /// During an exact seek, the latest picture at or before its time.
     held: Option<Picture>,
     /// A picture taken while passing that turned out to be past the time,
@@ -159,13 +173,14 @@ impl<R: Read + Seek> Video<R> {
             }),
         }
         .ok_or(Error::NoVideo)?;
-        let decoder = Decoder::with_reorder_delay(
+        let mut decoder = Decoder::with_reorder_delay(
             chosen.codec,
             &chosen.config,
             chosen.hint,
             limits,
             chosen.reorder_delay,
         )?;
+        decoder.set_container_size(chosen.width, chosen.height);
         let width = cropped(chosen.width, chosen.crop[0], chosen.crop[2]);
         let height = cropped(chosen.height, chosen.crop[1], chosen.crop[3]);
         let (width, height) = if chosen.orientation.swaps_sides() {
@@ -243,11 +258,11 @@ impl<R: Read + Seek> Video<R> {
             }
             if let Some(picture) = self.decoder.receive() {
                 match self.target {
-                    Some(target) if picture.time <= target => {
+                    Some(Target::At(target)) if picture.time <= target => {
                         // At or before the time sought: the latest so far.
                         self.held = Some(picture);
                     }
-                    Some(_) => {
+                    Some(Target::At(_)) => {
                         // Past it: the held picture is the one showing at
                         // the time sought, and this comes after it.
                         self.target = None;
@@ -258,6 +273,12 @@ impl<R: Read + Seek> Video<R> {
                             }
                             None => return Ok(Some(picture)),
                         }
+                    }
+                    // Before the key frame sought: passed by.
+                    Some(Target::From(from)) if picture.time < from => {}
+                    Some(Target::From(_)) => {
+                        self.target = None;
+                        return Ok(Some(picture));
                     }
                     None => return Ok(Some(picture)),
                 }
@@ -299,25 +320,20 @@ impl<R: Read + Seek> Video<R> {
     ///
     /// [`Error::Container`] when the source fails.
     pub fn seek(&mut self, time: i64, mode: SeekMode) -> Result<(), Error> {
-        let mut ticks = time::to_ticks(time, self.time_base);
-        // A key frame seek shows the key frame `time` falls under; where the
-        // container lands before it, the frames before it go as an exact
-        // seek's do.
-        let key_time = (mode == SeekMode::KeyFrame)
-            .then(|| self.demuxer.key_time_before(self.key, ticks))
-            .flatten();
-        if let Some(k) = key_time {
-            ticks = k;
-        }
-        self.demuxer.seek(self.key, ticks)?;
+        // Either seek starts from the key frame `time` falls under: the
+        // latest shown at or before it, which a key frame seek shows and an
+        // exact one decodes on from.
+        let key_time = self
+            .demuxer
+            .seek_key(self.key, time::to_ticks(time, self.time_base))?;
         self.decoder.reset()?;
         self.held = None;
         self.after = None;
         self.ended = false;
         self.next_time = time;
         self.target = match mode {
-            SeekMode::Exact => Some(time),
-            SeekMode::KeyFrame => key_time.map(|k| time::to_ns(k, self.time_base)),
+            SeekMode::Exact => Some(Target::At(time)),
+            SeekMode::KeyFrame => key_time.map(|k| Target::From(time::to_ns(k, self.time_base))),
         };
         Ok(())
     }

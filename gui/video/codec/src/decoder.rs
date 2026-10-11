@@ -152,6 +152,7 @@ impl Decoder {
             Codec::H264 => {
                 let mut d = Box::new(h264::Decoder::new());
                 d.set_reorder_delay(reorder_delay);
+                d.set_max_pixels(max_pixels);
                 d.configure(config);
                 Inner::H264(d)
             }
@@ -244,6 +245,21 @@ impl Decoder {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The picture size the container gives the track (`width` by
+    /// `height`, coded), which an H.264 decoder crops its pictures to where
+    /// the stream's own crop leaves encoder padding the container's size
+    /// leaves out -- as FFmpeg's decoder, opened with the container's size,
+    /// crops them (`width_from_caller`). Call it before the first packet.
+    /// The other codecs' pictures are the size their streams say.
+    pub fn set_container_size(&mut self, width: u64, height: u64) {
+        if let Inner::H264(d) = &mut self.codec {
+            d.set_container_size(
+                u32::try_from(width).unwrap_or(0),
+                u32::try_from(height).unwrap_or(0),
+            );
         }
     }
 

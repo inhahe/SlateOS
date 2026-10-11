@@ -16,6 +16,12 @@
 //!   (`mpeg4audio.c`).
 //! - [`layout`]: which channel each element is, and the order FFmpeg's
 //!   output gives them in (`aacdec.c`, `aacdec_tab.c`).
+//! - [`context`]: the decoder's state and its channel elements, and how a
+//!   configuration sets them up (`aacdec.h`, `aacdec.c`).
+//! - [`softfloat`]: libavutil's integer floating point, which prediction,
+//!   SBR and PS compute in (`softfloat.h`).
+//! - [`tables`]: FFmpeg's constant tables, generated from its source by
+//!   `tools/gen_tables.py`.
 //!
 //! The oracle the crate is held to is `tools/ffaac/build.sh`'s FFmpeg and
 //! `tools/pcm_expect.py`'s record of what it decodes.
@@ -27,5 +33,36 @@
               decoder above it is in, and this allow goes then"
 )]
 
+pub(crate) mod context;
 pub(crate) mod layout;
 pub(crate) mod mpeg4audio;
+pub(crate) mod softfloat;
+// Generated from FFmpeg by `tools/gen_tables.py`, which formats what it
+// writes, so regenerating and diffing compares like with like.
+pub(crate) mod tables;
+
+/// Why a stream, or a packet of one, does not decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The data is damaged, or not what its configuration says it is
+    /// (FFmpeg's `AVERROR_INVALIDDATA`, and its other refusals of data).
+    InvalidData,
+    /// The stream uses something the standard has that FFmpeg's decoder
+    /// does not decode (its `AVERROR_PATCHWELCOME` and `ENOSYS`).
+    Unsupported,
+    /// The decoder broke one of its own rules: a bug, not the stream's fault
+    /// (`AVERROR_BUG`).
+    Bug,
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidData => "invalid AAC data",
+            Self::Unsupported => "an AAC feature the decoder does not support",
+            Self::Bug => "an AAC decoder bug",
+        })
+    }
+}
+
+impl std::error::Error for Error {}

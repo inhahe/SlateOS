@@ -173,6 +173,18 @@ def rust_type(ty, shape):
     return t
 
 
+def wrapped(values, ty):
+    """`values` converted into `ty` as C converts an out-of-range constant into
+    a signed element -- modulo 2 to the element's width, as every compiler the
+    C libraries are built with does: FFmpeg writes some `int32_t` tables in
+    hex, `0xf383a3e3` among them."""
+    if isinstance(values, list):
+        return [wrapped(v, ty) for v in values]
+    bits = {"i8": 8, "i16": 16, "i32": 32}[ty]
+    v = values % (1 << bits)
+    return v - (1 << bits) if v >= 1 << (bits - 1) else v
+
+
 def check_range(name, values, ty):
     flat = values
     while flat and isinstance(flat[0], list):
@@ -184,11 +196,16 @@ def check_range(name, values, ty):
             raise SystemExit(f"{name}: {v} does not fit {ty}")
 
 
-def generate(root: str, tables, symbols: dict, header, source: str = "libvpx") -> bytes:
+def generate(root: str, tables, symbols: dict, header, source: str = "libvpx",
+             item: str = "pub const") -> bytes:
     """The Rust source for `tables`, each a tuple (C file under `root`, C name,
     Rust name, element type, shape, what it is), after the `//!` lines
     `header`: formatted by rustfmt, with LF line ends. `source` names the C
-    library in each table's doc comment."""
+    library in each table's doc comment; `item` is how each table is declared
+    (`pub(crate) static` for tables too big to copy into every use). An
+    element type ending in `%` is a
+    signed one whose values are converted into it as C converts them (see
+    `wrapped`)."""
     sources = {}
     out = list(header)
     for path, cname, rname, ty, shape, doc in tables:
@@ -199,12 +216,15 @@ def generate(root: str, tables, symbols: dict, header, source: str = "libvpx") -
         c_shape = [1 if n == STRUCT else n for n in shape]
         values = unwrap_structs(fill(items, c_shape, cname), shape)
         rust_shape = [n for n in shape if n != STRUCT]
+        if ty.endswith("%"):
+            ty = ty[:-1]
+            values = wrapped(values, ty)
         check_range(cname, values, ty)
         if doc:
             out.append(f"/// {doc[0].upper() + doc[1:]}: {source}'s `{cname}`.")
         else:
             out.append(f"/// {source}'s `{cname}`.")
-        out.append(f"pub const {rname}: {rust_type(ty, rust_shape)} = "
+        out.append(f"{item} {rname}: {rust_type(ty, rust_shape)} = "
                    f"{rust_array(values, rust_shape, ty)};")
         out.append("")
     # Through rustfmt, so the file is formatted the way every Rust file in the

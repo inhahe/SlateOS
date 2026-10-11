@@ -21,6 +21,8 @@ safeio = { path = "../safeio" }
 pathtext = { path = "../pathtext" }
 # The search box's keys: the one table of a one-line field's keys.
 textline = { path = "../textline" }
+# The search box's right-click menu: Cut, Copy, Paste, Delete, Select all.
+fieldmenu = { path = "../fieldmenu" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.

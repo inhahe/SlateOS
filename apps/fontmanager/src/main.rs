@@ -32,6 +32,7 @@ mod preview;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -41,7 +42,7 @@ use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, ImageChange, Response};
 use pathtext::ShowPath;
 
@@ -198,6 +199,8 @@ pub struct FontManager {
     search: TextInput,
     /// Whether the search box has the keyboard.
     search_focused: bool,
+    /// The search box's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<()>,
     /// The family chosen, by name.
     selected: Option<String>,
     /// How far the list is scrolled down, in pixels.
@@ -228,6 +231,7 @@ impl FontManager {
             filter: Filter::All,
             search: textline::field_holding("", SEARCH_CAPACITY),
             search_focused: false,
+            field_menu: fieldmenu::FieldMenu::new(),
             selected,
             list_scroll: 0.0,
             message: None,
@@ -443,6 +447,19 @@ impl FontManager {
 
     /// Handle an input event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The search box's right-click menu takes the presses, the keys,
+        // the pointer and the wheel while it is up, as any menu does -- a
+        // row chosen, a press outside putting it away and reaching nothing
+        // under it -- and is put away by a resize.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         if let Event::Resize { width, height } = event {
             self.window_width = *width as f32;
             self.window_height = *height as f32;
@@ -464,8 +481,43 @@ impl FontManager {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // The menu's dimmed rows say why while the pointer rests on
+            // one, on its own clock.
+            Event::Tick { elapsed_ms } if self.field_menu.tick(*elapsed_ms) => {
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// A right press: over the search box, its menu where the press landed,
+    /// the keyboard given to the box and its caret and selection left as
+    /// they are, so Cut and Copy act on what the user selected
+    /// (design-decisions 1454). Anywhere else, or while the picker, the
+    /// question or the shortcut card is up, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        if self.dialog.is_some()
+            || self.confirm.is_some()
+            || self.show_help
+            || !self.layout().search.contains(x, y)
+        {
+            return EventResult::Ignored;
+        }
+        self.search_focused = true;
+        let viewport = (self.window_width, self.window_height);
+        self.field_menu
+            .open((), self.search.edit_menu(), x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen: done to the search box as its key would
+    /// be, the list following a change to the search back to its top.
+    fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
+        if self.search.edit_command(id) == KeyEdit::Changed {
+            self.list_scroll = 0.0;
+        }
+        self.settle();
+        EventResult::Consumed
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -580,6 +632,9 @@ impl FontManager {
                 };
             }
             return EventResult::Ignored;
+        }
+        if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Right)) {
+            return self.open_field_menu(mouse.x, mouse.y);
         }
         if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
@@ -834,6 +889,8 @@ impl FontManager {
                 "F1 closes this",
             );
         }
+        // Over everything: a menu is drawn above the window it belongs to.
+        tree.commands.extend(self.field_menu.render(pal));
         tree
     }
 
@@ -1380,7 +1437,11 @@ impl App for FontManager {
         std::mem::take(&mut self.previews.changes)
     }
 
-    // No `tick_interval`: nothing here ages.
+    /// Only the search box's menu waits: a dimmed row says why after the
+    /// pointer has rested on it.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.field_menu.due_in().map(Duration::from_millis)
+    }
 }
 
 fn main() -> ExitCode {

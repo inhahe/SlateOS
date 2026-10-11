@@ -77,6 +77,27 @@ fn press(state: &mut FontManager, rect: Rect) -> EventResult {
     }))
 }
 
+fn right_press(state: &mut FontManager, rect: Rect) -> EventResult {
+    state.handle_event(&Event::Mouse(MouseEvent {
+        x: rect.x + rect.w / 2.0,
+        y: rect.y + rect.h / 2.0,
+        kind: MouseEventKind::Press(MouseButton::Right),
+    }))
+}
+
+/// Press the up menu's row for `command`.
+fn choose_row(state: &mut FontManager, command: guitk::editmenu::EditCommand) {
+    let (x, y) = state
+        .field_menu
+        .row_middle(command)
+        .unwrap_or_else(|| panic!("no {command:?} row"));
+    state.handle_event(&Event::Mouse(MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Left),
+    }));
+}
+
 /// **The list is the machine's fonts**, and nothing else -- this program
 /// listed nineteen it made up -- with the first chosen and a count in the
 /// status line.
@@ -567,6 +588,119 @@ fn the_search_box_uses_the_programs_clipboard() {
     state.handle_event(&ctrl(Key::V));
     assert_eq!(state.search.text(), "Gam", "Ctrl+V did not paste");
     assert_eq!(names(&state), ["Gamma"]);
+}
+
+/// **The search box's right-click menu cuts, copies and pastes on the
+/// program's clipboard** (`requests/c-e-text-fields-have-a-right-click-menu.md`):
+/// a right press over the box gives it the keyboard and the menu; the menu
+/// takes the keys while it is up; Paste puts the clipboard in and the list
+/// follows it; and a right press anywhere else offers nothing.
+#[test]
+fn the_search_boxs_right_click_menu_edits_the_search() {
+    use guitk::editmenu::EditCommand;
+    let machine = ScratchFonts::new("fontmanager-window-field-menu");
+    let mut state = manager(&machine);
+    let field = state.layout().search;
+    right_press(&mut state, field);
+    assert!(
+        state.field_menu.is_up(),
+        "a right-click on the box offered nothing"
+    );
+    assert!(state.search_focused, "the box was not given the keyboard");
+    assert_eq!(
+        state.field_menu.row_lit(EditCommand::Copy),
+        Some(false),
+        "Copy was offered with nothing selected"
+    );
+    assert!(
+        texts(&state).iter().any(|t| t == "Paste"),
+        "the menu is not drawn"
+    );
+
+    type_text(&mut state, "x");
+    assert_eq!(
+        state.search.text(),
+        "",
+        "a key reached the box through the menu"
+    );
+    state.handle_event(&key(Key::Escape));
+    assert!(!state.field_menu.is_up(), "Escape left the menu up");
+    assert!(
+        state.search_focused,
+        "Escape reached the box through the menu"
+    );
+
+    guitk::clipboard::set_text("Gam");
+    right_press(&mut state, field);
+    choose_row(&mut state, EditCommand::Paste);
+    assert!(!state.field_menu.is_up());
+    assert_eq!(state.search.text(), "Gam", "Paste did not paste");
+    assert_eq!(
+        names(&state),
+        ["Gamma"],
+        "the list did not follow the paste"
+    );
+
+    guitk::clipboard::set_text("");
+    right_press(&mut state, field);
+    choose_row(&mut state, EditCommand::SelectAll);
+    right_press(&mut state, field);
+    choose_row(&mut state, EditCommand::Copy);
+    assert_eq!(guitk::clipboard::text(), "Gam", "Copy copied nowhere");
+
+    let row = state.layout().rows[0].0;
+    assert_eq!(right_press(&mut state, row), EventResult::Ignored);
+    assert!(!state.field_menu.is_up(), "a row offered the box's menu");
+}
+
+/// **A dimmed row the pointer rests on says why, on the window's clock**,
+/// which the window asks for only while the menu waits -- and a paste from
+/// the menu stops at the box's capacity.
+#[test]
+fn the_search_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+    use guitk::editmenu::EditCommand;
+    let machine = ScratchFonts::new("fontmanager-window-field-menu-clock");
+    let mut state = manager(&machine);
+    assert_eq!(
+        App::tick_interval(&state),
+        None,
+        "a clock with nothing to wait for"
+    );
+    let field = state.layout().search;
+    right_press(&mut state, field);
+    let (x, y) = state
+        .field_menu
+        .row_middle(EditCommand::Copy)
+        .expect("Copy");
+    state.handle_event(&Event::Mouse(MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Move,
+    }));
+    let mut said = false;
+    for _ in 0..40 {
+        let Some(wait) = App::tick_interval(&state) else {
+            break;
+        };
+        let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        state.handle_event(&Event::Tick { elapsed_ms });
+        if state
+            .field_menu
+            .menu()
+            .and_then(guitk::menu::ContextMenu::showing_reason)
+            .is_some()
+        {
+            said = true;
+            break;
+        }
+    }
+    assert!(said, "the dimmed row never said why");
+    state.handle_event(&key(Key::Escape));
+
+    guitk::clipboard::set_text(&"g".repeat(SEARCH_CAPACITY + 10));
+    right_press(&mut state, field);
+    choose_row(&mut state, EditCommand::Paste);
+    assert_eq!(state.search.text().chars().count(), SEARCH_CAPACITY);
 }
 
 /// **A font whose file cannot be read says why** -- here, deleted since the

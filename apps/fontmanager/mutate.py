@@ -502,6 +502,61 @@ PREVIEW = [
     ),
 ]
 
+# The search box's right-click menu (2026-10-10).
+W_MENU = "the_search_boxs_right_click_menu_edits_the_search"
+W_MENU_CLOCK = "the_search_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MAIN += [
+    (
+        "a right press opens no menu",
+        "            return self.open_field_menu(mouse.x, mouse.y);\n",
+        "            return EventResult::Ignored;\n",
+        [W_MENU, W_MENU_CLOCK],
+    ),
+    (
+        "the keys reach the box through the menu",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [W_MENU],
+    ),
+    (
+        "a row chosen does nothing",
+        "        if self.search.edit_command(id) == KeyEdit::Changed {\n",
+        "        if false {\n",
+        [W_MENU, W_MENU_CLOCK],
+    ),
+    (
+        "the box is not given the keyboard",
+        "        self.search_focused = true;\n        let viewport",
+        "        let viewport",
+        [W_MENU],
+    ),
+    (
+        "a right press over a row opens the box's menu",
+        "            || !self.layout().search.contains(x, y)\n",
+        "",
+        [W_MENU],
+    ),
+    (
+        "the menu is not drawn",
+        "        tree.commands.extend(self.field_menu.render(pal));\n",
+        "",
+        [W_MENU],
+    ),
+    (
+        "the menu keeps no clock",
+        "        self.field_menu.due_in().map(Duration::from_millis)\n",
+        "        None\n",
+        [W_MENU_CLOCK],
+    ),
+    (
+        "the menu's clock does not move",
+        "            Event::Tick { elapsed_ms } if self.field_menu.tick(*elapsed_ms) => {\n",
+        "            Event::Tick { elapsed_ms } if false && self.field_menu.tick(*elapsed_ms) => {\n",
+        [W_MENU_CLOCK],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "library.rs": LIBRARY,

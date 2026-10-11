@@ -27,7 +27,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -223,6 +223,21 @@ impl Default for EventStore {
 
 /// The size a form field's text is drawn at, which moving its caret needs.
 const FORM_TEXT_SIZE: f32 = 13.0;
+
+/// The most characters the search box takes.
+const SEARCH_CAPACITY: usize = 256;
+
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 11.0;
+
+/// The text field a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The search box.
+    Search,
+    /// A text field of the event form.
+    Form(FormField),
+}
 /// A form row's height.
 const FORM_ROW_H: f32 = 40.0;
 
@@ -1026,8 +1041,11 @@ pub struct CalendarApp {
     pub form_error: Option<String>,
     /// The event a delete is waiting on its answer for.
     pub pending_delete: Option<u64>,
-    /// What was last copied or cut from a field of the form.
-    clipboard: String,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it.
+    search_editor: TextInput,
+    /// A text field's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1078,7 +1096,8 @@ impl CalendarApp {
             form_field: FormField::Title,
             form_error: None,
             pending_delete: None,
-            clipboard: String::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
         }
     }
 
@@ -1384,6 +1403,51 @@ impl CalendarApp {
         self.width = width;
         self.height = height;
         self.clamp_scroll();
+    }
+
+    /// Reload the search box's editor from the search, if the search
+    /// changed underneath it.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: searched again, on the agenda while
+    /// there is a search, from its top.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query == text {
+            return;
+        }
+        self.search_query = text.to_owned();
+        self.search();
+        if !self.search_query.is_empty() {
+            self.view = CalendarView::Agenda;
+        }
+        self.content_scroll = 0.0;
+    }
+
+    /// A press in the search box at `x`: the caret where it landed.
+    fn place_search_caret(&mut self, x: f32) {
+        let Some(search) = self.layout().search else {
+            return;
+        };
+        let drawn = if self.search_focused {
+            self.search_editor.cursor()
+        } else {
+            guitk::text::TextCursor::default()
+        };
+        self.sync_search_editor();
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (search.w - 16.0).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - search.x - 8.0,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Where everything goes at the current window size.
@@ -2189,24 +2253,60 @@ impl CalendarApp {
                 self.focus_ring_width,
             );
             let empty = self.search_query.is_empty();
-            label(
-                frame,
-                search.x + 8.0,
-                search.y + 8.0,
-                if empty {
-                    String::from("Search events")
-                } else {
-                    self.search_query.clone()
-                },
-                11.0,
-                if empty {
-                    self.palette.overlay0
-                } else {
-                    self.palette.text
-                },
-                FontWeightHint::Regular,
-                Some(search.w - 16.0),
-            );
+            if self.search_focused && !empty {
+                // The box with the keyboard: its text, with the caret and
+                // the selection where they are -- the end of the text if
+                // the search changed under the box's editor.
+                let synced = self.search_editor.text() == self.search_query;
+                let mut tree = RenderTree::new();
+                textedit::draw(
+                    &mut tree,
+                    &textedit::SingleLine {
+                        text: &self.search_query,
+                        cursor: if synced {
+                            self.search_editor.cursor()
+                        } else {
+                            guitk::text::TextCursor::from(self.search_query.len())
+                        },
+                        selection_anchor: if synced {
+                            self.search_editor.selection_anchor()
+                        } else {
+                            None
+                        },
+                        focused: true,
+                        x: search.x + 8.0,
+                        y: search.y + 7.0,
+                        width: (search.w - 16.0).max(0.0),
+                        line_height: 15.0,
+                        font_size: SEARCH_TEXT_SIZE,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.blue,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
+                );
+                frame.extend(tree.commands);
+            } else {
+                label(
+                    frame,
+                    search.x + 8.0,
+                    search.y + 8.0,
+                    if empty {
+                        String::from("Search events")
+                    } else {
+                        self.search_query.clone()
+                    },
+                    SEARCH_TEXT_SIZE,
+                    if empty {
+                        self.palette.overlay0
+                    } else {
+                        self.palette.text
+                    },
+                    FontWeightHint::Regular,
+                    Some(search.w - 16.0),
+                );
+            }
             frame.hit(Target::SearchField, search);
         }
 
@@ -3198,6 +3298,20 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         }
         return EventResult::Consumed;
     }
+    // A text field's right-click menu takes the presses, the keys, the
+    // pointer and the wheel while it is up, as any menu does -- a row
+    // chosen, a press outside putting it away and reaching nothing under
+    // it, a right press there opening that field's own -- and is put away
+    // by a resize.
+    match state.field_menu.event(event) {
+        fieldmenu::Outcome::Window => {}
+        fieldmenu::Outcome::Taken => return EventResult::Consumed,
+        fieldmenu::Outcome::Chosen(field, id) => return do_menu_row(state, field, id),
+        fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+            let _another = open_field_menu(state, x, y);
+            return EventResult::Consumed;
+        }
+    }
     // The picker takes input first while it is up, or a keystroke meant for
     // a filename lands in the search box behind it.
     //
@@ -3264,6 +3378,12 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
     // The form and the question before a delete are modal: every key and
     // every press is theirs while they are up.
     if state.form.is_some() {
+        if let Event::Mouse(mouse) = event
+            && matches!(mouse.kind, MouseEventKind::Press(MouseButton::Right))
+            && open_field_menu(state, mouse.x, mouse.y) == EventResult::Consumed
+        {
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key) if key.pressed => return handle_form_key(state, key),
             Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) => {
@@ -3295,7 +3415,9 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
             state.resize(*width as f32, *height as f32);
             EventResult::Consumed
         }
-        Event::Tick { .. } => {
+        Event::Tick { elapsed_ms } => {
+            // The menu's wait, beside midnight's.
+            let menu = state.field_menu.tick(*elapsed_ms);
             // Midnight. "Today" is drawn in blue in five different places, and
             // without this it would stay on yesterday until something else
             // happened to cause a repaint.
@@ -3304,6 +3426,7 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
                     state.today = now;
                     EventResult::Consumed
                 }
+                _ if menu => EventResult::Consumed,
                 _ => EventResult::Ignored,
             }
         }
@@ -3463,21 +3586,15 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
                 state.open_file_dialog(false);
                 EventResult::Consumed
             }
+            // The search box's own chords: select all, copy, cut, paste.
+            _ if state.search_focused => search_key(state, key),
             _ => EventResult::Ignored,
         };
     }
 
-    // Typed into the search box: what the key typed, AltGr's included, and
-    // not a command's letter -- Alt+W typed a `w` into the query.
-    if state.search_focused && textline::types_into_field(key) {
-        state.search_query.extend(key.typed());
-        state.search();
-        // The agenda is the only view that shows results, so a search that
-        // leaves you looking at a month grid has found nothing as far as the
-        // user can tell.
-        state.view = CalendarView::Agenda;
-        state.content_scroll = 0.0;
-        return EventResult::Consumed;
+    // The search box takes every other key while it has the keyboard.
+    if state.search_focused {
+        return search_key(state, key);
     }
 
     // Every other binding is on the key itself, and is the calendar's only
@@ -3486,29 +3603,6 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     // opened a new event and Alt+Delete asked to delete one.
     if !textline::is_plain(key.modifiers) {
         return EventResult::Ignored;
-    }
-
-    if state.search_focused {
-        match key.key {
-            Key::Escape => {
-                state.search_query.clear();
-                state.search();
-                state.search_focused = false;
-                state.clamp_scroll();
-                return EventResult::Consumed;
-            }
-            Key::Backspace => {
-                state.search_query.pop();
-                state.search();
-                state.content_scroll = 0.0;
-                return EventResult::Consumed;
-            }
-            Key::Enter => {
-                state.search_focused = false;
-                return EventResult::Consumed;
-            }
-            _ => {}
-        }
     }
 
     if let Some(index) = view_for_digit(key.key)
@@ -3656,14 +3750,10 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         }
         _ => {
             let field = state.form_field;
-            let clipboard = state.clipboard.clone();
             let Some(input) = state.form.as_mut().and_then(|f| f.input(field)) else {
                 return EventResult::Ignored;
             };
-            let done = textline::apply_key(input, key, &clipboard, FORM_TEXT_SIZE);
-            if let Some(copied) = done.copied {
-                state.clipboard = copied;
-            }
+            let done = textline::apply_key_on_clipboard(input, key, FORM_TEXT_SIZE);
             if done.handled {
                 state.form_error = None;
                 EventResult::Consumed
@@ -3742,12 +3832,109 @@ fn track_pointer(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
     }
 }
 
+/// A key for the search box while it has the keyboard: Escape empties it
+/// and leaves, Enter leaves keeping the search, and the rest is the box's
+/// (`textline::apply_key_on_clipboard`), on the program's clipboard. A
+/// change searches again, on the agenda -- the one view that lists what
+/// a search finds, so a search left over a month grid has found nothing as
+/// far as the user can tell. It takes every key but a chord of the
+/// window's or the desktop's.
+fn search_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
+    let plain = textline::is_plain(key.modifiers);
+    match key.key {
+        Key::Escape if plain => {
+            state.search_query.clear();
+            state.search();
+            state.search_focused = false;
+            state.clamp_scroll();
+            return EventResult::Consumed;
+        }
+        Key::Enter if plain => {
+            state.search_focused = false;
+            return EventResult::Consumed;
+        }
+        _ => {}
+    }
+    state.sync_search_editor();
+    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);
+    let typed = state.search_editor.text().to_owned();
+    state.set_search(&typed);
+    if edit.handled || plain || textline::types_into_field(key) {
+        EventResult::Consumed
+    } else {
+        EventResult::Ignored
+    }
+}
+
+/// A right press: over the search box or one of the event form's text
+/// fields, that field's menu where the press landed, the field given the
+/// keyboard and its caret and selection left as they are, so Cut and Copy
+/// act on what the user selected (design-decisions 1454). Anywhere else,
+/// nothing.
+fn open_field_menu(state: &mut CalendarApp, x: f32, y: f32) -> EventResult {
+    let field = match state.target_at(x, y) {
+        Some(Target::SearchField) if state.form.is_none() => {
+            state.search_focused = true;
+            state.sync_search_editor();
+            MenuField::Search
+        }
+        Some(Target::Field(field)) if field.is_text() && state.form.is_some() => {
+            state.form_field = field;
+            MenuField::Form(field)
+        }
+        _ => return EventResult::Ignored,
+    };
+    let rows = match field {
+        MenuField::Search => state.search_editor.edit_menu(),
+        MenuField::Form(which) => {
+            let Some(input) = state.form.as_mut().and_then(|form| form.input(which)) else {
+                return EventResult::Ignored;
+            };
+            input.edit_menu()
+        }
+    };
+    let viewport = (state.width, state.height);
+    state.field_menu.open(field, rows, x, y, viewport);
+    EventResult::Consumed
+}
+
+/// The menu's row `id`, chosen for `field`: done to it as its key would be,
+/// a change to the search searching again and a change to the form
+/// putting its complaint away.
+fn do_menu_row(
+    state: &mut CalendarApp,
+    field: MenuField,
+    id: guitk::menu::MenuItemId,
+) -> EventResult {
+    match field {
+        MenuField::Search => {
+            state.sync_search_editor();
+            if state.search_editor.edit_command(id) == KeyEdit::Changed {
+                let typed = state.search_editor.text().to_owned();
+                state.set_search(&typed);
+            }
+        }
+        MenuField::Form(which) => {
+            if let Some(input) = state.form.as_mut().and_then(|form| form.input(which))
+                && input.edit_command(id) == KeyEdit::Changed
+            {
+                state.form_error = None;
+            }
+        }
+    }
+    EventResult::Consumed
+}
+
 fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
     let (x, y) = (mouse.x, mouse.y);
 
     match &mouse.kind {
+        MouseEventKind::Press(MouseButton::Right) => open_field_menu(state, x, y),
         MouseEventKind::Press(MouseButton::Left) => {
             let hit = state.target_at(x, y);
+            if hit == Some(Target::SearchField) {
+                state.place_search_caret(x);
+            }
             state.search_focused = matches!(hit, Some(Target::SearchField));
 
             match hit {
@@ -3882,7 +4069,12 @@ impl App for CalendarApp {
     /// new day within a minute of midnight rather than whenever the user next
     /// happens to click something.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_mins(1))
+        let minute = Duration::from_mins(1);
+        Some(
+            self.field_menu
+                .due_in()
+                .map_or(minute, |ms| Duration::from_millis(ms).min(minute)),
+        )
     }
 
     /// Closing asks first only when the latest changes cannot be saved; the
@@ -3904,6 +4096,7 @@ impl App for CalendarApp {
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.resize(width, height);
         let mut tree = self.frame(width, height).into_tree();
+        tree.commands.extend(self.field_menu.render(&self.palette));
         // Over everything, the picker included: they are never up together.
         let palette = self.palette;
         if let Some(question) = self.question.as_mut() {
@@ -6359,6 +6552,218 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::Escape));
         assert!(app.search_query.is_empty());
         assert!(!app.search_focused);
+    }
+
+    /// **The search box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces. It
+    /// typed only at its end, and Backspace from the end was its only edit.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = sample_app(june_2024());
+        probe::click(&mut app, Target::SearchField);
+        probe::type_str(&mut app, "Lnch");
+        for _ in 0..3 {
+            probe::key(&mut app, &probe::press(Key::Left));
+        }
+        probe::type_str(&mut app, "u");
+        assert_eq!(
+            app.search_query, "Lunch",
+            "typing did not go in at the caret"
+        );
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.search_query, "unch",
+            "Delete did not take the first character"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "x",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let mut app = sample_app(june_2024());
+        probe::click(&mut app, Target::SearchField);
+        probe::type_str(&mut app, "nch");
+        let search = probe::rect_of(&app, Target::SearchField).expect("the search box");
+        handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: search.x + 8.0,
+                y: search.y + search.h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        probe::type_str(&mut app, "Lu");
+        assert_eq!(
+            app.search_query, "Lunch",
+            "the caret did not go where the press was"
+        );
+    }
+
+    /// **A text field's right-click menu cuts, copies and pastes on the
+    /// program's clipboard** (`requests/c-e-text-fields-have-a-right-click-menu.md`),
+    /// in the search box and in the event form's fields alike: a right press
+    /// gives the field the keyboard and the menu; the menu takes the keys
+    /// while it is up; and what Ctrl+C takes in one field, the menu pastes
+    /// in another.
+    #[test]
+    fn a_text_fields_right_click_menu_edits_it() {
+        use guitk::editmenu::EditCommand;
+        let choose = |app: &mut CalendarApp, command: EditCommand| {
+            let (x, y) = app.field_menu.row_middle(command).expect("the row");
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            );
+        };
+        let mut app = sample_app(june_2024());
+        guitk::clipboard::set_text("Lunch");
+        probe::click_with(&mut app, Target::SearchField, MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the search offered nothing"
+        );
+        assert!(app.search_focused, "the search was not given the keyboard");
+        assert_eq!(app.field_menu.row_lit(EditCommand::Copy), Some(false));
+        let (w, h) = (app.width, app.height);
+        assert!(
+            App::render(&mut app, w, h)
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Paste")),
+            "the menu is not drawn"
+        );
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "",
+            "a key reached the box through the menu"
+        );
+        choose(&mut app, EditCommand::Paste);
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.search_query, "Lunch",
+            "Paste did not paste into the search"
+        );
+        assert_eq!(
+            app.view,
+            CalendarView::Agenda,
+            "the search's results are not shown"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        probe::click(&mut app, Target::NewEvent);
+        probe::type_str(&mut app, "Standup");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            "Standup",
+            "Ctrl+C kept a clipboard of its own"
+        );
+        app.form_error = Some(String::from("a complaint"));
+        probe::click_with(
+            &mut app,
+            Target::Field(FormField::Place),
+            MouseButton::Right,
+        );
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on a field offered nothing"
+        );
+        assert_eq!(
+            app.form_field,
+            FormField::Place,
+            "the field was not given the keyboard"
+        );
+        choose(&mut app, EditCommand::Paste);
+        let place = app
+            .form
+            .as_ref()
+            .and_then(|form| form.input_ref(FormField::Place))
+            .map(|input| input.text().to_owned());
+        assert_eq!(
+            place.as_deref(),
+            Some("Standup"),
+            "Paste did not paste into the field"
+        );
+        assert_eq!(app.form_error, None, "the complaint outlived the change");
+
+        probe::click_with(&mut app, Target::Save, MouseButton::Right);
+        assert!(
+            !app.field_menu.is_up(),
+            "a right-click on Save offered a field's menu"
+        );
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**,
+    /// which waits for the menu as well as for midnight -- and a paste from
+    /// the menu stops at the search box's capacity.
+    #[test]
+    fn the_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = sample_app(june_2024());
+        let minute = App::tick_interval(&app);
+        probe::click_with(&mut app, Target::SearchField, MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        assert!(
+            App::tick_interval(&app) < minute,
+            "the clock does not wait for the menu"
+        );
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            handle_event(&mut app, &Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        guitk::clipboard::set_text(&"l".repeat(SEARCH_CAPACITY + 10));
+        probe::click_with(&mut app, Target::SearchField, MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert_eq!(app.search_query.chars().count(), SEARCH_CAPACITY);
     }
 
     #[test]

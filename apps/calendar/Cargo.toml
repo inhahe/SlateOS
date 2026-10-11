@@ -25,6 +25,8 @@ textfmt = { path = "../../textfmt" }
 
 # The keys a one-line field answers, for the event form.
 textline = { path = "../textline" }
+# A text field's right-click menu: Cut, Copy, Paste, Delete, Select all.
+fieldmenu = { path = "../fieldmenu" }
 
 # "Your latest changes are not saved", asked the way every editor here asks.
 unsaved = { path = "../unsaved" }

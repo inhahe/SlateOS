@@ -542,12 +542,6 @@ MUTATIONS = [
         ['a_key_held_with_a_modifier_is_not_the_calendars'],
     ),
     (
-        "a command's letter is typed into the search",
-        '    if state.search_focused && textline::types_into_field(key) {',
-        '    if state.search_focused && key.types_text() {',
-        ['a_key_held_with_a_modifier_is_not_the_calendars'],
-    ),
-    (
         "a key held with Alt or the Windows key is the calendar's",
         '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n',
         '',
@@ -692,6 +686,90 @@ def partition(rows):
             groups.setdefault((src, "calendarstore"), []).append((name, old, row[2], in_store))
     return groups
 
+
+# The search box edits at a caret, and every text field has a right-click
+# menu on the program's clipboard (2026-10-10).
+CARET = "the_search_box_edits_at_a_caret"
+PRESSED = "a_press_in_the_search_box_puts_the_caret_there"
+MENU = "a_text_fields_right_click_menu_edits_it"
+MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MUTATIONS += [
+    (
+        "the search types only at its end",
+        "    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "    let end = state.search_editor.text().len();\n"
+        "    state.search_editor.set_cursor(guitk::text::TextCursor::from(end));\n"
+        "    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        [CARET],
+    ),
+    (
+        "the search box takes no plain keys",
+        "        return search_key(state, key);\n",
+        "        return EventResult::Ignored;\n",
+        [CARET, PRESSED],
+    ),
+    (
+        "the search's chords are not the box's",
+        "            _ if state.search_focused => search_key(state, key),\n",
+        "",
+        [CARET],
+    ),
+    (
+        "a press in the search puts the caret nowhere",
+        "                state.place_search_caret(x);\n",
+        "",
+        [PRESSED],
+    ),
+    (
+        "a right press opens no menu",
+        "        MouseEventKind::Press(MouseButton::Right) => open_field_menu(state, x, y),\n",
+        "        MouseEventKind::Press(MouseButton::Right) => EventResult::Ignored,\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "a right press in the form opens no menu",
+        "            && open_field_menu(state, mouse.x, mouse.y) == EventResult::Consumed\n",
+        "            && false\n",
+        [MENU],
+    ),
+    (
+        "the keys reach a field through its menu",
+        "        fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "        fieldmenu::Outcome::Taken => {}\n",
+        [MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "            if state.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "            if false {\n",
+        [MENU, MENU_CLOCK],
+    ),
+    (
+        "a row chosen does nothing to the form",
+        "                && input.edit_command(id) == KeyEdit::Changed\n",
+        "                && false\n",
+        [MENU],
+    ),
+    (
+        "the menu is not drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [MENU],
+    ),
+    (
+        "the clock does not wait for the menu",
+        "                .map_or(minute, |ms| Duration::from_millis(ms).min(minute)),\n",
+        "                .map_or(minute, |_| minute),\n",
+        [MENU_CLOCK],
+    ),
+    (
+        "the menu's clock does not move",
+        "            let menu = state.field_menu.tick(*elapsed_ms);\n",
+        "            let menu = false;\n",
+        [MENU_CLOCK],
+    ),
+]
 
 if __name__ == "__main__":
     only = sys.argv[1:] or None

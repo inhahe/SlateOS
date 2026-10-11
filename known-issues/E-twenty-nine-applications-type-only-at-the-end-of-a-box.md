@@ -26,8 +26,8 @@ and Backspace `pop`s it.
 missed because its typing came in by the key's name (`handle_key`) rather
 than as a key event; and `finance`'s, whose typed text was pushed onto the
 search while its Backspace and Escape went by name. Both edit at a caret on
-lane E's branch, the same day, with their right-click menus. `calendar`'s
-and `reminders`' search boxes are next, the same shape.
+lane E's branch, the same day, with their right-click menus; and so does
+`calendar`'s, which pushed what was typed onto its search.
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;

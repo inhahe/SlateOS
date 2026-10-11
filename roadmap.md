@@ -3886,10 +3886,10 @@ word; text inside them that says "lane C" is history.
   recorder's marker names, the process explorer's filter and New Task
   boxes, the mail client's compose form, the font manager's search box,
   the flashcards' search box and card and deck fields, the finance
-  program's search box and form fields (both search boxes, typed only at
-  their end until then, edit at a caret).
-  **Remaining:** calendar, jsonviewer, notes, paint, regextester,
-  reminders, snippets, stickynotes.
+  program's and the calendar's search boxes and form fields (the three
+  search boxes, typed only at their end until then, edit at a caret).
+  **Remaining:** jsonviewer, notes, paint, regextester, reminders,
+  snippets, stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

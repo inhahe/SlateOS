@@ -2023,6 +2023,10 @@ fn frame_duration(sc: &Stream) -> Option<u32> {
 /// each sample in decoding order, how many of the 16 before it are shown
 /// after it, the most any sample waits. 0 for another codec, a track
 /// without offsets, or a fragmented file's `moov`, which lists no samples.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "the ring's indices stay within it: each is 0 to MAX_REORDER_DELAY"
+)]
 fn video_delay(sc: &Stream, codec: Codec) -> u32 {
     const MAX_REORDER_DELAY: usize = 16;
     if !(sc.has_ctts && codec == Codec::H264) {
@@ -2039,7 +2043,11 @@ fn video_delay(sc: &Stream, codec: Codec) -> u32 {
             break;
         };
         let mut j = start;
-        start = (start + 1) % (MAX_REORDER_DELAY + 1);
+        start = if start == MAX_REORDER_DELAY {
+            0
+        } else {
+            start.saturating_add(1)
+        };
         pts[j] = entry.timestamp.wrapping_add(i64::from(tts.offset));
         let mut swaps = 0u32;
         while j != start {
@@ -2048,13 +2056,13 @@ fn video_delay(sc: &Stream, codec: Codec) -> u32 {
                 break;
             }
             pts.swap(j, r);
-            swaps += 1;
+            swaps = swaps.saturating_add(1);
             j = r;
         }
         delay = delay.max(swaps);
-        in_tts += 1;
+        in_tts = in_tts.saturating_add(1);
         if in_tts == tts.count {
-            tts_at += 1;
+            tts_at = tts_at.saturating_add(1);
             in_tts = 0;
         }
     }

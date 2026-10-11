@@ -268,26 +268,54 @@ pub(crate) struct Pps {
     /// Whether Cb's and Cr's offsets differ.
     pub(crate) chroma_qp_diff: i32,
     pub(crate) data: Vec<u8>,
-    /// The 4x4 dequantization factors of each of the six lists at every
-    /// QP, laid out as the inverse transform reads them, row
-    /// `list * QPS + qp` (`dequant4_coeff`); see [`Pps::dequant4`].
-    pub(crate) dequant4_coeff: Box<[[u32; 16]]>,
-    /// The 8x8 ones, with the 8x8 transform only (FFmpeg's pointers are null
-    /// without it); see [`Pps::dequant8`].
-    pub(crate) dequant8_coeff: Option<Box<[[u32; 64]]>>,
+    /// The dequantization factors, laid out as the inverse transform reads
+    /// them and as FFmpeg's `PPS` holds them, end to end: six 4x4 buffers
+    /// of a row per QP (`dequant4_buffer`), then six 8x8 ones
+    /// (`dequant8_buffer`). Only the QPs the bit depth reaches are filled,
+    /// and a list whose scaling matrix is an earlier list's reads that
+    /// list's buffer, leaving its own zero: a damaged CAVLC block can read
+    /// its row's factors past the row's end (see [`Pps::dequant4_from`]),
+    /// and gets what FFmpeg's memory holds there.
+    pub(crate) dequant: Box<[u32]>,
+    /// The 4x4 buffer each list reads (`dequant4_coeff[list]`).
+    pub(crate) dequant4_list: [usize; 6],
+    /// The 8x8 buffer each list reads, with the 8x8 transform only:
+    /// FFmpeg's pointers are null without it, and its buffers zero.
+    pub(crate) dequant8_list: Option<[usize; 6]>,
     /// The sequence parameter set the picture's was read against.
     pub(crate) sps: Arc<Sps>,
 }
 
+/// Where the 8x8 buffers start in [`Pps::dequant`].
+const DEQUANT8_AT: usize = 6 * QPS * 16;
+
 impl Pps {
     /// List `list`'s 4x4 factors at `qp` (`dequant4_coeff[list][qp]`).
     pub(crate) fn dequant4(&self, list: usize, qp: usize) -> Option<&[u32; 16]> {
-        self.dequant4_coeff.get(list * QPS + qp)
+        self.dequant4_from(list, qp)?.first_chunk()
+    }
+
+    /// The factors from list `list`'s 4x4 row at `qp` to the end of the
+    /// tables: what FFmpeg's `qmul[k]` reads for every `k`, those past the
+    /// row's 16 coming from the rows after it -- as a damaged CAVLC block's
+    /// scan reads them (`decode_residual`).
+    pub(crate) fn dequant4_from(&self, list: usize, qp: usize) -> Option<&[u32]> {
+        if qp >= QPS {
+            return None;
+        }
+        let buffer = *self.dequant4_list.get(list)?;
+        self.dequant.get((buffer * QPS + qp) * 16..)
     }
 
     /// List `list`'s 8x8 factors at `qp` (`dequant8_coeff[list][qp]`).
     pub(crate) fn dequant8(&self, list: usize, qp: usize) -> Option<&[u32; 64]> {
-        self.dequant8_coeff.as_ref()?.get(list * QPS + qp)
+        if qp >= QPS {
+            return None;
+        }
+        let buffer = *self.dequant8_list.as_ref()?.get(list)?;
+        self.dequant
+            .get(DEQUANT8_AT + (buffer * QPS + qp) * 64..)?
+            .first_chunk()
     }
 }
 
@@ -892,42 +920,67 @@ fn build_qp_table(index: i32, depth: i32) -> [u8; QP_MAX_NUM + 1] {
     t
 }
 
-/// `init_dequant4_coeff_table`: each 4x4 list's factors at every QP, in the
-/// transposed order the inverse transform reads them.
-fn init_dequant4(m4: &[[u8; 16]; 6], depth: i32) -> Box<[[u32; 16]]> {
+/// The buffer each of six scaling lists reads: the first list with the same
+/// matrix, which is the list's own when no earlier one has it.
+fn dequant_buffers<const N: usize>(m: &[[u8; N]; 6]) -> [usize; 6] {
+    std::array::from_fn(|i| (0..i).find(|&j| m[j] == m[i]).unwrap_or(i))
+}
+
+/// `init_dequant_tables`: [`Pps::dequant`] and the buffer each list reads,
+/// 4x4 and -- with the 8x8 transform -- 8x8. `bypass`: the stream may
+/// bypass the transform, so QP 0's factors are all 64, a shift of six the
+/// inverse transform's own undoes.
+fn init_dequant(
+    m4: &[[u8; 16]; 6],
+    m8: &[[u8; 64]; 6],
+    depth: i32,
+    transform_8x8: bool,
+    bypass: bool,
+) -> (Box<[u32]>, [usize; 6], Option<[usize; 6]>) {
     let max_qp = (51 + 6 * (depth - 8)) as usize;
-    let mut t = vec![[0u32; 16]; 6 * QPS].into_boxed_slice();
-    for (i, list) in m4.iter().enumerate() {
+    let mut t = vec![0u32; DEQUANT8_AT + 6 * QPS * 64].into_boxed_slice();
+    // `init_dequant4_coeff_table`, in the transposed order the inverse
+    // transform reads.
+    let list4 = dequant_buffers(m4);
+    for (i, list) in m4.iter().enumerate().filter(|&(i, _)| list4[i] == i) {
         for q in 0..=max_qp {
             let shift = u32::from(QUANT_DIV6[q]) + 2;
             let idx = usize::from(QUANT_REM6[q]);
-            let row = &mut t[i * QPS + q];
+            let row = (i * QPS + q) * 16;
             for (x, &factor) in list.iter().enumerate() {
                 let init = u32::from(DEQUANT4_COEFF_INIT[idx][(x & 1) + ((x >> 2) & 1)]);
-                row[(x >> 2) | ((x << 2) & 0xF)] = (init * u32::from(factor)) << shift;
+                t[row + ((x >> 2) | ((x << 2) & 0xF))] = (init * u32::from(factor)) << shift;
             }
         }
     }
-    t
-}
-
-/// `init_dequant8_coeff_table`.
-fn init_dequant8(m8: &[[u8; 64]; 6], depth: i32) -> Box<[[u32; 64]]> {
-    let max_qp = (51 + 6 * (depth - 8)) as usize;
-    let mut t = vec![[0u32; 64]; 6 * QPS].into_boxed_slice();
-    for (i, list) in m8.iter().enumerate() {
-        for q in 0..=max_qp {
-            let shift = u32::from(QUANT_DIV6[q]);
-            let idx = usize::from(QUANT_REM6[q]);
-            let row = &mut t[i * QPS + q];
-            for (x, &factor) in list.iter().enumerate() {
-                let kind = usize::from(DEQUANT8_COEFF_INIT_SCAN[((x >> 1) & 12) | (x & 3)]);
-                let init = u32::from(DEQUANT8_COEFF_INIT[idx][kind]);
-                row[(x >> 3) | ((x & 7) << 3)] = (init * u32::from(factor)) << shift;
+    // `init_dequant8_coeff_table`.
+    let list8 = transform_8x8.then(|| dequant_buffers(m8));
+    if let Some(list8) = &list8 {
+        for (i, list) in m8.iter().enumerate().filter(|&(i, _)| list8[i] == i) {
+            for q in 0..=max_qp {
+                let shift = u32::from(QUANT_DIV6[q]);
+                let idx = usize::from(QUANT_REM6[q]);
+                let row = DEQUANT8_AT + (i * QPS + q) * 64;
+                for (x, &factor) in list.iter().enumerate() {
+                    let kind = usize::from(DEQUANT8_COEFF_INIT_SCAN[((x >> 1) & 12) | (x & 3)]);
+                    let init = u32::from(DEQUANT8_COEFF_INIT[idx][kind]);
+                    t[row + ((x >> 3) | ((x & 7) << 3))] = (init * u32::from(factor)) << shift;
+                }
             }
         }
     }
-    t
+    if bypass {
+        // Through each list's buffer, as FFmpeg writes through its pointer.
+        for i in 0..6 {
+            let row = list4[i] * QPS * 16;
+            t[row..row + 16].fill(1 << 6);
+            if let Some(list8) = &list8 {
+                let row = DEQUANT8_AT + list8[i] * QPS * 64;
+                t[row..row + 64].fill(1 << 6);
+            }
+        }
+    }
+    (t, list4, list8)
 }
 
 /// Read a picture parameter set and keep it by its id
@@ -1029,19 +1082,13 @@ pub(crate) fn decode_pps(
         build_qp_table(chroma_qp_index_offset[1], sps.bit_depth_luma),
     ];
 
-    // `init_dequant_tables`.
-    let mut dequant4 = init_dequant4(&m4, sps.bit_depth_luma);
-    let mut dequant8 = (transform_8x8_mode != 0).then(|| init_dequant8(&m8, sps.bit_depth_luma));
-    if sps.transform_bypass != 0 {
-        // Lossless macroblocks: QP 0's factors all 64, a shift of six that
-        // the inverse transform's own undoes.
-        for list in 0..6 {
-            dequant4[list * QPS] = [1 << 6; 16];
-            if let Some(d8) = dequant8.as_mut() {
-                d8[list * QPS] = [1 << 6; 64];
-            }
-        }
-    }
+    let (dequant, dequant4_list, dequant8_list) = init_dequant(
+        &m4,
+        &m8,
+        sps.bit_depth_luma,
+        transform_8x8_mode != 0,
+        sps.transform_bypass != 0,
+    );
 
     let pps = Pps {
         pps_id,
@@ -1067,8 +1114,9 @@ pub(crate) fn decode_pps(
         chroma_qp_table,
         chroma_qp_diff: i32::from(chroma_qp_index_offset[0] != chroma_qp_index_offset[1]),
         data,
-        dequant4_coeff: dequant4,
-        dequant8_coeff: dequant8,
+        dequant,
+        dequant4_list,
+        dequant8_list,
         sps,
     };
     ps.pps_list[pps_id as usize] = Some(Arc::new(pps));

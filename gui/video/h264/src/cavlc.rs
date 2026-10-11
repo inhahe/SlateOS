@@ -198,10 +198,12 @@ fn pred_non_zero_count(nnz: &[u8; 120], n: usize) -> usize {
 }
 
 /// One block's coefficients (`decode_residual`): at most `max_coeff` of
-/// them, dequantized by `qmul` -- or, for a DC block (`n` from
-/// `LUMA_DC_BLOCK_INDEX` on), kept as they are -- and stored at the scan's
-/// positions in `block`, as `int16` unless `wide`. The count goes into
-/// `nnz` for the blocks after to predict from.
+/// them, dequantized by `qmul` -- the factors from the block's row on, as
+/// [`crate::ps::Pps::dequant4_from`] gives them -- or, for a DC block (`n`
+/// from `LUMA_DC_BLOCK_INDEX` on), kept as they are; and stored at the
+/// scan's positions in `block`, which runs on past the block to the
+/// macroblock's end, as `int16` unless `wide`. The count goes into `nnz`
+/// for the blocks after to predict from.
 #[allow(
     clippy::too_many_arguments,
     reason = "FFmpeg's signature, the context split up"
@@ -351,7 +353,13 @@ fn decode_residual(
     };
 
     // STORE_BLOCK: from the last coefficient back, each a run of zeros
-    // before the one after it.
+    // before the one after it. Zeros run out before the scan's start only
+    // in a damaged stream, and the positions read there can lie past the
+    // block's 16 -- in the macroblock's blocks after it, dequantized by the
+    // QP rows after `qmul`'s (both slices run on), as FFmpeg stores them.
+    // Past a luma DC block's 16 (`mb_luma_dc`), FFmpeg's stores land where
+    // nothing reads them -- the row's unused half, or the next plane's row,
+    // cleared before it is used -- and they are dropped here.
     let dc = n >= LUMA_DC_BLOCK_INDEX;
     let mut put = |at: isize, level: i32| -> Result<(), DecodeError> {
         let pos = scan.get(at)?;
@@ -361,8 +369,11 @@ fn decode_residual(
             let q = qmul.and_then(|q| q.get(pos)).copied().ok_or(DecodeError)?;
             ((level as u32).wrapping_mul(q).wrapping_add(32) as i32) >> 6
         };
-        let slot = block.get_mut(pos).ok_or(DecodeError)?;
-        *slot = if wide { v } else { i32::from(v as i16) };
+        if let Some(slot) = block.get_mut(pos) {
+            *slot = if wide { v } else { i32::from(v as i16) };
+        } else if !dc {
+            return Err(DecodeError);
+        }
         Ok(())
     };
     let mut at = (zeros_left + total_coeff as i32 - 1) as isize;
@@ -454,7 +465,7 @@ impl Context {
                 fill(&mut sl.non_zero_count_cache, SCAN8[p * 16], 4, 4, 0);
                 return Ok(0);
             }
-            let qmul = pps.dequant4(p, qscale).ok_or(DecodeError)?;
+            let qmul = pps.dequant4_from(p, qscale).ok_or(DecodeError)?;
             for i8x8 in 0..4 {
                 for i4x4 in 0..4 {
                     let index = i4x4 + 4 * i8x8 + p * 16;
@@ -508,7 +519,7 @@ impl Context {
                     .wrapping_add(nnz[corner + 9]);
                 new_cbp |= i32::from(nnz[corner] != 0) << i8x8;
             } else {
-                let qmul = pps.dequant4(cqm, qscale).ok_or(DecodeError)?;
+                let qmul = pps.dequant4_from(cqm, qscale).ok_or(DecodeError)?;
                 for i4x4 in 0..4 {
                     let index = i4x4 + 4 * i8x8 + p * 16;
                     decode_residual(
@@ -924,6 +935,10 @@ impl Context {
                 let num_c8x8 = sps.chroma_format_idc as usize;
                 let wide = self.pixel_shift != 0;
                 if cbp & 0x30 != 0 {
+                    // Only a 4:2:2 DC block can run its zeros out before its
+                    // scan's start. FFmpeg then reads whatever its linker put
+                    // before `ff_h264_chroma422_dc_scan`, which cannot be
+                    // followed, and the block is a decode error here.
                     let dc_scan: &[u8] = if sps.chroma_format_idc == 2 {
                         &CHROMA422_DC_SCAN
                     } else {
@@ -950,7 +965,7 @@ impl Context {
                     for chroma_idx in 0..2 {
                         let list = chroma_idx + 1 + if is_intra(mb_type) { 0 } else { 3 };
                         let qmul = pps
-                            .dequant4(list, sl.hdr.chroma_qp[chroma_idx] as usize)
+                            .dequant4_from(list, sl.hdr.chroma_qp[chroma_idx] as usize)
                             .ok_or(DecodeError)?;
                         let mut block = 16 * (16 + 16 * chroma_idx);
                         for i8x8 in 0..num_c8x8 {
@@ -1104,3 +1119,6 @@ const RUN_BITS: [[u8; 16]; 7] = [
     [3, 0, 1, 3, 2, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     [7, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
 ];
+
+#[cfg(test)]
+mod tests;

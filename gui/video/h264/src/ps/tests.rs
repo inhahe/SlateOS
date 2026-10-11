@@ -522,7 +522,7 @@ fn each_picture_parameter_set_reads_as_ffmpeg_traces_it() {
             t.int("transform_8x8_mode_flag"),
             "{name}"
         );
-        assert_eq!(pps.dequant8_coeff.is_some(), pps.transform_8x8_mode != 0);
+        assert_eq!(pps.dequant8_list.is_some(), pps.transform_8x8_mode != 0);
 
         // The chroma QP table: the luma QP plus the offset, through the
         // depth's chroma table.
@@ -603,6 +603,60 @@ fn the_dequantization_tables_follow_the_scaling_lists() {
                 }
             }
         }
+    }
+}
+
+/// The factors lie as FFmpeg's `PPS` holds them, for what reads past a row
+/// (a damaged CAVLC block): a list whose matrix an earlier list has reads
+/// that list's buffer and leaves its own zero; rows past the bit depth's
+/// last QP are zero; a row runs on into the next QP's, the 4x4 buffers
+/// into the 8x8 ones; and the transform bypass's factors are written
+/// through each list's buffer.
+#[test]
+fn the_factors_lie_as_ffmpegs_do() {
+    let mut m4 = [[16u8; 16]; 6];
+    m4[2] = [20; 16];
+    m4[4] = [24; 16];
+    m4[5] = m4[2];
+    let mut m8 = [[16u8; 64]; 6];
+    m8[1] = [24; 64];
+    m8[3] = m8[1];
+    let (t, list4, list8) = init_dequant(&m4, &m8, 8, true, false);
+    assert_eq!(list4, [0, 0, 2, 0, 4, 2]);
+    assert_eq!(list8, Some([0, 1, 0, 1, 0, 0]));
+    let row = |at: usize, buffer: usize, q: usize, n: usize| {
+        &t[at + (buffer * QPS + q) * n..at + (buffer * QPS + q + 1) * n]
+    };
+    for unused in [1, 3, 5] {
+        assert!(
+            row(0, unused, 26, 16).iter().all(|&f| f == 0),
+            "4x4 buffer {unused}"
+        );
+    }
+    assert!(row(0, 0, 51, 16).iter().all(|&f| f != 0));
+    assert!(
+        row(0, 0, 52, 16).iter().all(|&f| f == 0),
+        "past 8 bits' last QP"
+    );
+    assert!(
+        row(DEQUANT8_AT, 2, 26, 64).iter().all(|&f| f == 0),
+        "8x8 buffer 2"
+    );
+    assert_eq!(
+        row(0, 2, 27, 16)[0],
+        (20 * 14) << 6,
+        "QP 27: a scale of 14, shifted 4 + 2"
+    );
+    assert_eq!(t.len(), DEQUANT8_AT + 6 * QPS * 64);
+
+    let (t, list4, list8) = init_dequant(&m4, &m8, 8, true, true);
+    for (list, buffer) in list4.into_iter().enumerate() {
+        let qp0 = &t[buffer * QPS * 16..buffer * QPS * 16 + 16];
+        assert!(qp0.iter().all(|&f| f == 1 << 6), "4x4 list {list}");
+    }
+    for (list, buffer) in list8.unwrap().into_iter().enumerate() {
+        let qp0 = &t[DEQUANT8_AT + buffer * QPS * 64..DEQUANT8_AT + buffer * QPS * 64 + 64];
+        assert!(qp0.iter().all(|&f| f == 1 << 6), "8x8 list {list}");
     }
 }
 

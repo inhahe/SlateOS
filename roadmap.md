@@ -3892,7 +3892,25 @@ word; text inside them that says "lane C" is history.
   menu to give: its search box, drawn but reached by no key, takes Ctrl+F
   and edits at a caret, and its form's fields copy and paste on the
   program's clipboard. **Remaining:** jsonviewer, notes, paint, regextester,
-  snippets, stickynotes.
+  snippets, stickynotes -- regextester's test input, jsonviewer's source
+  pane and snippets' editor through the item below.
+
+- `[ ]` `[E]` **Lane E's interim multi-line field goes; its four users move
+  to the toolkit's** -- 2026-10-10. `apps/textarea` was written before the
+  toolkit had a multi-line field, to live "until the toolkit has one";
+  `guitk::textarea::TextArea` has been there since 2026-09-25 (§878), with
+  what the interim one lacks: undo a word at a time, wrapping, right-to-left
+  lines, a view that scrolls, its own drawing, and the edit menu a
+  right-click menu is built from. The four: `apps/regextester`'s test input
+  (proportional; draws its own highlighted lines, through the field's
+  layout), `apps/slides`' words in a box (which lays its own wrapped-line
+  caret moves over the interim field, and keeps a clipboard of its own),
+  and two code editors in the fixed-pitch face -- `apps/jsonviewer`'s source
+  pane and `apps/snippets`' editor -- which wait on the field measuring in a
+  face of its own (lane C's step 2 of
+  `requests/e-c-the-multi-line-field-needs-a-font-family.md`) unless the
+  toolkit's code editor serves them better
+  (`requests/c-e-the-toolkit-has-a-code-editor.md`).
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

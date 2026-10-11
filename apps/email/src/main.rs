@@ -3802,12 +3802,12 @@ impl EmailApp {
     /// The box the body's text is laid out in, and its font.
     fn body_metrics(&self) -> textarea::Metrics {
         let rect = self.field_rect(ComposeField::Body);
-        textarea::Metrics {
-            width: (rect.w - 16.0).max(0.0),
-            height: (rect.h - 8.0).max(0.0),
-            font_size: BODY_TEXT,
-            weight: FontWeightHint::Regular,
-        }
+        textarea::Metrics::new(
+            (rect.w - 16.0).max(0.0),
+            (rect.h - 8.0).max(0.0),
+            BODY_TEXT,
+            FontWeightHint::Regular,
+        )
     }
 
     // ====================================================================

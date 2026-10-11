@@ -1758,12 +1758,7 @@ fn text_box(note: &Note) -> Rect {
 /// What the field lays a note's text out in: its box and its font size.
 fn text_metrics(note: &Note) -> textarea::Metrics {
     let r = text_box(note);
-    textarea::Metrics {
-        width: r.w,
-        height: r.h,
-        font_size: note.font_size.size(),
-        weight: FontWeightHint::Regular,
-    }
+    textarea::Metrics::new(r.w, r.h, note.font_size.size(), FontWeightHint::Regular)
 }
 
 /// The x at which a body line's own text begins, after its marker.

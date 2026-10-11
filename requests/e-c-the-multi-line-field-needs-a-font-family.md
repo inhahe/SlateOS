@@ -2,8 +2,8 @@
 
 **From:** Lane E (`apps/**`). **To:** Lane C (`gui/toolkit`).
 **Filed:** 2026-09-28. **Status:** step 1 of 2 DONE -- landed on `lane-c` 2026-09-28
-(`79a4d311f`), on `main` since 2026-09-28 (`9154182d0`); step 2 waits for lane E's
-three `Metrics` sites -- reply at the end.
+(`79a4d311f`), on `main` since 2026-09-28 (`9154182d0`); lane E's three `Metrics`
+sites switched 2026-10-10, so step 2 is lane C's to do -- replies at the end.
 
 **In short:** `guitk::textarea::TextArea` lays its text out with the
 proportional face's measurements, and has no way to be told otherwise.
@@ -78,3 +78,15 @@ colours it (`syntax::Language::for_file` / `named("json")`), JSON included
 and a snippet editor may be better served by that than by a prose field in a
 fixed face; `TextArea` with a family remains the right thing for text that
 should wrap like prose.
+
+## Lane E -- 2026-10-10: the three sites build with `Metrics::new`
+
+`apps/email` `body_metrics`, `apps/notes` `body_box` and `apps/stickynotes`
+`text_metrics` each build their `Metrics` with `textarea::Metrics::new(...)`,
+and no struct literal of it is left in `apps/**`. It is on `lane-e` and
+reaches `main` with lane E's next publish; step 2 can go in once it is
+there. Twelve days late: the switch was missed, not held back.
+
+For the two code editors, lane E will weigh the code editor you point to
+against `TextArea` with a family when it moves them; `apps/regextester`
+moves to `TextArea` meanwhile.

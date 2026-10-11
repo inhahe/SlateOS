@@ -3530,12 +3530,12 @@ impl NotesApp {
         (
             left,
             top,
-            textarea::Metrics {
-                width: (right - left).max(0.0),
-                height: (bottom - top).max(0.0),
-                font_size: BODY_FONT_SIZE,
-                weight: FontWeightHint::Regular,
-            },
+            textarea::Metrics::new(
+                (right - left).max(0.0),
+                (bottom - top).max(0.0),
+                BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
         )
     }
 

@@ -2944,7 +2944,8 @@ impl FlashcardsApp {
         if self.picker.is_open() || self.show_help {
             return EventResult::Ignored;
         }
-        let field = match self.target_at(x, y) {
+        // The frame as it is now, as a left press reads it.
+        let field = match self.frame().hit_test(x, y) {
             Some(Target::Search) if self.view == AppView::DeckDetail => {
                 self.search_active = true;
                 self.sync_search_editor();

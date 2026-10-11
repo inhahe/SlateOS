@@ -62,6 +62,42 @@ fn fps(path: &PathBuf, convert: bool) -> (f64, usize) {
     (best, frames)
 }
 
+/// H.264 decoding alone, frames a second, on 1080p streams with B pictures:
+/// FATE's `h264refframeregression.mp4` (High 10, progressive) and
+/// `twofields_packet.mp4` (Main, interlaced), from the directory `H264_FATE`
+/// names (its `h264` subdirectory), and an 8-bit encode of the first,
+/// which the motion compensation's 8-bit paths take --
+///
+/// ```text
+/// ffmpeg -i <fate>/h264/h264refframeregression.mp4 -an -c:v libx264 -preset medium \
+///     -crf 20 -pix_fmt yuv420p -bf 3 target/h264bench/x264_1080p.mp4
+/// ```
+#[test]
+#[ignore = "a measurement: run with --release --ignored --nocapture"]
+fn bench_h264() {
+    let fate = std::env::var_os("H264_FATE").map(|d| PathBuf::from(d).join("h264"));
+    let encoded = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../target/h264bench/x264_1080p.mp4");
+    let mut paths: Vec<PathBuf> = fate
+        .iter()
+        .flat_map(|d| {
+            ["h264refframeregression.mp4", "twofields_packet.mp4"].map(|name| d.join(name))
+        })
+        .collect();
+    paths.push(encoded);
+    for path in paths {
+        if !path.is_file() {
+            println!("{}: not there (see the doc comment)", path.display());
+            continue;
+        }
+        let (decoded, frames) = fps(&path, false);
+        println!(
+            "{}: {frames} frames; decoded {decoded:.1} a second",
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+}
+
 #[test]
 #[ignore = "a measurement: run with --release --ignored --nocapture"]
 fn bench_play() {

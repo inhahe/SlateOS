@@ -50,156 +50,229 @@ fn avg2(a: i32, b: i32) -> i32 {
     (a + b + 1) >> 1
 }
 
-/// A reference window: the samples a filter reads around a block, edges
-/// repeated where they reach past the picture.
-struct Window {
-    s: Vec<i32>,
-    stride: usize,
-    /// How far into the window the block starts.
-    origin: usize,
+/// The largest luma block and its filter's reach: 16 samples and 2 before,
+/// 3 after.
+const WIN: usize = 16 + 5;
+
+/// The buffers a block's filters work in: a reference window, and the
+/// filters' passes.
+#[derive(Clone, Debug)]
+pub(crate) struct Filters {
+    /// The samples a filter reads around a block, edges repeated where they
+    /// reach past the picture (FFmpeg's `edge_emu_buffer`).
+    win: [i32; WIN * WIN],
+    /// The two-dimensional half position's first pass: a row of horizontal
+    /// sums for each of the block's rows and the vertical filter's reach
+    /// (`pixeltmp`).
+    tmp: [i32; WIN * 16],
+    /// The horizontal and the vertical half position, a block of each, `w`
+    /// a row: what the quarter positions average.
+    half_h: [i32; 256],
+    half_v: [i32; 256],
 }
 
-impl Window {
-    /// `w` by `h` samples from (`x0`, `y0`) of a picture `pic_w` by `pic_h`
-    /// whose sample (0, 0) is `base` in `plane`, rows `stride` apart.
-    #[allow(clippy::too_many_arguments, reason = "emulated_edge_mc's")]
-    fn fetch<P: Pixel>(
-        plane: &[P],
-        base: usize,
-        stride: usize,
-        x0: i32,
-        y0: i32,
-        w: usize,
-        h: usize,
-        pic_w: i32,
-        pic_h: i32,
-        origin: usize,
-    ) -> Self {
-        let mut s = Vec::with_capacity(w * h);
-        for j in 0..h as i32 {
-            let y = (y0 + j).clamp(0, pic_h - 1) as usize;
-            let row = base + y * stride;
-            for i in 0..w as i32 {
-                let x = (x0 + i).clamp(0, pic_w - 1) as usize;
-                s.push(plane[row + x].int());
+/// What a macroblock's prediction is made in, kept from macroblock to
+/// macroblock so that nothing is allocated for each.
+#[derive(Clone, Debug)]
+pub(crate) struct McScratch {
+    filters: Filters,
+    /// A list's prediction of each plane, row by row, `w` samples a row.
+    blocks: [[i32; 256]; 3],
+    /// The second list's, where weighted bi-prediction keeps both
+    /// (FFmpeg's `bipred_scratchpad`).
+    kept: [[i32; 256]; 3],
+}
+
+impl Default for McScratch {
+    fn default() -> Self {
+        Self {
+            filters: Filters {
+                win: [0; WIN * WIN],
+                tmp: [0; WIN * 16],
+                half_h: [0; 256],
+                half_v: [0; 256],
+            },
+            blocks: [[0; 256]; 3],
+            kept: [[0; 256]; 3],
+        }
+    }
+}
+
+/// A reference window's geometry: `w` by `h` samples from (`x0`, `y0`) of
+/// a picture `pic_w` by `pic_h` whose sample (0, 0) is `base` in a plane
+/// with rows `stride` apart.
+#[derive(Clone, Copy)]
+struct Reach {
+    base: usize,
+    stride: usize,
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    pic_w: i32,
+    pic_h: i32,
+}
+
+/// Copy `r`'s samples of `plane` into `win`, `r.w` a row, each clamped into
+/// the picture: the edge samples repeated outward, as FFmpeg's
+/// `emulated_edge_mc` repeats them.
+fn fetch<P: Pixel>(win: &mut [i32], plane: &[P], r: Reach) {
+    let xs_inside = r.x0 >= 0 && r.x0 + r.w as i32 <= r.pic_w;
+    for j in 0..r.h {
+        let y = (r.y0 + j as i32).clamp(0, r.pic_h - 1) as usize;
+        let row = r.base + y * r.stride;
+        let out = &mut win[j * r.w..(j + 1) * r.w];
+        if xs_inside {
+            let start = row + r.x0 as usize;
+            for (o, s) in out.iter_mut().zip(&plane[start..start + r.w]) {
+                *o = s.int();
+            }
+        } else {
+            for (i, o) in out.iter_mut().enumerate() {
+                let x = (r.x0 + i as i32).clamp(0, r.pic_w - 1) as usize;
+                *o = plane[row + x].int();
             }
         }
-        Self {
-            s,
-            stride: w,
-            origin,
-        }
-    }
-
-    /// The sample at (`x`, `y`) from the block's start.
-    fn g(&self, x: i32, y: i32) -> i32 {
-        self.s[(self.origin as i32 + x + y * self.stride as i32) as usize]
     }
 }
 
-/// The six-tap filter over a row's samples at `x - 2` to `x + 3`.
-fn tap(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
-    (c + d) * 20 - (b + e) * 5 + (a + f)
+/// The six-tap filter over the samples at `x - 2` to `x + 3` of a row, or
+/// of a column: `s[0]`, `s[step]` and on to `s[5 * step]`.
+fn tap6(s: &[i32], step: usize) -> i32 {
+    (s[2 * step] + s[3 * step]) * 20 - (s[step] + s[4 * step]) * 5 + (s[0] + s[5 * step])
 }
 
 /// A `w` by `h` luma block at quarter-sample position `xy` (`mx & 3` plus
-/// four times `my & 3`): what FFmpeg's `put_h264_qpel*_mc*` write
-/// (`h264qpel_template.c`). FFmpeg covers a 16x8 or 8x16 partition with
-/// two square calls; every sample's value is the one a single pass gives. The two-dimensional half position keeps its
-/// intermediate sums as FFmpeg's `pixeltmp` does: 16 bits to 10-bit
+/// four times `my & 3`) from the window `win`, `w + 5` wide with the block
+/// two rows and two columns in, into `out`, `w` a row: what FFmpeg's
+/// `put_h264_qpel*_mc*` write (`h264qpel_template.c`). FFmpeg covers a 16x8
+/// or 8x16 partition with two square calls; every sample's value is the one
+/// a single pass gives. Each half position is filtered once and the quarter
+/// positions average two of them; the two-dimensional half position keeps
+/// its first pass's sums as FFmpeg's `pixeltmp` does: 16 bits to 10-bit
 /// samples (10 itself offset to fit), 32 deeper.
-fn qpel(win: &Window, w: usize, h: usize, xy: usize, bits: u32) -> Vec<i32> {
-    let g = |x: i32, y: i32| win.g(x, y);
-    let hf = |x: i32, y: i32| {
-        tap(
-            g(x - 2, y),
-            g(x - 1, y),
-            g(x, y),
-            g(x + 1, y),
-            g(x + 2, y),
-            g(x + 3, y),
-        )
+fn qpel(s: &mut Filters, w: usize, h: usize, xy: usize, bits: u32, out: &mut [i32]) {
+    let ws = w + 5;
+    // The window's sample (x, y) from the block's start.
+    let at = |x: usize, y: usize| (y + 2) * ws + x + 2;
+    let win = &s.win;
+    let clip5 = |v: i32| clip((v + 16) >> 5, bits);
+    // The horizontal half position at rows `y0..y0 + rows`, into `half_h`.
+    let fill_h = |half: &mut [i32], y0: usize, rows: usize| {
+        for y in 0..rows {
+            for x in 0..w {
+                half[y * w + x] = clip5(tap6(&win[at(x, y0 + y) - 2..], 1));
+            }
+        }
     };
-    let v = |x: i32, y: i32| {
-        tap(
-            g(x, y - 2),
-            g(x, y - 1),
-            g(x, y),
-            g(x, y + 1),
-            g(x, y + 2),
-            g(x, y + 3),
-        )
+    // The vertical half position at columns `x0..x0 + cols`, into
+    // `half_v`, `cols` a row.
+    let fill_v = |half: &mut [i32], x0: usize, cols: usize| {
+        for y in 0..h {
+            for x in 0..cols {
+                half[y * cols + x] = clip5(tap6(&win[at(x0 + x, y) - 2 * ws..], ws));
+            }
+        }
     };
-    let put_h = |x: i32, y: i32| clip((hf(x, y) + 16) >> 5, bits);
-    let put_v = |x: i32, y: i32| clip((v(x, y) + 16) >> 5, bits);
-    let pad = if bits == 10 {
-        -10 * ((1 << bits) - 1)
-    } else {
-        0
+    // The two-dimensional half position, into `out`.
+    let fill_hv = |tmp: &mut [i32], out: &mut [i32]| {
+        let pad = if bits == 10 {
+            -10 * ((1 << bits) - 1)
+        } else {
+            0
+        };
+        let narrow = bits <= 10;
+        for r in 0..h + 5 {
+            for x in 0..w {
+                // Rows -2 to h + 2 of the block's columns.
+                let t = tap6(&win[(r * ws) + x..], 1) + pad;
+                tmp[r * w + x] = (if narrow { i32::from(t as i16) } else { t }) - pad;
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let v = tap6(&tmp[y * w + x..], w);
+                out[y * w + x] = clip((v + 512) >> 10, bits);
+            }
+        }
     };
-    let narrow = bits <= 10;
-    let tmp = |x: i32, y: i32| {
-        let t = hf(x, y) + pad;
-        (if narrow { i32::from(t as i16) } else { t }) - pad
-    };
-    let put_hv = |x: i32, y: i32| {
-        clip(
-            (tap(
-                tmp(x, y - 2),
-                tmp(x, y - 1),
-                tmp(x, y),
-                tmp(x, y + 1),
-                tmp(x, y + 2),
-                tmp(x, y + 3),
-            ) + 512)
-                >> 10,
-            bits,
-        )
-    };
-    let mut out = Vec::with_capacity(w * h);
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            out.push(match xy {
-                0 => g(x, y),
-                1 => avg2(g(x, y), put_h(x, y)),
-                2 => put_h(x, y),
-                3 => avg2(g(x + 1, y), put_h(x, y)),
-                4 => avg2(g(x, y), put_v(x, y)),
-                5 => avg2(put_h(x, y), put_v(x, y)),
-                6 => avg2(put_h(x, y), put_hv(x, y)),
-                7 => avg2(put_h(x, y), put_v(x + 1, y)),
-                8 => put_v(x, y),
-                9 => avg2(put_v(x, y), put_hv(x, y)),
-                10 => put_hv(x, y),
-                11 => avg2(put_v(x + 1, y), put_hv(x, y)),
-                12 => avg2(g(x, y + 1), put_v(x, y)),
-                13 => avg2(put_h(x, y + 1), put_v(x, y)),
-                14 => avg2(put_h(x, y + 1), put_hv(x, y)),
-                _ => avg2(put_h(x, y + 1), put_v(x + 1, y)),
-            });
+    let g = |x: usize, y: usize| win[at(x, y)];
+    let n = w * h;
+    match xy {
+        0 => {
+            for y in 0..h {
+                for x in 0..w {
+                    out[y * w + x] = g(x, y);
+                }
+            }
+        }
+        1 | 3 => {
+            fill_h(&mut s.half_h, 0, h);
+            let dx = usize::from(xy == 3);
+            for y in 0..h {
+                for x in 0..w {
+                    out[y * w + x] = avg2(g(x + dx, y), s.half_h[y * w + x]);
+                }
+            }
+        }
+        2 => fill_h(&mut out[..n], 0, h),
+        4 | 12 => {
+            fill_v(&mut s.half_v, 0, w);
+            let dy = usize::from(xy == 12);
+            for y in 0..h {
+                for x in 0..w {
+                    out[y * w + x] = avg2(g(x, y + dy), s.half_v[y * w + x]);
+                }
+            }
+        }
+        8 => fill_v(&mut out[..n], 0, w),
+        10 => fill_hv(&mut s.tmp, &mut out[..n]),
+        5 | 7 | 13 | 15 => {
+            // Diagonal quarters: a horizontal half row (the next row's for
+            // 13 and 15) averaged with a vertical half column (the next
+            // column's for 7 and 15).
+            let (dy, dx) = (usize::from(xy >= 13), usize::from(xy & 3 == 3));
+            fill_h(&mut s.half_h, dy, h);
+            fill_v(&mut s.half_v, dx, w);
+            for i in 0..n {
+                out[i] = avg2(s.half_h[i], s.half_v[i]);
+            }
+        }
+        6 | 14 => {
+            fill_h(&mut s.half_h, usize::from(xy == 14), h);
+            fill_hv(&mut s.tmp, &mut out[..n]);
+            for i in 0..n {
+                out[i] = avg2(s.half_h[i], out[i]);
+            }
+        }
+        _ => {
+            // 9 and 11: the vertical half column (the next one's for 11)
+            // averaged with the two-dimensional half position.
+            fill_v(&mut s.half_v, usize::from(xy == 11), w);
+            fill_hv(&mut s.tmp, &mut out[..n]);
+            for i in 0..n {
+                out[i] = avg2(s.half_v[i], out[i]);
+            }
         }
     }
-    out
 }
 
 /// A `w` by `h` chroma block at eighth-sample position (`fx`, `fy`),
-/// bilinear (`put_h264_chroma_mc*`).
-fn chroma_block(win: &Window, w: usize, h: usize, fx: i32, fy: i32) -> Vec<i32> {
+/// bilinear (`put_h264_chroma_mc*`), from the window `win`, `w + 1` wide,
+/// into `out`, `w` a row.
+fn chroma_block(win: &[i32], w: usize, h: usize, fx: i32, fy: i32, out: &mut [i32]) {
     let a = (8 - fx) * (8 - fy);
     let b = fx * (8 - fy);
     let c = (8 - fx) * fy;
     let d = fx * fy;
-    let mut out = Vec::with_capacity(w * h);
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let s = a * win.g(x, y)
-                + b * win.g(x + 1, y)
-                + c * win.g(x, y + 1)
-                + d * win.g(x + 1, y + 1);
-            out.push((s + 32) >> 6);
+    let ws = w + 1;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * ws + x;
+            let s = a * win[i] + b * win[i + 1] + c * win[i + ws] + d * win[i + ws + 1];
+            out[y * w + x] = (s + 32) >> 6;
         }
     }
-    out
 }
 
 /// A prediction written into the picture -- or, with `avg`, averaged with
@@ -306,9 +379,10 @@ impl Context {
 
     /// One list's prediction of a partition (`mc_dir_part`): luma, then
     /// chroma at the vector halved (4:2:0, 4:2:2 across) or whole (4:4:4).
-    /// `into` the planes, put or averaged, or -- for weighted bi-
-    /// prediction -- `None`, its blocks handed back instead.
+    /// Into the planes, put or averaged -- or, with `keep`, for weighted
+    /// bi-prediction, left in `scratch`'s kept blocks instead.
     #[allow(
+        clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "one function in FFmpeg, kept whole to read against it"
     )]
@@ -321,7 +395,8 @@ impl Context {
         dst: &mut Dst<'_, P>,
         avg: bool,
         keep: bool,
-    ) -> Result<Option<[Vec<i32>; 3]>, DecodeError> {
+        scratch: &mut McScratch,
+    ) -> Result<(), DecodeError> {
         let sps = self.ps.sps.as_deref().ok_or(DecodeError)?;
         let bits = sps.bit_depth_luma as u32;
         let mb_field = sl.hdr.mb_field_decoding_flag != 0;
@@ -341,36 +416,41 @@ impl Context {
         // chroma predicted like any other.
         let chroma_idc = self.chroma_format_idc.max(1);
         let (w, h) = (part.w, part.h);
+        let McScratch {
+            filters,
+            blocks,
+            kept,
+        } = scratch;
+        let out = if keep { kept } else { blocks };
 
         // Luma: the block and the filter's reach, two before and three
         // after.
-        let luma_block = |plane: &[P], p: usize| -> Vec<i32> {
-            let win = Window::fetch(
-                plane,
-                r.offset[p],
-                linesize,
-                full_mx - 2,
-                full_my - 2,
-                w + 5,
-                h + 5,
-                pic_width,
-                pic_height,
-                2 * (w + 5) + 2,
-            );
-            qpel(&win, w, h, luma_xy, bits)
+        let luma_reach = |p: usize| Reach {
+            base: r.offset[p],
+            stride: linesize,
+            x0: full_mx - 2,
+            y0: full_my - 2,
+            w: w + 5,
+            h: h + 5,
+            pic_w: pic_width,
+            pic_h: pic_height,
         };
-
-        let y_block = luma_block(self.ref_plane(r, 0, &*dst.planes[0])?, 0);
+        let planes = if chroma_idc == 3 { 3 } else { 1 };
+        for p in 0..planes {
+            fetch(
+                &mut filters.win,
+                self.ref_plane(r, p, &*dst.planes[p])?,
+                luma_reach(p),
+            );
+            qpel(filters, w, h, luma_xy, bits, &mut out[p]);
+        }
         if chroma_idc == 3 {
-            let cb = luma_block(self.ref_plane(r, 1, &*dst.planes[1])?, 1);
-            let cr = luma_block(self.ref_plane(r, 2, &*dst.planes[2])?, 2);
-            if keep {
-                return Ok(Some([y_block, cb, cr]));
+            if !keep {
+                for p in 0..3 {
+                    store(dst.planes[p], dst.at[p], linesize, w, &out[p][..w * h], avg);
+                }
             }
-            store(dst.planes[0], dst.at[0], linesize, w, &y_block, avg);
-            store(dst.planes[1], dst.at[1], linesize, w, &cb, avg);
-            store(dst.planes[2], dst.at[2], linesize, w, &cr, avg);
-            return Ok(None);
+            return Ok(());
         }
 
         // Chroma: eighths of a chroma sample; 4:2:2 is full height.
@@ -383,33 +463,38 @@ impl Context {
         let (cw, ch) = (w / 2, if chroma_idc == 1 { h / 2 } else { h });
         let fx = mx & 7;
         let fy = ((my as u32) << u32::from(chroma_idc == 2)) as i32 & 7;
-        let (cx0, cy0) = (mx >> 3, my >> ysh);
-        let c_w = pic_width >> 1;
-        let c_h = pic_height >> u32::from(chroma_idc == 1);
-        let chroma = |plane: &[P], p: usize| {
-            let win = Window::fetch(
-                plane,
-                r.offset[p],
-                uvlinesize,
-                cx0,
-                cy0,
-                cw + 1,
-                ch + 1,
-                c_w,
-                c_h,
-                0,
+        for p in 1..3 {
+            let reach = Reach {
+                base: r.offset[p],
+                stride: uvlinesize,
+                x0: mx >> 3,
+                y0: my >> ysh,
+                w: cw + 1,
+                h: ch + 1,
+                pic_w: pic_width >> 1,
+                pic_h: pic_height >> u32::from(chroma_idc == 1),
+            };
+            fetch(
+                &mut filters.win,
+                self.ref_plane(r, p, &*dst.planes[p])?,
+                reach,
             );
-            chroma_block(&win, cw, ch, fx, fy)
-        };
-        let cb = chroma(self.ref_plane(r, 1, &*dst.planes[1])?, 1);
-        let cr = chroma(self.ref_plane(r, 2, &*dst.planes[2])?, 2);
-        if keep {
-            return Ok(Some([y_block, cb, cr]));
+            chroma_block(&filters.win, cw, ch, fx, fy, &mut out[p]);
         }
-        store(dst.planes[0], dst.at[0], linesize, w, &y_block, avg);
-        store(dst.planes[1], dst.at[1], uvlinesize, cw, &cb, avg);
-        store(dst.planes[2], dst.at[2], uvlinesize, cw, &cr, avg);
-        Ok(None)
+        if !keep {
+            store(dst.planes[0], dst.at[0], linesize, w, &out[0][..w * h], avg);
+            for p in 1..3 {
+                store(
+                    dst.planes[p],
+                    dst.at[p],
+                    uvlinesize,
+                    cw,
+                    &out[p][..cw * ch],
+                    avg,
+                );
+            }
+        }
+        Ok(())
     }
 
     /// One partition, weighted or not (`mc_part`, `mc_part_std`,
@@ -424,6 +509,7 @@ impl Context {
         part: Part,
         mb_at: [usize; 3],
         dst: &mut Dst<'_, P>,
+        scratch: &mut McScratch,
         list0: bool,
         list1: bool,
     ) -> Result<(), DecodeError> {
@@ -471,7 +557,7 @@ impl Context {
             let mut avg = false;
             for (list, used) in [(0, list0), (1, list1)] {
                 if used {
-                    self.mc_dir_part(sl, entry(list)?, part, list, dst, avg, false)?;
+                    self.mc_dir_part(sl, entry(list)?, part, list, dst, avg, false, scratch)?;
                     avg = true;
                 }
             }
@@ -486,12 +572,9 @@ impl Context {
         if list0 && list1 {
             let r0 = refn(0);
             let r1 = refn(1);
-            self.mc_dir_part(sl, entry(0)?, part, 0, dst, false, false)?;
-            let Some([ty, tcb, tcr]) =
-                self.mc_dir_part(sl, entry(1)?, part, 1, dst, false, true)?
-            else {
-                return Err(DecodeError);
-            };
+            self.mc_dir_part(sl, entry(0)?, part, 0, dst, false, false, scratch)?;
+            self.mc_dir_part(sl, entry(1)?, part, 1, dst, false, true, scratch)?;
+            let [ty, tcb, tcr] = &scratch.kept;
             let (i0, i1) = (
                 usize::try_from(r0).map_err(|_| DecodeError)?,
                 usize::try_from(r1).map_err(|_| DecodeError)?,
@@ -503,7 +586,7 @@ impl Context {
                     dst.planes[0],
                     dst.at[0],
                     linesize,
-                    &ty,
+                    ty,
                     part.w,
                     part.h,
                     5,
@@ -516,7 +599,7 @@ impl Context {
                     dst.planes[1],
                     dst.at[1],
                     c_stride,
-                    &tcb,
+                    tcb,
                     cw,
                     ch,
                     5,
@@ -529,7 +612,7 @@ impl Context {
                     dst.planes[2],
                     dst.at[2],
                     c_stride,
-                    &tcr,
+                    tcr,
                     cw,
                     ch,
                     5,
@@ -550,7 +633,7 @@ impl Context {
                     dst.planes[0],
                     dst.at[0],
                     linesize,
-                    &ty,
+                    ty,
                     part.w,
                     part.h,
                     pwt.luma_log2_weight_denom,
@@ -565,7 +648,7 @@ impl Context {
                     dst.planes[1],
                     dst.at[1],
                     c_stride,
-                    &tcb,
+                    tcb,
                     cw,
                     ch,
                     d,
@@ -578,7 +661,7 @@ impl Context {
                     dst.planes[2],
                     dst.at[2],
                     c_stride,
-                    &tcr,
+                    tcr,
                     cw,
                     ch,
                     d,
@@ -593,7 +676,7 @@ impl Context {
 
         let list = usize::from(list1);
         let i = usize::try_from(refn(list)).map_err(|_| DecodeError)?;
-        self.mc_dir_part(sl, entry(list)?, part, list, dst, false, false)?;
+        self.mc_dir_part(sl, entry(list)?, part, list, dst, false, false, scratch)?;
         let lw = pwt.luma_weight.get(i).map(|x| x[list]).ok_or(DecodeError)?;
         weight(
             dst.planes[0],
@@ -653,7 +736,23 @@ impl Context {
         dest_y: usize,
         dest_c: [usize; 2],
     ) -> Result<(), DecodeError> {
-        let sl = &*sl;
+        // The slice's scratch, made once and lent to each macroblock.
+        let mut scratch = sl.mc_scratch.take().unwrap_or_default();
+        let result = self.hl_motion_parts(&*sl, &mut scratch, mb_type, planes, dest_y, dest_c);
+        sl.mc_scratch = Some(scratch);
+        result
+    }
+
+    /// [`Self::hl_motion`], with the scratch to predict in.
+    fn hl_motion_parts<P: Pixel>(
+        &self,
+        sl: &SliceContext,
+        scratch: &mut McScratch,
+        mb_type: u32,
+        planes: [&mut [P]; 3],
+        dest_y: usize,
+        dest_c: [usize; 2],
+    ) -> Result<(), DecodeError> {
         // Under H264_MV the line `tools/ffdbg`'s FFDBG_MV prints in FFmpeg,
         // for `tools/h264cmp.py`.
         #[cfg(test)]
@@ -694,6 +793,7 @@ impl Context {
                 part(0, 16, 16, 0, 0),
                 mb_at,
                 &mut dst,
+                scratch,
                 dir(mb_type, 0, 0),
                 dir(mb_type, 0, 1),
             )?;
@@ -703,6 +803,7 @@ impl Context {
                 part(0, 16, 8, 0, 0),
                 mb_at,
                 &mut dst,
+                scratch,
                 dir(mb_type, 0, 0),
                 dir(mb_type, 0, 1),
             )?;
@@ -711,6 +812,7 @@ impl Context {
                 part(8, 16, 8, 0, 4),
                 mb_at,
                 &mut dst,
+                scratch,
                 dir(mb_type, 1, 0),
                 dir(mb_type, 1, 1),
             )?;
@@ -720,6 +822,7 @@ impl Context {
                 part(0, 8, 16, 0, 0),
                 mb_at,
                 &mut dst,
+                scratch,
                 dir(mb_type, 0, 0),
                 dir(mb_type, 0, 1),
             )?;
@@ -728,6 +831,7 @@ impl Context {
                 part(4, 8, 16, 4, 0),
                 mb_at,
                 &mut dst,
+                scratch,
                 dir(mb_type, 1, 0),
                 dir(mb_type, 1, 1),
             )?;
@@ -744,6 +848,7 @@ impl Context {
                         part(n, 8, 8, x_offset, y_offset),
                         mb_at,
                         &mut dst,
+                        scratch,
                         l0,
                         l1,
                     )?;
@@ -753,6 +858,7 @@ impl Context {
                         part(n, 8, 4, x_offset, y_offset),
                         mb_at,
                         &mut dst,
+                        scratch,
                         l0,
                         l1,
                     )?;
@@ -761,6 +867,7 @@ impl Context {
                         part(n + 2, 8, 4, x_offset, y_offset + 2),
                         mb_at,
                         &mut dst,
+                        scratch,
                         l0,
                         l1,
                     )?;
@@ -770,6 +877,7 @@ impl Context {
                         part(n, 4, 8, x_offset, y_offset),
                         mb_at,
                         &mut dst,
+                        scratch,
                         l0,
                         l1,
                     )?;
@@ -778,13 +886,22 @@ impl Context {
                         part(n + 1, 4, 8, x_offset + 2, y_offset),
                         mb_at,
                         &mut dst,
+                        scratch,
                         l0,
                         l1,
                     )?;
                 } else {
                     for j in 0..4 {
                         let (sx, sy) = (x_offset + 2 * (j & 1), y_offset + (j & 2));
-                        self.mc_part(sl, part(n + j, 4, 4, sx, sy), mb_at, &mut dst, l0, l1)?;
+                        self.mc_part(
+                            sl,
+                            part(n + j, 4, 4, sx, sy),
+                            mb_at,
+                            &mut dst,
+                            scratch,
+                            l0,
+                            l1,
+                        )?;
                     }
                 }
             }

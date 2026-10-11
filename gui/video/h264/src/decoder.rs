@@ -96,6 +96,9 @@ pub(crate) struct DecodeError;
 #[derive(Clone, Debug)]
 pub(crate) struct SliceContext {
     pub(crate) hdr: SliceHeader,
+    /// What inter prediction works in, made at the first inter macroblock
+    /// and kept (`crate::mc::McScratch`).
+    pub(crate) mc_scratch: Option<Box<crate::mc::McScratch>>,
     /// Each list's references: 16 frame entries a list, then 32 MBAFF
     /// field entries, two for each frame one.
     pub(crate) ref_list: [Box<[Ref; 48]>; 2],
@@ -236,6 +239,7 @@ impl Default for SliceContext {
     fn default() -> Self {
         Self {
             hdr: SliceHeader::default(),
+            mc_scratch: None,
             ref_list: [
                 Box::new([Ref::default(); 48]),
                 Box::new([Ref::default(); 48]),

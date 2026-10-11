@@ -59341,15 +59341,3 @@ is still run by hand, not by `boot-test.sh`.
   parameters; put `needs_fg` and `f_grain` back as FFmpeg has them; write
   film grain SEIs into conformance streams with the tests' `Syntax` writer
   (`src/tests.rs` writes one) and compare each picture with FFmpeg's.
-
-- **h264: inter prediction allocates and recomputes** (`gui/video/h264/src/mc.rs`;
-  the Opus review of the H.264 batch, 2026-10-10). `Window::fetch`, `qpel`
-  and `chroma_block` allocate a `Vec` for every partition, plane and list --
-  hundreds of thousands per 1080p B picture -- and the centre quarter
-  positions (6, 9, 10, 11, 14) evaluate the horizontal six-tap six times a
-  sample instead of once a row: about 1,500 filters for a 16x16 block where
-  FFmpeg runs about 21x16 and 256. **Do it** next: scratch buffers kept in
-  the slice context (FFmpeg's `edge_emu_buffer` and `bipred_scratchpad`),
-  the block read in place where it and its filter's reach are inside the
-  picture, and the two-dimensional filter in two passes over a temporary of
-  `pixeltmp`'s width; with a benchmark, and the oracle tests unchanged.

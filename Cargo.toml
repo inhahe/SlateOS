@@ -17,6 +17,7 @@ members = [
     # (§1350), and vorbis, Tremor's, ported the same way (§1352), and flac,
     # libFLAC's; and h264, FFmpeg's H.264 decoder translated (§1376).
     "gui/video/codec",
+    "gui/video/ffbits",
     "gui/video/flac",
     "gui/video/h264",
     "gui/video/matroska",

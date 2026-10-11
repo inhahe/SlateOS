@@ -1299,6 +1299,10 @@ name = "fdisk"
 version = "0.1.0"
 
 [[package]]
+name = "ffbits"
+version = "0.1.0"
+
+[[package]]
 name = "file"
 version = "0.1.0"
 dependencies = [

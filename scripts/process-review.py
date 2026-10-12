@@ -215,18 +215,40 @@ def boot_section(rows: list[dict], since: str) -> str:
     flaky = [r for r in fails if any(x.get("verdict") == "PASS" for x in
                                      by_tree[(r.get("src_digest"), r.get("profile"),
                                               r.get("sanitizer"))])]
-    gates = [r.get("gates_seconds") or 0 for r in week]
-    walls = [r.get("wall_seconds") or 0 for r in week]
+    # Wall-clock seconds, as the history records them; a row without one
+    # (a run whose gates never finished) is left out, not counted as 0.
+    gates = [r["gates_seconds"] for r in week if isinstance(r.get("gates_seconds"), (int, float))]
+    walls = [r["wall_seconds"] for r in week if isinstance(r.get("wall_seconds"), (int, float))]
     verdicts = Counter(r.get("verdict") for r in week)
     branches = Counter(r.get("branch") or "?" for r in week)
+
+    def summary(xs: list[float]) -> str:
+        if not xs:
+            return "not recorded"
+        return f"{sum(xs) / 3600:.1f} hours (median {statistics.median(xs) / 60:.0f} minutes a boot)"
+
     return (f"## Boot tests\n\n{len(week)} boots: "
             + ", ".join(f"{n} {v}" for v, n in verdicts.most_common())
             + f". Of the {len(fails)} that failed, {len(flaky)} were flaky (the same tree "
             f"passed on another run); the rest failed on trees that never passed. "
-            f"Gates took {sum(gates) / 3600:.1f} hours of CPU in all "
-            f"(median {statistics.median(gates) / 60:.0f} minutes a boot), booting "
-            f"{sum(walls) / 3600:.1f} (median {statistics.median(walls) / 60:.0f} minutes). "
+            f"Wall time in the gates: {summary(gates)}; in the boots: {summary(walls)}. "
             f"By branch: " + ", ".join(f"{b} {n}" for b, n in branches.most_common()) + ".\n")
+
+
+def load_history(path: Path) -> list[dict]:
+    """The boot history's records, skipping a line a killed run cut short or a
+    merge interleaved (the file is merged with merge=union)."""
+    rows = []
+    if not path.is_file():
+        return rows
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            rows.append(r)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +294,9 @@ DATED = re.compile(r"(\d{4}-\d{2}-\d{2})")
 #: A known issue's lane: its file name's first letter, or the second
 #: field of a tech-debt entry (`TD-B-...`).
 ISSUE_LANE = re.compile(r"^(?:TD-)?([A-F])-")
+#: Or the lane its heading names, `### [B] ...`, which entries named by
+#: subsystem (`TD-OILS-...`) still carry.
+HEADING_LANE = re.compile(r"\[([A-F])\]|\(lane ([A-F])\b|\*\*Lane:\*\*\s*([A-F])\b")
 
 
 def backlog_section(root: Path, today: dt.date) -> str:
@@ -281,11 +306,12 @@ def backlog_section(root: Path, today: dt.date) -> str:
     for p in sorted((root / "known-issues").glob("*.md")):
         if p.name == "README.md":
             continue
+        # The directory is the status (known-issues/README.md): an entry
+        # still here is open, whatever word its own stamp uses.
         head = p.read_text(encoding="utf-8", errors="replace")[:1500]
-        if not re.search(r"\*\*Status:\*\*\s*OPEN", head, re.I):
-            continue
-        m = ISSUE_LANE.match(p.name)
-        lane = m.group(1) if m else "other"
+        first = head.splitlines()[0] if head else ""
+        m = HEADING_LANE.search(first) or ISSUE_LANE.match(p.name) or HEADING_LANE.search(head)
+        lane = next((g for g in m.groups() if g), "other") if m else "other"
         issues[lane] += 1
         first = head.splitlines()[0] if head else ""
         m = DATED.findall(first)
@@ -320,8 +346,7 @@ def backlog_section(root: Path, today: dt.date) -> str:
 def report(today: dt.date, cua: Path) -> str:
     since = (today - dt.timedelta(days=7)).isoformat()
     history = REPO / "bench" / "boot-history.jsonl"
-    rows = [json.loads(x) for x in history.read_text(encoding="utf-8").splitlines() if x.strip()] \
-        if history.is_file() else []
+    rows = load_history(history)
     log = git("log", f"--since={since}", "--grep=^Reviewed: ", "--format=%x1e%H%n%B",
               "refs/remotes/origin/main")
     return "\n".join([
@@ -356,25 +381,47 @@ def newest_claude() -> str:
 
 
 def propose(text: str) -> str:
-    claude = newest_claude()
-    r = subprocess.run([claude, "-p", "--model", "opus", "--effort", "medium", PROPOSE + text],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       stdin=subprocess.DEVNULL, env=gitenv.clean_env(), timeout=1800)
-    return ("## Three changes to make first (Claude, from the numbers above)\n\n"
-            + (r.stdout.strip() if r.returncode == 0 else
-               f"The proposal run failed (exit {r.returncode}): {r.stderr.strip()[:500]}") + "\n")
+    """Claude's three changes, as a section -- or, if the call fails or runs
+    over half an hour, the reason why, so the week's numbers stand anyway.
+    The prompt goes on stdin: the report can outgrow a command line."""
+    import proctree  # the timeout that kills the whole tree before draining
+    head = "## Three changes to make first (Claude, from the numbers above)\n\n"
+    try:
+        r = proctree.run_captured([newest_claude(), "-p", "--model", "opus", "--effort",
+                                   "medium"], input=(PROPOSE + text).encode("utf-8"),
+                                  timeout=1800, env=gitenv.clean_env())
+    except OSError as e:
+        return head + f"The proposal run could not start: {e}\n"
+    out = r.stdout.decode("utf-8", errors="replace").strip()
+    if r.timed_out:
+        return head + "The proposal run took over half an hour and was stopped.\n"
+    if r.returncode != 0 or not out:
+        err = r.stderr.decode("utf-8", errors="replace").strip()[:500]
+        return head + f"The proposal run failed (exit {r.returncode}): {err}\n"
+    return head + out + "\n"
 
 
 def register(out: str) -> int:
     """Register the weekly Task Scheduler entry: Mondays 06:30, after the
-    curator, from the integration tree, which is kept at main."""
+    curator, from the integration tree, which is kept at main. The task
+    starts in System32, so `out` is made absolute here."""
     script = Path("E:/visual studio projects/os/scripts/process-review.py")
     pyw = Path(sys.executable).with_name("pythonw.exe")
-    cmd = f'"{pyw}" "{script}" --out "{out}" --propose'
+    cmd = f'"{pyw}" "{script}" --out "{Path(out).resolve()}" --propose'
     r = subprocess.run(["schtasks", "/create", "/f", "/tn", TASK, "/sc", "weekly", "/d", "MON",
-                        "/st", "06:30", "/tr", cmd], capture_output=True, text=True)
+                        "/st", "06:30", "/tr", cmd], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
     print(r.stdout.strip() or r.stderr.strip())
     return r.returncode
+
+
+def write_report(out: Path, today: dt.date, text: str) -> Path:
+    out.mkdir(parents=True, exist_ok=True)
+    dated = out / f"process-review-{today.isoformat()}.md"
+    for path in (dated, out / "latest.md"):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    return dated
 
 
 # ---------------------------------------------------------------------------
@@ -423,14 +470,29 @@ def self_test() -> int:
             "### [A] old -- 2026-08-01\n\n**Status:** OPEN\n", encoding="utf-8")
         (root / "known-issues" / "A-new.md").write_text(
             "### [A] new -- 2026-10-10\n\n**Status:** OPEN\n", encoding="utf-8")
-        (root / "known-issues" / "B-fixed.md").write_text(
-            "### [B] done -- 2026-08-01\n\n**Status:** FIXED\n", encoding="utf-8")
+        # Stamped otherwise, but still in known-issues/: open all the same.
+        (root / "known-issues" / "TD-B-half.md").write_text(
+            "### [B] half done -- 2026-08-01\n\n**Status:** HALF\n", encoding="utf-8")
         (root / "requests" / "f-ad-x.md").write_text(
             "# x\n**Filed:** 2026-08-01. **Status:** open.\n", encoding="utf-8")
         text = backlog_section(root, dt.date(2026, 10, 12))
         expect("backlog A", "| A | 2 | 1 | 1 | 1 |" in text, True)
         expect("backlog D", "| D | 0 | 0 | 1 | 1 |" in text, True)
-        expect("fixed issue not counted", "| B |" in text, False)
+        expect("an entry stamped otherwise is open", "| B | 1 | 1 | 0 | 0 |" in text, True)
+        history = root / "h.jsonl"
+        history.write_text('{"ts": "a"}\n{"ts": "b", cut sh\n[1, 2]\n{"ts": "c"}\n',
+                           encoding="utf-8")
+        expect("malformed history lines skipped", [r["ts"] for r in load_history(history)],
+               ["a", "c"])
+        # A proposal that cannot run still leaves the numbers written.
+        global newest_claude
+        saved = newest_claude
+        newest_claude = lambda: str(root / "no-such-claude.exe")  # noqa: E731
+        try:
+            section_text = propose("numbers")
+        finally:
+            newest_claude = saved
+        expect("a failed proposal says why", "could not start" in section_text, True)
     for f in failures:
         print(f"FAIL {f}")
     print(f"process-review self-test: {'FAILED' if failures else 'ok'}")
@@ -438,8 +500,10 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
+    # Under pythonw.exe, as the scheduled task runs it, there are no streams.
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(encoding="utf-8", errors="replace")
+        if stream is not None:
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if selftestflag.wants_selftest(argv):
         return self_test()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -452,18 +516,27 @@ def main(argv: list[str]) -> int:
     if a.register:
         return register(a.register)
     today = dt.date.today()
-    text = report(today, CUA_DIR)
-    if a.propose:
-        text += "\n" + propose(text)
-    if a.out:
-        out = Path(a.out)
+    if not a.out:
+        text = report(today, CUA_DIR)
+        print(text + ("\n" + propose(text) if a.propose else ""))
+        return 0
+    out = Path(a.out)
+    try:
+        text = report(today, CUA_DIR)
+        # The numbers are written before the proposal is asked for, so a
+        # failed or slow proposal cannot lose them.
+        dated = write_report(out, today, text)
+        if a.propose:
+            dated = write_report(out, today, text + "\n" + propose(text))
+    except Exception:  # noqa: BLE001 -- a scheduled run has nobody to tell but this file
+        import traceback
         out.mkdir(parents=True, exist_ok=True)
-        for name in (f"process-review-{today.isoformat()}.md", "latest.md"):
-            with open(out / name, "w", encoding="utf-8", newline="\n") as f:
-                f.write(text)
-        print(out / f"process-review-{today.isoformat()}.md")
-    else:
-        print(text)
+        with open(out / "last-error.txt", "w", encoding="utf-8", newline="\n") as f:
+            f.write(f"{dt.datetime.now().isoformat(timespec='seconds')}\n"
+                    f"{traceback.format_exc()}")
+        return 1
+    if sys.stdout is not None:
+        print(dated)
     return 0
 
 

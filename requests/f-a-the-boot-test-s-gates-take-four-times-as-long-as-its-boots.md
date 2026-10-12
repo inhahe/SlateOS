@@ -1,15 +1,17 @@
-# F → A — the boot test's gates use four times the CPU its boots do; and a failed boot does not say why
+# F → A — the boot test's gates take four times as long as its boots; and a failed boot does not say why
 
 **From:** Lane F. **To:** Lane A (`scripts/boot-test.sh`, `scripts/gate-cache.py`, `scripts/boot-history.py`).
 **Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
 **Priority:** after the desktop work (design-decisions §1392). The operator
 says the boot test's wall time matters little, because the weekly usage
 limit is what stops the lanes, but "it would still be nice to use less CPU
-time on my computer". This is about CPU, not tokens.
+time on my computer". This is about the machine's time and CPU, not tokens.
 
 **In short:** since 2026-10-01, `bench/boot-history.jsonl` records 150 boot
-tests. They spent 172 hours in gates against 34 hours booting: the median
-boot is 14 minutes, the median gate run an hour. In lane F's boot of
+tests. They spent 172 hours in gates against 34 hours booting, wall
+clock: the median boot is 14 minutes, the median gate run an hour. The
+gates' CPU time is higher still, since many of them build and test on
+every core. In lane F's boot of
 2026-10-12 the gate cache served 4 of 326 gates:
 
     === Gates OK (2233s) ===

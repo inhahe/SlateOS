@@ -74,24 +74,30 @@ def seed(src, corpus):
                 if packets:
                     open(os.path.join(corpus("vp8"), name + ".pkt"), "wb").write(packets)
 
-    # VP9's WebM vectors are remuxed to IVF with ffmpeg first.
+    # VP9's WebM vectors are remuxed to IVF with ffmpeg first; without ffmpeg
+    # in WSL (`sudo apt install ffmpeg`) only the IVF vectors seed it.
+    have_ffmpeg = shutil.which("ffmpeg") is not None
+    if not have_ffmpeg:
+        print("fuzz: no ffmpeg in WSL: vp9 is seeded from its IVF vectors only")
     tmp = os.path.join(os.path.expanduser("~"), "fuzz", "ivf-tmp")
     os.makedirs(tmp, exist_ok=True)
-    for dirpath, _, names in os.walk(os.path.join(src, "gui/video/vp9/tests/data")):
-        for name in names:
-            path = os.path.join(dirpath, name)
-            if name.endswith(".ivf"):
-                ivf = path
-            elif name.endswith(".webm"):
-                ivf = os.path.join(tmp, name + ".ivf")
-                r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path,
-                                    "-map", "0:v:0", "-c:v", "copy", "-frames:v", "8", "-f",
-                                    "ivf", ivf], stdin=subprocess.DEVNULL)
-                if r.returncode != 0:
+    try:
+        for dirpath, _, names in os.walk(os.path.join(src, "gui/video/vp9/tests/data")):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                if name.endswith(".ivf"):
+                    ivf = path
+                elif name.endswith(".webm") and have_ffmpeg:
+                    ivf = os.path.join(tmp, name + ".ivf")
+                    r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path,
+                                        "-map", "0:v:0", "-c:v", "copy", "-frames:v", "8",
+                                        "-f", "ivf", ivf], stdin=subprocess.DEVNULL)
+                    if r.returncode != 0:
+                        continue
+                else:
                     continue
-            else:
-                continue
-            packets = ivf_packets(ivf)
-            if packets and len(packets) <= MAX_SEED:
-                open(os.path.join(corpus("vp9"), name + ".pkt"), "wb").write(packets)
-    shutil.rmtree(tmp)
+                packets = ivf_packets(ivf)
+                if packets and len(packets) <= MAX_SEED:
+                    open(os.path.join(corpus("vp9"), name + ".pkt"), "wb").write(packets)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

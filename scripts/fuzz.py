@@ -78,6 +78,14 @@ def wsl_path(p: Path) -> str:
     return s
 
 
+def qemu_running() -> bool:
+    """Whether a QEMU guest is up on this Windows machine: a fuzz round
+    beside one stretches its timings (CLAUDE.md)."""
+    out = subprocess.run(["tasklist", "/NH"], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL).stdout
+    return "qemu-system" in out.lower()
+
+
 def closure(src: Path, roots: list[str]) -> list[str]:
     """`roots` and every crate they reach by a `path` dependency, as
     repository-relative directories."""
@@ -129,9 +137,16 @@ def setup(harness: Harness, src: Path, home: Path) -> Path:
             shutil.rmtree(dst)
         dst.mkdir(parents=True)
         for item in (src / crate).iterdir():
-            if item.name in SKIP:
+            if item.name in ("target", "fuzz"):
                 continue
-            if item.is_dir():
+            if item.name in SKIP:
+                # Only the sources: a manifest's `[[test]]`, `[[bench]]` and
+                # `[[example]]` must find their files, or cargo refuses the
+                # whole workspace; their data stays behind.
+                for f in item.rglob("*.rs"):
+                    (dst / f.relative_to(src / crate)).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dst / f.relative_to(src / crate))
+            elif item.is_dir():
                 shutil.copytree(item, dst / item.name)
             else:
                 shutil.copy2(item, dst / item.name)
@@ -157,25 +172,28 @@ def setup(harness: Harness, src: Path, home: Path) -> Path:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    counts = {}
+    def names(target: str) -> set[str]:
+        return {p.name for p in corpus(target).iterdir()}
+
+    had = {t: names(t) for t in harness.targets}
     for target, dirs in harness.seeds.items():
-        n = 0
         for sub in dirs:
             base = src / sub
+            if not base.is_dir():
+                print(f"fuzz: {target}'s seed directory {sub} is not there")
             for p in sorted(base.rglob("*")) if base.is_dir() else []:
                 if p.is_file() and p.stat().st_size <= MAX_SEED:
                     rel = str(p.relative_to(src)).replace(os.sep, "_").replace("/", "_")
                     shutil.copy2(p, corpus(target) / rel)
-                    n += 1
-        counts[target] = n
     hook = harness.dir / "seeds.py"
     if hook.is_file():
         namespace: dict = {"__file__": str(hook)}
         exec(compile(hook.read_text(encoding="utf-8"), str(hook), "exec"), namespace)
         namespace["seed"](str(src), lambda t: str(corpus(t)))
-    for target in harness.targets:
-        counts[target] = sum(1 for _ in corpus(target).iterdir())
-    print("fuzz: seeds:", counts)
+    # What this setup added, and what the corpus holds with what the fuzzer
+    # has grown: a seed source gone missing shows as nothing added.
+    print("fuzz: seeds added (corpus):", ", ".join(
+        f"{t} {len(names(t) - had[t])} ({len(names(t))})" for t in harness.targets))
     return tree
 
 
@@ -215,7 +233,7 @@ def run(harness: Harness, tree: Path, secs: int) -> int:
                                                stdin=subprocess.DEVNULL)))
     found = False
     for t, log, p in procs:
-        p.wait()
+        code = p.wait()
         log.close()
         text = (logs / f"{t}.log").read_text(encoding="utf-8", errors="replace")
         stats = re.findall(r"^stat::(number_of_executed_units|new_units_added):\s*(\d+)", text, re.M)
@@ -226,6 +244,13 @@ def run(harness: Harness, tree: Path, secs: int) -> int:
             print(f"    {line}")
         for a in new:
             print(f"    finding: {a}")
+        if code != 0 and not new:
+            # It stopped without a finding: a bad dictionary, a corpus it
+            # could not read, the out-of-memory killer. Not a clean round.
+            found = True
+            print(f"    did not fuzz to the end (exit {code}); the log's end:")
+            for line in text.splitlines()[-6:]:
+                print(f"      {line}")
         if before[t]:
             print(f"    ({len(before[t])} finding(s) from earlier rounds in "
                   f"{tree / 'fuzz' / 'artifacts' / t})")
@@ -249,6 +274,9 @@ def self_test() -> int:
             (src / path / "src" / "lib.rs").write_text("", encoding="utf-8")
             (src / path / "tests").mkdir()
             (src / path / "tests" / "big.bin").write_bytes(b"x")
+            # A `[[bench]]` the manifest declares: its source must come along.
+            (src / path / "benches").mkdir()
+            (src / path / "benches" / "rate.rs").write_text("fn main() {}", encoding="utf-8")
             (src / path / "Cargo.toml").write_text(
                 f'[package]\nname = "{path.split("/")[-1]}"\n[dependencies]\n{deps}',
                 encoding="utf-8")
@@ -285,7 +313,9 @@ def self_test() -> int:
         expect("crates copied without tests", sorted(
             str(p.relative_to(tree)).replace(os.sep, "/") for p in tree.rglob("lib.rs")),
             ["a/src/lib.rs", "c/src/lib.rs", "lib/b/src/lib.rs"])
-        expect("no tests copied", list(tree.glob("*/tests")), [])
+        expect("no test data copied", list(tree.glob("*/tests/big.bin")), [])
+        expect("declared bench sources copied", (tree / "a" / "benches" / "rate.rs").is_file(),
+               True)
         root = (tree / "Cargo.toml").read_text(encoding="utf-8")
         expect("workspace lints kept", "unsafe_code" in root and '"lib/b"' in root, True)
         expect("harness installed", (tree / "fuzz" / "Cargo.toml").is_file()
@@ -313,16 +343,35 @@ def main(argv: list[str]) -> int:
     ap.add_argument("action", choices=("setup", "run"))
     ap.add_argument("harness", help="the harness directory, e.g. netproto/fuzz")
     ap.add_argument("seconds", nargs="?", type=int, default=1200, help="per target, for run")
+    ap.add_argument("--src", help="the checkout to copy the crates from (default: the one "
+                    "the harness is in)")
     a = ap.parse_args(argv)
     if os.name == "nt":
+        if a.action == "run" and qemu_running():
+            print("fuzz: a QEMU guest is up, and a round loads every core: run it when the "
+                  "guest has finished")
+            return 1
+        # The crates are the harness's own checkout's, not this script's: a
+        # lane trying a harness in its own worktree fuzzes its own code.
+        # A harness outside any checkout of this repository (being tried
+        # from a scratch directory, say) fuzzes the script's own checkout.
+        top = subprocess.run(["git", "-C", str(Path(a.harness).resolve()), "rev-parse",
+                              "--show-toplevel"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+        src = Path(__file__).resolve().parent.parent
+        if top.returncode == 0 and top.stdout.strip():
+            candidate = Path(top.stdout.strip())
+            roots = Harness(Path(a.harness).resolve()).roots
+            if all((candidate / r / "Cargo.toml").is_file() for r in roots):
+                src = candidate
         # `-u`: the log a background run writes to shows progress as it goes.
         r = subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "python3", "-u",
-                            wsl_path(Path(__file__)),
-                            a.action, wsl_path(Path(a.harness)), str(a.seconds)],
+                            wsl_path(Path(__file__)), a.action, wsl_path(Path(a.harness)),
+                            str(a.seconds), "--src", wsl_path(src)],
                            stdin=subprocess.DEVNULL)
         return r.returncode
     harness = Harness(Path(a.harness).resolve())
-    src = Path(__file__).resolve().parent.parent
+    src = Path(a.src) if a.src else Path(__file__).resolve().parent.parent
     tree = setup(harness, src, Path.home())
     if a.action == "setup":
         return 0

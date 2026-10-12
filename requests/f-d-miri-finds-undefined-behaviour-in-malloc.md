@@ -1,11 +1,12 @@
-# F → D — Miri finds undefined behaviour in `malloc`; and what `posix` needs before Miri can test the rest
+# F → D — Miri finds undefined behaviour in `malloc` and `envz_merge`; and what `posix` needs before Miri can test the rest
 
-**From:** Lane F. **To:** Lane D (`posix/src/malloc.rs`, `posix/src/malloc/dlmalloc.rs`, `posix/src/string.rs`).
+**From:** Lane F. **To:** Lane D (`posix/src/malloc.rs`, `posix/src/malloc/dlmalloc.rs`, `posix/src/argz.rs`, `posix/src/string.rs`).
 **Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
 
 **In short:** the operator adopted Miri for `unsafe` code that has host
 tests (design-decisions §1393). Its first run over `posix` found undefined
-behaviour in the allocator every SlateOS program links:
+behaviour in two places: `envz_merge` (section 1b), and the allocator every
+SlateOS program links:
 
 - the dlmalloc port keeps raw pointers into its own bin array inside heap
   chunks;
@@ -54,6 +55,31 @@ The usual fixes:
 model. Whether it passes there says whether the pattern is wrong only under
 Stacked Borrows' rules or under both. Either way the `noalias` reasoning
 above applies.
+
+## 1b. A second finding: `envz_merge` reads a byte past the slice it was given
+
+`argz::tests::envz_is_glibcs`:
+
+    error: Undefined Behavior: trying to retag from <12578132> for SharedReadOnly permission
+           at alloc5914211[0x58], but that tag does not exist in the borrow stack for this location
+       --> posix\src\argz.rs:768:37
+    768 |  let with_nul = unsafe { core::slice::from_raw_parts(e.as_ptr(), e.len() + 1) };
+    help: <12578132> was created by a SharedReadOnly retag at offsets [0x55..0x58]
+    stack: argz::envz_forms::envz_merge <- argz::tests::envz_is_glibcs
+
+`e` is the entry without its NUL. The pointer `e.as_ptr()` carries
+permission for `e`'s bytes only, so a slice one byte longer reads outside
+it. The NUL is really there, but this pointer may not reach it. The fix is
+to take the pointer, or the slice with its NUL, from the buffer that holds
+the NUL: the argz vector, sliced to `e`'s offset and `e.len() + 1`.
+
+## 1c. The other modules tried
+
+| Module | Result under Miri |
+|---|---|
+| `obstack`, `list`, `objtable` | pass (5, 18 and 2 tests) |
+| `environ`, `getopt`, `libgen` | stop at the string functions' inline assembly (section 2) |
+| `malloc` | still running after 40 minutes: needs a narrower filter |
 
 ## 2. What keeps Miri from the rest of `posix`
 

@@ -16,7 +16,8 @@ inputs they name. This harness asks about the inputs nobody named.
 ## Running it
 
 With `scripts/fuzz.py`, which every lane's harness shares (its docstring says
-what WSL needs):
+what WSL needs; this harness's seeds also want `ffmpeg` there, and without it
+VP9 is seeded from its IVF vectors only):
 
     python scripts/fuzz.py run gui/video/fuzz 1200   # seconds per target, all in parallel
 

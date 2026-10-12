@@ -127,10 +127,15 @@ use libfuzzer_sys::fuzz_target;
 use sshwire::{PacketCodec, Role};
 
 fn drain(codec: &mut PacketCodec, mut buf: &[u8]) {
-    // Every packet in the input, as the stream reader hands them over.
+    // Every packet in the input, as the stream reader hands them over. A
+    // decoded packet must use bytes, and no more than it was given: a reader
+    // would loop forever on the one, and slice past its buffer on the other.
     for _ in 0..64 {
         match codec.decode(buf) {
-            Ok(Some((_payload, used))) if used > 0 && used <= buf.len() => buf = &buf[used..],
+            Ok(Some((_payload, used))) => {
+                assert!(used > 0 && used <= buf.len(), "decode used {used} of {}", buf.len());
+                buf = &buf[used..];
+            }
             _ => return,
         }
     }

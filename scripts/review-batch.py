@@ -513,6 +513,7 @@ def owning_workspaces(tree: Path, files: list[str]) -> dict[str, set[str]]:
     `.rs` paths) belong to, repo-relative ("" for the tree's own), with the
     names of the packages they are in."""
     out: dict[str, set[str]] = {}
+    roots: dict[Path, str | None] = {}  # crate directory -> its workspace, asked once
     for f in files:
         d = (tree / f).parent
         while d != tree and not (d / "Cargo.toml").is_file():
@@ -524,100 +525,151 @@ def owning_workspaces(tree: Path, files: list[str]) -> dict[str, set[str]]:
             package = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]["name"]
         except (KeyError, OSError, tomllib.TOMLDecodeError):
             continue
-        r = subprocess.run(["cargo", "locate-project", "--workspace", "--message-format",
-                            "plain"], cwd=d, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", stdin=subprocess.DEVNULL, env=gitenv.clean_env())
-        if r.returncode != 0:
-            continue
-        root = Path(r.stdout.strip()).parent.resolve()
-        rel = "" if root == tree.resolve() else str(root.relative_to(tree.resolve())).replace(
-            os.sep, "/")
-        out.setdefault(rel, set()).add(package)
+        if d not in roots:
+            r = subprocess.run(["cargo", "locate-project", "--workspace", "--message-format",
+                                "plain"], cwd=d, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                               env=gitenv.clean_env())
+            root = Path(r.stdout.strip()).parent.resolve() if r.returncode == 0 else None
+            roots[d] = None if root is None or not root.is_relative_to(tree.resolve()) else (
+                "" if root == tree.resolve()
+                else root.relative_to(tree.resolve()).as_posix())
+        if roots[d] is not None:
+            out.setdefault(roots[d], set()).add(package)
     return out
 
 
-def mutants_tally(out_dir: Path) -> tuple[int, list[str], int]:
-    """(mutants tested, the ones no test caught, mutants found) from a
+#: cargo-mutants' exit statuses that mean it tested what it found: all
+#: caught, some missed, some timed out.
+MUTANTS_FINISHED = {0, 2, 3}
+
+
+def mutants_tally(out_dir: Path) -> tuple[int, list[str], int, int]:
+    """(mutants a test ran against -- caught, missed or timed out -- the ones
+    no test caught, mutants found, mutants that did not build) from a
     cargo-mutants output directory."""
     mo = out_dir / "mutants.out"
     lines = {}
     for name in ("caught", "missed", "timeout", "unviable"):
         p = mo / f"{name}.txt"
-        lines[name] = [x for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] \
-            if p.is_file() else []
+        lines[name] = [x for x in p.read_text(encoding="utf-8", errors="replace").splitlines()
+                       if x.strip()] if p.is_file() else []
     # Every mutant it found, tested or not, is listed in mutants.json.
     try:
         found = len(json.loads((mo / "mutants.json").read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         found = 0
-    tested = sum(len(v) for v in lines.values())
-    return tested, lines["missed"], max(found, tested)
+    tested = len(lines["caught"]) + len(lines["missed"]) + len(lines["timeout"])
+    return tested, lines["missed"], max(found, tested + len(lines["unviable"])), \
+        len(lines["unviable"])
+
+
+def batch_rust_files(scratch: Path, base: str, tip: str, remote: str) -> tuple[list[str], str]:
+    """The Rust files the batch's own commits change, and the commit to diff
+    the tip against so that only the batch's lines show: the last of
+    `<remote>/main` the tip has merged, or `base` if that is later.
+    Comparing `base` and `tip` alone would bring in another lane's changes
+    merged from main in between."""
+    revs = [f"{base}..{tip}", *published(remote, scratch)]
+    names = git("log", "--no-renames", "--format=", "--name-only", "--diff-merges=dense-combined",
+                *revs, "--", "*.rs", cwd=scratch)
+    files = sorted({f for f in names.splitlines() if f.strip() and (scratch / f).is_file()})
+    main_ref = f"refs/remotes/{remote}/main"
+    since = base
+    if resolve(main_ref, cwd=scratch, check=False):
+        mb = git("merge-base", main_ref, tip, cwd=scratch, check=False).strip()
+        if mb and is_ancestor(base, mb, scratch):
+            since = mb
+    return files, since
+
+
+def is_ancestor(a: str, b: str, cwd: str | Path | None = None) -> bool:
+    """Whether commit `a` is `b` or one of its ancestors."""
+    return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=cwd,
+                          env=gitenv.clean_env(), capture_output=True,
+                          stdin=subprocess.DEVNULL).returncode == 0
 
 
 def mutation_round(top: Path, scratch: Path, base: str, tip: str, stamp: str,
-                   budget: int) -> str | None:
+                   budget: int, remote: str = "origin") -> str | None:
     """Mutate the batch's changed Rust lines in `scratch` with cargo-mutants,
-    for at most `budget` seconds, at idle priority; keep the results in the
-    reports directory and answer the `Review-mutants` trailer's value (None
-    when there was nothing to mutate or no cargo-mutants)."""
-    if subprocess.run(["cargo", "mutants", "--version"], capture_output=True,
-                      stdin=subprocess.DEVNULL).returncode != 0:
+    one package at a time, for at most `budget` seconds in all, at idle
+    priority; keep its output and results in the reports directory and
+    answer the `Review-mutants` trailer's value (None when there was nothing
+    to mutate, or no cargo-mutants)."""
+    try:
+        have = subprocess.run(["cargo", "mutants", "--version"], capture_output=True,
+                              stdin=subprocess.DEVNULL).returncode == 0
+    except OSError:
+        have = False
+    if not have:
         print("review-batch: cargo-mutants is not installed (cargo install cargo-mutants "
               "--locked); no mutation testing this time", flush=True)
         return None
-    files = [f for f in git("diff", "--name-only", "--no-renames", base, tip, "--", "*.rs",
-                            cwd=scratch).split() if (scratch / f).is_file()]
+    files, since = batch_rust_files(scratch, base, tip, remote)
     groups = owning_workspaces(scratch, files)
-    for rel in list(groups):
-        skipped = groups[rel] & NO_HOST_TESTS
-        if skipped:
-            print(f"review-batch: no mutation testing for {', '.join(sorted(skipped))}: its "
-                  "tests do not run on the host", flush=True)
-            groups[rel] -= skipped
-        if not groups[rel]:
-            del groups[rel]
-    if not groups:
+    jobs = []
+    for rel, packages in sorted(groups.items()):
+        for p in sorted(packages):
+            if p in NO_HOST_TESTS:
+                print(f"review-batch: no mutation testing for {p}: its tests do not run on "
+                      "the host", flush=True)
+            else:
+                jobs.append((rel, p))
+    if not jobs:
         return None
     dest = reports_dir(top) / f"{stamp}-{tip[:12]}-mutants"
     deadline = time.monotonic() + budget
     runner = Path(__file__).resolve().parent / "run-timeout.py"
-    tested, missed, found = 0, [], 0
-    for rel, packages in sorted(groups.items()):
+    tested = found = unviable = 0
+    missed: list[str] = []
+    failed: list[str] = []
+    for rel, package in jobs:
         left = int(deadline - time.monotonic())
         if left < 60:
-            break
+            failed.append(f"{package} (no time left)")
+            continue
         ws = scratch / rel if rel else scratch
-        diff = git("diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
-                   *([f"--relative={rel}/"] if rel else []), base, tip, "--",
+        diff = git("diff", "--no-renames", "--no-ext-diff", "--no-color", "--src-prefix=a/",
+                   "--dst-prefix=b/", *([f"--relative={rel}/"] if rel else []), since, tip, "--",
                    *(f for f in files if not rel or f.startswith(rel + "/")), cwd=scratch)
-        diff_file = scratch / f".mutants-{len(rel)}.diff"
-        diff_file.write_text(diff, encoding="utf-8", newline="\n")
-        out = dest / (rel.replace("/", "_") or "workspace")
+        out = dest / package
         out.mkdir(parents=True, exist_ok=True)
+        diff_file = out / "batch.diff"
+        diff_file.write_text(diff, encoding="utf-8", newline="\n")
         cmd = ["cargo", "mutants", "-d", str(ws), "--in-place", "--in-diff", str(diff_file),
                "--shuffle", "--timeout", "300", "-o", str(out)]
         if os.name == "nt":
             # The workspace's own config builds for bare metal.
             cmd.append("--cargo-arg=--target=x86_64-pc-windows-gnu")
         if not rel:
-            for p in sorted(packages):
-                cmd += ["-p", p]
-        print(f"review-batch: mutation testing {rel or 'the workspace'} "
-              f"({', '.join(sorted(packages))}), at most {left // 60} minutes", flush=True)
-        subprocess.run([sys.executable, str(runner), str(left), *cmd], cwd=scratch,
-                       env=gitenv.clean_env(), capture_output=True, stdin=subprocess.DEVNULL,
-                       creationflags=IDLE_PRIORITY_CLASS if os.name == "nt" else 0)
-        t, m, f = mutants_tally(out)
-        tested, found = tested + t, found + f
+            cmd += ["-p", package]
+        print(f"review-batch: mutation testing {package}, at most {left // 60} minutes",
+              flush=True)
+        r = subprocess.run([sys.executable, str(runner), str(left), *cmd], cwd=scratch,
+                           env=gitenv.clean_env(), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                           creationflags=IDLE_PRIORITY_CLASS if os.name == "nt" else 0)
+        (out / "output.txt").write_text(r.stdout + r.stderr, encoding="utf-8", newline="\n")
+        t, m, f, u = mutants_tally(out)
+        tested, found, unviable = tested + t, found + f, unviable + u
         missed += [f"{rel + '/' if rel else ''}{x}" for x in m]
-    if not found:
+        if r.returncode not in MUTANTS_FINISHED:
+            why = "out of time" if r.returncode == 124 else f"exit {r.returncode}"
+            failed.append(f"{package} ({why}; {out / 'output.txt'})")
+    if not found and not failed:
         return None
-    print(f"review-batch: mutants: {tested} of {found} tested, {len(missed)} not caught by any "
-          f"test -- each is a finding to triage: add the test that catches it, or say why the "
-          f"change cannot matter. Results: {dest}", flush=True)
+    print(f"review-batch: mutants: {tested} of {found} tested against the tests "
+          f"({unviable} did not build), {len(missed)} not caught by any test -- each is a "
+          f"finding to triage: add the test that catches it, or say why the change cannot "
+          f"matter. Results: {dest}", flush=True)
     for x in missed:
         print(f"  missed: {x}")
-    return f"{len(missed)} missed of {tested} tested ({found} found) {dest.name}"
+    for x in failed:
+        print(f"  not finished: {x}")
+    return (f"{len(missed)} missed of {tested} tested ({found} found"
+            + (f"; not finished: {', '.join(x.split(' (')[0] for x in failed)}" if failed else "")
+            + f") {dest.name}")
 
 
 def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str,
@@ -666,19 +718,27 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
                 runs.append(f"{model}-{level} {name}")
                 print(f"review-batch: {model} at {level} -- done; report {report}", flush=True)
                 print(said[-6000:], flush=True)
-        mutants = None
-        if mutants_budget > 0:
-            wait_for_no_qemu(qemu_wait)
-            mutants = mutation_round(top, scratch, base, tip, stamp, mutants_budget)
+        # The record first: the reviews are done and paid for, and nothing
+        # the mutation round does may lose it.
         print("\nTrailers for the follow-up commit (fill in the findings after triage):\n")
         print(f"Reviewed: {base}..{tip}")
         print(f"Review-tier: {tier}")
         print(f"Review-runs: {', '.join(runs)}")
         print(f"Review-lane: {lane_letter(top)}")
         print(f"Review-written-at: {written_at}")
-        if mutants:
-            print(f"Review-mutants: {mutants}")
-        print("Review-findings: <n> fixed, <m> dismissed", flush=True)
+        print("Review-findings: <n> fixed, <m> dismissed\n", flush=True)
+        if mutants_budget > 0:
+            try:
+                if qemu_running():
+                    print("review-batch: a QEMU guest is up; mutation testing waits for it",
+                          flush=True)
+                    wait_for_no_qemu(qemu_wait)
+                mutants = mutation_round(top, scratch, base, tip, stamp, mutants_budget, remote)
+                if mutants:
+                    print(f"Add to the trailers:\nReview-mutants: {mutants}", flush=True)
+            except (Exception, SystemExit) as e:  # noqa: BLE001 -- the record stands
+                print(f"review-batch: no mutation testing this time ({e}); the record above "
+                      "stands", flush=True)
     finally:
         remove_scratch(top, scratch)
     return 0
@@ -939,8 +999,43 @@ def self_test() -> int:
         (mo / "mutants.json").write_text(json.dumps([{}] * 9), encoding="utf-8")
         (mo / "caught.txt").write_text("x\ny\n", encoding="utf-8")
         (mo / "missed.txt").write_text("src/a.rs:1:1: replace f with g\n", encoding="utf-8")
+        (mo / "unviable.txt").write_text("u\n", encoding="utf-8")
         expect("mutants tally", mutants_tally(tree / "out"),
-               (3, ["src/a.rs:1:1: replace f with g"], 9))
+               (3, ["src/a.rs:1:1: replace f with g"], 9, 1))
+
+    # A batch that merged main: only its own Rust files are mutated, diffed
+    # from the main it merged, not another lane's change merged in between.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+
+        def g(*args: str) -> str:
+            env = gitenv.clean_env()
+            env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                       GIT_COMMITTER_EMAIL="t@t")
+            r = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True,
+                               text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
+            if r.returncode:
+                raise SystemExit(f"self-test: git {args}: {r.stderr}")
+            return r.stdout.strip()
+
+        def put(name: str, text: str) -> str:
+            (repo / name).write_text(text, encoding="utf-8", newline="\n")
+            g("add", name)
+            g("commit", "-q", "-m", name)
+            return g("rev-parse", "HEAD")
+
+        g("init", "-q", "-b", "lane")
+        root = put("a.rs", "fn a() {}\n")
+        g("update-ref", "refs/remotes/origin/main", root)
+        put("lane.rs", "fn lane() {}\n")
+        g("checkout", "-q", "-b", "mainline", root)
+        other = put("m.rs", "fn other_lane() {}\n")
+        g("update-ref", "refs/remotes/origin/main", other)
+        g("checkout", "-q", "lane")
+        g("merge", "-q", "--no-edit", "mainline")
+        tip = put("lane2.rs", "fn lane2() {}\n")
+        files, since = batch_rust_files(repo, root, tip, "origin")
+        expect("batch's own Rust files", (files, since), (["lane.rs", "lane2.rs"], other))
 
     cmds = review_commands("a" * 40, "b" * 40, "max")
     expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])

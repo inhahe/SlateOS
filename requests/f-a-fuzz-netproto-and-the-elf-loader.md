@@ -30,6 +30,13 @@ The three targets:
 
 `netproto` forbids `unsafe`, so nothing runs under the address sanitizer.
 
+Mutation testing (design-decisions §1393) of netproto's last change,
+8c3e25af6, found one test missing. `write_echo_reply` (`icmpv6.rs:353`)
+still passes every test with its `<` made `<=`. Nothing checks an echo
+reply written into a buffer of exactly the reply's size, which must
+succeed. The other mutant it left, `|` for `^` in `answer_solicitation`
+(`icmpv6.rs:331`), cannot matter: the flags it joins never share a bit.
+
 ## 2. The ELF loader: its parser needs to be a crate of its own first
 
 `kernel/src/proc/elf.rs` cannot be fuzzed where it is: it is part of the
@@ -304,7 +311,10 @@ fn ipv4_packet(buf: &[u8]) {
     let _ = (p.dont_fragment(), p.is_fragment());
     match p.protocol {
         ipv4::PROTO_ICMP => {
-            if let Some(e) = icmp::Echo::parse(p.payload) {
+            // ICMP's checksum covers the message alone, as IGMP's does.
+            let mut msg = p.payload.to_vec();
+            fix(&mut msg, 2, 0);
+            if let Some(e) = icmp::Echo::parse(&msg) {
                 let mut out = [0u8; 2048];
                 let _ = icmp::reply_to(&mut out, &e);
             }

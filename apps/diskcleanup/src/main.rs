@@ -442,6 +442,11 @@ pub struct CleanupScanner {
     /// somebody else's home -- a folder that does not exist, so each category
     /// reported nothing to free however much there was.
     home: Option<PathBuf>,
+    /// The other drives' recycle bins, as `(the drive's label, the bin's
+    /// folder)`: each drive but the home folder's keeps its own, at its top
+    /// (design-decisions §1238). `None` asks the machine at every scan, so a
+    /// stick plugged in since the last one is found; a test names its own.
+    drive_bins: Option<Vec<(String, PathBuf)>>,
 }
 
 impl CleanupScanner {
@@ -453,7 +458,16 @@ impl CleanupScanner {
             max_log_age_days: 30,
             max_package_cache_age_days: 60,
             home: home_under_root(std::env::var_os("HOME").as_deref()),
+            drive_bins: None,
         }
+    }
+
+    /// Look in these drives' bins -- `(label, folder)` -- instead of the
+    /// machine's.
+    #[must_use]
+    pub fn with_drive_bins(mut self, bins: Vec<(String, PathBuf)>) -> Self {
+        self.drive_bins = Some(bins);
+        self
     }
 
     /// Look for the home at `home` under each base instead -- a relative
@@ -503,6 +517,9 @@ impl CleanupScanner {
             self.scan_old_backups(path);
             self.scan_downloaded_updates(path);
         }
+        // Once a scan, not once a base path: the drives' bins are where the
+        // drives are mounted, under no base in particular.
+        self.scan_drive_bins();
         &self.items
     }
 
@@ -627,19 +644,50 @@ impl CleanupScanner {
     /// than as the id of its folder in the bin. Each item's path is that
     /// folder, and removing it whole is exactly `RecycleBin::delete`: the
     /// thing and the record of it together, never one without the other.
+    ///
+    /// This is the home folder's drive's bin; the other drives' are
+    /// [`scan_drive_bins`](Self::scan_drive_bins)'.
     pub fn scan_recycle_bin(&mut self, base_path: &str) {
         let Some(dir) = self.in_home(base_path, &[".recycle"]) else {
             return;
         };
+        self.scan_bin(dir, "~/.recycle/*", None);
+    }
+
+    /// Scan every other drive's recycle bin: each drive keeps its own, so a
+    /// file deleted from a stick is in the stick's (design-decisions §1238).
+    /// A bin is shown with its drive, and the drive's own limits are not
+    /// applied here: the user chose this category to empty the bins.
+    pub fn scan_drive_bins(&mut self) {
+        let bins = match &self.drive_bins {
+            Some(bins) => bins.clone(),
+            None => recyclebin::Bins::system()
+                .reachable()
+                .into_iter()
+                .filter(|drive| !drive.home)
+                .map(|drive| (drive.label(), drive.bin.root().to_path_buf()))
+                .collect(),
+        };
+        for (label, dir) in bins {
+            let pattern = format!("{}/*", dir.shown());
+            self.scan_bin(dir, &pattern, Some(&label));
+        }
+    }
+
+    /// One recycle bin's entries, as items, from the bin at `dir` -- on the
+    /// drive labelled `on`, when it is not the home folder's.
+    fn scan_bin(&mut self, dir: PathBuf, pattern: &str, on: Option<&str>) {
         // Recorded whether or not anything is found, as `collect` does.
         self.roots.push(dir.clone());
-        // The age limit is the bin's own rule for purging, which this does
-        // not apply: the user chose this category to empty the bin.
-        let bin = recyclebin::RecycleBin::new(dir.clone(), Duration::ZERO);
+        let bin = recyclebin::RecycleBin::new(dir.clone());
         // A bin that cannot be read contributes nothing, as a category whose
         // folder is missing does; the executor could not delete from it either.
         let Ok(entries) = bin.list() else {
             return;
+        };
+        let description = match on {
+            Some(drive) => format!("Deleted files awaiting permanent removal, on {drive}"),
+            None => String::from("Deleted files awaiting permanent removal"),
         };
         let now = SystemTime::now();
         for entry in entries {
@@ -660,8 +708,8 @@ impl CleanupScanner {
                 CleanupItem::new(&path, CleanupCategory::RecycleBin)
                     .with_size(measure_recursive(&path))
                     .with_last_accessed_days(days)
-                    .with_description("Deleted files awaiting permanent removal")
-                    .with_pattern("~/.recycle/*")
+                    .with_description(&description)
+                    .with_pattern(pattern)
                     .with_safety(true)
                     .with_shown_as(format!("{}{from}", entry.display_name())),
             );
@@ -2939,7 +2987,7 @@ mod tests {
         let scratch = ScratchDir::new("trash");
         scratch.file("home/alice/Documents/gone.txt", 8);
         let home = Path::new(scratch.as_str()).join("home/alice");
-        let bin = recyclebin::RecycleBin::new(home.join(".recycle"), Duration::from_hours(1));
+        let bin = recyclebin::RecycleBin::new(home.join(".recycle"));
         bin.recycle(&home.join("Documents/gone.txt"))
             .expect("recycle");
 
@@ -2964,6 +3012,46 @@ mod tests {
         assert!(
             bin.list().expect("list").is_empty(),
             "the bin still lists it"
+        );
+    }
+
+    /// **Every drive's bin is cleaned, each said to be on its drive**: a file
+    /// deleted from a stick is in the stick's own bin (design-decisions
+    /// §1238), and a cleanup that looked only at home would leave it there.
+    #[test]
+    fn a_drives_own_bin_is_scanned_and_cleaned_with_the_rest() {
+        let scratch = ScratchDir::new("trash_drive");
+        scratch.file("stick/photo.jpg", 16);
+        let stick = Path::new(scratch.as_str()).join("stick");
+        let bin = recyclebin::RecycleBin::new(stick.join(".recycle-1000"));
+        bin.recycle(&stick.join("photo.jpg")).expect("recycle");
+
+        let mut scanner = CleanupScanner::new()
+            .with_home("home/alice")
+            .with_drive_bins(vec![(
+                String::from("/media/stick"),
+                stick.join(".recycle-1000"),
+            )]);
+        scanner.scan(&[scratch.as_str()]);
+        let binned: Vec<&CleanupItem> = scanner
+            .items()
+            .iter()
+            .filter(|item| item.category == CleanupCategory::RecycleBin)
+            .collect();
+        assert_eq!(binned.len(), 1, "{binned:?}");
+        assert!(
+            binned[0].description.ends_with("on /media/stick"),
+            "{}",
+            binned[0].description
+        );
+        assert!(binned[0].label().starts_with("photo.jpg, from "));
+
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::RecycleBin]);
+        let result = CleanupExecutor::execute(&plan);
+        assert!(result.is_success(), "{result:?}");
+        assert!(
+            bin.list().expect("list").is_empty(),
+            "the stick's bin kept it"
         );
     }
 

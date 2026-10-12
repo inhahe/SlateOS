@@ -24,6 +24,12 @@ pathtext = { path = "../pathtext" }
 # known-issues.md "safeio adoption is not enforced by any test".
 audit = []
 
+# `testing::refuse_replacing`: a file a test can read and a save cannot
+# replace, for a program's test of what it says when its save's write fails
+# (`src/testing.rs`). Off in every real build, like `audit`; a caller turns it
+# on in its own `[dev-dependencies]`.
+testing = []
+
 # Test fixtures only: a private temp directory per test, removed on drop --
 # named from the process id and a counter, so two tests in one process can
 # never draw the same name the way a clock-tagged name could.

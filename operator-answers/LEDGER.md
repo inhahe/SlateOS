@@ -10,6 +10,58 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-10: B-Q23 answered, B-Q24 confirmed, answered questions out of sight
+
+- **Given:** 2026-10-10, in chat to lane F's session, after lane F showed the
+  operator which files in `open-questions/` were already answered and why
+  they were still there: B-Q23's answer (`answers.txt` had labelled it
+  "B-Q24"), B-Q24's confirmed, and a request about how the open questions
+  are shown.
+- **Processed:** 2026-10-10 by lane F: copied; lane B told by notice; the
+  request answered in chat with a proposal.
+- **Copy:** `operator-answers/2026-10-10-chat-to-lane-f.txt`
+- **Content:** sha256 `27ab410bb9d828ce4214a6ee4369b453fa2f788ec62f5a7d44946b468fd1624c`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| B-Q23: Claude's recommendation -- E, the installer's question decides what is installed, with B as what "desktop" means | B | -- | relayed 2026-10-10 |
+| B-Q24: A -- the second of `answers.txt`'s two "B-Q24" lines; the first was B-Q23's | B | §1070 | recorded (lane B took A on 2026-10-09) |
+| Questions already answered should not show among the open ones, though their lanes are rate-limited for days | F | `scripts/questions-for-you.py` | recorded: `questions-for-you/` in the integration tree, only the questions still waiting on you, rebuilt when you run the `update.bat` you keep there -- no scheduled task ("nah, i'll just run update.bat ... when i want it updated", later the same day: `operator-answers/2026-10-10-chat-to-lane-f-2.txt`) |
+
+## chat, 2026-10-10: `dotnet/runtime` instead of Mono; the ports listed in roadmap-detailed.md
+
+- **Given:** 2026-10-10, in chat to lane E's session. It answers lane E's
+  report that Mono 6.14 cannot run the operator's two C# programs, both of
+  them .NET 8 with a WPF window. It is not the answer to a queued question,
+  so there is no file in the integration tree.
+- **Processed:** 2026-10-10 by lane E, the same hour:
+  - recorded as §1246;
+  - the ports the operator asked for by name, listed in
+    `roadmap-detailed.md` §6.13;
+  - lanes D and B told by notice.
+- **Copy:** `operator-answers/2026-10-10-chat-dotnet-runtime-instead-of-mono.txt`
+- **Content:** sha256 `88f42c1431aa236b08d6bfaa4ba59e2066d1d7b6da1630c68d4f76ab651d3d64`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | relayed 2026-10-10 (D: its Mono item in `roadmap.md` becomes `dotnet/runtime`; B: the §1050 list in lane B's backlog still names Mono) |
+| the ports asked for by name, listed in `roadmap-detailed.md` | E | `roadmap-detailed.md` §6.13 | recorded |
+
+## chat, 2026-10-10: a consent prompt takes no keystrokes
+
+- **Given:** 2026-10-10, in chat to lane E's session -- a rule, not the answer
+  to a queued question, so no file in the integration tree.
+- **Processed:** 2026-10-10 by lane E, the same hour: recorded as §1242 with
+  the defect it finds (`known-issues/E-the-capability-prompt-is-answered-by-the-keys-the-user-is-typing.md`);
+  lanes C and F told by notice and asked in
+  `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`.
+- **Copy:** `operator-answers/2026-10-10-chat-consent-prompts-take-no-keystrokes.txt`
+- **Content:** sha256 `192ca7baf831fdf8127577d499703b36ed49eec336b21b5ec2c274458dc53186`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| a consent prompt is answered only on purpose: no key the user was typing answers it | C, F | §1242 (written by lane E) | relayed 2026-10-10 (C: the prompt's keys and clicks; F: a window that opens without the keyboard) |
+
 ## open-questions/answers.2.txt
 
 - **Written:** 2026-10-09 16:15, as `open-questions/answers.2.txt` in the
@@ -74,7 +126,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| F-Q1 | F | -- | relayed 2026-10-09 (B) |
+| F-Q1 | F | §1370 (HEIC, and HEVC video, a separate install) | recorded |
 | C-Q31 | C | the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | relayed 2026-10-09 for lane C's decision entry |
 | B-Q24 | B | §1070 (A: new passwords are yescrypt, `$y$j9T$`; done 2026-10-09) | recorded |
 | A-Q22 | A | §1564 | recorded |
@@ -95,19 +147,19 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | D-Q6 | D | -- | relayed 2026-10-09 (B) |
 | D-Q7 | D | -- | relayed 2026-10-09 (Claude's recommendation) |
 | D-Q8 | D | -- | relayed 2026-10-09 (B, with a question about swap files) |
-| E-Q1 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| E-Q2 | E | -- | relayed 2026-10-09 (Claude's recommendation, with three changes) |
-| E-Q3 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| E-Q4 | E | -- | relayed 2026-10-09 (Claude's recommendation, with a question) |
-| E-Q5 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| F-Q3 | F | -- | relayed 2026-10-09 (Claude's recommendation, with three choices for a capture) |
-| F-Q4 | F | -- | relayed 2026-10-09 (A) |
-| F-Q5 | F | -- | relayed 2026-10-09 (A, with a note) |
-| F-Q6 | F | -- | relayed 2026-10-09 (B, with additions) |
-| F-Q7 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q8 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q9 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| F-Q10 | F | -- | relayed 2026-10-09 (A, with a question) |
+| E-Q1 | E | §1235 | recorded (whisper.cpp; the port is lane D's, the model package lane B's, the dictation front end lane E's) |
+| E-Q2 | E | §1236 | recorded: weather and the dictionary's online lookups off until turned on; the programs whose purpose is the internet (speed test, IRC, torrents, VPN, remote desktop, the scanner's WHOIS) unchanged. The table in §1236 says how "those three things" was read |
+| E-Q3 | E | §1237 | recorded (`pkg rollback` exists; a desktop entry for it waits on `requests/e-b-programs-can-ask-the-package-manager-to-roll-back.md`) |
+| E-Q4 | E | §1238 | recorded; the question back is answered there: yes, each drive's bin gets an age, a size and a count limit (`roadmap-detailed.md`) |
+| E-Q5 | E | §1239 | recorded (one window for the rest waits on `requests/e-cf-a-program-can-ask-to-have-only-one-window.md`) |
+| F-Q3 | F | §1371 (the person's action is the permission; scheduled capture asks once, for its run, or always, in A-Q26's store) | recorded |
+| F-Q4 | F | §1372 (rav1d's assembly) | recorded |
+| F-Q5 | F | §1373; the note in `deferred-questions/F-when-slateos-is-built-for-x86-64-v3-...` | recorded |
+| F-Q6 | F | §1374 (PIN pairing; turning it on sets up the name, the port and a certificate; a browser viewer for any screen); lanes C and D asked in `requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md` | recorded |
+| F-Q7 | F | §1375 (kept), answered "A" in `open-questions/answers.2.txt` after lane A's replies | recorded |
+| F-Q8 | F | §1376 (FFmpeg's H.264 decoder, translated), answered "B" in `open-questions/answers.2.txt` | recorded |
+| F-Q9 | F | §1377 (FFmpeg's fixed-point AAC decoder, translated), answered "B" in `open-questions/answers.2.txt` | recorded |
+| F-Q10 | F | §1378 (Chrome's colour management: skcms, Chrome's HDR handling); its question -- printers -- answered by lane A: Little CMS when printing is built | recorded |
 | B-Q23 | B | -- | **not answered** in this file; the first "B-Q24" line may have been meant for it -- lane A asked the operator |
 
 ## open-questions-answers.2.txt

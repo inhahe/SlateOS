@@ -1,0 +1,25 @@
+# cea608_styles.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 1935266666 4304300000 1
+text 0000 - "ffffff row"
+break
+text 0010 00ff00 "00ff00 row"
+break
+text 0000 0000ff "0000ff row"
+break
+text 0010 00ffff "00ffff row"
+break
+text 0000 ff0000 "ff0000 row"
+break
+text 0010 ffff00 "ffff00 row"
+break
+text 0000 ff00ff "ff00ff row"
+cue 4304300000 5705700000 1
+text 0100 - "italic"
+break
+text 0000 - "a"
+text 0100 - " b"
+text 0000 ff0000 " c"
+text 0010 00ffff " d"
+text 0100 00ffff " e"
+break
+text 0000 - "plain"

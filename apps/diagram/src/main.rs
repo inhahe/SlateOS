@@ -54,6 +54,7 @@ use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use statehistory::StateHistory;
@@ -758,6 +759,11 @@ pub struct DiagramApp {
     /// said -- "Process", "Decision?", "CEO" -- permanently. A user's diagram
     /// of their own system was always a diagram of ours.
     pub editing: Option<(LabelTarget, String)>,
+    /// The label being typed's editor -- its caret and selection over
+    /// `editing`'s text -- reloaded when that text changed under it.
+    label_editor: TextInput,
+    /// What the label's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    label_clipboard: String,
     /// Current interaction mode.
     pub mode: InteractionMode,
     /// Whether to snap to grid.
@@ -894,6 +900,8 @@ impl DiagramApp {
             groups: Vec::new(),
             selection: Selection::default(),
             editing: None,
+            label_editor: TextInput::new(),
+            label_clipboard: String::new(),
             mode: InteractionMode::Select,
             snap_to_grid: true,
             grid_size: DEFAULT_GRID_SIZE,
@@ -1084,6 +1092,7 @@ impl DiagramApp {
         let Some(existing) = existing else {
             return EventResult::Ignored;
         };
+        self.label_editor.set_text(&existing);
         self.editing = Some((target, existing));
         EventResult::Consumed
     }
@@ -1104,24 +1113,92 @@ impl DiagramApp {
                 self.editing = None;
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                buf.pop();
-                self.editing = Some((target, buf));
-                EventResult::Consumed
-            }
+            // Every other key is the label's editor's: the caret keys,
+            // Backspace and Delete at the caret, Ctrl+A, C, X and V, and
+            // typing -- AltGr's among it (Polish `ż` is AltGr+Z), and no
+            // command's letter or control character: Tab's `\t` is no part of
+            // a name. The label took typing at its end and Backspace from it,
+            // and nothing else.
             _ => {
-                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
-                // AltGr+Z. A command carries its letter as text and types
-                // none of it: Ctrl or Alt on its own, the Windows key. Nor
-                // does a control character: Tab's `\t` is no part of a name.
-                if !textline::types_into_field(key) {
-                    return EventResult::Ignored;
+                if self.label_editor.text() != buf {
+                    self.label_editor.set_text(&buf);
                 }
-                buf.extend(key.typed());
+                let edit = textline::apply_key(
+                    &mut self.label_editor,
+                    key,
+                    LABEL_CAPACITY,
+                    &self.label_clipboard,
+                    // The order the caret takes through text that runs both
+                    // ways does not change with the size it is drawn at.
+                    LABEL_TEXT_SIZE,
+                );
+                if let Some(copied) = edit.copied {
+                    self.label_clipboard = copied;
+                }
+                self.label_editor.text().clone_into(&mut buf);
                 self.editing = Some((target, buf));
-                EventResult::Consumed
+                if edit.handled {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
         }
+    }
+
+    /// Where the caret and the selection anchor of the label being typed,
+    /// `buf`, are: the editor's while it holds `buf`, the end and none
+    /// otherwise. One answer for the drawing and for a press.
+    fn label_caret(&self, buf: &str) -> (guitk::text::TextCursor, Option<usize>) {
+        if self.label_editor.text() == buf {
+            (
+                self.label_editor.cursor(),
+                self.label_editor.selection_anchor(),
+            )
+        } else {
+            (guitk::text::TextCursor::from(buf.len()), None)
+        }
+    }
+
+    /// The label being typed's strip, where it is drawn on the screen.
+    fn editing_strip_on_screen(&self) -> Option<LabelStrip> {
+        let (target, _) = self.editing.as_ref()?;
+        let strip = match target {
+            LabelTarget::Node(id) => node_label_strip(self.find_node(*id)?, self.zoom),
+            LabelTarget::Edge(id) => {
+                let edge = self.edges.iter().find(|e| e.id == *id)?;
+                let (a, b) = self.edge_ends(edge)?;
+                edge_label_strip(a, b, self.zoom)
+            }
+        };
+        Some(LabelStrip {
+            x: strip.x + PALETTE_WIDTH + self.pan_x,
+            y: strip.y + TOOLBAR_HEIGHT + self.pan_y,
+            ..strip
+        })
+    }
+
+    /// A press at `x` in the label being typed, drawn at `strip` on the
+    /// screen: the caret under the pointer, measured against the label as
+    /// it was drawn.
+    fn press_label(&mut self, strip: LabelStrip, x: f32) {
+        let Some((_, buf)) = self.editing.clone() else {
+            return;
+        };
+        let (drawn, _) = self.label_caret(&buf);
+        if self.label_editor.text() != buf {
+            self.label_editor.set_text(&buf);
+        }
+        let cursor = textedit::cursor_at_click(
+            &buf,
+            drawn,
+            strip.width,
+            strip.font_size,
+            FontWeightHint::Regular,
+            x - strip.x,
+        );
+        self.label_editor.set_selection_anchor(None);
+        self.label_editor.set_cursor(cursor);
     }
 
     pub fn set_node_label(&mut self, id: NodeId, label: String) {
@@ -2545,6 +2622,16 @@ impl DiagramApp {
             }
         }
 
+        // The label being typed, where it is drawn: the caret under the
+        // pointer.
+        if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left))
+            && let Some(strip) = self.editing_strip_on_screen()
+            && strip.field().contains(ev.x, ev.y)
+        {
+            self.press_label(strip, ev.x);
+            return EventResult::Consumed;
+        }
+
         let (cx, cy) = self.screen_to_canvas(ev.x, ev.y);
         match ev.kind {
             MouseEventKind::Press(MouseButton::Left) => match self.mode {
@@ -3868,10 +3955,10 @@ impl DiagramApp {
             &mut tree,
             &textedit::SingleLine {
                 text: buf,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: guitk::text::TextCursor::from(buf.len()),
-                selection_anchor: None,
+                // Where the caret and the selection are; they were fixed at
+                // the end, the only place the keys could type.
+                cursor: self.label_caret(buf).0,
+                selection_anchor: self.label_caret(buf).1,
                 focused: true,
                 x: strip.x,
                 y: strip.y,
@@ -4617,6 +4704,13 @@ fn diagram_from_document(doc: &yamldoc::Document) -> Result<(DiagramSnapshot, us
 fn escape_json(s: &str) -> String {
     guitk::escape::json_string(s)
 }
+
+/// The most a label holds, in characters: a name for a box or a line, and
+/// a paste of a page is not one.
+const LABEL_CAPACITY: usize = 1024;
+/// The size a label's caret keys measure at; the order the caret takes
+/// does not change with the zoom a label is drawn at.
+const LABEL_TEXT_SIZE: f32 = 13.0;
 
 /// Where a label is written, in the canvas's zoomed coordinates: the strip
 /// its text starts in, how wide that is, and the size it is drawn at. The
@@ -7496,6 +7590,128 @@ mod tests {
         assert!(
             (after.0 - before.0 - 20.0).abs() < 0.01,
             "the other selected shape stayed: {before:?} -> {after:?}"
+        );
+    }
+
+    // -- A label edits at a caret -------------------------------------------------
+
+    fn held(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn label_of(app: &DiagramApp, id: NodeId) -> String {
+        app.find_node(id)
+            .map(|n| n.label.clone())
+            .unwrap_or_default()
+    }
+
+    /// **A label being typed edits at a caret**: the arrows, Home and End
+    /// move it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X
+    /// and V select, copy, cut and paste, a press puts it where it lands --
+    /// and it is drawn where it is. The label took typing at its end and
+    /// Backspace from it, and nothing else: "Pocess" was fixed by deleting
+    /// back to the `o`.
+    #[test]
+    fn a_label_being_typed_edits_at_a_caret() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.set_node_label(id, String::from("Pocess"));
+        app.selection.nodes = vec![id];
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Right));
+        app.handle_event(&types("r"));
+        let strip = node_label_strip(app.find_node(id).expect("the box"), app.zoom);
+        let at = strip.x
+            + guitk::text::caret_x(
+                "Process",
+                guitk::text::TextCursor::from(2),
+                strip.font_size,
+                FontWeightHint::Regular,
+            );
+        let carets: Vec<f32> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && strip.field().contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carets.len(), 1, "one caret in the label");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Pr` it follows at {at}"
+        );
+
+        app.handle_event(&press(Key::End));
+        app.handle_event(&types(" step"));
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        app.handle_event(&held(Key::A, Modifiers::ctrl()));
+        assert!(
+            app.render_commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::RichText { text, spans, .. }
+                    if text == "rocess step" && !spans.is_empty()
+            )),
+            "the selection is not drawn"
+        );
+        app.handle_event(&held(Key::C, Modifiers::ctrl()));
+        app.handle_event(&held(Key::X, Modifiers::ctrl()));
+        app.handle_event(&types("P"));
+        app.handle_event(&held(Key::V, Modifiers::ctrl()));
+        // A press at the label's end, on the screen, puts the caret there --
+        // from its start, where Home leaves it.
+        app.handle_event(&press(Key::Home));
+        let field = strip.field();
+        let (sx, sy) = (
+            field.right() - 1.0 + PALETTE_WIDTH + app.pan_x,
+            field.y + field.h / 2.0 + TOOLBAR_HEIGHT + app.pan_y,
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: sx,
+            y: sy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        app.handle_event(&types("!"));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            label_of(&app, id),
+            "Process step!",
+            "Delete, Ctrl+A, C, X and V, or the press"
+        );
+    }
+
+    /// **A label starts from its word, the caret after it**, whatever the
+    /// last label typed left in the editor.
+    #[test]
+    fn a_label_starts_from_its_word_the_caret_after_it() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let a = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        let b = app.add_node(NodeShape::Rectangle, 400.0, 100.0);
+        app.set_node_label(a, String::from("Start"));
+        app.set_node_label(b, String::from("Start"));
+        app.selection.nodes = vec![a];
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Enter));
+        app.selection.nodes = vec![b];
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&types("!"));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            label_of(&app, b),
+            "Start!",
+            "the last label's caret was kept"
         );
     }
 }

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Memory
+Comment=Turn the cards over and match the pairs
+Icon=applications-games
+Exec=memory
+Categories=Game;
+Keywords=cards;pairs;

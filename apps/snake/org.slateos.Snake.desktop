@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Snake
+Comment=Grow the snake without biting yourself
+Icon=applications-games
+Exec=snake
+Categories=Game;ArcadeGame;
+Keywords=arcade;

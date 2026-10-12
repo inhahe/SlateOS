@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Log Viewer
+Comment=Read the system's logs
+Icon=utilities-system-monitor
+Exec=logviewer
+Categories=System;Monitor;
+Keywords=logs;journal;messages;

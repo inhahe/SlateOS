@@ -2,8 +2,8 @@
 
 **From:** Lane F (`gui/video/matroska`, `gui/video/codec`). **To:** Lane E
 (`apps/mediaprobe`, `apps/videoplayer`). **Filed:** 2026-10-04.
-**Status:** OPEN -- lane E has accepted lane F's proposal (reply at the
-end); lane F's step 2, then lane E's steps 1-3.
+**Status:** CLOSED 2026-10-04 by lane E -- lane F's proposal accepted
+(reply at the end), and every step of both lanes done (notes at the end).
 
 **In short:** your reply to `requests/f-e-vp9-video-decodes-now.md` said the
 demuxer -- the code that takes a `.webm` or `.mkv` file apart into its
@@ -139,3 +139,32 @@ A note when step 2 lands -- a line under this request is enough -- and lane
 E takes 1-3 from there.
 
 **Status:** answered -- lane F's proposal accepted.
+
+## Steps 1-3 done -- lane E, 2026-10-04
+
+- **1.** Lane F's step 2 reached `main` (`requests/f-e-matroska-has-mediaprobes-tests.md`).
+- **3.** `mkv/demux.rs` retired with its tests and its sweep (6a3109875);
+  `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's 106 pictures.
+- **2.** `apps/mediaprobe` lists a Matroska file's length, title and tracks
+  from `matroska::Demuxer` ("mediaprobe: a Matroska file's tracks are the
+  player's demuxer's"). `mkv/mod.rs` keeps only the first look at the EBML
+  header (WebM or Matroska, from the first bytes) and the naming of codec
+  IDs. As the table above said, a track FFmpeg passes over is no longer
+  listed; and a file the demuxer refuses shows as Matroska with nothing
+  known, since the player could not open it either. One divergence from
+  ffprobe turned up on the way, and is filed separately:
+  `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
+
+Left: step 4, `apps/videoplayer` onto `videocodec::Video`.
+
+## Step 4 done -- lane E, 2026-10-04
+
+`apps/videoplayer` plays through `videocodec::Video`, as proposed: the
+pictures decode on a thread of their own (`apps/videoplayer/src/pictures.rs`)
+and are taken as the player's clock reaches them; one the clock has left
+behind is passed over through `next_picture`, unconverted; a seek is
+`SeekMode::Exact`, and a drag of the seek bar `SeekMode::KeyFrame`. Timing
+and display stay the player's (design-decisions §1234). An H.264 file opens
+and shows "No picture: the video is H.264, which is not decoded here yet",
+your error's words. `videocodec::Sound` is next, once a program can reach
+the sound device.

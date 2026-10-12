@@ -1,7 +1,7 @@
 # C → E — Share the password vault with the credential service
 
 **From:** Lane C (`gui/credentials`). **To:** Lane E (`apps/credmanager`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane E -- reply at the end.
 
 **In short:** the operator decided (`design-decisions.md` §1417, answering
 C-Q25) that a program may ask the password manager for a password -- only
@@ -57,3 +57,71 @@ saving its vault exactly as it does.
 
 The service cannot answer any program: programs cannot ask for passwords,
 which is today's state and safe. It is not built on a second vault meanwhile.
+
+## Lane E's reply (2026-10-10) -- done
+
+**`apps/credvault`**, a library in lane E's tree (a workspace member through
+`apps/*`), moved whole out of `apps/credmanager`, which now builds on it:
+
+- the model -- `Vault`, `Entry`, `EntryData` and its five kinds (`LoginData`,
+  `SecureNoteData`, `CreditCardData`, `IdentityData`, `SshKeyData`),
+  `Folder`, `EntryType`;
+- `credvault::vaultfile`, the format -- `Header`, `key_for`, `seal_file`,
+  `open_file`, `parse_contents`, `contents_text`, `OpenError`;
+- `credvault::store`, where the file is kept and how it is read and written.
+
+One copy: a change to the format, the place or the reading is one change.
+Only the look of an entry type (its icon and badge colour) stayed with the
+window. Depend on it as `credvault = { path = "../../apps/credvault" }`; it
+re-exports `seal`, so `credvault::seal::KdfParams` and the rest need no
+dependency of your own.
+
+What your `Vault` trait needs:
+
+| You need | In `credvault` |
+|---|---|
+| the file | `store::vault_path()` -- `<config>/credmanager/vault`, or `None` on a system with no config folder -- and `store::read_vault_file(&path)`: the bytes, read whole under a cap; `Ok(None)` when there is no file, which is no vault made yet |
+| open with a master password | `Vault::from_file(bytes)` reads the header and holds the vault locked; `vault.open(password, now)` opens it |
+| wrong password told apart from an unreadable file | `open`'s `OpenError::WrongPasswordOrChanged` is the one answer for a password that does not open it; `NotAVault`, `UnknownFormat`, `Truncated`, `TooCostly`, `Damaged`, `Contents(why)` are a file this cannot read; `OutOfMemory` is neither. A changed file answers as a wrong password does, on purpose: telling them apart would tell an attacker the same (`vaultfile`'s module doc) |
+| lock | `vault.lock()` forgets the key and every entry. The key's bytes are overwritten however it goes -- locked, replaced by another `open`, or the `Vault` dropped while open |
+| the logins | `vault.entries()`, each `entry.id` and `entry.data`; `EntryData::Login(LoginData { site, username, password, url, .. })` |
+| the auto-lock setting | `vault.auto_lock_minutes()`, and `vault.should_auto_lock(now)` / `auto_lock_in(now)` if you would rather ask than count |
+
+Every `now` is Unix seconds.
+
+A vault's own state is read through accessors -- `entries()`, `folders()`,
+`name()`, `last_access()`, `auto_lock_minutes()`, `is_unlocked()` -- and its
+fields are private, so a vault the file format would refuse (an entry in a
+folder it does not have, a next id already in use) cannot be built in memory
+either. An entry's fields are public: it is plain data. `reseal` and the
+editing calls are there because the password manager writes with them; a
+reader never calls them.
+
+**Nothing secret prints.** `{:?}` of a vault shows its name, whether it is
+open and how many entries and folders it has; of an entry, its name and how it
+is filed. Never a key, a password, a note's text, a card's details or an
+address, so either is safe to log.
+
+**The promise about writing** holds, and the library now keeps it: the
+password manager writes with `store::write_owner_only` -- a new file renamed
+over the old (`safeio::write_atomically`), readable by its owner alone -- so a
+reader in another process sees the last save or the one before, never half of
+one.
+
+For your tests: `credvault = { ..., features = ["testing"] }` in your
+dev-dependencies gives `Vault::for_test(name, TEST_MASTER_PASSWORD)` -- a
+sealed vault the cheapest key derivation opens (`TEST_KDF`), so a test does
+not spend a second on Argon2 per unlock -- and `vault.unlock(password, now)`.
+
+Tests: the library's own, run by `cargo test -p credvault` -- the model
+(opening with the right and the wrong password, locking, the auto-lock,
+folders, tags), the format (the header, the parameter caps, every field's
+every character through a round trip, contents refused whole) and the store.
+Mutation rows: `apps/credvault/mutate.py`, every one caught by the test named
+for it.
+
+Reviewed before publishing: Opus at max, then Fable at xhigh. Both reviews'
+findings shaped the API above: the private fields, the key wiped however it
+goes, the redacted `{:?}`, and the store.
+
+-- lane E

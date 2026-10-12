@@ -17,6 +17,7 @@
 use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::disabled::WhyDisabled;
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -27,6 +28,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textinput::TextInput;
 use oswindow::app::Response;
 #[cfg(test)]
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
@@ -66,6 +69,10 @@ const PASSWORD_CARET_INSET: f32 = 14.0;
 const PASSWORD_DOT_DIAMETER: f32 = 10.0;
 /// Spacing between password dots.
 const PASSWORD_DOT_SPACING: f32 = 16.0;
+/// How far the first dot's cell sits inside the password box's left edge.
+const PASSWORD_DOTS_INSET: f32 = 20.0;
+/// How wide a run of dots the password box shows before it scrolls them.
+const PASSWORD_DOTS_WIDTH: f32 = PASSWORD_FIELD_WIDTH - 2.0 * PASSWORD_DOTS_INSET;
 /// Password font size (for placeholder text).
 const PASSWORD_FONT_SIZE: f32 = 16.0;
 
@@ -662,6 +669,16 @@ impl ShakeAnimation {
             self.elapsed_ms = 0;
             return 0.0;
         }
+        self.offset()
+    }
+
+    /// The current horizontal offset in pixels, without advancing: what the
+    /// last [`ShakeAnimation::tick`] answered, for a reader -- a press on
+    /// the password box -- that has the box where it was last drawn.
+    fn offset(&self) -> f32 {
+        if !self.active || self.elapsed_ms >= SHAKE_DURATION_MS {
+            return 0.0;
+        }
         // Damped sine wave for a natural shake feel.
         let t = self.elapsed_ms as f32 / SHAKE_DURATION_MS as f32;
         let decay = 1.0 - t;
@@ -702,6 +719,34 @@ fn sin_approx(x: f32) -> f32 {
 // ============================================================================
 // Lockout timer
 // ============================================================================
+
+/// [`WhyDisabled`], with a `Debug` that says what it shows: the toolkit's
+/// has none (`requests/e-c-whydisabled-and-tooltip-could-be-clone.md` asks
+/// for one), and this screen's state is `Debug` whole. Derefs to the
+/// toolkit's, so it is used as one.
+#[derive(Default)]
+struct ShownWhy(WhyDisabled);
+
+impl std::fmt::Debug for ShownWhy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhyDisabled")
+            .field("showing", &self.0.showing())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for ShownWhy {
+    type Target = WhyDisabled;
+    fn deref(&self) -> &WhyDisabled {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ShownWhy {
+    fn deref_mut(&mut self) -> &mut WhyDisabled {
+        &mut self.0
+    }
+}
 
 /// Manages the lockout timer after too many failed attempts.
 #[derive(Clone, Debug)]
@@ -945,6 +990,10 @@ pub struct LockScreen {
     pub selected_user_index: usize,
     /// Password input buffer (plaintext, never displayed).
     password_buffer: String,
+    /// The password's editor -- its caret and selection over
+    /// `password_buffer` -- reloaded when the password changed under it:
+    /// cleared, refused, or typed through [`LockScreen::type_char`].
+    password_editor: TextInput,
     /// Number of consecutive failed password attempts.
     pub failed_attempts: u32,
     /// Whether to display the "wrong password" error message.
@@ -981,6 +1030,16 @@ pub struct LockScreen {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Where the pointer is, `None` once it has left: kept for the reason the
+    /// password box gives while a lockout switches it off, which is asked
+    /// again after every event -- the lockout ends under a pointer at rest.
+    pointer: Option<(f32, f32)>,
+    /// Why the switched-off password box is switched off, said while the
+    /// pointer rests on it (`requests/c-e-say-why-a-control-is-disabled.md`).
+    why_disabled: ShownWhy,
+    /// The screen's clock for that reason, in milliseconds: every tick's
+    /// `elapsed_ms`.
+    clock_ms: u64,
 }
 
 impl LockScreen {
@@ -998,6 +1057,9 @@ impl LockScreen {
         let users = UserList::new(users);
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            pointer: None,
+            why_disabled: ShownWhy::default(),
+            clock_ms: 0,
             state: LockScreenState::Clock,
             screen_width: SCREEN_WIDTH,
             screen_height: SCREEN_HEIGHT,
@@ -1011,6 +1073,7 @@ impl LockScreen {
             users,
             selected_user_index: 0,
             password_buffer: String::new(),
+            password_editor: TextInput::new(),
             failed_attempts: 0,
             show_error: false,
             shake: ShakeAnimation::new(),
@@ -1181,6 +1244,111 @@ impl LockScreen {
         self.show_error = false;
     }
 
+    /// The password's editor loaded with the password, unless it holds it
+    /// already: the caret after it.
+    fn load_password(&mut self) {
+        if self.password_editor.text() != self.password_buffer {
+            self.password_editor.set_text(&self.password_buffer);
+        }
+    }
+
+    /// Where the caret and the selection's other end are in the password,
+    /// counted in dots: how many characters come before each. The editor's
+    /// while it holds the password; after the last dot, nothing selected,
+    /// otherwise.
+    fn caret_dots(&self) -> (usize, Option<usize>) {
+        let dots = |byte: usize| {
+            self.password_buffer.get(..byte).map_or_else(
+                || self.password_buffer.chars().count(),
+                |head| head.chars().count(),
+            )
+        };
+        if self.password_editor.text() == self.password_buffer {
+            (
+                dots(self.password_editor.cursor().byte()),
+                self.password_editor.selection_anchor().map(dots),
+            )
+        } else {
+            (self.password_buffer.chars().count(), None)
+        }
+    }
+
+    /// How far the dots are scrolled left, so the caret stays in view. One
+    /// answer for the drawing and for a press.
+    fn dots_scroll(&self) -> f32 {
+        let total = self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING;
+        let caret = self.caret_dots().0 as f32 * PASSWORD_DOT_SPACING;
+        guitk::textedit::horizontal_scroll(total, PASSWORD_DOTS_WIDTH, caret)
+    }
+
+    /// A key for the password: a masked field's (`textline::apply_masked_key`)
+    /// -- the arrows step a dot at a time, Home and End go to the ends,
+    /// Shift selects, Backspace and Delete delete at the caret, Ctrl+A
+    /// selects it all, and typing goes where the caret is: what AltGr types
+    /// among it (German `@` is AltGr+Q), and no command's letter (Ctrl+K put
+    /// a `k` in a password nobody could see to take out). Nothing is copied
+    /// or cut from it, and there is no clipboard here to paste from. Refused
+    /// while a lockout runs, as typing always was. `Consumed` where the key
+    /// changed the password, its caret or its selection.
+    ///
+    /// The box took typing at its end and Backspace from it, and Delete
+    /// threw away the whole password.
+    fn password_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.lockout.is_active() {
+            return EventResult::Ignored;
+        }
+        self.load_password();
+        let editor = &self.password_editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit =
+            textline::apply_masked_key(&mut self.password_editor, key, MAX_PASSWORD_LENGTH, "");
+        if !edit.handled {
+            return EventResult::Ignored;
+        }
+        if self.password_editor.text() != self.password_buffer {
+            self.password_buffer = self.password_editor.text().to_owned();
+            self.show_error = false;
+        }
+        let editor = &self.password_editor;
+        let after = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        if after == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// A press at `x` in the password box drawn from `field_x`: the caret
+    /// between the dots nearest the pointer, measured against the dots as
+    /// they were drawn.
+    fn press_password(&mut self, field_x: f32, x: f32) {
+        let scroll = self.dots_scroll();
+        let count = self.password_buffer.chars().count();
+        let offset = x - field_x - PASSWORD_DOTS_INSET + scroll;
+        let index = (0..=count)
+            .min_by(|a, b| {
+                let gap = |i: &usize| (*i as f32 * PASSWORD_DOT_SPACING - offset).abs();
+                gap(a).total_cmp(&gap(b))
+            })
+            .unwrap_or(count);
+        self.load_password();
+        let byte = self
+            .password_buffer
+            .char_indices()
+            .nth(index)
+            .map_or(self.password_buffer.len(), |(byte, _)| byte);
+        self.password_editor.set_selection_anchor(None);
+        self.password_editor.set_cursor(TextCursor::from(byte));
+    }
+
     /// Clear the entire password buffer.
     pub fn clear_password(&mut self) {
         self.password_buffer.clear();
@@ -1321,6 +1489,52 @@ impl LockScreen {
     /// collect it with [`Self::take_unlock_request`] after each call. This
     /// doc has said so since before the flag existed; it does now.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Mouse(mouse) = event {
+            self.pointer = match mouse.kind {
+                MouseEventKind::Leave => None,
+                _ => Some((mouse.x, mouse.y)),
+            };
+        }
+        let mut result = self.route_event(event);
+        if let Event::Tick { elapsed_ms } = event {
+            // Whether the reason appeared now is not asked: every tick draws
+            // this screen already, for its clock.
+            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+            self.why_disabled.tick(self.clock_ms);
+        }
+        if self.explain_disabled() {
+            result = EventResult::Consumed;
+        }
+        result
+    }
+
+    /// Say why the password box is switched off while the pointer rests on
+    /// it -- a lockout refuses every key -- or stop saying it. Asked after
+    /// every event, so a lockout that ends under a resting pointer takes its
+    /// reason with it. Returns whether what is drawn changed.
+    fn explain_disabled(&mut self) -> bool {
+        let locked = self.state == LockScreenState::PasswordEntry && self.lockout.is_active();
+        match self.pointer {
+            Some(at) => {
+                // Where the box rests, not where the shake has it: a box that
+                // moved every frame would restart the reason's wait on every
+                // one, and the reason would wait out the whole shake.
+                let field = self.password_field_home();
+                let boxes = [(
+                    (field.x, field.y, field.width, field.height),
+                    "Too many wrong passwords: the box opens again when the countdown ends.",
+                )];
+                let disabled: &[guitk::disabled::Disabled<'_>] = if locked { &boxes } else { &[] };
+                let screen = (self.screen_width, self.screen_height);
+                self.why_disabled
+                    .pointer_at(at, self.clock_ms, screen, disabled)
+            }
+            None => self.why_disabled.pointer_left(),
+        }
+    }
+
+    /// Hand an event to whichever part of the screen answers it.
+    fn route_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_event) => self.handle_key(key_event),
             Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -1394,25 +1608,8 @@ impl LockScreen {
                     self.submit_password();
                     EventResult::Consumed
                 }
-                Key::Backspace => {
-                    self.backspace();
-                    EventResult::Consumed
-                }
-                Key::Delete => {
-                    self.clear_password();
-                    EventResult::Consumed
-                }
-                // What a key typed, AltGr's among it -- German `@` is AltGr+Q
-                // -- and not a command's letter: a chord carries its letter as
-                // text, and Ctrl+K put a `k` in the password the user then
-                // could not see to take out.
-                _ if textline::types_into_field(key) => {
-                    for ch in key.typed() {
-                        self.type_char(ch);
-                    }
-                    EventResult::Consumed
-                }
-                _ => EventResult::Ignored,
+                // Every other key is the password's (`password_key`).
+                _ => self.password_key(key),
             },
         }
     }
@@ -1434,6 +1631,13 @@ impl LockScreen {
                         let submit_rect = self.submit_button_rect();
                         if hit_test(mouse.x, mouse.y, &submit_rect) {
                             self.submit_password();
+                            return EventResult::Consumed;
+                        }
+                        // The password box: the caret between the dots under
+                        // the pointer.
+                        let field = self.password_field_rect();
+                        if !self.lockout.is_active() && hit_test(mouse.x, mouse.y, &field) {
+                            self.press_password(field.x, mouse.x);
                             return EventResult::Consumed;
                         }
                         // Check if click is on a user in the user list.
@@ -1484,6 +1688,25 @@ impl LockScreen {
     /// Center X position for the main content area.
     fn center_x(&self) -> f32 {
         self.screen_width / 2.0
+    }
+
+    /// Where the password box stands when it is not shaking.
+    fn password_field_home(&self) -> Rect {
+        Rect {
+            x: self.center_x() - PASSWORD_FIELD_WIDTH / 2.0,
+            y: self.password_field_y(),
+            width: PASSWORD_FIELD_WIDTH,
+            height: PASSWORD_FIELD_HEIGHT,
+        }
+    }
+
+    /// Where the password box is drawn, shaken or not.
+    fn password_field_rect(&self) -> Rect {
+        let home = self.password_field_home();
+        Rect {
+            x: home.x + self.shake.offset(),
+            ..home
+        }
     }
 
     /// Compute the rectangle for the submit button.
@@ -1554,6 +1777,11 @@ impl LockScreen {
                 self.render_password_screen(&mut tree);
             }
         }
+
+        // Why the password box is switched off, over everything, while the
+        // pointer rests on it.
+        tree.commands
+            .extend(self.why_disabled.render(&self.palette));
 
         tree
     }
@@ -1778,7 +2006,8 @@ impl LockScreen {
     /// How the password box is drawn now: marked while it has the keyboard,
     /// red once a password has been refused -- until the typing changes --
     /// and switched off while a lockout refuses every key. Never lit under
-    /// the pointer: it has no press of its own; the screen takes every press.
+    /// the pointer: a press on it only places the caret, the keys being its
+    /// already.
     fn password_field_state(&self) -> field::State {
         field::State {
             hovered: false,
@@ -1818,8 +2047,7 @@ impl LockScreen {
             // `é` is two bytes and was two dots, so the count on screen was
             // not the count typed.
             let dot_count = self.password_buffer.chars().count();
-            let total_dot_width = dot_count as f32 * PASSWORD_DOT_SPACING;
-            let dots_start_x = x + 20.0;
+            let dots_start_x = x + PASSWORD_DOTS_INSET;
             let dot_cy = y + PASSWORD_FIELD_HEIGHT / 2.0;
             let dot_radius = PASSWORD_DOT_DIAMETER / 2.0;
 
@@ -1831,13 +2059,24 @@ impl LockScreen {
                 PASSWORD_FIELD_HEIGHT,
             );
 
-            // If there are too many dots, scroll them so the latest are visible.
-            let max_visible_width = PASSWORD_FIELD_WIDTH - 40.0;
-            let scroll_offset = if total_dot_width > max_visible_width {
-                total_dot_width - max_visible_width
-            } else {
-                0.0
-            };
+            // Scrolled so the caret stays in view; it scrolled to the last
+            // dot, where the keys typed.
+            let scroll_offset = self.dots_scroll();
+
+            // The selected dots, behind them.
+            if let (cursor, Some(anchor)) = self.caret_dots()
+                && cursor != anchor
+            {
+                let (from, to) = (cursor.min(anchor), cursor.max(anchor));
+                tree.push(RenderCommand::FillRect {
+                    x: dots_start_x + from as f32 * PASSWORD_DOT_SPACING - scroll_offset,
+                    y: y + PASSWORD_CARET_INSET,
+                    width: to.saturating_sub(from) as f32 * PASSWORD_DOT_SPACING,
+                    height: PASSWORD_FIELD_HEIGHT - 2.0 * PASSWORD_CARET_INSET,
+                    color: self.palette.accent,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
 
             for i in 0..dot_count {
                 let dot_x = dots_start_x + (i as f32 * PASSWORD_DOT_SPACING) - scroll_offset
@@ -1858,13 +2097,13 @@ impl LockScreen {
             tree.unclip();
         }
 
-        // The caret, after the last dot -- or at the start of an empty box --
-        // while the box has the keyboard. There was none: nothing on the
-        // screen said where the next character would go, or that one would.
+        // The caret, between the dots where it is -- at the start of an
+        // empty box -- while the box has the keyboard. There was none at
+        // first, and then one after the last dot, where the keys typed.
         if state.focused && !state.disabled {
-            let shown = (self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING)
-                .min(PASSWORD_FIELD_WIDTH - 40.0);
-            let caret_x = x + 20.0 + shown;
+            let caret_x =
+                x + PASSWORD_DOTS_INSET + self.caret_dots().0 as f32 * PASSWORD_DOT_SPACING
+                    - self.dots_scroll();
             tree.push(RenderCommand::Line {
                 x1: caret_x,
                 y1: y + PASSWORD_CARET_INSET,
@@ -2370,6 +2609,98 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why the password box is switched off ----------------------------------
+
+    /// **The reason waits the same while the box shakes**: the fifth wrong
+    /// password starts the lockout and the shake together, and the box
+    /// moving under a resting pointer does not start the wait again.
+    #[test]
+    fn the_lockouts_reason_waits_the_same_while_the_box_shakes() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let field = ls.password_field_home();
+        let at = (field.x + field.width / 2.0, field.y + field.height / 2.0);
+        ls.lockout.start(30);
+        ls.shake.trigger();
+        ls.handle_event(&Event::Mouse(MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::Move,
+        }));
+        // The window's animation ticks, through the first 512 ms -- most of
+        // them while the box shakes.
+        for _ in 0..32 {
+            ls.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert_eq!(
+            ls.why_disabled.showing(),
+            Some("Too many wrong passwords: the box opens again when the countdown ends."),
+            "the shake started the reason's wait again"
+        );
+    }
+
+    /// **The switched-off password box says why**, while the pointer rests
+    /// on it during a lockout, after the delay and drawn over everything --
+    /// and the reason goes when the lockout ends under the resting pointer.
+    #[test]
+    fn a_locked_out_password_box_says_why_while_the_pointer_rests_on_it() {
+        let mouse = |kind, (x, y): (f32, f32)| Event::Mouse(MouseEvent { x, y, kind });
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let field = ls.password_field_rect();
+        let at = (field.x + field.width / 2.0, field.y + field.height / 2.0);
+
+        ls.handle_event(&mouse(MouseEventKind::Move, at));
+        ls.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "a box that takes keys explains itself"
+        );
+
+        ls.lockout.start(30);
+        ls.handle_event(&mouse(MouseEventKind::Move, (at.0 + 1.0, at.1)));
+        assert_eq!(ls.why_disabled.showing(), None, "the reason came at once");
+        assert_eq!(
+            ls.handle_event(&Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            ls.why_disabled.showing(),
+            Some("Too many wrong passwords: the box opens again when the countdown ends.")
+        );
+        let tree = ls.render();
+        let reason = ls.why_disabled.render(&ls.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        // The lockout runs out under the pointer: the box takes keys again,
+        // and says nothing.
+        ls.handle_event(&Event::Tick { elapsed_ms: 30_000 });
+        assert!(!ls.lockout.is_active());
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "the reason outlived the lockout"
+        );
+
+        ls.lockout.start(30);
+        ls.handle_event(&mouse(MouseEventKind::Move, at));
+        ls.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ls.why_disabled.showing().is_some());
+        assert_eq!(
+            ls.handle_event(&mouse(MouseEventKind::Leave, at)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            ls.why_disabled.showing(),
+            None,
+            "the reason outlived the pointer"
+        );
+    }
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -4228,5 +4559,173 @@ mod tests {
             "the pointer leaving does not put the light out"
         );
         assert!(!ls.submit_hovered);
+    }
+
+    // -- The password edits at a caret ---------------------------------------------
+
+    fn key_in(ls: &mut LockScreen, key: Key, modifiers: Modifiers) -> EventResult {
+        ls.handle_event(&chord_key(key, "", modifiers))
+    }
+
+    fn type_keys(ls: &mut LockScreen, text: &str) {
+        for c in text.chars() {
+            ls.handle_event(&chord_key(Key::Unknown(0), &c.to_string(), Modifiers::NONE));
+        }
+    }
+
+    /// The x of every caret drawn in the password box.
+    fn box_carets(ls: &mut LockScreen) -> Vec<f32> {
+        let rect = password_box(ls);
+        ls.render()
+            .commands
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::Line { x1, x2, .. }
+                    if (x1 - x2).abs() < 0.01 && x1 > rect.x && x1 < rect.right() =>
+                {
+                    Some(x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The password edits at a caret**: the arrows step a dot at a time,
+    /// Home and End go to the ends, typing goes where the caret is, Delete
+    /// deletes at it -- it threw away the whole password -- Ctrl+A selects
+    /// it all, and the caret and the selection are drawn between and behind
+    /// the dots. Nothing leaves it for a clipboard. The box took typing at
+    /// its end and Backspace from it, and nothing else.
+    #[test]
+    fn the_password_edits_at_a_caret() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        type_keys(&mut ls, "pasword");
+        for _ in 0..4 {
+            key_in(&mut ls, Key::Left, Modifiers::NONE);
+        }
+        type_keys(&mut ls, "s");
+        assert_eq!(ls.password_buffer, "password", "the caret did not move");
+        let rect = password_box(&mut ls);
+        let at = rect.x + PASSWORD_DOTS_INSET + 4.0 * PASSWORD_DOT_SPACING;
+        let carets = box_carets(&mut ls);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the fourth dot at {at}"
+        );
+
+        key_in(&mut ls, Key::Home, Modifiers::NONE);
+        key_in(&mut ls, Key::Delete, Modifiers::NONE);
+        assert_eq!(ls.password_buffer, "assword", "Delete at the caret");
+        type_keys(&mut ls, "p");
+        key_in(&mut ls, Key::A, Modifiers::ctrl());
+        let accent = ls.palette.accent;
+        let selection = ls.render().commands.iter().find_map(|c| match *c {
+            RenderCommand::FillRect { color, width, .. } if color == accent => Some(width),
+            _ => None,
+        });
+        assert_eq!(
+            selection,
+            Some(8.0 * PASSWORD_DOT_SPACING),
+            "the selection is not drawn behind the eight dots"
+        );
+        key_in(&mut ls, Key::C, Modifiers::ctrl());
+        key_in(&mut ls, Key::X, Modifiers::ctrl());
+        assert_eq!(ls.password_buffer, "password", "Ctrl+X cut the password");
+        key_in(&mut ls, Key::Backspace, Modifiers::NONE);
+        assert_eq!(ls.password_buffer, "", "Backspace over the selection");
+    }
+
+    /// **A press between the dots puts the caret there**, and a key that
+    /// changes nothing is no redraw.
+    #[test]
+    fn a_press_between_the_dots_puts_the_caret_there() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        type_keys(&mut ls, "abcd");
+        let rect = password_box(&mut ls);
+        let between = rect.x + PASSWORD_DOTS_INSET + PASSWORD_DOT_SPACING + 3.0;
+        ls.handle_event(&Event::Mouse(MouseEvent {
+            x: between,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_keys(&mut ls, "!");
+        assert_eq!(ls.password_buffer, "a!bcd", "the press missed the dots");
+        key_in(&mut ls, Key::End, Modifiers::NONE);
+        assert_eq!(
+            key_in(&mut ls, Key::End, Modifiers::NONE),
+            EventResult::Ignored,
+            "End at the end is a redraw"
+        );
+    }
+
+    /// **A shaken password box is pressed where it is drawn**: a press
+    /// during the shake after a refused password is measured against the
+    /// box where it stands, not where it rests.
+    #[test]
+    fn a_shaken_password_box_is_pressed_where_it_is_drawn() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        type_keys(&mut ls, "abcd");
+        ls.shake.trigger();
+        // On to a moment it stands more than half a dot off its rest.
+        let mut offset = 0.0;
+        for _ in 0..40 {
+            offset = ls.shake.tick(5);
+            if offset.abs() > PASSWORD_DOT_SPACING / 2.0 + 1.0 {
+                break;
+            }
+        }
+        assert!(
+            offset.abs() > PASSWORD_DOT_SPACING / 2.0,
+            "the shake never moved the box half a dot"
+        );
+        let rect = password_box(&mut ls);
+        let between = rect.x + PASSWORD_DOTS_INSET + 2.0 * PASSWORD_DOT_SPACING + 2.0;
+        ls.handle_event(&Event::Mouse(MouseEvent {
+            x: between,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_keys(&mut ls, "!");
+        assert_eq!(
+            ls.password_buffer, "ab!cd",
+            "the press was measured from the box at rest"
+        );
+    }
+
+    /// **A lockout refuses the password's keys**, as it refused typing:
+    /// nothing is edited, typed or deleted while it runs.
+    #[test]
+    fn a_lockout_refuses_the_passwords_keys() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        type_keys(&mut ls, "ab");
+        ls.lockout.start(30);
+        key_in(&mut ls, Key::Backspace, Modifiers::NONE);
+        type_keys(&mut ls, "c");
+        assert_eq!(
+            ls.password_buffer, "ab",
+            "a key edited the password in a lockout"
+        );
+    }
+
+    /// **The password edits what it holds**, however it came to hold it:
+    /// typed through `type_char`, its caret is after it.
+    #[test]
+    fn the_password_edits_what_it_holds() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        type_keys(&mut ls, "ab");
+        key_in(&mut ls, Key::Home, Modifiers::NONE);
+        ls.clear_password();
+        ls.type_char('x');
+        type_keys(&mut ls, "y");
+        assert_eq!(
+            ls.password_buffer, "xy",
+            "the key edited the password the editor held"
+        );
     }
 }

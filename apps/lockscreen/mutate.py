@@ -77,12 +77,11 @@ MUTATIONS += [
         "        let _ = settings;\n",
         [FIELD],
     ),
-    (
-        "a chord's letter goes into the password",
-        "                _ if textline::types_into_field(key) => {\n",
-        "                _ if key.types_text() => {\n",
-        [CHORD],
-    ),
+    # No row for "a chord's letter goes into the password": since 2026-10-04
+    # the password's keys are textline::apply_masked_key's, which tells a
+    # command from AltGr itself, in its own crate and with its own tests;
+    # a_chord_is_not_typed_into_the_password_and_altgr_is still holds the box
+    # to it.
     (
         "a chord from the clock types its letter",
         "                        if textline::types_into_field(key) {\n",
@@ -112,6 +111,122 @@ MUTATIONS += [
         "                    MouseEventKind::Leave if self.submit_hovered => {\n",
         "                    MouseEventKind::Leave if false => {\n",
         [LIGHT],
+    ),
+]
+
+# The password edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and Delete threw the whole
+# password away.
+EDITS = "the_password_edits_at_a_caret"
+PRESS = "a_press_between_the_dots_puts_the_caret_there"
+LOCKOUT = "a_lockout_refuses_the_passwords_keys"
+HOLDS = "the_password_edits_what_it_holds"
+
+MUTATIONS += [
+    (
+        "a lockout lets the password's keys through",
+        "        if self.lockout.is_active() {\n            return EventResult::Ignored;\n        }\n        self.load_password();\n",
+        "        self.load_password();\n",
+        [LOCKOUT],
+    ),
+    (
+        "a key finds the editor holding another password",
+        "        if self.password_editor.text() != self.password_buffer {\n"
+        "            self.password_editor.set_text(&self.password_buffer);",
+        "        if false {\n"
+        "            self.password_editor.set_text(&self.password_buffer);",
+        [HOLDS],
+    ),
+    (
+        "every key the box answers is a redraw",
+        "        if after == before {\n",
+        "        if false {\n",
+        [PRESS],
+    ),
+    (
+        "the caret is drawn after the last dot",
+        "                x + PASSWORD_DOTS_INSET + self.caret_dots().0 as f32 * PASSWORD_DOT_SPACING\n",
+        "                x + PASSWORD_DOTS_INSET + self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING\n",
+        [EDITS],
+    ),
+    (
+        "the selection is not drawn",
+        "            if let (cursor, Some(anchor)) = self.caret_dots()\n",
+        "            if let (cursor, Some(anchor)) = (0, None::<usize>)\n",
+        [EDITS],
+    ),
+    (
+        "a press on the dots does not place the caret",
+        "                            self.press_password(field.x, mouse.x);\n",
+        "                            let _ = field;\n",
+        [PRESS],
+    ),
+    (
+        "a press is measured from the box's edge, not its first dot",
+        "        let offset = x - field_x - PASSWORD_DOTS_INSET + scroll;\n",
+        "        let offset = x - field_x + scroll;\n",
+        [PRESS],
+    ),
+    (
+        "a press puts the caret at the end",
+        "            .unwrap_or(count);\n        self.load_password();\n",
+        "            .map(|_| count)\n            .unwrap_or(count);\n        self.load_password();\n",
+        [PRESS],
+    ),
+    (
+        "a shaken box is pressed where it stood",
+        "            x: home.x + self.shake.offset(),\n",
+        "            x: home.x,\n",
+        ["a_shaken_password_box_is_pressed_where_it_is_drawn"],
+    ),
+    (
+        "the lockout's reason is asked where the shake has the box",
+        "                let field = self.password_field_home();\n",
+        "                let field = self.password_field_rect();\n",
+        ["the_lockouts_reason_waits_the_same_while_the_box_shakes"],
+    ),
+]
+
+
+# Why the password box is switched off, said while the pointer rests on
+# it during a lockout (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md).
+MUTATIONS += [
+    (
+        'the password box gives no reason during a lockout',
+        '        let locked = self.state == LockScreenState::PasswordEntry && self.lockout.is_active();',
+        '        let locked = false;',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the pointer is not followed for the password box's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => None,\n                _ => self.pointer,',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a pointer that left keeps the password box's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => self.pointer,\n                _ => Some((mouse.x, mouse.y)),',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the clock for the password box's reason does not move",
+        '            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);',
+        '            let _ = elapsed_ms;',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the password box's reason going asks for no frame",
+        '        if self.explain_disabled() {\n            result = EventResult::Consumed;\n        }',
+        '        self.explain_disabled();',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the password box's reason is not drawn",
+        '        tree.commands\n            .extend(self.why_disabled.render(&self.palette));',
+        '        let _ = self.why_disabled.render(&self.palette);',
+        ['a_locked_out_password_box_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

@@ -6,6 +6,10 @@ which owns `apps/**` since the six-lane split, raised it as E-Q2 with the
 option table below and a recommendation. Kept here for its history; answer
 it there.*
 
+*Answered 2026-10-09 (design-decisions §1236): Open-Meteo, off until the user
+turns forecasts on -- the first row below, behind the third row's default.
+Built the same day in lane E (`apps/weather/src/source.rs`).*
+
 **In short:** Our weather app has no weather and no way to get any, and it
 says so plainly in its own window rather than showing invented numbers. So
 there is nothing wrong with it today and nothing for you to decide. When we

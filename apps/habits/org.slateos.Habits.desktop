@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Habit Tracker
+Comment=Track daily and weekly habits and their streaks
+Icon=office-calendar
+Exec=habits
+Categories=Office;
+Keywords=habits;streaks;goals;

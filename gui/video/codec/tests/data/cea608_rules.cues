@@ -1,0 +1,9 @@
+# cea608_rules.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 2502500000 3903900000 1
+text 0000 - "01234567890123456789012345678906"
+break
+text 0000 - "x y"
+break
+text 0000 - "ab"
+break
+text 0000 - "ok██ok!"

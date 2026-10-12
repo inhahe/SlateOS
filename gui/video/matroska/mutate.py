@@ -31,6 +31,10 @@ SRC = Path(__file__).parent / "src"
 
 # A video track's projection, as ffprobe reads it (`tests/projection.rs`).
 PROJECTIONS = "every_projection_is_read_as_ffmpeg_reads_it"
+SEEKHEAD_DAMAGE = "a_seekhead_ffmpeg_reads_past_does_not_refuse_the_file"
+# A video track's colour, as ffprobe reads it (`tests/colour.rs`).
+COLOURS = "every_colour_is_read_as_ffmpeg_reads_it"
+COLOUR_NUMBERS = "a_colour_keeps_its_numbers"
 
 # The fixtures' tests: every packet, and the packets after each seek, as
 # ffprobe gives them.
@@ -321,7 +325,7 @@ TRACK = [
     ),
     (
         "a projection's fault refuses nothing",
-        "                return Err(Error::Invalid(why));",
+        "                return Err(EntryError::Refused(Error::Invalid(why)));",
         "                let _ = why;",
         [PROJECTIONS],
     ),
@@ -349,6 +353,73 @@ TRACK = [
         "(_, 2, _) => None,",
         [PROJECTIONS],
     ),
+    # The colour: FFmpeg's rules for what of Colour it takes.
+    (
+        "a second Colour replaces the first",
+        "                v.colour.get_or_insert(colour);",
+        "                v.colour = Some(colour);",
+        [COLOURS, COLOUR_NUMBERS],
+    ),
+    (
+        "the transfer is not read",
+        "            ids::TRANSFER_CHARACTERISTICS => c.transfer_characteristics = r.uint(e.size, 2)?,",
+        "            ids::TRANSFER_CHARACTERISTICS => {\n                r.uint(e.size, 2)?;\n            }",
+        [COLOURS, COLOUR_NUMBERS],
+    ),
+    (
+        "MaxCLL alone is a content light level",
+        "    if max_cll != 0 && max_fall != 0 {",
+        "    if max_cll != 0 {",
+        [COLOURS],
+    ),
+    (
+        "a chromaticity of 0 is taken",
+        ".all(|&v| v > 0.0)",
+        ".all(|&v| v >= 0.0)",
+        [COLOURS],
+    ),
+    (
+        "a chromaticity that is not a number is taken",
+        ".all(|&v| v > 0.0)",
+        ".all(|&v| !(v <= 0.0))",
+        [COLOURS],
+    ),
+    (
+        "a peak without a black is a luminance",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(min >= 0.0 && max > min)",
+        [COLOURS],
+    ),
+    (
+        "a black below 0 is taken",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(self.min_said && max > min)",
+        [COLOURS],
+    ),
+    (
+        "a black at the peak is taken",
+        "(self.min_said && min >= 0.0 && max > min)",
+        "(self.min_said && min >= 0.0 && max >= min)",
+        [COLOURS],
+    ),
+    (
+        "a second MasteringMetadata keeps the first's numbers",
+        "    into.xy = [0.0; 8];\n    into.max = 0.0;\n    into.min = 0.0;\n",
+        "",
+        [COLOURS],
+    ),
+    (
+        "a black is counted in its own MasteringMetadata only",
+        "    into.min = 0.0;\n",
+        "    into.min = 0.0;\n    into.min_said = false;\n",
+        [COLOURS],
+    ),
+    (
+        "the peak is not read",
+        "            into.max = r.float(e.size, 0.0)?;",
+        "            r.float(e.size, 0.0)?;",
+        [COLOURS],
+    ),
 ]
 
 CUES = [
@@ -371,12 +442,27 @@ CUES = [
 DEMUX = [
     # Reading the description.
     (
+        "a Tracks damaged before its first entry refuses the file",
+        "                        }) if refused || read > 0 => return Err(error),",
+        "                        }) if refused || read >= 0 => return Err(error),",
+        [SEEKHEAD_DAMAGE],
+    ),
+    (
+        "an entry FFmpeg refuses the file for is passed over",
+        "                        }) if refused || read > 0 => return Err(error),",
+        "                        }) if read > 0 => return Err(error),",
+        [PROJECTIONS],
+    ),
+    (
         "a damaged Info before the Clusters refuses the file",
-        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
-        "                    ids::CUES => cues_read.push(h.start),",
-        "                    ids::INFO => nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?,\n"
-        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
-        "                    ids::CUES => cues_read.push(h.start),",
+        "                    ids::CUES => {\n"
+        "                        cues_read.push(h.start);",
+        "                    ids::INFO => {\n"
+        "                        nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?;\n"
+        "                        Ok(())\n"
+        "                    }\n"
+        "                    ids::CUES => {\n"
+        "                        cues_read.push(h.start);",
         [META_DAMAGED_INFO, META_DAMAGED_INFO_PACKETS],
     ),
     (
@@ -387,7 +473,7 @@ DEMUX = [
     ),
     (
         "Tracks after the Clusters are not looked for",
-        "            ids::TRACKS => self.read_tracks(&h),\n",
+        "            ids::TRACKS => self.read_tracks(&h).map_err(|d| d.error),\n",
         "            ids::TRACKS => Ok(()),\n",
         [TRACKS_AT_THE_END],
     ),
@@ -399,9 +485,12 @@ DEMUX = [
     ),
     (
         "only the first Cues element before the Clusters is the index",
-        "                    ids::CUES => cues_read.push(h.start),",
-        "                    ids::CUES if cues_read.is_empty() => cues_read.push(h.start),\n"
-        "                    ids::CUES => {}",
+        "                        cues_read.push(h.start);\n"
+        "                        Ok(())",
+        "                        if cues_read.is_empty() {\n"
+        "                            cues_read.push(h.start);\n"
+        "                        }\n"
+        "                        Ok(())",
         [SEEKS_TWO_CUES],
     ),
     (
@@ -426,9 +515,9 @@ DEMUX = [
     ),
     (
         "a second Tracks before the Clusters is not read",
-        "                    ids::TRACKS => self.read_tracks(&h)?,",
-        "                    ids::TRACKS if self.tracks.is_empty() => self.read_tracks(&h)?,\n"
-        "                    ids::TRACKS => {}",
+        "                    ids::TRACKS => match self.read_tracks(&h) {",
+        "                    ids::TRACKS if !self.tracks.is_empty() => Ok(()),\n"
+        "                    ids::TRACKS => match self.read_tracks(&h) {",
         [META_TWO_TRACKS_PACKETS, META_TWO_TRACKS],
     ),
     (
@@ -445,17 +534,17 @@ DEMUX = [
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
-        "                                        segment_ends = None;\n",
+        "                                segment_ends = None;\n",
         "",
         ["after_damage_the_segment_runs_to_the_end_of_the_file"],
     ),
     (
         "damage before the first Cluster refuses the file",
-        "                            Err(_) => {\n"
-        "                                // Past its four-byte ID, and one more.",
-        "                            Err(e) => {\n"
-        "                                return Err(e);\n"
-        "                                // Past its four-byte ID, and one more.",
+        "                    Err(_) => {\n"
+        "                        // Past its four-byte ID, and one more.",
+        "                    Err(e) => {\n"
+        "                        return Err(e);\n"
+        "                        // Past its four-byte ID, and one more.",
         [META_DAMAGE],
     ),
     # Reading the Clusters.

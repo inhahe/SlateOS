@@ -150,27 +150,15 @@ MUTATIONS = [
     # The body is the toolkit's multi-line field
     # (requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md).
     (
-        "a copy in the body is kept from the lines",
-        "                    (compose.body.clipboard() != clipboard)\n                        .then(|| compose.body.clipboard().to_owned())",
-        "                    None::<String>",
-        ["the_body_wraps_undoes_a_word_and_shares_the_clipboard"],
-    ),
-    (
-        "the body pastes its own clipboard, not the window's",
-        "                    compose.body.set_clipboard(clipboard.clone());",
-        "",
-        ["a_copy_in_a_line_pastes_into_the_body"],
-    ),
-    (
         "the body grows past its capacity",
         "        <= BODY_CAPACITY\n}",
         "        <= usize::MAX\n}",
         ["the_body_stops_at_its_capacity"],
     ),
     (
-        "a paste is not capped",
-        "        return (key.key == Key::V).then(|| clipboard.to_owned());",
-        "        return None;",
+        'a paste is not capped',
+        '        return Some(guitk::clipboard::text());\n',
+        '        return None;\n',
         ["the_body_stops_at_its_capacity"],
     ),
     (
@@ -401,6 +389,96 @@ STORE_MUTATIONS = [
         "            if c.is_control() || matches!(c, '/' | '\\\\' | ':' | '*' | '?' | '\"' | '<' | '>' | '|') {",
         "            if c.is_control() {",
         ["a_draft_is_named_for_its_subject"],
+    ),
+]
+
+# The compose fields' right-click menu (2026-10-10, requests/c-e-text-fields-
+# have-a-right-click-menu.md): Cut, Copy, Paste, Delete and Select all (Undo
+# and Redo in the body) through apps/fieldmenu; the lines, the body and the
+# menu share the program's clipboard; each line holds its capacity and the
+# body refuses a paste past what a message holds, as by key.
+E_COPY = "a_fields_right_click_menu_copies_and_pastes_between_fields"
+E_ESC = "escape_puts_a_fields_menu_away_and_leaves_the_message_open"
+E_CAP = "a_paste_from_the_menu_stops_at_each_fields_capacity"
+E_CLOCK = "the_menu_is_drawn_and_a_dimmed_row_says_why_on_its_own_clock"
+
+MUTATIONS += [
+    (
+        "a right press on a field opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [E_COPY, E_ESC],
+    ),
+    (
+        "the right-click leaves the keyboard where it was",
+        "        compose.field = field;\n        self.field_menu.open(field, menu, x, y, viewport);\n",
+        "        self.field_menu.open(field, menu, x, y, viewport);\n",
+        [E_COPY],
+    ),
+    (
+        "a row chosen for a line does nothing",
+        "                Some(input) => input.edit_command(id),\n",
+        "                Some(_input) => KeyEdit::Unhandled,\n",
+        [E_COPY],
+    ),
+    (
+        "a row chosen for the body does nothing",
+        "            compose.body.edit_command(id, &m)\n",
+        "            KeyEdit::Unhandled\n",
+        [E_COPY],
+    ),
+    (
+        "a paste from the menu goes past the body's cap",
+        "            if pasting && !body_fits(&compose.body, &guitk::clipboard::text()) {\n"
+        "                return;\n"
+        "            }\n",
+        "",
+        [E_CAP],
+    ),
+    (
+        'a line holds no capacity',
+        '    textline::field_holding(text, FIELD_CAPACITY)\n',
+        '    textline::field_holding(text, usize::MAX)\n',
+        [E_CAP],
+    ),
+    (
+        "the lines' keys keep a clipboard the menu does not share",
+        "                    let _edit = textline::apply_key_on_clipboard(input, key, FIELD_CAPACITY, 13.0);\n",
+        "                    let _edit = textline::apply_key(input, key, FIELD_CAPACITY, \"\", 13.0);\n",
+        [E_COPY],
+    ),
+    (
+        "Escape reaches the form under a field's menu",
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
+        [E_ESC],
+    ),
+    (
+        "a field's menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [E_CLOCK],
+    ),
+    (
+        "the window's ticks do not move the menu's clock",
+        '            return if self.field_menu.tick(*elapsed_ms) {\n',
+        '            return if self.field_menu.tick(0) {\n',
+        [E_CLOCK],
+    ),
+    (
+        "the window asks no tick for the menu's wait",
+        '        self.field_menu.due_in().map(Duration::from_millis)\n',
+        '        self.field_menu.due_in().map(Duration::from_millis).filter(|_| false)\n',
+        [E_CLOCK],
+    ),
+]
+
+MUTATIONS += [
+    (
+        'a release the menu passes on is kept from the window',
+        '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window => {}\n',
+        '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window\n                if self.field_menu.is_up()\n                    && matches!(\n                        event,\n                        Event::Mouse(MouseEvent {\n                            kind: MouseEventKind::Release(_),\n                            ..\n                        })\n                    ) =>\n            {\n                return EventResult::Consumed;\n            }\n            fieldmenu::Outcome::Window => {}\n',
+        ["a_body_drag_ends_at_its_release_though_a_menu_came_up_in_it"],
     ),
 ]
 

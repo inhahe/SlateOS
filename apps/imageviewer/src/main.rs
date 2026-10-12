@@ -735,12 +735,13 @@ pub struct ViewerState {
     /// its first frame only, as lane F's request asks.
     animations: bool,
 
-    /// The recycle bin Delete moves pictures to: the file manager's, so a
-    /// picture deleted here is listed and restored there.
-    recycle: recyclebin::RecycleBin,
-    /// The picture Delete moved last -- its bin entry and where it was --
-    /// for Ctrl+Z to put back.
-    last_recycled: Option<(String, PathBuf)>,
+    /// The recycle bins Delete moves pictures to: the file manager's, so a
+    /// picture deleted here is listed and restored there -- each to the bin
+    /// on its own drive (design-decisions §1238).
+    recycle: recyclebin::Bins,
+    /// The picture Delete moved last -- the bin it went to, its entry there,
+    /// and where it was -- for Ctrl+Z to put back.
+    last_recycled: Option<(recyclebin::DriveBin, String, PathBuf)>,
     /// What the last Delete or Ctrl+Z did, on the status bar until the next
     /// picture is asked for.
     notice: Option<String>,
@@ -851,7 +852,7 @@ impl ViewerState {
             frame_left_ms: 0,
             animation_paused: false,
             animations: true,
-            recycle: recyclebin::RecycleBin::default_location(),
+            recycle: recyclebin::Bins::system(),
             last_recycled: None,
             notice: None,
         }
@@ -870,8 +871,8 @@ impl ViewerState {
         };
         let name = shown_file_name(&path).unwrap_or_else(|| shown_path(&path));
         match self.recycle.recycle(&path) {
-            Ok(id) => {
-                self.last_recycled = Some((id, path.clone()));
+            Ok((bin, id)) => {
+                self.last_recycled = Some((bin, id, path.clone()));
                 let at = self.entries.iter().position(|e| e.path == path);
                 if let Some(at) = at {
                     self.entries.remove(at);
@@ -894,11 +895,11 @@ impl ViewerState {
 
     /// Put back the picture Delete moved last, and show it.
     fn undo_delete(&mut self) {
-        let Some((id, path)) = self.last_recycled.take() else {
+        let Some((went_to, id, path)) = self.last_recycled.take() else {
             return;
         };
         let name = shown_file_name(&path).unwrap_or_else(|| shown_path(&path));
-        match self.recycle.restore(&id) {
+        match went_to.bin.restore(&id) {
             Ok(restored) => {
                 let _ = self.open_file(&restored);
                 self.notice = Some(format!("Put {name} back"));
@@ -5237,8 +5238,7 @@ the picture at once, which reads as D advancing the slideshow"
             std::fs::write(dir.join(name), png_bytes(w, 2)).expect("write");
         }
         let mut state = ViewerState::new(1024.0, 768.0);
-        state.recycle =
-            recyclebin::RecycleBin::new(dir.join(".bin"), std::time::Duration::from_mins(1));
+        state.recycle = recyclebin::Bins::single(dir.join(".bin"));
         assert_eq!(state.open_file(&dir.join("b.png")), Opened::Shown);
         state
     }
@@ -5314,7 +5314,7 @@ the picture at once, which reads as D advancing the slideshow"
         let mut state = on_b_with_a_bin(&guard);
         assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
         assert!(!dir.join("b.png").exists(), "the picture is still there");
-        let binned = state.recycle.list().expect("list the bin");
+        let binned = state.recycle.home().bin.list().expect("list the bin");
         assert_eq!(binned.len(), 1);
         assert_eq!(
             binned[0].original_path.as_deref(),
@@ -5337,6 +5337,51 @@ the picture at once, which reads as D advancing the slideshow"
         );
     }
 
+    /// Drives of a test's own making: folders standing for mount points.
+    struct PretendDrives(Vec<PathBuf>);
+
+    impl recyclebin::Drives for PretendDrives {
+        fn mounted(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+        fn mount_point_of(&self, path: &Path) -> Option<PathBuf> {
+            recyclebin::longest_mount(&self.0, path)
+        }
+    }
+
+    /// **A picture on a stick goes to the stick's bin, and Ctrl+Z brings it
+    /// back from there** (design-decisions §1238): the bin it went to is
+    /// remembered with it, since there is one on every drive.
+    #[test]
+    fn a_picture_on_a_stick_is_binned_and_put_back_on_the_stick() {
+        let guard = scratch("delete-stick");
+        let root = guard.dir().to_path_buf();
+        let stick = root.join("stick");
+        std::fs::create_dir_all(&stick).expect("stick");
+        std::fs::create_dir_all(root.join("home")).expect("home");
+        std::fs::write(stick.join("p.png"), png_bytes(3, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.recycle = recyclebin::Bins::new(
+            root.join("home").join(".recycle"),
+            Box::new(PretendDrives(vec![root.clone(), stick.clone()])),
+            None,
+        );
+        assert_eq!(state.open_file(&stick.join("p.png")), Opened::Shown);
+        assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
+        let stick_bin = recyclebin::RecycleBin::new(stick.join(".recycle"));
+        assert_eq!(
+            stick_bin.list().expect("list").len(),
+            1,
+            "not in the stick's bin"
+        );
+        assert!(state.handle_event(&ctrl(Key::Z)));
+        assert!(
+            stick.join("p.png").exists(),
+            "Ctrl+Z looked in the home bin"
+        );
+        assert!(stick_bin.list().expect("list").is_empty());
+    }
+
     /// Ctrl+Z puts the deleted picture back, and shows it.
     #[test]
     fn ctrl_z_puts_a_deleted_picture_back() {
@@ -5348,7 +5393,7 @@ the picture at once, which reads as D advancing the slideshow"
         assert!(dir.join("b.png").exists(), "not put back");
         assert_eq!(state.image_info.filename, "b.png");
         assert_eq!(state.entries.len(), 3);
-        assert!(state.recycle.list().expect("list").is_empty());
+        assert!(state.recycle.home().bin.list().expect("list").is_empty());
         // Nothing more to put back.
         assert!(state.handle_event(&ctrl(Key::Z)));
         assert_eq!(state.image_info.filename, "b.png");
@@ -5361,8 +5406,7 @@ the picture at once, which reads as D advancing the slideshow"
         let dir = guard.dir();
         std::fs::write(dir.join("only.png"), png_bytes(2, 2)).expect("write");
         let mut state = ViewerState::new(1024.0, 768.0);
-        state.recycle =
-            recyclebin::RecycleBin::new(dir.join(".bin"), std::time::Duration::from_mins(1));
+        state.recycle = recyclebin::Bins::single(dir.join(".bin"));
         assert_eq!(state.open_file(&dir.join("only.png")), Opened::Shown);
         state.pending_images.clear();
         assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
@@ -5380,10 +5424,7 @@ the picture at once, which reads as D advancing the slideshow"
         let mut state = on_b_with_a_bin(&guard);
         // A bin whose folder cannot be made: its parent is a file.
         std::fs::write(dir.join("blocker"), b"a file").expect("write");
-        state.recycle = recyclebin::RecycleBin::new(
-            dir.join("blocker").join("bin"),
-            std::time::Duration::from_mins(1),
-        );
+        state.recycle = recyclebin::Bins::single(dir.join("blocker").join("bin"));
         assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
         assert!(dir.join("b.png").exists());
         assert_eq!(state.image_info.filename, "b.png");

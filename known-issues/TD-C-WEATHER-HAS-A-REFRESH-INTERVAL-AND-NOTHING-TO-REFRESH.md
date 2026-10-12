@@ -1,4 +1,4 @@
-### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN
+### TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH — 2026-09-04 — OPEN (fixed on lane E 2026-10-09; close once on `main` and boot-tested)
 
 **In short.** The weather app's settings offer an update interval — "every 30
 minutes" by default, adjustable from 5 to 120 — and nothing is behind it. There
@@ -39,3 +39,16 @@ removed on 2026-09-15; the app opens on a notice that it cannot fetch.)
 *Later the same day:* the field and its setter are gone too -- the pre-push
 write-only-fields gate refused them, written, clamped and tested and read by
 nothing but the tests. The interval comes back with the source.
+
+**Update 2026-10-09 (lane E): there is a source, and the clock drives it.**
+The operator's answer to E-Q2 (design-decisions §1236) put Open-Meteo behind
+a switch that is off until the user turns it on; `apps/weather/src/source.rs`
+makes the requests. `tick_interval` now returns the time to the next request
+the window makes on its own -- `source::REFRESH`, half an hour after the
+forecast shown arrived, or `source::RETRY`, five minutes after one failed --
+500 ms while an answer is out (the waker brings it; the clock is the fallback),
+and still `None` with forecasts off or nothing asked. The interval is a fixed
+half hour -- the old setting's default -- rather than a setting: nobody has
+asked for another, and every request is one more time the user's places go
+out in plain text. If someone does ask, the setting goes back on the Settings
+tab and into `next_ask`. R asks at once.

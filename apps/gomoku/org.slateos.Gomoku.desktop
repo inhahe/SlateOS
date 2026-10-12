@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Gomoku
+Comment=Five in a row against the computer
+Icon=applications-games
+Exec=gomoku
+Categories=Game;BoardGame;
+Keywords=five;row;board;

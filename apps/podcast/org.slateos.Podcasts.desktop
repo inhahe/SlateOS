@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Podcasts
+Comment=Follow podcasts and play their episodes
+Icon=audio-x-generic
+Exec=podcast
+Categories=AudioVideo;Audio;Player;
+Keywords=podcast;episodes;

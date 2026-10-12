@@ -89,8 +89,8 @@ MUTATIONS = [
     ),
     (
         "a file too big to read whole is read in part",
-        "        if read.truncated {",
-        "        if false {",
+        "    if read.truncated {\n        return Err(format!(",
+        "    if false {\n        return Err(format!(",
         ["a_library_too_big_to_read_whole_is_refused"],
     ),
     (
@@ -121,7 +121,9 @@ MUTATIONS = [
         "a failed save is not said",
         '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
-        [FAILING],
+        # Not FAILING since 2026-10-09: its folder in the file's place fails
+        # the read a save now does first (§1239), before any write.
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         "the failure is drawn nowhere",
@@ -561,6 +563,106 @@ MUTATIONS += [
         "        self.search_editor.set_selection_anchor(None);\n        self.search_editor.set_cursor(cursor);\n",
         "        self.search_editor.set_selection_anchor(None);\n",
         [SEARCH_EDITS],
+    ),
+]
+
+# 2026-10-09: two windows of Notes save into one library (design-decisions
+# §1239) -- each its own changes, into what the file holds.
+MUTATIONS += [
+    (
+        "a save writes this window's copy over the file",
+        "        let merged = self.merged_with(&theirs);\n",
+        "        let _ = &theirs;\n"
+        "        let merged = Library { notebooks: self.notebooks.clone(), notes: self.notes.clone() };\n",
+        # Not the hearing test: a window that has heard the other's save has
+        # it in its own copy, so writing that copy whole loses nothing there.
+        ["two_windows_each_make_a_note_and_both_are_kept"],
+    ),
+    (
+        "a new note takes the next number",
+        "        recordfile::fresh_id(|id| {\n"
+        "            self.notes.iter().any(|n| n.id == id) || self.base.notes.iter().any(|n| n.id == id)\n"
+        "        })\n",
+        "        self.notes.iter().map(|n| n.id).max().map_or(1, |m| m.saturating_add(1))\n",
+        ["two_windows_each_make_a_note_and_both_are_kept"],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {\n",
+        "        if true || now == self.file_stamp {\n",
+        ["a_window_hears_another_windows_save"],
+    ),
+    (
+        "hearing another window's save drops what is unsaved",
+        "        let shown = if self.unsaved {\n",
+        "        let shown = if false {\n",
+        ["a_window_hears_another_windows_save"],
+    ),
+    (
+        "a notebook another window deleted is not brought back for a note in it",
+        "        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks, &theirs.notebooks);\n",
+        "",
+        [
+            "a_notebook_deleted_while_another_window_filled_it_comes_back",
+            "a_notebook_deleted_here_after_another_window_filled_it_comes_back",
+        ],
+    ),
+    (
+        "a notebook deleted here is looked for in this window's copy alone",
+        "            .chain(\n"
+        "                theirs\n"
+        "                    .iter()\n"
+        "                    .filter(|nb| needed.contains(&nb.id) && !mine.iter().any(|m| m.id == nb.id)),\n"
+        "            )\n",
+        "",
+        ["a_notebook_deleted_here_after_another_window_filled_it_comes_back"],
+    ),
+]
+
+
+# The context menu follows the pointer and says why a greyed row is greyed
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): it never saw
+# the pointer move and was put away after every press, so its submenus
+# could not be reached with the pointer at all.
+MUTATIONS += [
+    (
+        'a press that opens Move to puts the menu away',
+        '                    if !menu.is_visible() {\n                        self.note_menu = None;\n                    }',
+        '                    self.note_menu = None;',
+        ['move_to_is_reached_with_the_pointer'],
+    ),
+    (
+        'the note menu never sees the pointer move',
+        '                MouseEventKind::Move => {\n                    menu.handle_mouse_move(event.x, event.y);',
+        '                MouseEventKind::Move => {\n                    let _ = &menu;',
+        ['move_to_is_reached_with_the_pointer', 'the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        'the notebook the note is in is not explained',
+        '            menu.explain(current, "The note is in this notebook already.");',
+        '            let _ = current;',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        'time does not pass for the note menu',
+        '                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);',
+        '                let _ = elapsed_ms;',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        "the window does not wake for the note menu's reason",
+        '            .map(|ms| Duration::from_millis(ms.max(1)))\n    }',
+        '            .filter(|_| false)\n            .map(|ms| Duration::from_millis(ms.max(1)))\n    }',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+]
+
+MUTATIONS += [
+    (
+        "a double click on the note menu reaches the note behind it",
+        "                MouseEventKind::DoubleClick(_) => return EventResult::Consumed,\n",
+        "",
+        ["a_double_click_on_the_note_menu_writes_nothing_behind_it"],
     ),
 ]
 

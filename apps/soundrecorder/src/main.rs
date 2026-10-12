@@ -2073,8 +2073,10 @@ pub struct SoundRecorderApp {
     pub marker_scroll: usize,
     /// The chosen marker's name, while it is being written.
     pub rename: Option<TextInput>,
-    /// What a copy or a cut in the name field took, for a paste.
-    clipboard: String,
+    /// The name box's right-click menu -- Cut, Copy, Paste, Delete, Select
+    /// all -- while it is up
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<()>,
     pub picker: FilePicker,
     pub picker_for: PickerFor,
     pub panel: Panel,
@@ -2134,7 +2136,7 @@ impl SoundRecorderApp {
             leave_for: None,
             marker_scroll: 0,
             rename: None,
-            clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
             picker: FilePicker::default(),
             picker_for: PickerFor::Open,
             panel: Panel::Library,
@@ -2582,6 +2584,22 @@ impl SoundRecorderApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The name box's right-click menu takes the presses and the keys
+        // while it is up, as any menu does.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => {
+                if let Some(input) = self.rename.as_mut() {
+                    let _edit = input.edit_command(id);
+                }
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -2595,7 +2613,8 @@ impl SoundRecorderApp {
                 // would report a duration that drifts from the audio.
                 self.tick(*elapsed_ms);
                 let saved = self.check_auto_save(*elapsed_ms);
-                if self.state == RecordingState::Recording || saved {
+                let reason = self.field_menu.tick(*elapsed_ms);
+                if self.state == RecordingState::Recording || saved || reason {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -2759,8 +2778,7 @@ impl SoundRecorderApp {
             self.status_line = String::from("Choose a marker to name first");
             return;
         };
-        let mut input = TextInput::new();
-        input.set_text(&label);
+        let mut input = textline::field_holding(&label, LABEL_CAPACITY);
         input.select_all();
         self.rename = Some(input);
         self.panel = Panel::Recording;
@@ -2777,15 +2795,39 @@ impl SoundRecorderApp {
             Key::Enter if plain => self.commit_rename(),
             Key::Escape if plain => self.rename = None,
             _ => {
-                if let Some(input) = self.rename.as_mut()
-                    && let Some(copied) =
-                        textline::apply_key(input, key, LABEL_CAPACITY, &self.clipboard, 13.0)
-                            .copied
-                {
-                    self.clipboard = copied;
+                // On the program's clipboard, which the box's right-click menu
+                // copies to and pastes from too.
+                if let Some(input) = self.rename.as_mut() {
+                    let _edit = textline::apply_key_on_clipboard(input, key, LABEL_CAPACITY, 13.0);
                 }
             }
         }
+        EventResult::Consumed
+    }
+
+    /// The name box, where it was last drawn: the chosen marker's row's name
+    /// part, while a name is being written.
+    fn rename_rect(&self) -> Option<Rect> {
+        self.rename.as_ref()?;
+        let chosen = self.chosen_marker()?;
+        self.last_hits
+            .iter()
+            .find(|(target, _)| *target == Target::MarkerRow(chosen))
+            .map(|(_, row)| marker_name_rect(*row))
+    }
+
+    /// A right press: over the name box while a name is being written, its
+    /// menu where the press landed, the box's caret and selection left as
+    /// they are (design-decisions 1454). Anywhere else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        if !self.rename_rect().is_some_and(|rect| rect.contains(x, y)) {
+            return EventResult::Ignored;
+        }
+        let viewport = (self.window_width, self.window_height);
+        let Some(input) = self.rename.as_ref() else {
+            return EventResult::Ignored;
+        };
+        self.field_menu.open((), input.edit_menu(), x, y, viewport);
         EventResult::Consumed
     }
 
@@ -3740,6 +3782,7 @@ impl SoundRecorderApp {
                 self.clamp_scrolls();
                 result
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             MouseEventKind::Release(MouseButton::Left) => {
                 if self.drag.take().is_some() {
                     EventResult::Consumed
@@ -3967,7 +4010,15 @@ impl App for SoundRecorderApp {
     ///
     /// 100 ms: the elapsed readout shows tenths.
     fn tick_interval(&self) -> Option<Duration> {
-        (self.state == RecordingState::Recording).then(|| Duration::from_millis(100))
+        let recording =
+            (self.state == RecordingState::Recording).then(|| Duration::from_millis(100));
+        // And the name box's menu, while a dimmed row the pointer rests on
+        // waits to say why.
+        let menu = self.field_menu.due_in().map(Duration::from_millis);
+        match (recording, menu) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3986,7 +4037,10 @@ impl App for SoundRecorderApp {
         self.clamp_scrolls();
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // The name box's right-click menu, over everything.
+        tree.commands.extend(self.field_menu.render(&self.palette));
+        tree
     }
 }
 
@@ -5080,6 +5134,157 @@ mod tests {
         app.rescan();
         assert!(app.open_path(&a));
         (dir, app)
+    }
+
+    /// **The marker-name box's right-click menu edits the name**, the keys
+    /// and the menu sharing the program's clipboard; the menu is modal while
+    /// it is up, and there is none with no name being written
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    #[test]
+    fn the_name_boxs_right_click_menu_edits_the_name() {
+        use guitk::editmenu::EditCommand;
+        let (_dir, mut app) = fixture("menu");
+        probe::click(&mut app, Target::MarkerRow(0));
+        probe::click(&mut app, Target::RenameMarker);
+        assert!(app.rename.is_some());
+        let (w, h) = (app.window_width, app.window_height);
+        let _frame = App::render(&mut app, w, h);
+        let rect = app.rename_rect().expect("the box is drawn");
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        let press = |app: &mut SoundRecorderApp, x: f32, y: f32, button: MouseButton| {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        };
+        assert_eq!(
+            press(&mut app, x, y, MouseButton::Right),
+            EventResult::Consumed
+        );
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        let tree = App::render(&mut app, w, h);
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "Cut"
+            )),
+            "the menu is not drawn"
+        );
+        // The whole name is selected as the box opens: Cut is lit.
+        assert_eq!(app.field_menu.row_lit(EditCommand::Cut), Some(true));
+        let (mx, my) = app.field_menu.row_middle(EditCommand::Cut).expect("Cut");
+        press(&mut app, mx, my, MouseButton::Left);
+        assert!(!app.field_menu.is_up());
+        assert_eq!(app.rename.as_ref().map(TextInput::text), Some(""));
+        assert_eq!(guitk::clipboard::text(), "intro");
+        // Pasted back by key: one clipboard.
+        app.handle_event(&Event::Key(probe::ctrl(Key::V)));
+        assert_eq!(app.rename.as_ref().map(TextInput::text), Some("intro"));
+
+        // Escape puts the menu away and keeps the box.
+        press(&mut app, x, y, MouseButton::Right);
+        app.handle_event(&Event::Key(probe::press(Key::Escape)));
+        assert!(!app.field_menu.is_up());
+        assert!(
+            app.rename.is_some(),
+            "Escape reached the box through the menu"
+        );
+
+        // A press outside puts it away and works nothing under it.
+        press(&mut app, x, y, MouseButton::Right);
+        probe::click(&mut app, Target::AddMarker);
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.open.as_ref().map(|o| o.markers.len()),
+            Some(1),
+            "the press went through the menu"
+        );
+
+        // With no name being written, no menu.
+        app.handle_event(&Event::Key(probe::press(Key::Escape)));
+        assert!(app.rename.is_none());
+        assert_eq!(
+            press(&mut app, x, y, MouseButton::Right),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why on the window's clock**,
+    /// which the window asks for while the menu waits though nothing is
+    /// recording -- and a paste from the menu stops at the label's capacity.
+    #[test]
+    fn the_name_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let (_dir, mut app) = fixture("menu-clock");
+        probe::click(&mut app, Target::MarkerRow(0));
+        probe::click(&mut app, Target::RenameMarker);
+        app.handle_event(&Event::Key(probe::press(Key::End)));
+        let (w, h) = (app.window_width, app.window_height);
+        let _frame = App::render(&mut app, w, h);
+        let rect = app.rename_rect().expect("the box is drawn");
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "a clock with nothing to wait for"
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        // Nothing selected after End: Copy is dimmed.
+        let (mx, my) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: mx,
+            y: my,
+            kind: MouseEventKind::Move,
+        }));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        app.handle_event(&Event::Key(probe::press(Key::Escape)));
+
+        guitk::clipboard::set_text(&"n".repeat(LABEL_CAPACITY + 10));
+        app.handle_event(&Event::Key(probe::ctrl(Key::A)));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        let (mx, my) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: mx,
+            y: my,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.rename.as_ref().map(|i| i.text().chars().count()),
+            Some(LABEL_CAPACITY)
+        );
     }
 
     /// **A key held with Alt or the Windows key is not the recorder's, and

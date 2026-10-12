@@ -1,7 +1,13 @@
-//! The demuxer against libvpx's VP9 test vectors: every frame of the video
-//! track, demuxed here, decodes -- by `vp9`, lane F's port of libvpx -- to
-//! the very pictures libvpx publishes MD5s for. A frame cut short, a frame
-//! out of order or a frame missed would make a picture differ, or the count.
+//! The tree's Matroska demuxer against libvpx's VP9 test vectors: every
+//! frame of the video track, demuxed by `matroska`, decodes -- by `vp9`,
+//! lane F's port of libvpx -- to the very pictures libvpx publishes MD5s
+//! for. A frame cut short, a frame out of order or a frame missed would make
+//! a picture differ, or the count.
+//!
+//! Written for this crate's own demuxer, which `matroska` replaced on
+//! 2026-10-04 (`requests/f-e-two-matroska-demuxers-which-stays.md`); it
+//! holds the replacement to the same pictures, and is lane F's to take into
+//! `gui/video/matroska`'s suite if it would rather keep it there.
 //!
 //! The vectors and their MD5 files are the WebM project's, published with
 //! libvpx, under libvpx's licence (`tests/data/libvpx-LICENSE`); copied from
@@ -21,8 +27,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use mediaprobe::Kind;
-use mediaprobe::mkv::Demuxer;
+use matroska::{Demuxer, TrackKind};
 use vp9::{Decoder, Picture};
 
 fn data_dir() -> PathBuf {
@@ -64,14 +69,12 @@ fn md5s(path: &Path) -> Vec<String> {
 /// Demuxes `path`'s video track and decodes it; returns how many pictures
 /// matched libvpx's, or the first difference.
 fn check(path: &Path) -> Result<usize, String> {
-    let len = std::fs::metadata(path).unwrap().len();
-    let mut demuxer = Demuxer::open(File::open(path).unwrap(), len)
-        .unwrap()
-        .ok_or("not read as Matroska")?;
+    let mut demuxer = Demuxer::open(File::open(path).unwrap())
+        .map_err(|e| format!("not read as Matroska: {e}"))?;
     let video = demuxer
-        .streams()
+        .tracks()
         .iter()
-        .find(|s| s.info.kind == Kind::Video)
+        .find(|t| t.kind == TrackKind::Video)
         .ok_or("no video track")?
         .number;
     let want = md5s(&path.with_extension("webm.md5"));
@@ -85,10 +88,13 @@ fn check(path: &Path) -> Result<usize, String> {
         }
         // libvpx's vectors are muxed in presentation order, a frame a
         // block.
-        if packet.timestamp_ns < last_time {
+        let time = packet
+            .timestamp
+            .ok_or_else(|| format!("packet {packets}: no time"))?;
+        if time < last_time {
             return Err(format!("packet {packets}: time goes backwards"));
         }
-        last_time = packet.timestamp_ns;
+        last_time = time;
         let picture = decoder
             .decode(&packet.data)
             .map_err(|e| format!("packet {packets}: {e}"))?;
@@ -139,11 +145,8 @@ fn every_frame_demuxed_decodes_to_libvpx_pictures() {
 #[test]
 fn a_seek_lands_on_a_frame_decoding_can_start_at() {
     let path = data_dir().join("vp90-2-03-deltaq.webm");
-    let len = std::fs::metadata(&path).unwrap().len();
-    let mut demuxer = Demuxer::open(File::open(&path).unwrap(), len)
-        .unwrap()
-        .unwrap();
-    let video = demuxer.streams()[0].number;
+    let mut demuxer = Demuxer::open(File::open(&path).unwrap()).unwrap();
+    let video = demuxer.tracks()[0].number;
     // Every frame, with its time, to compare against.
     let mut all = Vec::new();
     while let Some(p) = demuxer.next_packet().unwrap() {
@@ -152,9 +155,9 @@ fn a_seek_lands_on_a_frame_decoding_can_start_at() {
         }
     }
     assert!(all.len() > 1);
-    let last = all.last().unwrap().timestamp_ns;
+    let last = all.last().unwrap().timestamp.unwrap();
     for target in [0, last / 2, last] {
-        demuxer.seek(u64::try_from(target).unwrap(), video).unwrap();
+        demuxer.seek(video, target).unwrap();
         let first = loop {
             let p = demuxer
                 .next_packet()
@@ -167,7 +170,10 @@ fn a_seek_lands_on_a_frame_decoding_can_start_at() {
         // A frame of the file, at or before the target, where decoding can
         // start.
         assert!(first.keyframe, "seek to {target}: not a key frame");
-        assert!(first.timestamp_ns <= target, "seek to {target}: past it");
+        assert!(
+            first.timestamp.unwrap() <= target,
+            "seek to {target}: past it"
+        );
         assert!(all.contains(&first));
         let mut decoder = Decoder::new();
         assert!(decoder.decode(&first.data).unwrap().is_some());

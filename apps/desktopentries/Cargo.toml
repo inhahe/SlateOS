@@ -1,0 +1,14 @@
+[package]
+name = "desktopentries"
+version = "0.1.0"
+edition = "2024"
+description = "The tests that keep every windowed program's desktop entry readable by the start menu and true to its program"
+publish = false
+
+# No code: the crate is its tests (src/lib.rs). They read each program's
+# `org.slateos.*.desktop` through the same reader the desktop uses.
+[dev-dependencies]
+desktopentry = { path = "../../gui/desktopentry" }
+
+[lints]
+workspace = true

@@ -20,6 +20,10 @@ pathcodec = { path = "../../gui/pathcodec" }
 pathtext = { path = "../pathtext" }
 # The library written whole or not at all, and a book read only up to a cap.
 safeio = { path = "../safeio" }
+# Two readers open at once each keep the books the other opened and the
+# places it reached: a merge by book file, and a watch on the library file
+# (design-decisions §1239).
+recordfile = { path = "../recordfile" }
 
 [dev-dependencies]
 # Scratch folders for the library and the books, so no test reads or writes

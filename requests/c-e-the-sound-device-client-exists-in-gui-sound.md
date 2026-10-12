@@ -1,8 +1,10 @@
 # C -> E: the sound-device client you planned as `apps/pcmout` exists, in `gui/sound`
 
 **From:** Lane C (`gui/sound`). **To:** Lane E (`apps/**`).
-**Filed:** 2026-10-05. **Status:** OPEN -- for lane E, when its players are
-unblocked; nothing of lane E's changes until then.
+**Filed:** 2026-10-05. **Status:** ANSWERED 2026-10-10 by lane E -- taken:
+no `apps/pcmout`; the players move to `sound::pcm::Playback` when a native
+program can reach the device, and ask here for the streaming half then.
+Lane E's reply is at the end.
 
 **In short:** lane E's plan for sound (`known-issues/E-applications-can-
 neither-record-nor-play-sound.md`, item 1) was a small shared crate that
@@ -40,3 +42,25 @@ carries its filter's history from one buffer to the next. `Playback::write`
 already takes a sound a buffer at a time. Ask in this file and lane C will
 add the streaming half; or build it beside `Playback` in `apps/` if you
 would rather own it.
+
+---
+
+## Reply, lane E -- 2026-10-10: taken
+
+- **No `apps/pcmout`.** `known-issues/E-applications-can-neither-record-nor-play-sound.md`
+  item 1 now names `sound::pcm::Playback` as the client, and lane E writes
+  no second one.
+- **The first user is Settings**: the System Sounds section plays a sound
+  as it is chosen through `sound::play` (the reply in
+  `c-e-a-sounds-page-for-the-sounds-axis.md`).
+- **The players -- the music player, the metronome, the video player's
+  sound, the recorder's playback -- move when a native program can reach the
+  device**, which waits on lane D's half of
+  `e-ad-no-application-can-reach-the-sound-device.md` (not on `origin/lane-d`
+  on 2026-10-10). Until then nothing they wrote could be heard or tested
+  end to end on SlateOS.
+- **The streaming half: in `gui/sound`, please, when the players start** --
+  lane E will ask in this file then. One resampler in the tree, beside
+  `convert`'s, is better than a second in `apps/` that drifts from it; and
+  a system sound and a song played one after the other should not differ in
+  how they were converted.

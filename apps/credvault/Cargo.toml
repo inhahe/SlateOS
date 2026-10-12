@@ -1,0 +1,32 @@
+[package]
+name = "credvault"
+version = "0.1.0"
+edition = "2024"
+description = "The SlateOS password vault -- its entries, its sealed file and where it is kept -- shared by the password manager and the credential service"
+publish = false
+
+[features]
+# `Vault::for_test`, `Vault::unlock`, `TEST_KDF` and `TEST_MASTER_PASSWORD`:
+# a vault the cheapest key derivation opens, for the tests of the programs
+# built on this one.
+testing = []
+
+[dependencies]
+# The cipher and the key derivation: XChaCha20-Poly1305 and Argon2id, vendored
+# from RustCrypto (design-decisions.md §539, §1218).
+seal = { path = "../../rustcrypto/seal" }
+# The contents are tab-separated records, escaped the way every program's
+# record files are.
+textfmt = { path = "../../textfmt" }
+# Where the vault is kept: beside every program's settings and data.
+settingsfile = { path = "../../gui/settingsfile" }
+# The file read with a cap, and written whole -- a new file renamed over the
+# old -- so a reader in another process never sees half a save.
+safeio = { path = "../safeio" }
+
+[dev-dependencies]
+# Scratch folders, so no test reads or writes a real vault.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

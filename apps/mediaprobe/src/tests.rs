@@ -363,10 +363,20 @@ fn a_track_says_its_name_language_and_flags() {
             element(0x22_B59C, b"und"),
             uint_element(0x55AA, 1),
         ]),
+        entry(&[
+            uint_element(0x83, 2),
+            element(0x86, b"A_OPUS"),
+            element(0x22_B59C, b"ger"),
+            element(0x22_B59D, b"und"),
+        ]),
     ];
     let mut file = ebml_header("matroska");
     file.extend(mkv_segment(1.0, Some("The\nTitle"), &tracks));
     let p = read(&file);
+    assert_eq!(
+        p.tracks[2].language, None,
+        "a BCP 47 tag of undetermined is undetermined, whatever the ISO code says"
+    );
     assert_eq!(p.title.as_deref(), Some("The Title"), "a title is one line");
     let a = &p.tracks[0];
     assert_eq!(a.codec, Codec::Ac3);
@@ -396,11 +406,13 @@ fn the_duration_is_in_ticks_of_the_timestamp_scale() {
     let mut file = ebml_header("matroska");
     file.extend(segment);
     assert_eq!(read(&file).duration_secs, Some(90.0));
-    // A NaN duration is no duration.
-    let info = float_element(0x4489, f64::NAN);
-    let mut file = ebml_header("matroska");
-    file.extend(element(0x1853_8067, &element(0x1549_A966, &info)));
-    assert_eq!(read(&file).duration_secs, None);
+    // A NaN duration is no duration, and nor is one of nothing.
+    for nothing in [f64::NAN, 0.0] {
+        let info = float_element(0x4489, nothing);
+        let mut file = ebml_header("matroska");
+        file.extend(element(0x1853_8067, &element(0x1549_A966, &info)));
+        assert_eq!(read(&file).duration_secs, None, "{nothing}");
+    }
 }
 
 #[test]
@@ -414,11 +426,14 @@ fn an_audio_track_takes_matroskas_defaults_and_its_output_rate() {
         ]
         .concat(),
     );
+    // Sound in packets of a fixed length, as Opus and AAC are muxed: a
+    // packet's length is not a frame rate.
     let sbr = element(
         0xAE,
         &[
             uint_element(0x83, 2),
             element(0x86, b"A_AAC/MPEG4/LC/SBR"),
+            uint_element(0x23_E383, 20_000_000),
             element(
                 0xE1,
                 &[
@@ -431,8 +446,17 @@ fn an_audio_track_takes_matroskas_defaults_and_its_output_rate() {
         ]
         .concat(),
     );
+    let silent = element(
+        0xAE,
+        &[
+            uint_element(0x83, 2),
+            element(0x86, b"A_OPUS"),
+            element(0xE1, &uint_element(0x9F, 0)),
+        ]
+        .concat(),
+    );
     let mut file = ebml_header("matroska");
-    file.extend(mkv_segment(1.0, None, &[bare, sbr]));
+    file.extend(mkv_segment(1.0, None, &[bare, sbr, silent]));
     let p = read(&file);
     assert_eq!(
         (p.tracks[0].sample_rate, p.tracks[0].channels),
@@ -444,6 +468,8 @@ fn an_audio_track_takes_matroskas_defaults_and_its_output_rate() {
         (Some(44_100), Some(6))
     );
     assert_eq!(p.tracks[1].codec, Codec::Aac);
+    assert_eq!(p.tracks[1].frame_rate, None, "sound has no frame rate");
+    assert_eq!(p.tracks[2].channels, None, "no channels is not a count");
 }
 
 #[test]
@@ -456,11 +482,13 @@ fn what_a_cluster_of_unknown_length_hides_is_found_through_the_seek_head() {
         0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     ];
     cluster.extend(uint_element(0xE7, 0));
-    let seek = |id: u64, position: usize| {
+    // A SeekID is the element's ID as it is written, four bytes for every
+    // top-level element, as muxers write it.
+    let seek = |id: u32, position: usize| {
         element(
             0x4DBB,
             &[
-                uint_element(0x53AB, id),
+                element(0x53AB, &id.to_be_bytes()),
                 uint_element(0x53AC, position as u64),
             ]
             .concat(),
@@ -501,16 +529,130 @@ fn every_matroska_codec_id_is_named() {
         ("A_TRUEHD", Codec::TrueHd),
         ("S_TEXT/ASS", Codec::Ass),
         ("S_HDMV/PGS", Codec::Pgs),
+        ("D_WEBVTT/SUBTITLES", Codec::WebVtt),
+        ("D_WEBVTT/CAPTIONS", Codec::WebVtt),
         ("V_QUICKTIME", Codec::Other(String::from("V_QUICKTIME"))),
     ] {
+        // Each in a track of its own kind: one whose codec is of another
+        // kind is passed over, as FFmpeg passes it over.
+        let kind = match id.as_bytes()[0] {
+            b'V' => 1,
+            b'A' => 2,
+            _ => 17,
+        };
         let entry = element(
             0xAE,
-            &[uint_element(0x83, 1), element(0x86, id.as_bytes())].concat(),
+            &[uint_element(0x83, kind), element(0x86, id.as_bytes())].concat(),
         );
         let mut file = ebml_header("matroska");
         file.extend(mkv_segment(1.0, None, &[entry]));
         assert_eq!(read(&file).tracks[0].codec, codec, "{id}");
     }
+}
+
+#[test]
+fn the_tracks_listed_are_the_tracks_the_player_reads() {
+    // The demuxer the player plays through passes over a track of a kind it
+    // does not play, one with no codec, and one whose codec is of another
+    // kind -- FFmpeg's rule. A list that showed them would offer the viewer
+    // a track that never plays.
+    let entry = |kind: u64, codec: Option<&str>| {
+        let mut fields = uint_element(0x83, kind);
+        if let Some(codec) = codec {
+            fields.extend(element(0x86, codec.as_bytes()));
+        }
+        element(0xAE, &fields)
+    };
+    // A picture that gives no size, which the player takes from the codec:
+    // listed, its size unsaid.
+    let sizeless = element(
+        0xAE,
+        &[
+            uint_element(0x83, 1),
+            element(0x86, b"V_MPEG4/ISO/AVC"),
+            element(0xE0, &[]),
+        ]
+        .concat(),
+    );
+    let tracks = [
+        mkv_video("V_VP9", 640, 360, 30),
+        entry(3, Some("V_MS/VFW/FOURCC")),
+        entry(2, None),
+        entry(2, Some("V_VP8")),
+        entry(17, Some("S_TEXT/UTF8")),
+        entry(0x21, Some("D_WEBVTT/METADATA")),
+        sizeless,
+    ];
+    let mut file = ebml_header("webm");
+    file.extend(mkv_segment(1.0, None, &tracks));
+    let p = read(&file);
+    let listed: Vec<(Kind, Codec)> = p.tracks.iter().map(|t| (t.kind, t.codec.clone())).collect();
+    assert_eq!(
+        listed,
+        [
+            (Kind::Video, Codec::Vp9),
+            (Kind::Subtitle, Codec::Text),
+            (Kind::Other, Codec::WebVtt),
+            (Kind::Video, Codec::H264),
+        ]
+    );
+    assert_eq!((p.tracks[3].width, p.tracks[3].height), (None, None));
+}
+
+#[test]
+fn a_file_cut_short_says_only_what_its_whole_header_says() {
+    let file = testing::mkv(1280, 720, 60, 24);
+    // Cut inside its first Cluster -- a download still going -- the header
+    // is whole, and all of it is read.
+    let p = read(&file[..file.len() - 5]);
+    assert_eq!(p.tracks.len(), 2);
+    assert!(close(p.duration_secs, 60.0), "{:?}", p.duration_secs);
+    // Cut inside its Tracks, the player cannot open it, and nothing is
+    // claimed for it but what it is. (The Cluster is its last 29 bytes: an
+    // ID of four, a length of eight, and a timestamp of seventeen.)
+    let p = read(&file[..file.len() - 29 - 10]);
+    assert_eq!(
+        p,
+        Probe {
+            container: Container::Matroska,
+            ..Probe::default()
+        }
+    );
+}
+
+/// A file that reads its first `good` reads and then fails, as a disk does.
+struct FailingDisk {
+    bytes: Cursor<Vec<u8>>,
+    good: usize,
+}
+
+impl io::Read for FailingDisk {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.good == 0 {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        self.good -= 1;
+        self.bytes.read(buf)
+    }
+}
+
+impl io::Seek for FailingDisk {
+    fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        self.bytes.seek(to)
+    }
+}
+
+#[test]
+fn a_matroska_file_that_cannot_be_read_is_an_error_not_an_empty_file() {
+    // The first read is the probe's look at the first bytes; the next is the
+    // demuxer's. A failure there is the disk's, and is said, not taken for a
+    // file with nothing in it.
+    let mut disk = FailingDisk {
+        bytes: Cursor::new(testing::mkv(320, 240, 2, 25)),
+        good: 1,
+    };
+    let e = probe(&mut disk).expect_err("the disk failed");
+    assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]

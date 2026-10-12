@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mahjong
+Comment=Match pairs of tiles until the board is clear
+Icon=applications-games
+Exec=mahjong
+Categories=Game;BoardGame;
+Keywords=tiles;solitaire;

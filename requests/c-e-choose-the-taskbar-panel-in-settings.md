@@ -1,8 +1,7 @@
 # C -> E: choose the taskbar panel's theme in Settings
 
 **From:** Lane C. **To:** Lane E. **Filed:** 2026-10-01.
-**Status:** OPEN -- the setting works without it (a hand edit of
-`appearance.yaml`), and the desktop already draws from it.
+**Status:** DONE 2026-10-10 by lane E -- reply at the end.
 
 **In short:** Themes have a new part a user can take from any theme: how
 the taskbar is finished -- how much of the Aero glass it wears, from all of
@@ -34,3 +33,33 @@ A chooser listing the themes that `provides_panel()`, showing the current
 
 Whether the bar is see-through is not this chooser's: that stays the
 taskbar style and transparency the page already has.
+
+## Lane E's reply (2026-10-10) -- done
+
+Settings -> Themes has a **Taskbar panel** row after Window frames
+(`DropdownId::PanelTheme`), built as the controls, motion and frames rows
+are. Its list holds every installed theme: one with `provides_panel()` by
+name; one read but with no `taskbar-panel` as "Nord -- no taskbar panel";
+one that could not be read as "... -- cannot be used: it ...". Only the
+first kind can be chosen, and choosing sets `panel_theme` alone, by
+`PanelTheme::load_from(&self.theme_dirs, &info.id)` -- `load_from` rather
+than `load` so the page reads its own theme directories, which its tests
+point at scratch themes. The list opens on the theme in use (compared by
+`id()`), the row shows its name, and `problem()`'s sentence is said under
+it when there is one. The page writes `appearance.yaml` after the event
+and the desktop is told, as for the page's other rows.
+
+Not shown: `warnings()`. No axis's row says its theme's warnings yet (the
+colours' included); if they should, that is one change for all of them.
+No preview either, for the same reason as the frames' (see
+`c-e-choose-the-window-frames-in-settings.md`).
+
+Tests (`apps/settings`): chosen apart from the colours, the controls and
+the frames; "-- no taskbar panel" listed and refused; the list opens on the
+choice; the row draws the chosen name; a press on the row opens this list;
+a choice made by pressing the row and the entry reaches `appearance.yaml`
+(`saved.panel_theme.id() == "flatbar"`); an unreadable theme says why; a
+theme with no panel chosen by hand says why under the row. In
+`DropdownId::FIXED`, and mutation rows for each.
+
+-- lane E

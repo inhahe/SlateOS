@@ -1,12 +1,15 @@
-"""Mutation test for videocodec's subtitles: Blu-ray's PGS and DVD's VobSub
-pictures, and the reader that gives their cues.
+"""Mutation test for videocodec's subtitles: Blu-ray's PGS, DVD's VobSub and
+DVB's pictures; WebVTT, TTML and CEA-608 captions in MP4, with the XML TTML
+is read from and the joining of their cues' pieces; and the reader that
+gives every format's cues.
 
-Each row puts back one way of not showing what FFmpeg shows -- a rule of its
-`pgssub` decoder dropped, a colour rounded otherwise, a crop made as FFmpeg
-makes it -- or of not giving the cues a player needs, and names the tests
-that have to notice: the fixtures' (`tests/subtitles.rs`, held to FFmpeg's
-sub2video pictures by `tests/data/generate_subtitle_fixtures.py`) and the
-module's own.
+Each row puts back one way of not showing what the reference shows -- a rule
+of FFmpeg's `pgssub` decoder dropped, a colour rounded otherwise, a crop made
+as FFmpeg makes it, a TTML time read otherwise than ttconv reads it, a
+caption command done otherwise than the FCC's rules say -- or of
+not giving the cues a player needs, and names the tests that have to notice:
+the fixtures' (`tests/subtitles.rs`, held to their references' answers by
+`tests/data/generate_subtitle_fixtures.py`) and the module's own.
 
 Breaks one piece of production code at a time and checks that the tests
 which claim to cover it are the ones that fail.  A test that passes against
@@ -28,6 +31,21 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src"
 TARGETS = ("--lib", "--test", "subtitles")
+# colour.rs's and picture.rs's rows run the unit tests and the HDR fixtures'
+# tests.
+COLOUR_TARGETS = ("--lib", "--test", "hdr")
+
+# What each video says of its light (colour.rs, tests/hdr.rs).
+HDR = "every_frame_says_its_light_as_ffmpeg_reads_it"
+HDR_TRANSFER = "unsaid_transfer_is_bt709s"
+HDR_SCALED = "the_light_is_scaled_as_ffmpeg_scales_it"
+HDR_KINDS = "the_bitstream_s_light_stands_kind_by_kind"
+HDR_UNSAID = "unspecified_and_reserved_say_nothing"
+HDR_GUESS = "hdr_is_guessed_as_chrome_guesses_it"
+SIZE_GUESS = "unsaid_colour_is_guessed_from_the_size"
+MATRIX_GUESS = "unsaid_primaries_are_the_matrix_s"
+# How each is shown (picture.rs, tests/hdr.rs): Chrome's pixels.
+CHROME = "every_first_frame_is_chrome_s"
 
 # pgs.rs's own.
 SHOWS = "a_display_set_shows_its_composition"
@@ -138,6 +156,11 @@ XML_LAUGHS = "a_doctype_is_passed_over_and_its_entities_never_read"
 XML_REFUSED = "what_is_not_well_formed_is_refused"
 XML_DEEP = "elements_nest_only_so_deep"
 XML_SCOPE_ENDS = "a_declaration_is_in_scope_until_its_element_ends"
+XML_EXPAT_LINES = "line_endings_and_white_space_are_read_as_expat_reads_them"
+XML_EDGES = "what_is_well_formed_at_the_edges_is_read"
+XML_CHARS = "the_characters_xml_allows_are_expats"
+XML_ONE_NAMESPACE = "a_namespace_is_one_string_however_many_names_are_in_it"
+XML_BORROWED = "what_is_as_written_is_borrowed"
 # The TTML fixtures'.
 TTML_MP4 = "ttml_in_mp4"
 TTML_SPLIT = "ttml_in_samples_of_two_seconds_is_joined_again"
@@ -148,6 +171,37 @@ TTML_REGIONS = "ttml_regions"
 TTML_DEFAULT = "ttml_without_regions"
 TTML_SEEK = "a_seek_in_ttml_gives_the_cues_showing_then"
 TTML_FORGETS = "a_seek_in_ttml_forgets_what_was_read"
+FORMATS = "which_formats_are_text_which_pictures_and_which_read"
+
+# CEA-608 captions (cea608.rs): the module's own.
+C_POPON = "a_pop_on_caption_shows_from_end_of_caption_to_the_erase"
+C_REPLACED = "a_caption_replaced_ends_where_the_next_begins"
+C_SAME = "the_same_caption_shown_again_ends_nothing"
+C_EXTENDED = "an_extended_character_takes_the_place_of_the_one_before"
+C_PARITY = "a_character_failing_parity_is_a_solid_block"
+C_PARITY_CODE = "a_control_code_failing_parity_is_ignored"
+C_REDUNDANT = "a_control_code_is_redundant_only_in_the_very_next_pair"
+C_CHANNEL = "another_channel_and_text_mode_show_nothing"
+C_FIRST_COLUMN = "backspace_in_the_first_column_is_nothing_and_a_full_row_overwrites_its_last"
+C_MIDROW = "mid_row_codes_are_spaces_and_a_colour_turns_italics_off"
+C_ROLL = "roll_up_rolls_its_window_and_a_line_shows_from_its_first_character"
+C_ROLL_AGAIN = "roll_up_sent_again_before_each_line_ends_nothing"
+C_ROLL_ERASES = "roll_up_erases_a_pop_on_caption"
+C_WINDOW = "a_pac_naming_another_base_row_moves_the_window_intact"
+C_BLANKED = "typing_that_leaves_the_screen_blank_ends_a_stretch"
+C_PAINT = "paint_on_shows_from_its_first_character_to_the_erase"
+C_COLUMN = "a_row_keeps_its_column_and_the_caption_its_third"
+C_ATOMS = "a_samples_pairs_are_its_field_1_atoms"
+# The CEA-608 fixtures'.
+CEA_POPON = "cea608_pop_on"
+CEA_STYLES = "cea608_styles"
+CEA_CHARS = "cea608_characters"
+CEA_ROLLUP = "cea608_roll_up"
+CEA_MODES = "cea608_switching_style_and_a_window_moved"
+CEA_PAINT = "cea608_paint_on"
+CEA_RULES = "cea608_the_rules_no_reader_keeps"
+CEA_SEEK = "a_seek_in_cea608_gives_the_screen_showing_then"
+CEA_FORGETS = "a_seek_in_cea608_forgets_the_screen_read_before"
 
 # (name, old, new, [tests that must fail])
 PICTURES = [
@@ -446,6 +500,31 @@ READER = [
         "            Reader::Ttml(_) => {}",
         [TTML_FORGETS],
     ),
+    # CEA-608 captions in MP4.
+    (
+        "CEA-608 samples are not read as captions",
+        "                || self.captions(&sample, ticks)",
+        "                || false",
+        [CEA_POPON],
+    ),
+    (
+        "the screen still showing at the track's end is lost",
+        "            let last = decoder.finish(*end);\n            self.give_caption(last);",
+        "            let _ = decoder.finish(*end);\n            self.give_caption(None);",
+        [CEA_MODES],
+    ),
+    (
+        "a seek in CEA-608 reads from the time, not before it",
+        "            ticks = time::to_ticks(time.saturating_sub(CAPTION_LOOKBACK), self.time_base);",
+        "            ticks = time::to_ticks(time, self.time_base);",
+        [CEA_SEEK],
+    ),
+    (
+        "a seek in CEA-608 keeps the screen read before it",
+        "                **decoder = cea608::Decoder::default();",
+        "                let _ = &decoder;",
+        [CEA_FORGETS],
+    ),
     (
         "TTML's cues are given without a seek's time",
         "            let (start, end) = (w.start.to_ns(), w.end.to_ns());\n            if self.kept(start, end) {",
@@ -642,7 +721,10 @@ JOINED = [
 ]
 
 # TTML: its times, its documents worked out paragraph by paragraph, its
-# styles, regions and white space, and how it is said.
+# styles, regions and white space, and how it is said. The stretches test
+# (TT_STRETCHES) holds the paragraph-by-paragraph working to the
+# whole-document one over the same parsed document, so it names only the
+# rows of the former: a document read wrongly is read wrongly by both.
 TTML = [
     # Times.
     (
@@ -680,13 +762,13 @@ TTML = [
         "a sequence's children all begin with it",
         "    let implicit_begin = if parent.seq {",
         "    let implicit_begin = if false && parent.seq {",
-        [TT_SEQ, TT_STRETCHES, TTML_TIMING, TTML_TIMING_SPLIT],
+        [TT_SEQ, TTML_TIMING, TTML_TIMING_SPLIT],
     ),
     (
         "a parallel container ends with its first child to end",
         "                        (Some(a), Some(b)) => Some(a.max(b)),",
         "                        (Some(a), Some(b)) => Some(a.min(b)),",
-        [TT_STRETCHES, TTML_TIMING],
+        [TT_LATE, TTML_TIMING],
     ),
     (
         "a container beginning late ends early, as ttconv's",
@@ -696,8 +778,8 @@ TTML = [
     ),
     (
         "an element not allowed where it is takes every one after it",
-        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    continue;",
-        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    break;",
+        "                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {\n                    continue;",
+        "                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {\n                    break;",
         [TT_NOT_ALLOWED],
     ),
     # Paragraph by paragraph.
@@ -770,20 +852,287 @@ TTML = [
     ),
 ]
 
+# CEA-608 captions: the FCC's rules for each command, the characters, what a
+# cue is, and how it is said.
+CEA608 = [
+    # Pairs.
+    (
+        "a character failing parity is shown as sent",
+        "            if !odd(b) {\n                self.put('\\u{2588}');",
+        "            if false && !odd(b) {\n                self.put('\\u{2588}');",
+        [C_PARITY, CEA_RULES],
+    ),
+    (
+        "a control code failing parity is acted on",
+        "            if !odd(b1) || !odd(b2) || self.last == Some([b1, b2]) {",
+        "            if self.last == Some([b1, b2]) {",
+        [C_PARITY_CODE, CEA_RULES],
+    ),
+    (
+        "every control code acted on twice",
+        "            if !odd(b1) || !odd(b2) || self.last == Some([b1, b2]) {",
+        "            if !odd(b1) || !odd(b2) {",
+        [C_POPON, C_REDUNDANT, CEA_POPON],
+    ),
+    (
+        "a control code repeated pairs apart is ignored",
+        "        if [b1, b2] == [0x80, 0x80] {\n            self.last = None;",
+        "        if [b1, b2] == [0x80, 0x80] {\n            let _ = self.last;",
+        [C_REDUNDANT, CEA_RULES],
+    ),
+    (
+        "another channel's captions are shown",
+        "            self.ours = c1 < 0x18;",
+        "            self.ours = true;",
+        [C_CHANNEL, CEA_RULES],
+    ),
+    (
+        "text mode's characters are captions",
+        "        if !self.ours || matches!(self.mode, Mode::Unset | Mode::Text) {",
+        "        if !self.ours || matches!(self.mode, Mode::Unset) {",
+        [C_CHANNEL, CEA_RULES],
+    ),
+    (
+        "a pop-on caption is loaded on the screen",
+        "        if self.mode == Mode::PopOn {",
+        "        if false {",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "the samples' second field read as the first",
+        '            if kind == b"cdat" {',
+        '            if kind == b"cdat" || kind == b"cdt2" {',
+        [C_ATOMS],
+    ),
+    # Characters.
+    (
+        "a mid-row code is no space",
+        "                };\n                self.put(' ');\n                false",
+        "                };\n                false",
+        [C_MIDROW, CEA_STYLES],
+    ),
+    (
+        "a colour mid-row code keeps italics",
+        "                    Style {\n                        colour: code,\n                        italic: false,\n                        underline,\n                    }\n                };\n                self.put(' ');",
+        "                    Style {\n                        colour: code,\n                        italic: self.style.italic,\n                        underline,\n                    }\n                };\n                self.put(' ');",
+        [C_MIDROW, CEA_STYLES],
+    ),
+    (
+        "a special character is the next one along",
+        "                if let Some(&ch) = SPECIAL.get(usize::from(c2 & 0x0F)) {",
+        "                if let Some(&ch) = SPECIAL.get(usize::from(c2.wrapping_add(1) & 0x0F)) {",
+        [CEA_CHARS],
+    ),
+    (
+        "an extended character backs over nothing",
+        "                self.col = self.col.saturating_sub(1);\n                let table",
+        "                let table",
+        [C_EXTENDED, CEA_CHARS],
+    ),
+    (
+        "the two extended sets swapped",
+        "                let table = EXTENDED.get(usize::from(c1 & 1));",
+        "                let table = EXTENDED.get(usize::from(!c1 & 1));",
+        [C_EXTENDED, CEA_CHARS],
+    ),
+    # Commands.
+    (
+        "a PAC's indent is not kept",
+        "            self.col = usize::from(code & 7).saturating_mul(4);",
+        "            self.col = 0;",
+        [C_COLUMN, CEA_POPON, CEA_PAINT],
+    ),
+    (
+        "a tab offset is one column short",
+        "                    .saturating_add(usize::from(c2 & 0x03))",
+        "                    .saturating_add(usize::from(c2 & 0x02))",
+        [CEA_PAINT],
+    ),
+    (
+        "a PAC in roll-up leaves the window where it was",
+        "        let moved = self.mode == Mode::RollUp && row != self.row;",
+        "        let moved = false;",
+        [C_WINDOW, CEA_MODES],
+    ),
+    (
+        "Backspace in the first column erases it",
+        "                if self.col > 0 {\n                    self.col = self.col.saturating_sub(1);",
+        "                if true {\n                    self.col = self.col.saturating_sub(1);",
+        [C_FIRST_COLUMN],
+    ),
+    (
+        "Delete to End of Row spares the cursor's column",
+        ".and_then(|r| r.get_mut(col..))",
+        ".and_then(|r| r.get_mut(col.saturating_add(1)..))",
+        [CEA_PAINT],
+    ),
+    (
+        "Roll-Up keeps a pop-on caption",
+        "                if self.mode != Mode::RollUp {\n                    *self.displayed = BLANK;",
+        "                if self.mode != Mode::RollUp {\n                    let _ = BLANK;",
+        [C_ROLL_ERASES, CEA_MODES],
+    ),
+    (
+        "a Carriage Return brings the top line back to the base row",
+        "                    rows.rotate_left(1);\n                    if let Some(last) = rows.last_mut() {\n                        *last = BLANK_ROW;\n                    }",
+        "                    rows.rotate_left(1);",
+        # The fixture's lines are none longer than the line after them, so
+        # only the unit test, whose first line is, can see this.
+        [C_ROLL],
+    ),
+    (
+        "End of Caption shows nothing",
+        "                core::mem::swap(&mut self.displayed, &mut self.hidden);",
+        "                let _ = (&self.displayed, &self.hidden);",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "Erase Displayed Memory erases nothing",
+        "            0x2C => {\n                *self.displayed = BLANK;",
+        "            0x2C => {\n                let _ = BLANK;",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "Erase Non-Displayed Memory erases nothing",
+        "            0x2E => *self.hidden = BLANK,",
+        "            0x2E => {}",
+        [CEA_POPON],
+    ),
+    # What a cue is.
+    (
+        "a command that changes nothing ends the stretch",
+        "        if after == self.screen {",
+        "        if false {",
+        [C_SAME, C_ROLL_AGAIN, CEA_ROLLUP],
+    ),
+    (
+        "typing that blanks the screen ends nothing",
+        "        if flushed || self.screen.is_empty() {",
+        "        if flushed {",
+        [C_BLANKED],
+    ),
+    (
+        "a stretch begins at the command, the screen still blank",
+        "            if !self.screen.is_empty() {\n                self.since = Some(t);\n            }",
+        "            self.since = Some(t);",
+        [CEA_ROLLUP],
+    ),
+    # How it is said.
+    (
+        "an empty cell before a character is a space SRT may drop",
+        "cell.map_or(('\\u{a0}', WHITE)",
+        "cell.map_or((' ', WHITE)",
+        [C_COLUMN, CEA_POPON],
+    ),
+    (
+        "the middle third is the bottom's",
+        "        } else if twice < 20 {\n            4",
+        "        } else if twice < 20 {\n            1",
+        [C_WINDOW, CEA_POPON, CEA_MODES],
+    ),
+    (
+        "the grid's face is not named",
+        '        w.op(Op::Face(Some("Monospace".to_owned())));',
+        "",
+        [C_COLUMN, CEA_POPON],
+    ),
+]
+
 # What TTML needs of XML.
 XML = [
+    # What a run of the document reads as.
     (
         "line endings are kept as written",
-        '        normalized = text.replace("\\r\\n", "\\n").replace(\'\\r\', "\\n");',
-        "        normalized = text.to_owned();",
-        [XML_REFERENCES],
+        "        '\\r' => true,",
+        "        '\\r' => false,",
+        [XML_REFERENCES, XML_EXPAT_LINES, XML_BORROWED],
+    ),
+    (
+        "a tab or a line feed in a value is kept",
+        "        '\\n' | '\\t' => run == Run::Value,",
+        "        '\\n' | '\\t' => false,",
+        [XML_REFERENCES, XML_EXPAT_LINES, XML_BORROWED],
+    ),
+    (
+        "a carriage return in a value is a line feed",
+        "            out.push(if run == Run::Value { ' ' } else { '\\n' });",
+        "            out.push('\\n');",
+        [XML_EXPAT_LINES],
+    ),
+    (
+        "a reference in a CDATA section is read",
+        "        '&' => run != Run::Cdata,",
+        "        '&' => true,",
+        [XML_REFERENCES, XML_BORROWED],
+    ),
+    (
+        "what is as written is copied",
+        "        return Ok(Cow::Borrowed(s));",
+        "        return Ok(Cow::Owned(s.to_owned()));",
+        [XML_BORROWED],
     ),
     (
         "an ampersand's reference is another character",
-        "            \"amp\" => '&',",
-        "            \"amp\" => '+',",
+        "        \"amp\" => '&',",
+        "        \"amp\" => '+',",
         [XML_REFERENCES, TTML_SPLIT],
     ),
+    # The characters XML allows.
+    (
+        "a character XML does not allow is read",
+        "    if !text.chars().all(is_xml_char) {",
+        "    if false {",
+        [XML_REFUSED, XML_CHARS],
+    ),
+    (
+        "a reference to a character XML does not allow is read",
+        "                .filter(|&c| is_xml_char(c))",
+        "                .filter(|&c| c != '\\0')",
+        [XML_REFUSED, XML_CHARS],
+    ),
+    (
+        "a backspace is a character XML allows",
+        "'\\0'..='\\u{8}'",
+        "'\\0'..='\\u{7}'",
+        [XML_CHARS],
+    ),
+    (
+        "a tab is a character XML refuses",
+        "'\\0'..='\\u{8}'",
+        "'\\0'..='\\u{9}'",
+        [XML_CHARS, XML_REFERENCES, XML_EXPAT_LINES],
+    ),
+    (
+        "a form feed is a character XML allows",
+        "'\\u{b}' | '\\u{c}'",
+        "'\\u{b}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+000E is a character XML allows",
+        "'\\u{e}'..='\\u{1f}'",
+        "'\\u{f}'..='\\u{1f}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+001F is a character XML allows",
+        "'\\u{e}'..='\\u{1f}'",
+        "'\\u{e}'..='\\u{1e}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+FFFE is a character XML allows",
+        "'\\u{fffe}' | '\\u{ffff}'",
+        "'\\u{ffff}'",
+        [XML_CHARS, XML_REFUSED],
+    ),
+    (
+        "U+FFFF is a character XML allows",
+        "'\\u{fffe}' | '\\u{ffff}'",
+        "'\\u{fffe}'",
+        [XML_CHARS, XML_REFUSED],
+    ),
+    # Elements, and a DOCTYPE.
     (
         "nesting goes one past the bound",
         "        if self.open.len() >= MAX_DEPTH {",
@@ -796,18 +1145,32 @@ XML = [
         "                (None, '>') => {",
         [XML_LAUGHS],
     ),
+    # An element's attributes, each once.
     (
         "an attribute written twice is read",
-        "            if !written_names.insert(attribute) {",
-        "            if !written_names.insert(attribute) && false {",
+        "            .written\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b))",
+        "            .written\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b) && false)",
+        [XML_REFUSED],
+    ),
+    (
+        "attributes written are told apart unsorted",
+        "        self.written.sort_unstable();",
+        "",
         [XML_REFUSED],
     ),
     (
         "two attributes resolving alike are read",
-        "            if !names.insert(n.clone()) {",
-        "            if !names.insert(n.clone()) && false {",
+        "            .expanded\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b))",
+        "            .expanded\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b) && false)",
         [XML_REFUSED],
     ),
+    (
+        "attributes resolved are told apart unsorted",
+        "        self.expanded.sort_unstable();",
+        "",
+        [XML_REFUSED],
+    ),
+    # Namespaces: in scope, and each one string.
     (
         "a declaration stays in scope after its element",
         "                namespaces.pop();",
@@ -823,8 +1186,57 @@ XML = [
     (
         "a prefix bound by nothing is in no namespace",
         "                None => return Err(XmlError::UnboundPrefix),",
-        "                None => String::new(),",
+        "                None => &self.none,",
         [XML_REFUSED, XML_SCOPE_ENDS],
+    ),
+    (
+        "each name its namespace's own copy",
+        "            namespace: Rc::clone(namespace),",
+        "            namespace: Rc::from(&**namespace),",
+        [XML_ONE_NAMESPACE, XML_REFUSED],
+    ),
+    (
+        "a namespace declared twice is two strings",
+        "        if let Some(known) = self.namespaces.get(uri) {\n            return Rc::clone(known);\n        }\n",
+        "",
+        [XML_ONE_NAMESPACE, XML_REFUSED],
+    ),
+    # The reserved prefixes and namespaces, and declarations' names.
+    (
+        "the xmlns prefix may be declared",
+        '        if prefix == "xmlns" {',
+        "        if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "the xml prefix may be bound to another namespace",
+        "            if uri != XML_NAMESPACE {",
+        "            if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "the xml prefix's own declaration is refused",
+        '        if prefix == "xml" {\n            if uri',
+        "        if false {\n            if uri",
+        [XML_EDGES, XML_REFUSED],
+    ),
+    (
+        "a prefix may be bound to a reserved namespace",
+        "        } else if uri == XML_NAMESPACE || uri == XMLNS_NAMESPACE {",
+        "        } else if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "a prefix may be bound to no namespace",
+        "        } else if uri.is_empty() && !prefix.is_empty() {",
+        "        } else if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "a declaration's prefix may be no name",
+        "        Some(prefix) if prefix.is_empty() || prefix.contains(':') => {",
+        "        Some(prefix) if false => {",
+        [XML_REFUSED],
     ),
 ]
 
@@ -842,6 +1254,12 @@ CONTAINER = [
         [WEBVTT_MP4],
     ),
     (
+        "MP4's CEA-608 is offered as a format not read",
+        "                        } else if t.codec == mp4::Codec::Cea608 {",
+        "                        } else if false {",
+        [CEA_POPON],
+    ),
+    (
         "MP4's TTML is offered as a format not read",
         "                        } else if t.codec == mp4::Codec::Ttml {",
         "                        } else if false {",
@@ -857,10 +1275,16 @@ LIB = [
         [OPENED],
     ),
     (
+        "CEA-608 is not text",
+        "                | Self::Cea608\n",
+        "",
+        [FORMATS],
+    ),
+    (
         "TTML is not text",
-        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml",
-        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText",
-        [TTML_MP4, TTML_DEFAULT],
+        "                | Self::Ttml\n",
+        "",
+        [FORMATS],
     ),
 ]
 
@@ -1180,6 +1604,234 @@ DVB_ROWS = [
     ),
 ]
 
+# What a picture says of its light (colour.rs).
+COLOUR = [
+    (
+        "an unsaid transfer is PQ",
+        "        transfer: said_transfer.unwrap_or(TRANSFER_BT709),",
+        "        transfer: said_transfer.unwrap_or(16),",
+        [HDR_TRANSFER],
+    ),
+    (
+        "the file's transfer stands over the bitstream's",
+        "    let said_transfer = bitstream.transfer.or(container.transfer);",
+        "    let said_transfer = container.transfer.or(bitstream.transfer);",
+        ["the_bitstream_wins_then_the_file"],
+    ),
+    (
+        "an AV1 transfer that says nothing is taken",
+        "        let transfer = said(transfer, false);",
+        "        let transfer = Some(transfer);",
+        ["av1_s_code_points_say_what_they_name"],
+    ),
+    (
+        "Matroska's transfer is not read",
+        "        let transfer = u16::try_from(c.transfer_characteristics)\n            .ok()\n            .and_then(|t| said(t, false));",
+        "        let transfer = None;",
+        [HDR, HDR_UNSAID],
+    ),
+    (
+        "MP4's transfer is not read",
+        "            said(c.transfer, false),",
+        "            None,",
+        [HDR, HDR_UNSAID],
+    ),
+    (
+        "the file's mastering display stands over the bitstream's",
+        "        mastering: bitstream.mastering.or(container.mastering),",
+        "        mastering: container.mastering.or(bitstream.mastering),",
+        [HDR, HDR_KINDS],
+    ),
+    (
+        "the file's content light level stands over the bitstream's",
+        "        content: bitstream.content.or(container.content),",
+        "        content: container.content.or(bitstream.content),",
+        [HDR, HDR_KINDS],
+    ),
+    (
+        "AV1's chromaticities are read as 24.8",
+        "let xy = |p: [u16; 2]| p.map(|v| f64::from(v) / 65536.0);",
+        "let xy = |p: [u16; 2]| p.map(|v| f64::from(v) / 256.0);",
+        [HDR],
+    ),
+    (
+        "AV1's peak is read as 0.16",
+        "max: f64::from(m.max_luminance) / 256.0,",
+        "max: f64::from(m.max_luminance) / 65536.0,",
+        [HDR],
+    ),
+    (
+        "AV1's black is read as 24.8",
+        "min: f64::from(m.min_luminance) / 16384.0,",
+        "min: f64::from(m.min_luminance) / 256.0,",
+        [HDR],
+    ),
+    (
+        "MP4's peak is over its chromaticities' scale",
+        "max: over(m.max_luminance, m.max_luminance_scale),",
+        "max: over(m.max_luminance, m.chromaticity_scale),",
+        [HDR, HDR_SCALED],
+    ),
+    (
+        "Matroska's MaxCLL past 32 bits is kept whole",
+        "    u32::try_from(v & u64::from(u32::MAX)).unwrap_or(u32::MAX)",
+        "    u32::try_from(v).unwrap_or(u32::MAX)",
+        [HDR_SCALED],
+    ),
+    (
+        "an HDR transfer's unsaid colour is guessed by the size",
+        "if said_transfer.is_some_and(|t| TRANSFERS_BT2020.contains(&t)) {",
+        "if said_transfer.is_some_and(|t| t == 0) {",
+        [HDR_GUESS],
+    ),
+    (
+        "BT.709 said does not outrank BT.2020",
+        "        let bt709 = said_matrix == Some(MATRIX_BT709) || said_primaries == Some(PRIMARIES_BT709);",
+        "        let bt709 = false;",
+        [HDR_GUESS],
+    ),
+    (
+        "unsaid primaries do not follow BT.2020's matrix",
+        "            MATRIX_BT2020_NCL | MATRIX_BT2020_CL => PRIMARIES_BT2020,",
+        "            MATRIX_BT2020_CL => PRIMARIES_BT2020,",
+        [MATRIX_GUESS],
+    ),
+    (
+        "NTSC's professional height is 488",
+        "                480 | 486 => PRIMARIES_SMPTE170M,",
+        "                480 | 488 => PRIMARIES_SMPTE170M,",
+        [SIZE_GUESS],
+    ),
+]
+
+# How an HDR picture is shown (picture.rs).
+SHOWN = [
+    (
+        "HDR is shown as ordinary video",
+        "        match colour.managed() {",
+        "        match None::<Transfer> {",
+        [CHROME],
+    ),
+    (
+        "an HDR picture's light is not read",
+        "                Some(_) => self.light(),",
+        "                Some(_) => Light::default(),",
+        [CHROME],
+    ),
+    (
+        "MaxCLL is not the light",
+        "        max_cll: light.content.map_or(0.0, |c| c.max_cll as f32),",
+        "        max_cll: 0.0,",
+        [CHROME],
+    ),
+    (
+        "the mastering display's peak is not the light",
+        "            .map_or(0.0, |l| l.max as f32),",
+        "            .map_or(0.0, |_| 0.0),",
+        [CHROME],
+    ),
+    (
+        "HDR's primaries are taken for BT.709's",
+        "Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));",
+        "Conversion::new(signal(transfer), 1, hdr_light(look.light));",
+        [CHROME],
+    ),
+]
+
+# A colour said whole, as Chrome takes it (colour.rs), and which pictures
+# take Chrome's conversion (picture.rs): the unit tests, and Chrome's own
+# pixels for twelve fixtures (tests/sdr.rs).
+SDR_TARGETS = ("--lib", "--test", "sdr")
+SDR_CHROME = "sdr_first_frames_are_chrome_s"
+WHOLE_PARTS = "a_colour_is_whole_when_every_part_is_said_and_named"
+VP9_WHOLES = "vp9_colour_spaces_are_chrome_s_wholes"
+WHOSE = "whose_whole_colour_stands_is_the_decoder_s"
+CONVERTS = "chrome_converts_whole_colours_that_are_not_srgb_s"
+
+WHOLE = [
+    (
+        "libvpx's decoder asks the bitstream first",
+        "        Prefer::File => container.whole.or(bitstream.whole),",
+        "        Prefer::File => bitstream.whole.or(container.whole),",
+        [WHOSE, SDR_CHROME],
+    ),
+    (
+        "dav1d's decoder asks the file first",
+        "        Prefer::Bitstream => bitstream.whole.or(container.whole),",
+        "        Prefer::Bitstream => container.whole.or(bitstream.whole),",
+        [WHOSE, SDR_CHROME],
+    ),
+    (
+        "a colour without its range is whole",
+        "(matrix?, primaries?, transfer?, full_range?);",
+        "(matrix?, primaries?, transfer?, full_range.unwrap_or(false));",
+        [WHOLE_PARTS, WHOSE],
+    ),
+    (
+        "a code Chrome has no name for makes a colour whole",
+        "    (named_matrix(matrix) && named_primaries(primaries) && named_transfer(transfer)).then_some(",
+        "    (named_matrix(matrix) || named_primaries(primaries) || named_transfer(transfer)).then_some(",
+        [WHOLE_PARTS],
+    ),
+    (
+        "BT.2020's constant-luminance matrix is named",
+        "    matches!(m, 0 | 1 | 4..=9 | 11)",
+        "    matches!(m, 0 | 1 | 4..=11)",
+        [WHOLE_PARTS],
+    ),
+    (
+        "Matroska's derived range is the full one",
+        "            1 | 3 => Some(false),\n            2 => Some(true),",
+        "            1 => Some(false),\n            2 | 3 => Some(true),",
+        [WHOLE_PARTS],
+    ),
+    (
+        "VP9's BT.601 is FFmpeg's BT.470BG primaries",
+        "            1 | 3 => Some((PRIMARIES_SMPTE170M, 6, MATRIX_BT601)),",
+        "            1 | 3 => Some((PRIMARIES_BT470BG, 6, MATRIX_BT601)),",
+        [VP9_WHOLES, SDR_CHROME],
+    ),
+    (
+        "VP9's BT.2020 at 8 bits takes the 10-bit curve",
+        "            _ => TRANSFER_BT709,\n        };",
+        "            _ => 14,\n        };",
+        [VP9_WHOLES],
+    ),
+    (
+        "VP9's colour space is not read whole",
+        "            whole: chrome.map(|(primaries, transfer, matrix)| Colour {",
+        "            whole: chrome.filter(|_| false).map(|(primaries, transfer, matrix)| Colour {",
+        [VP9_WHOLES, WHOSE, SDR_CHROME],
+    ),
+    (
+        "sRGB's own colour said whole is converted",
+        "        (transfer.is_hdr() || (self.whole && !srgb)).then_some(transfer)",
+        "        (transfer.is_hdr() || self.whole).then_some(transfer)",
+        [CONVERTS, SDR_CHROME],
+    ),
+    (
+        "a colour pieced together is converted",
+        "        (transfer.is_hdr() || (self.whole && !srgb)).then_some(transfer)",
+        "        (transfer.is_hdr() || !srgb).then_some(transfer)",
+        [CONVERTS],
+    ),
+]
+
+WHOLE_SHOWN = [
+    (
+        "AV1 asks the file first",
+        "            Planes::Av1(p) => (Prefer::Bitstream, ColourHint::av1(p)),",
+        "            Planes::Av1(p) => (Prefer::File, ColourHint::av1(p)),",
+        [SDR_CHROME],
+    ),
+    (
+        "VP9's depth is taken for 8 bits",
+        "ColourHint::vp9(space, full_range, picture.bit_depth()),",
+        "ColourHint::vp9(space, full_range, 8),",
+        ["vp9_s_bt2020_takes_its_curve_from_its_depth"],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -1192,11 +1844,16 @@ if __name__ == "__main__":
         (SRC / "subtitle" / "joined.rs", JOINED),
         (SRC / "subtitle" / "ttml.rs", TTML),
         (SRC / "subtitle" / "xml.rs", XML),
+        (SRC / "subtitle" / "cea608.rs", CEA608),
         (SRC / "subtitle.rs", READER),
         (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),
+        (SRC / "colour.rs", COLOUR, COLOUR_TARGETS),
+        (SRC / "picture.rs", SHOWN, COLOUR_TARGETS),
+        (SRC / "colour.rs", WHOLE, SDR_TARGETS),
+        (SRC / "picture.rs", WHOLE_SHOWN, SDR_TARGETS),
     ]
-    names = [name for _, rows in tables for name, *_ in rows]
+    names = [name for _, rows, *_ in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]
     if unmatched:
         print(f"{len(unmatched)} filter(s) name no row in any table:")
@@ -1204,9 +1861,10 @@ if __name__ == "__main__":
             print(f"  {o!r}")
         raise SystemExit(2)
     results = [0]
-    for src, rows in tables:
+    for src, rows, *targets in tables:
         mine = [o for o in only if any(o in name for name, *_ in rows)]
         if only and not mine:
             continue
-        results.append(sweep(src, rows, "videocodec", timeout=600, only=mine or None, targets=TARGETS))
+        results.append(sweep(src, rows, "videocodec", timeout=600, only=mine or None,
+                             targets=targets[0] if targets else TARGETS))
     raise SystemExit(max(results))

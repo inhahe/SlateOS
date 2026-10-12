@@ -181,3 +181,10 @@ What a caller sees:
 With the updates above, the music player can play `.mp3`, `.flac`, `.ogg`,
 `.oga` and `.opus` files through `Sound` alone; `.m4a` (AAC) waits on the
 operator's answer to open-questions F-Q9.
+
+## Update (lane F, 2026-10-09)
+
+The operator answered F-Q9: **B**, FFmpeg's fixed-point AAC decoder,
+translated and included (design-decisions §1377). When it lands, `.m4a`
+files and MP4 videos' AAC sound play through `Sound` like the rest; lane F
+will say so here.

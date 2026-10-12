@@ -7,6 +7,10 @@ description = "SlateOS Process Explorer — graphical system monitor and task ma
 pathtext = { path = "../pathtext" }
 # The keys that edit the New Task box's command line.
 textline = { path = "../textline" }
+# The right-click menu of the filter box and the New Task box's line -- Cut,
+# Copy, Paste, Delete, Select all -- held, routed and drawn as every
+# program's is.
+fieldmenu = { path = "../fieldmenu" }
 # An environment variable or a mapped file's name that is not text is shown
 # by its bytes, as escapes -- the tree's one renderer for untrusted text.
 quoting = { path = "../../userspace/quoting" }

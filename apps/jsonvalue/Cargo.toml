@@ -1,0 +1,12 @@
+[package]
+name = "jsonvalue"
+version = "0.1.0"
+edition = "2024"
+description = "The applications' one JSON reader and writer: a value tree, a parser bounded against hostile input, and a printer"
+publish = false
+
+# No dependencies: a JSON reader is text in, a tree out.
+[dependencies]
+
+[lints]
+workspace = true

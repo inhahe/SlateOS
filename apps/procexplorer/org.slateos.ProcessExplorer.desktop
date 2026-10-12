@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Process Explorer
+Comment=See the running programs and what they use
+Icon=utilities-system-monitor
+Exec=procexplorer
+Categories=System;Monitor;
+Keywords=processes;tasks;memory;cpu;

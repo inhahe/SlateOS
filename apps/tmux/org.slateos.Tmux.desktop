@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal Multiplexer
+Comment=Several terminals in one window, in panes
+Icon=utilities-terminal
+Exec=tmux-app
+Categories=System;TerminalEmulator;
+Keywords=tmux;panes;terminal;

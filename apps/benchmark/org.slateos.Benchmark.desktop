@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Benchmark
+Comment=Measure how fast this computer is
+Icon=utilities-system-monitor
+Exec=benchmark
+Categories=System;Monitor;
+Keywords=benchmark;performance;speed;

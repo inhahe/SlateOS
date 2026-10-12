@@ -51,6 +51,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, Response};
 use pathtext::ShowPath;
@@ -95,6 +96,11 @@ const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
 // limit. A cap here would be a policy ("you may not mark more than 500 lines")
 // with nothing behind it.
 const MAX_SEARCH_RESULTS: usize = 10_000;
+/// The most the search box holds, in characters: a search or a pattern is a
+/// line, and a paste of a page would be searched for at every key.
+const SEARCH_CAPACITY: usize = 1024;
+/// How far the search box's text sits inside each side of the box.
+const SEARCH_TEXT_INSET: f32 = 10.0;
 
 // ============================================================================
 // Log Level
@@ -246,8 +252,23 @@ fn parse_json_line(line: &str, line_number: usize) -> Option<LogEntry> {
         return None;
     }
 
-    // Simple JSON object parser
-    let fields = parse_json_object(trimmed)?;
+    // The applications' one JSON reader (`apps/jsonvalue`), each value as the
+    // line wrote it: a string as its text, anything else as written. A 64-bit
+    // id or a nanosecond time is shown as it is, not as the nearest `f64` to
+    // it, and `1.50` stays `1.50`. A line that is not one object -- a comma
+    // left out, more after it, cut off part-way -- is not read as one; the
+    // caller shows it as a plain line.
+    let fields: Vec<(String, String)> = jsonvalue::object_members(trimmed)
+        .ok()?
+        .into_iter()
+        .map(|member| {
+            let shown = match member.value {
+                jsonvalue::JsonValue::Str(text) => text,
+                _ => member.text.to_owned(),
+            };
+            (member.key, shown)
+        })
+        .collect();
 
     let timestamp = fields
         .iter()
@@ -332,192 +353,6 @@ fn as_millis(t: u64) -> u64 {
         t.saturating_mul(1000)
     } else {
         t
-    }
-}
-
-fn parse_json_object(s: &str) -> Option<Vec<(String, String)>> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-
-    // Skip whitespace and opening brace
-    skip_ws(&chars, &mut i);
-    if chars.get(i) != Some(&'{') {
-        return None;
-    }
-    i = i.saturating_add(1);
-
-    let mut fields = Vec::new();
-
-    loop {
-        skip_ws(&chars, &mut i);
-        if chars.get(i) == Some(&'}') {
-            break;
-        }
-
-        // Parse key
-        let key = parse_json_string(&chars, &mut i)?;
-        skip_ws(&chars, &mut i);
-        if chars.get(i) != Some(&':') {
-            return None;
-        }
-        i = i.saturating_add(1);
-        skip_ws(&chars, &mut i);
-
-        // Parse value
-        let value = parse_json_value(&chars, &mut i)?;
-        fields.push((key, value));
-
-        skip_ws(&chars, &mut i);
-        if chars.get(i) == Some(&',') {
-            i = i.saturating_add(1);
-        }
-    }
-
-    Some(fields)
-}
-
-fn skip_ws(chars: &[char], i: &mut usize) {
-    // `get` rather than a length test plus an index: one expression that
-    // cannot disagree with itself, over input this program did not write.
-    while chars.get(*i).is_some_and(char::is_ascii_whitespace) {
-        *i = i.saturating_add(1);
-    }
-}
-
-fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
-    if chars.get(*i) != Some(&'"') {
-        return None;
-    }
-    *i = i.saturating_add(1);
-
-    let mut s = String::new();
-    while let Some(&ch) = chars.get(*i) {
-        match ch {
-            '"' => {
-                *i = i.saturating_add(1);
-                return Some(s);
-            }
-            '\\' => {
-                *i = i.saturating_add(1);
-                match chars.get(*i) {
-                    Some('n') => s.push('\n'),
-                    Some('r') => s.push('\r'),
-                    Some('t') => s.push('\t'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some('/') => s.push('/'),
-                    Some('u') => {
-                        // Parse 4 hex digits
-                        *i = i.saturating_add(1);
-                        let mut hex = String::new();
-                        for _ in 0..4 {
-                            if let Some(&c) = chars.get(*i) {
-                                hex.push(c);
-                                *i = i.saturating_add(1);
-                            }
-                        }
-                        if let Ok(code) = u32::from_str_radix(&hex, 16)
-                            && let Some(ch) = char::from_u32(code)
-                        {
-                            s.push(ch);
-                        }
-                        continue;
-                    }
-                    Some(&c) => s.push(c),
-                    None => return None,
-                }
-            }
-            c => s.push(c),
-        }
-        *i = i.saturating_add(1);
-    }
-    None
-}
-
-fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
-    skip_ws(chars, i);
-    match chars.get(*i) {
-        Some('"') => parse_json_string(chars, i),
-        Some(c) if c.is_ascii_digit() || *c == '-' => {
-            let mut n = String::new();
-            while let Some(&ch) = chars.get(*i) {
-                if !(ch.is_ascii_digit() || matches!(ch, '.' | '-' | 'e' | 'E' | '+')) {
-                    break;
-                }
-                n.push(ch);
-                *i = i.saturating_add(1);
-            }
-            Some(n)
-        }
-        Some('t') => {
-            // true
-            if chars
-                .get(*i..i.saturating_add(4))
-                .map(|s| s.iter().collect::<String>())
-                == Some("true".into())
-            {
-                *i = i.saturating_add(4);
-                Some("true".into())
-            } else {
-                None
-            }
-        }
-        Some('f') => {
-            // false
-            if chars
-                .get(*i..i.saturating_add(5))
-                .map(|s| s.iter().collect::<String>())
-                == Some("false".into())
-            {
-                *i = i.saturating_add(5);
-                Some("false".into())
-            } else {
-                None
-            }
-        }
-        Some('n') => {
-            // null
-            if chars
-                .get(*i..i.saturating_add(4))
-                .map(|s| s.iter().collect::<String>())
-                == Some("null".into())
-            {
-                *i = i.saturating_add(4);
-                Some("null".into())
-            } else {
-                None
-            }
-        }
-        Some('[' | '{') => {
-            // Skip nested structures (arrays/objects) as a single string
-            let start = *i;
-            let open = *chars.get(*i)?;
-            let close = if open == '[' { ']' } else { '}' };
-            let mut depth: u32 = 1;
-            *i = i.saturating_add(1);
-            while depth > 0 {
-                let Some(&ch) = chars.get(*i) else {
-                    // Ran off the end with the structure still open: the line
-                    // is truncated, which is a thing a log file being written
-                    // to genuinely is at the moment it is read.
-                    break;
-                };
-                match ch {
-                    c if c == open => depth = depth.saturating_add(1),
-                    c if c == close => depth = depth.saturating_sub(1),
-                    '"' => {
-                        // The nested string moves `i` past its closing quote,
-                        // so this must not advance again.
-                        let _ = parse_json_string(chars, i);
-                        continue;
-                    }
-                    _ => {}
-                }
-                *i = i.saturating_add(1);
-            }
-            Some(chars.get(start..*i)?.iter().collect())
-        }
-        _ => None,
     }
 }
 
@@ -1201,6 +1036,11 @@ struct App {
     /// floor to Warn instead — the app had no input at all, so nothing had ever
     /// needed to make the distinction.
     search_focused: bool,
+    /// The search box's editor -- its caret and selection over the
+    /// filter's `search_query` -- reloaded when the query changed under it.
+    search_editor: TextInput,
+    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    search_clipboard: String,
     /// Whether the shortcut list is up.
     show_help: bool,
     /// How wide the mark is round the search box while it has the keyboard:
@@ -1301,6 +1141,8 @@ impl App {
             search_results: Vec::new(),
             current_search_result: 0,
             search_focused: false,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
         }
     }
 
@@ -1542,7 +1384,11 @@ impl App {
             }
             return EventResult::Consumed;
         }
-        // Chords first, and apart. This match reads `key.key` and nothing
+        // The search box first, while it has the keyboard: its editor's
+        // chords -- Ctrl+A, C, X and V -- are the box's, and it hands on the
+        // ones it does not answer (`handle_key_search`).
+        //
+        // Then the chords, apart. This match reads `key.key` and nothing
         // else, so a bare `Key::D` arm takes `Ctrl+D` as readily as `D`: a
         // chord nobody bound quietly raised the level floor. A chord means
         // something here or nothing at all, and the same thing while the
@@ -1550,11 +1396,14 @@ impl App {
         // someone typing a pattern reaches for. Ctrl without Alt: AltGr
         // arrives as Ctrl+Alt and types a letter -- `ł` is AltGr+L on a
         // Polish keyboard -- which is no chord, and goes to the search box.
+        if self.search_focused
+            && let Some(result) = self.handle_key_search(key)
+        {
+            return result;
+        }
+        // Chords, apart.
         if textline::is_ctrl_chord(key.modifiers) {
             return self.handle_chord(key);
-        }
-        if self.search_focused {
-            return self.handle_key_search(key);
         }
         // Any other key held with Alt or the Windows key is not this
         // window's: the Windows key's are the desktop's, and Alt+W is not
@@ -1593,7 +1442,7 @@ impl App {
                 EventResult::Consumed
             }
             Key::Slash => {
-                self.search_focused = true;
+                self.focus_search();
                 EventResult::Consumed
             }
             Key::N => self.step_search(true),
@@ -1657,33 +1506,107 @@ impl App {
         }
     }
 
-    /// Keys while the search box has focus.
-    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
-        match key.key {
-            Key::Escape | Key::Enter => {
-                self.search_focused = false;
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                if self.filter.search_query.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.update_search();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
-            _ => {
-                // What AltGr types goes in; a command's letter, which it
-                // carries as text, does not (`textline::types_into_field`).
-                if !textline::types_into_field(key) {
-                    return EventResult::Ignored;
-                }
-                self.filter.search_query.extend(key.typed());
-                self.update_search();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
+    /// Keys while the search box has focus: `None` for a Ctrl chord the box
+    /// does not answer, which is the window's (`handle_chord`) -- Ctrl+R
+    /// turns the pattern on with the box in use.
+    ///
+    /// Escape and Enter give the keyboard back. Every other key is the box's
+    /// editor's: the caret keys, Backspace and Delete at the caret, Ctrl+A,
+    /// C, X and V, and typing -- what `AltGr` types among it, and no
+    /// command's letter.
+    /// A key that changes nothing in the box -- Backspace with nothing to
+    /// delete, an arrow at the end -- is not a redraw, and a plain key the
+    /// box does not answer goes nowhere: an arrow up or down is the list's
+    /// only once the box has given the keyboard back. The box took typing at
+    /// its end and Backspace from it, and nothing else.
+    fn handle_key_search(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        if textline::is_plain(key.modifiers) && matches!(key.key, Key::Escape | Key::Enter) {
+            self.search_focused = false;
+            return Some(EventResult::Consumed);
         }
+        if self.search_editor.text() != self.filter.search_query {
+            self.search_editor.set_text(&self.filter.search_query);
+        }
+        let before = (
+            self.search_editor.cursor(),
+            self.search_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            key,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SMALL_TEXT,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        let moved = before
+            != (
+                self.search_editor.cursor(),
+                self.search_editor.selection_anchor(),
+            );
+        if self.search_editor.text() != self.filter.search_query {
+            self.filter.search_query = self.search_editor.text().to_owned();
+            self.update_search();
+            self.reanchor_selection();
+            return Some(EventResult::Consumed);
+        }
+        if edit.handled {
+            return Some(if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            });
+        }
+        if textline::is_ctrl_chord(key.modifiers) {
+            return None;
+        }
+        Some(EventResult::Ignored)
+    }
+
+    /// `/`: the search box takes the keyboard, with what it holds selected,
+    /// so typing starts a new search and an arrow key keeps the old one to
+    /// edit.
+    fn focus_search(&mut self) {
+        self.search_focused = true;
+        self.search_editor.set_text(&self.filter.search_query);
+        self.search_editor.select_all();
+    }
+
+    /// Where the search box's caret is drawn: the editor's while the box has
+    /// the keyboard (the end, if the query changed under the editor), the
+    /// start otherwise, which shows the start of what the box holds. One
+    /// answer for the drawing and for a press.
+    fn search_cursor(&self) -> text::TextCursor {
+        if !self.search_focused {
+            text::TextCursor::default()
+        } else if self.search_editor.text() == self.filter.search_query {
+            self.search_editor.cursor()
+        } else {
+            text::TextCursor::from(self.filter.search_query.len())
+        }
+    }
+
+    /// A press in the search box, drawn at `rect`, at `x`: it takes the
+    /// keyboard, with the caret under the pointer, measured against the box
+    /// as it was drawn.
+    fn press_search(&mut self, rect: Rect, x: f32) {
+        let drawn = self.search_cursor();
+        self.search_focused = true;
+        if self.search_editor.text() != self.filter.search_query {
+            self.search_editor.set_text(&self.filter.search_query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.filter.search_query,
+            drawn,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+            SMALL_TEXT,
+            FontWeightHint::Regular,
+            x - rect.x - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Switch views, reporting whether anything changed.
@@ -2184,9 +2107,9 @@ impl App {
         field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
         let line = text::line_height(SMALL_TEXT, FontWeightHint::Regular);
         let (tx, ty, tw) = (
-            search.x + 10.0,
+            search.x + SEARCH_TEXT_INSET,
             search.y + (search.h - line) / 2.0,
-            (search.w - 20.0).max(0.0),
+            (search.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
         if self.filter.search_query.is_empty() && !state.focused {
             cmds.push(RenderCommand::Text {
@@ -2200,17 +2123,23 @@ impl App {
                 overflow: TextOverflow::Ellipsis,
             });
         }
-        // The query and its caret, scrolled so the end being typed stays in
-        // view.
+        // The query, with its caret and selection where they are, scrolled
+        // so the caret stays in view. The caret was fixed at the end, the
+        // only place the keys could type. The editor's selection only while
+        // it is the box's: a query changed under it has not been reloaded
+        // into it yet.
+        let editing = self.search_focused && self.search_editor.text() == self.filter.search_query;
         let mut typed = RenderTree::new();
         textedit::draw(
             &mut typed,
             &textedit::SingleLine {
                 text: &self.filter.search_query,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: text::TextCursor::from(self.filter.search_query.len()),
-                selection_anchor: None,
+                cursor: self.search_cursor(),
+                selection_anchor: if editing {
+                    self.search_editor.selection_anchor()
+                } else {
+                    None
+                },
                 focused: state.focused,
                 x: tx,
                 y: ty,
@@ -3676,7 +3605,16 @@ impl App {
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                let target = self.frame().hit_test(event.x, event.y);
+                let frame = self.frame();
+                let target = frame.hit_test(event.x, event.y);
+                // The search box, as drawn: it takes the keyboard, with the
+                // caret under the pointer.
+                if target == Some(Target::SearchBox)
+                    && let Some(rect) = frame.rect_of(|t| *t == Target::SearchBox)
+                {
+                    self.press_search(rect, event.x);
+                    return EventResult::Consumed;
+                }
                 // A press anywhere but the search box takes the keyboard
                 // from it, including a press on nothing.
                 let unfocused =
@@ -4018,7 +3956,7 @@ mod tests {
 
     #[test]
     fn a_string_containing_braces_does_not_end_a_nested_value_early() {
-        // The scanner hands a quote to `parse_json_string`, which is what
+        // The reader (`jsonvalue`) takes a string whole, which is what
         // stops a `}` inside a message from closing the object around it.
         let mut file = LogFile::new("t.log", "/t.log");
         file.parse_content(
@@ -4613,44 +4551,52 @@ mod tests {
         assert!(parse_json_line("plain text log line", 1).is_none());
     }
 
+    /// A string is read with its escapes, a character outside the BMP from
+    /// its two halves among them -- which the log viewer's own reader
+    /// dropped, both halves, so an emoji in a message vanished.
     #[test]
-    fn test_parse_json_string_escapes() {
-        let chars: Vec<char> = r#""hello \"world\"""#.chars().collect();
-        let mut i = 0;
-        let result = parse_json_string(&chars, &mut i).unwrap();
-        assert_eq!(result, "hello \"world\"");
+    fn a_string_value_is_read_with_its_escapes() {
+        let line = r#"{"message":"say \"hi\" A 😀","level":"INFO"}"#;
+        let entry = parse_json_line(line, 1).unwrap();
+        assert_eq!(entry.message, "say \"hi\" A \u{1F600}");
     }
 
+    /// **A value is shown as the line wrote it**: a 64-bit id past what an
+    /// `f64` holds exactly, and a number with a trailing zero, are not
+    /// rewritten, and a nested value is its whole text.
     #[test]
-    fn test_parse_json_unicode_escape() {
-        let chars: Vec<char> = r#""hello\u0041""#.chars().collect();
-        let mut i = 0;
-        let result = parse_json_string(&chars, &mut i).unwrap();
-        assert_eq!(result, "helloA");
+    fn a_value_is_shown_as_the_line_wrote_it() {
+        let line = r#"{"msg":"m","trace":12345678901234567891,"ratio":1.50,"ok":true,"none":null,"tags":["a", "b"]}"#;
+        let entry = parse_json_line(line, 1).unwrap();
+        let field = |name: &str| {
+            entry
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("trace"), Some("12345678901234567891"));
+        assert_eq!(field("ratio"), Some("1.50"));
+        assert_eq!(field("ok"), Some("true"));
+        assert_eq!(field("none"), Some("null"));
+        assert_eq!(field("tags"), Some(r#"["a", "b"]"#));
     }
 
+    /// **A line that is not one object is a plain line**, shown as it is,
+    /// rather than half-read: the old reader took a missing comma in its
+    /// stride and anything after the closing brace as nothing at all.
     #[test]
-    fn test_parse_json_value_number() {
-        let chars: Vec<char> = "42".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "42");
-    }
-
-    #[test]
-    fn test_parse_json_value_true() {
-        let chars: Vec<char> = "true".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "true");
-    }
-
-    #[test]
-    fn test_parse_json_value_null() {
-        let chars: Vec<char> = "null".chars().collect();
-        let mut i = 0;
-        let result = parse_json_value(&chars, &mut i).unwrap();
-        assert_eq!(result, "null");
+    fn a_line_that_is_not_one_object_is_read_as_plain_text() {
+        for line in [
+            r#"{"msg":"a" "level":"ERROR"}"#,
+            r#"{"msg":"a"} {"msg":"b"}"#,
+        ] {
+            assert!(parse_json_line(line, 1).is_none(), "{line}");
+            let mut file = LogFile::new("t.log", "/t.log");
+            file.parse_content(line);
+            assert_eq!(file.entries.len(), 1);
+            assert_eq!(file.entries[0].message, line, "not shown as it is");
+        }
     }
 
     // --- Plain text parser tests ---
@@ -5020,7 +4966,7 @@ mod tests {
     /// the second out of the first.
     #[test]
     fn wrapping_gives_a_long_message_more_than_one_line() {
-        let long = "the quick brown fox jumps over the lazy dog and keeps going                     well past the width of any sensible log window so that there                     is certainly something to wrap here";
+        let long = "the quick brown fox jumps over the lazy dog and keeps going well past the width of any sensible log window so that there is certainly something to wrap here";
         let mut app = app_with_source("svc");
         if let Some(file) = app.files.first_mut()
             && let Some(entry) = file.entries.first_mut()
@@ -6645,6 +6591,211 @@ mod tests {
         assert!(
             caret > rect.x && caret < rect.right(),
             "the caret of a long query is at {caret}, outside the box {rect:?}"
+        );
+    }
+
+    // -- The search box edits at a caret ----------------------------------------
+
+    fn search_rect(app: &App) -> Rect {
+        app.frame()
+            .rect_of(|t| *t == Target::SearchBox)
+            .expect("the search box is drawn")
+    }
+
+    fn press_at(app: &mut App, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&typed(c));
+        }
+    }
+
+    /// The x of every caret drawn in the search box.
+    fn search_carets(app: &App) -> Vec<f32> {
+        let rect = search_rect(app);
+        app.frame()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The search box edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- it and
+    /// the selection are drawn where they are, and the list is searched
+    /// again at every edit. The box took typing at its end and Backspace
+    /// from it, and nothing else.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = App::with_sample();
+        let all = app.filtered_entries().len();
+        app.handle_event(&press(Key::Slash));
+        type_text(&mut app, "dcp");
+        assert_eq!(
+            app.handle_event(&press(Key::Left)),
+            EventResult::Consumed,
+            "a caret moved is not drawn"
+        );
+        app.handle_event(&press(Key::Left));
+        type_text(&mut app, "h");
+        assert_eq!(app.filter.search_query, "dhcp", "the caret did not move");
+        let hits = app.filtered_entries().len();
+        assert!(hits > 0 && hits < all, "the edit did not search");
+        assert_eq!(
+            app.search_results.len(),
+            hits,
+            "the edit did not count the matches again"
+        );
+        let rect = search_rect(&app);
+        let at =
+            rect.x + SEARCH_TEXT_INSET + text::measure("dh", SMALL_TEXT, FontWeightHint::Regular);
+        let carets = search_carets(&app);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `dh` it follows at {at}"
+        );
+
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.filter.search_query, "hcp", "Delete at the caret");
+        app.handle_event(&press(Key::End));
+        app.handle_event(&held(Key::Home, Modifiers::shift(), ""));
+        let line = text::line_height(SMALL_TEXT, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + SEARCH_TEXT_INSET,
+            text::measure("hcp", SMALL_TEXT, FontWeightHint::Regular),
+        );
+        assert!(
+            app.frame().commands().iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        app.handle_event(&ctrl(Key::C));
+        type_text(&mut app, "d");
+        assert_eq!(app.filter.search_query, "d", "Shift+Home did not select");
+        app.handle_event(&ctrl(Key::V));
+        assert_eq!(app.filter.search_query, "dhcp", "Ctrl+C or Ctrl+V");
+        app.handle_event(&ctrl(Key::A));
+        app.handle_event(&ctrl(Key::X));
+        assert_eq!(app.filter.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.filtered_entries().len(), all, "the cut did not search");
+        assert!(
+            app.search_results.is_empty(),
+            "the cut left the matches counted"
+        );
+        app.handle_event(&ctrl(Key::V));
+        assert_eq!(app.filter.search_query, "dhcp", "Ctrl+X took nothing");
+
+        // A press at the start of the text puts the caret there, and one
+        // past its end at its end.
+        let mid = rect.y + rect.h / 2.0;
+        press_at(&mut app, rect.x + SEARCH_TEXT_INSET + 0.5, mid);
+        type_text(&mut app, "<");
+        assert_eq!(
+            app.filter.search_query, "<dhcp",
+            "the press did not put the caret there"
+        );
+        press_at(&mut app, rect.right() - 2.0, mid);
+        type_text(&mut app, ">");
+        assert_eq!(app.filter.search_query, "<dhcp>");
+    }
+
+    /// **A key that changes nothing in the box is not a redraw, and the
+    /// list's keys wait for the box to give the keyboard back**: an arrow at
+    /// the end of the query, and Up and Down, which are the list's. A Ctrl
+    /// chord the box does not answer is the window's: Ctrl+R turns the
+    /// pattern on with the box in use.
+    #[test]
+    fn the_search_box_keeps_the_lists_keys_and_passes_the_windows_chords() {
+        let mut app = App::with_sample();
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Slash));
+        // A search with several lines to show: the networking ones.
+        type_text(&mut app, "net");
+        // After the search, which puts the selection on a line it shows.
+        let selected = app.selected_entry;
+        assert!(selected.is_some());
+        assert_eq!(
+            app.handle_event(&press(Key::Right)),
+            EventResult::Ignored,
+            "an arrow at the end is a redraw"
+        );
+        // Both ways, since the selection may stand at either end of what the
+        // search shows, where one of the two moves nothing anyway.
+        assert!(
+            app.filtered_entries().len() > 1,
+            "the search shows one line"
+        );
+        for k in [Key::Down, Key::Up] {
+            assert_eq!(app.handle_event(&press(k)), EventResult::Ignored);
+            assert_eq!(app.selected_entry, selected, "{k:?} moved the list");
+        }
+        assert!(!app.filter.regex);
+        assert_eq!(app.handle_event(&ctrl(Key::R)), EventResult::Consumed);
+        assert!(app.filter.regex, "Ctrl+R did nothing with the box in use");
+        assert!(app.search_focused);
+    }
+
+    /// **`/` selects what the box holds**, so typing starts a new search and
+    /// an arrow keeps the old one to edit.
+    #[test]
+    fn slash_selects_what_the_search_box_holds() {
+        let mut app = App::with_sample();
+        app.handle_event(&press(Key::Slash));
+        type_text(&mut app, "dhcp");
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.search_focused);
+        app.handle_event(&press(Key::Slash));
+        type_text(&mut app, "boot");
+        assert_eq!(
+            app.filter.search_query, "boot",
+            "/ did not select the search"
+        );
+    }
+
+    /// **The box edits the search it shows**, however the search came to be
+    /// in it: its editor is loaded from the query whenever a press or a key
+    /// finds the two apart, so a press lands in what is shown and a key
+    /// types after it.
+    #[test]
+    fn the_box_edits_the_search_it_shows() {
+        let mut app = App::with_sample();
+        app.filter.search_query = String::from("dhcp");
+        let rect = search_rect(&app);
+        press_at(
+            &mut app,
+            rect.x + SEARCH_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+        );
+        assert!(app.search_focused);
+        type_text(&mut app, "<");
+        assert_eq!(
+            app.filter.search_query, "<dhcp",
+            "the press missed the shown text"
+        );
+        app.filter.search_query = String::from("boot");
+        type_text(&mut app, "?");
+        assert_eq!(
+            app.filter.search_query, "boot?",
+            "the key edited another search"
         );
     }
 }

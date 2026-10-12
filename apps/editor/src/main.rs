@@ -35,6 +35,8 @@ use guitk::menubar;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::undo::{Travel, UndoHistory};
 use highlight::{HighlightState, StyledToken, Theme, Token};
 use input::FindField;
@@ -1663,6 +1665,14 @@ pub const TAB_BAR_TOP: f32 = guitk::menubar::BAR_HEIGHT;
 /// pixel only if they read the same number. [`TAB_BAR_HEIGHT`] used to be that
 /// number *and* the strip's own height -- two facts that are equal only while
 /// nothing sits above the strip, which stopped being true here.
+/// The size the find bar's fields' text is drawn at, which the caret keys
+/// and a press measure against as well.
+pub(crate) const FIND_TEXT_SIZE: f32 = 12.0;
+/// How far a find field's text sits inside each side of its box.
+pub(crate) const FIND_TEXT_INSET: f32 = 4.0;
+/// The most a find field holds, in characters: a search or a replacement
+/// is a line, and a paste of a page would be searched for at every key.
+pub(crate) const FIND_CAPACITY: usize = 4096;
 pub const TEXT_TOP: f32 = TAB_BAR_TOP + TAB_BAR_HEIGHT;
 
 /// Complete editor application state.
@@ -1722,6 +1732,12 @@ pub struct EditorState {
     pub clipboard: String,
     /// Which of the find bar's two fields the keyboard is typing into.
     pub find_field: FindField,
+    /// The find bar's editor: the caret and selection of the field the
+    /// keyboard is typing into, loaded whenever the keyboard moves to the
+    /// other field or the field's text changed under it.
+    pub(crate) find_editor: TextInput,
+    /// Which field `find_editor` holds.
+    pub(crate) find_editor_for: Option<FindField>,
     /// Where the pointer is, while it is over the window: the find bar's box
     /// under it is drawn lit.
     pub pointer: Option<(f32, f32)>,
@@ -1824,6 +1840,8 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
+            find_editor: TextInput::new(),
+            find_editor_for: None,
             pointer: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dialog: None,
@@ -2766,6 +2784,61 @@ impl EditorState {
         }
     }
 
+    /// What one of the find bar's fields holds.
+    pub(crate) fn find_text(&self, field: FindField) -> &str {
+        match field {
+            FindField::Query => &self.find.query,
+            FindField::Replace => &self.find.replace_text,
+        }
+    }
+
+    /// Where a find field's caret is: the editor's, for the field it holds
+    /// while its text is the field's; the end otherwise -- the field the
+    /// keyboard moves to types after what it holds. One answer for the
+    /// drawing and for a press.
+    pub(crate) fn find_cursor(&self, field: FindField) -> text::TextCursor {
+        let held = self.find_text(field);
+        if self.find_editor_for == Some(field) && self.find_editor.text() == held {
+            self.find_editor.cursor()
+        } else {
+            text::TextCursor::from(held.len())
+        }
+    }
+
+    /// A find field's text in its box at `rect`, with the caret -- while it
+    /// has the keyboard -- and the selection where they are, scrolled so the
+    /// caret stays in view. The two fields were plain text with no caret at
+    /// all: nothing said where typing would go, and only the end could take
+    /// it.
+    fn draw_find_text(&self, tree: &mut RenderTree, field: FindField, rect: Rect, focused: bool) {
+        let held = self.find_text(field);
+        let line = text::line_height(FIND_TEXT_SIZE, FontWeightHint::Regular);
+        let editing = self.find_editor_for == Some(field) && self.find_editor.text() == held;
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: held,
+                cursor: self.find_cursor(field),
+                selection_anchor: if editing && focused {
+                    self.find_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x: rect.x + FIND_TEXT_INSET,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: (rect.w - 2.0 * FIND_TEXT_INSET).max(0.0),
+                line_height: line,
+                font_size: FIND_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+
     fn render_find_panel(&self, tree: &mut RenderTree) {
         let panel = self.find_panel_rect();
         let (panel_x, panel_y, panel_w, panel_h) = (panel.x, panel.y, panel.w, panel.h);
@@ -2792,20 +2865,15 @@ impl EditorState {
         // they were bare fills, and nothing said which of the two the keys
         // typed into.
         let query = self.find_box(FindField::Query);
+        let query_state = self.find_box_state(FindField::Query);
         guitk::field::draw(
             tree,
             &self.palette,
             query,
-            self.find_box_state(FindField::Query),
+            query_state,
             self.focus_ring_width,
         );
-        tree.text(
-            query.x + 4.0,
-            query.y + 4.0,
-            &self.find.query,
-            self.palette.text,
-            12.0,
-        );
+        self.draw_find_text(tree, FindField::Query, query, query_state.focused);
 
         // Replace input
         tree.text(
@@ -2816,20 +2884,15 @@ impl EditorState {
             11.0,
         );
         let replace = self.find_box(FindField::Replace);
+        let replace_state = self.find_box_state(FindField::Replace);
         guitk::field::draw(
             tree,
             &self.palette,
             replace,
-            self.find_box_state(FindField::Replace),
+            replace_state,
             self.focus_ring_width,
         );
-        tree.text(
-            replace.x + 4.0,
-            replace.y + 4.0,
-            &self.find.replace_text,
-            self.palette.text,
-            12.0,
-        );
+        self.draw_find_text(tree, FindField::Replace, replace, replace_state.focused);
 
         // Match count
         // The case-sensitivity state and the key that changes it. Both were

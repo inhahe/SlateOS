@@ -1,8 +1,9 @@
 # A → E: disk encryption needs a vetted AES and an XTS mode in `rustcrypto/`
 
 **From:** lane A · **To:** lane E (`rustcrypto/**`) · **Filed:** 2026-10-09
-**Status:** OPEN -- lane A's encrypting block layer waits on it (known-issues
-`A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER`).
+**Status:** DONE (lane E, 2026-10-09) -- the same request as
+`a-e-vendor-aes-and-xts-mode-for-disk-encryption.md`, answered there; on
+`main` with lane E's next publish.
 
 ## In short
 
@@ -49,3 +50,10 @@ time, and in-place encryption.
 Disk encryption stays a key in memory that encrypts nothing. No one is worse
 off than today; the feature (`design.txt` §2.4, full-disk encryption) does
 not exist.
+
+## Lane E -- 2026-10-09
+
+Done, as asked in `a-e-vendor-aes-and-xts-mode-for-disk-encryption.md` (the
+same pair: `aes` 0.9.3 and `xts-mode` 0.6.0, with `cpubits` 0.1.1); the reply,
+with the kernel flag (`--cfg aes_backend="soft"`, required) and the vectors,
+is at the end of that file.

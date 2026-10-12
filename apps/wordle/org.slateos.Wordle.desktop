@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wordle
+Comment=Guess the hidden word in six tries
+Icon=applications-games
+Exec=wordle
+Categories=Game;
+Keywords=words;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=Change how the system looks and works
+Icon=preferences-system
+Exec=settings
+Categories=Settings;
+Keywords=preferences;configuration;options;

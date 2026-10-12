@@ -70,12 +70,37 @@
 //!
 //! Each picture is converted by its own colour description -- its matrix,
 //! primaries and range, from its bitstream, else from the file, else guessed
-//! from its size as players guess it (`colour.rs`) -- through
+//! as mpv guesses it, from the size and the matrix (`colour.rs`) -- through
 //! `gui/video/yuv`'s port of libavif's conversion, so a frame has exactly the
 //! pixels an AVIF still of the same picture would: libyuv's fixed point for
 //! BT.601, BT.709 and BT.2020, chroma upsampled bilinearly; libavif's
 //! floating point for the rest. Held to libavif itself, frame by frame
 //! (`tests/frames.rs`).
+//!
+//! The description also says what light the samples stand for -- the
+//! transfer function, BT.709's for ordinary video, PQ or HLG for HDR -- and a
+//! picture says what HDR metadata it carries ([`Picture::light`]): the
+//! display it was mastered on and how bright its content gets, AV1's metadata
+//! OBUs kind by kind over the file's (Matroska's `Colour`, MP4's `mdcv` and
+//! `clli`, VP9's `SmDm` and `CoLL`), each as FFmpeg gives it with each frame.
+//! An HDR picture is shown as Chrome shows it on an sRGB screen
+//! (design-decisions §1378): `gui/video/yuv`'s transcription of Skia's colour
+//! conversion and its tone map, by that light -- the content's peak its
+//! MaxCLL, else its mastering display's, else 1000 cd/m2 -- and BT.2020's
+//! colours carried to sRGB's; its colour unsaid is guessed as Chrome guesses
+//! it, BT.2020's for an HDR transfer. Held to the light ffprobe reads and to
+//! Chrome's pixels (`tests/hdr.rs`).
+//!
+//! An ordinary (SDR) picture whose colour is said whole -- all four parts in
+//! one place, as Chrome takes a colour: the file for VP8 and VP9, AV1's
+//! sequence header, VP9's colour space read as all four -- in primaries or
+//! a curve not sRGB's (BT.601's, which most standard-definition video says;
+//! BT.2020's; Display P3's; a power of 2.2) is converted to sRGB's as Chrome
+//! converts it (design-decisions §1381, [`Colour::converted`]). Held to
+//! Chrome's own pixels (`tests/sdr.rs`). What Chrome does with a colour
+//! said in pieces or not at all -- BT.601 at the studio range, unconverted
+//! -- is not copied: such a picture is pieced together and guessed as above
+//! (`open-questions/F-Q11.md`).
 //!
 //! # Time
 //!
@@ -97,6 +122,8 @@
 
 mod colour;
 mod container;
+#[cfg(test)]
+mod cost;
 mod decoder;
 mod orientation;
 mod picture;
@@ -150,12 +177,70 @@ impl fmt::Display for Codec {
 }
 
 /// What a file says of a track's colour, for whatever the bitstream leaves
-/// unsaid: each `None` where the file is silent. H.273's numbers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// unsaid: each `None` where the file is silent. H.273's numbers, and the
+/// HDR metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ColourHint {
     pub matrix: Option<u16>,
     pub primaries: Option<u16>,
+    pub transfer: Option<u16>,
     pub full_range: Option<bool>,
+    /// The mastering display and content light level the file says.
+    pub light: Light,
+    /// The colour said whole here, as Chrome takes it: all four parts said,
+    /// each a code Chrome names ([`Colour::whole`]); `None` where any part
+    /// is missing. Where it is not `None` it agrees with the four above,
+    /// except where Chrome reads this place differently (VP9's colour
+    /// space, whose one field Chrome takes for all four).
+    pub whole: Option<Colour>,
+}
+
+/// What a video says of its light, by which an HDR picture is mapped to the
+/// screen -- an sRGB one of no headroom, until screens say their own
+/// ([`Picture::to_frame`]): the display it was mastered on, and how bright
+/// its content gets -- each `None` where nothing says. A picture's is its
+/// bitstream's, kind by kind, else its file's ([`Picture::light`]), as FFmpeg
+/// gives it with each frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Light {
+    pub mastering: Option<MasteringDisplay>,
+    pub content: Option<ContentLightLevel>,
+}
+
+/// The display a video was mastered on (SMPTE ST 2086, HDR10's "mastering
+/// display colour volume"). A file may say either half without the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MasteringDisplay {
+    /// Its primaries and white point.
+    pub chromaticities: Option<Chromaticities>,
+    /// Its peak and black.
+    pub luminance: Option<Luminance>,
+}
+
+/// The CIE 1931 x and y of a display's red, green and blue primaries and of
+/// its white point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chromaticities {
+    pub red: [f64; 2],
+    pub green: [f64; 2],
+    pub blue: [f64; 2],
+    pub white: [f64; 2],
+}
+
+/// A display's peak and black, in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Luminance {
+    pub max: f64,
+    pub min: f64,
+}
+
+/// How bright a video's content gets (CTA-861.3), in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentLightLevel {
+    /// MaxCLL: its brightest pixel's light.
+    pub max_cll: u32,
+    /// MaxFALL: its brightest frame's average light.
+    pub max_fall: u32,
 }
 
 /// What a decoder will take on before it refuses.
@@ -299,6 +384,8 @@ pub enum SubtitleFormat {
     MovText,
     /// TTML -- IMSC 1, broadcasting's -- in MP4 (`stpp`).
     Ttml,
+    /// CEA-608 closed captions -- television's -- in MP4 (`c608`).
+    Cea608,
     /// Blu-ray's pictures of text (`S_HDMV/PGS`), read as images.
     Pgs,
     /// DVD's pictures of text (`S_VOBSUB`), read as images.
@@ -314,7 +401,13 @@ impl SubtitleFormat {
     pub const fn is_text(self) -> bool {
         matches!(
             self,
-            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml
+            Self::SubRip
+                | Self::Ass
+                | Self::Ssa
+                | Self::WebVtt
+                | Self::MovText
+                | Self::Ttml
+                | Self::Cea608
         )
     }
 
@@ -334,6 +427,7 @@ impl fmt::Display for SubtitleFormat {
             Self::WebVtt => "WebVTT",
             Self::MovText => "3GPP timed text",
             Self::Ttml => "TTML",
+            Self::Cea608 => "CEA-608",
             Self::Pgs => "PGS",
             Self::VobSub => "VobSub",
             Self::Dvb => "DVB",

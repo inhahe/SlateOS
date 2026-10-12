@@ -45,7 +45,6 @@ LEGACY = "a_legacy_incremental_is_rebuilt_from_its_chain"
 DELETED = "a_file_deleted_before_an_incremental_stays_deleted"
 MODE = "a_mode_survives_the_round_trip"
 MODE_WHOLE = "a_mode_that_is_not_whole_is_refused"
-WHOLE = "only_a_whole_number_is_a_u64"
 MONTHS = "keep_monthly_counts_calendar_months"
 STANDALONE = "a_standalone_snapshot_does_not_hold_its_parent"
 
@@ -165,12 +164,15 @@ MANIFEST = [
     ),
 ]
 
+# The JSON reader moved to apps/jsonvalue on 2026-10-09 (its own mutate.py
+# covers it); this row stays for the manifest test that leans on it, and
+# mutates the moved file -- snapstore's tests build against it.
 JSON = [
     (
         "a fraction reads as a whole number",
         "n.is_finite() && *n >= 0.0 && n.trunc() == *n && *n <= EXACT",
         "n.is_finite() && *n >= 0.0 && *n <= EXACT",
-        [WHOLE, MODE_WHOLE],
+        [MODE_WHOLE],
     ),
 ]
 
@@ -198,7 +200,7 @@ TABLES = {
     "lib.rs": LIB,
     "store.rs": STORE,
     "manifest.rs": MANIFEST,
-    "json.rs": JSON,
+    "../../jsonvalue/src/lib.rs": JSON,
     "retention.rs": RETENTION,
 }
 

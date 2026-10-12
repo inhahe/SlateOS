@@ -1,0 +1,7 @@
+# cea608_painton.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 300300000 5338666666 1
+text 0000 - "abc   def"
+break
+text 0000 - "Keep"
+break
+text 0000 - "paint ON"

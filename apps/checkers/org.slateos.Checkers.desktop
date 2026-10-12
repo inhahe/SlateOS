@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Checkers
+Comment=American checkers against the computer
+Icon=applications-games
+Exec=checkers
+Categories=Game;BoardGame;
+Keywords=draughts;board;

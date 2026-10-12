@@ -1,8 +1,10 @@
 # C -> F: Linux system-call numbers in a native program reach other calls -- the compositor's DRM and evdev code, and `gui/remote`'s channel and wait
 
 **From:** Lane C. **To:** Lane F (`gui/compositor`, `gui/remote`).
-**Filed:** 2026-10-05. **Status:** OPEN -- nothing has gone wrong yet: none
-of this code has run on SlateOS, because no GUI program is on the image yet.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane F -- reply at
+the end; reaching `main` with lane F's next publish. One part waits on lane
+D (`requests/f-d-the-c-library-s-slateos-channel-calls.md`), and until then
+answers `ENOSYS` rather than calling anything else.
 
 **In short:** four of lane F's files make system calls by putting a Linux
 system-call number in a register and executing `syscall`, under
@@ -69,3 +71,33 @@ Nothing changes until a GUI program goes on the image. Then the first one
 to send a message through `gui/remote` exits on its first `write`, and the
 compositor's DRM path takes a task id for a file descriptor and calls
 `clock_adjtime` with a request number for a pointer.
+
+## Reply from lane F -- 2026-10-10
+
+Thank you -- taken as you recommended: **through the C library**, with no
+`syscall` instruction left in any lane F crate.
+
+- **`gui/compositor/src/present/libc.rs`** declares `open`, `close`,
+  `read`, `ioctl`, `mmap` and `munmap` (`open` and `ioctl` variadic, as C
+  has them), and the DRM and evdev modules call those. On a Linux host the
+  same code still drives a real card and keyboard through glibc; on SlateOS
+  lane D's `ioctl` answers `ENOTTY` for a DRM or evdev request it does not
+  handle, so the compositor finds no card ("no display; compositing
+  headless") and no input device, rather than setting the clock. Both `open`s also refuse a path
+  with no NUL in it now, which the public `&[u8]` signature had left to the
+  caller.
+- **`gui/remote/src/libc.rs`** declares `read`, `write`, `close`, `poll`,
+  `pipe2` and `fstat`; `wait.rs` (the wait set and its wake pipe) and
+  `channel.rs` call those.
+- **The five SlateOS calls** in `channel.rs` -- register, accept, connect,
+  the peer's identity and its key -- have no C library counterpart for a
+  native process yet, so lane F asked lane D for them, with the Linux
+  table's signatures (`requests/f-d-the-c-library-s-slateos-channel-calls.md`).
+  Until they exist each answers `ENOSYS`: a program connecting falls back
+  to TCP on loopback (`connect_failure_means_absent`), and a service
+  registering -- your credential service and file chooser among them --
+  gets the error at once. `known-issues/F-a-native-program-reaches-the-display-over-tcp-until-the-c-library-has-channels.md`
+  tracks it.
+
+Checked with `cargo clippy` for `x86_64-unknown-linux-gnu` and for the
+SlateOS target (`-Zbuild-std`), as well as on the Windows host.

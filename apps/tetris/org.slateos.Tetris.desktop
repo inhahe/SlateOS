@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Tetris
+Comment=Fit the falling blocks into lines
+Icon=applications-games
+Exec=tetris
+Categories=Game;BlocksGame;
+Keywords=blocks;arcade;

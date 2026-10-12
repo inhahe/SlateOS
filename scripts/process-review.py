@@ -343,6 +343,78 @@ def backlog_section(root: Path, today: dt.date) -> str:
 # The report, and the proposals
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Context per lane: what the context trial compares
+# ---------------------------------------------------------------------------
+
+LANE_TITLE = re.compile(r"^OS ([A-F])$")
+
+
+def context_rows(db: sqlite3.Connection, since: float, price_for) -> dict[str, list[float]]:
+    """Per lane, from the usage analyzer's database since `since` (epoch
+    seconds): [API calls, context tokens summed over them, compactions, API
+    $]. A session is a lane's by its title, `OS A` to `OS F`."""
+    lane_of: dict[str, str] = {}
+    for path, title in db.execute("select path, title from titles"):
+        m = LANE_TITLE.match(title or "")
+        if m:
+            lane_of[path] = m.group(1)
+    best: dict[tuple[str, str], tuple] = {}
+    for path, req, model, inp, outp, cw5, cw1h, cr in db.execute(
+            "select path, req_id, model, inp, outp, cw5, cw1h, cr from lines "
+            "where ts > ? and req_id is not null", (since,)):
+        if path not in lane_of:
+            continue
+        row = (model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
+        if (path, req) not in best or sum(row[1:]) > sum(best[(path, req)][1:]):
+            best[(path, req)] = row
+    rows: dict[str, list[float]] = {}
+    for (path, _), (model, inp, outp, cw5, cw1h, cr) in best.items():
+        r = rows.setdefault(lane_of[path], [0, 0, 0, 0.0])
+        p_in, p_out, p_w5, p_w1h, p_r = price_for(model)
+        r[0] += 1
+        r[1] += inp + cw5 + cw1h + cr
+        r[3] += (inp * p_in + outp * p_out + cw5 * p_w5 + cw1h * p_w1h + cr * p_r) / 1e6
+    for (path,) in db.execute("select path from prompts where kind = 'compact' and ts > ?",
+                              (since,)):
+        if path in lane_of:
+            rows.setdefault(lane_of[path], [0, 0, 0, 0.0])[2] += 1
+    return rows
+
+
+def context_section(cua: Path, since: str) -> str:
+    db_path = cua / "state" / "cua.sqlite"
+    if not db_path.is_file():
+        return "## Context per lane\n\nThe usage analyzer's database is missing.\n"
+    sys.path.insert(0, str(cua))
+    try:
+        from cua import config  # type: ignore[import-not-found]
+    except ImportError:
+        return "## Context per lane\n\nThe usage analyzer could not be imported.\n"
+    db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    start = dt.datetime.fromisoformat(since).replace(tzinfo=dt.timezone.utc).timestamp()
+    rows = context_rows(db, start, config.price_for)
+    lines = ["## Context per lane",
+             "",
+             "What the context trial compares (`os/go.bat`: account c's lanes, E and F, "
+             "compact at 300k tokens from 2026-10-12; the others at 950k). A shorter "
+             "context should show as a smaller context per call and a lower cost per "
+             "commit; forgetting, as more compactions, more cost per commit, and more "
+             "review findings and failed boots (above) for the same lanes.",
+             "",
+             "| lane | API calls | context per call | compactions | API $ | commits | API $ per commit |",
+             "|---|---:|---:|---:|---:|---:|---:|"]
+    for lane in sorted(rows):
+        calls, ctx, compactions, cost = rows[lane]
+        commits = len(git("rev-list", "--no-merges", f"--since={since}",
+                          f"refs/remotes/origin/lane-{lane.lower()}").split())
+        per = f"{cost / commits:.2f}" if commits else "-"
+        lines.append(f"| {lane} | {calls} | {ctx / calls / 1000:.0f}k | {compactions} | "
+                     f"{cost:.0f} | {commits} | {per} |" if calls else
+                     f"| {lane} | 0 | - | {compactions} | 0 | {commits} | - |")
+    return "\n".join(lines) + "\n"
+
+
 def report(today: dt.date, cua: Path) -> str:
     since = (today - dt.timedelta(days=7)).isoformat()
     history = REPO / "bench" / "boot-history.jsonl"
@@ -351,8 +423,8 @@ def report(today: dt.date, cua: Path) -> str:
               "refs/remotes/origin/main")
     return "\n".join([
         f"# How SlateOS is being built: the week to {today.isoformat()}", "",
-        usage_section(cua), boot_section(rows, since), review_section(log),
-        backlog_section(REPO, today)])
+        usage_section(cua), context_section(cua, since), boot_section(rows, since),
+        review_section(log), backlog_section(REPO, today)])
 
 
 PROPOSE = """You are reviewing how an autonomous six-lane Claude development effort \
@@ -484,6 +556,26 @@ def self_test() -> int:
                            encoding="utf-8", newline="\n")
         expect("malformed history lines skipped", [r["ts"] for r in load_history(history)],
                ["a", "c"])
+        # Context per lane: requests deduplicated, sessions by their title.
+        db = sqlite3.connect(":memory:")
+        db.executescript(
+            "create table titles(path text, ts real, kind text, title text);"
+            "create table lines(path text, req_id text, ts real, model text, inp int, outp int,"
+            " cw5 int, cw1h int, cr int);"
+            "create table prompts(path text, uuid text, ts real, kind text, native int);")
+        db.executemany("insert into titles values (?, 0, 'custom-title', ?)",
+                       [("e.jsonl", "OS E"), ("x.jsonl", "something else")])
+        db.executemany("insert into lines values (?, ?, ?, 'm', ?, 0, 0, 0, ?)", [
+            ("e.jsonl", "r1", 100, 1000, 299000),   # one request, logged twice
+            ("e.jsonl", "r1", 100, 1000, 299000),
+            ("e.jsonl", "r2", 100, 0, 100000),
+            ("e.jsonl", "r0", 1, 0, 9),             # before the window
+            ("x.jsonl", "r9", 100, 0, 1)])          # not a lane
+        db.executemany("insert into prompts values (?, 'u', ?, ?, 0)",
+                       [("e.jsonl", 100, "compact"), ("e.jsonl", 100, "human")])
+        got = context_rows(db, 50, lambda m: (0, 0, 0, 0, 1.0))
+        expect("context rows", {k: v[:3] for k, v in got.items()}, {"E": [2, 400000, 1]})
+        expect("context cost", round(got["E"][3], 6), 0.399)
         # A proposal that cannot run still leaves the numbers written.
         global newest_claude
         saved = newest_claude

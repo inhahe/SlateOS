@@ -1494,6 +1494,18 @@ list moved to lane D on 2026-09-22):
     §1.3, no lane yet: the kernel applies them at process creation, Settings
     and the task manager set them).
 
+- **Requests to lane B, taken 2026-10-11:**
+  - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
+    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`, on
+    lane-a-wip until lane A's next publish: the kernel turns on only a whole
+    disk with a swap header by itself).
+  - `[ ]` `[B]` `pkg` packages say which font families they carry, so
+    Settings can offer a theme's recommended fonts
+    (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
+  - `[ ]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
+    test-module finder from `rustlex` once lane A puts one there
+    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`).
+
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**
   An operator decision of 2026-08-21 that had no roadmap entry and was found

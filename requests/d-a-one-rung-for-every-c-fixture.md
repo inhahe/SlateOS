@@ -121,24 +121,27 @@ will close them myself as each one goes on.
 | `ctest-siginfo` | -- (filed with the library reading your extended signal frame and sending through `SYS_SIGNAL_QUEUE`/`TGKILL`, 2026-10-07; `known-issues/D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE.md`); what a handler and `sigwaitinfo` are told, against Linux's answers: `raise`, `kill`, `sigqueue` and `tgkill` of itself, `setitimer`'s `SIGALRM` (`SI_KERNEL`), a child's `kill`, `sigqueue` and exit (`CLD_EXITED`, status 7), a child killed by `SIGTERM` (`CLD_KILLED`, 15), `tgkill` into another process, a zombie signalled, and the refusals; needs your extended frame, `SYS_SIGNAL_QUEUE` and `SYS_SIGNAL_TGKILL`, and must run as an ordinary user | - | 30 |
 | `ctest-tmpfile` | -- (filed with `O_TMPFILE` and `linkat` reaching your calls, 2026-10-07); a nameless file that takes writes and is in no listing, named by `linkat` with `AT_EMPTY_PATH` and through `/proc/self/fd/N`, an `O_EXCL` one never named (`ENOENT`), one closed without a name leaving nothing, and the refusals (`ENOTDIR`, `EINVAL`, `EEXIST`); needs `SYS_FS_TMPFILE` as it is since 2026-10-01 and your `SYS_FS_LINK_HANDLE`, in `/tmp/ctest-tmpfile` | file | 30 |
 | `ctest-seals` | -- (filed with `F_ADD_SEALS` and `F_GET_SEALS` reaching your calls, 2026-10-07; `known-issues/D-POSIX-FILE-SEALS-DIFFER-FROM-LINUX-IN-THREE-PLACES.md`); a write refused under `F_SEAL_WRITE`, the size held by `F_SEAL_SHRINK` and `F_SEAL_GROW`, a memfd made without `MFD_ALLOW_SEALING` starting with `F_SEAL_SEAL` and one made with `MFD_NOEXEC_SEAL` with `F_SEAL_EXEC`, and the refusals; needs your `SYS_FS_ADD_SEALS` and `SYS_FS_GET_SEALS` | file | 30 |
+| `ctest-sound` | -- (filed with the library's half of your device door, 2026-10-07; `e-ad-no-application-can-reach-the-sound-device.md`); alsa-lib's first calls, made by hand: the control device opened and naming card 0, the playback device opened (a character device, major 116), S16_LE stereo at 48 kHz negotiated, a period of silence written and `poll` saying when the ring has room, then what is the device's and what the descriptor's -- `ENOTTY` for a terminal request, `EBADFD` for a read of the control device (your point 1 in `d-a-the-device-door-s-two-gaps.md`; it fails at code 52 until then), `ESPIPE`, and `FIONBIO`, `FIOCLEX` and `FIONCLEX`; needs `SYS_DEVICE_*` and a sound card in the QEMU it runs in | - | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the seventeen after them came on 2026-10-07 -- GDB, Mono,
+says eleven; the eighteen after them came on 2026-10-07 -- GDB, Mono,
 binutils and GCC on the image, each run by the fixture named for it, and Unix
 sockets with names, shared anonymous memory, close-on-exec at a native exec,
 record locks, appends, positional I/O, timed joins, ignored signals, renicing,
-CPU affinity, each signal's record, files made with no name and file seals,
-which your `SYS_UNIX_*`, native `MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`,
-`SYS_FS_RECORD_LOCK`, `SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE`,
+CPU affinity, each signal's record, files made with no name, file seals and
+the sound card, which your `SYS_UNIX_*`, native `MAP_SHARED`,
+`SYS_PROCESS_SET_EXEC_CLOSE`, `SYS_FS_RECORD_LOCK`,
+`SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE`,
 `SYS_THREAD_JOIN_TIMEOUT`, `SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED`,
 `SYS_PROCESS_GET_PRIORITY`/`SET_PRIORITY`,
 `SYS_SCHED_SET_AFFINITY`/`GET_AFFINITY`, `SYS_CPU_CURRENT`, the extended
 signal frame, `SYS_SIGNAL_QUEUE`/`TGKILL`, `SYS_FS_TMPFILE`,
-`SYS_FS_LINK_HANDLE` and `SYS_FS_ADD_SEALS`/`GET_SEALS` made possible.
+`SYS_FS_LINK_HANDLE`, `SYS_FS_ADD_SEALS`/`GET_SEALS` and the device door
+(`SYS_DEVICE_*`) made possible.
 `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned

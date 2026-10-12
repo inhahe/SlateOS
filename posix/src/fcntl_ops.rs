@@ -876,7 +876,9 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::UnixStream
         | fdtable::HandleKind::UnixSocket
         | fdtable::HandleKind::PtyMaster
-        | fdtable::HandleKind::PtySlave => entry.handle,
+        | fdtable::HandleKind::PtySlave
+        | fdtable::HandleKind::DevicePcm
+        | fdtable::HandleKind::DeviceControl => entry.handle,
         fdtable::HandleKind::Epoll
         | fdtable::HandleKind::Timerfd
         | fdtable::HandleKind::Inotify => {
@@ -906,10 +908,10 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
             _ => {}
         }
         // And the path, as `dup` copies it: what an `*at` call resolves a
-        // name against and what `/proc/self/fd` names. Until 2026-10-07 a
-        // copy made here had none, so `openat` against an `F_DUPFD_CLOEXEC`
-        // copy of a directory -- what CPython's `os.dup` makes -- found no
-        // directory to resolve in.
+        // name against, what `/proc/self/fd` names, and the node a device's
+        // `fstat` reports. Until 2026-10-07 a copy made here had none, so
+        // `openat` against an `F_DUPFD_CLOEXEC` copy of a directory -- what
+        // CPython's `os.dup` makes -- found no directory to resolve in.
         fdtable::copy_fd_path(oldfd, new_fd);
         new_fd
     } else {

@@ -200,6 +200,22 @@ pub enum HandleKind {
     /// the kernel resolves that through `current_tty()`; the handle form is for
     /// naming a pty you are *not* running on.
     PtySlave,
+
+    /// A sound card's PCM substream, opened through lane A's device door
+    /// (`SYS_DEVICE_*`, [`crate::device_door`]): `/dev/snd/pcmC0D0p` for
+    /// playback, `/dev/snd/pcmC0D0c` for capture.
+    ///
+    /// `handle` is the kernel's PCM handle, which the process holds -- closed
+    /// at its exit, one more holder at its `fork`. `ioctl`, `read` and
+    /// `write` carry Linux's ALSA requests and transfers through to the
+    /// kernel's own handlers unchanged; `poll` asks the kernel whether the
+    /// ring has room. It does not cross `exec` or spawn yet.
+    DevicePcm,
+
+    /// The sound card's control device, `/dev/snd/controlC0`, opened through
+    /// the device door: the card's identity and its controls, through
+    /// `ioctl`. The kernel keeps nothing per open, so `handle` is always 1.
+    DeviceControl,
 }
 
 /// An entry in the file descriptor table.

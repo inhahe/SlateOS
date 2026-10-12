@@ -696,6 +696,13 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONCLEX => return set_close_on_exec(fd, false),
         _ => {}
     }
+    // A device's requests are its own: through the door to the kernel's
+    // handler for its node, the terminal requests among them -- which a sound
+    // device answers ENOTTY, as on Linux. FIONBIO is the descriptor's flag,
+    // answered here (`do_vfs_ioctl` again).
+    if crate::device_door::is_device(entry.kind) && request != FIONBIO {
+        return crate::device_door::ioctl(&entry, request, arg);
+    }
 
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
@@ -1032,6 +1039,12 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
             // No FIONREAD in eventfd's, epoll's or timerfd's file operations
             // (timerfd's ioctl knows only TFD_IOC_SET_TICKS), so the ioctl is
             // ENOTTY.
+            Err(errno::ENOTTY)
+        }
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            // A device's FIONREAD is the device's to answer, and `ioctl`
+            // hands it there before this is reached; here only so that this
+            // match stays exhaustive. ALSA's answer is the same: ENOTTY.
             Err(errno::ENOTTY)
         }
     }
@@ -3240,6 +3253,41 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(ioctl(fd, FIOCLEX, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// A sound device's requests are the device's -- a terminal request and
+    /// FIONREAD among them, which this library would otherwise answer itself
+    /// -- and FIONBIO, FIOCLEX and FIONCLEX the descriptor's. The host has no
+    /// door, so what reaches it comes back ENOSYS.
+    #[test]
+    fn a_sound_devices_requests_are_the_devices() {
+        /// `SNDRV_PCM_IOCTL_PVERSION`, `_IOR('A', 0x00, int)`.
+        const SNDRV_PCM_IOCTL_PVERSION: u64 = 0x8004_4100;
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::DevicePcm, 0x5ACD, crate::fcntl::O_RDWR)
+            .unwrap();
+        let mut word = 0i32;
+        for request in [TCGETS, TIOCGWINSZ, FIONREAD, SNDRV_PCM_IOCTL_PVERSION] {
+            crate::errno::set_errno(0);
+            assert_eq!(
+                ioctl(fd, request, (&raw mut word).cast()),
+                -1,
+                "{request:#x}"
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "{request:#x}"
+            );
+        }
+        let mut on = 1i32;
+        assert_eq!(ioctl(fd, FIONBIO, (&raw mut on).cast()), 0);
+        assert_ne!(
+            fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK,
+            0
+        );
+        assert_eq!(ioctl(fd, FIOCLEX, core::ptr::null_mut()), 0);
+        assert_eq!(fdtable::get_fd_flags(fd), Some(fdtable::FD_CLOEXEC));
+        assert!(fdtable::close_fd(fd).is_some());
     }
 
     #[test]

@@ -208,12 +208,12 @@ fn put_tagged(out: &mut [u8], prefix: &[u8], value: u64, suffix: &[u8]) -> usize
 }
 
 /// What `readlink` answers for descriptor N's link: Linux's name for the
-/// object. A file's path is the caller's (`fdtable::get_fd_path`), since
-/// only it has the table; everything else is named here. Writes as much as
-/// fits into `out` and returns the full length.
+/// object. A file's path -- and a device's, its node's -- is the caller's
+/// (`fdtable::get_fd_path`), since only it has the table; everything else is
+/// named here. Writes as much as fits into `out` and returns the full length.
 pub(crate) fn link_target_of_kind(entry: &FdEntry, out: &mut [u8]) -> Option<usize> {
     Some(match entry.kind {
-        HandleKind::File => return None,
+        HandleKind::File | HandleKind::DevicePcm | HandleKind::DeviceControl => return None,
         HandleKind::Pipe => put_tagged(out, b"pipe:[", entry.handle, b"]"),
         HandleKind::TcpStream
         | HandleKind::TcpListener
@@ -350,6 +350,9 @@ pub(crate) fn open(resolved: &[u8], flags: i32, mode: crate::types::ModeT) -> Op
             }
             let fd = if entry.kind == HandleKind::File {
                 reopen_file(n, &entry, flags)
+            } else if crate::device_door::is_device(entry.kind) {
+                // The node again, as Linux's reopen opens the device again.
+                crate::device_door::reopen(n, flags)
             } else if flags & O_DIRECTORY != 0 {
                 fail(errno::ENOTDIR)
             } else if !access_within(flags, entry.status_flags) {
@@ -858,6 +861,34 @@ mod tests {
             Ok(n) => Ok(buf[..n].to_vec()),
             Err(_) => Err(errno::get_errno()),
         }
+    }
+
+    /// A sound device's link names its node, `stat` through it finds the
+    /// node, and opening it opens the device again -- never a dup of the
+    /// descriptor. The host has no door, so there the device is not there to
+    /// open again: ENOENT, and no descriptor made.
+    #[test]
+    fn a_sound_devices_link_is_its_node() {
+        let node = b"/dev/snd/pcmC0D0p";
+        let fd =
+            crate::fdtable::alloc_fd_with_flags(HandleKind::DevicePcm, 0x5ACD, O_RDWR).unwrap();
+        crate::fdtable::store_fd_path(fd, node.as_ptr(), node.len());
+        let link = std::format!("/dev/fd/{fd}");
+        assert_eq!(readlink_of(&link, 64).unwrap(), node);
+        let st = stat_of(&link, true).unwrap();
+        assert_eq!(st.st_mode & crate::fcntl::S_IFMT, crate::fcntl::S_IFCHR);
+        assert_eq!(st.st_rdev, (116 << 8) | 16);
+        let open_count = || {
+            (0..crate::fdtable::MAX_FDS)
+                .filter_map(|n| i32::try_from(n).ok())
+                .filter(|&n| crate::fdtable::get_fd(n).is_some())
+                .count()
+        };
+        let before = open_count();
+        assert_eq!(open_errno(&link, O_RDWR), (-1, errno::ENOENT));
+        assert_eq!(open_count(), before);
+        crate::fdtable::clear_fd_path(fd);
+        assert!(crate::fdtable::close_fd(fd).is_some());
     }
 
     /// Linux's link texts, and readlink's truncation without a NUL.

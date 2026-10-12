@@ -1495,7 +1495,9 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
         // Not transferable yet either (see `inheritable_fds`): filtered out
         // before this conversion, and mapped only so that it is total.
-        HandleKind::UnixSocket => fd_handle_type::FILE,
+        HandleKind::UnixSocket | HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            fd_handle_type::FILE
+        }
     }
 }
 
@@ -1695,10 +1697,16 @@ fn inheritable_fds() -> ChildFds {
             // `requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-
             // its-bytes.md`; until then `socketpair(AF_UNIX, SOCK_STREAM)`
             // stays `UnixStream`, which does cross.
+            //
+            // A sound card's device (`DevicePcm`, `DeviceControl`) is skipped
+            // for the same reason: the kernel's map has no type for its
+            // handle, so a child that needs the card opens it itself
+            // (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
-                && entry.kind != fdtable::HandleKind::UnixSocket;
+                && entry.kind != fdtable::HandleKind::UnixSocket
+                && !crate::device_door::is_device(entry.kind);
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // Close-on-exec fds are not inherited unless an action says so.
@@ -5740,6 +5748,28 @@ mod tests {
         let _ = crate::fdtable::close_fd(9);
         posix_spawn_file_actions_destroy(&raw mut acts);
         assert_eq!(fds, [0, 1, 2]);
+    }
+
+    /// A sound card's device does not reach a child, close-on-exec or not:
+    /// the kernel's map has no type for its handle, so nothing names it
+    /// there (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
+    #[test]
+    fn a_sound_device_does_not_reach_the_child() {
+        use crate::fdtable::{HandleKind, install_fd};
+        ensure_std_fds();
+        let _ = install_fd(41, HandleKind::DevicePcm, 0x5ACD);
+        let _ = install_fd(42, HandleKind::DeviceControl, 1);
+        let child = inheritable_fds();
+        let _ = crate::fdtable::close_fd(41);
+        let _ = crate::fdtable::close_fd(42);
+        for fd in [41, 42] {
+            assert!(!child.is_open(fd), "fd {fd}");
+        }
+        // Mapped only so that the conversion is total.
+        assert_eq!(
+            kind_to_handle_type(HandleKind::DevicePcm),
+            fd_handle_type::FILE
+        );
     }
 
     /// Every descriptor from 32 up used to be dropped from every child.

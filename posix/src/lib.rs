@@ -417,6 +417,9 @@ pub(crate) mod decfloat;
 // `pwhash::des`, reached through `crypt.rs` and `gensalt.rs`; and POSIX's
 // `encrypt` and `setkey`.
 pub mod des;
+// The device door: the sound card's ALSA devices, through lane A's
+// `SYS_DEVICE_*` calls.
+pub(crate) mod device_door;
 // libxcrypt's last three crypt methods, each over its hash in `pwhash`:
 // NetBSD's sha1crypt, Solaris's SunMD5 and FreeBSD's NT; reached only
 // through `crypt.rs` and `gensalt.rs`.

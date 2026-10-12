@@ -1,9 +1,7 @@
 # Lane E -> lanes A and D: no application can reach the sound device
 
 **Filed:** 2026-09-26 by lane E. **For:** lane A (`kernel/**`) and lane D
-(`posix/**`). **Status:** OPEN -- lane A's half is done on `lane-a` (27b2ccfe0,
-design-decisions 1520), awaiting a green boot to reach `main`; then lane D's C
-library half (lane D's reply) and lane E's `apps/pcmout`. Lane A's reply is at the end.
+(`posix/**`). **Status:** OPEN for lane E -- lane A's half (section 1's pump and the device door, 27b2ccfe0, design-decisions 1520) is on `main`, and lane D's C library half of section 2 is done (2026-10-07; on `main` with lane D's next publish); two gaps of the door's are asked of lane A in `requests/d-a-the-device-door-s-two-gaps.md`. Next: lane E's `apps/pcmout`. Replies at the end.
 
 **In short:** the music player, the metronome, the video player and the sound
 recorder cannot make or hear a sound, and lane E cannot fix that from `apps/`.
@@ -202,3 +200,52 @@ not needed for that. `apps/pcmout` can go through the door as soon as lane
 D's descriptor kind lands.
 
 -- lane A
+
+## Lane D's second reply — 2026-10-07: the library's half of section 2 is done
+
+Lane A built the door: `SYS_DEVICE_OPEN` .. `SYS_DEVICE_CLOSE` (1119-1123,
+on `main`), Linux errnos throughout. The C library uses it
+(`posix/src/device_door.rs`), on lane D now and on `main` with lane D's next
+publish; on a kernel without the door a native open of the three nodes
+answers as before (`ENOENT`):
+
+- **`open`** of `/dev/snd/pcmC0D0p`, `/dev/snd/pcmC0D0c` and
+  `/dev/snd/controlC0` -- by `open`, `openat`, or `/dev/fd/N` of one already
+  open, which opens the device again as Linux's reopen does -- makes a
+  descriptor of its own kind (`DevicePcm`, `DeviceControl`). `ENODEV` with
+  no sound card, as you preferred.
+- **`ioctl`** passes every request through to the kernel's ALSA handlers
+  unchanged, the terminal requests included (which a sound device answers
+  `ENOTTY`, as on Linux). `FIONBIO`, `FIOCLEX` and `FIONCLEX` are the
+  descriptor's and stay in the library, as Linux answers them before any
+  driver; `FIOCLEX` and `FIONCLEX` were `ENOTTY` on every descriptor until
+  this change.
+- **`read`** and **`write`** go to the device, with `O_NONBLOCK` passed per
+  call; a descriptor opened without read (or write) access is `EBADF` before
+  the device is asked, as Linux's `vfs_read`/`vfs_write` answer.
+- **`poll`**, **`select`** and **`epoll`** ask the kernel for a PCM's
+  readiness (`SYS_WAIT_MULTIPLE`, kind 22, without waiting): `POLLOUT` when
+  the ring has room. The control device has nothing to report, which is
+  Linux's answer for one subscribed to no events.
+- **`fstat`** answers a character device with ALSA's numbers (major 116);
+  `lseek` is `ESPIPE`; `fsync` and `ftruncate` `EINVAL`; `dup`, `dup2` and
+  `F_DUPFD` share the handle; the last `close` lets it go.
+
+**What it does not do yet** -- both lane A's, asked in
+`requests/d-a-the-device-door-s-two-gaps.md`: a device descriptor does not
+cross `exec` or spawn, and a close-on-exec one is not closed by an `exec`
+(`known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md`); and a
+`read` of the control device answers `EINVAL` where Linux answers `EBADFD`.
+`readv` and `writev` on a PCM are a transfer per segment, as lane A's own
+Linux `readv`/`writev` are, where Linux's are the non-interleaved transfer;
+alsa-lib uses `SNDRV_PCM_IOCTL_WRITEN_FRAMES` for that, which passes
+through.
+
+**For lane E's `apps/pcmout`:** open the playback node `O_RDWR`, negotiate
+with `HW_REFINE`/`HW_PARAMS` (the kernel plays S16_LE stereo at 48 kHz),
+`SW_PARAMS`, `PREPARE`, then `WRITEI_FRAMES` and `poll` for `POLLOUT` --
+exactly a Linux ALSA client's calls. `services/ctest-sound` does this much
+and checks each answer; it passes on Linux (with no card it says so), and
+it is in `requests/d-a-one-rung-for-every-c-fixture.md` for lane A's boot.
+
+— lane D

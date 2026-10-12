@@ -676,6 +676,13 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             let bits = status as u64;
             ((bits & 0x1) != 0, (bits & 0x2) != 0, false, false)
         }
+
+        // A sound card's devices: the kernel's word for a PCM's ring, asked
+        // without waiting; nothing to report for the control device
+        // (`crate::device_door::readiness` says why).
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            crate::device_door::readiness(kind, handle)
+        }
     }
 }
 
@@ -1509,6 +1516,38 @@ mod tests {
         assert!(w);
         assert!(!h);
         assert!(!e);
+    }
+
+    /// A sound card's control device has nothing to report -- Linux's
+    /// `snd_ctl_poll` for one subscribed to no events -- so `poll` of it with
+    /// no time answers 0. A PCM is the kernel's to say, and a kernel that
+    /// cannot (the host has none) releases its caller: readable, hung up and
+    /// in error.
+    #[test]
+    fn a_sound_device_polls_as_the_kernel_says() {
+        assert_eq!(
+            check_readiness(fdtable::HandleKind::DeviceControl, 1),
+            (false, false, false, false)
+        );
+        assert_eq!(
+            check_readiness(fdtable::HandleKind::DevicePcm, 7),
+            (true, false, true, true)
+        );
+        let ctl = fdtable::alloc_fd_with_flags(
+            fdtable::HandleKind::DeviceControl,
+            1,
+            crate::fcntl::O_RDWR,
+        )
+        .expect("fd table full");
+        let mut p = Pollfd {
+            fd: ctl,
+            events: POLLIN | POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid `Pollfd`, as `nfds` says.
+        assert_eq!(unsafe { poll(&raw mut p, 1, 0) }, 0);
+        assert_eq!(p.revents, 0);
+        assert!(fdtable::close_fd(ctl).is_some());
     }
 
     // -- is_set_in comprehensive --

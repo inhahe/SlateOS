@@ -1259,6 +1259,35 @@ pub const UNIX_ADDR_LEN: usize = 116;
 /// then the sender's address as a [`UNIX_ADDR_LEN`]-byte record.
 pub const UNIX_RECV_INFO_LEN: usize = 144;
 
+// The device door (1119-1123): the Linux device ABI, reached natively --
+// today the sound card's ALSA nodes, which `crate::device_door` opens and
+// drives. Every call answers as the device does: a value of 0 or more, or a
+// negated Linux errno; an interrupted wait answers the native restart
+// sentinel. Mirrors kernel/src/syscall/number.rs on lane-a (the block above
+// `SYS_DEVICE_OPEN`).
+/// `SYS_DEVICE_OPEN(path_ptr, path_len)` -- open a device node by its path;
+/// returns the handle, and its kind as the second value. `ENOENT` for a path
+/// the door does not serve, `ENODEV` when the device is absent.
+pub const SYS_DEVICE_OPEN: u64 = 1119;
+/// `SYS_DEVICE_IOCTL(kind, handle, request, arg, flags)` -- one request, as
+/// a Linux `ioctl(fd, request, arg)` on the node (`request`'s low 32 bits).
+pub const SYS_DEVICE_IOCTL: u64 = 1120;
+/// `SYS_DEVICE_READ(kind, handle, buf, len, flags)` -- as `read(2)` on the
+/// node.
+pub const SYS_DEVICE_READ: u64 = 1121;
+/// `SYS_DEVICE_WRITE(kind, handle, buf, len, flags)` -- as `write(2)` on the
+/// node: a blocking PCM write waits until all of it is queued.
+pub const SYS_DEVICE_WRITE: u64 = 1122;
+/// `SYS_DEVICE_CLOSE(kind, handle)` -- let go of the handle.
+pub const SYS_DEVICE_CLOSE: u64 = 1123;
+
+/// `SYS_WAIT_MULTIPLE(items_ptr, count, timeout_ns)` -- wait until any of
+/// `count` 24-byte items (handle u64, kind u32, events u32, revents u32, four
+/// bytes of padding) is ready: `kind` a kernel resource type, the event bits
+/// Linux's `poll` bits. A timeout of 0 asks once without waiting, `u64::MAX`
+/// waits for as long as it takes. Returns how many items fired.
+pub const SYS_WAIT_MULTIPLE: u64 = 1066;
+
 // Futexes (IPC range 210-219)
 pub const SYS_FUTEX_WAIT: u64 = 210;
 pub const SYS_FUTEX_WAKE: u64 = 211;

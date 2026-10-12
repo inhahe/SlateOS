@@ -121,6 +121,12 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     if let Some(fd) = crate::fdname::open(resolved, flags, mode) {
         return fd;
     }
+    // The sound card's nodes, through lane A's device door
+    // (`crate::device_door`); on a kernel without the door, the filesystem's
+    // answer below.
+    if let Some(fd) = crate::device_door::open(resolved, flags) {
+        return fd;
+    }
     open_resolved(resolved, flags, mode)
 }
 
@@ -375,6 +381,10 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             0
         }
         HandleKind::PtyMaster | HandleKind::PtySlave => close_pty_handle(entry.handle),
+        // A device's answer is a Linux errno, which the door sets itself.
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            return crate::device_door::close(entry.kind, entry.handle);
+        }
     };
 
     errno::translate(ret) as i32
@@ -427,6 +437,10 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         HandleKind::Eventfd => return read_eventfd(fd, entry.handle, buf, count),
         HandleKind::Timerfd => return read_timerfd(fd, entry.handle, buf, count, mark),
         HandleKind::Inotify => return read_inotify(fd, entry.handle, buf, count, mark),
+        // A device answers its own count and buffer, as its Linux driver does.
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            return crate::device_door::read(&entry, buf, count);
+        }
         HandleKind::Epoll => {
             // An epoll file has no read: EINVAL whatever the count or buffer
             // (`vfs_read`'s FMODE_CAN_READ, ahead of `access_ok`).
@@ -565,7 +579,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Eventfd
-        | HandleKind::Inotify => {
+        | HandleKind::Inotify
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => {
             // Answered before the buffer was looked at, above; here only so
             // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
@@ -822,6 +838,10 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
     // `read`).
     match entry.kind {
         HandleKind::Eventfd => return write_eventfd(entry.handle, buf, count),
+        // A device answers its own count and buffer, as its Linux driver does.
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            return crate::device_door::write(&entry, buf, count);
+        }
         HandleKind::Timerfd | HandleKind::Epoll => {
             // No write: EINVAL whatever the count or buffer (`vfs_write`'s
             // FMODE_CAN_WRITE, ahead of `access_ok`).
@@ -970,7 +990,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::Eventfd => {
+        | HandleKind::Eventfd
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => {
             // Answered before the buffer was looked at, above; here only so
             // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
@@ -1152,7 +1174,9 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => {
+        | HandleKind::PtySlave
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -1839,12 +1863,17 @@ pub(crate) fn plan_rw_flags(flags: i32, is_write: bool, has_iter: bool) -> Resul
 /// It decides which `RWF_*` flags the vectored calls take (see
 /// [`plan_rw_flags`]) and whether kernel AIO may read or write it at all
 /// (`aio_read`'s `EINVAL`).  eventfd has `read_iter` and a plain `.write`;
-/// timerfd and inotify have a plain `.read` and no write; epoll has neither.
-/// Files, pipes, sockets and terminals have both.
+/// timerfd and inotify have a plain `.read` and no write; epoll has neither,
+/// and nor has the sound card's control device (a plain `.read`, no write).
+/// Files, pipes, sockets, terminals and a sound card's PCM have both.
 pub(crate) fn has_iter_ops(kind: HandleKind, is_write: bool) -> bool {
     match kind {
         HandleKind::Eventfd => !is_write,
-        HandleKind::Timerfd | HandleKind::Inotify | HandleKind::Epoll => false,
+        HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::Epoll
+        | HandleKind::DeviceControl => false,
+        HandleKind::DevicePcm => true,
         HandleKind::File
         | HandleKind::Pipe
         | HandleKind::Console
@@ -2098,6 +2127,18 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            // Share the handle, as a pipe's: the kernel has no dup for a
+            // device, and `close` lets it go only at its last descriptor.
+            // The path goes with it, for `fstat` and `/proc/self/fd`.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(entry.kind, entry.handle, src_status) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
     }
 }
 
@@ -2141,7 +2182,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => entry.handle,
+        | HandleKind::PtySlave
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => entry.handle,
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Share the epoll/timerfd/inotify instance.  No addref
             // needed: dup2 calls is_handle_referenced() before tearing
@@ -2558,6 +2601,27 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            // The node the descriptor was opened by: a character device of
+            // ALSA's, with Linux's numbers (`device_door::stat_of`) -- which
+            // is how a program, alsa-lib's checks among them, tells which
+            // device a descriptor is.
+            let mut path = [0u8; crate::unistd::PATH_MAX];
+            let len = fdtable::get_fd_path(fd, &mut path);
+            let (mode, rdev) = path
+                .get(..len)
+                .and_then(crate::device_door::stat_of)
+                .unwrap_or((crate::fcntl::S_IFCHR | 0o660, 0));
+            // SAFETY: buf validity checked above.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 1);
+                (*buf).st_mode = mode;
+                (*buf).st_rdev = rdev;
+                (*buf).st_nlink = 1;
+                (*buf).st_blksize = 4096;
+            }
+            0
+        }
     }
 }
 
@@ -2895,7 +2959,9 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => {
+        | HandleKind::PtySlave
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -2942,7 +3008,9 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => {
+        | HandleKind::PtySlave
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -3086,6 +3154,12 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
             0
         }
         HandleKind::PtyMaster | HandleKind::PtySlave => close_pty_handle(handle),
+        // Released without a word: the door's answer is a Linux errno, not
+        // a native code, and nobody reads it (see `release`).
+        HandleKind::DevicePcm | HandleKind::DeviceControl => {
+            crate::device_door::release(kind, handle);
+            0
+        }
     }
 }
 
@@ -5726,7 +5800,9 @@ fn fallocate_on(
         | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => return Err(errno::ENODEV),
+        | HandleKind::PtySlave
+        | HandleKind::DevicePcm
+        | HandleKind::DeviceControl => return Err(errno::ENODEV),
     }
     let (kind, size, blocks, blksize) = file.stat()?;
     match kind {
@@ -8224,8 +8300,9 @@ pub(crate) fn plan_resolve(resolve: u64) -> ResolvePlan {
 /// through the filesystem: `/dev/ptmx` and `/dev/pts/<n>`.
 ///
 /// The gate is factored out so [`open_pty_device`] and [`openat2_forward`]
-/// cannot disagree about which names are libc-internal — the second refuses
-/// exactly the set the first claims.
+/// cannot disagree about which names are libc-internal — the second hands
+/// exactly the set the first claims to it, or refuses it under a `RESOLVE_*`
+/// restriction.
 pub(crate) fn is_pty_device_path(resolved: &[u8]) -> bool {
     resolved == b"/dev/ptmx" || resolved.starts_with(b"/dev/pts/")
 }
@@ -8311,14 +8388,28 @@ fn openat2_forward_inner(
         return open_tmpfile(resolved.get(..resolved_len).unwrap_or(&[]), posix_flags);
     }
 
-    // `/dev/ptmx` and `/dev/pts/<n>` are answered inside this libc and do not
-    // exist in the kernel's namespace at all.  Forwarding one would come back
-    // ENOENT — a lie, because the file does exist to this caller — so the
-    // honest answer is that a walk cannot be confined to something the walker
-    // does not have.
-    if is_pty_device_path(resolved.get(..resolved_len).unwrap_or(&[])) {
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
+    // `/dev/ptmx` and `/dev/pts/<n>` are answered inside this libc, and the
+    // sound card's nodes through the kernel's device door rather than its
+    // namespace: none of them is in the kernel's namespace at all. A plain
+    // `openat` (no `RESOLVE_*`) opens them as `open` does -- until
+    // 2026-10-07 a pty name was refused here too, so `openat(devfd, "ptmx")`
+    // answered EOPNOTSUPP. A restricted walk is refused: forwarding one would
+    // come back ENOENT -- a lie, because the file does exist to this caller --
+    // so the honest answer is that a walk cannot be confined to something the
+    // walker does not have.
+    let name = resolved.get(..resolved_len).unwrap_or(&[]);
+    if is_pty_device_path(name) || crate::device_door::node(name).is_some() {
+        if k_resolve != 0 {
+            errno::set_errno(errno::EOPNOTSUPP);
+            return -1;
+        }
+        if let Some(fd) = open_pty_device(name, posix_flags) {
+            return fd;
+        }
+        if let Some(fd) = crate::device_door::open(name, posix_flags) {
+            return fd;
+        }
+        // A kernel without the door: its walk answers for the name, below.
     }
 
     let native_flags = translate_open_flags(posix_flags);
@@ -10264,6 +10355,8 @@ mod tests {
             HandleKind::TcpStream,
             HandleKind::UnixStream,
             HandleKind::PtySlave,
+            HandleKind::DevicePcm,
+            HandleKind::DeviceControl,
         ] {
             assert_eq!(
                 fallocate_on(&alloc_entry(kind, fcntl::O_RDWR), &file, 0, 0, 4096),
@@ -12003,10 +12096,10 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
-    /// What has no storage -- a pipe, a socket, a terminal, an eventfd -- has
-    /// nothing to sync: `fsync` and `fdatasync` answer EINVAL, as Linux's
-    /// `vfs_fsync_range` does with no `fsync` operation, and
-    /// `sync_file_range` answers ESPIPE first. All three answered 0 until
+    /// What has no storage -- a pipe, a socket, a terminal, an eventfd, a
+    /// sound device -- has nothing to sync: `fsync` and `fdatasync` answer
+    /// EINVAL, as Linux's `vfs_fsync_range` does with no `fsync` operation,
+    /// and `sync_file_range` answers ESPIPE first. All three answered 0 until
     /// 2026-10-06 (`sync_file_range` by way of `fsync`).
     #[test]
     fn what_has_no_storage_has_nothing_to_sync() {
@@ -12018,6 +12111,8 @@ mod tests {
             HandleKind::Eventfd,
             HandleKind::UnixStream,
             HandleKind::PtySlave,
+            HandleKind::DevicePcm,
+            HandleKind::DeviceControl,
         ] {
             let fd = fdtable::alloc_fd_with_flags(kind, 0x5359, crate::fcntl::O_RDWR)
                 .expect("fd table full");
@@ -12032,6 +12127,104 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE, "{kind:?}");
             assert!(fdtable::close_fd(fd).is_some());
         }
+    }
+
+    /// A sound card's device, as its Linux node answers: a character device
+    /// with ALSA's numbers, which does not seek; the descriptor's access mode
+    /// decides whether a transfer reaches the device at all; `dup` and
+    /// `F_DUPFD` share the handle and keep the node; and only the last close
+    /// lets the handle go. The host has no kernel, so what reaches the door
+    /// comes back ENOSYS -- which is how these tell that it did.
+    #[test]
+    fn a_sound_device_descriptor_answers_as_its_linux_node() {
+        use crate::errno::{self, get_errno, set_errno};
+        use crate::fcntl::{O_RDONLY, O_RDWR, O_WRONLY, S_IFCHR, S_IFMT};
+        let node = b"/dev/snd/pcmC0D0p";
+        let open_as = |status, handle| {
+            let fd = fdtable::alloc_fd_with_flags(HandleKind::DevicePcm, handle, status)
+                .expect("fd table full");
+            fdtable::store_fd_path(fd, node.as_ptr(), node.len());
+            fd
+        };
+        let fd = open_as(O_RDWR, 0x5ACD);
+
+        let mut st = crate::stat::Stat::zeroed();
+        assert_eq!(fstat(fd, &raw mut st), 0);
+        assert_eq!(st.st_mode & S_IFMT, S_IFCHR);
+        assert_eq!(st.st_mode & 0o777, 0o660);
+        assert_eq!(st.st_rdev, (116 << 8) | 16);
+        assert_eq!(st.st_nlink, 1);
+
+        let mut byte = 0u8;
+        set_errno(0);
+        assert_eq!(lseek(fd, 0, crate::fcntl::SEEK_SET), -1);
+        assert_eq!(get_errno(), errno::ESPIPE);
+        set_errno(0);
+        assert_eq!(pread(fd, &raw mut byte, 1, 0), -1);
+        assert_eq!(get_errno(), errno::ESPIPE);
+        set_errno(0);
+        assert_eq!(ftruncate(fd, 0), -1);
+        assert_eq!(get_errno(), errno::EINVAL);
+
+        // A transfer reaches the device -- a zero count and a null buffer
+        // too, which its driver answers, not this library ...
+        set_errno(0);
+        assert_eq!(read(fd, &raw mut byte, 1), -1);
+        assert_eq!(get_errno(), errno::ENOSYS);
+        set_errno(0);
+        assert_eq!(write(fd, &raw const byte, 1), -1);
+        assert_eq!(get_errno(), errno::ENOSYS);
+        set_errno(0);
+        assert_eq!(read(fd, core::ptr::null_mut(), 0), -1);
+        assert_eq!(get_errno(), errno::ENOSYS);
+        // ... unless the descriptor was not opened for it: EBADF first.
+        let wo = open_as(O_WRONLY, 0x5ACE);
+        let ro = open_as(O_RDONLY, 0x5ACE);
+        set_errno(0);
+        assert_eq!(read(wo, &raw mut byte, 1), -1);
+        assert_eq!(get_errno(), errno::EBADF);
+        set_errno(0);
+        assert_eq!(write(ro, &raw const byte, 1), -1);
+        assert_eq!(get_errno(), errno::EBADF);
+        // `wo` shares its handle with `ro`: its close asks the kernel nothing.
+        assert_eq!(close(wo), 0);
+        set_errno(0);
+        assert_eq!(close(ro), -1, "the handle's last close reaches the door");
+        assert_eq!(get_errno(), errno::ENOSYS);
+
+        // dup and F_DUPFD share the handle, and keep the node.
+        let d = dup(fd);
+        let f = crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_DUPFD_CLOEXEC, 10);
+        assert!(d >= 0 && f >= 10, "{d} {f}");
+        for copy in [d, f] {
+            let e = fdtable::get_fd(copy).expect("open");
+            assert_eq!((e.kind, e.handle), (HandleKind::DevicePcm, 0x5ACD));
+            let mut st = crate::stat::Stat::zeroed();
+            assert_eq!(fstat(copy, &raw mut st), 0);
+            assert_eq!(st.st_rdev, (116 << 8) | 16, "fd {copy}");
+        }
+        assert_eq!(close(d), 0);
+        assert_eq!(close(f), 0);
+        set_errno(0);
+        assert_eq!(close(fd), -1, "the handle's last close reaches the door");
+        assert_eq!(get_errno(), errno::ENOSYS);
+        assert!(fdtable::get_fd(fd).is_none());
+    }
+
+    /// `dup2` over a sound device's last descriptor lets its handle go
+    /// without a word: Linux reports the evicted file's close to no one, so
+    /// the `dup2` that succeeded leaves errno as it was.
+    #[test]
+    fn dup2_over_a_sound_device_says_nothing_of_its_close() {
+        let dev = fdtable::alloc_fd_with_flags(HandleKind::DeviceControl, 1, crate::fcntl::O_RDWR)
+            .expect("fd table full");
+        let src = fdtable::alloc_fd_with_flags(HandleKind::Pipe, 0x77, crate::fcntl::O_RDONLY)
+            .expect("fd table full");
+        crate::errno::set_errno(1234);
+        assert_eq!(dup2(src, dev), dev);
+        assert_eq!(crate::errno::get_errno(), 1234);
+        assert_eq!(fdtable::get_fd(dev).map(|e| e.kind), Some(HandleKind::Pipe));
+        assert!(fdtable::close_fd(dev).is_some() && fdtable::close_fd(src).is_some());
     }
 
     #[test]
@@ -14393,6 +14586,40 @@ mod tests {
             &how,
             core::mem::size_of::<OpenHow>(),
         );
+    }
+
+    /// A walk confined by `RESOLVE_*` cannot be confined to a name the
+    /// kernel's namespace has not got -- a pty's, which this library answers,
+    /// or the sound card's, which the device door does: EOPNOTSUPP, where a
+    /// forwarded walk would bring back ENOENT for a node that exists to this
+    /// caller.
+    #[test]
+    fn a_confined_walk_to_a_name_the_kernel_has_not_got_is_eopnotsupp() {
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDWR as u64,
+            mode: 0,
+            resolve: RESOLVE_BENEATH,
+        };
+        for name in [
+            &b"/dev/snd/pcmC0D0p\0"[..],
+            b"/dev/snd/controlC0\0",
+            b"/dev/ptmx\0",
+            b"/dev/pts/3\0",
+        ] {
+            crate::errno::set_errno(0);
+            let ret = openat2(
+                AT_FDCWD,
+                name.as_ptr(),
+                &how,
+                core::mem::size_of::<OpenHow>(),
+            );
+            assert_eq!(ret, -1, "{name:?}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EOPNOTSUPP,
+                "{name:?}"
+            );
+        }
     }
 
     // ===================================================================

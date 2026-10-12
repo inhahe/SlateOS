@@ -985,21 +985,21 @@ def self_test() -> int:
     # own for its members, its own for a crate with a [workspace] of its own.
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp)
-        (tree / "Cargo.toml").write_text('[workspace]\nmembers = ["a"]\n', encoding="utf-8")
+        (tree / "Cargo.toml").write_text('[workspace]\nmembers = ["a"]\n', encoding="utf-8", newline="\n")
         for crate, extra in (("a", ""), ("solo", "\n[workspace]\n")):
             (tree / crate / "src").mkdir(parents=True)
-            (tree / crate / "src" / "lib.rs").write_text("", encoding="utf-8")
+            (tree / crate / "src" / "lib.rs").write_text("", encoding="utf-8", newline="\n")
             (tree / crate / "Cargo.toml").write_text(
                 f'[package]\nname = "{crate}"\nversion = "0.0.0"\nedition = "2021"\n{extra}',
-                encoding="utf-8")
+                encoding="utf-8", newline="\n")
         expect("owning workspaces", owning_workspaces(tree, ["a/src/lib.rs", "solo/src/lib.rs"]),
                {"": {"a"}, "solo": {"solo"}})
         mo = tree / "out" / "mutants.out"
         mo.mkdir(parents=True)
-        (mo / "mutants.json").write_text(json.dumps([{}] * 9), encoding="utf-8")
-        (mo / "caught.txt").write_text("x\ny\n", encoding="utf-8")
-        (mo / "missed.txt").write_text("src/a.rs:1:1: replace f with g\n", encoding="utf-8")
-        (mo / "unviable.txt").write_text("u\n", encoding="utf-8")
+        (mo / "mutants.json").write_text(json.dumps([{}] * 9), encoding="utf-8", newline="\n")
+        (mo / "caught.txt").write_text("x\ny\n", encoding="utf-8", newline="\n")
+        (mo / "missed.txt").write_text("src/a.rs:1:1: replace f with g\n", encoding="utf-8", newline="\n")
+        (mo / "unviable.txt").write_text("u\n", encoding="utf-8", newline="\n")
         expect("mutants tally", mutants_tally(tree / "out"),
                (3, ["src/a.rs:1:1: replace f with g"], 9, 1))
 

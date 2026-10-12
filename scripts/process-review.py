@@ -467,21 +467,21 @@ def self_test() -> int:
         (root / "known-issues").mkdir()
         (root / "requests").mkdir()
         (root / "known-issues" / "A-old.md").write_text(
-            "### [A] old -- 2026-08-01\n\n**Status:** OPEN\n", encoding="utf-8")
+            "### [A] old -- 2026-08-01\n\n**Status:** OPEN\n", encoding="utf-8", newline="\n")
         (root / "known-issues" / "A-new.md").write_text(
-            "### [A] new -- 2026-10-10\n\n**Status:** OPEN\n", encoding="utf-8")
+            "### [A] new -- 2026-10-10\n\n**Status:** OPEN\n", encoding="utf-8", newline="\n")
         # Stamped otherwise, but still in known-issues/: open all the same.
         (root / "known-issues" / "TD-B-half.md").write_text(
-            "### [B] half done -- 2026-08-01\n\n**Status:** HALF\n", encoding="utf-8")
+            "### [B] half done -- 2026-08-01\n\n**Status:** HALF\n", encoding="utf-8", newline="\n")
         (root / "requests" / "f-ad-x.md").write_text(
-            "# x\n**Filed:** 2026-08-01. **Status:** open.\n", encoding="utf-8")
+            "# x\n**Filed:** 2026-08-01. **Status:** open.\n", encoding="utf-8", newline="\n")
         text = backlog_section(root, dt.date(2026, 10, 12))
         expect("backlog A", "| A | 2 | 1 | 1 | 1 |" in text, True)
         expect("backlog D", "| D | 0 | 0 | 1 | 1 |" in text, True)
         expect("an entry stamped otherwise is open", "| B | 1 | 1 | 0 | 0 |" in text, True)
         history = root / "h.jsonl"
         history.write_text('{"ts": "a"}\n{"ts": "b", cut sh\n[1, 2]\n{"ts": "c"}\n',
-                           encoding="utf-8")
+                           encoding="utf-8", newline="\n")
         expect("malformed history lines skipped", [r["ts"] for r in load_history(history)],
                ["a", "c"])
         # A proposal that cannot run still leaves the numbers written.

@@ -271,15 +271,15 @@ def self_test() -> int:
 
         def crate(path: str, deps: str = "") -> None:
             (src / path / "src").mkdir(parents=True)
-            (src / path / "src" / "lib.rs").write_text("", encoding="utf-8")
+            (src / path / "src" / "lib.rs").write_text("", encoding="utf-8", newline="\n")
             (src / path / "tests").mkdir()
             (src / path / "tests" / "big.bin").write_bytes(b"x")
             # A `[[bench]]` the manifest declares: its source must come along.
             (src / path / "benches").mkdir()
-            (src / path / "benches" / "rate.rs").write_text("fn main() {}", encoding="utf-8")
+            (src / path / "benches" / "rate.rs").write_text("fn main() {}", encoding="utf-8", newline="\n")
             (src / path / "Cargo.toml").write_text(
                 f'[package]\nname = "{path.split("/")[-1]}"\n[dependencies]\n{deps}',
-                encoding="utf-8")
+                encoding="utf-8", newline="\n")
 
         crate("a", 'b = { path = "../lib/b" }  # a comment with path = "nowhere"\n')
         crate("lib/b", 'c = { path = "../../c" }\nserde = "1"\n')
@@ -287,22 +287,23 @@ def self_test() -> int:
         crate("unrelated")
         (src / "Cargo.toml").write_text(
             '[workspace]\n[workspace.lints.rust]\nunsafe_code = "warn"\n\n[profile.dev]\n',
-            encoding="utf-8")
+            encoding="utf-8", newline="\n")
         (src / "a" / "tests" / "data").mkdir()
         (src / "a" / "tests" / "data" / "one.pkt").write_bytes(b"seed")
         h = src / "a" / "fuzz"
         (h / "fuzz_targets").mkdir(parents=True)
-        (h / "fuzz_targets" / "parse.rs").write_text("", encoding="utf-8")
-        (h / "parse.dict").write_text('"tok"\n', encoding="utf-8")
+        (h / "fuzz_targets" / "parse.rs").write_text("", encoding="utf-8", newline="\n")
+        (h / "parse.dict").write_text('"tok"\n', encoding="utf-8", newline="\n")
         (h / "harness.toml").write_text(
             '[package]\nname = "a-fuzz"\n[package.metadata.slateos-fuzz]\n'
             'seeds = { parse = ["a/tests/data"] }\n[dependencies]\n'
             'libfuzzer-sys = "0.4"\na = { path = "../a" }\n'
-            '[[bin]]\nname = "parse"\npath = "fuzz_targets/parse.rs"\n', encoding="utf-8")
+            '[[bin]]\nname = "parse"\npath = "fuzz_targets/parse.rs"\n', encoding="utf-8",
+            newline="\n")
         (h / "seeds.py").write_text(
             "import os\ndef seed(src, corpus):\n"
             "    open(os.path.join(corpus('parse'), 'made'), 'wb').write(b'made')\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="\n")
         harness = Harness(h)
         expect("targets", harness.targets, ["parse"])
         expect("roots", harness.roots, ["a"])
@@ -324,7 +325,8 @@ def self_test() -> int:
                ["a_tests_data_one.pkt", "made"])
         (h / "harness.toml").write_text(
             (h / "harness.toml").read_text(encoding="utf-8").replace(
-                'seeds = { parse', 'sanitize = ["nope"]\nseeds = { parse'), encoding="utf-8")
+                'seeds = { parse', 'sanitize = ["nope"]\nseeds = { parse'), encoding="utf-8",
+            newline="\n")
         try:
             Harness(h)
             failures.append("a sanitize entry naming no target was accepted")

@@ -19,7 +19,7 @@ no reader. Nothing regressed.
 |---|---|---|
 | **Magnifier settings** | The feature exists (`apps/magnifier`), the settings do not reach it | A settings page *and* a config route. `a11y::MagnifierConfig` is read only inside `a11y.rs`; `apps/magnifier` keeps its own and never consults it. So this is the same disconnection as the sticky-keys one, one layer along. |
 | **Auto-click / dwell click** | **None.** Zero matches for `auto_click` or `dwell` outside the deleted panel | The feature first: hold the pointer still for *n* ms and a click is synthesised. That is compositor work, in the pointer path, and it wants the same treatment sticky keys just got. |
-| **Flash screen on system sound** | **None** | The feature first. It needs a signal that a system sound played, which nothing currently emits. |
+| **Flash screen on system sound** | **None** | The feature first. It needs a signal that a system sound played, which nothing currently emits. *2026-10-07: built -- the shell's event sounds (§1476) are the signal, and `sounds.visual_alert` in `appearance.yaml` flashes the window in front or the screen for each (§1603); its switch on the Settings application's accessibility page is asked of lane E (`requests/c-e-a-visual-alert-for-sounds-on-the-accessibility-page.md`). Three of the four remain.* |
 | **Closed captions** | **None.** The 254 `caption` matches in the tree are window titles and UI subtitles, not subtitle tracks | A media-subtitle pipeline, which is a far larger job than a settings toggle and belongs to whatever plays video. |
 
 **Why they were not ported instead.** §815 says "moves to the Settings app",

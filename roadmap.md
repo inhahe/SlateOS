@@ -2337,6 +2337,16 @@ live.
   SlateOS, which waits on the kernel's counters, as the system monitor's
   does (`requests/c-a-the-system-monitor-reads-disk-and-network-counters-the-kernel-does-not-serve.md`).
 
+- `[x]` `[C]` **A sound the desktop makes can be seen as well as heard**
+  (`design-decisions.md` §1603) -- done 2026-10-07. `sounds.visual_alert` in
+  `appearance.yaml`: off, the window in front, or the whole screen flashes
+  -- one faint pulse -- each time the desktop makes a sound, even where none
+  can be heard; a run of sounds flashes at most two and a half times a
+  second, under the rate at which flashing can bring on a seizure. One of
+  the four accessibility features the deleted accessibility panel promised.
+  **Lane E:** its switch on the accessibility page
+  (`requests/c-e-a-visual-alert-for-sounds-on-the-accessibility-page.md`).
+
 - `[x]` `[C]` **The desktop raises the calendar's reminders**
   (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder
   is due, a notification from Calendar -- the event, when and where -- stays

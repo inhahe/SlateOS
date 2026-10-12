@@ -1143,6 +1143,9 @@ pub struct SoundSettings {
     /// specification name, over the theme's: `sounds.events.<name>` in the
     /// file, an absolute path or `off`.
     pub events: BTreeMap<String, EventSound>,
+    /// What the screen shows as an event sounds, for someone who may not
+    /// hear it: `sounds.visual_alert` in the file.
+    pub visual_alert: VisualAlert,
 }
 
 impl Default for SoundSettings {
@@ -1151,6 +1154,55 @@ impl Default for SoundSettings {
             enabled: true,
             volume: DEFAULT_SOUND_VOLUME,
             events: BTreeMap::new(),
+            visual_alert: VisualAlert::Off,
+        }
+    }
+}
+
+/// What the screen shows each time the desktop makes a sound, for a user who
+/// may not hear it -- Windows' "visual notifications for sounds". The flash
+/// is the desktop's (`desktop::DesktopShell::sound_event`); this is the
+/// choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VisualAlert {
+    /// Nothing: the sound alone.
+    #[default]
+    Off,
+    /// The window in front flashes -- the screen, with no window in front.
+    Window,
+    /// The whole screen flashes.
+    Screen,
+}
+
+impl VisualAlert {
+    /// Every choice, as a settings page offers them.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Window, Self::Screen];
+
+    /// How `appearance.yaml` spells it.
+    #[must_use]
+    pub const fn yaml_name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Window => "window",
+            Self::Screen => "screen",
+        }
+    }
+
+    /// The choice the file's `name` spells; `None` for one it does not.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|alert| alert.yaml_name() == name.trim())
+    }
+
+    /// How a settings page names it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Window => "Flash the active window",
+            Self::Screen => "Flash the screen",
         }
     }
 }
@@ -2860,6 +2912,14 @@ impl AppearanceSettings {
                 s.sounds.events.insert(name, choice);
             }
         }
+        // A spelling this build does not know keeps the default, nothing:
+        // a flash nobody chose is not a safe guess.
+        if let Some(alert) = doc
+            .get_str(&["sounds", "visual_alert"])
+            .and_then(|name| VisualAlert::from_yaml_name(&name))
+        {
+            s.sounds.visual_alert = alert;
+        }
         // The widget style, spelled and loaded as the colour theme is -- file
         // and all, since the palette carries it and a palette is resolved per
         // frame.
@@ -3220,6 +3280,10 @@ impl AppearanceSettings {
         for (name, choice) in &self.sounds.events {
             doc.set_str(&["sounds", "events", name], &choice.yaml_value());
         }
+        doc.set_str(
+            &["sounds", "visual_alert"],
+            self.sounds.visual_alert.yaml_name(),
+        );
         doc.set_str(
             &["theme", "widget_style"],
             &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
@@ -4147,6 +4211,8 @@ mod tests {
                         ))),
                     ),
                 ]),
+                // Not the default, so a round trip that dropped it shows.
+                visual_alert: VisualAlert::Window,
             },
             // A third, read back from the file the round trip installs.
             widget_theme: themes::WidgetTheme::from_style(
@@ -4598,6 +4664,49 @@ mod tests {
         s.write_into(&mut doc);
         assert_eq!(doc.keys(&["sounds", "events"]), ["complete"]);
         assert_eq!(AppearanceSettings::read_from(&doc).sounds, s.sounds);
+    }
+
+    /// **The visual alert is spelled `off`, `window` or `screen`**, read and
+    /// written so; one this build does not know -- or none -- is off, since a
+    /// flash nobody chose is not a safe guess.
+    #[test]
+    fn the_visual_alert_is_spelled_off_window_or_screen() {
+        let read = |text: &str| AppearanceSettings::read_from(&Document::parse(text));
+        assert_eq!(
+            read("sounds:\n  visual_alert: screen\n")
+                .sounds
+                .visual_alert,
+            VisualAlert::Screen
+        );
+        assert_eq!(
+            read("sounds:\n  visual_alert: \" window \"\n")
+                .sounds
+                .visual_alert,
+            VisualAlert::Window
+        );
+        assert_eq!(
+            read("sounds:\n  visual_alert: strobe\n")
+                .sounds
+                .visual_alert,
+            VisualAlert::Off
+        );
+        assert_eq!(read("").sounds.visual_alert, VisualAlert::Off);
+        for alert in VisualAlert::ALL {
+            let mut s = AppearanceSettings::default();
+            s.sounds.visual_alert = alert;
+            let mut doc = Document::parse("");
+            s.write_into(&mut doc);
+            assert_eq!(
+                doc.get_str(&["sounds", "visual_alert"]).as_deref(),
+                Some(alert.yaml_name())
+            );
+            assert_eq!(
+                AppearanceSettings::read_from(&doc).sounds.visual_alert,
+                alert
+            );
+            assert_eq!(VisualAlert::from_yaml_name(alert.yaml_name()), Some(alert));
+            assert!(!alert.label().is_empty());
+        }
     }
 
     /// **A volume is held to 0 to 1, a NaN is the default, and a name that is

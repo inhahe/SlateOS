@@ -2651,6 +2651,11 @@ pub struct DesktopShell {
     /// screenshot -- and the events asked for, for the tests to read. See
     /// [`event_sounds`].
     pub event_sounds: event_sounds::EventSounds,
+    /// The last visual alert ([`sound_event`](Self::sound_event)): what it
+    /// flashed and when it began, on the overlay clock -- drawn for
+    /// [`FLASH_MS`](Self::FLASH_MS) and keeping the next away for
+    /// [`FLASH_SPACING_MS`](Self::FLASH_SPACING_MS).
+    last_flash: Option<(appearance::VisualAlert, u64)>,
     /// Milliseconds of animation time the shell has been told about, and the
     /// only clock [`show_osd`](Self::show_osd) consults.
     ///
@@ -3119,6 +3124,7 @@ impl DesktopShell {
             // it is a heads-up overlay and may sit over the taskbar.
             osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
             event_sounds: event_sounds::EventSounds::new(),
+            last_flash: None,
             osd_clock_ms: 0,
             // Not positioned here. `set_position` needs a screen size, and this
             // one would go stale the moment the display changed; the dialog is
@@ -13752,7 +13758,7 @@ impl DesktopShell {
             && rule.sound
             && let Some(name) = event_sounds::for_notification(notif.priority)
         {
-            self.event_sounds.sound(&self.appearance, name);
+            self.sound_event(name);
         }
         let id = self.notifications.push_notification(notif);
         if let Some(mut shown) = pop_up {
@@ -15948,9 +15954,98 @@ impl DesktopShell {
         // Heard as it is shown: a volume's new level, a screenshot's shutter
         // -- the events `event_sounds::for_osd` gives a sound.
         if let Some(name) = event_sounds::for_osd(&kind) {
-            self.event_sounds.sound(&self.appearance, name);
+            self.sound_event(name);
         }
         self.osd.show(kind, self.osd_clock_ms);
+    }
+
+    /// How long a visual alert's flash is up: one short pulse.
+    pub const FLASH_MS: u64 = 150;
+    /// The least time from one flash to the next. A run of sounds -- a
+    /// volume key held, a burst of notifications -- flashes at most this
+    /// often: under three flashes a second, past which a flashing screen can
+    /// bring on a seizure (WCAG 2.3.1).
+    pub const FLASH_SPACING_MS: u64 = 400;
+    /// How strongly a flash covers what is under it, of 255: enough to be
+    /// seen from across a room, not so much that what was on the screen is
+    /// lost for the moment it is up.
+    const FLASH_ALPHA: u8 = 96;
+
+    /// Sound the shell's event `name` as the user's appearance settings say
+    /// ([`event_sounds`]) -- and, for a user who asked to see sounds as well
+    /// as hear them ([`VisualAlert`](appearance::VisualAlert)), flash the
+    /// window in front or the whole screen, on the overlay surface, which
+    /// takes no clicks.
+    ///
+    /// An event the settings make silent flashes nothing: the flash stands
+    /// for a sound. One that sounds where no sound can be heard -- no sound
+    /// device, the volume down -- flashes all the same, since that is when it
+    /// is most wanted. And no flash comes sooner than
+    /// [`FLASH_SPACING_MS`](Self::FLASH_SPACING_MS) after the last.
+    pub fn sound_event(&mut self, name: &str) {
+        let choice = self.event_sounds.sound(&self.appearance, name);
+        let alert = self.appearance.sounds.visual_alert;
+        if alert == appearance::VisualAlert::Off
+            || choice == appearance::sounds::SoundChoice::Silent
+            || self.flash_settling()
+        {
+            return;
+        }
+        self.sync_osd_screen();
+        self.last_flash = Some((alert, self.osd_clock_ms));
+    }
+
+    /// Whether a visual alert's flash is up now.
+    #[must_use]
+    pub fn flashing(&self) -> bool {
+        self.last_flash
+            .is_some_and(|(_, at)| self.osd_clock_ms.saturating_sub(at) < Self::FLASH_MS)
+    }
+
+    /// Whether the last flash began less than
+    /// [`FLASH_SPACING_MS`](Self::FLASH_SPACING_MS) ago, so the next must
+    /// wait. The session draws frames until it has not -- the overlay clock
+    /// stands still while nothing moves, and a spacing measured on a clock
+    /// that has stopped would keep the next flash away for good.
+    #[must_use]
+    pub fn flash_settling(&self) -> bool {
+        self.last_flash
+            .is_some_and(|(_, at)| self.osd_clock_ms.saturating_sub(at) < Self::FLASH_SPACING_MS)
+    }
+
+    /// The flash as drawn, while it is up: the window in front covered in
+    /// the text's ink, faintly -- the whole screen for
+    /// [`Screen`](appearance::VisualAlert::Screen), or with no window in
+    /// front to flash. Nothing otherwise.
+    fn flash_commands(&self, p: &Palette) -> Vec<guitk::render::RenderCommand> {
+        let Some((alert, _)) = self.last_flash.filter(|_| self.flashing()) else {
+            return Vec::new();
+        };
+        let front = (alert == appearance::VisualAlert::Window)
+            .then(|| {
+                self.windows
+                    .values()
+                    .filter(|w| {
+                        w.focused
+                            && w.mapped
+                            && w.state != WindowState::Minimized
+                            && w.desktop == self.current_desktop
+                    })
+                    .map(|w| w.frame)
+                    .next()
+            })
+            .flatten();
+        let area = front
+            .unwrap_or_else(|| Rect::new(0.0, 0.0, self.osd.screen_width, self.osd.screen_height));
+        let ink = p.text;
+        vec![guitk::render::RenderCommand::FillRect {
+            x: area.x,
+            y: area.y,
+            width: area.w,
+            height: area.h,
+            color: Color::rgba(ink.r, ink.g, ink.b, Self::FLASH_ALPHA),
+            corner_radii: CornerRadii::all(0.0),
+        }]
     }
 
     /// Advance the overlay clock by one frame's worth of time and expire
@@ -16018,12 +16113,18 @@ impl DesktopShell {
     /// Render the heads-up overlays, if any are showing.
     #[must_use]
     pub fn render_osd(&self) -> Option<RenderTree> {
-        if !self.osd.has_visible() {
+        let p = Palette::from_settings(&self.appearance);
+        // A sound's flash, under any overlay up with it: the volume's
+        // overlay stays readable through the flash its own sound makes.
+        let flash = self.flash_commands(&p);
+        if flash.is_empty() && !self.osd.has_visible() {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands
-            .extend(self.osd.render(&Palette::from_settings(&self.appearance)));
+        tree.commands.extend(flash);
+        if self.osd.has_visible() {
+            tree.commands.extend(self.osd.render(&p));
+        }
         Some(tree)
     }
 

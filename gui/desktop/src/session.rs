@@ -3931,7 +3931,8 @@ impl<T: Transport> ShellSession<T> {
         // appear — `shell_mut().show_osd(..)` is public, and the shell will grow
         // its own callers (a brightness key, a caps-lock report) that this must
         // not have to learn about one at a time.
-        let osd_was_visible = self.shell.osd.has_visible();
+        // A sound's flash with it, which any of the same can set off.
+        let osd_was_visible = self.shell.osd.has_visible() || self.shell.flash_settling();
         // And for the toasts: a notification can arrive, or a toast be pressed
         // away, from anything handled here.
         let toasts_were_moving = self.shell.toasts.is_moving();
@@ -4171,7 +4172,8 @@ impl<T: Transport> ShellSession<T> {
         // that is already pending resets the instant its delta is measured
         // from, so a keystroke landing mid-fade would silently shorten that
         // frame and make every animation on screen jump.
-        if !osd_was_visible && self.shell.osd.has_visible() {
+        if !osd_was_visible && (self.shell.osd.has_visible() || self.shell.flash_settling()) {
+            self.dirty = true;
             self.arm_next_frame();
         }
         // A toast that has just started to move -- one arriving, or one
@@ -4585,6 +4587,10 @@ impl<T: Transport> ShellSession<T> {
             // towards. A term that only counted fades would leave a freshly
             // shown OSD on screen for ever on an otherwise idle desktop.
             || self.shell.osd.has_visible()
+            // A sound's flash, up or settling: the overlay clock that times it
+            // and spaces the next stands still while nothing moves, so frames
+            // run until the spacing is over (`DesktopShell::flash_settling`).
+            || self.shell.flash_settling()
             // A toast sliding or settling. One sitting still is not a reason
             // for frames: its time coming up is a deadline, below.
             || self.shell.toasts.is_moving()
@@ -4721,12 +4727,15 @@ impl<T: Transport> ShellSession<T> {
     }
 
     /// Sound the shell's event `name` as the user's appearance settings say
-    /// ([`crate::event_sounds`]).
+    /// ([`crate::event_sounds`]), with its visual alert if the user asked
+    /// for one (`DesktopShell::sound_event`) -- and frames for the flash.
     fn sound_event(&mut self, name: &str) {
-        let shell = &mut self.shell;
-        // What was chosen is kept in `event_sounds`' record; nothing here acts
-        // on it.
-        let _chosen = shell.event_sounds.sound(&shell.appearance, name);
+        let was = self.shell.flash_settling();
+        self.shell.sound_event(name);
+        if !was && self.shell.flash_settling() {
+            self.dirty = true;
+            self.arm_next_frame();
+        }
     }
 
     /// A login screen `width` by `height` pixels for the accounts in

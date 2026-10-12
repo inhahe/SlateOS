@@ -6,7 +6,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
 )]
 
 use super::*;
@@ -306,4 +307,178 @@ fn the_record_keeps_the_latest_events() {
     assert_eq!(recent.first().copied(), Some("event-5"));
     let last = format!("event-{}", RECENT + 4);
     assert_eq!(recent.last().copied(), Some(last.as_str()));
+}
+
+// ---- the visual alert: a flash for each sound ----
+
+/// The fills the overlay surface draws now: `(x, y, width, height, colour)`.
+fn overlay_fills(shell: &DesktopShell) -> Vec<(f32, f32, f32, f32, guitk::color::Color)> {
+    shell
+        .render_osd()
+        .map(|tree| {
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } => Some((*x, *y, *width, *height, *color)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A shell whose visual alert is `alert`.
+fn alerting(alert: appearance::VisualAlert) -> DesktopShell {
+    let mut s = DesktopShell::new(1920, 1080);
+    s.appearance.sounds.visual_alert = alert;
+    s
+}
+
+/// A focused window on the shell's desktop at `frame`.
+fn focused_window(s: &mut DesktopShell, frame: crate::Rect) {
+    let id = crate::WindowId(7);
+    s.windows.insert(
+        id,
+        crate::ManagedWindow {
+            id,
+            title: "Editor".to_owned(),
+            app_id: "editor".to_owned(),
+            skip_taskbar: false,
+            skip_alt_tab: false,
+            to_tray: false,
+            state: crate::WindowState::Normal,
+            desktop: s.current_desktop,
+            focused: true,
+            mapped: true,
+            pid: 1,
+            icon_id: 0,
+            frame,
+            z_order: 0,
+        },
+    );
+}
+
+/// **With the visual alert on the screen, a sound flashes the whole
+/// screen** -- faintly, in the text's ink -- for a moment, and then the
+/// overlay surface has nothing to draw.
+#[test]
+fn a_sound_flashes_the_screen() {
+    let mut s = alerting(appearance::VisualAlert::Screen);
+    assert!(overlay_fills(&s).is_empty());
+    s.notify(notif("Chat", NotifPriority::Normal));
+    assert!(s.flashing());
+    let p = appearance::Palette::from_settings(&s.appearance);
+    let fills = overlay_fills(&s);
+    assert_eq!(fills.len(), 1);
+    let (x, y, w, h, color) = fills[0];
+    assert_eq!((x, y, w, h), (0.0, 0.0, 1920.0, 1080.0));
+    assert_eq!((color.r, color.g, color.b), (p.text.r, p.text.g, p.text.b));
+    assert!(color.a > 0 && color.a < 255, "the flash hides the screen");
+    s.advance_osd(DesktopShell::FLASH_MS);
+    assert!(!s.flashing());
+    assert!(s.render_osd().is_none(), "the flash stays up");
+}
+
+/// **With it on the window, the window in front flashes** -- or, with none
+/// in front, the screen.
+#[test]
+fn a_sound_flashes_the_window_in_front() {
+    let mut s = alerting(appearance::VisualAlert::Window);
+    s.notify(notif("Chat", NotifPriority::Normal));
+    let (x, y, w, h, _) = overlay_fills(&s)[0];
+    assert_eq!(
+        (x, y, w, h),
+        (0.0, 0.0, 1920.0, 1080.0),
+        "no window in front"
+    );
+
+    let mut s = alerting(appearance::VisualAlert::Window);
+    let frame = crate::Rect::new(200.0, 150.0, 800.0, 600.0);
+    focused_window(&mut s, frame);
+    s.notify(notif("Chat", NotifPriority::Normal));
+    let (x, y, w, h, _) = overlay_fills(&s)[0];
+    assert_eq!((x, y, w, h), (frame.x, frame.y, frame.w, frame.h));
+}
+
+/// **Off, nothing flashes; and a sound the settings silence flashes
+/// nothing either** -- the flash stands for a sound.
+#[test]
+fn off_or_silent_nothing_flashes() {
+    let mut s = alerting(appearance::VisualAlert::Off);
+    s.notify(notif("Chat", NotifPriority::Normal));
+    assert!(!s.flashing());
+    assert!(overlay_fills(&s).is_empty());
+
+    let mut s = alerting(appearance::VisualAlert::Screen);
+    s.appearance.sounds.enabled = false;
+    s.notify(notif("Chat", NotifPriority::Normal));
+    assert!(!s.flashing(), "a silent event flashed");
+    // A notification that makes no sound -- a low one -- flashes nothing.
+    let mut s = alerting(appearance::VisualAlert::Screen);
+    s.notify(notif("Chat", NotifPriority::Low));
+    assert!(!s.flashing());
+}
+
+/// **Sounds in a run flash at most once in the spacing** -- a volume key
+/// held flashes under three times a second -- and the next after it flashes
+/// again.
+#[test]
+fn sounds_in_a_run_flash_at_most_once_in_the_spacing() {
+    let mut s = alerting(appearance::VisualAlert::Screen);
+    s.show_osd(OsdKind::Volume {
+        level: 40,
+        muted: false,
+    });
+    assert!(s.flashing());
+    s.advance_osd(DesktopShell::FLASH_MS);
+    assert!(!s.flashing());
+    assert!(s.flash_settling());
+    s.show_osd(OsdKind::Volume {
+        level: 45,
+        muted: false,
+    });
+    assert!(!s.flashing(), "flashed again within the spacing");
+    assert_eq!(
+        heard(&s),
+        ["audio-volume-change", "audio-volume-change"],
+        "the sound itself is not spaced"
+    );
+    s.advance_osd(DesktopShell::FLASH_SPACING_MS - DesktopShell::FLASH_MS);
+    assert!(!s.flash_settling());
+    s.show_osd(OsdKind::Volume {
+        level: 50,
+        muted: false,
+    });
+    assert!(s.flashing(), "the spacing kept the next away for good");
+    const {
+        assert!(
+            DesktopShell::FLASH_SPACING_MS > 1000 / 3,
+            "three flashes a second"
+        );
+    }
+}
+
+/// **The flash is drawn under an overlay that comes with it**: the volume's
+/// overlay stays readable through the flash its own sound makes.
+#[test]
+fn the_flash_is_under_the_overlay_its_sound_comes_with() {
+    let mut s = alerting(appearance::VisualAlert::Screen);
+    s.show_osd(OsdKind::Volume {
+        level: 40,
+        muted: false,
+    });
+    let tree = s.render_osd().expect("drawn");
+    let first = tree.commands.first().expect("something drawn");
+    assert!(
+        matches!(first, guitk::render::RenderCommand::FillRect { width, .. } if *width == 1920.0),
+        "the flash is not under the overlay: {first:?}"
+    );
+    assert!(tree.commands.len() > 1, "the overlay is not drawn");
 }

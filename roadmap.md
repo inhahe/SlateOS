@@ -2848,12 +2848,18 @@ D's to act on once answered).
   I/O, timed and try joins, ignored signals across exec, `getpriority` /
   `setpriority` / `nice`, CPU affinity and `sched_getcpu`, each signal's
   record (the extended frame, `sigqueue`, `tgkill`), program headers for TLS,
-  `shmat` at an address, `O_TMPFILE` and `linkat(AT_EMPTY_PATH)`, file seals.
+  `shmat` at an address, `O_TMPFILE` and `linkat(AT_EMPTY_PATH)`, file seals,
+  and the device door (1119-1123: the sound card's PCM and control devices
+  as descriptors of their own, `ioctl`/`read`/`write` through, `poll`
+  readiness; `requests/e-ad-no-application-can-reach-the-sound-device.md`,
+  its two gaps asked in `requests/d-a-the-device-door-s-two-gaps.md`).
   **Closes** as each fixture passes in a lane D boot on lane A's kernel.
-  **Next:** the device door (1119-1123, `requests/e-ad-no-application-can-
-  reach-the-sound-device.md`: descriptor kinds for the sound card's PCM and
-  control devices, `ioctl`/`read`/`write` through, readiness for `poll`);
-  then `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential service, and the
+  **Next:** lane A's calls of 2026-10-07 on `lane-a-wip` -- `SYS_MEMORY_LOCK`
+  (1145; `mlock` and kin pass straight through, closing D-Q8),
+  `SYS_PROCESS_GETGROUPS` (1143), `SYS_MMAP_FILE` (1144), the null-buffer
+  shortcuts in `posix/src/file.rs` that lane A's `cc3806b84` makes
+  unnecessary, and the PI-futex fast path (`a6e37445d`) -- then
+  `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential service, and the
   deferred filesystem operations (1126-1128) if a C caller needs them.
 
 - `[D]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~2151).

@@ -490,6 +490,29 @@ mod tests {
         assert_eq!(F_DUPFD_CLOEXEC, 1030);
     }
 
+    /// `F_DUPFD` and `F_DUPFD_CLOEXEC` copy the descriptor's path, as `dup`
+    /// does: what an `*at` call resolves a name against, and what
+    /// `/proc/self/fd` names.
+    #[test]
+    fn f_dupfd_keeps_the_descriptors_path() {
+        use crate::fcntl::O_RDONLY;
+        let path = b"/tmp/a-directory";
+        let fd = fdtable::alloc_fd_with_flags(fdtable::HandleKind::File, 0xD1D, O_RDONLY)
+            .expect("a free descriptor");
+        fdtable::store_fd_path(fd, path.as_ptr(), path.len());
+        for cmd in [F_DUPFD, F_DUPFD_CLOEXEC] {
+            let copy = fcntl(fd, cmd, 20);
+            assert!(copy >= 20, "{cmd}: {copy}");
+            let mut out = [0u8; 64];
+            let n = fdtable::get_fd_path(copy, &mut out);
+            assert_eq!(&out[..n], path, "{cmd}");
+            fdtable::clear_fd_path(copy);
+            assert!(fdtable::close_fd(copy).is_some());
+        }
+        fdtable::clear_fd_path(fd);
+        assert!(fdtable::close_fd(fd).is_some());
+    }
+
     /// The seal commands and bits are Linux's numbers.
     #[test]
     fn test_seal_constants_are_linuxs() {
@@ -882,6 +905,12 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
             }
             _ => {}
         }
+        // And the path, as `dup` copies it: what an `*at` call resolves a
+        // name against and what `/proc/self/fd` names. Until 2026-10-07 a
+        // copy made here had none, so `openat` against an `F_DUPFD_CLOEXEC`
+        // copy of a directory -- what CPython's `os.dup` makes -- found no
+        // directory to resolve in.
+        fdtable::copy_fd_path(oldfd, new_fd);
         new_fd
     } else {
         // No kernel cleanup needed: every handle kind (including File now)

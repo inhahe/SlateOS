@@ -113,10 +113,10 @@ LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
 LANG = "gui/desktop/src/language_settings.rs"
 MON = "gui/desktop/src/widgets/monitor.rs"
-# The disk usage widget's drawing (design-decisions 1501): each disk's name and
+# The disk usage widget's drawing (design-decisions 1601): each disk's name and
 # share, its bar -- the disk's colour, red when nearly full -- and what is free.
 DISKS = "gui/desktop/src/widgets/disks.rs"
-# The network widget's lines (design-decisions 1502): "Connected" in green,
+# The network widget's lines (design-decisions 1602): "Connected" in green,
 # any other state in the quiet ink, the facts in the text's.
 NETW = "gui/desktop/src/widgets/network.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"

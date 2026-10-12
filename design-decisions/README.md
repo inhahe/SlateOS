@@ -75,13 +75,14 @@ number. `scripts/check-docs.py` enforces the numbering; it replaced
 | §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
 | §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
 | §1400–§1499 | **lane C** | **open** — full at §1499 | immediately after §885; C's own run ascends |
-| §1500–§1599 | **lane C** | **open** | immediately after §1499; C's own run ascends |
+| §1500–§1599 | **lane A** | **open** | immediately after §979, the end of lane A's §900 band; A's own run ascends from there |
+| §1600–§1699 | **lane C** | **open** | immediately after §1499; C's own run ascends |
 
 A band that fills stays **open** beside the lane's next one until its newest
 entries are on `main`: `check-docs.py` (D3) accepts an entry in a closed band
 only from its baseline, which an entry written since has not reached.
 `--next-decision` gives the first of a lane's open bands with room. Lane C's
-§1400–§1499 is such a band (full 2026-10-07; §1500–§1599 opened beside it).
+§1400–§1499 is such a band (full 2026-10-07; §1600–§1699 opened beside it -- §1500–§1599 is lane A's).
 
 Bands below the open ones are closed but **not free**: every number in them is
 spent, and spent numbers are never reissued. §217–§220 are lane C's although they

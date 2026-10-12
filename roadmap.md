@@ -2312,13 +2312,13 @@ live.
   time. **Next:** whether a click on a widget opens what it shows is the
   operator's to say (`open-questions/C-Q36.md`).
 
-- `[x]` `[C]` **A world clock widget** (`design-decisions.md` §1500) -- done
+- `[x]` `[C]` **A world clock widget** (`design-decisions.md` §1600) -- done
   2026-10-07. "Add widget > World clock": each of the other clocks the Date
   & Time settings keep -- the popup's -- with its label, the time there, the
   day when it is another, and how far ahead or behind it is; with none, it
   says where they are added. Tools see a list of the clocks.
 
-- `[x]` `[C]` **A disk usage widget** (`design-decisions.md` §1501) -- done
+- `[x]` `[C]` **A disk usage widget** (`design-decisions.md` §1601) -- done
   2026-10-07. "Add widget > Disk usage": each disk the system has mounted --
   the mount table's, less the kernel's own views and memory -- named by
   where it is mounted, with how much of it is in use, a bar, and what is
@@ -2327,7 +2327,7 @@ live.
   ten seconds while one is out; one the kernel will not measure is listed as
   not measured. Tools see a list of progress bars.
 
-- `[x]` `[C]` **A network widget** (`design-decisions.md` §1502) -- done
+- `[x]` `[C]` **A network widget** (`design-decisions.md` §1602) -- done
   2026-10-07. "Add widget > Network": whether the machine is connected, the
   address it has with its prefix, the traffic in and out, the gateway and
   the name server -- as many as fit, most wanted first -- and, given two

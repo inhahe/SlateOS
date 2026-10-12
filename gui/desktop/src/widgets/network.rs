@@ -1,7 +1,7 @@
 //! The network widget: the link the machine is on -- connected or not, the
 //! address it has, the traffic over it now, the gateway and the name
 //! server -- and, given the room, the last minute's traffic as the system
-//! monitor graphs it (`design-decisions.md` §1502).
+//! monitor graphs it (`design-decisions.md` §1602).
 //!
 //! The link is the kernel's (`crate::netlink`), read by the shell no oftener
 //! than [`LINK_SPACING_MS`] while a network widget is out; the traffic is the

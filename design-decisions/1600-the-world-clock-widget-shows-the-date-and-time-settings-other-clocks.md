@@ -1,4 +1,4 @@
-## 1500. The world clock widget shows the Date & Time settings' other clocks
+## 1600. The world clock widget shows the Date & Time settings' other clocks
 
 **Date:** 2026-10-07 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
 

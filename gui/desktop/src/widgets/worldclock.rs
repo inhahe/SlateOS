@@ -2,7 +2,7 @@
 //! clocks the Date & Time settings keep beside the main one, which the clock
 //! popup shows too -- each with its label, its time, the day it is there
 //! when that is another day, and how far ahead or behind it is: "Tokyo,
-//! 09:30, Tomorrow, 13 hours ahead" (`design-decisions.md` §1500).
+//! 09:30, Tomorrow, 13 hours ahead" (`design-decisions.md` §1600).
 //!
 //! One list of other clocks on the desktop: a clock added, hidden or
 //! renamed in the settings is so on the popup and on the widget alike. With

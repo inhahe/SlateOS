@@ -1,4 +1,4 @@
-## 1502. The network widget shows the link the machine is on, and the traffic over it
+## 1602. The network widget shows the link the machine is on, and the traffic over it
 
 **Date:** 2026-10-07 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
 

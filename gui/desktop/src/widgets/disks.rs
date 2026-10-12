@@ -1,7 +1,7 @@
 //! The disk usage widget: each disk the system has mounted and how full it
 //! is -- where it is mounted and how much of it is in use, a bar, and what is
 //! free of what it holds; the bar red when the disk is nearly full
-//! (`design-decisions.md` §1501).
+//! (`design-decisions.md` §1601).
 //!
 //! The disks are the shell's to find. While a disk usage widget is out, its
 //! [`Sampler`] reads the mount table and asks the kernel each disk's space

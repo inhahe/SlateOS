@@ -1,4 +1,4 @@
-## 1501. The disk usage widget lists the disks mounted, each by where it is mounted
+## 1601. The disk usage widget lists the disks mounted, each by where it is mounted
 
 **Date:** 2026-10-07 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
 

@@ -280,12 +280,17 @@ pub(crate) mod native {
     pub const PROCESS_EXITED: i64 = -202;
     pub const NO_CHILD_PROCESS: i64 = -203;
 
-    // --- IPC (300 range: -300 to -304) ---
+    // --- IPC (300 range: -300 to -305) ---
     pub const CHANNEL_CLOSED: i64 = -300;
     pub const CHANNEL_FULL: i64 = -301;
     // MessageTooLarge = -302
     // Overflow = -303
     pub const RESOURCE_EXHAUSTED: i64 = -304;
+    /// Native `SYS_UNIX_SENDMSG`'s refusal when the sender's user already has
+    /// more descriptors in flight than its `RLIMIT_NOFILE`: Linux's
+    /// `ETOOMANYREFS` for the same limit (lane A's
+    /// `requests/a-d-native-sendmsg-and-recvmsg-can-carry-descriptors.md`).
+    pub const TOO_MANY_REFERENCES: i64 = -305;
 
     // --- Capability (400 range: -400 to -402) ---
     pub const PERMISSION_DENIED: i64 = -400;
@@ -428,6 +433,9 @@ pub fn errno_for(code: i64) -> i32 {
 
         // IPC errors
         native::CHANNEL_CLOSED => ECONNRESET,
+        // Too many descriptors in flight over Unix sockets, as Linux's
+        // `unix_attach_fds` says it.
+        native::TOO_MANY_REFERENCES => ETOOMANYREFS,
 
         // Capability / permission errors
         native::PERMISSION_DENIED | native::INVALID_CAPABILITY => EACCES,
@@ -932,6 +940,9 @@ mod tests {
 
         assert_eq!(translate(native::RESOURCE_EXHAUSTED), -1);
         assert_eq!(get_errno(), ENOMEM);
+
+        assert_eq!(translate(native::TOO_MANY_REFERENCES), -1);
+        assert_eq!(get_errno(), ETOOMANYREFS);
     }
 
     #[test]

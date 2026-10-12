@@ -2693,6 +2693,11 @@ pub fn exec_process(
     // pcb::reset_linux_state_for_exec for the per-field rationale.
     pcb::reset_linux_state_for_exec(pid);
 
+    // The old image's lifecycle endpoint ends: the new one has not
+    // registered, and is not sent requests it cannot read
+    // (`proc::lifecycle`).
+    crate::proc::lifecycle::on_exec(pid);
+
     // Flush TLB for the user half.  Since we just freed all user
     // mappings, any stale TLB entries could cause use-after-free.
     // Reloading CR3 flushes all non-global TLB entries.

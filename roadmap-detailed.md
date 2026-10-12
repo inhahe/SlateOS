@@ -1135,7 +1135,7 @@ _Note the boundary: this covers programs that **crash**. A program that **hangs*
 - [x] Hardware exceptions → language-level exceptions (SEH-style) _(exception.rs: ExceptionCode enum, ExceptionContext struct, per-process handler registry; idt.rs: dispatch to userspace handler via modified IRETQ frame, context pushed on user stack, SysV ABI, SYS_EXCEPTION_RETURN to resume)_
   - [x] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
   - [x] Normal page faults handled by kernel, NOT exposed to application
-- [ ] Structured shutdown via IPC message (not Unix signals)
+- [-] Structured shutdown via IPC message (not Unix signals) — *2026-10-09: the kernel half is built (lane A, §1569): a program registers for close and terminate requests (`SYS_LIFECYCLE_REGISTER`/`REQUEST`/`QUERY`, 1172-1174) and each arrives as one message. The rest is the operator's §1072 design, built by lanes B (`kill`, services), C (the toolkit answering for every GUI program) and E (the task manager).*
 - [ ] Process credential / capability management
 - [ ] Unwind info in release builds for backtraces (< 2% perf impact)
 - [ ] Separate debug symbol files loaded on demand for symbolization

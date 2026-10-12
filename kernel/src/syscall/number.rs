@@ -7205,6 +7205,57 @@ pub const UNIX_MSG_CTRUNC: u64 = 1 << 0;
 pub const SYS_RESTART_SYSCALL: u64 = 1171;
 
 // ---------------------------------------------------------------------------
+// A program's lifecycle endpoint (1172-1174)
+// ---------------------------------------------------------------------------
+//
+// How a program is asked to close or to stop -- by message, not by signal
+// (`crate::proc::lifecycle`; design-decisions 1072, the operator's answer to
+// B-Q22; lane B's `requests/a-b-the-lifecycle-endpoint.md`).
+
+/// `lifecycle_register()` -- answer lifecycle requests. Returns the handle of
+/// a channel end on which the kernel brings each request made of the caller:
+/// one [`LIFECYCLE_MESSAGE_LEN`]-byte message per request -- `u32` kind
+/// ([`LIFECYCLE_CLOSE`] or [`LIFECYCLE_TERMINATE`]), `u32` flags (0), `u64`
+/// request id, `u32` the asker's pid, `u32` the asker's real uid;
+/// little-endian. The channel can be waited on with [`SYS_WAIT_MULTIPLE`]
+/// (`POLLIN`). Nothing is sent back: the asker watches for the exit.
+///
+/// Closing the channel stops the caller answering; so do `exec` (the new
+/// image registers for itself) and exit. A forked child has none until it
+/// registers.
+///
+/// Errors: `AlreadyExists` while the caller has an endpoint open;
+/// `PermissionDenied` for a kernel task.
+pub const SYS_LIFECYCLE_REGISTER: u64 = 1172;
+
+/// `lifecycle_request(pid, kind)` -- ask process `pid` to close
+/// ([`LIFECYCLE_CLOSE`]: as the user would -- it may ask about unsaved work,
+/// and may decline) or to terminate ([`LIFECYCLE_TERMINATE`]: stop now,
+/// cleanly, asking nothing). Who may ask is who may signal `pid`, by
+/// [`SYS_SIGNAL_SEND`]'s rule. Returns the request's id; the outcome is the
+/// program's exit, or its staying. To end a program whatever it would answer,
+/// kill it ([`SYS_PROCESS_KILL`]).
+///
+/// Errors: `NoSuchProcess`; `ProcessExited` (a zombie); `PermissionDenied`;
+/// `InvalidArgument` for another `kind`; `NotSupported` when `pid` does not
+/// answer lifecycle requests -- ask it with `SIGTERM` instead, as `kill`
+/// does; `ChannelFull` when its queue is full of requests it has not read.
+pub const SYS_LIFECYCLE_REQUEST: u64 = 1173;
+
+/// `lifecycle_query(pid)` -- 1 when process `pid` answers lifecycle requests,
+/// 0 when not: for `kill` choosing between a request and a signal, and the
+/// task manager showing which programs can be asked. Errors:
+/// [`SYS_LIFECYCLE_REQUEST`]'s first three.
+pub const SYS_LIFECYCLE_QUERY: u64 = 1174;
+
+/// [`SYS_LIFECYCLE_REQUEST`]'s `kind`: close as the user would.
+pub const LIFECYCLE_CLOSE: u64 = 1;
+/// [`SYS_LIFECYCLE_REQUEST`]'s `kind`: stop now, cleanly, asking nothing.
+pub const LIFECYCLE_TERMINATE: u64 = 2;
+/// Bytes of one lifecycle request message.
+pub const LIFECYCLE_MESSAGE_LEN: usize = 24;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

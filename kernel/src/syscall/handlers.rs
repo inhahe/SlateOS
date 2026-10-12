@@ -9014,6 +9014,47 @@ pub(crate) fn check_signal_target(
     Ok(sig)
 }
 
+/// `SYS_LIFECYCLE_REGISTER` (1172) -- the caller answers lifecycle requests:
+/// returns the channel end they arrive on (`crate::proc::lifecycle`).
+pub fn sys_lifecycle_register(_args: &SyscallArgs) -> SyscallResult {
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::proc::lifecycle::register(pid) {
+        Ok(end) => broker_value(end.raw()),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_LIFECYCLE_REQUEST` (1173) -- ask process `arg0` to close (`arg1` 1)
+/// or to terminate (2), by the rule a signal to it passes
+/// ([`check_signal_target`]). Returns the request's id.
+pub fn sys_lifecycle_request(args: &SyscallArgs) -> SyscallResult {
+    let caller = caller_pid().unwrap_or(0);
+    if let Err(e) = check_signal_target(caller, args.arg0, 0) {
+        return SyscallResult::err(e);
+    }
+    let Ok(kind) = u32::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let uid = crate::proc::pcb::process_uid(caller).unwrap_or(0);
+    match crate::proc::lifecycle::request(args.arg0, kind, caller, uid) {
+        Ok(id) => broker_value(id),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_LIFECYCLE_QUERY` (1174) -- 1 when process `arg0` answers lifecycle
+/// requests, 0 when not; by the rule a signal to it passes.
+pub fn sys_lifecycle_query(args: &SyscallArgs) -> SyscallResult {
+    let caller = caller_pid().unwrap_or(0);
+    if let Err(e) = check_signal_target(caller, args.arg0, 0) {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(i64::from(crate::proc::lifecycle::answers(args.arg0)))
+}
+
 /// The record of a signal process `caller` sends: the sender class, the
 /// caller's pid and real uid, and the value.
 fn sender_info(

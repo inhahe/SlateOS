@@ -1,5 +1,17 @@
 ## Resolved — lane B
 
+- B-Q23 and B-Q26 -- answered by the operator; each is written up in
+  `design-decisions/` with the operator's words:
+  - B-Q23 What is SlateOS for? -- (§1073) **"Claude's recommendation"**, given
+    in chat to lane F on 2026-10-10: E, the installer's "what is this machine
+    for" question decides what is installed, with B as what "desktop" means --
+    everything but the six network servers. The image keeps everything until
+    an installer exists (§1053).
+  - B-Q26 Process Lasso's controls -- (§1074) **A**, in
+    `open-questions/answers.3.txt` on 2026-10-11: a program's remembered
+    settings gain the processors it may use, a cap on its processor use and a
+    profile while it runs (`roadmap-detailed.md` §1.3).
+
 - B-Q22, B-Q24 and B-Q25 -- answered by the operator on 2026-10-09, in
   `open-questions/answers.txt` in the integration tree, relayed verbatim by
   lane A; each is written up in `design-decisions/` with the operator's words:

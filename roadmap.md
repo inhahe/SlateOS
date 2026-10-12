@@ -1425,17 +1425,17 @@ list moved to lane D on 2026-09-22):
       and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
-    reassign, not an assignment: Mono, .NET on Linux (D, as a language
-    runtime, like CPython); Xonsh (B, a shell -- needs CPython); Nushell *on
-    SlateOS* (B -- the `[x]` below it measured a Windows build); the
-    operator's WinDirStat fork, `D:/visual studio projects/dirsize/windirstat`,
-    or QDirStat (E); a real debugger, GDB and/or LLDB (D, with the toolchain --
-    the `gdb` crate here is hand-written); and a reimplementation of
-    `D:/visual studio projects/backup` in a supported language, or that
-    program run on Mono once Mono runs (E).
+    reassign, not an assignment: .NET as `dotnet/runtime`, not Mono (D, as a
+    language runtime, like CPython -- the operator's change of 2026-10-10,
+    §1246); Xonsh (B, a shell -- needs CPython); Nushell *on SlateOS* (B --
+    the `[x]` below it measured a Windows build); and a real debugger, GDB
+    and/or LLDB (D, with the toolchain -- the `gdb` crate here is
+    hand-written). The operator's WinDirStat fork and the operator's backup
+    program are lane E's own items now. The whole list, YSH included, is
+    `roadmap-detailed.md` §6.13.
 
 - **The operator's answers of 2026-10-09 (B-Q22, B-Q24, B-Q25), as work.**
-  B-Q23 had no answer; lane A has asked the operator.
+  B-Q23 was answered on 2026-10-10 and B-Q26 on 2026-10-11 (below).
   - `[x]` `[B]` **New passwords are yescrypt** (§1070, B-Q24). Done 2026-10-09:
     `userdb::PASSWORD_METHOD`, a setting from `crypt_gensalt` through
     `libcall::crypt`, `authlib`'s burn to match.
@@ -1459,9 +1459,13 @@ list moved to lane D on 2026-09-22):
       Ubuntu's by `scripts/killall-diff.sh`, each case in a PID namespace of
       its own with four named victims. On SlateOS it signals with `kill(2)`:
       no pidfds there, the case upstream falls back for.
-    - `[ ]` `[A]` The kernel half: a lifecycle endpoint each process registers
+    - `[-]` `[A]` The kernel half: a lifecycle endpoint each process registers
       at start, found by PID under a signal's permission rule -- offered by
-      lane A 2026-10-09 and accepted; its request carries the interface.
+      lane A 2026-10-09 and accepted. Built 2026-10-11 on lane-a-wip
+      (`SYS_LIFECYCLE_REGISTER` 1172, `SYS_LIFECYCLE_REQUEST` 1173 answering
+      `NotSupported` for a program with no endpoint, `SYS_LIFECYCLE_QUERY`
+      1174; §1569, `requests/a-b-the-lifecycle-endpoint.md`), reaching main
+      with lane A's next publish.
     - `[ ]` `[B]` The userspace half: a library a program answers *close* (may
       decline) and *terminate* (may not) with; `kill`, `pkill` and `killall`
       sending them -- `--close`, `--via=message|signal`, `--force`,
@@ -1476,6 +1480,19 @@ list moved to lane D on 2026-09-22):
       without asking" and force, where it sends `SIGKILL` today (requested).
     - `[ ]` `[F]` *close* for a Linux program's windows, as the compositor's
       close request -- asked when the toolkit half exists.
+  - **What is installed is the installer's question** (§1073, B-Q23: E, with
+    "desktop" meaning everything but the six network servers):
+    - `[ ]` `[B]` Package groups in `pkg/`, one per answer -- desktop,
+      development and gaming the same set (everything but `sshd`, `ftpd`,
+      `telnet`, `inetd`, `ntpd`, `finger`), server without the desktop
+      applications and games -- each installable later from the others.
+    - `[ ]` The installer's "what is this machine for" answer selects a group
+      (no owner yet; the image keeps everything until then, §1053).
+  - **A program's remembered settings grow by three** (§1074, B-Q26: A) --
+    the processors it may use, a cap on its processor use, a profile while it
+    runs -- with the remembered priority they join (`roadmap-detailed.md`
+    §1.3, no lane yet: the kernel applies them at process creation, Settings
+    and the task manager set them).
 
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**

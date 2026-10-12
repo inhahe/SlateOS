@@ -10,6 +10,26 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## open-questions/answers.3.txt
+
+- **Written:** 2026-10-11 02:14, as `open-questions/answers.3.txt` in the
+  integration tree.
+- **Processed:** 2026-10-11 by lane B: copied; lane B's answer recorded; lanes
+  C and F sent their answers by notice.
+- **Copy:** `operator-answers/2026-10-11-open-questions-answers.3.txt`
+- **Content:** sha256 `f3cee424078cd0ae670605616f54fb1fe4b2bd9515050b51b70a92209fb2c8ea`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| B-Q26 | B | §1074 (A: a program's remembered settings gain the processors it may use, a cap on its processor use and a profile while it runs; `roadmap-detailed.md` §1.3) | recorded |
+| C-Q35 | C | -- | relayed 2026-10-11 (Claude's recommendations) |
+| C-Q36 | C | -- | relayed 2026-10-11 (A) |
+| F-Q11 | F | -- | relayed 2026-10-11 (C, "if that would usually result in more correctness") |
+| F-Q12 | F | -- | relayed 2026-10-11 (B) |
+| F-Q13 | F | -- | relayed 2026-10-11 (C) |
+| F-Q14 | F | -- | relayed 2026-10-11 (the operator plans on 1, not settled: the new computer is not here yet) |
+| F-Q15 | F | -- | relayed 2026-10-11 (A) |
+
 ## chat, 2026-10-10: B-Q23 answered, B-Q24 confirmed, answered questions out of sight
 
 - **Given:** 2026-10-10, in chat to lane F's session, after lane F showed the
@@ -24,7 +44,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| B-Q23: Claude's recommendation -- E, the installer's question decides what is installed, with B as what "desktop" means | B | -- | relayed 2026-10-10 |
+| B-Q23: Claude's recommendation -- E, the installer's question decides what is installed, with B as what "desktop" means | B | §1073 | recorded 2026-10-11: the installer's "what is this machine for" answer picks a package group, "desktop" being everything but the six network servers; the image keeps everything until an installer exists (§1053) |
 | B-Q24: A -- the second of `answers.txt`'s two "B-Q24" lines; the first was B-Q23's | B | §1070 | recorded (lane B took A on 2026-10-09) |
 | Questions already answered should not show among the open ones, though their lanes are rate-limited for days | F | `scripts/questions-for-you.py` | recorded: `questions-for-you/` in the integration tree, only the questions still waiting on you, rebuilt when you run the `update.bat` you keep there -- no scheduled task ("nah, i'll just run update.bat ... when i want it updated", later the same day: `operator-answers/2026-10-10-chat-to-lane-f-2.txt`) |
 
@@ -44,7 +64,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | relayed 2026-10-10 (D: its Mono item in `roadmap.md` becomes `dotnet/runtime`; B: the §1050 list in lane B's backlog still names Mono) |
+| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | relayed 2026-10-10 (D: its Mono item in `roadmap.md` becomes `dotnet/runtime`); B: recorded 2026-10-11 -- the §1050 list in lane B's backlog names `dotnet/runtime` and points to §6.13 |
 | the ports asked for by name, listed in `roadmap-detailed.md` | E | `roadmap-detailed.md` §6.13 | recorded |
 
 ## chat, 2026-10-10: a consent prompt takes no keystrokes
@@ -104,7 +124,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
 | B-Q22 | B | §1072 | recorded: lane A's reading of your answer -- close, terminate, force -- is the one §1072 records; its offer of the kernel half is accepted (lane A told 2026-10-09) |
-| B-Q23 | B | -- | **still not answered**: neither file answers it, and `open-questions/B-Q23.md` waits. If the first "B-Q24" line of `answers.txt` ("Claude's recommendation") was meant for it, the recommendation there is E, with B as what "desktop" means -- say so and it is recorded |
+| B-Q23 | B | §1073 | not answered in either file; answered 2026-10-10 in chat to lane F (the section of that name, above) and recorded 2026-10-11 |
 | F-Q5 | F | -- | relayed 2026-10-09 (lane A's note: the run-time processor check disappears once the whole system is built for x86-64-v3) |
 | F-Q3 | F | -- | relayed 2026-10-09 (lane A's note: keep the three choices in A-Q26's stored permissions, not a second store) |
 | C-Q33 | C | -- | relayed 2026-10-09 (lane A: by your rule it is C; lane C records C unless you say otherwise) |

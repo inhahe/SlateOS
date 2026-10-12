@@ -48,8 +48,9 @@ for each review the tier runs (Fable's may be `unavailable`: when its allowance
 is spent the Opus review stands alone). The commits after the reviewed tip up to
 and including the record's own are the follow-up fixes, which are not reviewed
 again. `--stats` reads the records to say whether the effort level code is
-written at -- the session's, from `CLAUDE_EFFORT` when the review runs --
-shows in how much its reviews find.
+written at shows in how much its reviews find. That level is read from the
+session's transcript, which records it for every request, at each commit's
+time; `CLAUDE_EFFORT`, the session's level now, only where it cannot say.
 
 Exit status: 0 done (or, for `--check`, every commit reviewed); 1 a review that
 could not run, or a commit `--check` refuses; 2 a usage error.
@@ -672,7 +673,69 @@ def mutation_round(top: Path, scratch: Path, base: str, tip: str, stamp: str,
             + f") {dest.name}")
 
 
-def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str,
+def effort_timeline(transcript: Path) -> list[tuple[float, str]]:
+    """(time, effort) for every request a session's transcript records, in
+    order: Claude Code writes each request's `perTurnEffort` there."""
+    out = []
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"perTurnEffort"' not in line:
+                    continue
+                e = re.search(r'"perTurnEffort"\s*:\s*"(\w+)"', line)
+                t = re.search(r'"timestamp"\s*:\s*"([^"]+)"', line)
+                if e and t:
+                    try:
+                        when = dt.datetime.fromisoformat(t.group(1).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    out.append((when.timestamp(), e.group(1)))
+    except OSError:
+        return []
+    out.sort()
+    return out
+
+
+def batch_written_at(cs: list[Commit], timeline: list[tuple[float, str]], fallback: str) -> str:
+    """The effort level the batch's commits were made at: for each commit,
+    the level of the session's last request before it. One level when they
+    agree; `mixed (...)` when they do not; `fallback` when the transcript
+    does not reach back to them (another session made them)."""
+    import bisect
+    if not timeline:
+        return fallback
+    times = [t for t, _ in timeline]
+    seen: dict[str, int] = {}
+    for c in cs:
+        if len(c.parents) > 1:
+            continue
+        try:
+            when = dt.datetime.fromisoformat(c.date).timestamp()
+        except ValueError:
+            continue
+        i = bisect.bisect_right(times, when) - 1
+        # A request more than six hours before the commit is not the one
+        # that made it: the session was elsewhere, or the commit is older.
+        if i >= 0 and when - times[i] < 6 * 3600:
+            seen[timeline[i][1]] = seen.get(timeline[i][1], 0) + 1
+    if not seen:
+        return fallback
+    if len(seen) == 1:
+        return next(iter(seen))
+    return "mixed (" + ", ".join(f"{k} {n}" for k, n in sorted(seen.items())) + ")"
+
+
+def session_transcript() -> Path | None:
+    """This Claude Code session's transcript, if this runs inside one."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    if not sid:
+        return None
+    found = list(Path(config).glob(f"projects/*/{sid}.jsonl"))
+    return found[0] if found else None
+
+
+def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str | None,
            mutants_budget: int = MUTANTS_BUDGET) -> int:
     top = Path(git("rev-parse", "--show-toplevel").strip())
     base_rev, _, tip_rev = rng.partition("..")
@@ -680,6 +743,13 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
         raise SystemExit("review-batch: give the batch as <base>..<tip>")
     base, tip = resolve(base_rev), resolve(tip_rev)
     tier, why, cs = batch_tier(f"{base}..{tip}", remote)
+    if written_at is None:
+        # The level the commits were made at, from this session's own
+        # transcript; the session's level now only if that cannot say.
+        transcript = session_transcript()
+        written_at = batch_written_at(
+            cs, effort_timeline(transcript) if transcript else [],
+            os.environ.get("CLAUDE_EFFORT", "unknown"))
     print(f"review-batch: {len(cs)} commits, {base[:10]}..{tip[:10]}: tier {tier}")
     for w in why[:20]:
         print(f"  {w}")
@@ -1037,6 +1107,32 @@ def self_test() -> int:
         files, since = batch_rust_files(repo, root, tip, "origin")
         expect("batch's own Rust files", (files, since), (["lane.rs", "lane2.rs"], other))
 
+    # The level a batch was written at: the session's last request before
+    # each commit, from its transcript.
+    with tempfile.TemporaryDirectory() as tmp:
+        transcript = Path(tmp) / "s.jsonl"
+        with open(transcript, "w", encoding="utf-8", newline="\n") as f:
+            for when, effort in (("2026-10-11T10:00:00.000Z", "max"),
+                                 ("2026-10-11T12:00:00.000Z", "max"),
+                                 ("2026-10-12T09:00:00.000Z", "xhigh")):
+                f.write(json.dumps({"type": "assistant", "timestamp": when,
+                                    "perTurnEffort": effort}) + "\n")
+            f.write('{"type": "user", "timestamp": "2026-10-12T09:30:00.000Z"}\n')
+        tl = effort_timeline(transcript)
+        expect("timeline", [e for _, e in tl], ["max", "max", "xhigh"])
+
+        def made(*dates: str) -> list[Commit]:
+            return [Commit(f"{i:040x}", ["p"], d, "m") for i, d in enumerate(dates)]
+
+        expect("all at max", batch_written_at(made("2026-10-11T12:30:00+00:00"), tl, "fb"), "max")
+        expect("mixed", batch_written_at(made("2026-10-11T10:05:00+00:00",
+                                              "2026-10-12T09:10:00+00:00"), tl, "fb"),
+               "mixed (max 1, xhigh 1)")
+        expect("before the transcript", batch_written_at(made("2026-10-01T00:00:00+00:00"),
+                                                         tl, "fb"), "fb")
+        expect("long after the last request", batch_written_at(
+            made("2026-10-13T09:00:00+00:00"), tl, "fb"), "fb")
+
     cmds = review_commands("a" * 40, "b" * 40, "max")
     expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
     expect("max prompt", cmds[0][2][-1], f"/code-review max commits {'a' * 40}..{'b' * 40}")
@@ -1069,9 +1165,10 @@ def main(argv: list[str]) -> int:
                     help="seconds to wait for a QEMU guest to finish before reviewing")
     ap.add_argument("--mutants-budget", type=int, default=MUTANTS_BUDGET,
                     help="seconds of mutation testing after the reviews; 0 for none")
-    ap.add_argument("--written-at", default=os.environ.get("CLAUDE_EFFORT", "unknown"),
-                    help="the effort level the batch was written at (default: this "
-                         "session's, CLAUDE_EFFORT)")
+    ap.add_argument("--written-at", default=None,
+                    help="the effort level the batch was written at (default: read from "
+                         "this session's transcript at each commit's time, else "
+                         "CLAUDE_EFFORT)")
     a = ap.parse_args(argv)
     if a.stats:
         print_stats(stats(f"refs/remotes/{a.remote}/main", a.since))

@@ -1725,6 +1725,44 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
     })
 }
 
+/// Which area [`deactivate`] takes away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AreaTarget {
+    /// By the path it was added with.
+    Path(Vec<u8>),
+    /// A block device's area, by the device's name in the registry.
+    Device(String),
+    /// A file's area, by the file's identity: any name for the file will do,
+    /// as Linux's `swapoff` finds a file by its inode rather than its name.
+    File {
+        /// The filesystem's identity, as the VFS gives it.
+        fs_id: u64,
+        /// The file's inode.
+        ino: u64,
+    },
+}
+
+impl AreaTarget {
+    /// Whether `dev` is the area this names. The compressed tier never is.
+    fn names(&self, dev: &SwapDevice) -> bool {
+        match self {
+            _ if dev.kind == AreaKind::Memory => false,
+            Self::Path(path) => dev.path == *path,
+            Self::Device(name) => {
+                dev.kind == AreaKind::Device
+                    && matches!(&dev.backend, SwapBackend::Disk(disk) if disk.device_name == *name)
+            }
+            Self::File { fs_id, ino } => {
+                dev.kind
+                    == AreaKind::File {
+                        fs_id: *fs_id,
+                        ino: *ino,
+                    }
+            }
+        }
+    }
+}
+
 /// Take a swap area away: `swapoff`. It gives no more slots out; every page
 /// in it is brought back into memory, from every address space that has
 /// one there; and only then is it gone. A failure leaves it as it was, in
@@ -1732,33 +1770,35 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
 ///
 /// # Errors
 ///
-/// - `InvalidArgument`: no area by that path (or the compressed tier,
-///   which is not taken away).
+/// - `InvalidArgument`: no such area (the compressed tier is not taken
+///   away).
 /// - `DeviceBusy`: `swapoff` is already emptying it, or pages were still
 ///   left after [`DRAIN_PASSES`] walks.
 /// - `OutOfMemory`: memory, with the other areas' room, cannot hold what it
 ///   holds -- checked first -- or ran out on the way.
 /// - `IoError`: a page could not be read back (it stays in the area).
-pub fn deactivate(path: &[u8]) -> KernelResult<RemovedArea> {
-    deactivate_also(path, &[])
+pub fn deactivate(target: &AreaTarget) -> KernelResult<RemovedArea> {
+    deactivate_also(target, &[])
 }
 
 /// [`deactivate`], walking the address spaces at `extra` too: for a
 /// self-test's own, which no process holds.
-fn deactivate_also(path: &[u8], extra: &[u64]) -> KernelResult<RemovedArea> {
+pub(crate) fn deactivate_also(target: &AreaTarget, extra: &[u64]) -> KernelResult<RemovedArea> {
     let _admin = SWAP_ADMIN.lock();
+    // An area is known by its first global slot from here on: no other area
+    // can have it while this one does.
     let (base, end) = {
         let mut state = SWAP.lock();
         let others_free: u32 = state
             .devices
             .iter()
-            .filter(|d| d.path != path && !d.draining)
+            .filter(|d| !target.names(d) && !d.draining)
             .map(|d| d.slots.free_count())
             .sum();
         let dev = state
             .devices
             .iter_mut()
-            .find(|d| d.path == path && d.kind != AreaKind::Memory)
+            .find(|d| target.names(d))
             .ok_or(KernelError::InvalidArgument)?;
         if dev.draining {
             return Err(KernelError::DeviceBusy);
@@ -1776,13 +1816,13 @@ fn deactivate_also(path: &[u8], extra: &[u64]) -> KernelResult<RemovedArea> {
         (dev.base_slot, dev.end_slot())
     };
 
-    let drained = drain(path, base, end, extra);
+    let drained = drain(base, end, extra);
 
     let mut state = SWAP.lock();
     let index = state
         .devices
         .iter()
-        .position(|d| d.path == path)
+        .position(|d| d.base_slot == base && d.draining)
         .ok_or(KernelError::InternalError)?;
     if let Err(e) = drained {
         if let Some(dev) = state.devices.get_mut(index) {
@@ -1803,23 +1843,62 @@ fn deactivate_also(path: &[u8], extra: &[u64]) -> KernelResult<RemovedArea> {
     })
 }
 
-/// Pages the area at `path` still holds; `None` when it is gone.
-fn area_pages(path: &[u8]) -> Option<u32> {
+/// Read `buf` -- whole sectors -- from byte `offset`, a sector multiple, of
+/// the area `target` names, through its extents and past every cache: for a
+/// self-test checking that an area is where its filesystem says.
+///
+/// # Errors
+///
+/// `InvalidArgument` for no such disk area, or an offset or length that is
+/// not whole sectors or runs past it; the device's own.
+pub(crate) fn area_read(target: &AreaTarget, offset: u64, buf: &mut [u8]) -> KernelResult<()> {
+    let (device, extents) = {
+        let state = SWAP.lock();
+        match state
+            .devices
+            .iter()
+            .find(|d| target.names(d))
+            .map(|d| &d.backend)
+        {
+            Some(SwapBackend::Disk(disk)) => (disk.device_name.clone(), disk.extents.clone()),
+            _ => return Err(KernelError::InvalidArgument),
+        }
+    };
+    let sector = SECTOR_BYTES as u64;
+    if !offset.is_multiple_of(sector) || !buf.len().is_multiple_of(SECTOR_BYTES) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let first = offset.checked_div(sector).unwrap_or(0);
+    area_io(&device, &extents, first, buf, false)
+}
+
+/// Whether a swap area is a file on the filesystem `fs_id`: the VFS refuses
+/// to unmount it while one is.
+#[must_use]
+pub fn file_area_on(fs_id: u64) -> bool {
     SWAP.lock()
         .devices
         .iter()
-        .find(|d| d.path == path)
+        .any(|d| matches!(d.kind, AreaKind::File { fs_id: f, .. } if f == fs_id))
+}
+
+/// Pages the area at global slot `base` still holds; `None` when it is gone.
+fn area_pages(base: u32) -> Option<u32> {
+    SWAP.lock()
+        .devices
+        .iter()
+        .find(|d| d.base_slot == base)
         .map(SwapDevice::pages)
 }
 
 /// Bring every page in global slots `[base, end)` back into memory: walk
 /// every process's address space, pinned so it cannot go mid-walk (and the
-/// address spaces at `extra`), until the area at `path` holds none.
-fn drain(path: &[u8], base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
+/// address spaces at `extra`), until the area holds none.
+fn drain(base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
     let in_area =
         |raw: u64| SwapEntry::from_pte_raw(raw).is_some_and(|e| (base..end).contains(&e.slot()));
     for pass in 0..DRAIN_PASSES {
-        if area_pages(path).is_none_or(|n| n == 0) {
+        if area_pages(base).is_none_or(|n| n == 0) {
             return Ok(());
         }
         if pass > 0 {
@@ -1844,7 +1923,7 @@ fn drain(path: &[u8], base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
             unsafe { bring_back(pin.pml4(), &in_area)? };
         }
     }
-    if area_pages(path).is_none_or(|n| n == 0) {
+    if area_pages(base).is_none_or(|n| n == 0) {
         Ok(())
     } else {
         Err(KernelError::DeviceBusy)
@@ -3573,7 +3652,7 @@ fn test_whole_device() -> KernelResult<()> {
     }
     area_io(DEV, &whole, 0, &mut head, true)?;
     let taken = activate(request(b"/dev/swaptest1"));
-    let removed = deactivate(b"/dev/swaptest1");
+    let removed = deactivate(&AreaTarget::Device(String::from(DEV)));
     drop(disk);
 
     let checks = [
@@ -3723,7 +3802,8 @@ fn test_area_round_trip() -> KernelResult<()> {
         }
 
         // swapoff: the page comes back and the area goes.
-        let removed = deactivate_also(PATH, &[pml4]).map_err(|_| "swapoff failed")?;
+        let removed = deactivate_also(&AreaTarget::Path(PATH.to_vec()), &[pml4])
+            .map_err(|_| "swapoff failed")?;
         if removed.device != DEV || removed.extents != extents {
             return Err("swapoff gave back the wrong area");
         }
@@ -3753,7 +3833,10 @@ fn test_area_round_trip() -> KernelResult<()> {
         if list_devices().iter().any(|d| d.path == PATH) {
             return Err("the area is still listed");
         }
-        if !matches!(deactivate(PATH), Err(KernelError::InvalidArgument)) {
+        if !matches!(
+            deactivate(&AreaTarget::Path(PATH.to_vec())),
+            Err(KernelError::InvalidArgument)
+        ) {
             return Err("a second swapoff was not refused");
         }
         if used_slots() != used_before {
@@ -3766,7 +3849,8 @@ fn test_area_round_trip() -> KernelResult<()> {
     // teardown gives back any slot still named), then the disk.
     // SAFETY: never loaded in any CR3; nothing else uses it.
     unsafe { page_table::destroy_user_address_space(pml4) };
-    let _ = deactivate(PATH); // Gone already on success; `InvalidArgument` then.
+    // Gone already on success, and then `InvalidArgument`: nothing to do.
+    let _ = deactivate(&AreaTarget::Path(PATH.to_vec()));
     drop(disk);
 
     match result {

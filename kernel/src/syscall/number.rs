@@ -7256,6 +7256,39 @@ pub const LIFECYCLE_TERMINATE: u64 = 2;
 pub const LIFECYCLE_MESSAGE_LEN: usize = 24;
 
 // ---------------------------------------------------------------------------
+// Swap areas (1175-1176)
+// ---------------------------------------------------------------------------
+//
+// `swapon` and `swapoff` for native programs: the C library's, and through it
+// util-linux's (`crate::mm::swapctl`; the operator's D-Q8 question; known-issues
+// A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK).
+
+/// `swap_on(path_ptr, path_len, flags)` -- turn swap on at the absolute path:
+/// a block device (`/dev/<name>`) or a regular file, whose first page must be
+/// a swap header (Linux's `mkswap`'s). `flags` are Linux's `swapon` flags:
+/// `SWAP_FLAG_PREFER` (0x8000) with a priority in the low 15 bits, or none
+/// for the next default (-2, -3, ...); the discard flags are accepted. A file
+/// is then refused writes, resizing, removal and renaming until
+/// [`SYS_SWAP_OFF`]. Needs root's authority, as mounting does.
+///
+/// Errors: `PermissionDenied`; `InvalidArgument` for unknown flags, no swap
+/// header, a file with holes, or a path that is neither; `NotSupported` for
+/// a file on a filesystem that cannot give its blocks; `DeviceBusy` when it
+/// is swap already; `ResourceExhausted` for too many areas; `OutOfMemory`;
+/// the path's own (`NotFound`, ...).
+pub const SYS_SWAP_ON: u64 = 1175;
+
+/// `swap_off(path_ptr, path_len)` -- turn swap off at the absolute path:
+/// every page in the area comes back into memory first. A file is found by
+/// identity, so any name for it will do. Needs root's authority.
+///
+/// Errors: `PermissionDenied`; `InvalidArgument` when it is not a swap area;
+/// `DeviceBusy` when pages could not all be brought back (it stays in use);
+/// `OutOfMemory` when memory and the other areas cannot hold what it holds;
+/// the path's own.
+pub const SYS_SWAP_OFF: u64 = 1176;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

@@ -31216,14 +31216,47 @@ fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
     if swap_flags & !SWAP_FLAGS_VALID != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Architectural directive: we have no swap subsystem and no caller
-    // holds CAP_SYS_ADMIN.  Linux's gate-2 always trips, BEFORE getname
-    // ever runs.  Return EPERM without touching the specialfile ptr.
-    linux_err(errno::EPERM)
+    // Gate 2: CAP_SYS_ADMIN -- root's authority here, as for mounting.
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    // Gate 3: the name, then what it names (`mm::swapctl`).
+    let path = match swap_path(args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    #[allow(clippy::cast_possible_truncation)] // masked to 19 bits above
+    match crate::mm::swapctl::swap_on(&path, swap_flags as u32) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => linux_err(swap_errno(e)),
+    }
+}
+
+/// The file `swapon(2)` or `swapoff(2)` names: the caller's path, through its
+/// container root and its symbolic links, as a host path that exists.
+/// `EFAULT`, `ENOENT`, `ENAMETOOLONG` and the rest as the lookup answers.
+fn swap_path(path_ptr: u64) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let guest = resolve_at_path(AT_FDCWD, path_ptr)?;
+    let host = crate::fs::Vfs::resolve_path(&guest).map_err(|e| linux_err(linux_errno_for(e)))?;
+    crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(host)
+}
+
+/// The errno for a `swapon` or `swapoff` refused (`mm::swapctl`): Linux's own
+/// answers where the kernel's error has no single meaning -- `EINVAL` for
+/// "not a swap area" (no header, a hole, a file on a filesystem that cannot
+/// swap, a path that is neither a file nor a block device), `EPERM` for too
+/// many areas (`MAX_SWAPFILES`).
+fn swap_errno(e: KernelError) -> i32 {
+    match e {
+        KernelError::InvalidArgument | KernelError::NotSupported => errno::EINVAL,
+        KernelError::ResourceExhausted => errno::EPERM,
+        other => linux_errno_for(other),
+    }
 }
 
 /// `swapoff(path)`.
-fn sys_swapoff(_args: &SyscallArgs) -> SyscallResult {
+fn sys_swapoff(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (mm/swapfile.c::SYSCALL_DEFINE1(swapoff)):
     //
     //   SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
@@ -31255,10 +31288,17 @@ fn sys_swapoff(_args: &SyscallArgs) -> SyscallResult {
     // probe CAP_SYS_ADMIN; EPERM aborts cleanly, EFAULT triggers
     // pointer-shape retries that can never succeed.
     //
-    // Architectural directive: we have no swap subsystem and no caller
-    // holds CAP_SYS_ADMIN.  Linux's gate-1 always trips.  EPERM
-    // unconditionally.
-    linux_err(errno::EPERM)
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    let path = match swap_path(args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match crate::mm::swapctl::swap_off(&path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(swap_errno(e)),
+    }
 }
 
 /// `reboot(magic1, magic2, cmd, arg)`, answered as Linux's

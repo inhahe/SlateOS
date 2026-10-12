@@ -1493,6 +1493,12 @@ extern "C" fn kernel_main() -> ! {
                 }
             }
 
+            // A swap file on that ext4, turned on and off (`mm::swapctl`): skips
+            // itself without one.
+            selftest::dispatch_debug("Swap file", selftest::Severity::Integrity, || {
+                mm::swapctl::self_test_file()
+            });
+
             // Probe for ISO 9660 filesystems (CD-ROM images).
             // In QEMU, an ISO image can be attached as a virtio-blk device.
             for iso_dev in &["vdb", "vdc", "vdd"] {

@@ -1,6 +1,11 @@
 ### A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK -- 2026-10-09 -- OPEN (lane A)
 
-**Status:** OPEN (lane A). Found answering the operator's question on D-Q8
+**Status:** OPEN -- fixed on lane-a-wip (8a2e52950: areas only by header,
+extents, `swapoff`; then `swapon`/`swapoff` by path and swap files on ext4),
+awaiting a boot on main. Left after that: zram sized from RAM (item 5); a GPT
+swap partition taken at boot (item 1's second half), which waits for the block
+layer to have partition devices at all; and turning configured swap on at boot
+(lane B's, `requests/a-b-turn-on-configured-swap-at-boot.md`). Found answering the operator's question on D-Q8
 ("Shouldn't we allow a swap file or at least a swap partition? What did we agree
 on in the design files?", `operator-answers/2026-10-09-open-questions-answers.txt`).
 
@@ -47,8 +52,9 @@ memory pressure past what zram holds, which with 256 slots is 4 MiB.
    than one run, so a partition is one extent and a file is the extents the
    filesystem gives it.
 3. **A swap file**, the design's default: `swapon` on a regular file asks its
-   filesystem (ext4) for the file's extents, refuses one with holes or
-   not-yet-written extents, checks the signature, and marks the inode as an
+   filesystem (ext4) for the file's extents, refuses one with holes (an
+   unwritten extent, `fallocate`'s, is taken, as Linux takes it), checks the
+   signature, and marks the inode as an
    active swap file so writes and truncation are refused while it is in use
    (Linux's `S_SWAPFILE`). The kernel then reads and writes the sectors
    directly, as Linux does.

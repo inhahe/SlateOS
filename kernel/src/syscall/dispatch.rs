@@ -122,6 +122,7 @@ use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
     SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
     SYS_LIFECYCLE_QUERY, SYS_LIFECYCLE_REGISTER, SYS_LIFECYCLE_REQUEST, SYS_RESTART_SYSCALL,
+    SYS_SWAP_OFF, SYS_SWAP_ON,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -581,6 +582,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_LIFECYCLE_REGISTER as usize] = Some(handlers::sys_lifecycle_register);
     handlers[SYS_LIFECYCLE_REQUEST as usize] = Some(handlers::sys_lifecycle_request);
     handlers[SYS_LIFECYCLE_QUERY as usize] = Some(handlers::sys_lifecycle_query);
+    // Swap areas (`mm::swapctl`).
+    handlers[SYS_SWAP_ON as usize] = Some(handlers::sys_swap_on);
+    handlers[SYS_SWAP_OFF as usize] = Some(handlers::sys_swap_off);
     handlers[SYS_SIGNAL_QUEUE as usize] = Some(handlers::sys_signal_queue);
     handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
     handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);

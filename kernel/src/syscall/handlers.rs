@@ -9055,6 +9055,46 @@ pub fn sys_lifecycle_query(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::from(crate::proc::lifecycle::answers(args.arg0)))
 }
 
+/// `SYS_SWAP_ON` (1175) -- turn swap on at the absolute path
+/// `arg0`/`arg1` with `swapon`'s flags `arg2` (`mm::swapctl::swap_on`).
+pub fn sys_swap_on(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_root_authority() {
+        return SyscallResult::err(e);
+    }
+    // Symbolic links followed, as Linux's `swapon` opens the file.
+    let path = match read_user_path(args.arg0, args.arg1 as usize)
+        .and_then(|p| crate::fs::Vfs::resolve_path(&p))
+    {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(flags) = u32::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::mm::swapctl::swap_on(&path, flags) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SWAP_OFF` (1176) -- turn swap off at the absolute path `arg0`/`arg1`
+/// (`mm::swapctl::swap_off`).
+pub fn sys_swap_off(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_root_authority() {
+        return SyscallResult::err(e);
+    }
+    let path = match read_user_path(args.arg0, args.arg1 as usize)
+        .and_then(|p| crate::fs::Vfs::resolve_path(&p))
+    {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::mm::swapctl::swap_off(&path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// The record of a signal process `caller` sends: the sender class, the
 /// caller's pid and real uid, and the value.
 fn sender_info(

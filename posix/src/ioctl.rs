@@ -73,6 +73,10 @@ pub const TIOCGWINSZ: u64 = 0x5413;
 pub const TIOCSWINSZ: u64 = 0x5414;
 /// Set/clear non-blocking I/O.
 pub const FIONBIO: u64 = 0x5421;
+/// Set the descriptor's close-on-exec flag, as `fcntl(F_SETFD, FD_CLOEXEC)`.
+pub const FIOCLEX: u64 = 0x5451;
+/// Clear the descriptor's close-on-exec flag.
+pub const FIONCLEX: u64 = 0x5450;
 /// Get number of bytes available to read.
 pub const FIONREAD: u64 = 0x541B;
 /// Get termios attributes.
@@ -684,6 +688,15 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         return -1;
     }
 
+    // The descriptor's own requests, whatever it names: Linux's
+    // `do_vfs_ioctl` answers them before any driver is asked. (Until
+    // 2026-10-07 FIOCLEX and FIONCLEX were ENOTTY on every descriptor.)
+    match request {
+        FIOCLEX => return set_close_on_exec(fd, true),
+        FIONCLEX => return set_close_on_exec(fd, false),
+        _ => {}
+    }
+
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
         TIOCSWINSZ => handle_tiocswinsz(entry.kind, entry.handle, arg),
@@ -797,6 +810,30 @@ fn handle_tiocswinsz(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
         let _ = term;
         host_winsize::set(winsize_to_wire(&ws));
         0
+    }
+}
+
+/// FIOCLEX and FIONCLEX — set or clear the descriptor's close-on-exec flag,
+/// as `fcntl(fd, F_SETFD, ...)` does, on any descriptor: Linux's
+/// `do_vfs_ioctl` answers both before a driver is asked, and reads no
+/// argument for either. CPython's `os.set_inheritable` tries them first, and
+/// falls back to `fcntl` only on `ENOTTY`, which is what every descriptor
+/// answered here until 2026-10-07.
+fn set_close_on_exec(fd: i32, on: bool) -> i32 {
+    let Some(flags) = fdtable::get_fd_flags(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    let new_flags = if on {
+        flags | fdtable::FD_CLOEXEC
+    } else {
+        flags & !fdtable::FD_CLOEXEC
+    };
+    if fdtable::set_fd_flags(fd, new_flags) {
+        0
+    } else {
+        errno::set_errno(errno::EBADF);
+        -1
     }
 }
 
@@ -3186,6 +3223,23 @@ mod tests {
             assert!(n >= 0, "FIONREAD on {kind:?} reported {n}");
             let _ = fdtable::close_fd(fd);
         }
+    }
+
+    /// FIOCLEX and FIONCLEX set and clear close-on-exec on any descriptor --
+    /// a file's, whose driver knows no requests here, included -- as Linux's
+    /// `do_vfs_ioctl` does before a driver is asked. They were ENOTTY on
+    /// every descriptor until 2026-10-07.
+    #[test]
+    fn fioclex_and_fionclex_are_the_descriptors() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0xC1E).unwrap();
+        assert_eq!(ioctl(fd, FIOCLEX, core::ptr::null_mut()), 0);
+        assert_eq!(fdtable::get_fd_flags(fd), Some(fdtable::FD_CLOEXEC));
+        assert_eq!(ioctl(fd, FIONCLEX, core::ptr::null_mut()), 0);
+        assert_eq!(fdtable::get_fd_flags(fd), Some(0));
+        assert!(fdtable::close_fd(fd).is_some());
+        crate::errno::set_errno(0);
+        assert_eq!(ioctl(fd, FIOCLEX, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]

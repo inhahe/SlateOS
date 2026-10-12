@@ -224,6 +224,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/fuzz.py` | Fuzz a crate with its own harness: libFuzzer through `cargo fuzz`, in WSL. |
 | `scripts/gate-cache.py` | Replay a gate's passing verdict when nothing it read has changed. |
 | `scripts/gate-cost-report.py` | What each boot-test gate has cost, against what it has caught. |
 | `scripts/gatecache_site/sitecustomize.py` | Gate-cache bootstrap: trace this Python process when a cached gate runs it. |
@@ -577,4 +578,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_567 scripts._
+_568 scripts._

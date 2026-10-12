@@ -15,48 +15,38 @@ inputs they name. This harness asks about the inputs nobody named.
 
 ## Running it
 
-In WSL, with a nightly toolchain (`rustup toolchain install nightly`) and
-`cargo install cargo-fuzz --locked`:
+With `scripts/fuzz.py`, which every lane's harness shares (its docstring says
+what WSL needs):
 
-    python3 setup.py "/mnt/e/visual studio projects/os-lane-f"
-    bash run.sh 1200        # seconds per target; all eight in parallel
+    python scripts/fuzz.py run gui/video/fuzz 1200   # seconds per target, all in parallel
 
-`setup.py` does three things:
+It copies the decoder crates and every crate they reach by `path` into
+`~/fuzz/lanef-fuzz/tree` in WSL, installs this harness there with each
+target's dictionary of the tokens its parsers read (`NAME.dict`), and runs
+every target at low priority, built as a release build is, with a 4 GB memory
+limit and 20 seconds per input. `image` and `video` reach `rav1d`'s `unsafe`
+code and run under the address sanitizer (`harness.toml`'s `sanitize`); the
+six all-safe targets run without it, at about twice the speed. A finding lands
+in `~/fuzz/lanef-fuzz/tree/fuzz/artifacts/<target>/`.
 
-- It copies the decoder crates and every crate they reach by `path` into
-  `~/fuzz/tree`, under a workspace root that holds only this workspace's
-  lints. cargo-fuzz needs nightly and a workspace of its own, and the real
-  one has neither to spare.
-- It installs the harness (`harness.toml`, `fuzz_targets/`, and each
-  target's dictionary of the tokens its parsers read, `NAME.dict`) as
-  `~/fuzz/tree/fuzz`.
-- It builds seed corpora from the crates' own test fixtures. The VP8 and VP9
-  packet targets take their seeds from the test vectors, remuxed to runs of
-  length-prefixed packets with `ffmpeg`; the subtitle target from
-  `videocodec`'s subtitle fixtures -- text, timed text, PGS and VobSub
-  pictures -- with `subtitles.dict`'s markup -- ASS override tags, SRT and
-  WebVTT tags, cue settings -- PGS's segment headers, VobSub's control
-  commands, and DVB's segment headers and pixel codes for its mutations; the
-  MP4 target from the `mp4` crate's
-  fixtures, ffmpeg's files and the hand-written ones that exercise each
-  table, with `mp4.dict`'s box types and the counts at the edges of FFmpeg's
-  arithmetic.
-
-`run.sh` runs each target at low priority for the given time. It builds with
-`-O` and no debug assertions, as a release build runs, so anything it finds
-also happens in what ships. Each run has a 4 GB memory limit and a 20-second
-limit per input, so a hang or a runaway allocation counts as a finding.
-`image` and `video` reach `rav1d`'s `unsafe` code, and run under the address
-sanitizer; the six all-safe targets run without it, at about twice the
-speed. A finding lands in `~/fuzz/tree/fuzz/artifacts/<target>/`.
+`seeds.py` builds the seed corpora from the crates' own test fixtures. The
+VP8 and VP9 packet targets take their seeds from the test vectors, remuxed to
+runs of length-prefixed packets with `ffmpeg`; the subtitle target from
+`videocodec`'s subtitle fixtures -- text, timed text, PGS and VobSub pictures
+-- with `subtitles.dict`'s markup -- ASS override tags, SRT and WebVTT tags,
+cue settings -- PGS's segment headers, VobSub's control commands, and DVB's
+segment headers and pixel codes for its mutations; the MP4 target from the
+`mp4` crate's fixtures, ffmpeg's files and the hand-written ones that
+exercise each table, with `mp4.dict`'s box types and the counts at the edges
+of FFmpeg's arithmetic.
 
 ## When it finds something
 
-Reproduce with `cargo +nightly fuzz run -O <target> <artifact>`, then fix the
+Reproduce with `cargo +nightly fuzz run -O <target> <artifact>` in
+`~/fuzz/lanef-fuzz/tree`, then fix the
 crate in the lane F worktree. Copy the artifact into that crate's tests as a
 regression test (each crate's `tests/` already holds damaged files of its
-own), and run `setup.py` again before the next round so the fuzzer sees the
-fix.
+own), and the next round copies the fixed crate in.
 
 ## What it has found
 

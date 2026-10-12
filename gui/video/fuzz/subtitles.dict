@@ -212,3 +212,26 @@
 "&#x41;"
 "<![CDATA["
 "<!DOCTYPE"
+# CEA-608 captions in MP4 (c608): the sample entry and atoms, and commands
+# as sent -- each byte with its parity bit, every control code twice.
+"c608"
+"cdat"
+"cdt2"
+"clcp"
+# Resume Caption Loading, End of Caption, Erase Displayed and Non-Displayed
+# Memory, Roll-Up 2, Carriage Return, Resume Direct Captioning, Backspace.
+"\x94\x20\x94\x20"
+"\x94\x2f\x94\x2f"
+"\x94\x2c\x94\x2c"
+"\x94\xae\x94\xae"
+"\x94\x25\x94\x25"
+"\x94\xad\x94\xad"
+"\x94\x29\x94\x29"
+"\x94\xa1\x94\xa1"
+# A PAC to row 15, a mid-row italics, an extended character, a tab offset,
+# channel 2's Resume Caption Loading.
+"\x94\xe0\x94\xe0"
+"\x91\xae\x91\xae"
+"\x92\x20\x92\x20"
+"\x97\xa2\x97\xa2"
+"\x1c\x20\x1c\x20"

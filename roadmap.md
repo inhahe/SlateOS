@@ -2230,7 +2230,11 @@ live.
   turned on (`context-menus.yaml`); a menu that cannot be used is reported
   with why. **Lane E:** the file manager's menus and the Settings page that
   lists and switches them
-  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`) -- the file
+  manager's done 2026-10-10 (60fc1cd4a), but for the items' pictures, which
+  wait on it drawing from the icon theme at all; the Settings page done the
+  same day (Apps -> Context Menus: every menu with its switch, whose it is
+  and what it adds, and what is not offered with why). Menu rows
   draw their pictures since the same day -- an item's, a submenu's, a jump
   list action's (`ContextMenu::render_with_icons`).
 
@@ -3261,6 +3265,53 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
+- `[E]` **The operator's backup program, LithicBackup, on SlateOS**
+  (design-decisions §1050, the operator's answer to B-Q18: "a
+  reimplementation of `d:\visual studio projects\backup` in a language we
+  support, or if we get Mono ported, we can just run it on that"). Adopted
+  2026-10-10 from the list in lane B's backlog. The program is C# for .NET 8
+  (`net8.0-windows`): about 50,000 lines in 168 files, a WPF window, and
+  Windows underneath it -- the NTFS change journal says what changed, IMAPI2
+  burns the discs, Win32 names the volumes. Mono 6.14 cannot load a .NET 8
+  program, so the operator changed the .NET port to `dotnet/runtime` (§1246).
+  Even then, running it needs more than the runtime: WPF exists only on
+  Windows, and the journal and the burner are Windows calls. The operator's
+  two routes:
+  - **Run it on .NET:** its window rewritten (in Avalonia, itself a port, or
+    against our toolkit), and its Windows services swapped for SlateOS's own.
+  - **Reimplement it:**
+    - the engine on `apps/snapstore`, the store `apps/backup` and System
+      Restore share;
+    - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
+    - the window in our toolkit;
+    - the feature list from the program's own `design.md`, `roadmap.md` and
+      `known-issues.md`.
+
+  Which route is chosen when the work starts, depending on how far
+  `dotnet/runtime` has got by then. Either way, copying a file that is open
+  and changing waits on the VSS equivalent in `roadmap-detailed.md` (the
+  operator's request of 2026-08-21). The operator's whole list of ports is
+  `roadmap-detailed.md` §6.13.
+
+- `[E]` **The operator's WinDirStat fork on SlateOS** (design-decisions
+  §1050, B-Q18: "QDirStat, or better, port my own fork of WinDirStat that can
+  be found at d:\visual studio projects\dirsize\windirstat"). Adopted
+  2026-10-10 from the same list.
+  - **The fork:** C++ on MFC and Win32, about 39,000 lines. It has All
+    Files, Largest Files, Duplicate Files, Search Results, File Watcher,
+    Extension and Treemap views; logical against physical size; scans saved
+    and reloaded; and cleanup from the window. MFC is Windows-only, so a port
+    means a new window layer under the fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported: a treemap, a sortable file list and an
+    extension breakdown.
+  - **First step:** compare the fork's features with diskanalyzer's. Then
+    either port the fork's logic or bring its features to diskanalyzer; if
+    neither is clearly better, it is a question for the operator.
+
+  QDirStat, the other route the operator named, is built on Qt, which
+  nothing here has ported.
+
 - `[-]` `[E]` **Games and the theme** — **C-Q16**, answered by the operator
   (`design-decisions.md` §1422): every game's chrome follows the palette, and
   on the board a colour keeps its own value only where a player reads it --
@@ -3434,13 +3485,64 @@ word; text inside them that says "lane C" is history.
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
     2026-09-29** (3a7073848): a morning and an evening picture, each with
     its time, and the picture and the rotation saying when a schedule hides
-    them;
+    them (since 2026-10-10 the page shows one source at a time, below);
+  - ~~a theme's wallpapers on the Background page
+    (`c-e-a-themes-wallpapers-on-the-background-page.md`)~~ **done
+    2026-10-10**: the page asks one question first -- Show: a picture, a
+    theme's pictures, pictures by time of day, a folder in turn, or none --
+    and choosing a source clears those the desktop would show over it
+    (design-decisions §1243); themes chosen by their pictures, decoded off
+    the window's thread; the pictures themes bring offered as pictures;
+  - ~~window frames, the taskbar panel and the cursor theme chosen in
+    Settings (`c-e-choose-the-window-frames-in-settings.md`,
+    `c-e-choose-the-taskbar-panel-in-settings.md`,
+    `c-e-choose-the-cursor-theme-in-settings.md`)~~ **done 2026-10-10**:
+    three rows on the Themes page, each list holding every installed theme
+    and choosing that axis alone;
+  - ~~how long notifications are kept
+    (`c-e-a-setting-for-how-long-notifications-are-kept.md`)~~ **done
+    2026-10-10**: Keep for, on the Notifications page;
+  - ~~the password vault shared with the credential service
+    (`c-e-share-the-password-vault-with-the-credential-service.md`)~~
+    **done 2026-10-10**: `apps/credvault`, the vault's model and its file
+    format moved out of the password manager into a library both build on,
+    so the service reads the vault with the very code that writes it;
+  - ~~the System Sounds section on Settings' Sound page
+    (`c-e-a-sounds-page-for-the-sounds-axis.md`)~~ **done 2026-10-10**: on
+    or off, a volume, the sound theme -- every one installed, other
+    desktops' too -- and each event's sound (the theme's, none, or a file of
+    the user's), each heard as it is chosen; heard on SlateOS once the C
+    library reaches the sound device (lane D's half of
+    `e-ad-no-application-can-reach-the-sound-device.md`);
+  - ~~a Window Rules page in Settings
+    (`c-e-a-window-rules-page-in-settings.md`)~~ **done 2026-10-10**: the
+    rules in order, each switched, changed, moved and deleted, a new one
+    added, and the file's unreadable ones said and never saved over
+    (`e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`
+    asks lane C to keep them); the snap zones wait on lane F to be named
+    (`e-f-settings-could-name-the-snap-zones.md`). Settings' pages scroll
+    since the same day -- they did not, and what ran past the window's bottom
+    could not be reached;
+  - `[-]` a disabled control says why while the pointer rests on it
+    (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
+    (every dimmed button and unusable row), thirteen games through
+    `gamechrome::why`, the lock screen and System Restore's forms, and the
+    explorer's, notes' and the photo manager's context menus -- which never
+    saw the pointer, so their submenus could not be reached with it -- done
+    2026-10-10; hangman, gomoku, pinball and the network manager wait on
+    lane C's `Frame::greyed`, the editor's menu rows on the menu bar's
+    `explain`;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio
     button and drop-down, and the dock (`c-e-the-toolkit-has-a-slider-now.md`,
     `c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`,
-    `c-e-the-toolkit-has-a-dock.md`);
+    `c-e-the-toolkit-has-a-dock.md`). The slider, 2026-10-04: the mixer's
+    faders, the video player's seek bar, volume and Adjustments, the
+    camera's seven settings and the password manager's generator length
+    (its auto-lock already was); `slides` and `photomanager` have no slider
+    -- lane C's counts matched "SlideRight" -- so left are settings,
+    colorpicker and paint;
   - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
     the requests themselves are on lane B's branch): the terminal answers
     how wide it will draw a run of text -- **done** (e99d960e6, OSC 7730,
@@ -3456,23 +3558,65 @@ word; text inside them that says "lane C" is history.
   file (f661f4c01); the three modules lane C's palette refusal waited on
   (16d1a710a).
 
-- `[ ]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
+- `[x]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
   file into frames, and lane F's Matroska reader stays as the tree's one
   (`requests/f-e-two-matroska-demuxers-which-stays.md`, answered
   2026-10-04):
-  - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
+  - `[x]` `apps/videoplayer` plays through `videocodec::Video` -- open,
     `next_frame`, `seek`, late pictures dropped through `next_picture`
-    without their conversion -- keeping timing and display its own;
-  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`,
-    and `mkv/demux.rs` is retired with its mutation rows -- once lane F's
-    port of its test cases and its mutation sweep is on `main`.
+    without their conversion -- keeping timing and display its own --
+    2026-10-04 (design-decisions §1234): a film's pictures decode on a
+    thread of their own (`src/pictures.rs`), shown as the player's clock
+    reaches them; every jump of the clock moves the picture; a drag of the
+    seek bar shows key frames; the film ends when its last picture's time
+    is up. WebM, Matroska and MP4 in VP8, VP9 and AV1; H.264 and HEVC
+    files open and say why they show no picture;
+  - `[x]` `mkv/demux.rs` is retired with its tests and its mutation sweep,
+    lane F's port of both being on `main` -- 2026-10-04;
+    `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
+    now;
+  - `[x]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
+    -- 2026-10-04: a Matroska file's length, title and tracks are the
+    demuxer's, so a track FFmpeg passes over is not listed, and a file the
+    player cannot open shows as Matroska with nothing known; `mkv/mod.rs`
+    keeps only the first look at the EBML header. The crate's mutation
+    sweep of its three header readers, lost 2026-10-03, is back. A
+    divergence from ffprobe found on the way -- a SeekHead `matroska`
+    refuses a whole file over -- is
+    `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
 
-- `[-]` `[E]` **Text boxes with a caret** --
+- `[ ]` `[E]` **The video player's sound and picture controls** -- what the
+  player still draws and does not do, each saying so where it is drawn
+  since 2026-10-04:
+  - `[ ]` the film's sound: `videocodec::Sound` (lane F,
+    `requests/f-e-a-videos-sound-decodes-now.md`) gives a film's Opus,
+    timed on the pictures' clock; it has nowhere to go until a program can
+    reach the sound device
+    (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Then
+    the sound becomes the clock (design-decisions §1234), and the volume
+    and the Equalizer tab act;
+  - `[x]` the Adjustments tab's sliders move, and the picture is shown
+    through them -- brightness, contrast, saturation, hue, gamma and
+    sharpness, applied on the decoding thread -- 2026-10-04: the toolkit's
+    slider for each (and for the seek bar and the volume), the keys Up and
+    Down to choose one and its own keys to move it, Reset All; the grade
+    (`src/grade.rs`) is one table and one matrix a pixel, and a sharpening
+    pass where asked, and a paused picture is decoded again through it;
+  - `[ ]` a screenshot of the picture on screen, in the Settings tab's
+    format;
+  - `[ ]` Resume Playback: where a film was left is kept, and it opens
+    there.
+
+- `[x]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
-  twenty-nine programs' boxes take typing only at their end, with no caret,
+  twenty-nine programs' boxes took typing only at their end, with no caret,
   selection or clipboard. One program at a time onto `textline::apply_key`
-  over a `TextInput`, as netscan's and sysmonitor's; emojipicker done
-  2026-10-04.
+  over a `TextInput`, as netscan's and sysmonitor's: all twenty-nine done
+  2026-10-04, listed in the known issue -- the masked boxes (passwordgen's
+  analyser, lockscreen's password, credmanager's secrets) through
+  `textline::apply_masked_key`, a caret that moves between the mask's
+  characters. The known issue moves to `known-issues-resolved/` once this
+  is on `main`.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task
@@ -3714,6 +3858,37 @@ word; text inside them that says "lane C" is history.
   (`requests/e-a-the-sevenz-crate-is-ready-for-the-kernel-shim.md`: the
   kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
   shims.
+
+- `[-]` `[E]` **Programs draw their pictures from the icon theme, not as
+  emoji** -- 2026-10-10, lane C's
+  `requests/c-e-draw-pictures-from-the-icon-theme.md`. No font here draws
+  emoji, so each was a box. `apps/themeicons` is the piece every program
+  under `oswindow::app` uses: icons named while drawing, uploaded through
+  `App::take_images`, dropped and drawn again when the colours or the icon
+  theme change. **Done:** Settings (its sidebar, search field, open lists'
+  checks and placeholder card), the file manager's detail view (each file
+  by its type's own icon name, its kind's built-in icon where the theme has
+  none) and the archive manager's file list. **Remaining:** the file
+  manager's toolbar and transfer buttons and the world clock, which need
+  icons the built-in set does not draw
+  (`requests/e-c-icon-names-lane-e-s-programs-need.md`); the finance
+  categories, which no icon name describes; Settings' account pictures,
+  which wait on the picture being kept at all
+  (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+
+- `[-]` `[E]` **A text field's right-click menu in every program** --
+  2026-10-10, lane C's `requests/c-e-text-fields-have-a-right-click-menu.md`:
+  Cut, Copy, Paste, Delete and Select all (Undo and Redo in a box with a
+  history), each dimmed when it would do nothing. `apps/fieldmenu` holds the
+  menu, routes the presses, keys, pointer and clock to it and draws it, for
+  every program; `textline::apply_key_on_clipboard` puts the keys on the
+  program's clipboard, which the menu copies to and pastes from -- programs
+  kept clipboards of their own for the keys. **Done:** Settings, the QR code
+  maker, the torrent client's magnet box, the renamer's boxes, the sound
+  recorder's marker names, the process explorer's filter and New Task
+  boxes, the mail client's compose form. **Remaining:** calendar, finance,
+  flashcards, jsonviewer, notes, paint, regextester, reminders, snippets,
+  stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
@@ -4250,8 +4425,10 @@ lane C's `guitk`.
     vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
     One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
     (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
-    reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
-    chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
+    reuse. `[ ]` The rest of the gap to libvpx's SIMD on one core: SSSE3/AVX2
+    copies of motion compensation and the loop filter, chosen at run time,
+    one checked `unsafe` call each -- the operator allowed it 2026-10-09
+    (F-Q5, §1373); the same for VP8's lane shuffles.
   - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
     CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
     transforms and quantisers, bit-exact against libvpx's C; the bitstream
@@ -4307,12 +4484,22 @@ lane C's `guitk`.
     queues the frames to decode. Tested end to end, compositor to decoded
     pixels. `[ ]` The remote desktop service that reads the stream, and with
     it coding off the compositor's thread
-    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`).
+    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`):
+    as the operator decided it (F-Q6, §1374), a device pairs by PIN as with
+    Chrome Remote Desktop and is remembered by key; the viewer is a web page
+    the machine serves over HTTPS, for phones, tablets and desktops, zooming
+    and scrolling the remote screen; and turning it on sets up the dynamic
+    DNS name, the router's port and a Let's Encrypt certificate, from lane
+    D's pieces, in lane C's Settings page
+    (`requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
-  and gets thumbnails wherever a picture does. HEIC waits on
-  `open-questions.md` F-Q1 (a patent question), and would reuse the container.
+  and gets thumbnails wherever a picture does.
+  - `[ ]` HEIC, as an optional install (F-Q1 answered B, §1370): an HEVC
+    decoder (libde265, LGPL, as a separate replaceable helper) that a fresh
+    install lacks and offers the first time a HEIC file is opened; the
+    container reader serves HEIC as is. One decoder for HEVC video too.
   - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
     alpha, gain maps, sequences; `dimensions` and `pixel_format` match
     Pillow's libavif on all 224 files of the AOM and libavif corpora.
@@ -4339,9 +4526,11 @@ lane C's `guitk`.
     byte for byte on 28 fixtures made here
     (`tests/data/generate_avif_rescale.py`).
   - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
-    twice dav1d's time, one thread); making rav1d faster waits on
-    `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
-    (known-issues.md, "[F] AVIF decoding has no committed benchmark").
+    twice dav1d's time, one thread). `[ ]` rav1d's hand-written assembly
+    (F-Q4 answered A, §1372): its `asm` feature, assembled with NASM at
+    build time and chosen at run time, its pixels held to the Rust's on every
+    fixture (known-issues.md, "[F] AVIF decoding has no committed
+    benchmark").
 
 - `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
   codec support"): the video player (`apps/videoplayer`, lane E) has its
@@ -4417,7 +4606,8 @@ lane C's `guitk`.
         seeks held to ffprobe's, and every byte of six files damaged in
         turn; and what a track says of its picture (colour, pixel shape,
         display matrix, clean aperture), held to ffprobe over 28 files more.
-        It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+        It carries FFmpeg's licence (LGPL), kept so by the operator (F-Q7
+        answered A, §1375).
       - `[x]` A file's claims held to its length: its tracks index at most a
         sample a byte of it between them, FFmpeg's own ceilings kept exactly
         -- after the fuzzer found a 734-byte file that asked for 46 GB.
@@ -4438,10 +4628,11 @@ lane C's `guitk`.
     - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
   - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
-    write into MP4: `videocodec` refuses them by name today. A decoder for
-    each, held to its reference as VP8's and VP9's are. Whether to include
-    one, and which code to start from, is the operator's:
-    `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
+    write into MP4: `videocodec` refuses them by name today.
+    - `[ ]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
+      answered B, §1376), included, held picture for picture to FFmpeg and
+      the conformance streams; every profile, interlaced, 10-bit and 4:2:2.
+    - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point
       decoder ported -- SILK, hybrid and CELT, concealment, in-band FEC,
@@ -4526,7 +4717,7 @@ lane C's `guitk`.
           dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
-        - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
+        - `[ ]` AAC, which most MP4 files carry: FFmpeg's fixed-point decoder translated into `gui/video/aac` (F-Q9 answered B, §1377), included, LC and HE-AAC, held bit for bit to FFmpeg as Opus and Vorbis are to theirs.
   - `[x]` Subtitles (2026-10-05, design-decisions §1360):
     `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
     cue by cue -- start, end, and the text as SRT markup whatever the
@@ -4586,16 +4777,74 @@ lane C's `guitk`.
       thousands of random documents; a document made to be slow given up
       on. Held to ttconv's reading of each fixture's samples: MP4Box's, and
       written box by box in samples of 2 s, 1.5 s and one, and a seek.
-    - `[ ]` CEA-608 captions in MP4 (`c608`)
-      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+    - `[x]` CEA-608 captions in MP4 (`c608`, 2026-10-05, design-decisions
+      §1369): television's captions, which FFmpeg's and CCExtractor's
+      readers each show otherwise than a television in places. Decoded by
+      the FCC's rules (47 CFR 79.101), channel CC1: pop-on, roll-up and
+      paint-on, every command, the extended characters by McPoodle's
+      tables; a cue for each stretch the screen shows the same, each row a
+      line in the grid's face, placed by its third. Seven fixtures written
+      box by box, each checked against FFmpeg or CCExtractor where either
+      is right, two against the rules alone; seeks. What a caption track's
+      other channels and CEA-708 would take:
+      `known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`.
+
+- `[-]` `[F]` **Colour management, as Chrome does it** (F-Q10 answered A,
+  §1378): pictures' ICC profiles through a port of skcms, Skia's colour
+  library; HDR and wide-gamut video through Chrome's own handling, held to
+  Chrome's pixels; the screen taken to be sRGB until screens report their
+  colours, then the compositor's to manage
+  (`known-issues/F-video-is-shown-without-colour-management.md`).
+  - `[x]` What a video says of its light, read as FFmpeg reads it -- the
+    transfer (PQ, HLG), the mastering display and the content light level,
+    from AV1's metadata OBUs, Matroska's `Colour`, MP4's `colr`, `mdcv` and
+    `clli` and VP9's `SmDm` and `CoLL` -- which Chrome's handling needs.
+  - `[x]` Chrome's handling of HDR on an sRGB screen (§1379): Skia's PQ and
+    HLG curves, its RWTMO tone map by the content's peak, BT.2020 to sRGB,
+    chroma upsampled as Chrome's GPU samples it; on every HDR video frame
+    and HDR AVIF (its `clli`), held to Chrome 154's own pixels
+    (`gui/video/yuv/src/managed.rs`).
+  - `[x]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
+    table lookups a pixel, to the scalar passes' bits -- steps 2 to 5 1.7
+    to 3.6 times faster (`gui/video/yuv/src/managed/avx2.rs`).
+  - `[ ]` HDR's speed, the rest: step 1 (Y'CbCr and its chroma in floating
+    point, some two fifths of a frame now) and the tone map's `exp2f` in
+    its curved middle, eight pixels at a time to the same bits.
+  - `[x]` SDR video's colours to sRGB as Chrome converts them (§1381):
+    every primaries other than BT.709's (BT.601's two too, BT.2020 SDR,
+    P3) and the curves Chrome does not take for the sRGB one, where the
+    video says its colour whole as Chrome takes it -- held to Chrome 154's
+    screenshots (`gui/video/codec/tests/sdr.rs`).
+  - `[x]` SDR AVIF's colours the same: Chrome's AVIF decoder converts by
+    its `nclx` (MIAF's defaults for what is unspecified), on the GPU as
+    video -- held to Chrome's screenshots
+    (`gui/imagecodec/tests/avif_sdr.rs`).
+  - `[ ]` Ordinary video and AVIF converted as Chrome's GPU converts them:
+    floating point with the exact constants, not libyuv's fixed point,
+    whose capped blue weight puts saturated blues up to 15 levels off
+    (`known-issues/F-ordinary-video-is-libyuv-s-arithmetic-not-chrome-s.md`);
+    measure 4K's speed first, and tell lane E.
+  - `[ ]` Video that does not fully say its colours: Chrome's BT.601 or
+    the players' guess -- `open-questions/F-Q11.md`, the operator's.
+  - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
+  - `[ ]` Gain maps (ISO 21496-1: UltraHDR JPEG, AVIF `tmap`), and HDR
+    screens' headroom, once screens report their colours.
+- `[ ]` `[F]` **Screen capture** (F-Q3 answered, §1371): the capture request
+  in `gui/remote`'s protocol and `gui/window`'s call; in the compositor,
+  Print Screen and its own region and window picker, whose pick is the
+  permission, and for programs capturing on their own schedule a prompt only
+  the compositor can draw -- once, for the program's run, or always (kept in
+  lane A's grant store by the program's fingerprint, §1568). Answers lane
+  E's `requests/e-f-an-application-cannot-read-the-screen-so-no-screenshot-can-be-taken.md`.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a
   channel's peer, a TCP peer cannot say what process it is, and `client_pid`
   is a per-connection number. Unblocks the process explorer's window picker
   (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
-  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
-  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  screen capture's prompt (F-Q3, §1371: who is asking, and an "always" kept
+  by the program's fingerprint), per-program grouping on the taskbar, and
+  the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
   design-decisions §1336.
   - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
     `Socket` runs over TCP or a channel from the service registry, through
@@ -4623,6 +4872,121 @@ lane C's `guitk`.
   - `[x]` The attested pid in the window list (`WindowInfo::process`,
     window list version 6), for per-program grouping on the taskbar; `pid`
     stays the per-connection number.
+
+- `[x]` `[F]` **A program's tray icon names a theme icon and its program** --
+  done 2026-10-05 (`design-decisions/1382-...`), for lane C's
+  `requests/c-f-let-a-tray-icon-name-a-theme-icon.md` and
+  `requests/c-f-name-a-tray-icons-program.md`. A tray icon was one character,
+  and the pictures a tray most wants are emoji no font here draws; it now
+  carries an `IconName` from the theme for the shell to draw, and the
+  program's name, which `oswindow` fills in from the one the program declares
+  (`EventLoop::set_app_id`, set by `app::open`), so the shell can remember
+  where a user put a program's icon. A program holds at most 32 icons and a
+  tooltip a kilobyte, and is told when refused. Lane C draws the named icon
+  and keys the tray's arrangement by the program's name.
+
+- `[x]` `[F]` **The shell can draw a live picture of any window** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-let-the-shell-draw-a-live-picture-of-a-window.md`
+  (`roadmap-detailed.md` → Taskbar: "hover thumbnails, Aero Peek-style
+  preview on hover"; also the overview and Alt-Tab).
+  `RenderCommand::WindowPicture` names a window; the compositor draws its
+  client area fitted and area-averaged into the rectangle, again whenever it
+  changes, and only in a shell's frames (§1385). Lane C builds the previews,
+  Peek and the cards on it.
+
+- `[x]` `[F]` **Text in a font family the drawing names** -- done
+  2026-10-10, with lane C, for `requests/c-f-text-in-a-family-the-drawing-names.md`
+  (`roadmap-detailed.md` §3.5: a font picker's live preview, a document's
+  runs). `FontFamily::Named(FamilyName)` (lane C's `5cc5a8029`, merged) on
+  the wire as `FontFamilyTag::Named` and its name; the compositor loads a
+  named family with the toolkit's own `ensure_family`, so a run is drawn in
+  the face it was measured in, at most four new families a frame.
+
+- `[x]` `[F]` **A shaped glyph's outline** -- done 2026-10-10, for lane C's
+  `requests/c-f-an-outline-for-each-shaped-glyph.md` (SVG text drawn as
+  paths: a gradient, a stroke, a clip on the letters). `SystemFont::outline`
+  gives any glyph the font shaped as a path in pixels, y up, from whichever
+  face drew it and at that face's weight, unhinted.
+
+- `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
+  F's part** (the operator's rule, `design-decisions.md` §1242;
+  `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).
+  - `[x]` The keyboard goes back to the window that had it (§1384): one
+    rule for closing, minimising, hiding and leaving a desktop -- the
+    window used most recently that can take it, in the same band or below.
+    Fixed with it: a minimised or hidden window was never told it lost the
+    keyboard (and stayed focused in the window list); minimising and
+    switching desktops handed the keyboard to the taskbar; a refused focus
+    told the focused window it had lost it; closing a window behind a
+    minimised one kept on top left no window focused; and an accent half
+    typed in a closed window completed itself in the next.
+  - `[x]` A shell action giving the keyboard back without closing the
+    window: `ShellControlAction::ReturnKeyboard` (Escape in the prompt) --
+    never back into the window giving it up.
+  - `[x]` Nothing but the user moves the keyboard into the prompt, and no
+    program takes it on its own say-so without the user's action
+    (§1386, the next item).
+  - `[~]` A window that opens without taking the keyboard (a field of
+    `WindowSpec`) -- **blocked by** lane C's `chrome()` naming every
+    field of a window's terms
+    (`requests/f-c-build-the-shells-window-terms-from-spec-new.md`).
+
+- `[x]` `[F]` **A program takes the keyboard on its own say-so only when the
+  user's action asked for it** -- done 2026-10-10 (§1386), the general case
+  lane E's §1242 request left to lane F, and the keyboard half of lane C's
+  `c-abf-...` F2. Activation tokens as Wayland's xdg-activation has them: a
+  launcher draws one (`GetActivationToken`, sixteen bytes from the kernel's
+  random source) standing for the user's latest action in its windows and
+  hands it to the program it starts (`SLATE_ACTIVATION_TOKEN`,
+  `EventLoop::vouch_for`); `oswindow` presents it with the program's first
+  window; `Window::activate` brings an existing window forward on one. Good
+  once, and only while the window holding the keyboard has seen no later
+  action. A program's own `Restore` no longer takes the keyboard (it could
+  take the keys, and the clipboard, whenever it liked); a refused window
+  opens beneath the one with the keyboard and asks for attention. A tray
+  click passed on by the shell counts as the user's action for the icon's
+  program. New windows with no token still take the keyboard (GNOME's and
+  KDE's default) -- refusing them too is F-Q12. Launchers asked to hand
+  tokens on: `requests/f-c-hand-a-started-program-an-activation-token.md`,
+  `requests/f-e-hand-a-started-program-an-activation-token.md`.
+
+- `[x]` `[F]` **A window can belong to another, and is kept above it** --
+  done 2026-10-10 (§1387), the window system's part of the operator's §1415
+  (the file explorer shows every program's Open and Save window, which
+  belongs to the program that asked) and lane C's
+  `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`.
+  `SetParent` with a program's own window, or with one another program lent
+  by `ExportWindow` (Wayland's xdg-foreign: a handle, never the raw id, so no
+  program can pin a window over someone else's uninvited). A window that
+  belongs to another stays above it and rises with it, opens centred over it
+  on its desktop, takes the keyboard if its parent has it and gives it back
+  to its parent on leaving, and is minimised and restored with it. Not yet:
+  keeping such windows off the taskbar (a window-list field).
+
+- `[x]` `[F]` **The pointer is drawn from the user's cursor theme** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-draw-the-pointer-from-the-cursor-theme.md` (§1459: Adwaita,
+  Breeze, Bibata install as they are). The theme's picture for each shape at
+  the user's size times the display's scale, read once and kept; scaled when
+  the theme's nearest size is not the one asked for; animated pointers frame
+  by frame on the compositor's clock, the loop woken for each frame with no
+  damage; the colour scheme for the built-in art only; the pictures dropped
+  on every `ReloadAppearance`. A shape the theme lacks is the built-in art.
+
+- `[x]` `[F]` **Window frames are drawn from the user's frame theme** -- done
+  2026-10-10 (§1388), for lane C's
+  `requests/c-f-draw-window-frames-from-the-theme.md` (§1456). Every window's
+  frame is measured by the chosen window-decorations theme: the title bar's
+  height, the border and the shadow. Its buttons and title are placed by the
+  same geometry the shell's run box uses, rounded to whole pixels, and drawn
+  and clicked in the same places. Titles go at the left or in the middle,
+  regular or bold, and are cut by clipping, by a mark at the end, or by
+  keeping the end. Buttons are rounded, round, square or bare marks, and the
+  one under the pointer lights up, whatever its shape. A theme change
+  re-measures every open window and refits the maximised and snapped ones. A
+  frame with neither border nor shadow keeps an invisible 6-pixel band to
+  resize it by.
 
 - `[F]` Port FreeRDP (line ~5058)
 
@@ -5525,7 +5889,9 @@ _Port ext4 first. Don't write a custom filesystem._
   newline, a NUL or 48 KiB, its trimming and `<N>` prefixes, each line filed
   under the process that wrote it from the socket's credentials, the writer
   named as journald's context cache names it -- plus systemd's own log for
-  its messages, every `SYSTEMD_LOG_*` setting and its colours; through new
+  its messages, every `SYSTEMD_LOG_*` setting and its colours, and an
+  `emerg` line broadcast to every logged-in terminal as journald's
+  `ForwardToWall` does (`userspace/journalfwd`); through new
   `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
   cases agree and 1 differs on purpose, ours in namespaces of its own with a
   private `/var/log`, the reference's records read back from WSL's journald);
@@ -5541,6 +5907,75 @@ _Port ext4 first. Don't write a custom filesystem._
   260 cases agree and 3 differ on purpose, comparing the whole tree each
   side leaves, its last case 300 random merges by
   `scripts/patch-merge-fuzz.py`; design-decisions §1068);
+  `pwdx` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: a
+  process number read as `strtol` reads it, so ` 12` and `+12` pass and then
+  name no process; a bad one ends the run after delivering what came before
+  it, as `error()` does, while a process it cannot read is reported *ahead*
+  of the answers still buffered, as the bare `fprintf (stderr)` upstream uses
+  is (the new `stdfd::diag_bytes_ahead_of_stdout`); standard output closed as
+  procps' own `close_stdout` closes it, silent for a reader that has gone
+  (`stdfd::close_stdout_procps`); `scripts/pwdx-diff.sh`: 111 cases agree and
+  9 differ on purpose, over sleepers in awkward directories, a deleted one and
+  a zombie. `free`, `uptime`, `vmstat`, `w`, `sysctl`, `pgrep` and `pkill`
+  close through `close_stdout_procps` too since the same day -- under
+  `trap '' PIPE` they had said `write error: Broken pipe` and exited 1 where
+  procps says nothing -- and `free` keeps `/proc/meminfo` open as the library
+  does, which decides what `free >&-` says; `scripts/procps-close-diff.sh`
+  holds the whole family to procps' close: 44 cases agree);
+  `pmap` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  default, `-x`, `-d` and `-X`/`-XX` formats, the rc file `-c`/`-C` read and
+  `-n`/`-N` write, `-A` ranges, `-p`, `-q`; each map read with `fgets` into
+  1024 bytes, so a mapping whose path makes its line longer arrives in
+  pieces and the second is scanned as a line of its own, as upstream does;
+  `-X`'s two passes over `smaps` and its field list kept from one process to
+  the next; shared memory named by its id, learned from a segment of its own
+  through the new `libcall::shm`; `procps::scanf` gained `%x` and scansets;
+  `scripts/pmap-diff.sh`: 328 cases agree and 3 differ on purpose, over
+  static targets -- so no shared library's pages move the `Pss` column --
+  mapping long paths, odd ones, deleted files and System V segments);
+  `skill` and `snice` (2026-10-09, procps-ng 4.0.4's `skill.c` -- new,
+  nothing here had them: one program, which it is by its name; the signal or
+  priority taken out of the arguments before `getopt`, a word a process id
+  when `strtol` reads all of it and a command name when not, `-n`, `-v`,
+  `-i`'s questions, `-d`'s lists, `-l`/`-L`, `--ns` -- which, as upstream's,
+  only `--nslist` makes count, and `--nslist` takes any name since
+  `procps_ns_get_id` never answers the -1 it is tested for -- and no
+  `close_stdout`, so the status is 0 whatever became of the output; the new
+  `libcall::priority`, and `procps::signals` gained the listings and
+  `skill_sig_option`; `scripts/skill-diff.sh`: 118 cases agree and 3 differ
+  on purpose, each safe by construction -- `-n`, signal 0, STOP and CONT,
+  or renicing upwards -- on targets the harness starts under names nothing
+  else has);
+  `tload` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  screen one buffer of rows run together, scrolled a byte at a time as
+  upstream scrolls it, frames written with the NUL before the buffer's last
+  byte, the column's height made an `int` as C makes one, the scale halved
+  and drifting back up, the size asked of the terminal written to, a resize
+  (`SIGWINCH`) starting the graph again; one deliberate difference: a
+  height that is not a finite number -- `-s inf`, `-s nan`, `-s 1e308` --
+  is drawn empty, where upstream never finishes the frame and spins a
+  processor until it is killed; `libcall::signal` gained `SIGWINCH`;
+  `scripts/tload-diff.sh`, over a pinned `/proc/loadavg` and frames read by
+  `scripts/tload-frames.py` from a pipe or from pseudo-terminals of chosen
+  sizes, resized mid-run);
+  `pidof` and `killall5` (2026-10-09, sysvinit 3.08's `killall5.c` -- new,
+  nothing here had them: one program, `pidof` by that name and `killall5` by
+  any other; a name matched as upstream matches it -- `argv[0]`, its last
+  part, the name's last part, the executable's real path or the executable
+  deleted, under `-x` a script's argument when `stat` names the script, a
+  title with a blank or a login shell by its `stat` name -- with `cmdline`
+  read 4096 bytes to an argument as upstream reads it; `-s` one id for each
+  name, `-d`'s first byte or a NUL, `-o`'s `,`/`;`/`:` lists and `%PPID`,
+  `-c` for root only; killall5's signal read from its first argument
+  wherever the others are, every process stopped first unless `-o` named
+  some, and its own session, init and kernel threads left alone; what either
+  has to say sent to syslog as `daemon.err` unless standard input is a
+  terminal `ttyname` can name; the new `libcall::process::getuid`, `geteuid`
+  and `lock_all_memory`; `scripts/pidof-diff.sh`: 83 cases agree, each run
+  with standard input `/dev/null` -- the complaints read from a socket bound
+  over `/dev/log` -- and with a terminal, every run in a PID namespace of its
+  own whose init starts the same fixtures in the same order on both sides,
+  so that killall5 can reach nothing else);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5568,6 +6003,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fw: firewall rule management (allow/deny by port/IP, policy, logging, persistence, JSON output)
   - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
   - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
+  - [x] pwdx: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pwdx-diff.sh`, 120 cases)
+  - [x] pmap: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pmap-diff.sh`, 331 cases)
+  - [x] skill/snice: procps-ng 4.0.4's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/skill-diff.sh`, 121 cases)
+  - [x] tload: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/tload-diff.sh`)
+  - [x] pidof/killall5: sysvinit 3.08's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/pidof-diff.sh`, 83 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)
@@ -5648,7 +6088,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pgrep/pkill: procps-ng 4.0.4's, coreutils programs since 2026-10-03 (see the coreutils item; `scripts/pgrep-diff.sh`, 437 cases); `pidwait` waits on the native `pidfd_open`
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)
-  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
+  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); an `emerg` message broadcast to every logged-in user's terminal as journald's default `ForwardToWall` does (`userspace/journalfwd`, shared with `systemd-cat`; `scripts/journalfwd-diff.sh` holds it to systemd's own `wall()`, 31 cases); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
   - [x] ftp: interactive FTP client (USER/PASS login, PORT/PASV data, ASCII/binary transfer, mget/mput with glob, resume, progress)
   - [x] chroot: change root directory (root check, --userspec, --groups, user/group resolution, privilege drop)
@@ -6079,8 +6519,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 
 ### 4.1 Core applications
 - [-] `[E]` **Scheduled backups that happen** (2026-09-27, C-Q21, design-decisions §1426) -- lane E's half done: schedules are kept in `<config>/backup/schedules.json`, where one program can find them all, with a time and a day (`--at`, `--on`); `backup run-due` runs each that is due -- one missed while the machine was off runs once, as soon as it is run -- and records it; `schedules` lists them, `unschedule` removes one. Waiting on lanes D and B for the service that runs `backup run-due` at boot and every few minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
-- [-] Weather dashboard (apps/weather: layouts for current conditions, hourly/daily forecast, alerts, temperature graph and air quality, all real and tested; unit cycling (T/U/W/P) works. **It has no weather and says so** -- `render_cannot_fetch` draws four lines instead of the dashboard, because there is no transport to fetch from and the invented forecast was rightly deleted. The five location operations are `#[cfg(test)]` and there is nothing to attach a location to until a source exists; tracked in `deferred-questions.md`, not as a live question)
-- [-] Weather dashboard (apps/weather: see the fuller line above -- the layouts are built and unit settings work; the app has no weather source and states that in its own window rather than drawing an empty dashboard)
+- [-] `[E]` **A recycle bin on every drive, with each drive's own limits** (2026-10-09, E-Q4, design-decisions §1238, §1240) -- `apps/recyclebin`: a file goes to the bin on its own drive (`~/.recycle` on the home folder's drive, `<mount point>/.recycle-<uid>` on the others, found from `/proc/mounts`), so a delete from a stick is a rename on the stick. Each bin keeps to its own limits -- age, size, number of items -- written in it (`limits.yaml`), or to the user's default (`recyclebin.yaml`), or thirty days; held to them oldest first, never on a guess (an unreadable limit or a damaged entry deletes nothing). The file manager lists every drive's bin in one Recycle Bin, restores and erases each item in its own bin, undoes a delete from the bin it went to, and applies the limits when the bin is opened, saying what that removed; the image viewer's Delete and Ctrl+Z use the drive's bin; Disk Cleanup cleans every drive's. Settings -> System -> Recycle Bin lists every drive's bin with what it holds, sets the default limits, and gives a drive limits of its own (written into its bin) or takes them away. Still to do: applying the limits when a drive appears (`known-issues/E-a-drives-recycle-bin-limits-wait-until-the-bin-is-opened.md`, the recycle-bin service's).
+- [-] `[E]` **Two windows of a program keep each other's work** (2026-10-09, E-Q5, design-decisions §1239) -- `apps/recordfile`: ids no other window will give out (random, below 2^52), a three-way merge by id that puts a window's changes into what the file holds now (the later save wins only for a record both windows changed; an order changed here is kept), and a watch on the file (inotify) that wakes a window to read it again when another saves. Each program also repairs what a merge can break in it -- Notes brings back a notebook another window deleted while this one put a note in it, Contacts a group, and a book names no one it does not have; the kanban board merges a board inside (its columns, cards and labels by id) and mends a card left in two places, in none, or in a column and the archive at once, which its reader refuses; Snippets puts at the top level a folder or snippet another window left in a folder deleted here, and lists every folder after its parent; Flashcards merges each deck's file card by card, a review with it; Finance brings back an account a kept transaction is in and keeps budgets by category. Finance and Flashcards, which went at once when closed, now ask first while a save is failing, as the others do. **Done:** all eight -- Notes, Contacts, the kanban board, Reminders, the e-book reader's library, Snippets, Flashcards and Finance -- with tests of two windows. **To do:** the single-window programs (`requests/e-cf-a-program-can-ask-to-have-only-one-window.md`).
 
 ### 4.2 Package manager — Python/fastpy candidate
 

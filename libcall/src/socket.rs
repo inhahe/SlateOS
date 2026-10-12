@@ -319,7 +319,11 @@ fn parse_control(control: &[u8], close: &mut dyn FnMut(i32)) -> Option<Ucred> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
 
     extern crate std;
     use super::*;

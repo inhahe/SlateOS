@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**493 programs; 334 on the image, 6 carried inside the kernel.**
+**500 programs; 341 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 308
+## Userland utilities and services (`userspace/`, lane B) -- 315
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -137,6 +137,7 @@ two disagree.
 | `jq` | Slate OS JSON processor | yes |  |  |
 | `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
 | `kill` | Process Termination Utility | yes |  | `killall` |
+| `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
 | `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
@@ -205,10 +206,12 @@ two disagree.
 | `patch` | Apply a diff to the files it names: GNU patch 2.7.6 as Ubuntu ships it, ported. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. | yes | `coreutils` |  |
 | `pgrep` | Look up processes by name and other attributes. | yes | `coreutils` |  |
+| `pidof` | Find the processes running a program: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `ping` | ICMP Ping Utility | yes |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. | yes | `coreutils` |  |
 | `pkg` | Slate OS package manager. | yes |  |  |
 | `pkill` | Signal processes chosen by name and other attributes. | yes | `coreutils` |  |
+| `pmap` | Report the memory map of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `polkit` | PolicyKit Authorization Framework | yes |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. | yes | `coreutils` |  |
@@ -220,6 +223,7 @@ two disagree.
 | `ptx` | Produce a permuted index of file contents. | yes | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). | yes |  |  |
 | `pwd` | Print the full filename of the current working directory. | yes | `coreutils` |  |
+| `pwdx` | Print the working directory of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `readelf` | ELF Binary Inspector | yes |  |  |
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |
@@ -247,7 +251,9 @@ two disagree.
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. | yes |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. | yes | `coreutils` |  |
 | `shuf` | Write a random permutation of the input lines. | yes | `coreutils` |  |
+| `skill` | Send a signal to the processes an expression picks. | yes | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
+| `snice` | Set the nice value of the processes an expression picks. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |
 | `ss` | Socket statistics (ss/sockstat) | yes |  | `sockstat` |
@@ -280,6 +286,7 @@ two disagree.
 | `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
+| `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
 | `top` | Interactive Process Monitor | yes |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
@@ -380,7 +387,7 @@ two disagree.
 | `finance` | Personal Finance — budget tracking and expense management. |  |  |  |
 | `flashcards` | Spaced-repetition study application. |  |  |  |
 | `flood` | Flood It — a colour-flooding puzzle. |  |  |  |
-| `fontmanager` | Font Manager — Graphical Font Management and Preview |  |  |  |
+| `fontmanager` | Font Manager: the fonts on this machine, each shown in its own letters; a font file installed; the user's own fonts removed. |  |  |  |
 | `freecell` | Classic FreeCell card game. |  |  |  |
 | `game2048` | Slide the tiles together until two of them make 2048. |  |  |  |
 | `gomoku` | Gomoku (five in a row) -- a 15x15 Go-style board against a minimax opponent, in a real window. |  |  |  |

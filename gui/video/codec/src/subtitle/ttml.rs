@@ -244,7 +244,7 @@ impl Parameters {
     /// sub-frame a frame and one tick a second where none is given -- the
     /// tick rate not following the frame rate, as TTML would have it -- and
     /// 32 by 15 cells.
-    fn read(tt: &Element) -> Self {
+    fn read(tt: &Element<'_>) -> Self {
         let number = |name: &str| {
             tt.attribute(TTP, name)
                 .and_then(|v| v.trim().parse::<u32>().ok())
@@ -500,14 +500,14 @@ struct Specified {
 
 impl Specified {
     /// The styles `e`'s own `tts:` attributes give.
-    fn inline(e: &Element) -> Self {
+    fn inline(e: &Element<'_>) -> Self {
         let mut s = Self::default();
         for (name, value) in &e.attributes {
-            if name.namespace != TTS {
+            if *name.namespace != *TTS {
                 continue;
             }
             let value = value.trim();
-            match name.local.as_str() {
+            match name.local {
                 "color" => s.colour = colour(value),
                 "fontWeight" => {
                     s.bold = match value {
@@ -941,7 +941,7 @@ type Styles = HashMap<String, Specified>;
 /// Every `<style>` of the head's `<styling>`, by `xml:id`: its own styles
 /// over those it references -- those before it -- the last of those over
 /// the earlier. Of two with one identifier, the first.
-fn read_styles(head: &Element) -> Styles {
+fn read_styles(head: &Element<'_>) -> Styles {
     let mut out = Styles::new();
     // The first `<styling>`, as ttconv reads only it.
     for styling in head.elements().filter(|e| e.name.is(TT, "styling")).take(1) {
@@ -958,7 +958,7 @@ fn read_styles(head: &Element) -> Styles {
 
 /// An element's styles: its own `tts:` attributes over those its `style`
 /// attribute references, the last over the earlier.
-fn specified(e: &Element, styles: &Styles) -> Specified {
+fn specified(e: &Element<'_>, styles: &Styles) -> Specified {
     let mut s = Specified::inline(e);
     for referenced in e
         .attribute("", "style")
@@ -976,7 +976,7 @@ fn specified(e: &Element, styles: &Styles) -> Specified {
 /// Every `<region>` of the head's `<layout>`, in order: its place in the
 /// root container, and its styles -- its own, those it references, and
 /// those of `<style>` elements inside it.
-fn read_regions(head: &Element, styles: &Styles, params: &Parameters) -> Vec<Region> {
+fn read_regions(head: &Element<'_>, styles: &Styles, params: &Parameters) -> Vec<Region> {
     let mut out = Vec::new();
     // The first `<layout>`, as ttconv reads only it.
     for layout in head.elements().filter(|e| e.name.is(TT, "layout")).take(1) {
@@ -1029,15 +1029,15 @@ fn read_regions(head: &Element, styles: &Styles, params: &Parameters) -> Vec<Reg
     reason = "ttconv's process, step for step, is easier to hold to it whole"
 )]
 fn content(
-    e: &Element,
+    e: &Element<'_>,
     cx: &Context<'_>,
     parent: &Timing,
     preserve: bool,
 ) -> Option<(Content, Option<Ratio>)> {
-    let kind = if e.name.namespace != TT {
+    let kind = if *e.name.namespace != *TT {
         return None;
     } else {
-        match e.name.local.as_str() {
+        match e.name.local {
             "body" => Kind::Body,
             "div" => Kind::Div,
             "p" => Kind::P,
@@ -1078,7 +1078,7 @@ fn content(
             Node::Text(text) => {
                 if mixed && !timing.seq {
                     children.push(Content {
-                        kind: Kind::Text(text.clone()),
+                        kind: Kind::Text(text.as_ref().to_owned()),
                         id: String::new(),
                         region: None,
                         begin: None,
@@ -1100,7 +1100,7 @@ fn content(
                     Kind::P | Kind::Span => &["span", "br"][..],
                     _ => &[][..],
                 };
-                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {
+                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {
                     continue;
                 }
                 let Some((c, desired_end)) = content(child, cx, &timing, preserve) else {
@@ -1613,6 +1613,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::cost;
 
     fn secs(n: i128, d: i128) -> Ratio {
         Ratio::new(n, d).unwrap()
@@ -1932,9 +1933,20 @@ mod tests {
         assert_eq!(placement(1, &region((10, 5), (80, 15), 0)), 8);
         assert_eq!(placement(0, &region((0, 0), (100, 100), 0)), 7);
         assert_eq!(placement(2, &region((0, 40), (100, 20), 1)), 6);
-        // The anchor exactly at a third is in the next.
         assert_eq!(placement(0, &region((0, 0), (100, 100), 1)), 4);
         assert_eq!(placement(0, &region((100, 0), (0, 0), 0)), 9);
+        // An anchor exactly at a third is in the next: a line centred in a
+        // region two thirds wide from the left edge is anchored at 1/3
+        // across, and one in a region two thirds high from the top, its
+        // lines at the middle, at 1/3 down.
+        let thirds = Region {
+            id: String::new(),
+            place: [Ratio::ZERO, Ratio::ZERO, secs(2, 3), secs(2, 3)],
+            display_align: 1,
+            styles: Specified::default(),
+        };
+        assert_eq!(placement(1, &thirds), 5);
+        assert_eq!(placement(0, &thirds), 4);
     }
 
     #[test]
@@ -2205,12 +2217,12 @@ mod tests {
             .collect();
         let text = format!(r#"<tt xmlns="{TT}"><body><div>{body}</div></body></tt>"#);
         let d = Document::read(text.as_bytes()).unwrap();
-        let started = std::time::Instant::now();
-        let stretches = d.showings(Ratio::ZERO, Ratio::whole(200_000)).unwrap();
+        let (stretches, cost) = cost::of(|| d.showings(Ratio::ZERO, Ratio::whole(200_000)));
+        let stretches = stretches.unwrap();
         assert_eq!(stretches.len(), 100_000);
         // No layout: the root container's top left.
         assert_eq!(stretches[99_999].2.text, "{\\an7}line 99999");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 
     /// One paragraph of six thousand spans, each beginning at its own time,
@@ -2224,9 +2236,9 @@ mod tests {
             .collect();
         let text = format!(r#"<tt xmlns="{TT}"><body><div><p>{spans}</p></div></body></tt>"#);
         let d = Document::read(text.as_bytes()).unwrap();
-        let started = std::time::Instant::now();
-        assert_eq!(d.showings(Ratio::ZERO, Ratio::whole(10_000)), None);
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let (given_up, cost) = cost::of(|| d.showings(Ratio::ZERO, Ratio::whole(10_000)));
+        assert_eq!(given_up, None);
+        assert!(cost < cost::BOUND, "{cost:?}");
         // A few hundred such spans -- karaoke, a syllable at a time -- are
         // said.
         let syllables: String = (0..300)
@@ -2267,14 +2279,15 @@ mod tests {
         let text = format!(
             r#"<tt xmlns="{TT}" xmlns:tts="{TTS}"><head><styling>{styles}</styling><layout>{regions}</layout></head><body><div>{body}</div></body></tt>"#
         );
-        let started = std::time::Instant::now();
-        let d = Document::read(text.as_bytes()).unwrap();
-        let stretches = d
-            .showings(Ratio::ZERO, Ratio::whole(i128::from(n)))
-            .unwrap();
+        let (stretches, cost) = cost::of(|| {
+            Document::read(text.as_bytes())
+                .unwrap()
+                .showings(Ratio::ZERO, Ratio::whole(i128::from(n)))
+        });
+        let stretches = stretches.unwrap();
         assert_eq!(stretches.len(), usize::try_from(n).unwrap());
         assert!(stretches[0].2.text.contains("<b>"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 
     /// White space in a paragraph of a hundred thousand pieces, most of them
@@ -2294,9 +2307,8 @@ mod tests {
                 style: Computed::INITIAL,
             });
         }
-        let started = std::time::Instant::now();
-        lwsp(&mut pieces);
+        let ((), cost) = cost::of(|| lwsp(&mut pieces));
         assert_eq!(pieces.len(), 1000);
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 }

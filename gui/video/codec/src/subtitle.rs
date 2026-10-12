@@ -1,7 +1,7 @@
 //! A video file's subtitles, cue by cue: SubRip, ASS and SSA, and WebVTT, in
-//! Matroska and WebM; 3GPP timed text, WebVTT and TTML in MP4 -- and
-//! Blu-ray's PGS, DVD's VobSub and digital television's DVB subtitles, which
-//! are pictures of text.
+//! Matroska and WebM; 3GPP timed text, WebVTT, TTML and CEA-608 captions in
+//! MP4 -- and Blu-ray's PGS, DVD's VobSub and digital television's DVB
+//! subtitles, which are pictures of text.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,6 +48,11 @@
 //!   well-formed TTML document shows nothing and is counted, as in GPAC and
 //!   ttconv; so is one that would cost far more to say than its size, which
 //!   only a document made to be slow does.
+//! - CEA-608 closed captions (MP4's `c608`: television's, as QuickTime and
+//!   broadcast recorders keep them) are decoded by the FCC's rules for
+//!   caption decoders, channel CC1 -- FFmpeg's decoder and CCExtractor each
+//!   depart from them -- a cue for each stretch the screen shows the same,
+//!   each row a line in the caption grid's face (`cea608.rs`).
 //!
 //! **A cue of pictures** -- Blu-ray's PGS (`S_HDMV/PGS`), DVD's VobSub
 //! (`S_VOBSUB`) and DVB's (`S_DVBSUB`), subtitles stored as pictures of
@@ -74,6 +79,7 @@
 //! timed-text sample with no text clears the screen, and is no cue.
 
 mod ass;
+mod cea608;
 mod colours;
 mod dvb;
 mod isovtt;
@@ -165,6 +171,14 @@ enum Reader {
     /// sample's stretch -- each paragraph's stretches of showing the same,
     /// joined within a sample and across samples, on the exact clock.
     Ttml(joined::Joined<ttml::Ratio, ttml::Shown>),
+    /// CEA-608 captions in MP4 (`c608`): each sample a frame's byte
+    /// pairs, the screen built from them and a cue each stretch it shows
+    /// the same; `end`, the end of the last sample read, where the screen
+    /// still showing at the track's end stops.
+    Cea608 {
+        decoder: Box<cea608::Decoder>,
+        end: i64,
+    },
     MovText(movtext::Setup),
     /// Blu-ray's pictures, a display set a block.
     Pgs(pgs::Decoder),
@@ -255,6 +269,10 @@ impl<R: Read + Seek> Subtitles<R> {
             },
             SubtitleFormat::MovText => Reader::MovText(movtext::Setup::parse(&chosen.config)),
             SubtitleFormat::Ttml => Reader::Ttml(joined::Joined::default()),
+            SubtitleFormat::Cea608 => Reader::Cea608 {
+                decoder: Box::default(),
+                end: 0,
+            },
             SubtitleFormat::Pgs => Reader::Pgs(pgs::Decoder::default()),
             SubtitleFormat::VobSub => Reader::VobSub(vobsub::Setup::parse(&chosen.config)),
             SubtitleFormat::Dvb => Reader::Dvb(dvb::Decoder::new(&chosen.config)),
@@ -309,7 +327,10 @@ impl<R: Read + Seek> Subtitles<R> {
                 self.damaged = self.damaged.saturating_add(1);
                 continue;
             };
-            if self.joins(&sample, ticks) || self.documents(&sample, ticks) {
+            if self.joins(&sample, ticks)
+                || self.documents(&sample, ticks)
+                || self.captions(&sample, ticks)
+            {
                 continue;
             }
             let start = time::to_ns(ticks, self.time_base);
@@ -347,6 +368,10 @@ impl<R: Read + Seek> Subtitles<R> {
         if let Reader::Ttml(joined) = &mut self.reader {
             let whole = joined.finish();
             self.give_shown(whole);
+        }
+        if let Reader::Cea608 { decoder, end } = &mut self.reader {
+            let last = decoder.finish(*end);
+            self.give_caption(last);
         }
         self.make_until(i64::MAX);
         if let Some(cue) = self.showing.take() {
@@ -438,6 +463,45 @@ impl<R: Read + Seek> Subtitles<R> {
                     images: Vec::new(),
                 });
             }
+        }
+    }
+
+    /// For CEA-608, `sample`'s byte pairs (at `ticks`) decoded and the
+    /// stretches of the screen they end made ready; `false` for a track of
+    /// any other kind. A sample whose atoms do not fit it is counted, and
+    /// changes nothing.
+    fn captions(&mut self, sample: &Sample, ticks: i64) -> bool {
+        let Reader::Cea608 { decoder, end } = &mut self.reader else {
+            return false;
+        };
+        let at = time::to_ns(ticks, self.time_base);
+        let end_ticks = ticks.saturating_add(i64::try_from(sample.duration).unwrap_or(i64::MAX));
+        *end = time::to_ns(end_ticks, self.time_base);
+        let Some(pairs) = cea608::Decoder::pairs(&sample.data) else {
+            self.damaged = self.damaged.saturating_add(1);
+            return true;
+        };
+        let ended: Vec<cea608::Shown> = pairs
+            .into_iter()
+            .filter_map(|p| decoder.pair(p, at))
+            .collect();
+        for shown in ended {
+            self.give_caption(Some(shown));
+        }
+        true
+    }
+
+    /// A stretch of a CEA-608 screen given, unless a seek has passed it by.
+    fn give_caption(&mut self, shown: Option<cea608::Shown>) {
+        if let Some(s) = shown
+            && self.kept(s.start, s.end)
+        {
+            self.ready.push_back(Cue {
+                start: s.start,
+                end: s.end,
+                text: s.text,
+                images: Vec::new(),
+            });
         }
     }
 
@@ -543,14 +607,20 @@ impl<R: Read + Seek> Subtitles<R> {
     /// time is known: Blu-ray's and DVB's from the start of the epoch the
     /// time falls in -- the display set that defines afresh what the ones
     /// after it show -- up to 64 display sets back; DVD's from
-    /// the SPU before the one at the time, which may still show.
+    /// the SPU before the one at the time, which may still show. CEA-608
+    /// captions are read from a minute before, their screen built afresh.
     ///
     /// # Errors
     ///
     /// [`Error::Container`] when the source fails, or the track has no cue
     /// to go to. Reading then goes on where it was.
     pub fn seek(&mut self, time: i64) -> Result<(), Error> {
-        let ticks = time::to_ticks(time, self.time_base);
+        let mut ticks = time::to_ticks(time, self.time_base);
+        if let Reader::Cea608 { .. } = self.reader {
+            // The screen at the time is what the pairs before it built:
+            // read from CAPTION_LOOKBACK before.
+            ticks = time::to_ticks(time.saturating_sub(CAPTION_LOOKBACK), self.time_base);
+        }
         self.demuxer.seek(self.key, ticks)?;
         match &self.reader {
             Reader::Pgs(_) => self.back_to_epoch_start(ticks, pgs::begins_epoch)?,
@@ -568,6 +638,10 @@ impl<R: Read + Seek> Subtitles<R> {
             // samples to: a cue showing at the time is in its sample.
             Reader::IsoVtt(joined) => joined.clear(),
             Reader::Ttml(joined) => joined.clear(),
+            Reader::Cea608 { decoder, end } => {
+                **decoder = cea608::Decoder::default();
+                *end = 0;
+            }
             _ => {}
         }
         self.showing = None;
@@ -665,6 +739,12 @@ impl<R: Read + Seek> Subtitles<R> {
 /// epoch: Blu-ray's usually begin one at every subtitle.
 const EPOCH_STEPS: usize = 64;
 
+/// How far before the time [`Subtitles::seek`] reads CEA-608 captions from,
+/// in nanoseconds: a minute. The screen at a time is what the pairs before
+/// it built, and a caption is rarely shown longer -- one shown longer is
+/// missed, as a television tuned in then misses it.
+const CAPTION_LOOKBACK: i64 = 60_000_000_000;
+
 /// What a packet says.
 enum Said {
     /// A cue: its text as SRT markup.
@@ -718,6 +798,7 @@ fn said(reader: &Reader, sample: &Sample) -> Said {
         Reader::MovText(_)
         | Reader::IsoVtt(_)
         | Reader::Ttml(_)
+        | Reader::Cea608 { .. }
         | Reader::Pgs(_)
         | Reader::VobSub(_)
         | Reader::Dvb(_) => Said::Damaged,

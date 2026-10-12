@@ -23,6 +23,17 @@ hex-literal = { path = "../hex-literal" }
 chacha20 = { path = "../chacha20", default-features = false, features = ["cipher"] }
 poly1305 = { path = "../poly1305" }
 blake2 = { path = "../blake2", default-features = false }
+# AES and XTS, which `seal` does not use: lane A's disk-encryption layer
+# does (AES-256-XTS, the sector number as the tweak). Their vectors run here
+# for the reason the rest do -- the vendored crates' own suites cannot run in
+# this workspace. `cipher`'s `dev` module reads `aes`'s NESSIE files in place.
+aes = { path = "../aes" }
+xts-mode = { path = "../xts-mode", default-features = false }
+cipher = { path = "../cipher", features = ["dev"] }
+# X25519, which `seal` does not use either: lane B's ssh key exchange does
+# (`curve25519-sha256`, RFC 8731). RFC 7748's vectors run here for the same
+# reason, with the features `sshwire` builds it with.
+x25519-dalek = { path = "../x25519-dalek", default-features = false, features = ["static_secrets", "zeroize", "precomputed-tables"] }
 
 [lints]
 workspace = true

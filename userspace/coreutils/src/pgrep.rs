@@ -1514,7 +1514,7 @@ pub fn main() -> ExitCode {
     );
     let mut out = Stream::stdout();
     let status = prog.run(argv.get(1..).unwrap_or_default(), &mut out);
-    stdfd::close_stdout_bytes(&prog.name, out, ExitCode::from(status), EXIT_FAILURE)
+    stdfd::close_stdout_procps(&prog.name, out, ExitCode::from(status))
 }
 
 #[cfg(test)]

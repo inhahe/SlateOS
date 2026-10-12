@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sokoban
+Comment=Push every crate onto a target
+Icon=applications-games
+Exec=sokoban
+Categories=Game;LogicGame;
+Keywords=crates;warehouse;puzzle;

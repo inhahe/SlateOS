@@ -24,14 +24,26 @@
 //! the frames are reassembled exactly as from a TCP read. Every read uses a
 //! buffer of the full limit, so no message is ever cut short.
 //!
-//! ## The kernel calls
+//! ## The calls
 //!
-//! Five SlateOS extensions to the Linux table, at numbers Linux will not
-//! reach, plus `read`, `write`, `poll`, `fstat` and `close`. The decisions this
+//! Five SlateOS calls -- register, accept, connect, the peer's identity and
+//! whether it holds the service's key -- plus `read`, `write`, `poll`,
+//! `fstat` and `close` on the descriptors they answer. The decisions this
 //! module makes -- the chunking, the read loop, what each errno means -- are
 //! written against [`MessagePipe`], so they are tested on the development
 //! host against a fake. Only the calls themselves are SlateOS's
 //! (`target_vendor = "slateos"`), in the `kernel` section below.
+//!
+//! All go through the C library, never as `syscall` instructions: a program
+//! built for SlateOS is a native program, whose table numbers the calls
+//! differently from Linux's (`crate::libc` has the story). The five SlateOS
+//! calls are not in lane D's C library yet
+//! (`requests/f-d-the-c-library-s-slateos-channel-calls.md`), and until they
+//! are, each answers [`ENOSYS`] -- "a kernel without channel descriptors",
+//! from which [`connect_failure_means_absent`] lets a program fall back to
+//! TCP on its own machine. They used to be issued as the Linux table's
+//! SlateOS extensions (1001 to 1005), which a native program's table
+//! numbers as other calls entirely.
 
 use std::io::{self, ErrorKind};
 use std::time::Duration;
@@ -229,10 +241,9 @@ pub fn connect_failure_means_absent(err: &io::Error) -> bool {
 #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
 pub use kernel::{ChannelConn, ChannelListener};
 
-/// The real descriptors and the system calls on them: SlateOS only.
+/// The real descriptors and the calls on them: SlateOS only.
 #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
 mod kernel {
-    use std::arch::asm;
     use std::io;
     use std::os::fd::RawFd;
     use std::sync::Arc;
@@ -240,98 +251,80 @@ mod kernel {
     use std::time::Duration;
 
     use super::{
-        ENODATA, Errno, MessagePipe, PeerCred, Received, message_limit, recv_messages, send_chunked,
+        ENODATA, ENOSYS, Errno, MessagePipe, PeerCred, Received, message_limit, recv_messages,
+        send_chunked,
     };
     use crate::client::Transport;
+    use crate::libc::{self, O_CLOEXEC, O_NONBLOCK};
     use crate::wait::{AsWaitHandle, WaitHandle, WaitSet, WakeReceiver, WakeSender, wake_channel};
-
-    const SYS_READ: u64 = 0;
-    const SYS_WRITE: u64 = 1;
-    const SYS_CLOSE: u64 = 3;
-    const SYS_FSTAT: u64 = 5;
-    const SYS_POLL: u64 = 7;
-    const SLATE_SERVICE_REGISTER: u64 = 1001;
-    const SLATE_SERVICE_ACCEPT: u64 = 1002;
-    const SLATE_SERVICE_CONNECT: u64 = 1003;
-    const SLATE_CHANNEL_PEER_CRED: u64 = 1004;
-    const SLATE_CHANNEL_PEER_HAS_KEY: u64 = 1005;
 
     /// Every descriptor made here: non-blocking, because a compositor has a
     /// frame to draw whether or not a client has spoken; close-on-exec,
     /// because a program's connection to the display must not leak into a
     /// child it starts.
-    const FLAGS: u64 = 0o4000 | 0o2_000_000;
+    const FLAGS: i32 = O_NONBLOCK | O_CLOEXEC;
     /// `POLLOUT`.
     const POLLOUT: i16 = 0x004;
-    /// Where `st_blksize` sits in the x86-64 Linux `struct stat` (144 bytes).
+    /// Where `st_blksize` sits in the x86-64 `struct stat` (144 bytes), as
+    /// Linux and lane D's C library lay it out.
     const STAT_BLKSIZE_AT: usize = 56;
     const STAT_SIZE: usize = 144;
 
-    /// Issue a system call with up to three arguments.
-    ///
-    /// # Safety
-    ///
-    /// The arguments must be valid for the call named by `n`: any pointer must
-    /// point to memory of the size the kernel will read or write.
-    unsafe fn syscall3(n: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-        let ret: i64;
-        // SAFETY: the `syscall` instruction clobbers `rcx` and `r11`, declared
-        // below, and returns in `rax`; the argument registers are the x86-64
-        // Linux syscall ABI, which SlateOS's Linux table follows. Validity of
-        // the arguments is this function's documented precondition.
-        unsafe {
-            asm!(
-                "syscall",
-                inlateout("rax") n as i64 => ret,
-                in("rdi") a1,
-                in("rsi") a2,
-                in("rdx") a3,
-                lateout("rcx") _,
-                lateout("r11") _,
-                options(nostack),
-            );
-        }
-        ret
+    // The five SlateOS calls. Each is the C library's
+    // `slate_service_register` and so on, with the Linux table's meaning
+    // (`kernel/src/syscall/linux.rs`), once lane D's C library has them --
+    // and until then `ENOSYS`, what a kernel without channel descriptors
+    // says, so a program falls back to TCP rather than calling anything else.
+
+    /// `slate_service_register(name, len, flags)`: a listener descriptor.
+    fn service_register(_name: &str, _flags: i32) -> Result<RawFd, Errno> {
+        Err(ENOSYS)
     }
 
-    /// A raw return as a result: `-4095..0` is `-errno`.
-    fn decode(ret: i64) -> Result<i64, Errno> {
-        if (-4095..0).contains(&ret) {
-            Err(ret
-                .checked_neg()
-                .and_then(|v| Errno::try_from(v).ok())
-                .unwrap_or(super::ENOSYS))
-        } else {
-            Ok(ret)
-        }
+    /// `slate_service_accept(listener, flags)`: the next client's channel
+    /// descriptor; `EAGAIN` from a non-blocking listener with none waiting.
+    fn service_accept(_listener: RawFd, _flags: i32) -> Result<RawFd, Errno> {
+        Err(ENOSYS)
     }
 
-    /// A descriptor from a successful call.
-    fn as_fd(ret: Result<i64, Errno>) -> Result<RawFd, Errno> {
-        ret.and_then(|fd| RawFd::try_from(fd).map_err(|_| super::ENOSYS))
+    /// `slate_service_connect(name, len, flags)`: a channel descriptor.
+    fn service_connect(_name: &str, _flags: i32) -> Result<RawFd, Errno> {
+        Err(ENOSYS)
     }
 
-    /// A descriptor as a system call argument. A negative one -- closed --
-    /// becomes a number no descriptor has, so the kernel answers `EBADF`;
-    /// `unsigned_abs` would have turned `-1` into `1`, which is stdout.
-    fn fd_arg(fd: RawFd) -> u64 {
-        u64::try_from(fd).unwrap_or(u64::MAX)
+    /// `slate_channel_peer_cred(fd, out)`: the peer's pid, uid and gid as the
+    /// kernel recorded them, three native-endian `u32`s; `ENODATA` when it
+    /// recorded nobody.
+    fn channel_peer_cred(_fd: RawFd, _out: &mut [u8; 12]) -> Result<(), Errno> {
+        Err(ENOSYS)
+    }
+
+    /// `slate_channel_peer_has_key(fd)`: whether the peer holds the key of
+    /// the service it connected to.
+    fn channel_peer_has_key(_fd: RawFd) -> Result<bool, Errno> {
+        Err(ENOSYS)
+    }
+
+    /// A C library call's answer as a result: negative is a failure, whose
+    /// reason is in `errno`.
+    fn checked(ret: isize) -> Result<usize, Errno> {
+        usize::try_from(ret).map_err(|_| libc::last_errno())
     }
 
     fn close(fd: RawFd) {
         // SAFETY: closing takes no pointer; a descriptor this module owns.
         // The result is dropped: there is nothing to do about a failed close,
         // and the descriptor is gone either way.
-        let _ = unsafe { syscall3(SYS_CLOSE, fd_arg(fd), 0, 0) };
+        let _ = unsafe { libc::close(fd) };
     }
 
     /// The descriptor's message limit, from `fstat`'s `st_blksize`.
     fn reported_limit(fd: RawFd) -> usize {
         let mut stat = [0u8; STAT_SIZE];
         // SAFETY: `stat` is `STAT_SIZE` writable bytes, the size of the x86-64
-        // `struct stat` the kernel writes.
-        let ret = unsafe { syscall3(SYS_FSTAT, fd_arg(fd), stat.as_mut_ptr() as u64, 0) };
-        if decode(ret).is_err() {
+        // `struct stat` the C library writes.
+        let ret = unsafe { libc::fstat(fd, stat.as_mut_ptr().cast()) };
+        if ret < 0 {
             return 0;
         }
         stat.get(STAT_BLKSIZE_AT..STAT_BLKSIZE_AT + 8)
@@ -366,28 +359,12 @@ mod kernel {
     impl MessagePipe for Fd {
         fn send(&mut self, message: &[u8]) -> Result<usize, Errno> {
             // SAFETY: `message` is `message.len()` readable bytes.
-            let ret = unsafe {
-                syscall3(
-                    SYS_WRITE,
-                    fd_arg(self.0),
-                    message.as_ptr() as u64,
-                    message.len() as u64,
-                )
-            };
-            decode(ret).and_then(|n| usize::try_from(n).map_err(|_| super::ENOSYS))
+            checked(unsafe { libc::write(self.0, message.as_ptr().cast(), message.len()) })
         }
 
         fn recv(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             // SAFETY: `buf` is `buf.len()` writable bytes.
-            let ret = unsafe {
-                syscall3(
-                    SYS_READ,
-                    fd_arg(self.0),
-                    buf.as_mut_ptr() as u64,
-                    buf.len() as u64,
-                )
-            };
-            decode(ret).and_then(|n| usize::try_from(n).map_err(|_| super::ENOSYS))
+            checked(unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len()) })
         }
 
         fn wait_writable(&mut self, timeout: Duration) -> Result<bool, Errno> {
@@ -395,12 +372,13 @@ mod kernel {
             let mut pollfd = [0u8; 8];
             pollfd[..4].copy_from_slice(&self.0.to_ne_bytes());
             pollfd[4..6].copy_from_slice(&POLLOUT.to_ne_bytes());
-            let ms = u64::try_from(timeout.as_millis())
-                .unwrap_or(u64::MAX)
-                .min(i32::MAX as u64);
+            let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
             // SAFETY: `pollfd` is one 8-byte `struct pollfd`, read and written.
-            let ret = unsafe { syscall3(SYS_POLL, pollfd.as_mut_ptr() as u64, 1, ms) };
-            decode(ret).map(|ready| ready > 0)
+            let ret = unsafe { libc::poll(pollfd.as_mut_ptr().cast(), 1, ms) };
+            if ret < 0 {
+                return Err(libc::last_errno());
+            }
+            Ok(ret > 0)
         }
     }
 
@@ -448,17 +426,7 @@ mod kernel {
         /// says which a caller may fall back from), or the kernel's other
         /// errnos.
         pub fn connect(name: &str) -> io::Result<Self> {
-            // SAFETY: `name` is `name.len()` readable bytes; the kernel copies
-            // it in and keeps no pointer.
-            let ret = unsafe {
-                syscall3(
-                    SLATE_SERVICE_CONNECT,
-                    name.as_ptr() as u64,
-                    name.len() as u64,
-                    FLAGS,
-                )
-            };
-            as_fd(decode(ret))
+            service_connect(name, FLAGS)
                 .map(Self::adopt)
                 .map_err(io::Error::from_raw_os_error)
         }
@@ -471,17 +439,8 @@ mod kernel {
         /// The kernel's errno, other than "nobody recorded".
         pub fn peer_cred(&self) -> io::Result<Option<PeerCred>> {
             let mut out = [0u8; 12];
-            // SAFETY: `out` is the 12 writable bytes the call writes.
-            let ret = unsafe {
-                syscall3(
-                    SLATE_CHANNEL_PEER_CRED,
-                    fd_arg(self.fd.0),
-                    out.as_mut_ptr() as u64,
-                    0,
-                )
-            };
-            match decode(ret) {
-                Ok(_) => {
+            match channel_peer_cred(self.fd.0, &mut out) {
+                Ok(()) => {
                     let word = |at: usize| {
                         out.get(at..at.saturating_add(4))
                             .and_then(|b| <[u8; 4]>::try_from(b).ok())
@@ -506,10 +465,8 @@ mod kernel {
         ///
         /// The kernel's errno, other than "no identity".
         pub fn peer_has_key(&self) -> io::Result<Option<bool>> {
-            // SAFETY: the call takes no pointer.
-            let ret = unsafe { syscall3(SLATE_CHANNEL_PEER_HAS_KEY, fd_arg(self.fd.0), 0, 0) };
-            match decode(ret) {
-                Ok(holds) => Ok(Some(holds != 0)),
+            match channel_peer_has_key(self.fd.0) {
+                Ok(holds) => Ok(Some(holds)),
                 Err(ENODATA) => Ok(None),
                 Err(errno) => Err(io::Error::from_raw_os_error(errno)),
             }
@@ -623,16 +580,7 @@ mod kernel {
         /// `EACCES` without the `Service` capability with `WRITE`,
         /// `EADDRINUSE` if the name is taken, or the kernel's other errnos.
         pub fn register(name: &str) -> io::Result<Self> {
-            // SAFETY: `name` is `name.len()` readable bytes; copied in.
-            let ret = unsafe {
-                syscall3(
-                    SLATE_SERVICE_REGISTER,
-                    name.as_ptr() as u64,
-                    name.len() as u64,
-                    FLAGS,
-                )
-            };
-            as_fd(decode(ret))
+            service_register(name, FLAGS)
                 .map(|fd| Self { fd: Fd(fd) })
                 .map_err(io::Error::from_raw_os_error)
         }
@@ -643,9 +591,7 @@ mod kernel {
         ///
         /// The kernel's errno, other than "nobody waiting".
         pub fn accept(&self) -> io::Result<Option<ChannelConn>> {
-            // SAFETY: the call takes no pointer.
-            let ret = unsafe { syscall3(SLATE_SERVICE_ACCEPT, fd_arg(self.fd.0), FLAGS, 0) };
-            match as_fd(decode(ret)) {
+            match service_accept(self.fd.0, FLAGS) {
                 Ok(fd) => Ok(Some(ChannelConn::adopt(fd))),
                 Err(super::EAGAIN) => Ok(None),
                 Err(errno) => Err(io::Error::from_raw_os_error(errno)),

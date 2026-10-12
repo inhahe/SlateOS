@@ -170,7 +170,8 @@ mod tests {
     fn a_ready_pipe_is_reported_with_its_cookie() {
         unsafe extern "C" {
             fn pipe(fds: *mut i32) -> i32;
-            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+            // `void *`, as the runtime this test links declares it.
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
             fn close(fd: i32) -> i32;
         }
         let mut fds = [0i32; 2];
@@ -182,7 +183,7 @@ mod tests {
         let mut ev = [EpollEvent::default(); 4];
         assert_eq!(super::wait(ep, &mut ev, 0), Ok(0));
         // SAFETY: one byte from a live buffer to a pipe we own.
-        assert_eq!(unsafe { write(w, b"x".as_ptr(), 1) }, 1);
+        assert_eq!(unsafe { write(w, b"x".as_ptr().cast(), 1) }, 1);
         assert_eq!(super::wait(ep, &mut ev, 1000), Ok(1));
         let first = ev[0];
         let data = first.data;

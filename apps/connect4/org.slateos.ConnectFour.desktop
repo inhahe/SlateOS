@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Connect Four
+Comment=Get four in a row before the computer does
+Icon=applications-games
+Exec=connect4
+Categories=Game;BoardGame;
+Keywords=four;row;

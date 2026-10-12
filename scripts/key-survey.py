@@ -14,13 +14,17 @@ anywhere in their own strings, and the top of that list gets read by hand.
 
 Every `.rs` file in the crate is read, not just `main.rs`: 12 of 141 apps
 have more than one source file, and a sweep over `src/main.rs` alone is
-the eighth way a search says nothing.
+the eighth way a search says nothing. Every one, that is, but a test
+module's (`test_module_files`).
 """
 
 import io
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rustlex  # noqa: E402
@@ -453,13 +457,155 @@ def is_label(literal: str) -> bool:
     return not any(mark in literal for mark in (r"\x1b", r"\u{1b}", chr(27)))
 
 
-def crate_sources(crate: Path) -> list[Path]:
-    return sorted(p for p in (crate / "src").rglob("*.rs"))
+# A module declared under `#[cfg(test)]` is test code from its first line to
+# its last, and only its parent says so: `live_code` reads one file at a time
+# and cannot know it. So test modules are found from the declarations,
+# resolved as cargo resolves them, and not by name -- test code is not always
+# called `tests`. A declaration this misreads leaves its module read as live
+# code.
+#
+# One `mod` declaration: its attributes (any number, in any order, each one
+# spanning lines where rustfmt broke it), a visibility, its name, and `;` for a
+# module in a file of its own or `{` for one written inline.
+_MOD_DECL = re.compile(
+    r"(?<![\w#])(?P<attrs>(?:#\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_]\w*)\s*(?P<end>[;{])"
+)
+_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# A file or an inline module can say it itself instead: an inner
+# `#![cfg(test)]` among the attributes before its first item.
+_INNER_CFG_TEST = re.compile(r"(?:\s*#!\[[^\]]*\])*?\s*#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_SAYS_INNER_CFG_TEST = re.compile(r"#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_PATH_ATTR = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+# Every file that declares a module file has this in it, comments and all;
+# the rest are not lexed.
+_DECLARES_A_FILE = re.compile(r"\bmod\s+(?:r#)?\w+\s*;")
+
+
+class _ModDecl(NamedTuple):
+    """A `mod name;` -- a module in a file of its own."""
+
+    name: str
+    #: Under `#[cfg(test)]`, itself or through an inline module around it.
+    gated: bool
+    #: Its `#[path = "..."]`, if it has one.
+    path: str | None
+    #: The inline modules around it, outermost first.
+    inline: tuple[str, ...]
+
+
+def _matching_brace(code: str, at: int) -> int:
+    """Where the block that opens at `code[at]` closes (the text's end if it
+    never does). `code` has its comments and literals blanked."""
+    depth = 0
+    for i in range(at, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(code)
+
+
+def _module_file_decls(text: str) -> list[_ModDecl]:
+    """Every declaration of a module file in one source file's `text`."""
+    # Matched with comments and literals blanked, so a declaration in either
+    # is not one; `#[path]`'s value is read from the same offsets of a copy
+    # that keeps the literals.
+    code = rustlex.strip_noise(text)
+    kept = rustlex.strip_noise(text, keep_literals=True)
+    files: list[tuple[int, str, bool, str | None]] = []
+    blocks: list[tuple[int, int, str, bool]] = []
+    for m in _MOD_DECL.finditer(code):
+        gated = bool(_CFG_TEST.search(m["attrs"]))
+        if m["end"] == "{":
+            gated = gated or bool(_INNER_CFG_TEST.match(code, m.end()))
+            blocks.append((m.end() - 1, _matching_brace(code, m.end() - 1), m["name"], gated))
+            continue
+        attr = _PATH_ATTR.search(kept, m.start("attrs"), m.end("attrs"))
+        files.append((m.start(), m["name"], gated, attr["path"] if attr else None))
+    decls = []
+    for at, name, gated, path in files:
+        around = [b for b in blocks if b[0] < at < b[1]]
+        decls.append(_ModDecl(
+            name,
+            gated or any(b[3] for b in around),
+            path,
+            tuple(b[2] for b in around),
+        ))
+    return decls
+
+
+def _module_dir(path: Path, owners: set[Path]) -> Path:
+    """Where `mod x;` in the file `path` looks for `x`. That is beside a crate
+    root -- `lib.rs`, `main.rs`, a file directly in `src/bin` -- or beside a
+    `mod.rs` or a file loaded through `#[path]` (`owners`). For any other file,
+    it is the directory named for that file."""
+    in_bin = path.parent.name == "bin" and path.parent.parent.name == "src"
+    if path.name in ("lib.rs", "main.rs", "mod.rs") or in_bin or path in owners:
+        return path.parent
+    return path.parent / path.stem
+
+
+def _declared_files(path: Path, decl: _ModDecl, owners: set[Path]) -> list[Path]:
+    """The files `decl`, made in the file `path`, may load."""
+    if decl.path is not None:
+        # Beside the declaring file -- or, from inside an inline module, under
+        # that module's directory.
+        base = (
+            _module_dir(path, owners).joinpath(*decl.inline)
+            if decl.inline
+            else path.parent
+        )
+        return [Path(os.path.normpath(base / decl.path))]
+    base = _module_dir(path, owners).joinpath(*decl.inline, decl.name)
+    return [base.with_name(f"{decl.name}.rs"), base / "mod.rs"]
+
+
+def test_module_files(texts: dict[Path, str]) -> set[Path]:
+    """Which of a crate's source files -- `texts` maps each one's path to its
+    contents -- a build compiles only for its tests: those a `#[cfg(test)]`
+    declaration loads, those whose own `#![cfg(test)]` says so, and those any
+    declaration in such a file loads, all the way down."""
+    if len(texts) < 2:
+        return set()
+    decls = {
+        path: _module_file_decls(text)
+        for path, text in texts.items()
+        if _DECLARES_A_FILE.search(text)
+    }
+    owners: set[Path] = set()
+    for path, found in decls.items():
+        for decl in found:
+            if decl.path is not None:
+                owners.update(_declared_files(path, decl, owners))
+    tests: set[Path] = {
+        path
+        for path, text in texts.items()
+        if _SAYS_INNER_CFG_TEST.search(text)
+        and _INNER_CFG_TEST.match(rustlex.strip_noise(text))
+    }
+    while True:
+        before = len(tests)
+        for path, found in decls.items():
+            for decl in found:
+                if decl.gated or path in tests:
+                    tests.update(p for p in _declared_files(path, decl, owners) if p in texts)
+        if len(tests) == before:
+            return tests
 
 
 def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
-    files = crate_sources(crate)
-    if not files:
+    texts: dict[Path, str] = {}
+    for path in sorted((crate / "src").rglob("*.rs")):
+        try:
+            texts[path] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    tests_only = test_module_files(texts)
+    sources = [src for path, src in texts.items() if path not in tests_only]
+    if not sources:
         return None
 
     matched: set[str] = set()
@@ -468,11 +614,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
     has_list = False
     kept_sources: list[str] = []
 
-    for path in files:
-        try:
-            src = io.open(path, encoding="utf-8").read()
-        except (OSError, UnicodeDecodeError):
-            continue
+    for src in sources:
         live, _test = rustlex.live_code(src)
         for m in LIST_RE.finditer(live):
             # The literal that follows the declaration, up to its closing
@@ -661,7 +803,125 @@ def _self_test() -> int:
         ("f/{ap:.1}", set(), "control: an aperture, which even has a slash"),
         ("add(a: u32, b: u32)", set(), "control: a doc fixture"),
     ]
+    # `test_module_files` cases: one crate's tree, each declaration shape in
+    # it, and which of its files are its tests'. Paths only; nothing is read.
+    nl = chr(10)
+    src = Path("probe") / "src"
+    tree = {
+        src / "lib.rs": nl.join([
+            "mod real;",
+            "mod other;",
+            "#[cfg(test)]",
+            "mod tests;",
+            "#[cfg(test)]",
+            '#[path = "oracle_cases.rs"]',
+            "mod oracle;",
+            "#[cfg(test)]",
+            "mod inline {",
+            "    mod deeper;",
+            "}",
+            "/*",
+            "#[cfg(test)]",
+            "mod commented_out;",
+            "*/",
+            "#[cfg(test)]",
+            "#[allow(",
+            "    clippy::unwrap_used,",
+            "    clippy::panic,",
+            ")]",
+            "mod multi;",
+            '#[path = "renamed_cases.rs"]',
+            "#[cfg(test)]",
+            "mod renamed;",
+            "mod outer {",
+            "    #[cfg(test)]",
+            "    mod util;",
+            "}",
+            "mod util;",
+            'const SAMPLE: &str = r#"',
+            "#[cfg(test)]",
+            "mod widgets;",
+            '"#;',
+            "mod self_gated;",
+            "mod inner_gated {",
+            "    #![cfg(test)]",
+            "    mod deep2;",
+            "}",
+        ]),
+        src / "self_gated.rs": nl.join(["//! The root's tests.", "#![cfg(test)]", "mod helper2;"]),
+        src / "self_gated" / "helper2.rs": "",
+        src / "inner_gated" / "deep2.rs": "",
+        src / "tests.rs": "mod helper;",
+        src / "tests" / "helper.rs": "",
+        src / "oracle_cases.rs": "mod fixtures;",
+        src / "fixtures.rs": "",
+        src / "inline" / "deeper.rs": "",
+        src / "commented_out.rs": "",
+        src / "multi.rs": "",
+        src / "renamed_cases.rs": "",
+        src / "renamed.rs": "",
+        src / "outer" / "util.rs": "",
+        src / "util.rs": "",
+        src / "widgets.rs": "",
+        src / "real.rs": nl.join(["#[cfg(test)]", "pub(crate) mod tests;"]),
+        src / "real" / "tests.rs": "",
+        src / "other.rs": "mod tests;",
+        src / "other" / "tests.rs": "",
+        src / "bin" / "tool.rs": nl.join(["#[cfg(test)]", "mod checks;"]),
+        src / "bin" / "checks.rs": "",
+    }
+    modules: list[tuple[Path, bool, str]] = [
+        (src / "tests.rs", True, "a module declared under cfg(test) is a test file"),
+        (src / "tests" / "helper.rs", True, "and so is every module beneath it"),
+        (src / "oracle_cases.rs", True, "a path attribute names the test file"),
+        (src / "inline" / "deeper.rs", True, "a file beneath an inline test module"),
+        (src / "real" / "tests.rs", True, "a pub(crate) one, beside a non-root file"),
+        (src / "bin" / "checks.rs", True, "a binary's root resolves beside itself"),
+        (src / "multi.rs", True, "a declaration under an attribute spanning lines"),
+        (src / "renamed_cases.rs", True, "a path attribute written before cfg(test)"),
+        (src / "outer" / "util.rs", True, "a declaration inside a live inline module"),
+        (src / "fixtures.rs", True, "a module of a path-loaded test file sits beside it"),
+        (src / "self_gated.rs", True, "a file whose own #![cfg(test)] says so"),
+        (src / "self_gated" / "helper2.rs", True, "and the modules it declares"),
+        (src / "inner_gated" / "deep2.rs", True, "a file in an inline module that says so"),
+        (src / "lib.rs", False, "control: the crate root"),
+        (src / "other" / "tests.rs", False, "control: called `tests`, never gated"),
+        (src / "commented_out.rs", False, "control: a declaration commented out"),
+        (src / "renamed.rs", False, "control: the name a path attribute replaced"),
+        (src / "util.rs", False, "control: the live module of the nested one's name"),
+        (src / "widgets.rs", False, "control: a declaration inside a string literal"),
+    ]
+    test_files = test_module_files(tree)
     bad = 0
+    for path, want_test, why in modules:
+        ok = (path in test_files) == want_test
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       {path} is{'' if want_test else ' not'} test code;"
+                  f" test_module_files -> {sorted(map(str, test_files))}")
+            bad += 1
+    # And the survey reads none of a test module: the key a test presses is
+    # reported only once the module is no longer gated.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe"
+        (probe / "src").mkdir(parents=True)
+        tests_rs = probe / "src" / "tests.rs"
+        lib_rs = probe / "src" / "lib.rs"
+        tests_rs.write_text("fn t() { press(Key::A); }", encoding="utf-8", newline="")
+        lib_rs.write_text(nl.join(["#[cfg(test)]", "mod tests;"]), encoding="utf-8", newline="")
+        gated = survey(probe)
+        lib_rs.write_text("mod tests;", encoding="utf-8", newline="")
+        ungated = survey(probe)
+    surveyed: list[tuple[object, object, str]] = [
+        (gated, None, "the survey skips a test module's file"),
+        (ungated, (1, 1, ["A"], False), "control: the same file, ungated, is read"),
+    ]
+    for got_survey, want_survey, why in surveyed:
+        ok = got_survey == want_survey
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       survey -> {got_survey!r}, wanted {want_survey!r}")
+            bad += 1
     for text, want_read, why in labels_read:
         got_read = label_keys(text)
         ok = got_read == want_read
@@ -708,7 +968,10 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    total = len(cases) + len(named) + len(payloads) + len(labels) + len(typed) + len(labels_read)
+    total = (
+        len(cases) + len(named) + len(payloads) + len(labels) + len(typed)
+        + len(labels_read) + len(modules) + len(surveyed)
+    )
     print(f"self-test ok -- {total} case(s)")
     return 0
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mind Map
+Comment=Arrange ideas as a map of branches
+Icon=x-office-drawing
+Exec=mindmap
+Categories=Office;
+Keywords=ideas;brainstorm;map;

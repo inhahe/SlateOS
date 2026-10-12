@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Kanban Board
+Comment=Plan work as cards on a board
+Icon=x-office-spreadsheet
+Exec=kanban
+Categories=Office;ProjectManagement;
+Keywords=tasks;board;cards;todo;

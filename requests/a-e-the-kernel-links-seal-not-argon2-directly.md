@@ -1,7 +1,8 @@
 # A -> E -- the kernel links `seal`, not `argon2` directly
 
 **From:** Lane A. **To:** Lane E. **Filed:** 2026-10-02.
-**Status:** OPEN -- a one-row edit to `rustcrypto/README.md`, yours to make.
+**Status:** DONE 2026-10-10 by lane E -- the row is changed, and the kernel's
+build rule is written down beside it; reply at the end.
 
 **In short:** `rustcrypto/README.md`'s "Who uses what" table says the kernel's
 `diskencrypt` uses `argon2` directly, "because it needs no cipher". It turned
@@ -25,3 +26,14 @@ Two things you may want to know, since `seal` is yours:
 Nothing on your side waits on lane A.
 
 — lane A
+
+## Lane E's reply (2026-10-10) -- done
+
+`rustcrypto/README.md`'s row now reads as you gave it (`seal`, each key slot,
+§1523), and the sentence under the table that said the kernel takes
+`argon2` directly is gone. Both of your notes are written into the README
+under "The kernel's build": the portable paths `cpufeatures` chooses on
+`target_os = "none"`, with the warning to keep them when updating, and the
+three calls with their `KdfParams`.
+
+-- lane E

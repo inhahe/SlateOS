@@ -3,7 +3,8 @@
 **From:** lane A · **To:** lane F · **Filed:** 2026-09-27 · Under
 design-decisions §974 (the operator's answer to A-Q13).
 
-**Status:** OPEN
+**Status:** DONE 2026-10-10 by lane F -- reply at the end; the hook wiring
+(§2) is yours once it reaches `main` with lane F's next publish.
 
 **In short:** your checker that regenerates `gui/font`'s DFA tables and compares
 them with the checked-in ones is one of the 22 quick checks that now run on
@@ -71,3 +72,43 @@ Gate 72 stays in the hook. It has never refused a correct tree that I can
 find, and taking it out would give up the fast feedback for a risk that has
 not shown itself. If you would rather it came out until the self-test exists,
 say so and it will.
+
+## Reply from lane F -- 2026-10-10
+
+Done, sorry for the wait: `python scripts/check-generated-tables.py
+--self-test` (any `selftestflag` spelling; an option it does not know is now
+refused with exit 2 and nothing checked). It runs the checker against a
+fixture generator and table in a temporary directory -- 16 cases, ending in
+`[gentables] 16 self-test case(s), 0 failed` -- and exits 0 only when every
+verdict is right:
+
+| fixture | verdict held |
+|---|---|
+| a table its generator emits byte for byte | passed, exit 0, bytes unchanged |
+| one row changed | refused as drift, exit 1, `DRIFT gen/table.rs` named, the drifted bytes kept |
+| a generator that truncates the table and exits 3 | refused, exit 1, the table as it was |
+| a generator missing / a table missing | refused, not skipped; nothing created |
+| an interruption after the generator wrote | the interruption propagates, and the table is restored first |
+
+**One difference from your table:** a generator that fails is exit **1**,
+not 2. That is the checker's own decision, from lane B's
+`requests/b-c-check-generated-tables-returns-2-which-now-means-no-verdict.md`:
+2 means "could not look, no verdict", and a checked-in generator that will
+not run is a fault in the tree for everyone, so it blocks. The docstring had
+gone on saying 2 after the code changed; it is corrected. Your wiring in §2
+needs no change for it -- a non-zero self-test refuses either way.
+
+Mutation-checked as your gates were: each promise broken in a copy of the
+checker -- no restore, drift passed, a failing generator passed, a missing
+generator skipped, drift exiting 0, a drift that does not name the table --
+and the self-test failed on all six. The real run is unchanged: all four
+tables match their generators.
+
+**Wired, by lane F, 2026-10-10.** Gate 56 (`check-gates-are-wired`) refused
+lane F's push and boot test the moment the self-test existed and nothing ran
+it, and says any lane may wire a self-test unilaterally -- so rather than
+leave lane F unable to publish until you had: gate 72's section of
+`scripts/hooks/pre-push` now has your §2 text verbatim, before the real run,
+and `scripts/boot-test.sh` the same check before its real run, refusing with
+a message in the shape of its neighbours'. If you had the same change queued,
+they are the same lines; keep whichever merges.

@@ -263,6 +263,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/interleave-diff.sh` | interleave-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/join-diff.sh` | Differential test: our join against GNU join. |
 | `scripts/join-probe.py` | Ad-hoc measurement of GNU `join`. Not part of the build; kept only so the |
+| `scripts/journalfwd-diff.sh` | Differential test: journald's broadcast of an `emerg` message -- the |
+| `scripts/journalfwd-walltest.py` | Run one `wall` implementation against a utmp of the harness's making, and |
 | `scripts/kasan-build.sh` | kasan-build.sh — build the kernel with LLVM's KernelAddressSanitizer. |
 | `scripts/kasan-check-preshadow.py` | kasan-check-preshadow.py — prove the pre-shadow window is uninstrumented. |
 | `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
@@ -338,8 +340,12 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/patch-merge-fuzz.py` | Random `patch --merge` cases: ours against GNU patch, case by case. |
 | `scripts/pathchk-diff.sh` | pathchk-diff.sh — compare our `pathchk` against GNU's, inside WSL. |
 | `scripts/pgrep-diff.sh` | Differential test: our `pgrep`, `pkill` and `pidwait` against procps-ng |
+| `scripts/pidof-diff.sh` | pidof-diff.sh -- run our `pidof` and `killall5` and sysvinit's side by side |
+| `scripts/pidof-fixture.sh` | pidof-fixture.sh -- the init of a PID namespace running one pidof-diff case. |
+| `scripts/pidof-ttyrun.py` | Run a program with a pseudo-terminal as its standard input. |
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
+| `scripts/pmap-diff.sh` | pmap-diff.sh -- run our `pmap` and procps-ng's side by side and report every |
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
 | `scripts/pr-diff.sh` | pr-diff.sh — compare our `pr` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pre-boot.py` | Run everything `boot-test.sh` checks before it builds, without building anything. |
@@ -362,6 +368,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
+| `scripts/procps-close-diff.sh` | procps-close-diff.sh -- how each procps program here closes its standard |
 | `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and |
 | `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
@@ -372,9 +379,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/pstree-diff.sh` | Differential test: our `pstree` against psmisc 23.7's. |
 | `scripts/ptx-diff.sh` | ptx-diff.sh — compare our `ptx` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pwd-diff.sh` | pwd-diff.sh — run our `pwd` and GNU coreutils' `pwd` side by side and report |
+| `scripts/pwdx-diff.sh` | pwdx-diff.sh -- run our `pwdx` and procps-ng's side by side and report every |
 | `scripts/q45_apply.py` | Q45: give every `RenderCommand::Text` construction an explicit `overflow`. |
 | `scripts/q45_survey.py` | Survey every `RenderCommand::Text {` site before Q45 edits a single one. |
 | `scripts/qemu-probe.py` | Ask a throwaway QEMU a question, and always get the process back. |
+| `scripts/questions-for-you.py` | Rebuilds `questions-for-you/`: the operator's questions not yet answered. |
 | `scripts/quote-names-why.py` | Derive the `--why` for `quote-names-wire.py` from the crate's own source. |
 | `scripts/quote-names-wire.py` | Wire the `quoting` crate into a crate that `quote-names.py --fix` just edited. |
 | `scripts/quote-names.py` | Diagnostics that name a file must route the name through `quote`. |
@@ -404,6 +413,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/reintro-toolkit-focus.py` | Prove the toolkit's focus, caret and selection tests are regression tests. |
 | `scripts/renice-diff.sh` | Differential test: our `renice` against util-linux 2.39.3's. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
+| `scripts/review-batch.py` | Review a batch of commits at the level its contents call for; gate `main` on it. |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
 | `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
 | `scripts/run-checker.sh` | `run_checker` — the one implementation of "did that checker reach a verdict?" |
@@ -430,6 +440,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
+| `scripts/skill-diff.sh` | skill-diff.sh -- run our `skill` and `snice` and procps-ng's side by side and |
 | `scripts/sleep-diff.sh` | Differential test: our `sleep` against GNU coreutils 9.4's. |
 | `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
 | `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
@@ -525,6 +536,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/tic-diff.sh` | Differential test: ncurses 6.4's tic, captoinfo, infotocap, infocmp and toe, ours against Ubuntu's. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
+| `scripts/tload-diff.sh` | tload-diff.sh -- run our `tload` and procps-ng's side by side and report every |
+| `scripts/tload-frames.py` | Run tload and capture the frames it draws, for scripts/tload-diff.sh. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tput-diff.sh` | Differential test: ncurses 6.4's `tput`, `clear`, `tset` and `tabs`, ours against Ubuntu's. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
@@ -565,4 +578,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_555 scripts._
+_568 scripts._

@@ -995,6 +995,8 @@ pub struct SudokuApp {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Why a greyed key is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl SudokuApp {
@@ -1045,6 +1047,39 @@ impl SudokuApp {
             show_help: false,
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            reasons: gamechrome::why::Reasons::new(),
+        }
+    }
+
+    /// Why the key `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. Every key while the game is paused or won,
+    /// when the board takes nothing; hint, undo and redo when they have
+    /// nothing to give.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        if !KEYPAD.contains(&target) {
+            return None;
+        }
+        match self.status {
+            GameStatus::Paused => return Some("The game is paused: press Resume to play on."),
+            GameStatus::Won => {
+                return Some("This puzzle is solved: start a new game for another.");
+            }
+            GameStatus::Playing => {}
+        }
+        match target {
+            Target::Hint if self.hints_remaining() == 0 => {
+                Some("Every hint for this puzzle has been used.")
+            }
+            Target::Undo if !self.history.can_undo() => Some(if self.history.can_redo() {
+                "Every change has been taken back already."
+            } else {
+                "There is no change to take back yet."
+            }),
+            Target::Redo if !self.history.can_redo() => {
+                Some("Nothing has been taken back, so there is nothing to put back.")
+            }
+            _ => None,
         }
     }
 
@@ -2303,13 +2338,10 @@ impl SudokuApp {
             // the game is paused or won, when the board takes nothing, and
             // hint, undo and redo when they have nothing to give. Note mode,
             // a switch, shows it is on.
-            let live = self.status == GameStatus::Playing
-                && match target {
-                    Target::Hint => self.hints_remaining() > 0,
-                    Target::Undo => self.history.can_undo(),
-                    Target::Redo => self.history.can_redo(),
-                    _ => true,
-                };
+            //
+            // Greyed exactly when there is a reason to give for it: one
+            // answer for the paint and the words, so neither can drift.
+            let live = self.why_greyed(target).is_none();
             let on = target == Target::Notes && self.note_mode;
             self.chip(f, r, target, &key_label(target), l.font, on, live);
         }
@@ -2358,7 +2390,10 @@ impl SudokuApp {
 /// Route one event to the model. The single door every input comes through, so
 /// a test drives the program the way a player does.
 pub fn handle_event(app: &mut SudokuApp, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed key
+    // gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(key) => app.handle_key(key),
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         Event::Tick { elapsed_ms } => app.tick(*elapsed_ms),
@@ -2371,7 +2406,8 @@ pub fn handle_event(app: &mut SudokuApp, event: &Event) -> EventResult {
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for SudokuApp {
@@ -2398,13 +2434,11 @@ impl App for SudokuApp {
     }
 
     /// Asked after every event, so the clock gets a wake-up exactly while there
-    /// is something for it to move.
+    /// is something for it to move -- the game's time, or a greyed key's
+    /// reason waiting to appear.
     fn tick_interval(&self) -> Option<Duration> {
-        if self.status == GameStatus::Playing {
-            Some(Duration::from_millis(CLOCK_MS))
-        } else {
-            None
-        }
+        self.reasons
+            .sooner((self.status == GameStatus::Playing).then_some(Duration::from_millis(CLOCK_MS)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2421,7 +2455,18 @@ impl App for SudokuApp {
         // The size the frame is drawn at is the size the next click is read
         // against -- that is the whole point of storing it.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed keys this frame drew, for the reason the one under the
+        // pointer gives; none while the list of keys covers them.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -2469,6 +2514,94 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // --- Why a greyed key is greyed -------------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// key gives, if one shows, over everything.
+    fn on_screen(a: &mut SudokuApp) -> RenderTree {
+        App::render(a, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Rest the pointer on `target`, where the last frame drew it, and let
+    /// the toolkit's delay pass; what the window then says.
+    fn rest_on(a: &mut SudokuApp, target: Target) -> Option<String> {
+        let (x, y) = a
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} is not drawn"))
+            .centre();
+        handle_event(
+            a,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        handle_event(a, &Event::Tick { elapsed_ms: 500 });
+        a.reasons.showing().map(str::to_owned)
+    }
+
+    /// **A greyed key says why**, while the pointer rests on it, after the
+    /// delay and drawn over everything: undo and redo with nothing to give,
+    /// every key while the game is paused -- and a live key says nothing.
+    #[test]
+    fn a_greyed_key_says_why_while_the_pointer_rests_on_it() {
+        let mut a = SudokuApp::new();
+        on_screen(&mut a);
+        assert_eq!(
+            rest_on(&mut a, Target::Undo).as_deref(),
+            Some("There is no change to take back yet.")
+        );
+        let tree = on_screen(&mut a);
+        let reason = a.reasons.render(&a.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+        assert_eq!(
+            rest_on(&mut a, Target::Redo).as_deref(),
+            Some("Nothing has been taken back, so there is nothing to put back.")
+        );
+        assert_eq!(
+            rest_on(&mut a, Target::Digit(5)),
+            None,
+            "a live key explains itself"
+        );
+
+        a.apply(Intent::Pause);
+        assert_eq!(a.status, GameStatus::Paused);
+        on_screen(&mut a);
+        assert_eq!(
+            rest_on(&mut a, Target::Digit(5)).as_deref(),
+            Some("The game is paused: press Resume to play on.")
+        );
+    }
+
+    /// **The window asks for the tick that shows a reason**, sooner than
+    /// its clock's when the reason is due first.
+    #[test]
+    fn the_window_wakes_for_a_reason_sooner_than_for_its_clock() {
+        let mut a = SudokuApp::new();
+        a.apply(Intent::Pause);
+        on_screen(&mut a);
+        assert_eq!(App::tick_interval(&a), None, "a paused game keeps a clock");
+        let (x, y) = a
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Digit(1))
+            .expect("the keypad draws 1")
+            .centre();
+        handle_event(
+            &mut a,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        assert_eq!(App::tick_interval(&a), Some(Duration::from_millis(500)));
+    }
 
     /// The colours a game draws in until the theme says otherwise.
     fn colours() -> Colours {

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Imager
+Comment=Write disk images to drives and make images of drives
+Icon=media-optical
+Exec=diskimager
+Categories=System;Filesystem;
+Keywords=iso;image;usb;write;

@@ -241,12 +241,12 @@ impl SimpleDate {
 // ── Transaction ─────────────────────────────────────────────────────
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Transaction {
-    id: u32,
+    id: u64,
     date: SimpleDate,
     description: String,
     amount: i64, // cents (positive=income, negative=expense)
     category: Category,
-    account_id: u32,
+    account_id: u64,
     notes: String,
     recurring: bool,
 }
@@ -264,7 +264,7 @@ impl Transaction {
 // ── Account ─────────────────────────────────────────────────────────
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Account {
-    id: u32,
+    id: u64,
     name: String,
     account_type: AccountType,
     initial_balance: i64, // cents
@@ -398,19 +398,19 @@ impl FormField {
 enum Form {
     /// A transaction, new (`id: None`) or being changed.
     Transaction {
-        id: Option<u32>,
+        id: Option<u64>,
         date: TextInput,
         description: TextInput,
         amount: TextInput,
         notes: TextInput,
         income: bool,
         category: Category,
-        account: Option<u32>,
+        account: Option<u64>,
         recurring: bool,
     },
     /// An account, new or being changed.
     Account {
-        id: Option<u32>,
+        id: Option<u64>,
         name: TextInput,
         kind: AccountType,
         opening: TextInput,
@@ -473,9 +473,9 @@ impl Form {
 /// What a delete waiting on its answer would remove.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Doomed {
-    Transaction(u32),
+    Transaction(u64),
     /// An account, with every transaction in it.
-    Account(u32),
+    Account(u64),
 }
 
 /// Everything in the window a pointer can press, as the renderer records it.
@@ -498,15 +498,15 @@ enum Target {
     Search,
     FilterChip,
     TxList,
-    TxRow(u32),
+    TxRow(u64),
     AccountList,
-    AccountRow(u32),
+    AccountRow(u64),
     BudgetList,
     /// A budget, by its category's place in `Category::EXPENSE_CATS`.
     BudgetRow(usize),
     /// A transaction in the dashboard's recent list: a press shows it in the
     /// transactions screen.
-    RecentRow(u32),
+    RecentRow(u64),
     Field(FormField),
     /// The arrows either side of a chosen field.
     StepBack(FormField),
@@ -556,11 +556,6 @@ struct FinanceApp {
     transactions: Vec<Transaction>,
     accounts: Vec<Account>,
     budgets: Vec<Budget>,
-    // Allocated by `add_transaction` and `add_account`, neither of which has
-    // a caller: nothing in this program creates a transaction or an account.
-    // See `NO_DATA_LINES`.
-    next_tx_id: u32,
-    next_account_id: u32,
     current_date: SimpleDate,
     view_month: SimpleDate, // first day of the month being viewed
     /// The selected transaction's **id**, not its index.
@@ -570,7 +565,7 @@ struct FinanceApp {
     /// gap. `CLAUDE.md` names this directly: store stable identifiers, not
     /// positions into a container that moves. `None` means nothing is selected,
     /// which is the honest state for an empty or fully-filtered-out list.
-    selected_id: Option<u32>,
+    selected_id: Option<u64>,
     search_query: String,
     search_active: bool,
     category_filter: Option<Category>,
@@ -586,7 +581,7 @@ struct FinanceApp {
     pending_delete: Option<Doomed>,
     /// The chosen account, by id, and budget, by its category's place in
     /// `Category::EXPENSE_CATS`.
-    selected_account: Option<u32>,
+    selected_account: Option<u64>,
     selected_budget: usize,
     /// How far each list is scrolled, in rows. None of them scrolled: rows
     /// past the bottom edge were simply not drawn, and the transaction arrows
@@ -613,12 +608,33 @@ struct FinanceApp {
     /// could not be read (and so is left exactly as it is), or the last save
     /// failed.
     ledger_error: Option<String>,
+    /// The ledger as this window last read or wrote it: what a save merges
+    /// this window's changes against, so another window's, saved since, are
+    /// kept rather than written over (design-decisions §1239).
+    base: Ledger,
+    /// The ledger's file as this window last read or wrote it, to tell
+    /// another window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the ledger's file, which wakes the window when another
+    /// one saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
+    /// The question asked when the window is closed while a save is failing:
+    /// closing then would lose what the failing save holds.
+    question: Option<unsaved::Question<Pending>>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+}
+
+/// What the close question is holding up. Only the close: everything else
+/// is kept the moment it is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    /// The window, asked to close while a save is failing.
+    Close,
 }
 
 /// Everything that decides whether a frame is worth drawing.
@@ -644,7 +660,7 @@ struct FinanceApp {
 #[derive(Clone, Debug, PartialEq)]
 struct Fingerprint {
     screen: Screen,
-    selected_id: Option<u32>,
+    selected_id: Option<u64>,
     search_active: bool,
     /// What is in the search box, not merely that it is open.
     search_query: String,
@@ -654,7 +670,7 @@ struct Fingerprint {
     month: u8,
     form_open: bool,
     pending_delete: Option<Doomed>,
-    selected_account: Option<u32>,
+    selected_account: Option<u64>,
     selected_budget: usize,
     scrolls: (usize, usize, usize),
 }
@@ -672,8 +688,6 @@ impl FinanceApp {
             transactions: Vec::new(),
             accounts: Vec::new(),
             budgets: Vec::new(),
-            next_tx_id: 1,
-            next_account_id: 1,
             current_date: today,
             view_month: SimpleDate::new(today.year, today.month, 1),
             selected_id: None,
@@ -698,6 +712,10 @@ impl FinanceApp {
             wheel: wheel::Accumulator::default(),
             persist: false,
             ledger_error: None,
+            base: Ledger::default(),
+            file_stamp: None,
+            watch: None,
+            question: None,
         }
     }
 
@@ -719,56 +737,102 @@ impl FinanceApp {
     /// saved over it, and the window says so for as long as it is open. A
     /// save would write back only what was understood.
     fn load_ledger(&mut self, path: &std::path::Path) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, MAX_LEDGER_BYTES) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.ledger_error = Some(refused(err.to_string()));
-                return;
-            }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.ledger_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                MAX_LEDGER_BYTES / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_ledger(&read.text) {
-            Ok(ledger) => {
-                self.next_account_id = ledger
-                    .accounts
-                    .iter()
-                    .map(|a| a.id.saturating_add(1))
-                    .max()
-                    .unwrap_or(1);
-                self.next_tx_id = ledger
-                    .transactions
-                    .iter()
-                    .map(|t| t.id.saturating_add(1))
-                    .max()
-                    .unwrap_or(1);
+        match read_ledger_file(path) {
+            // None there yet: a first run.
+            Ok(None) => {}
+            Ok(Some(ledger)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = ledger.clone();
                 self.selected_account = ledger.accounts.first().map(|a| a.id);
-                self.accounts = ledger.accounts;
-                self.budgets = ledger.budgets;
-                self.transactions = ledger.transactions;
+                self.adopt(ledger);
             }
             Err(why) => {
                 self.persist = false;
-                self.ledger_error = Some(refused(why));
+                self.ledger_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
     }
 
+    /// The ledger as this window has it.
+    fn ledger(&self) -> Ledger {
+        Ledger {
+            accounts: self.accounts.clone(),
+            budgets: self.budgets.clone(),
+            transactions: self.transactions.clone(),
+        }
+    }
+
+    /// Show `ledger`: what this window and the file hold together, after a
+    /// save or another window's. What is chosen stays chosen while it is
+    /// there; what another window deleted is no longer chosen or waited on
+    /// for a delete.
+    fn adopt(&mut self, ledger: Ledger) {
+        self.accounts = ledger.accounts;
+        self.budgets = ledger.budgets;
+        self.transactions = ledger.transactions;
+        if self
+            .selected_account
+            .is_some_and(|id| !self.accounts.iter().any(|a| a.id == id))
+        {
+            self.selected_account = self.accounts.first().map(|a| a.id);
+        }
+        let waits_on_nothing = match self.pending_delete {
+            Some(Doomed::Transaction(id)) => !self.transactions.iter().any(|t| t.id == id),
+            Some(Doomed::Account(id)) => !self.accounts.iter().any(|a| a.id == id),
+            None => false,
+        };
+        if waits_on_nothing {
+            self.pending_delete = None;
+        }
+        self.reanchor_selection();
+    }
+
+    /// Read the ledger again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's changes not yet saved put into it. Whether
+    /// what is shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case. So is one that has gone.
+    fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = ledger_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(Some(theirs)) = read_ledger_file(&path) else {
+            return false;
+        };
+        let mine = self.ledger();
+        let shown = if mine == self.base {
+            theirs.clone()
+        } else {
+            merge_ledgers(&self.base, &mine, &theirs)
+        };
+        let changed = shown != mine;
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown);
+        changed
+    }
+
     /// Keep the ledger as it is now, if this window keeps anything.
+    ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it, entry by entry (design-decisions
+    /// §1239). Written whole and over, as it used to be, the window that
+    /// saved last threw away the other's transactions.
     fn save_ledger(&mut self) {
         if !self.persist {
             return;
@@ -777,15 +841,86 @@ impl FinanceApp {
             self.ledger_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = ledger_text(&self.accounts, &self.budgets, &self.transactions);
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_ledger_file(&path)
+        };
+        let theirs = match read {
+            Ok(Some(theirs)) => theirs,
+            // None there -- a first run, or gone since: nothing has been
+            // deleted from it, so it is what this window started from.
+            Ok(None) => self.base.clone(),
+            Err(why) => {
+                self.ledger_error = Some(format!(
+                    "Not saved: {} could not be read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = merge_ledgers(&self.base, &self.ledger(), &theirs);
+        let text = ledger_text(&merged.accounts, &merged.budgets, &merged.transactions);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| safeio::write_str_atomically(&path, &text));
-        self.ledger_error = match written {
-            Ok(()) => None,
-            Err(err) => Some(format!("Not saved to {}: {err}", path.shown())),
-        };
+        match written {
+            Ok(()) => {
+                self.ledger_error = None;
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base.clone_from(&merged);
+                self.adopt(merged);
+            }
+            Err(err) => {
+                self.ledger_error = Some(format!("Not saved to {}: {err}", path.shown()));
+            }
+        }
+    }
+
+    /// Whether the window holds a change no save has written: one a failing
+    /// save could not, in a window that keeps its ledger.
+    fn unkept(&self) -> bool {
+        self.persist && self.ledger() != self.base
+    }
+
+    /// Whether the window may close now: at once, unless the ledger has
+    /// changes a save is failing to write, which closing would lose. Asked
+    /// then, as every editor here asks; a window that could not read its
+    /// ledger at the start has said all along that nothing is kept, and goes.
+    fn request_close(&mut self) -> bool {
+        if self.unkept() {
+            self.save_ledger();
+        }
+        if !self.unkept() {
+            return true;
+        }
+        let detail = self.ledger_error.clone().unwrap_or_default();
+        self.question = Some(unsaved::Question::new(
+            "Your latest changes to your finances are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            Pending::Close,
+        ));
+        false
+    }
+
+    /// Act on the close question's answer: whether the window goes.
+    fn answer(&mut self, choice: unsaved::Choice) -> bool {
+        match choice {
+            // Gone only if the save now works; if it fails again the error is
+            // on screen and the window stays, which is what Save asked for.
+            unsaved::Choice::Save => {
+                self.save_ledger();
+                !self.unkept()
+            }
+            unsaved::Choice::Discard => true,
+            unsaved::Choice::Cancel => false,
+        }
     }
 
     /// Where what is entered goes, for the first-run card.
@@ -1019,11 +1154,11 @@ impl FinanceApp {
     }
 
     /// A new account, by the account form.
-    pub fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
-        let id = self.next_account_id;
-        // Saturating rather than wrapping: a wrapped counter hands out an id
-        // that already exists, and selection and deletion are both by id.
-        self.next_account_id = self.next_account_id.saturating_add(1);
+    pub fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u64 {
+        // Random, and no account's here: "the largest so far plus one" is
+        // the number two windows open on one ledger both give out
+        // (design-decisions §1239).
+        let id = recordfile::fresh_id(|id| self.accounts.iter().any(|a| a.id == id));
         self.accounts.push(Account {
             id,
             name: name.to_string(),
@@ -1044,12 +1179,12 @@ impl FinanceApp {
         desc: &str,
         amount: i64,
         category: Category,
-        account_id: u32,
+        account_id: u64,
         notes: &str,
         recurring: bool,
-    ) -> u32 {
-        let id = self.next_tx_id;
-        self.next_tx_id = self.next_tx_id.saturating_add(1);
+    ) -> u64 {
+        // Random, as an account's is (`add_account`).
+        let id = recordfile::fresh_id(|id| self.transactions.iter().any(|t| t.id == id));
         self.transactions.push(Transaction {
             id,
             date,
@@ -1064,7 +1199,7 @@ impl FinanceApp {
     }
 
     /// Delete by id, and leave the selection on a row that still exists.
-    fn delete_transaction(&mut self, id: u32) {
+    fn delete_transaction(&mut self, id: u64) {
         let Some(idx) = self.transactions.iter().position(|tx| tx.id == id) else {
             return;
         };
@@ -1090,7 +1225,7 @@ impl FinanceApp {
     }
 
     /// The ids of the transactions currently on screen, in screen order.
-    fn visible_ids(&self) -> Vec<u32> {
+    fn visible_ids(&self) -> Vec<u64> {
         self.filtered_transactions()
             .iter()
             .map(|(_, tx)| tx.id)
@@ -1209,7 +1344,7 @@ impl FinanceApp {
         }
     }
 
-    fn account_balance(&self, account_id: u32) -> i64 {
+    fn account_balance(&self, account_id: u64) -> i64 {
         let initial = self
             .accounts
             .iter()
@@ -1305,7 +1440,7 @@ impl FinanceApp {
     }
 
     /// Change transaction `id`.
-    fn open_edit_transaction(&mut self, id: u32) {
+    fn open_edit_transaction(&mut self, id: u64) {
         let Some(tx) = self.transactions.iter().find(|t| t.id == id) else {
             return;
         };
@@ -1341,7 +1476,7 @@ impl FinanceApp {
         self.form_error = None;
     }
 
-    fn open_edit_account(&mut self, id: u32) {
+    fn open_edit_account(&mut self, id: u64) {
         let Some(account) = self.accounts.iter().find(|a| a.id == id) else {
             return;
         };
@@ -1438,14 +1573,14 @@ impl FinanceApp {
     #[allow(clippy::too_many_arguments)]
     fn save_transaction(
         &mut self,
-        id: Option<u32>,
+        id: Option<u64>,
         date: &TextInput,
         description: &TextInput,
         amount: &TextInput,
         notes: &TextInput,
         income: bool,
         category: Category,
-        account: Option<u32>,
+        account: Option<u64>,
         recurring: bool,
     ) -> Result<(), String> {
         let Some(date) = SimpleDate::parse(date.text()) else {
@@ -1470,16 +1605,25 @@ impl FinanceApp {
         let notes = notes.text().trim().to_owned();
         match id {
             Some(id) => {
-                let Some(tx) = self.transactions.iter_mut().find(|t| t.id == id) else {
-                    return Err(String::from("That transaction is gone"));
+                let changed = Transaction {
+                    id,
+                    date,
+                    description,
+                    amount: cents,
+                    category,
+                    account_id: account,
+                    notes,
+                    recurring,
                 };
-                tx.date = date;
-                tx.description = description;
-                tx.amount = cents;
-                tx.category = category;
-                tx.account_id = account;
-                tx.notes = notes;
-                tx.recurring = recurring;
+                match self.transactions.iter_mut().find(|t| t.id == id) {
+                    Some(tx) => *tx = changed,
+                    // Deleted by another window while this one's form was open
+                    // on it: the change is the later one, so the transaction
+                    // comes back with it, as an edit here beats a deletion
+                    // elsewhere in a merge (design-decisions §1239). It said
+                    // "That transaction is gone", and the change was lost.
+                    None => self.transactions.push(changed),
+                }
                 self.selected_id = Some(id);
                 self.status_msg = String::from("Transaction changed");
             }
@@ -1502,7 +1646,7 @@ impl FinanceApp {
 
     fn save_account(
         &mut self,
-        id: Option<u32>,
+        id: Option<u64>,
         name: &TextInput,
         kind: AccountType,
         opening: &TextInput,
@@ -1537,7 +1681,7 @@ impl FinanceApp {
 
     /// Step a chosen field's value: forward, or back.
     fn step_choice(&mut self, which: FormField, forward: bool) -> bool {
-        let accounts: Vec<u32> = self.accounts.iter().map(|a| a.id).collect();
+        let accounts: Vec<u64> = self.accounts.iter().map(|a| a.id).collect();
         let Some(form) = self.form.as_mut() else {
             return false;
         };
@@ -1676,7 +1820,7 @@ impl FinanceApp {
     }
 
     /// The chosen transaction, if the list on screen shows it.
-    fn chosen_transaction(&self) -> Option<u32> {
+    fn chosen_transaction(&self) -> Option<u64> {
         self.selected_id
             .filter(|id| self.visible_ids().contains(id))
     }
@@ -1701,7 +1845,7 @@ impl FinanceApp {
 
     /// Show transaction `id` in the transactions screen, chosen: a press on
     /// the dashboard's recent list.
-    fn show_transaction(&mut self, id: u32) {
+    fn show_transaction(&mut self, id: u64) {
         let Some(tx) = self.transactions.iter().find(|t| t.id == id) else {
             return;
         };
@@ -1853,7 +1997,7 @@ impl FinanceApp {
     fn move_in_list(&mut self, delta: isize) {
         match self.screen {
             Screen::Accounts => {
-                let ids: Vec<u32> = self.accounts.iter().map(|a| a.id).collect();
+                let ids: Vec<u64> = self.accounts.iter().map(|a| a.id).collect();
                 let at = self
                     .selected_account
                     .and_then(|id| ids.iter().position(|v| *v == id));
@@ -4186,9 +4330,48 @@ impl App for FinanceApp {
         Some(Duration::from_secs(left.min(3600)))
     }
 
+    /// Watch the ledger's file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its ledger.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = ledger_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the ledger's file written: read it again if another
+    /// window wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
-            return Response::Exit;
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        // The close question takes every key and click while it is up: a
+        // keystroke reaching the ledger under it would be a change made while
+        // being asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                if self.answer(choice) {
+                    return Response::Exit;
+                }
+            }
+            return Response::Redraw;
         }
         match self.handle_event(event) {
             EventResult::Consumed => Response::Redraw,
@@ -4205,7 +4388,13 @@ impl App for FinanceApp {
         self.clamp_scrolls();
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // Over everything.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -4240,10 +4429,83 @@ fn ledger_path() -> Option<std::path::PathBuf> {
 }
 
 /// Everything a ledger holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Ledger {
     accounts: Vec<Account>,
     budgets: Vec<Budget>,
     transactions: Vec<Transaction>,
+}
+
+impl recordfile::Record for Account {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl recordfile::Record for Transaction {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+/// The ledger the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a ledger -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only what was understood.
+fn read_ledger_file(path: &std::path::Path) -> Result<Option<Ledger>, String> {
+    let read = match safeio::read_to_string_capped(path, MAX_LEDGER_BYTES) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            MAX_LEDGER_BYTES / (1024 * 1024)
+        ));
+    }
+    parse_ledger(&read.text).map(Some)
+}
+
+/// This window's changes since `base`, put into `theirs` -- what the file
+/// holds now (design-decisions §1239).
+///
+/// Accounts and transactions are merged by id, budgets by their category --
+/// a category has one budget -- and an account a kept transaction is in comes
+/// back: deleting an account deletes its transactions, but a merge takes
+/// records one by one, so another window's new transaction in an account this
+/// one deleted (or the other way round) would be kept in an account the ledger
+/// does not have, which `parse_ledger` refuses. It comes back from this
+/// window's copy, or from the file's when this window deleted it; one or the
+/// other has it, since each has every account its own transactions are in.
+fn merge_ledgers(base: &Ledger, mine: &Ledger, theirs: &Ledger) -> Ledger {
+    let mut accounts = recordfile::merge(&base.accounts, &mine.accounts, &theirs.accounts);
+    let transactions =
+        recordfile::merge(&base.transactions, &mine.transactions, &theirs.transactions);
+    let present: std::collections::HashSet<u64> = accounts.iter().map(|a| a.id).collect();
+    let needed: std::collections::HashSet<u64> = transactions
+        .iter()
+        .map(|t| t.account_id)
+        .filter(|id| !present.contains(id))
+        .collect();
+    accounts.extend(
+        mine.accounts
+            .iter()
+            .filter(|a| needed.contains(&a.id))
+            .chain(
+                theirs.accounts.iter().filter(|a| {
+                    needed.contains(&a.id) && !mine.accounts.iter().any(|m| m.id == a.id)
+                }),
+            )
+            .cloned(),
+    );
+    Ledger {
+        accounts,
+        budgets: recordfile::merge_by(&base.budgets, &mine.budgets, &theirs.budgets, |b| {
+            b.category
+        }),
+        transactions,
+    }
 }
 
 /// The ledger as text: the header, then a line per account, budget and
@@ -4320,7 +4582,7 @@ fn parse_ledger(text: &str) -> Result<Ledger, String> {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.as_slice() {
             ["account", id, kind, opening, name] => {
-                let id: u32 = id
+                let id: u64 = id
                     .parse()
                     .map_err(|_| bad("an account's number is not one"))?;
                 if ledger.accounts.iter().any(|a| a.id == id) {
@@ -4365,7 +4627,7 @@ fn parse_ledger(text: &str) -> Result<Ledger, String> {
                 description,
                 notes,
             ] => {
-                let id: u32 = id
+                let id: u64 = id
                     .parse()
                     .map_err(|_| bad("a transaction's number is not one"))?;
                 if ledger.transactions.iter().any(|t| t.id == id) {
@@ -4807,7 +5069,10 @@ mod tests {
     #[test]
     fn test_account_balance() {
         let app = FinanceApp::with_sample_data();
-        let bal = app.account_balance(1);
+        // The first account the sample made: ids are random, not counted
+        // from one (design-decisions §1239).
+        let checking = app.accounts[0].id;
+        let bal = app.account_balance(checking);
         assert!(bal != 0);
     }
 
@@ -6246,7 +6511,7 @@ mod tests {
             "",
             false,
         );
-        let listed: Vec<(SimpleDate, u32)> = app
+        let listed: Vec<(SimpleDate, u64)> = app
             .filtered_transactions()
             .iter()
             .map(|(_, t)| (t.date, t.id))
@@ -6674,7 +6939,7 @@ mod tests {
             probe::key(&mut app, &probe::press(Key::Delete));
             probe::key(&mut app, &probe::typing("y"));
             let again = FinanceApp::from_settings();
-            let ids: Vec<u32> = again.transactions.iter().map(|t| t.id).collect();
+            let ids: Vec<u64> = again.transactions.iter().map(|t| t.id).collect();
             assert_eq!(ids, vec![kept]);
         });
     }
@@ -6723,6 +6988,126 @@ mod tests {
                 broken,
                 "the unreadable ledger was saved over"
             );
+            // Nothing entered here was ever going to be kept, and the window
+            // has said so all along: closing does not ask.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    /// Every string the window draws, the close question over it included.
+    fn rendered_texts(app: &mut FinanceApp) -> Vec<String> {
+        let (w, h) = (app.width, app.height);
+        app.render(w, h)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A window closed while a save is failing asks first, as every editor
+    /// here asks, rather than going and losing what the save holds: Save
+    /// tries again and goes only if that works, Don't save goes, and Cancel
+    /// stays. Closed with everything kept, it goes without a word.
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("finance-closing", |_| {
+            let (mut app, _) = kept_with_account("Kept");
+            assert!(
+                app.request_close(),
+                "a window with everything kept asked before closing"
+            );
+            let path = ledger_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.add_account("Unwritten", AccountType::Cash, 0);
+            app.after_change();
+            assert!(app.ledger_error.is_some(), "control: the save failed");
+
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            // Wrapped to the dialog's width, so read as one run of words.
+            let asked = rendered_texts(&mut app).join(" ");
+            assert!(
+                asked.contains("Your latest changes to your finances are not saved."),
+                "the question is not drawn: {asked}"
+            );
+            // Why, as the status line says it, and what Save will do.
+            assert!(
+                asked.contains("-- try saving again before closing?"),
+                "{asked}"
+            );
+            assert_eq!(
+                asked.matches("Not saved to").count(),
+                2,
+                "the question does not say why: {asked}"
+            );
+            // A key under the question reaches nothing: N starts no form.
+            app.on_event(&Event::Key(probe::press(Key::N)));
+            assert!(
+                app.form.is_none(),
+                "a key reached the ledger under the question"
+            );
+            // Cancel: the window stays, unsaved.
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::Escape))),
+                Response::Redraw
+            ));
+            assert!(app.question.is_none());
+            assert!(app.unkept());
+            // Save while the write still fails: the window stays.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::S))),
+                Response::Redraw
+            ));
+            // Save once it can be written: the window goes, and the change is
+            // in the file.
+            drop(refusal);
+            assert!(
+                matches!(app.on_event(&Event::CloseRequested), Response::Exit),
+                "the close tries the save again first"
+            );
+            let again = FinanceApp::from_settings();
+            assert!(again.accounts.iter().any(|a| a.name == "Unwritten"));
+        });
+    }
+
+    /// Don't save, at the question, goes without the change.
+    #[test]
+    fn closing_without_saving_goes_without_the_change() {
+        settingsfile::testing::with_scratch_config("finance-discard", |_| {
+            let (mut app, _) = kept_with_account("Kept");
+            let path = ledger_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                return;
+            };
+            app.add_account("Dropped", AccountType::Cash, 0);
+            app.after_change();
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::D))),
+                Response::Exit
+            ));
+            drop(refusal);
+            let again = FinanceApp::from_settings();
+            assert!(!again.accounts.iter().any(|a| a.name == "Dropped"));
+            assert!(again.accounts.iter().any(|a| a.name == "Kept"));
         });
     }
 
@@ -6739,12 +7124,334 @@ mod tests {
                 .ledger_error
                 .clone()
                 .expect("a failed save said nothing");
-            assert!(error.starts_with("Not saved to "), "{error}");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239), and a folder in
+            // its place fails there.
+            assert!(error.starts_with("Not saved"), "{error}");
             assert!(texts(&app).contains(&error), "the failure is not on screen");
             std::fs::remove_dir(&path).unwrap();
             app.after_change();
             assert!(app.ledger_error.is_none(), "{:?}", app.ledger_error);
             assert!(path.is_file(), "the second save wrote nothing");
+        });
+    }
+
+    /// A save whose write fails -- the ledger reads, and cannot be replaced
+    /// -- says so, and the next change tries again. A folder where the file
+    /// goes (the test above) fails at the read, which a save does first, so
+    /// the write's failure needs a file that reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("finance-unwritable", |_| {
+            let mut app = FinanceApp::from_settings();
+            app.add_account("Wallet", AccountType::Cash, 0);
+            app.after_change();
+            let path = ledger_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.add_account("Purse", AccountType::Cash, 0);
+            app.after_change();
+            let error = app
+                .ledger_error
+                .clone()
+                .expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            drop(refusal);
+            app.after_change();
+            assert!(app.ledger_error.is_none(), "{:?}", app.ledger_error);
+            assert_eq!(FinanceApp::from_settings().accounts.len(), 2);
+        });
+    }
+
+    /// A window of Finance kept in the scratch settings folder, with an
+    /// account named `name` in it, and that account's number.
+    fn kept_with_account(name: &str) -> (FinanceApp, u64) {
+        let mut app = FinanceApp::from_settings();
+        let id = app.add_account(name, AccountType::Checking, 0);
+        app.after_change();
+        (app, id)
+    }
+
+    /// A transaction of `cents` in account `account`, saved.
+    fn spend(app: &mut FinanceApp, account: u64, what: &str, cents: i64) -> u64 {
+        let id = app.add_transaction(
+            SimpleDate::new(2026, 5, 18),
+            what,
+            cents,
+            Category::Food,
+            account,
+            "",
+            false,
+        );
+        app.after_change();
+        id
+    }
+
+    /// **Two windows each enter a transaction, and both are kept.** Each
+    /// wrote its own copy of the ledger whole, so the last to save threw away
+    /// the other's (design-decisions §1239).
+    #[test]
+    fn two_windows_each_enter_a_transaction_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("finance-two-windows", |_| {
+            let (mut first, account) = kept_with_account("Checking");
+            let mut second = FinanceApp::from_settings();
+            spend(&mut first, account, "From the first", -100);
+            spend(&mut second, account, "From the second", -200);
+            // And an account each: "the largest number plus one" in both
+            // windows would make them one account.
+            first.add_account("Cash", AccountType::Cash, 0);
+            first.after_change();
+            second.add_account("Savings", AccountType::Savings, 0);
+            second.after_change();
+            let again = FinanceApp::from_settings();
+            let mut said: Vec<&str> = again
+                .transactions
+                .iter()
+                .map(|t| t.description.as_str())
+                .collect();
+            said.sort_unstable();
+            assert_eq!(said, ["From the first", "From the second"]);
+            let mut accounts: Vec<&str> = again.accounts.iter().map(|a| a.name.as_str()).collect();
+            accounts.sort_unstable();
+            assert_eq!(accounts, ["Cash", "Checking", "Savings"]);
+        });
+    }
+
+    /// **A window reads the ledger again when another saves**; its own save
+    /// is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("finance-hear", |_| {
+            let (mut first, account) = kept_with_account("Checking");
+            let mut second = FinanceApp::from_settings();
+            spend(&mut first, account, "Heard", -100);
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert_eq!(second.transactions.len(), 1);
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+            spend(&mut second, account, "Here", -50);
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert!(first.reread_if_changed());
+            assert_eq!(first.transactions.len(), 2);
+        });
+    }
+
+    /// A transaction another window deleted stays deleted when this window
+    /// saves next -- one this window entered, and one it heard of from the
+    /// other's save. A save compares with what the window last wrote or read;
+    /// a transaction it has that is not in that is taken for one entered
+    /// since, and kept.
+    #[test]
+    fn a_transaction_deleted_in_another_window_stays_deleted() {
+        settingsfile::testing::with_scratch_config("finance-stays-deleted", |_| {
+            let (mut first, account) = kept_with_account("Checking");
+            let mut second = FinanceApp::from_settings();
+
+            let made_here = spend(&mut second, account, "Made here", -100);
+            assert!(first.reread_if_changed());
+            first.delete_doomed(Doomed::Transaction(made_here));
+            spend(&mut second, account, "Later", -50);
+            let kept = FinanceApp::from_settings();
+            assert!(
+                !kept.transactions.iter().any(|t| t.id == made_here),
+                "a transaction entered here and deleted there came back"
+            );
+
+            let heard_of = spend(&mut first, account, "Heard of", -10);
+            assert!(second.reread_if_changed());
+            first.delete_doomed(Doomed::Transaction(heard_of));
+            spend(&mut second, account, "Later still", -5);
+            let kept = FinanceApp::from_settings();
+            assert!(
+                !kept.transactions.iter().any(|t| t.id == heard_of),
+                "a transaction heard of here and deleted there came back"
+            );
+            assert_eq!(kept.transactions.len(), 2);
+        });
+    }
+
+    /// A change this window could not save -- its write failed -- survives
+    /// another window's save being read, and goes in with the next save.
+    #[test]
+    fn a_change_not_yet_saved_survives_hearing_another_save() {
+        settingsfile::testing::with_scratch_config("finance-unsaved-heard", |_| {
+            let (mut first, account) = kept_with_account("Checking");
+            let mut second = FinanceApp::from_settings();
+            let path = ledger_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            let mine = spend(&mut second, account, "Not yet saved", -100);
+            assert!(second.ledger_error.is_some(), "control: the save went");
+            drop(refusal);
+            spend(&mut first, account, "From the first", -50);
+            assert!(second.reread_if_changed());
+            assert!(
+                second.transactions.iter().any(|t| t.id == mine),
+                "a transaction not yet saved went"
+            );
+            assert_eq!(second.transactions.len(), 2);
+        });
+    }
+
+    /// A budget each window sets is kept: by category, one each; the same
+    /// category set in both is the later save's.
+    #[test]
+    fn budgets_set_in_two_windows_are_kept_by_category() {
+        settingsfile::testing::with_scratch_config("finance-budgets", |_| {
+            let (mut first, _) = kept_with_account("Checking");
+            let mut second = FinanceApp::from_settings();
+            first.set_budget(Category::Food, 30_000);
+            first.after_change();
+            second.set_budget(Category::Housing, 100_000);
+            second.after_change();
+            let limit = |app: &FinanceApp, c: Category| {
+                app.budgets
+                    .iter()
+                    .find(|b| b.category == c)
+                    .map(|b| b.monthly_limit)
+            };
+            // Each window's budget is kept: the first's survived the second's
+            // save, which knew nothing of it.
+            let between = FinanceApp::from_settings();
+            assert_eq!(limit(&between, Category::Food), Some(30_000));
+            assert_eq!(limit(&between, Category::Housing), Some(100_000));
+            second.set_budget(Category::Food, 45_000);
+            second.after_change();
+            let again = FinanceApp::from_settings();
+            assert_eq!(limit(&again, Category::Housing), Some(100_000));
+            assert_eq!(limit(&again, Category::Food), Some(45_000));
+            assert_eq!(again.budgets.len(), 2, "a category has two budgets");
+        });
+    }
+
+    /// An account one window deleted while the other entered a transaction
+    /// in it comes back with the transaction -- whichever window saves last.
+    /// Kept in an account the ledger does not have, the transaction made a
+    /// ledger `parse_ledger` refuses, and no window could read it again.
+    #[test]
+    fn an_account_deleted_while_another_window_used_it_comes_back() {
+        for deleter_saves_last in [false, true] {
+            settingsfile::testing::with_scratch_config("finance-account-back", |_| {
+                let (mut first, account) = kept_with_account("Doomed");
+                let mut second = FinanceApp::from_settings();
+                let tx = if deleter_saves_last {
+                    let tx = spend(&mut second, account, "Bought here", -100);
+                    first.delete_doomed(Doomed::Account(account));
+                    tx
+                } else {
+                    first.delete_doomed(Doomed::Account(account));
+                    spend(&mut second, account, "Bought here", -100)
+                };
+                let again = FinanceApp::from_settings();
+                assert!(
+                    again.ledger_error.is_none(),
+                    "the ledger cannot be read again: {:?}",
+                    again.ledger_error
+                );
+                assert!(again.transactions.iter().any(|t| t.id == tx));
+                assert!(again.accounts.iter().any(|a| a.id == account));
+            });
+        }
+    }
+
+    /// A transaction another window deleted while this one's form was open
+    /// on it is put back by the form's Save, with the change: an edit here
+    /// beats a deletion elsewhere. It said "That transaction is gone" and the
+    /// change was lost.
+    #[test]
+    fn a_transaction_deleted_elsewhere_while_changed_here_is_saved_back() {
+        settingsfile::testing::with_scratch_config("finance-form-deleted", |_| {
+            let (mut first, account) = kept_with_account("Checking");
+            let tx = spend(&mut first, account, "Shared", -100);
+            let mut second = FinanceApp::from_settings();
+            second.open_edit_transaction(tx);
+            if let Some(Form::Transaction { description, .. }) = second.form.as_mut() {
+                description.set_text("Changed here");
+            }
+            first.delete_doomed(Doomed::Transaction(tx));
+            assert!(second.reread_if_changed());
+            assert!(
+                !second.transactions.iter().any(|t| t.id == tx),
+                "control: the other window's delete was heard"
+            );
+            second.save_form();
+            let again = FinanceApp::from_settings();
+            let back = again
+                .transactions
+                .iter()
+                .find(|t| t.id == tx)
+                .expect("the change was dropped");
+            assert_eq!(back.description, "Changed here");
+        });
+    }
+
+    /// What another window deleted is no longer chosen or waited on for a
+    /// delete.
+    #[test]
+    fn what_another_window_deleted_is_no_longer_chosen() {
+        for waits_on_the_account in [false, true] {
+            settingsfile::testing::with_scratch_config("finance-chosen-gone", |_| {
+                let (mut first, account) = kept_with_account("Doomed");
+                let tx = spend(&mut first, account, "Doomed", -100);
+                let mut second = FinanceApp::from_settings();
+                second.selected_account = Some(account);
+                second.pending_delete = Some(if waits_on_the_account {
+                    Doomed::Account(account)
+                } else {
+                    Doomed::Transaction(tx)
+                });
+                first.delete_doomed(Doomed::Account(account));
+                assert!(second.reread_if_changed());
+                assert_ne!(second.selected_account, Some(account));
+                assert_eq!(second.pending_delete, None, "a delete waits on nothing");
+            });
+        }
+    }
+
+    /// A save that finds the ledger's file broken -- another program wrote it
+    /// -- leaves it as it is and says so, rather than writing this window's
+    /// ledger over what it could not read.
+    #[test]
+    fn a_save_leaves_a_file_it_cannot_read_as_it_is() {
+        settingsfile::testing::with_scratch_config("finance-save-unreadable", |_| {
+            let (mut app, _) = kept_with_account("Checking");
+            let path = ledger_path().unwrap();
+            std::fs::write(&path, "not a ledger\n").unwrap();
+            app.add_account("Another", AccountType::Cash, 0);
+            app.after_change();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a ledger\n");
+            let error = app.ledger_error.clone().expect("the refusal said nothing");
+            assert!(error.contains("could not be read"), "{error}");
+        });
+    }
+
+    /// A ledger file deleted while the window is open is written back whole
+    /// at the next save: a file that is not there has had nothing deleted
+    /// from it.
+    #[test]
+    fn a_ledger_file_deleted_while_open_is_written_back_whole() {
+        settingsfile::testing::with_scratch_config("finance-file-deleted", |_| {
+            let (mut app, account) = kept_with_account("Checking");
+            spend(&mut app, account, "Kept", -100);
+            std::fs::remove_file(ledger_path().unwrap()).unwrap();
+            app.add_account("Savings", AccountType::Savings, 0);
+            app.after_change();
+            let again = FinanceApp::from_settings();
+            assert_eq!(again.accounts.len(), 2, "an account went with the file");
+            assert_eq!(
+                again.transactions.len(),
+                1,
+                "a transaction went with the file"
+            );
         });
     }
 

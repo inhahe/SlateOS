@@ -1,0 +1,2 @@
+# light_smdm_empty.mp4: ffprobe refuses it (light_smdm_empty.mp4: Invalid data found when processing input) (generate_fixtures.py).
+refused

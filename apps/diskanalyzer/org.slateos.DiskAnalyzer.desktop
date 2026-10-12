@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Usage Analyzer
+Comment=See what takes up space on a disk
+Icon=drive-harddisk
+Exec=diskanalyzer %f
+Categories=System;Filesystem;
+Keywords=space;usage;size;
+MimeType=inode/directory;

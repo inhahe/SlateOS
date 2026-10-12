@@ -1118,6 +1118,23 @@ pub fn diag_bytes(bytes: &[u8]) {
 /// standard output by then, so there is nothing the skipped flush would have
 /// put first.
 pub fn diag_bytes_in_handler(bytes: &[u8]) {
+    diag_bytes_ahead_of_stdout(bytes);
+}
+
+/// [`diag_bytes`] without delivering standard output first: glibc's
+/// `fprintf (stderr, …)`, for an upstream that writes a complaint itself
+/// rather than through `error()`.
+///
+/// Only `error()` flushes `stdout` before it speaks. stdio's own writes to
+/// `stderr` do not, so such a complaint overtakes whatever standard output
+/// is still holding, and the order is observable when the two share a
+/// destination. procps' `pwdx` reports a process it cannot read this way;
+/// measured against procps 4.0.4, `pwdx A GONE B 2>&1 | cat` prints
+/// `GONE: No such process` first, and A's and B's directories after it,
+/// when the buffer is delivered at exit.
+///
+/// A failure is recorded for [`close_stderr`], as every diagnostic's is.
+pub fn diag_bytes_ahead_of_stdout(bytes: &[u8]) {
     if write_all(2, bytes).is_err() {
         DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
     }
@@ -1391,9 +1408,8 @@ pub fn close_stdin_and_stdout(
 }
 
 /// [`close_stdout_with`] for a program named by bytes -- see
-/// [`write_error_bytes`]. procps' `close_stdout` is gnulib's in all that
-/// matters here: silent for a reader that left (`EPIPE`), `write error`
-/// otherwise, and `failure` for that or for a lost diagnostic.
+/// [`write_error_bytes`]. A procps program wants [`close_stdout_procps`]
+/// instead, which differs from this when the reader has gone.
 pub fn close_stdout_bytes(program: &[u8], out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
     let after_stdout = match out.finish() {
         Ok(()) => earned,
@@ -1404,6 +1420,59 @@ pub fn close_stdout_bytes(program: &[u8], out: Stream, earned: ExitCode, failure
         }
     };
     close_stderr(after_stdout, failure)
+}
+
+/// procps-ng's `close_stdout` (`local/fileutils.c`), which every procps
+/// program registers with `atexit`: [`close_stdout_bytes`], except that a
+/// reader that has gone is never reported.
+///
+/// procps' copy skips its report whenever `errno` is `EPIPE`, where gnulib's
+/// does so only for a program that asked it to. So a procps program whose
+/// `SIGPIPE` is ignored -- `trap '' PIPE`, or a parent that ignored it -- and
+/// whose reader has gone says nothing and keeps the status it had earned,
+/// where a GNU one says `write error: Broken pipe` and exits 1. Measured on
+/// Ubuntu's procps 4.0.4 with `{ sleep 0.3; free; } | true` under
+/// `trap '' PIPE`: `free`, `uptime`, `vmstat`, `w`, `pgrep` and `pwdx` are
+/// all silent, status 0. (With `SIGPIPE` at its default the write kills the
+/// program first, here as there.)
+///
+/// Any other failure is reported as [`close_stdout_bytes`] reports it --
+/// `pwdx: write error: No space left on device`, or a bare `write error` for
+/// one that happened before the close -- with status 1, procps'
+/// `EXIT_FAILURE` for every program. `program` is the name procps prints,
+/// `program_invocation_short_name`.
+///
+/// One case is approximated. When a write failed part way through the run
+/// and the close had nothing left to fail on, procps decides by whatever
+/// `errno` it finds at exit: the last failing call's, which is `EPIPE` if
+/// nothing has failed since the pipe broke. This decides by the stream's
+/// first failure, and the two differ only if some call that was not a write
+/// to standard output failed in between.
+#[must_use]
+pub fn close_stdout_procps(program: &[u8], out: Stream, earned: ExitCode) -> ExitCode {
+    let after_stdout = match procps_close_failure(out) {
+        None => earned,
+        Some(e) => {
+            write_error_bytes(program, &e);
+            ExitCode::FAILURE
+        }
+    };
+    close_stderr(after_stdout, 1)
+}
+
+/// procps' `close_stream (stdout)` and the `errno == EPIPE` test after it:
+/// the failure its `close_stdout` reports, or `None` when it says nothing.
+fn procps_close_failure(out: Stream) -> Option<io::Error> {
+    let broke_earlier = out
+        .error()
+        .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe);
+    match out.finish() {
+        Ok(()) => None,
+        // `errno == EPIPE`: from the close's own write, or left by an earlier
+        // one.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe || broke_earlier => None,
+        Err(e) => Some(e),
+    }
 }
 
 /// The last word on the exit status: gnulib's `close_stream (stderr)`.
@@ -1705,12 +1774,18 @@ fn flush_stdout() {
 /// In glibc it is `error()` that flushes, not `fputs (…, stderr)`, so this
 /// generalises: *any* write to descriptor 2 flushes descriptor 1 first, not
 /// only one that came from a diagnostic-shaped call. That is a superset of
-/// upstream's behaviour and the difference is unobservable here, because every
-/// one of these utilities reaches standard error through `error()` and nothing
-/// else — there is no call site in the family that wants an unflushed one.
-/// Making it a property of the descriptor rather than of the call is what stops
-/// the two spellings from drifting apart again, which is the same argument
-/// [`Inner::record`] makes about the lost-diagnostic flag.
+/// upstream's behaviour and the difference is unobservable for a utility that
+/// reaches standard error through `error()` alone, or that writes nothing to
+/// standard output before it does -- which is all of the family that writes
+/// through a `Stream` on descriptor 2. Making it a property of the descriptor
+/// rather than of the call is what stops the two spellings from drifting apart
+/// again, which is the same argument [`Inner::record`] makes about the
+/// lost-diagnostic flag.
+///
+/// The one utility that does want an unflushed complaint after output it has
+/// buffered -- procps' `pwdx`, whose report of a process it cannot read is a
+/// bare `fprintf (stderr, …)` -- writes it with [`diag_bytes_ahead_of_stdout`]
+/// instead.
 ///
 /// It cannot deadlock. Descriptor 1's state is the only thing behind the lock,
 /// and this is reached only from a write to descriptor 2, whose state is always
@@ -2385,6 +2460,69 @@ mod tests {
     fn a_stream_that_never_failed_finishes_clean() {
         let s = Stream::new(-1, Buffering::Line);
         assert!(s.finish().is_ok(), "nothing written, nothing to fail");
+    }
+
+    /// A pipe whose reader has gone. This test binary runs with `SIGPIPE`
+    /// ignored, as every Rust program starts, so a write to it is `EPIPE`.
+    /// The writer is returned to keep the descriptor open for the test.
+    #[cfg(target_os = "linux")]
+    fn readerless(mode: Buffering) -> (Stream, std::io::PipeWriter) {
+        use std::os::fd::AsRawFd;
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        (Stream::new(writer.as_raw_fd(), mode), writer)
+    }
+
+    /// procps' `close_stdout` says nothing when the reader has gone, whether
+    /// the close's own write met the broken pipe or an earlier one did and
+    /// left the close nothing to write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procps_says_nothing_of_a_reader_that_has_gone() {
+        let (mut s, _keep) = readerless(Buffering::Block);
+        let _ = s.write(b"held until the close");
+        assert!(super::procps_close_failure(s).is_none(), "at the close");
+
+        let (mut s, _keep) = readerless(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        assert!(s.errored(), "the newline sent it, and it failed");
+        assert!(super::procps_close_failure(s).is_none(), "before the close");
+    }
+
+    /// ... and reports anything else as gnulib's does: the close's own
+    /// failure with its reason, an earlier one alone without.
+    #[test]
+    fn procps_reports_every_other_failure() {
+        let (mut s, _keep) = full(Buffering::Block);
+        let _ = s.write(b"held until the close");
+        let e = super::procps_close_failure(s).expect("a failing close");
+        assert!(!super::is_earlier_failure(&e));
+
+        let (mut s, _keep) = full(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        let e = super::procps_close_failure(s).expect("an earlier failure");
+        assert!(super::is_earlier_failure(&e));
+
+        let s = Stream::new(-1, Buffering::Line);
+        assert!(
+            super::procps_close_failure(s).is_none(),
+            "nothing written, nothing to report"
+        );
+    }
+
+    /// `fprintf (stderr, …)` leaves what standard output holds where it is:
+    /// only `error()` flushes it first.
+    #[test]
+    fn a_complaint_ahead_of_stdout_leaves_its_buffer_alone() {
+        let _shared = shared();
+        let mut out = Stream::stdout();
+        let _ = out.write(b"pending");
+        super::diag_bytes_ahead_of_stdout(b"");
+        assert!(
+            super::with_stdout(|inner| !inner.buf.is_empty()),
+            "the complaint should have gone ahead of it"
+        );
+        super::flush_stdout();
     }
 
     /// The one test that touches the process-global flag, and it is one test

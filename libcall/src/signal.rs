@@ -45,6 +45,8 @@ pub const SIGCHLD: i32 = 17;
 pub const SIGTTIN: i32 = 21;
 /// A background process wrote to its terminal, where that is not allowed.
 pub const SIGTTOU: i32 = 22;
+/// The window of the terminal the process is on changed size.
+pub const SIGWINCH: i32 = 28;
 
 /// `sigaction`'s flag for "resume a call this signal interrupted, rather than
 /// failing it with `EINTR`".
@@ -592,6 +594,7 @@ mod tests {
         assert_eq!(SIGCHLD, posix::signal::SIGCHLD);
         assert_eq!(SIGTTIN, posix::signal::SIGTTIN);
         assert_eq!(SIGTTOU, posix::signal::SIGTTOU);
+        assert_eq!(SIGWINCH, posix::signal::SIGWINCH);
         assert_eq!(
             u32::try_from(SA_RESTART).ok(),
             Some(posix::signal::SA_RESTART)

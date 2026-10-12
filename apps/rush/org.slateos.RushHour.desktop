@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rush Hour
+Comment=Slide the cars to let the red one out
+Icon=applications-games
+Exec=rush
+Categories=Game;LogicGame;
+Keywords=cars;sliding;puzzle;

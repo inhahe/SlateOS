@@ -1850,7 +1850,7 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
   window-title overflow so tabs and titles behave identically.
 
 ##### Tier 3 — Sound Scheme (nice-to-have, add later)
-- [-] System sounds: notification, error, login, logout, empty recycle bin, etc. -- *2026-10-05 (`design-decisions.md` §1476): `gui/sound` plays a sound file (WAV, Ogg Vorbis, Ogg Opus) through the kernel's ALSA device, converting to the mixer's 48 kHz stereo, and synthesizes a sound for each common event (message, information, warning, error, bell, complete, trash emptied, screen capture, device added and removed, login, logout, power, battery low, volume) for a theme with none. Not yet heard on SlateOS: native programs have no way to the device and the mixer is not emptied into a card (`requests/e-ad-no-application-can-reach-the-sound-device.md`, the kernel's). Choosing the sound -- the `sounds` theme axis, on/off, volume -- and playing it at the shell's events follow.* *2026-10-05 (§1477): chosen and played -- `theme.sounds` (a sound theme in the freedesktop layout, other desktops' included), `sounds.enabled`, `sounds.volume` and the user's own file or silence per event (`sounds.events`), in `appearance.yaml`; the desktop sounds a notification (by priority, as its program's rule allows), the volume, a device, a screenshot, a low battery, the network, and signing in and out. Still `[-]` until it is heard on SlateOS (the kernel's half, above); the Settings section is lane E's (`requests/c-e-a-sounds-page-for-the-sounds-axis.md`).*
+- [-] System sounds: notification, error, login, logout, empty recycle bin, etc. -- *2026-10-05 (`design-decisions.md` §1476): `gui/sound` plays a sound file (WAV, Ogg Vorbis, Ogg Opus) through the kernel's ALSA device, converting to the mixer's 48 kHz stereo, and synthesizes a sound for each common event (message, information, warning, error, bell, complete, trash emptied, screen capture, device added and removed, login, logout, power, battery low, volume) for a theme with none. Not yet heard on SlateOS: native programs have no way to the device and the mixer is not emptied into a card (`requests/e-ad-no-application-can-reach-the-sound-device.md`, the kernel's). Choosing the sound -- the `sounds` theme axis, on/off, volume -- and playing it at the shell's events follow.* *2026-10-05 (§1477): chosen and played -- `theme.sounds` (a sound theme in the freedesktop layout, other desktops' included), `sounds.enabled`, `sounds.volume` and the user's own file or silence per event (`sounds.events`), in `appearance.yaml`; the desktop sounds a notification (by priority, as its program's rule allows), the volume, a device, a screenshot, a low battery, the network, and signing in and out. Still `[-]` until it is heard on SlateOS (the kernel's half, above); the Settings section is lane E's (`requests/c-e-a-sounds-page-for-the-sounds-axis.md`).* *2026-10-10: the Settings section is done -- the switch, the volume, the sound theme and each event's sound (the theme's, none, or the user's own file), each heard as it is chosen. The kernel's half is on `main` (§1520); what stands between these sounds and a speaker now is the C library reaching the sound device (lane D's half of `requests/e-ad-no-application-can-reach-the-sound-device.md`).*
 - [x] Small OGG files bundled in theme directory, or reference a separate sound scheme package -- *2026-10-05 (§1477): both. A theme folder's `stereo/<event>.oga` (or `.ogg`, `.wav`) is its sounds, and a sound theme installed for another desktop under `$XDG_DATA_DIRS/sounds` is one of the themes `theme.sounds` can name.*
 - [x] Optional — many users run silent, but themes that pair colors with sounds are more cohesive -- *2026-10-05 (§1477): `sounds.enabled: false` silences every event; `sounds.events.<name>: off` one; a theme with colours and sounds gives both, chosen axis by axis.*
 
@@ -1934,7 +1934,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
 - [x] Grid view — *`gui/toolkit/src/grid.rs`.*
 - [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
-- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.*
+- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.* *2026-10-05: lane C's half is done -- `FontFamily::Named` and `text::ensure_family`, with which a program measures text in a family by name; the drawing waits on lane F's half (the wire and the compositor), which lands with it as one pair.*
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or
     highlights a family, changes the size, toggles bold/italic, etc.) — before the
@@ -2291,6 +2291,10 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
         WinForms/WPF do not exist here, so a C#-native notepad would need
         Avalonia or a binding to our own toolkit regardless. **Porting Mono does
         not by itself get this app running.**
+        *2026-10-10: the runtime to port is now `dotnet/runtime`, not Mono
+        (design-decisions §1246). This notepad targets .NET 8
+        (`net8.0-windows`, WPF), which Mono 6.14 cannot load. Under any
+        runtime, its window still has to be rewritten.*
   - [ ] *Lane A's read, non-binding:* these are answers to different questions.
         Route 1 delivers the editor; route 2 delivers a language runtime and
         should be prioritised as such — against CPython-style ambitions, not
@@ -2376,7 +2380,7 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
 
 _Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
-- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC waits on open-questions F-Q9).
+- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC: FFmpeg's fixed-point decoder, translated -- design-decisions §1377).
 - _Library browser, album art, metadata editing_
 - _Equalizer_
 - _User-customizable layout using the toolkit's dockable panel widget (drag-and-drop panels, add/remove, slide splitters) — simpler than foobar2000's layout system_
@@ -2537,7 +2541,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
-- [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
+- [-] Port a debugger (gdb/lldb) — *2026-10-10: GDB 18.1 links and is on the image; running a program under it waits on the kernel's `ptrace` (`roadmap.md`, lane D).* Both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
 
 #### Programming Language Support
 - [ ] Rust (native, first-class — kernel language)
@@ -2550,6 +2554,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Ruby (via CRuby/MRI port)
 - [ ] Nim (native compiler, needs C backend which uses gcc)
 - [ ] Zig (self-hosted compiler, minimal runtime)
+- [ ] C#, F# and Visual Basic (via `dotnet/runtime` — requires `mem.jit` capability). This is the operator's choice over Mono, made 2026-10-10 (design-decisions §1246), because their own C# programs target .NET 8. The list of ports they asked for is §6.13.
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
 
@@ -3789,6 +3794,72 @@ _Several independent watchdogs, each with its own deadline, each able to trip al
 - [ ] Per-incident history with retention/size caps, in the same shape as the crash-dump lifecycle in Phase 1.5
 - [ ] Process Explorer (§4.3) shows live watch state — which processes are not responding, and what each is blocked on
 - [ ] **Reports stay on the machine.** They contain window titles, file paths and process names. Capability-gated to read another user's incidents; never uploaded anywhere, consistent with the project's no-telemetry rule. Explicit, reviewable export for a user who chooses to send one to a developer.
+
+### 6.13 Ports the operator asked for by name
+
+_The operator's own list of things to port or bring over, kept here in one
+place, each item with where its work is described and tracked. Added
+2026-10-10 at the operator's request. The list comes from their answer to
+B-Q18 on 2026-09-27 (design-decisions §1050, quoted there word for word) and
+from two requests of 2026-08-21. `roadmap.md` is the authority on progress;
+the flags here say only where each item stood on 2026-10-10._
+
+**Asked for on 2026-09-27 (B-Q18, §1050):**
+
+- [ ] **Chromium** — §4.7. A joint task led by lane E, waiting on the POSIX
+      layer, the GPU stack and networking.
+- [ ] **.NET, so C# programs run directly: `dotnet/runtime`** — §4.8 →
+      Programming Language Support. The operator first asked for Mono, "dotnet
+      support for Linux". On 2026-10-10 they changed it to `dotnet/runtime`
+      (design-decisions §1246): Mono 6.14 implements .NET Framework 4 and
+      cannot load the .NET 8 programs they want to run. Lane D's Mono 6.14
+      work is where the port starts. That work links against `libc.a` and is
+      on the image, but has not yet been seen running.
+- [ ] **Xonsh** — §2.7, "xonsh as an optional shell". It needs CPython's
+      interactive mode, or fastpy's planned JIT REPL.
+- [-] **YSH** — §2.7. It comes with genuine Oils (`oils-for-unix`), which
+      builds and links against `libc.a` and is not yet on the image (lane B,
+      design-decisions §1043).
+- [ ] **Nushell, on SlateOS** — §2.7. The `[x]` it was once given measured a
+      Windows build (`nu.exe`), not SlateOS.
+- [ ] **The operator's WinDirStat fork, or QDirStat.**
+  - **The fork:** `D:/visual studio projects/dirsize/windirstat`, C++ on MFC
+    and Win32, about 39,000 lines. It has All Files, Largest Files, Duplicate
+    Files, Search Results, File Watcher, Extension and Treemap views; logical
+    against physical size; saved and reloaded scans; and cleanup from the
+    window. MFC is Windows-only, so a port means a new window layer under the
+    fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported.
+  - **The plan:** compare the two, then either port the fork's logic or bring
+    its features to diskanalyzer (lane E, `roadmap.md`).
+  - **QDirStat** is built on Qt, which nothing here has ported.
+- [-] **A capable debugger, like cdb** — §4.8, "Port a debugger (gdb/lldb)".
+      GDB 18.1 and gdbserver link against `libc.a` and are on the image as
+      `/bin/gnu-gdb` and `/bin/gdbserver`. Running a program under them waits
+      on the kernel's `ptrace` (lane D, `roadmap.md`). LLDB needs LLVM and
+      Clang ported first.
+- [ ] **The operator's backup program, LithicBackup.**
+  - **The program:** `D:/visual studio projects/backup`, C# for .NET 8
+    (`net8.0-windows`), about 50,000 lines in 168 files. It has a WPF window,
+    and Windows services under it: the NTFS change journal, IMAPI2 for
+    burning discs, and Win32 volume names.
+  - **The operator's two routes:** reimplement it in a language SlateOS
+    supports, or run it once .NET runs here.
+  - **Running it needs more than the runtime.** WPF exists only on Windows,
+    so its window is rewritten either way. Its Windows services are replaced
+    by SlateOS's own: §2.3's change journal, and §4.10's VSS equivalent.
+  - **The choice** waits on `dotnet/runtime` running here (lane E,
+    `roadmap.md`). `apps/backup` (§4.4) is SlateOS's own backup program,
+    which a reimplementation would build on.
+
+**Asked for on 2026-08-21:**
+
+- [ ] **A VSS equivalent** — §4.10: a frozen, readable view of a live
+      volume, so a backup copies files that are open and changing.
+- [ ] **The operator's notepad** — §4.2, "Bring over the operator's existing
+      notepad". `D:/visual studio projects/notepad` (NotepadRedo) is also
+      .NET 8 with a WPF window, so the same two routes apply.
 
 ---
 

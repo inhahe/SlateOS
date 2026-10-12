@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Reversi
+Comment=Othello against the computer
+Icon=applications-games
+Exec=reversi
+Categories=Game;BoardGame;
+Keywords=othello;board;

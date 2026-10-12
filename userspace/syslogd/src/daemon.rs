@@ -13,6 +13,7 @@
 //! the next one is tried. A logger that died on a full disk would take the
 //! report of the full disk with it.
 
+use crate::frame;
 use crate::record;
 use crate::sys;
 use quoting::quotef_os;
@@ -79,14 +80,11 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// The command name of process `pid`, as `/proc/PID/comm` gives it --
-/// journald's `_COMM`. `None` when the process has already gone.
+/// The command name of process `pid` -- journald's `_COMM`, from
+/// `/proc/PID/comm` escaped as journald escapes it. `None` when the process
+/// has already gone.
 fn command_name(pid: i32) -> Option<Vec<u8>> {
-    let mut comm = fs::read(format!("/proc/{pid}/comm")).ok()?;
-    if comm.last() == Some(&b'\n') {
-        comm.pop();
-    }
-    Some(comm)
+    journalfwd::pid_get_comm(u32::try_from(pid).ok()?)
 }
 
 /// Make the socket at `path`. A socket a previous daemon left there is
@@ -177,6 +175,15 @@ pub fn run(
             cut.about("a message longer than 256 KiB was cut short");
         }
         let raw = buf.get(..len).unwrap_or_default();
+        // journald forwards a message before it files it: one at `emerg` goes
+        // to every logged-in user's terminal (`ForwardToWall`, on by default).
+        let parsed = frame::parse(raw);
+        journalfwd::forward_wall(
+            parsed.priority,
+            parsed.identifier,
+            parsed.message,
+            creds.and_then(|c| u32::try_from(c.pid).ok()),
+        );
         let comm = creds.and_then(|c| command_name(c.pid));
         let mut line = record::line(raw, now_secs(), creds, comm.as_deref()).into_bytes();
         line.push(b'\n');

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Paint
+Comment=Draw and edit pictures
+Icon=applications-graphics
+Exec=paint
+Categories=Graphics;RasterGraphics;
+Keywords=drawing;painting;picture;

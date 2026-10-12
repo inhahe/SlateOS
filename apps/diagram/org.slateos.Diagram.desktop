@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Diagram Editor
+Comment=Draw flowcharts and diagrams
+Icon=x-office-drawing
+Exec=diagram
+Categories=Graphics;VectorGraphics;Office;
+Keywords=flowchart;chart;drawing;

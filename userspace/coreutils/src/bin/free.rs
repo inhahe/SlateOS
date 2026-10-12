@@ -836,12 +836,15 @@ fn run_main() -> ExitCode {
 
     // As the library reads it -- one bounded `read`, an empty file `EIO` --
     // so an empty `/proc/meminfo` is "Unable to create meminfo structure"
-    // here as it is upstream, and not a table of zeros.
-    let mut read_meminfo = || meminfo::read(MEMINFO_PATH);
+    // here as it is upstream, and not a table of zeros. From one descriptor,
+    // opened at the first report and kept, as the library keeps it: which
+    // number it gets shows in `free >&-` (see `MemFile`).
+    let mut meminfo_file = meminfo::MemFile::new();
+    let mut read_meminfo = || meminfo_file.read(MEMINFO_PATH);
     let mut sleep = std::thread::sleep;
 
     let status = run(&argv, &mut out, &mut err, &mut read_meminfo, &mut sleep);
-    stdfd::close_stdout("free", out, ExitCode::from(status))
+    stdfd::close_stdout_procps(b"free", out, ExitCode::from(status))
 }
 
 #[cfg(test)]

@@ -716,6 +716,13 @@ impl Fit {
                 height,
                 ..
             }
+            | RenderCommand::WindowPicture {
+                x,
+                y,
+                width,
+                height,
+                ..
+            }
             | RenderCommand::PushClip {
                 x,
                 y,

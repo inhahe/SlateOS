@@ -32,6 +32,7 @@ use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -1493,7 +1494,11 @@ const RULE_ROW_PITCH: f32 = ITEM_HEIGHT + 4.0;
 const RULE_LINE_HEIGHT: f32 = 16.0;
 
 /// What the analyser draws for each character it is not showing.
-const MASK: &str = "\u{2022}";
+const MASK: char = '\u{2022}';
+
+/// The most the analyser's box holds, in characters: a password, or a
+/// passphrase of many words, and a paste of a page is neither.
+const ANALYZER_CAPACITY: usize = 1024;
 
 /// The size the password box's text is drawn at.
 const PASSWORD_TEXT_SIZE: f32 = 13.0;
@@ -1614,6 +1619,12 @@ pub struct PasswordApp {
     /// for each character. Off to begin with: the analyser is where somebody
     /// types a password they use, and a screen is read over a shoulder.
     pub analyzer_revealed: bool,
+    /// The analyser's editor -- its caret and selection over
+    /// `analyzer_input` -- reloaded when the input changed under it.
+    analyzer_editor: TextInput,
+    /// What the analyser's Ctrl+C and Ctrl+X took while it was shown, for
+    /// its Ctrl+V. Nothing is taken from it hidden.
+    clipboard: String,
     /// Whether this window keeps the rules in `passwordgen.yaml`. Set by
     /// [`PasswordApp::with_settings`], which `main` calls; a window a test
     /// builds keeps nothing, so no test writes the developer's own settings.
@@ -1705,6 +1716,8 @@ impl PasswordApp {
             policy: PasswordPolicy::default(),
             rule_cursor: 0,
             analyzer_revealed: false,
+            analyzer_editor: TextInput::new(),
+            clipboard: String::new(),
             keeps_settings: false,
             settings_problems: Vec::new(),
             active_tab: ActiveTab::Generator,
@@ -2154,19 +2167,6 @@ impl PasswordApp {
         }
         if self.active_tab == ActiveTab::Analyzer {
             match key.key {
-                Key::Backspace => {
-                    let mut input = self.analyzer_input.clone();
-                    if input.pop().is_none() {
-                        return EventResult::Ignored;
-                    }
-                    self.set_analyzer_input(&input);
-                    // `set_analyzer_input` only stores the text. Measuring it
-                    // is the entire purpose of this tab, so a keystroke that
-                    // stored without measuring would leave the strength meter
-                    // showing the previous password's score.
-                    self.analyze_input();
-                    return EventResult::Consumed;
-                }
                 // Tab still moves on, or there would be no way out of the box.
                 // The digit keys do not: here a digit is part of the password,
                 // and "abc123" used to jump to the generator at the "1".
@@ -2177,21 +2177,7 @@ impl PasswordApp {
                     self.analyzer_revealed = !self.analyzer_revealed;
                     return EventResult::Consumed;
                 }
-                _ => {
-                    // A control character is a key, not part of a password:
-                    // an Enter that carries a "\r" must not be typed into it.
-                    // What AltGr types is (`®` is AltGr+R on US
-                    // International); a command's letter, which it carries as
-                    // text, is not (`textline::types_into_field`).
-                    if !textline::types_into_field(key) {
-                        return EventResult::Ignored;
-                    }
-                    let mut input = self.analyzer_input.clone();
-                    input.extend(key.typed());
-                    self.set_analyzer_input(&input);
-                    self.analyze_input();
-                    return EventResult::Consumed;
-                }
+                _ => return self.analyzer_key(key),
             }
         }
         // Every key from here on is a bare key, and one held with Ctrl, Alt
@@ -2263,6 +2249,82 @@ impl PasswordApp {
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// A key for the password being measured: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A and V, and typing -- what AltGr types
+    /// among it (`®` is AltGr+R on US International), and no command's
+    /// letter, which a chord carries as text, nor a control character: an
+    /// Enter carrying a "\r" is a key, not part of a password. Hidden, the
+    /// box is a masked field (`textline::apply_masked_key`): the arrows step
+    /// a character at a time, and nothing is copied or cut from it. Shown,
+    /// it copies as any field does. `Consumed` where the key changed the
+    /// password, its caret or its selection; a password changed is measured
+    /// at once, or the strength meter would go on showing the last one's
+    /// score. The box took typing at its end and Backspace from it, and
+    /// nothing else.
+    fn analyzer_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.analyzer_editor.text() != self.analyzer_input {
+            self.analyzer_editor.set_text(&self.analyzer_input);
+        }
+        let editor = &self.analyzer_editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit = if self.analyzer_revealed {
+            textline::apply_key(
+                &mut self.analyzer_editor,
+                key,
+                ANALYZER_CAPACITY,
+                &self.clipboard,
+                PASSWORD_TEXT_SIZE,
+            )
+        } else {
+            textline::apply_masked_key(
+                &mut self.analyzer_editor,
+                key,
+                ANALYZER_CAPACITY,
+                &self.clipboard,
+            )
+        };
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
+            return EventResult::Ignored;
+        }
+        if self.analyzer_editor.text() != self.analyzer_input {
+            let typed = self.analyzer_editor.text().to_owned();
+            self.set_analyzer_input(&typed);
+            self.analyze_input();
+        }
+        let editor = &self.analyzer_editor;
+        let after = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        if after == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Where the analyser's caret and selection anchor are in the password:
+    /// the editor's while it holds the password, after it and none
+    /// otherwise.
+    fn analyzer_caret(&self) -> (text::TextCursor, Option<usize>) {
+        if self.analyzer_editor.text() == self.analyzer_input {
+            (
+                self.analyzer_editor.cursor(),
+                self.analyzer_editor.selection_anchor(),
+            )
+        } else {
+            (text::TextCursor::from(self.analyzer_input.len()), None)
         }
     }
 
@@ -3125,9 +3187,11 @@ impl PasswordApp {
 
     /// The password box at `rect`, holding `typed` characters: the toolkit's
     /// field, with the password -- a dot a character until Ctrl+R shows it --
-    /// and the caret after it, scrolled so the end being typed stays in
-    /// view; a grey hint while it is empty. It was a card holding the text,
-    /// elided at its start, with no caret at all.
+    /// and its caret and selection where they are, on the same characters
+    /// of the dots, scrolled so the caret stays in view; a grey hint while
+    /// it is empty. It was a card holding the text, elided at its start,
+    /// with no caret at all; then a caret fixed at the end, the only place
+    /// the keys could type.
     fn render_password_box(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -3156,20 +3220,21 @@ impl PasswordApp {
             });
             return;
         }
-        let shown = if self.analyzer_revealed {
-            self.analyzer_input.clone()
+        let (cursor, anchor) = self.analyzer_caret();
+        let (shown, cursor, selection_anchor) = if self.analyzer_revealed {
+            (self.analyzer_input.clone(), cursor, anchor)
         } else {
-            MASK.repeat(typed)
+            let (dots, at, anchor) =
+                textline::masked(&self.analyzer_input, cursor.byte(), anchor, MASK);
+            (dots, text::TextCursor::from(at), anchor)
         };
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
             &textedit::SingleLine {
                 text: &shown,
-                // Typed and erased at its end, so the end is where the caret
-                // is -- and what the scroll keeps in view.
-                cursor: text::TextCursor::from(shown.len()),
-                selection_anchor: None,
+                cursor,
+                selection_anchor,
                 focused: state.focused,
                 x: tx,
                 y: ty,
@@ -5335,7 +5400,7 @@ rejects: {:?}",
         }
         let drawn = card_text(&app);
         assert!(!drawn.contains("hunter2"), "drawn in the clear: {drawn}");
-        assert!(drawn.contains(&MASK.repeat(7)), "{drawn}");
+        assert!(drawn.contains(&MASK.to_string().repeat(7)), "{drawn}");
         assert!(drawn.contains("7 characters"), "{drawn}");
         assert_eq!(app.handle_event(&ctrl(Key::R)), EventResult::Consumed);
         assert!(
@@ -5375,7 +5440,7 @@ rejects: {:?}",
         let has = |cmds: &[RenderCommand], want: &[RenderCommand]| {
             cmds.windows(want.len()).any(|win| win == want)
         };
-        let shown = MASK.repeat(7);
+        let shown = MASK.to_string().repeat(7);
         let at = cmds
             .iter()
             .position(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == shown))
@@ -5537,5 +5602,160 @@ rejects: {:?}",
             assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
             assert_eq!(app.active_tab, *want);
         }
+    }
+
+    // -- The analyser's box edits at a caret -----------------------------------------
+
+    fn type_into(app: &mut PasswordApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&typed(c));
+        }
+    }
+
+    /// Where the analyser's text is drawn -- its run's x and its spans --
+    /// and the x of the caret drawn on its line.
+    fn drawn_box(app: &PasswordApp, shown: &str) -> (f32, Vec<guitk::render::TextSpan>, Vec<f32>) {
+        let cmds = app.render_commands(1100.0, 760.0);
+        let (x, y, spans) = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText {
+                    text, x, y, spans, ..
+                } if text == shown => Some((*x, *y, spans.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{shown:?} is not drawn"));
+        let carets = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && (y1 - y).abs() < 1.0 =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        (x, spans, carets)
+    }
+
+    /// **The password being measured edits at a caret**, hidden or shown:
+    /// the arrows, Home and End move it, typing goes where it is, Delete
+    /// deletes at it, Ctrl+A selects, and it and the selection are drawn on
+    /// the dots where they stand on the characters. Hidden, nothing is
+    /// copied or cut from it; shown, Ctrl+C and Ctrl+X take it. The box
+    /// took typing at its end and Backspace from it, and nothing else.
+    #[test]
+    fn the_password_being_measured_edits_at_a_caret() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        type_into(&mut app, "pasword");
+        for _ in 0..4 {
+            app.handle_event(&press(Key::Left));
+        }
+        type_into(&mut app, "s");
+        assert_eq!(app.analyzer_input, "password", "the caret did not move");
+        assert!(app.current_analysis.is_some(), "the edit was not measured");
+        let dots = MASK.to_string().repeat(8);
+        let (x, _, carets) = drawn_box(&app, &dots);
+        let at = x + text::caret_x(
+            &dots,
+            text::TextCursor::from(4 * MASK.len_utf8()),
+            PASSWORD_TEXT_SIZE,
+            FontWeightHint::Bold,
+        );
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|c| (c - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the fourth dot at {at}"
+        );
+
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.analyzer_input, "assword", "Delete at the caret");
+        type_into(&mut app, "p");
+        app.handle_event(&ctrl(Key::A));
+        let (_, spans, _) = drawn_box(&app, &dots);
+        assert!(!spans.is_empty(), "the selection is not drawn on the dots");
+
+        // Hidden, nothing leaves it for the clipboard.
+        app.handle_event(&ctrl(Key::C));
+        app.handle_event(&ctrl(Key::X));
+        assert_eq!(
+            app.analyzer_input, "password",
+            "Ctrl+X cut a hidden password"
+        );
+        assert!(
+            app.clipboard.is_empty(),
+            "a hidden password reached the clipboard"
+        );
+
+        // Shown, it copies as a box does.
+        app.handle_event(&ctrl(Key::R));
+        app.handle_event(&ctrl(Key::A));
+        app.handle_event(&ctrl(Key::X));
+        assert_eq!(
+            app.analyzer_input, "",
+            "Ctrl+X did not cut a shown password"
+        );
+        app.handle_event(&ctrl(Key::V));
+        assert_eq!(app.analyzer_input, "password", "Ctrl+V");
+    }
+
+    /// **The dots stand for characters, and the caret steps one at a
+    /// time**: an `é` is one dot, and Left steps back over it in one press.
+    #[test]
+    fn a_dot_is_a_character_and_the_caret_steps_over_it() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        type_into(&mut app, "a\u{e9}b");
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&press(Key::Left));
+        type_into(&mut app, "!");
+        assert_eq!(
+            app.analyzer_input, "a!\u{e9}b",
+            "Left did not step a character"
+        );
+        let dots = MASK.to_string().repeat(4);
+        let (x, _, carets) = drawn_box(&app, &dots);
+        let at = x + text::caret_x(
+            &dots,
+            text::TextCursor::from(2 * MASK.len_utf8()),
+            PASSWORD_TEXT_SIZE,
+            FontWeightHint::Bold,
+        );
+        assert!(
+            carets.iter().all(|c| (c - at).abs() < 0.5) && !carets.is_empty(),
+            "the caret is drawn at {carets:?}, not after the second dot at {at}"
+        );
+        assert_eq!(
+            app.handle_event(&held(Key::Left, Modifiers::alt(), "")),
+            EventResult::Ignored,
+            "Alt+Left moved the caret"
+        );
+        app.handle_event(&press(Key::Home));
+        assert_eq!(
+            app.handle_event(&press(Key::Left)),
+            EventResult::Ignored,
+            "Left at the start is a redraw"
+        );
+    }
+
+    /// **The box edits what it shows**, however it came to be what it is.
+    #[test]
+    fn the_analyser_edits_what_it_shows() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        type_into(&mut app, "ab");
+        app.handle_event(&press(Key::Home));
+        app.set_analyzer_input("hunter");
+        type_into(&mut app, "2");
+        assert_eq!(
+            app.analyzer_input, "hunter2",
+            "the key edited the password the editor held"
+        );
     }
 }

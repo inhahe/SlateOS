@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=IRC Chat
+Comment=Talk on IRC channels
+Icon=internet-chat
+Exec=ircclient
+Categories=Network;Chat;IRCClient;
+Keywords=irc;chat;channels;

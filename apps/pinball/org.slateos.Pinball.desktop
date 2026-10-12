@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pinball
+Comment=Keep the ball in play with the flippers
+Icon=applications-games
+Exec=pinball
+Categories=Game;ArcadeGame;
+Keywords=flippers;arcade;

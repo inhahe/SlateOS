@@ -261,6 +261,33 @@ def vpcc(version=1, packed=0x80, primaries=2, transfer=2, space=2, init=0, body=
     return box(b"vpcC", body)
 
 
+def mdcv(gbr, white, peak, black):
+    """The mastering display: green, blue, then red, and the white point,
+    in units of 0.00002; the peak and black in units of 0.0001 cd/m2."""
+    xy = b"".join(u16(x) + u16(y) for x, y in gbr)
+    return box(b"mdcv", xy, u16(white[0]), u16(white[1]), u32(peak), u32(black))
+
+
+def smdm(rgb, white, peak, black, version=0):
+    """VP9's mastering display, a full box: red, green, blue and the white
+    point in 0.16, the peak in 24.8 and the black in 18.14."""
+    xy = b"".join(u16(x) + u16(y) for x, y in rgb)
+    return full(b"SmDm", version, 0, xy, u16(white[0]), u16(white[1]), u32(peak), u32(black))
+
+
+def clli(max_cll, max_fall):
+    return box(b"clli", u16(max_cll), u16(max_fall))
+
+
+def coll(max_cll, max_fall, version=0):
+    return full(b"CoLL", version, 0, u16(max_cll), u16(max_fall))
+
+
+# HDR10's mastering display, as mdcv and as SmDm say it.
+MDCV_HDR10 = mdcv([(8500, 39850), (6550, 2300), (35400, 14600)], (15635, 16450), 10_000_000, 1)
+SMDM_HDR10 = smdm([(46399, 19137), (11141, 52232), (8585, 3015)], (20493, 21561), 256000, 2)
+
+
 def pasp(h, v):
     return box(b"pasp", u32(h), u32(v))
 
@@ -342,13 +369,15 @@ class Trak:
 
 
 def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=None, cut=None,
-        movie_display=MATRIX, moov_last=False, moov_to_end=False, last_trak_to_end=False):
+        movie_display=MATRIX, moov_last=False, moov_to_end=False, last_trak_to_end=False,
+        before_traks=b""):
     """A file: ftyp, moov, then mdat with each track's chunks interleaved
     chunk by chunk -- or, `moov_last`, ftyp, mdat, moov. `mdat_header` writes
     the mdat's header itself (a 64-bit size, or 0 for one running to the
     end); `moov_to_end` gives the moov a size of 0, running to the end of the
     file (so it must be last), and `last_trak_to_end` the moov's last trak,
-    running to the end of the moov."""
+    running to the end of the moov. `before_traks` goes into the moov after
+    its mvhd, before any trak."""
     if moov_to_end and not moov_last:
         raise SystemExit("a moov running to the end of the file must be its last box")
     ftyp = box(b"ftyp", brand, u32(0x200), b"isom", b"iso2", b"mp41")
@@ -364,7 +393,8 @@ def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=N
         boxes = [t.trak(i + 1, offsets[i], movie_scale) for i, t in enumerate(traks)]
         if last_trak_to_end:
             boxes[-1] = u32(0) + boxes[-1][4:]
-        moov = box(moov_kind, mvhd(movie_scale, duration, movie_display) + b"".join(boxes))
+        moov = box(moov_kind, mvhd(movie_scale, duration, movie_display) + before_traks
+                   + b"".join(boxes))
         return u32(0) + moov[4:] if moov_to_end else moov
 
     zero = [[0] * len(c) for c in chunks]
@@ -547,6 +577,16 @@ def described():
     # its C conversions make edges of: the crop comes out of how GCC turns
     # infinity into an unsigned 64-bit number.
     one("clap_infinite.mp4", clap((48, 1), (40, 1), (1, 0), (0, 1)))
+    # The light: mdcv and clli; VP9's SmDm and CoLL; each in a version
+    # FFmpeg passes over; the first of two of each kind (SmDm before mdcv,
+    # clli before CoLL) standing; and a SmDm of 5 bytes, whose numbers FFmpeg
+    # reads on from the boxes after it, before reading those as themselves.
+    one("light_mdcv_clli.mp4", MDCV_HDR10, clli(1000, 400))
+    one("light_smdm_coll.mp4", SMDM_HDR10, coll(1000, 400))
+    one("light_versions.mp4", smdm([(1, 2), (3, 4), (5, 6)], (7, 8), 9, 10, version=1),
+        coll(1000, 400, version=1))
+    one("light_first_of_two.mp4", SMDM_HDR10, MDCV_HDR10, clli(1000, 400), coll(2000, 500))
+    one("light_overread.mp4", box(b"SmDm", bytes(5)), clli(4000, 1000), pasp(4, 3))
     return out
 
 
@@ -559,10 +599,19 @@ def refused():
         "vpcc_init_data.mp4": vpcc(init=2),
         # A vpcC too short to hold its version and flags.
         "vpcc_short.mp4": vpcc(body=bytes(4)),
+        # Light boxes too short: an mdcv under 24 bytes, a clli under 4, a
+        # SmDm and a CoLL under 5.
+        "light_mdcv_short.mp4": box(b"mdcv", bytes(20)),
+        "light_clli_short.mp4": box(b"clli", bytes(3)),
+        "light_smdm_empty.mp4": box(b"SmDm", bytes(4)),
+        "light_coll_empty.mp4": box(b"CoLL", bytes(4)),
     }
     out = {name: mp4([Trak(b"vide", visual_entry(b"vfx0", 64, 48, child), 10240, v8, [8])])
            for name, child in children.items()}
     # A fragment's run of one sample more than FFmpeg can index.
+    # A light box before any track: FFmpeg has no stream to give it to.
+    out["light_outside_a_track.mp4"] = mp4([Trak(b"vide", visual_entry(b"vfx0", 64, 48), 10240, v8, [8])],
+                                           before_traks=MDCV_HDR10)
     out["trun_past_ffmpeg_index.mp4"] = fragmented(fragment(1, INDEX_ALLOC + 1, 12, tfdt=0))
     # A run whose 1001st sample would take time past 2^63, its first nearly
     # there: FFmpeg refuses that sample, though the file holds only twelve.
@@ -706,17 +755,23 @@ def look(name):
                          check=True, capture_output=True, text=True, encoding="utf-8").stdout
     lines = []
     for st in json.loads(out)["streams"]:
-        display, crop = "none", "0,0,0,0"
+        display, crop, light, mastering = "none", "0,0,0,0", "none", "none"
         for sd in st.get("side_data_list", []):
             if sd["side_data_type"] == "Display Matrix":
                 rows = sd["displaymatrix"].strip().splitlines()
                 display = ",".join(w for row in rows for w in row.split(":", 1)[1].split())
             elif sd["side_data_type"] == "Frame Cropping":
                 crop = f"{sd['crop_left']},{sd['crop_top']},{sd['crop_right']},{sd['crop_bottom']}"
+            elif sd["side_data_type"] == "Content light level metadata":
+                light = f"{sd['max_content']},{sd['max_average']}"
+            elif sd["side_data_type"] == "Mastering display metadata":
+                mastering = ",".join(sd[k] for k in ("red_x", "red_y", "green_x", "green_y", "blue_x", "blue_y",
+                                                     "white_point_x", "white_point_y"))
+                mastering += f";{sd['max_luminance']};{sd['min_luminance']}"
         colour = "/".join(st.get(k, "unknown") for k in
                           ("color_primaries", "color_transfer", "color_space", "color_range"))
         lines.append(f"look {st['index']} sar={st.get('sample_aspect_ratio', 'N/A')} colour={colour} "
-                     f"matrix={display} crop={crop}")
+                     f"matrix={display} crop={crop} light={light} mastering={mastering}")
     return lines
 
 

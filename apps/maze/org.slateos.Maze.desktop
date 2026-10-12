@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Maze
+Comment=Find the way from corner to corner
+Icon=applications-games
+Exec=maze
+Categories=Game;
+Keywords=maze;labyrinth;

@@ -56610,8 +56610,9 @@ In rough order of how much a user would miss it:
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
   **folders** (`Folder`, `add_folder`/`remove_folder`/`rename_folder`/
   `set_folder`).
-* **Generator length** — `PasswordGenerator::set_length`. The panel shows the
-  length and offers no way to change it.
+* ~~**Generator length**~~ — DONE (lane E): Left and Right, and since
+  2026-10-04 the toolkit's slider on the panel, which a press moves and a
+  drag carries; the panel's buttons and boxes answer the pointer too.
 * **Jump from an audit issue to its entry** — `AuditIssue::entry_id` is carried
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
@@ -59115,6 +59116,32 @@ is already waiting, not whether the setter exists.
   `SYS_FS_SET_STATUS_FLAGS` (1095) on `origin/main`. **Then:** `F_SETFL`
   sends the description's flags in native `OpenFlags` bits; `write` keeps its
   `SEEK_END` only where the call answered `ENOSYS`.
+
+## Lane B — what waits on lane A's next publish (2026-10-09)
+
+- **Done 2026-10-09: SCRIPT_OWNERS rows for lane B's new scripts.** The
+  table reached main with lane A's publish of b083cfeca, which carried rows
+  for `tic-diff.sh`, `gen-terminfo-captab.py`, `systemd-cat-diff.sh` and
+  `patch-merge-fuzz.py`; lane B added the other six (`journalfwd-diff.sh`,
+  `journalfwd-walltest.py`, `pwdx-diff.sh`, `procps-close-diff.sh`,
+  `pmap-diff.sh`, `skill-diff.sh`) after merging it. From here a row goes in
+  the commit that creates its script; `which-lane.py --check-all` holds it.
+- **Open, waiting on lane D: switching off and restarting, from userland.**
+  The kernel's calls reached main with b083cfeca: `SYS_POWER_OFF` (1167),
+  `SYS_POWER_REBOOT` (1168) and `SYS_POWER_RELOAD` (1139), each gated by a
+  Process right. Lane B's half is in (2026-10-09): `libcall::power::reboot`,
+  the C library's `reboot`, and `powerctl`'s direct power-off and reboot
+  calling it where they wrote to a `/proc/acpi/power` no kernel has had.
+  They say `Function not implemented` until `posix`'s `reboot` asks the
+  kernel and projects `CAP_SYS_BOOT` from the rights -- asked in
+  `requests/b-d-reboot-should-call-the-new-power-syscalls.md`.
+  **Trigger:** `posix/src/process.rs`'s `reboot` no longer ends in `ENOSYS`
+  on `origin/main`. **Then:** `powerctl reload` stops the services and calls
+  `reboot (RB_KEXEC)` -- it refuses first until then, as it must -- and the
+  launcher's power entries (lane C/E's request) can count on all three.
+  Still unprovided either way: org.slateos.ServiceManager's PowerOff and
+  Reboot (known-issues b-org.slateos.servicemanager-has-two-clients-and-no-
+  provider).
 
 ## Lane A — kexec / power.reload: the load-and-jump mechanism (2026-10-03)
 

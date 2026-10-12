@@ -279,7 +279,8 @@ pub fn c_int(x: f64) -> i32 {
 
 /// `%.2f`, glibc's: rounded from the exact binary value, `nan`/`-nan`/`inf`
 /// spelled as C spells them.
-fn fixed2(x: f64) -> String {
+#[must_use]
+pub fn fixed2(x: f64) -> String {
     extfloat::render(&Spec::fixed(2), ExtF80::from_f64(x))
 }
 

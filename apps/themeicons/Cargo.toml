@@ -1,0 +1,18 @@
+[package]
+name = "themeicons"
+version = "0.1.0"
+edition = "2024"
+description = "Icons from the user's icon theme, for a program under oswindow::app: named while drawing, uploaded through the loop, dropped when the appearance changes"
+
+[dependencies]
+# The icon theme and the registry the desktop draws its own icons through
+# (`appearance::icons`), so a program's icons are the theme's the user chose.
+appearance = { path = "../../gui/appearance" }
+# The draw commands an icon is named in, and the pixels' wire order.
+guitk = { path = "../../gui/toolkit" }
+# The loop's image changes (`oswindow::app::ImageChange`): an `App` hands its
+# pictures over through `take_images`, never holding its window.
+oswindow = { path = "../../gui/window" }
+
+[lints]
+workspace = true

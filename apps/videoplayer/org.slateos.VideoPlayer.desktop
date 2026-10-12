@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Video Player
+Comment=Watch videos
+Icon=video-x-generic
+Exec=videoplayer %F
+Categories=AudioVideo;Video;Player;
+Keywords=video;movie;film;
+MimeType=video/webm;video/x-matroska;

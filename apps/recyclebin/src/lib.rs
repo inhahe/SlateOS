@@ -10,12 +10,30 @@
 //! deleted in the viewer would be gone from everywhere the user looks for it.
 //! So the bin is a crate both use, moved whole with its tests.
 //!
+//! # A bin on every drive
+//!
+//! Each drive has a bin of its own (design-decisions §1238): the home
+//! folder's drive keeps `~/.recycle`, and every other drive keeps one at its
+//! top, so a file is moved to a bin without leaving its drive. [`Bins`] says
+//! which bin a file goes to and which bins there are; [`RecycleBin`] is one
+//! bin. Each bin keeps to its own [`Limits`] -- an age, a size, a number of
+//! items -- written in the bin, so they go where the drive goes.
+//!
 //! # On disk
 //!
-//! `~/.recycle/<id>/meta.txt` holds the original path (escaped losslessly by
+//! `<bin>/<id>/meta.txt` holds the original path (escaped losslessly by
 //! `pathcodec`, so a name that is not text restores to itself) and when it was
-//! recycled; `~/.recycle/<id>/data` is the file or directory itself. See
-//! [`RecycleBin`].
+//! recycled; `<bin>/<id>/data` is the file or directory itself; and
+//! `<bin>/limits.yaml`, when the drive has limits of its own, says what they
+//! are. See [`RecycleBin`].
+
+mod bins;
+mod drives;
+mod limits;
+
+pub use bins::{Bins, DriveBin};
+pub use drives::{Drives, SystemDrives, longest_mount, parse_mounts};
+pub use limits::{Limits, USER_SETTINGS};
 
 use pathtext::ShowPath;
 use std::ffi::OsStr;
@@ -236,26 +254,49 @@ impl RecycleEntry {
     }
 }
 
-/// Manages the recycle bin at `~/.recycle/`.
+/// One recycle bin: the home bin (`~/.recycle/`) or a drive's.
 ///
 /// Layout on disk:
 /// ```text
-/// ~/.recycle/
+/// <bin>/
+///     limits.yaml         # this drive's limits, if it has its own
 ///     <hash>/
 ///         meta.txt        # original_path, recycled_at
 ///         data/           # the actual file or directory contents
 /// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecycleBin {
     root: PathBuf,
-    /// Items older than this are eligible for auto-purge.
-    max_age: Duration,
 }
 
-/// Recycled items are eligible for auto-purge after 30 days.
-///
-/// In hours rather than `Duration::from_days`, which is still nightly-gated
-/// (rust-lang/rust#120301).
-const DEFAULT_RECYCLE_MAX_AGE: Duration = Duration::from_hours(30 * 24);
+/// What holding a bin to its limits did ([`RecycleBin::prune`]).
+#[derive(Debug, Default)]
+pub struct Pruned {
+    /// How many entries were deleted.
+    pub deleted: u32,
+    /// How many bytes they held.
+    pub freed: u64,
+    /// The entries a limit took that could not be deleted, each with the
+    /// reason. They are still in the bin, whole or in part.
+    pub failed: Vec<(RecycleEntry, io::Error)>,
+}
+
+/// How much a bin holds ([`RecycleBin::usage`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// How many entries.
+    pub items: u32,
+    /// How many bytes, folders measured whole.
+    pub bytes: u64,
+}
+
+/// The most of a `limits.yaml` that is read: a few lines are all it holds,
+/// and a drive is not trusted to keep it short.
+const LIMITS_MAX: usize = 64 * 1024;
+
+/// What a new `limits.yaml` says at its top, for whoever opens it.
+const LIMITS_HEADER: &str = "# How long this drive's recycle bin keeps what is deleted.\n\
+                             # A limit left out is no limit.\n";
 
 /// How many candidate names a new recycle bin entry will try before failing.
 ///
@@ -277,34 +318,16 @@ fn now_nanos() -> u128 {
 }
 
 impl RecycleBin {
-    /// Create a new `RecycleBin` rooted at `root`.
+    /// The bin at `root`. Nothing is made until something is recycled.
     ///
-    /// `max_age` is the auto-purge threshold (default 30 days).
-    pub fn new(root: PathBuf, max_age: Duration) -> Self {
-        Self { root, max_age }
-    }
-
-    /// Create a `RecycleBin` at the default location (`~/.recycle/`)
-    /// with 30-day auto-purge.
-    ///
-    /// `var_os`, not `var`. This read `HOME` as UTF-8 and fell back to `/tmp`
-    /// when it was not, which put the recycle bin of anyone with a home
-    /// directory holding undecodable bytes in a directory that is cleared on
-    /// restart -- so "move to recycle bin" became "delete on next boot",
-    /// silently, for exactly the users this module is otherwise careful about.
-    /// [`Self::send_to_bin`] below goes to real trouble to record an original
-    /// path losslessly so a non-UTF-8 name can be restored; that care was
-    /// undone one function earlier by the location itself.
-    ///
-    /// The `/tmp` fallback now applies only when `HOME` is genuinely unset,
-    /// which is its own hazard and is left alone here: it is the pre-existing
-    /// behaviour for a case this change does not touch, and conflating the two
-    /// would hide which one was the bug.
-    pub fn default_location() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        Self::new(home.join(".recycle"), DEFAULT_RECYCLE_MAX_AGE)
+    /// Which bin a file belongs in is [`Bins`]'s to say: the home bin is
+    /// `$HOME/.recycle` -- read with `var_os`, not `var`, which read `HOME` as
+    /// UTF-8 and fell back to `/tmp` when it was not, putting the bin of
+    /// anyone whose home folder's name is not text in a folder cleared on
+    /// restart -- and each other drive's is at its top.
+    #[must_use]
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 
     /// Move `path` into the recycle bin and return the entry id.
@@ -519,40 +542,183 @@ impl RecycleBin {
         Ok(outcome)
     }
 
-    /// Permanently delete items older than `max_age`.
-    pub fn purge_old(&self) -> io::Result<u32> {
+    /// Hold the bin to `limits` as of `now`: delete what was deleted longer
+    /// ago than the age limit, then, oldest first, what takes it over the
+    /// size or the number of items.
+    ///
+    /// Ages are measured from the time recorded with each entry when it was
+    /// recycled, so a drive that was away a month is pruned for that month the
+    /// moment it is back. An entry whose metadata cannot be read is never
+    /// taken by a limit: its age is unknown, and unknown must not be read as
+    /// old -- that would delete a file to tidy up a damaged record. It counts
+    /// towards the size and the number, as it takes up space, and the user can
+    /// delete it themselves. A clock behind an entry's time gives it no age.
+    ///
+    /// Every entry a limit takes is tried; each that could not be deleted is
+    /// in [`Pruned::failed`] -- this used to be `purge_old`, which counted the
+    /// ones that went and said nothing of the others, and which nothing ever
+    /// called: the thirty days the bin was said to keep were never applied.
+    ///
+    /// # Errors
+    ///
+    /// Only when the bin cannot be listed.
+    pub fn prune(&self, limits: &Limits, now: SystemTime) -> io::Result<Pruned> {
+        let mut outcome = Pruned::default();
         let entries = self.list()?;
-        let now = SystemTime::now();
-        let mut count = 0u32;
+        // A folder's size is not in its entry (`RecycleEntry::size`); it is
+        // measured here, only when a size limit needs it.
+        let measure = |entry: &RecycleEntry| {
+            if limits.max_bytes.is_some() {
+                Self::entry_size(&self.root.join(&entry.id))
+            } else {
+                entry.size
+            }
+        };
+        let sizes: Vec<u64> = entries.iter().map(measure).collect();
+        // Oldest first; an undated entry last, where no limit reaches it.
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_by_key(|&i| {
+            entries
+                .get(i)
+                .and_then(|e| e.recycled_at)
+                .map_or((1, SystemTime::UNIX_EPOCH), |at| (0, at))
+        });
+        let mut items = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        let mut bytes = sizes
+            .iter()
+            .fold(0_u64, |total, s| total.saturating_add(*s));
 
-        for entry in &entries {
-            // An entry with no readable timestamp is never aged out. Its age
-            // is unknown, and "unknown" must not be read as "old": purging on
-            // a guess would delete a user's file to tidy up a metadata
-            // problem. It stays listed, and the user can empty it themselves.
-            let Some(recycled_at) = entry.recycled_at else {
+        for &i in &order {
+            let Some(entry) = entries.get(i) else {
                 continue;
             };
+            let Some(recycled_at) = entry.recycled_at else {
+                // Undated, and every later one is too.
+                break;
+            };
             let age = now.duration_since(recycled_at).unwrap_or(Duration::ZERO);
-            if age > self.max_age {
-                let entry_dir = self.root.join(&entry.id);
-                if fs::remove_dir_all(&entry_dir).is_ok() {
-                    count = count.saturating_add(1);
+            let too_old = limits.max_age.is_some_and(|max| age > max);
+            let too_many = limits.max_items.is_some_and(|max| items > u64::from(max));
+            let too_big = limits.max_bytes.is_some_and(|max| bytes > max);
+            if !(too_old || too_many || too_big) {
+                // Everything after this is newer: no age limit takes it, and
+                // the bin is within its size and number already.
+                break;
+            }
+            let size = sizes.get(i).copied().unwrap_or(0);
+            match self.delete(&entry.id) {
+                Ok(()) => {
+                    outcome.deleted = outcome.deleted.saturating_add(1);
+                    outcome.freed = outcome.freed.saturating_add(size);
+                    items = items.saturating_sub(1);
+                    bytes = bytes.saturating_sub(size);
                 }
+                // Still in the bin, and still counted: a newer entry may go
+                // in its place to bring the bin within its size or number.
+                Err(e) => outcome.failed.push((entry.clone(), e)),
             }
         }
-
-        Ok(count)
+        Ok(outcome)
     }
 
-    /// Set the auto-purge age threshold.
-    pub fn set_max_age(&mut self, age: Duration) {
-        self.max_age = age;
+    /// This bin's limits: those written in it (`limits.yaml`), or `default`
+    /// when it has none of its own.
+    ///
+    /// A file that is there but cannot be read gives [`Limits::NONE`], not
+    /// `default`: the drive's own limits may be looser than the default --
+    /// "keep a year" -- and applying a tighter one in their place would delete
+    /// what the user chose to keep. Keeping is the direction a mistake can be
+    /// undone in.
+    #[must_use]
+    pub fn limits(&self, default: &Limits) -> Limits {
+        match self.own_limits() {
+            Ok(Some(own)) => own,
+            Ok(None) => *default,
+            Err(_) => Limits::NONE,
+        }
     }
 
-    /// Current auto-purge age threshold.
-    pub fn max_age(&self) -> Duration {
-        self.max_age
+    /// The limits written in this bin, if it has its own: `Ok(None)` when it
+    /// has no `limits.yaml` and keeps to the default.
+    ///
+    /// # Errors
+    ///
+    /// A `limits.yaml` that is there but cannot be read, or is too long to be
+    /// one -- for which [`limits`](Self::limits) keeps everything, and a page
+    /// showing the bin should say why.
+    pub fn own_limits(&self) -> io::Result<Option<Limits>> {
+        let path = self.root.join(limits::FILE_NAME);
+        match safeio::read_to_string_capped(&path, LIMITS_MAX) {
+            Ok(read) if !read.truncated => Ok(Some(Limits::read(
+                &yamldoc::Document::parse(&read.text),
+                &[],
+            ))),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is too long to be a bin's limits", path.shown()),
+            )),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Give this bin limits of its own -- `Some` -- or take them away, so it
+    /// keeps to the user's default -- `None`. Written into the bin, so they go
+    /// where the drive goes; a file a user has commented keeps its comments.
+    ///
+    /// # Errors
+    ///
+    /// What writing or removing the file meets.
+    pub fn set_limits(&self, limits: Option<&Limits>) -> io::Result<()> {
+        let path = self.root.join(limits::FILE_NAME);
+        let Some(limits) = limits else {
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            };
+        };
+        let text = match safeio::read_to_string_capped(&path, LIMITS_MAX) {
+            Ok(read) if !read.truncated => {
+                let mut doc = yamldoc::Document::parse(&read.text);
+                limits.write(&mut doc, &[]);
+                doc.to_text()
+            }
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is too long to be a bin's limits", path.shown()),
+                ));
+            }
+            // A new file: the keys, under a line saying what they are.
+            // (Written into a document holding only that line, they would go
+            // above it -- a document's keys come before a comment that
+            // follows them.)
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut doc = yamldoc::Document::new();
+                limits.write(&mut doc, &[]);
+                format!("{LIMITS_HEADER}{}", doc.to_text())
+            }
+            Err(e) => return Err(e),
+        };
+        fs::create_dir_all(&self.root)?;
+        safeio::write_str_atomically(&path, &text)
+    }
+
+    /// How much the bin holds: its entries, and their bytes with folders
+    /// measured whole.
+    ///
+    /// # Errors
+    ///
+    /// Only when the bin cannot be listed.
+    pub fn usage(&self) -> io::Result<Usage> {
+        let mut usage = Usage::default();
+        for entry in self.list()? {
+            usage.items = usage.items.saturating_add(1);
+            usage.bytes = usage
+                .bytes
+                .saturating_add(Self::entry_size(&self.root.join(&entry.id)));
+        }
+        Ok(usage)
     }
 
     // ------------------------------------------------------------------
@@ -783,7 +949,8 @@ mod tests {
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::panic
+        clippy::panic,
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;
@@ -816,7 +983,7 @@ mod tests {
         let file_path = dir.join("important.txt");
         write_file(&file_path, "important data");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
 
         // Recycle.
         let id = bin.recycle(&file_path).unwrap();
@@ -852,7 +1019,7 @@ mod tests {
         let file_path = dir.join("report.docx");
         write_file(&file_path, "the old draft");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
         let id = bin.recycle(&file_path).expect("recycle");
         assert!(!file_path.exists());
 
@@ -887,7 +1054,7 @@ mod tests {
         let file_path = dir.join("notes.txt");
         write_file(&file_path, "notes");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
         let id = bin.recycle(&file_path).expect("recycle");
         let restored = bin.restore(&id).expect("restore");
 
@@ -907,7 +1074,7 @@ mod tests {
         fs::create_dir_all(&src_dir).expect("project");
         write_file(&src_dir.join("main.rs"), "the old source");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
         let id = bin.recycle(&src_dir).expect("recycle");
 
         // A new, unrelated `project/` with a file of the same name.
@@ -939,7 +1106,7 @@ mod tests {
     fn two_same_named_files_recycled_together_both_survive() {
         let scratch = temp_dir("recycle_collide");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
 
         // Both recycled at the *same* instant. Going through `recycle` would
         // not reproduce this: each call does enough filesystem work to advance
@@ -977,7 +1144,7 @@ mod tests {
     fn a_burst_of_same_named_files_keeps_every_one() {
         let scratch = temp_dir("recycle_burst");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
 
         let mut ids = Vec::new();
         for i in 0..64 {
@@ -1003,7 +1170,7 @@ mod tests {
         let dir = scratch.dir().to_path_buf();
         let bin_root = dir.join("bin");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
 
         write_file(&dir.join("a.txt"), "aaa");
         write_file(&dir.join("b.txt"), "bbb");
@@ -1023,33 +1190,232 @@ mod tests {
     fn recycle_bin_list_empty() {
         let scratch = temp_dir("recycle_list_empty");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
         let entries = bin.list().unwrap();
         assert!(entries.is_empty());
     }
 
+    /// Recycle `name` (holding `content`) from `dir` into `bin`, recorded as
+    /// recycled `days_ago` days before now. Returns its entry id.
+    fn recycled_days_ago(
+        bin: &RecycleBin,
+        dir: &Path,
+        name: &str,
+        content: &str,
+        days_ago: u64,
+    ) -> String {
+        let path = dir.join(name);
+        write_file(&path, content);
+        let id = bin.recycle(&path).unwrap();
+        let when = SystemTime::now()
+            .checked_sub(Duration::from_hours(days_ago * 24))
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        set_recycled_at(bin, &id, when);
+        id
+    }
+
+    /// Record entry `id` as recycled `secs` after the epoch: the third line
+    /// of its `meta.txt`.
+    fn set_recycled_at(bin: &RecycleBin, id: &str, secs: u64) {
+        let meta = bin.root().join(id).join("meta.txt");
+        let text = fs::read_to_string(&meta).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        let stamp = secs.to_string();
+        lines[2] = &stamp;
+        fs::write(&meta, format!("{}\n", lines.join("\n"))).unwrap();
+    }
+
+    fn names(bin: &RecycleBin) -> Vec<String> {
+        let mut names: Vec<String> = bin
+            .list()
+            .unwrap()
+            .iter()
+            .map(RecycleEntry::display_name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// **What was deleted longer ago than the age limit goes; the rest stays.**
+    /// The bin said it kept thirty days and nothing ever applied it:
+    /// `purge_old` had no caller.
     #[test]
-    fn recycle_bin_purge_old() {
-        let scratch = temp_dir("recycle_purge");
+    fn an_entry_past_the_age_limit_is_pruned_and_a_newer_one_kept() {
+        let scratch = temp_dir("prune_age");
         let dir = scratch.dir().to_path_buf();
-        let bin_root = dir.join("bin");
+        let bin = RecycleBin::new(dir.join("bin"));
+        recycled_days_ago(&bin, &dir, "old.txt", "twelve bytes", 10);
+        recycled_days_ago(&bin, &dir, "new.txt", "new", 2);
 
-        // Max age of 0 seconds means everything is "old".
-        let bin = RecycleBin::new(bin_root, Duration::from_secs(0));
+        let week = Limits {
+            max_age: Some(Duration::from_hours(7 * 24)),
+            ..Limits::NONE
+        };
+        let pruned = bin.prune(&week, SystemTime::now()).unwrap();
+        assert_eq!(pruned.deleted, 1);
+        assert_eq!(pruned.freed, 12, "what the old file held");
+        assert!(pruned.failed.is_empty());
+        assert_eq!(names(&bin), ["new.txt"]);
 
-        write_file(&dir.join("old.txt"), "old");
-        bin.recycle(&dir.join("old.txt")).unwrap();
+        // No limit, nothing goes.
+        let pruned = bin.prune(&Limits::NONE, SystemTime::now()).unwrap();
+        assert_eq!(pruned.deleted, 0);
+        assert_eq!(names(&bin), ["new.txt"]);
+    }
 
-        let purged = bin.purge_old().unwrap();
-        assert_eq!(purged, 1);
-        assert_eq!(bin.list().unwrap().len(), 0);
+    /// **Over its number or its size, a bin loses its oldest first** -- and
+    /// only as many as bring it within the limit.
+    #[test]
+    fn a_bin_over_its_number_or_size_loses_its_oldest_first() {
+        let scratch = temp_dir("prune_count");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"));
+        for (name, days) in [
+            ("a.txt", 5),
+            ("b.txt", 4),
+            ("c.txt", 3),
+            ("d.txt", 2),
+            ("e.txt", 1),
+        ] {
+            recycled_days_ago(&bin, &dir, name, "x", days);
+        }
+        let two = Limits {
+            max_items: Some(2),
+            ..Limits::NONE
+        };
+        let pruned = bin.prune(&two, SystemTime::now()).unwrap();
+        assert_eq!(pruned.deleted, 3);
+        assert_eq!(
+            names(&bin),
+            ["d.txt", "e.txt"],
+            "the newest were not the ones kept"
+        );
+
+        let scratch = temp_dir("prune_size");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"));
+        recycled_days_ago(&bin, &dir, "small.bin", &"s".repeat(10_000), 3);
+        recycled_days_ago(&bin, &dir, "middle.bin", &"m".repeat(20_000), 2);
+        recycled_days_ago(&bin, &dir, "large.bin", &"l".repeat(30_000), 1);
+        let under = Limits {
+            max_bytes: Some(45_000),
+            ..Limits::NONE
+        };
+        let pruned = bin.prune(&under, SystemTime::now()).unwrap();
+        assert_eq!(
+            pruned.deleted, 2,
+            "the bin was brought further down than its limit"
+        );
+        assert!(pruned.freed >= 30_000, "{}", pruned.freed);
+        assert_eq!(names(&bin), ["large.bin"]);
+        assert!(bin.usage().unwrap().bytes <= 45_000);
+    }
+
+    /// A folder in the bin counts at its whole size against a size limit:
+    /// its entry says 0 (`RecycleEntry::size`), which would never take it.
+    #[test]
+    fn a_folder_counts_whole_against_a_size_limit() {
+        let scratch = temp_dir("prune_folder");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"));
+        write_file(&dir.join("photos/one.jpg"), &"p".repeat(40_000));
+        let id = bin.recycle(&dir.join("photos")).unwrap();
+        recycled_days_ago(&bin, &dir, "note.txt", "n", 0);
+        // The folder is older than the note.
+        set_recycled_at(&bin, &id, 1_000_000_000);
+        assert_eq!(bin.usage().unwrap().items, 2);
+        assert!(bin.usage().unwrap().bytes >= 40_000);
+        let pruned = bin
+            .prune(
+                &Limits {
+                    max_bytes: Some(10_000),
+                    ..Limits::NONE
+                },
+                SystemTime::now(),
+            )
+            .unwrap();
+        assert_eq!(pruned.deleted, 1);
+        assert_eq!(names(&bin), ["note.txt"]);
+    }
+
+    /// An entry recorded as deleted after now -- a clock set back -- has no
+    /// age, so no age limit takes it.
+    #[test]
+    fn an_entry_from_the_future_is_not_old() {
+        let scratch = temp_dir("prune_future");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"));
+        recycled_days_ago(&bin, &dir, "soon.txt", "x", 0);
+        let day = Limits {
+            max_age: Some(Duration::from_hours(24)),
+            ..Limits::NONE
+        };
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert_eq!(bin.prune(&day, long_ago).unwrap().deleted, 0);
+        assert_eq!(names(&bin), ["soon.txt"]);
+    }
+
+    /// **A bin's own limits are read from it; without them, the default.**
+    /// One that cannot be read keeps everything: the drive's own may have
+    /// been looser than the default, and the default would then delete what
+    /// the user chose to keep.
+    #[test]
+    fn a_bins_limits_are_its_own_or_the_default() {
+        let scratch = temp_dir("bin_limits");
+        let bin = RecycleBin::new(scratch.dir().join("bin"));
+        let default = Limits::default();
+        assert_eq!(bin.limits(&default), default, "no file of its own");
+
+        let year = Limits {
+            max_age: Some(Duration::from_hours(365 * 24)),
+            max_bytes: None,
+            max_items: Some(5000),
+        };
+        bin.set_limits(Some(&year)).unwrap();
+        assert_eq!(bin.limits(&default), year);
+        let written = fs::read_to_string(bin.root().join("limits.yaml")).unwrap();
+        assert!(written.starts_with("# How long"), "{written}");
+
+        // A user's comment survives a change.
+        fs::write(
+            bin.root().join("limits.yaml"),
+            format!("# Mine.\n{written}"),
+        )
+        .unwrap();
+        let month = Limits {
+            max_age: Some(Duration::from_hours(30 * 24)),
+            ..year
+        };
+        bin.set_limits(Some(&month)).unwrap();
+        assert!(
+            fs::read_to_string(bin.root().join("limits.yaml"))
+                .unwrap()
+                .starts_with("# Mine.\n")
+        );
+        assert_eq!(bin.limits(&default), month);
+
+        // A file too long to be one keeps everything.
+        fs::write(bin.root().join("limits.yaml"), "#".repeat(LIMITS_MAX + 1)).unwrap();
+        assert_eq!(bin.limits(&default), Limits::NONE);
+
+        // Taken away: the default again.
+        bin.set_limits(None).unwrap();
+        assert_eq!(bin.limits(&default), default);
+        bin.set_limits(None).unwrap();
+        assert!(
+            bin.list().unwrap().is_empty(),
+            "the limits file was listed as an entry"
+        );
     }
 
     #[test]
     fn a_recycled_non_ascii_name_restores_to_its_original_path() {
         let scratch = temp_dir("recycle_nonascii");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
 
         let file_path = dir.join("写真 100%.txt");
         write_file(&file_path, "keep");
@@ -1079,7 +1445,7 @@ mod tests {
         );
         write_file(&entry_dir.join("data"), "old contents");
 
-        let bin = RecycleBin::new(bin_root, Duration::from_hours(24));
+        let bin = RecycleBin::new(bin_root);
         let listed = bin.list().expect("list");
         assert_eq!(
             listed.len(),
@@ -1096,7 +1462,7 @@ mod tests {
     fn a_recycle_that_could_not_move_the_data_leaves_no_entry_behind() {
         let scratch = temp_dir("recycle_orphan");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
 
         let err = bin
             .recycle(&dir.join("never_existed.txt"))
@@ -1144,7 +1510,7 @@ mod tests {
 
     /// Recycle a file, then corrupt its metadata.
     fn bin_with_a_damaged_entry(root: &Path) -> (RecycleBin, String) {
-        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(1));
+        let bin = RecycleBin::new(root.join("bin"));
         let file = root.join("notes.txt");
         write_file(&file, "some bytes");
         let id = bin.recycle(&file).expect("recycle");
@@ -1225,19 +1591,27 @@ mod tests {
     /// Its age is unknown, and unknown must not be read as old: purging on a
     /// guess would delete a user's file to tidy up a metadata problem.
     #[test]
-    fn a_damaged_entry_is_not_purged_by_age() {
+    fn a_damaged_entry_is_not_pruned_by_any_limit() {
         let scratch = temp_dir("recycle_damaged_purge");
-        let bin = RecycleBin::new(scratch.dir().join("bin"), Duration::from_secs(0));
+        let bin = RecycleBin::new(scratch.dir().join("bin"));
         let file = scratch.dir().join("notes.txt");
         write_file(&file, "some bytes");
         let id = bin.recycle(&file).expect("recycle");
         fs::write(bin.root().join(&id).join("meta.txt"), "not a meta file").expect("corrupt");
 
-        bin.purge_old().expect("purge");
+        let keep_nothing = Limits {
+            max_age: Some(Duration::ZERO),
+            max_bytes: Some(1),
+            max_items: Some(1),
+        };
+        let pruned = bin
+            .prune(&keep_nothing, SystemTime::now() + Duration::from_secs(1))
+            .expect("prune");
+        assert_eq!(pruned.deleted, 0);
         assert_eq!(
             bin.list().expect("list").len(),
             1,
-            "a damaged entry was aged out on an age nobody knows"
+            "a damaged entry was pruned on an age nobody knows"
         );
     }
 
@@ -1246,10 +1620,7 @@ mod tests {
     /// separator, becomes `_`. The name itself is kept in `meta.txt`.
     #[test]
     fn a_recycle_bin_folder_is_named_in_plain_characters() {
-        let bin = RecycleBin::new(
-            std::env::temp_dir().join("slateos-unused-bin"),
-            Duration::from_secs(1),
-        );
+        let bin = RecycleBin::new(std::env::temp_dir().join("slateos-unused-bin"));
         let id = bin.make_id(Path::new("/docs/caf\u{e9} notes.txt"), 7);
         assert!(id.starts_with("caf___notes.txt_"), "{id}");
         assert!(
@@ -1371,7 +1742,7 @@ mod tests {
     fn deleting_one_entry_leaves_the_rest() {
         let scratch = temp_dir("recycle_delete_one");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
         write_file(&dir.join("a.txt"), "aaa");
         write_file(&dir.join("b.txt"), "bbb");
         let a = bin.recycle(&dir.join("a.txt")).unwrap();
@@ -1399,7 +1770,7 @@ mod tests {
     #[test]
     fn deleting_an_entry_that_is_already_gone_is_not_an_error() {
         let scratch = temp_dir("recycle_delete_gone");
-        let bin = RecycleBin::new(scratch.dir().join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(scratch.dir().join("bin"));
         bin.delete("nothing_0000000000000000").unwrap();
     }
 
@@ -1409,7 +1780,7 @@ mod tests {
     fn an_id_that_is_not_one_name_is_refused() {
         let scratch = temp_dir("recycle_bad_id");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
         write_file(&dir.join("keep.txt"), "not in the bin");
         fs::create_dir_all(dir.join("victim")).unwrap();
         write_file(&dir.join("victim").join("inside.txt"), "not in the bin");
@@ -1456,7 +1827,7 @@ mod tests {
     fn emptying_reports_what_it_could_not_delete() {
         let scratch = temp_dir("recycle_empty_fails");
         let dir = scratch.dir().to_path_buf();
-        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(dir.join("bin"));
         write_file(&dir.join("held.txt"), "held open");
         write_file(&dir.join("free.txt"), "free");
         let held = bin.recycle(&dir.join("held.txt")).unwrap();
@@ -1513,7 +1884,7 @@ mod tests {
             eprintln!("skipped: this host can make no link");
             return;
         }
-        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(root.join("bin"));
         bin.recycle(&root.join("shortcut")).unwrap();
 
         let listed = bin.list().unwrap();
@@ -1536,7 +1907,7 @@ mod tests {
             "slate-recycle-v2\n/x\n5\n",
         );
         write_file(&root.join("outside").join("keep.txt"), "not in the bin");
-        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(root.join("bin"));
         fs::create_dir_all(bin.root()).unwrap();
         if folder_link(&root.join("outside"), &bin.root().join("planted")).is_none() {
             eprintln!("skipped: this host can make no link");
@@ -1569,7 +1940,7 @@ mod tests {
             eprintln!("skipped: this host can make no link");
             return;
         }
-        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        let bin = RecycleBin::new(root.join("bin"));
         let id = bin.recycle(&root.join("folder")).unwrap();
         fs::write(bin.root().join(&id).join("meta.txt"), "damaged").unwrap();
 

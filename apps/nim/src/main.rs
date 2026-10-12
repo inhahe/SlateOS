@@ -555,6 +555,8 @@ pub struct Nim {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Default for Nim {
@@ -582,7 +584,24 @@ impl Nim {
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            reasons: gamechrome::why::Reasons::new(),
         }
+    }
+
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. Take is greyed exactly when
+    /// [`enabled`](Self::enabled) refuses it.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        if target != Target::Take || self.enabled(Action::Take) {
+            return None;
+        }
+        Some(match self.state {
+            GameState::Won(_) => "The game is over: start a new game to play again.",
+            GameState::Playing if !self.human_turn() => "Wait: the computer is choosing its move.",
+            GameState::Playing if self.take_count == 0 => "Choose how many tokens to take first.",
+            GameState::Playing => "The heap chosen has fewer tokens left than that.",
+        })
     }
 
     /// The heaps a preset starts from.
@@ -1173,7 +1192,10 @@ impl Nim {
         );
 
         if btn.w > 0.0 && btn.h > 0.0 {
-            self.button(f, btn, "Take", l.small, false, self.enabled(Action::Take));
+            // Greyed exactly when there is a reason to give for it: one
+            // answer for the paint and the words, so neither can drift.
+            let live = self.why_greyed(Target::Take).is_none();
+            self.button(f, btn, "Take", l.small, false, live);
             // Recorded even when refused, so a click there stops at the button
             // rather than falling through to a heap behind it.
             f.hit(Target::Take, btn);
@@ -1474,7 +1496,10 @@ impl Nim {
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
 pub fn handle_event(app: &mut Nim, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
         Event::Resize { width, height } => {
@@ -1492,7 +1517,8 @@ pub fn handle_event(app: &mut Nim, event: &Event) -> EventResult {
             }
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for Nim {
@@ -1513,17 +1539,15 @@ impl App for Nim {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// Ticks are asked for only while the computer owes a reply.
+    /// Ticks are asked for only while the computer owes a reply, or a greyed
+    /// button's reason is waiting to appear.
     ///
     /// A board sitting still needs no frames, and a game that asks for 60 a
     /// second regardless is a game that keeps a laptop awake to draw the same
     /// pixels.
     fn tick_interval(&self) -> Option<Duration> {
-        if self.thinking() {
-            Some(Duration::from_millis(TICK_MS))
-        } else {
-            None
-        }
+        self.reasons
+            .sooner(self.thinking().then_some(Duration::from_millis(TICK_MS)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -1540,7 +1564,18 @@ impl App for Nim {
         // The size the frame is drawn at is the size the next click is read
         // against — that is the whole point of storing it here.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives; none while the sheet covers them.
+        let greyed = if self.show_help {
+            Vec::new()
+        } else {
+            gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target))
+        };
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -1591,6 +1626,62 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// button gives, if one shows, over everything.
+    fn on_screen(g: &mut Nim) -> RenderTree {
+        App::render(g, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Rest the pointer on Take, where the last frame drew it, and let the
+    /// toolkit's delay pass; what the window then says.
+    fn rest_on_take(g: &mut Nim) -> Option<String> {
+        let (x, y) = g
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::Take)
+            .expect("the info band draws Take")
+            .centre();
+        handle_event(
+            g,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        handle_event(g, &Event::Tick { elapsed_ms: 500 });
+        g.reasons.showing().map(str::to_owned)
+    }
+
+    /// **A greyed Take says why**, while the pointer rests on it, after the
+    /// delay and drawn over everything -- and a live one says nothing.
+    #[test]
+    fn a_greyed_take_says_why_while_the_pointer_rests_on_it() {
+        let mut g = Nim::new();
+        on_screen(&mut g);
+        assert!(g.enabled(Action::Take), "the fixture cannot take");
+        assert_eq!(rest_on_take(&mut g), None, "a live Take explains itself");
+
+        g.state = GameState::Won(Player::Human);
+        on_screen(&mut g);
+        assert_eq!(
+            App::tick_interval(&g),
+            Some(Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        assert_eq!(
+            rest_on_take(&mut g).as_deref(),
+            Some("The game is over: start a new game to play again.")
+        );
+        let tree = on_screen(&mut g);
+        let reason = g.reasons.render(&g.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+    }
 
     /// The palette for a light or a dark theme, in the bordered look (the
     /// default) or the card look.

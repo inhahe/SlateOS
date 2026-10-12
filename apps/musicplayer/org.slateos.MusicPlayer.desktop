@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Music Player
+Comment=Play music and playlists
+Icon=audio-x-generic
+Exec=musicplayer %F
+Categories=AudioVideo;Audio;Player;
+Keywords=music;songs;playlist;

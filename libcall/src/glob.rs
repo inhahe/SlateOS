@@ -145,6 +145,8 @@ const GLOB_ALTDIRFUNC: i32 = 1 << 9;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
     extern crate std;
     use super::*;
     use std::vec::Vec;

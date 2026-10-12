@@ -186,8 +186,8 @@ MUTATIONS = [
     ),
     (
         "the label field takes as many characters as are typed into it",
-        "                    if editor.label.chars().count() >= MAX_LABEL_LEN {",
-        "                    if false {",
+        "                    MAX_LABEL_LEN,\n                    &self.label_clipboard,\n",
+        "                    usize::MAX,\n                    &self.label_clipboard,\n",
         ["the_label_field_is_bounded"],
     ),
     # ---- the timer tab ----
@@ -247,7 +247,7 @@ MUTATIONS = [
     # ---- the keyboard ----
     (
         "ctrl-q is looked at only after the focused field has had it",
-        "        if m.ctrl && event.key == Key::Q {\n            return Action::Quit;\n        }\n",
+        "        if textline::is_ctrl_chord(m) && event.key == Key::Q {\n            return Action::Quit;\n        }\n",
         "",
         ["ctrl_q_quits_even_with_a_field_focused"],
     ),
@@ -374,6 +374,72 @@ MUTATIONS = [
         "                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n",
         "",
         ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+]
+
+# The label box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else, its caret a
+# `|` typed onto the end. A command's letter went into it, and into a
+# duration; and AltGr+Q, a German `@`, was Ctrl+Q and closed the program.
+EDITS = "the_label_box_edits_at_a_caret"
+COMMAND = "a_command_is_not_typed_and_altgr_is_not_ctrl"
+SHOWN = "the_label_box_edits_the_label_it_shows"
+
+MUTATIONS += [
+    (
+        "AltGr+Q closes the program",
+        "        if textline::is_ctrl_chord(m) && event.key == Key::Q {\n",
+        "        if m.ctrl && event.key == Key::Q {\n",
+        [COMMAND],
+    ),
+    (
+        "a command's letter is typed into a duration",
+        "                if !textline::types_into_field(event) {\n                    return Action::None;\n                }\n",
+        "",
+        [COMMAND],
+    ),
+    (
+        "Alt+Enter saves the alarm",
+        "                if event.key == Key::Enter && textline::is_plain(event.modifiers) {\n",
+        "                if event.key == Key::Enter {\n",
+        [COMMAND],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "                    self.label_clipboard = copied;\n",
+        "                    let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another label",
+        "                if self.label_editor.text() != editor.label {\n                    self.label_editor.set_text(&editor.label);\n                }\n                let before = (\n",
+        "                let before = (\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another label",
+        "        self.focus = Some(Focus::Label);\n        if self.label_editor.text() != label {\n",
+        "        self.focus = Some(Focus::Label);\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - LABEL_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does not place the caret",
+        "            self.press_label(rect, x);\n            return Action::Redraw;\n",
+        "            let _ = rect;\n",
+        [EDITS],
+    ),
+    (
+        "the caret is drawn at the end",
+        "                        cursor: self.label_cursor(&editor.label),\n",
+        "                        cursor: TextCursor::from(editor.label.len()),\n",
+        [EDITS],
     ),
 ]
 

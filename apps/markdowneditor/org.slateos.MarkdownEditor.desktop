@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Markdown Editor
+Comment=Write Markdown and see it rendered
+Icon=accessories-text-editor
+Exec=markdowneditor
+Categories=Office;
+Keywords=markdown;text;

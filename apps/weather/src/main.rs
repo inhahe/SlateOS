@@ -1,41 +1,51 @@
 //! Slate OS Weather Application
 //!
-//! **This program cannot fetch weather, and says so in the window.** It has
-//! no network access and no data source: `WeatherApp::new` -- what `main`
-//! builds -- holds no conditions, forecast, alerts or locations, every
-//! generator here is `#[cfg(test)]`, and so is every way to add a place.
-//! `render_commands` therefore stops at `render_cannot_fetch` and draws
-//! `CANNOT_FETCH_LINES` instead of the dashboard, so no panel ever shows a
-//! default that would be read as a reading. The fourth of those lines is the
-//! one that matters most: *silence here is not an all-clear* -- an empty
-//! alerts banner must not be mistaken for "no warnings in force".
+//! **Forecasts come from Open-Meteo, and only once the user turns them on.**
+//! The operator's answer to E-Q2 (design-decisions §1236) is that no program
+//! contacts a website by default unless that is what it is for. So the window
+//! opens on `FORECASTS_OFF_LINES` -- what turning forecasts on sends, to whom,
+//! when, and that it goes in plain text -- and a button that turns them on.
+//! Nothing is sent before that press, or the Settings row that does the same;
+//! [`source`] holds that rule and the requests, [`openmeteo`] what is asked
+//! and how the replies read, and [`fetch`] the HTTP exchange itself.
 //!
-//! It used to open on invented weather for New York, London and Tokyo, which
-//! is a confident lie about something people make decisions with. Deleting
-//! that was right, and the honest-empty state was put in at the same time.
-//! What is still missing is a real source: our HTTP library parses and
-//! serialises and has no transport, so there is nowhere to fetch from yet.
-//! That is tracked in `deferred-questions.md`, not as a live question, since
-//! nothing can act on it until the transport exists.
+//! Turned on, the user searches for a place by name on the Locations tab
+//! (Open-Meteo's geocoding), adds one of the places offered, and the window
+//! asks for its forecast and air quality: when a place is added or chosen,
+//! every half hour while the window is open, five minutes after a request
+//! that failed, and when the user presses R. The places and the switch are
+//! kept in the user's settings (`settingsfile`, `weather.yaml`) beside the
+//! units, and a change made in one window reaches the others.
 //!
-//! What does work with nothing fetched: the six tabs, the settings -- the
-//! units a reading will be given in, which are the user's to choose now and
-//! are kept in their settings (`settingsfile`, `weather.yaml`) -- and the F1
-//! card. Every control answers the pointer: the renderer records a hit box
-//! where it draws each one (`guitk::frame::Frame`).
+//! **No panel shows a default that would be read as a reading.** With no
+//! forecast in -- forecasts off, no place chosen, the request out, or failed
+//! -- the window says which and returns before the dashboard; an index the
+//! air-quality service did not give is "Not known", not 0. And it gives no
+//! severe-weather warnings, since Open-Meteo has none to give: the Alerts tab
+//! says so, because an empty alerts list is read as "no warnings in force".
+//! (It used to open on invented weather for New York, London and Tokyo -- a
+//! confident lie about something people make decisions with.)
 //!
-//! The layouts below are real and tested, and draw when a model is supplied
-//! (which today only tests do):
+//! Every frame showing Open-Meteo's data credits it (CC BY 4.0), along the
+//! bottom with the time the forecast is for. Every control answers the
+//! pointer: the renderer records a hit box where it draws each one
+//! (`guitk::frame::Frame`).
+//!
+//! What the window draws, once a forecast is in:
 //! - Current conditions with detailed metrics
 //! - Hourly forecast (24 hours) with horizontal strip layout
 //! - 7-day daily forecast in a table layout
-//! - Weather alerts with severity-based banner display
-//! - Multiple saved locations with default selection
 //! - Temperature graph (line chart of hourly temps)
-//! - Settings for units (temperature, wind, pressure, time)
 //! - Air quality index with color-coded display
+//! - Saved places, searched for by name, with a default
+//! - Settings for units (temperature, wind, pressure, time) and the forecasts
+//!   switch, kept between sessions
 //!
 //! Uses the guitk library for rendering.
+
+mod fetch;
+mod openmeteo;
+mod source;
 
 use appearance::Palette;
 use appearance::Surface;
@@ -45,6 +55,8 @@ use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -563,7 +575,10 @@ pub struct CurrentWeather {
     pub uv_index: u8,
     pub sunrise: (u8, u8),
     pub sunset: (u8, u8),
-    pub aqi: u16,
+    /// The US air-quality index, if the air-quality service answered: it is a
+    /// second request to a second service, and a reading it did not give is
+    /// not shown as one.
+    pub aqi: Option<u16>,
 }
 
 /// One hour of hourly forecast data.
@@ -587,11 +602,14 @@ pub struct DayForecast {
     pub wind_dir: WindDirection,
 }
 
-/// A saved location.
+/// A saved location: a place the user chose from a search, and where it is,
+/// which is what the forecast service is asked about.
 #[derive(Clone, Debug)]
 pub struct Location {
     pub name: String,
     pub is_default: bool,
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 // ============================================================================
@@ -722,7 +740,7 @@ pub fn sample_current_weather() -> CurrentWeather {
         uv_index: 5,
         sunrise: (6, 15),
         sunset: (20, 45),
-        aqi: 42,
+        aqi: Some(42),
     }
 }
 
@@ -875,21 +893,27 @@ pub fn sample_alerts() -> Vec<WeatherAlert> {
     }]
 }
 
-/// What the window says instead of a forecast.
+/// What the window says while forecasts are off, in place of a forecast:
+/// what turning them on would send, to whom and when, so the button under it
+/// is pressed knowing (design-decisions §1236, the operator's answer to E-Q2).
 ///
-/// Four lines, one more than the other refusals in this sweep, and the extra
-/// one is about alerts. A weather app is the only program here with a channel
-/// whose entire purpose is to make somebody change their plans for safety.
-/// Showing a fabricated "Thunderstorm Watch" does two things: it is wrong
-/// today, and it teaches the user that this app *has* such a channel -- so its
-/// silence tomorrow reads as "no warnings in force" rather than "not
-/// connected". The second is the durable harm and it outlives the fake alert.
-const CANNOT_FETCH_LINES: [&str; 4] = [
-    "This app cannot fetch weather.",
-    "It has no network access, so no observation, forecast or warning has been retrieved.",
-    "Nothing shown here is a reading -- there is no temperature, no forecast and no location.",
-    "It cannot deliver severe-weather alerts either. Silence here is not an all-clear.",
+/// The last line is about warnings, as it was when this app could fetch
+/// nothing. A weather app is the one program here with a channel whose whole
+/// purpose is to make somebody change their plans for safety, and Open-Meteo
+/// gives no warnings -- so an empty warnings list must not read as "none in
+/// force", with forecasts on or off.
+const FORECASTS_OFF_LINES: [&str; 4] = [
+    "Forecasts are off.",
+    "Turned on, this app asks Open-Meteo (open-meteo.com) for the weather at the places you add: it sends each place's latitude and longitude, and the names you search for.",
+    "It asks when you add or choose a place, and every half hour while the window is open. The requests go in plain text, so others on your network could see which places.",
+    "It gives no severe-weather warnings, on or off: Open-Meteo has none to give. Silence here is not an all-clear.",
 ];
+
+/// The longest place name the search box takes, in characters.
+const SEARCH_CAPACITY: usize = 100;
+
+/// The size the search box's text is drawn at.
+const SEARCH_FONT: f32 = 14.0;
 
 /// Default saved locations.
 #[cfg(test)]
@@ -898,14 +922,20 @@ pub fn default_locations() -> Vec<Location> {
         Location {
             name: "New York, NY".to_string(),
             is_default: true,
+            latitude: 40.714_27,
+            longitude: -74.005_97,
         },
         Location {
             name: "London, UK".to_string(),
             is_default: false,
+            latitude: 51.508_53,
+            longitude: -0.125_74,
         },
         Location {
             name: "Tokyo, JP".to_string(),
             is_default: false,
+            latitude: 35.6895,
+            longitude: 139.691_71,
         },
     ]
 }
@@ -925,11 +955,12 @@ pub enum ActiveView {
     SettingsView,
 }
 
-/// Main application state.
 /// The keys this program answers, raised by `F1` or `?`.
 ///
-/// Nothing here takes typed text, so `?` is free and design-decisions 863 says
-/// to bind it where it is.
+/// One thing takes typed text: the place search on the Places tab, while
+/// forecasts are on. There the letters, the digits and `?` type into it, and
+/// `F1` still raises this list; on every other tab `?` is free, and
+/// design-decisions 863 says to bind it where it is.
 ///
 /// The app named none of these before the list existed.
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -942,9 +973,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("W", "Wind units"),
     ("P", "Pressure units"),
     ("T", "24-hour or 12-hour"),
+    ("R", "Ask for the forecast again"),
+    ("Enter", "Search for the place typed, on the places tab"),
     ("F1 / ?", "This list"),
 ];
 
+/// Main application state.
 pub struct WeatherApp {
     /// The current observation, if anything has fetched one.
     ///
@@ -981,6 +1015,12 @@ pub struct WeatherApp {
     wheel: wheel::Accumulator,
     /// Why the units could not be kept, when they could not.
     settings_error: Option<String>,
+    /// Where the weather comes from, once forecasts are on (`source.rs`).
+    pub source: source::Source,
+    /// The place-name search on the Locations tab: its text and caret.
+    search: TextInput,
+    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    clipboard: String,
 }
 
 impl WeatherApp {
@@ -1009,6 +1049,11 @@ impl WeatherApp {
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             settings_error: None,
+            // Off: nothing is sent anywhere until the user turns forecasts
+            // on (design-decisions §1236).
+            source: source::Source::default(),
+            search: TextInput::new(),
+            clipboard: String::new(),
         }
     }
 
@@ -1027,6 +1072,9 @@ impl WeatherApp {
         app.daily = sample_daily_forecast();
         app.alerts = sample_alerts();
         app.locations = default_locations();
+        // Weather shown means forecasts are on. The fetcher is still the
+        // tests' own, which reaches nothing.
+        app.source.on = true;
         app
     }
 
@@ -1045,10 +1093,41 @@ impl WeatherApp {
         }
     }
 
-    /// Add a new location.
+    /// Add a location by name, at no particular place: for the tests of the
+    /// list itself. A place the user adds comes from a search, with where it
+    /// is ([`Self::add_place`]).
+    #[cfg(test)]
     pub fn add_location(&mut self, name: String) {
         let is_default = self.locations.is_empty();
-        self.locations.push(Location { name, is_default });
+        self.locations.push(Location {
+            name,
+            is_default,
+            latitude: 0.0,
+            longitude: 0.0,
+        });
+    }
+
+    /// Remove place `index` from the window's list, keep the list, and show
+    /// the place that takes its turn -- asking for its weather when that is a
+    /// different place from the one shown.
+    pub fn remove_place(&mut self, index: usize) -> bool {
+        let shown_before = self
+            .locations
+            .get(self.active_location_idx)
+            .map(|l| (l.latitude, l.longitude));
+        if !self.remove_location(index) {
+            return false;
+        }
+        let shown_after = self
+            .locations
+            .get(self.active_location_idx)
+            .map(|l| (l.latitude, l.longitude));
+        if shown_after != shown_before {
+            self.forget_weather();
+            self.ask_forecast();
+        }
+        self.store_places();
+        true
     }
 
     /// Remove a location by index. Returns true if removed.
@@ -1060,8 +1139,14 @@ impl WeatherApp {
         };
         let was_default = loc.is_default;
         self.locations.remove(idx);
-        // If we removed the active location, clamp the index.
-        if self.active_location_idx >= self.locations.len() {
+        if idx < self.active_location_idx {
+            // A place above the one shown went: the one shown moved up a
+            // row, and is still the one shown. Left as it was, the index
+            // named the place below it.
+            self.active_location_idx = self.active_location_idx.saturating_sub(1);
+        } else if self.active_location_idx >= self.locations.len() {
+            // The one shown went, and it was the last: the new last is shown.
+            // Otherwise the place after it took its row, and is shown.
             self.active_location_idx = self.locations.len().saturating_sub(1);
         }
         // If we removed the default, promote the first location
@@ -1172,7 +1257,24 @@ impl WeatherApp {
             // window follows. Read at startup only, it showed the old unit
             // until it was opened again.
             Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
-                if self.reread_units() {
+                let units = self.reread_units();
+                let places = self.reread_places();
+                if units || places {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // An answer the waker's wake did not bring in, and the half-hourly
+            // refresh of the forecast shown -- or the retry of one that failed.
+            Event::Tick { .. } => {
+                let mut changed = self.pump();
+                if self.refresh_due(std::time::Instant::now()) {
+                    self.ask_forecast();
+                    // What the window says changes: it is asking.
+                    changed = true;
+                }
+                if changed {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1180,6 +1282,44 @@ impl WeatherApp {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Read the forecast switch and the places again after the desktop said
+    /// `weather.yaml` changed -- turned on, a place added or removed, in
+    /// another window. Whether anything changed. Turned off there, this
+    /// window stops showing what it fetched; turned on there, or its place
+    /// changed, this window asks for the forecast of the place it now shows.
+    fn reread_places(&mut self) -> bool {
+        // A place as the file holds it. `set_f64` writes the shortest
+        // spelling that reads back as the same number, so a place this
+        // window wrote compares equal, bit for bit, when it comes back.
+        let spot = |l: &Location| (l.name.clone(), l.latitude.to_bits(), l.longitude.to_bits());
+        let was_on = self.source.on;
+        let before: Vec<_> = self.locations.iter().map(spot).collect();
+        let shown_before = before.get(self.active_location_idx).cloned();
+        self.load_places(&settingsfile::load(CONFIG_NAME));
+        let after: Vec<_> = self.locations.iter().map(spot).collect();
+        // The place this window shows stays shown while the list still has
+        // it. `load_places` shows the file's default -- the place a window
+        // opens on -- and the watcher announces every write, this window's
+        // own among them: without this, adding a place, or going to another
+        // and changing a unit, came straight back as a jump to the default.
+        if let Some(i) = shown_before
+            .as_ref()
+            .and_then(|shown| after.iter().position(|a| a == shown))
+        {
+            self.active_location_idx = i;
+        }
+        let shown_after = after.get(self.active_location_idx).cloned();
+        if was_on && !self.source.on {
+            // Off in another window: the same as off here, without writing
+            // the file back.
+            self.stop_fetching();
+        } else if self.source.on && (!was_on || shown_after != shown_before) {
+            self.forget_weather();
+            self.ask_forecast();
+        }
+        was_on != self.source.on || before != after
     }
 
     /// Apply a key press.
@@ -1191,6 +1331,35 @@ impl WeatherApp {
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        // The place-name search on the Locations tab, while forecasts are on,
+        // has the keys a text box has -- Ctrl+A, C, X and V among them, and
+        // what AltGr types -- so it comes before the plain-keys rule below.
+        // Enter searches; Escape empties it. The unit keys are letters, so
+        // they type here and change units on the other tabs.
+        if self.active_view == ActiveView::Locations && self.source.on && !self.show_help {
+            if key.key == Key::Enter && textline::is_plain(key.modifiers) {
+                let name = self.search.text().to_owned();
+                self.search_places(&name);
+                return EventResult::Consumed;
+            }
+            if key.key == Key::Escape && !self.search.text().is_empty() {
+                self.search.set_text("");
+                return EventResult::Consumed;
+            }
+            let edit = textline::apply_key(
+                &mut self.search,
+                key,
+                SEARCH_CAPACITY,
+                &self.clipboard,
+                SEARCH_FONT,
+            );
+            if let Some(copied) = edit.copied {
+                self.clipboard = copied;
+            }
+            if edit.handled {
+                return EventResult::Consumed;
+            }
         }
         // Every binding is on a key, taken plain -- nothing held but Shift. A
         // chord with Ctrl, Alt or the Windows key is the window's or the
@@ -1263,6 +1432,11 @@ impl WeatherApp {
                 self.change_setting(Setting::Time);
                 EventResult::Consumed
             }
+            // Ask for the forecast again now, rather than at the half hour.
+            Key::R if self.source.on && !self.locations.is_empty() => {
+                self.ask_forecast();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1322,7 +1496,7 @@ impl WeatherApp {
         if next >= self.locations.len() || next == self.active_location_idx {
             return EventResult::Ignored;
         }
-        self.set_active_location(next);
+        self.show_location(next);
         EventResult::Consumed
     }
 
@@ -1392,13 +1566,23 @@ impl WeatherApp {
             self.render_settings_view(cmds, title_y);
             return;
         }
+        // Where places are searched for and chosen, which is how a forecast
+        // comes: shown whether or not one has.
+        if self.active_view == ActiveView::Locations {
+            self.render_locations_view(cmds, title_y);
+            return;
+        }
+        if !self.source.on {
+            self.render_forecasts_off(cmds, title_y);
+            return;
+        }
 
-        // Nothing has been fetched, so there is no view to draw. Every panel
+        // Nothing has come yet, so there is no view to draw. Every panel
         // below reports a reading, and a panel with no reading to report
         // either shows a default -- 0 degrees, Clear -- or an empty space, and
         // both are read as observations.
         let Some(current) = self.current.clone() else {
-            self.render_cannot_fetch(cmds, title_y);
+            self.render_no_forecast_yet(cmds, title_y);
             return;
         };
 
@@ -1411,34 +1595,201 @@ impl WeatherApp {
             ActiveView::Locations => self.render_locations_view(cmds, title_y),
             ActiveView::SettingsView => self.render_settings_view(cmds, title_y),
         }
+        self.render_source_line(cmds);
     }
 
-    /// Render alert banner at the top. Returns the Y position after the banner.
-    /// Say, in the window, that no weather has been fetched.
-    fn render_cannot_fetch(&self, cmds: &mut Frame<Target>, y: f32) {
-        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+    /// `lines`, each wrapped to the window, from `y` down; the first larger
+    /// and in `first_colour`. Returns the y below the last.
+    fn paragraphs(
+        &self,
+        cmds: &mut Frame<Target>,
+        y: f32,
+        lines: &[&str],
+        first_colour: Color,
+    ) -> f32 {
+        let x = 16.0;
+        let width = (self.width - x * 2.0).max(0.0);
+        let mut cy = y;
+        for (i, line) in lines.iter().enumerate() {
+            let (size, weight, colour) = if i == 0 {
+                (15.0, FontWeightHint::Bold, first_colour)
+            } else {
+                (12.0, FontWeightHint::Regular, self.palette.subtext0)
+            };
+            for piece in text::wrap(line, width, size, weight) {
+                cmds.push(RenderCommand::Text {
+                    x,
+                    y: cy,
+                    text: piece,
+                    color: colour,
+                    font_size: size,
+                    font_weight: weight,
+                    max_width: Some(width),
+                    overflow: TextOverflow::Clip,
+                });
+                cy += text::line_height(size, weight);
+            }
+            cy += 6.0;
+        }
+        cy
+    }
+
+    /// A button: `label` in a rounded box at (`x`, `y`), recorded as `target`.
+    /// Returns its right edge.
+    fn button(&self, cmds: &mut Frame<Target>, x: f32, y: f32, label: &str, target: Target) -> f32 {
+        let w = text::measure(label, 13.0, FontWeightHint::Bold) + 28.0;
+        let rect = Rect::new(x, y, w, 30.0);
+        self.palette.push_surface(
+            cmds,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            8.0,
+            if self.hover == Some(target) {
+                Surface::Selected
+            } else {
+                Surface::Card
+            },
+        );
+        cmds.push(RenderCommand::Text {
+            x: rect.x + 14.0,
+            y: rect.y + (rect.h - text::line_height(13.0, FontWeightHint::Bold)) / 2.0,
+            text: label.to_string(),
+            color: self.palette.text,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        cmds.hit(target, rect);
+        rect.right()
+    }
+
+    /// While forecasts are off: what turning them on sends, and the button
+    /// that does it.
+    fn render_forecasts_off(&self, cmds: &mut Frame<Target>, y: f32) {
+        let below = self.paragraphs(
+            cmds,
+            y + 16.0,
+            &FORECASTS_OFF_LINES,
+            self.palette.ink(self.palette.yellow),
+        );
+        self.button(cmds, 16.0, below + 6.0, "Turn on forecasts", Target::TurnOn);
+    }
+
+    /// Forecasts on, and no forecast shown: no place chosen yet, one being
+    /// asked for, or why the last request failed.
+    fn render_no_forecast_yet(&self, cmds: &mut Frame<Target>, y: f32) {
+        let name = self
+            .locations
+            .get(self.active_location_idx)
+            .map(|l| l.name.as_str());
+        let Some(name) = name else {
+            let below = self.paragraphs(
+                cmds,
+                y + 16.0,
+                &[
+                    "No place chosen.",
+                    "Search for a place on the Locations tab and choose it; its weather is shown here.",
+                ],
+                self.palette.text,
+            );
+            self.button(
+                cmds,
+                16.0,
+                below + 6.0,
+                "Choose a place",
+                Target::Tab(ActiveView::Locations),
+            );
+            return;
+        };
+        if self.source.forecast_asked().is_some() {
+            let asking = format!("Asking Open-Meteo for the weather at {name}\u{2026}");
+            let lines: [&str; 1] = [&asking];
+            self.paragraphs(cmds, y + 16.0, &lines, self.palette.text);
+            return;
+        }
+        // Why there is none, and what happens next; or, with no reason
+        // known, a way to ask. Nothing out and nothing failed is not a state
+        // the window gets into, but a panel that said "Asking" over a
+        // request nobody made would wait for ever.
+        let again = format!(
+            "It is asked for again in {} minutes, or now with Try again.",
+            source::RETRY.as_secs() / 60
+        );
+        let (lines, colour) = match &self.source.error {
+            Some(error) => (
+                vec!["No forecast.", error.as_str(), again.as_str()],
+                self.palette.ink(self.palette.red),
+            ),
+            None => (vec!["No forecast yet."], self.palette.text),
+        };
+        let below = self.paragraphs(cmds, y + 16.0, &lines, colour);
+        self.button(cmds, 16.0, below + 6.0, "Try again", Target::Retry);
+    }
+
+    /// Along the bottom while a forecast is shown: whose data it is -- on
+    /// every frame that shows it, which its licence asks for -- when it is
+    /// for, and what is happening to it: being asked for again, or why a
+    /// newer one could not be had, on a line of its own above.
+    fn render_source_line(&self, cmds: &mut Frame<Target>) {
+        let when = self
+            .source
+            .observed
+            .as_deref()
+            .and_then(openmeteo::hour_minute)
+            .map(|(h, m)| format!(" \u{00b7} for {h:02}:{m:02} there"))
+            .unwrap_or_default();
+        let next = if self.source.forecast_asked().is_some() {
+            " \u{00b7} asking again\u{2026}"
+        } else {
+            " \u{00b7} R asks again"
+        };
+        let mut lines = vec![(
+            format!("{}{when}{next}", openmeteo::ATTRIBUTION),
+            self.palette.subtext0,
+        )];
+        if let Some(error) = &self.source.error {
+            lines.insert(
+                0,
+                (
+                    format!(
+                        "{error} \u{2014} this is the forecast from before; asked for again in {} minutes",
+                        source::RETRY.as_secs() / 60
+                    ),
+                    self.palette.ink(self.palette.red),
+                ),
+            );
+        }
+        #[expect(clippy::cast_precision_loss, reason = "one or two lines")]
+        let mut y = (self.height - 22.0 * lines.len() as f32).max(0.0);
+        // Over whatever a long view drew down there, so the lines can be read.
+        let strip = (y - 6.0).max(0.0);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: strip,
+            width: self.width,
+            height: (self.height - strip).max(0.0),
+            color: self.palette.base,
+            corner_radii: CornerRadii::ZERO,
+        });
+        for (text, color) in lines {
             cmds.push(RenderCommand::Text {
                 x: 16.0,
-                #[expect(clippy::cast_precision_loss, reason = "four lines; index is 0..4")]
-                y: y + 16.0 + i as f32 * 20.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 15.0 } else { 12.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(self.width - 32.0),
+                y,
+                text,
+                color,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.width - 32.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+            y += 22.0;
         }
     }
 
+    /// Render alert banner at the top. Returns the Y position after the banner.
     fn render_alerts_banner(&self, cmds: &mut Frame<Target>, y: f32) -> f32 {
         if self.alerts.is_empty() {
             return y;
@@ -2216,7 +2567,6 @@ impl WeatherApp {
     ) -> f32 {
         let card_w = self.width - x * 2.0;
         let card_h = 80.0;
-        let aq = AirQuality::from_aqi(current.aqi);
 
         // Card
         self.palette
@@ -2234,11 +2584,27 @@ impl WeatherApp {
             overflow: TextOverflow::Clip,
         });
 
+        // An index nobody gave is not drawn as one: 0 would read as "Good".
+        let Some(aqi) = current.aqi else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 38.0,
+                text: "Not known -- the air-quality service did not answer".to_string(),
+                font_size: 13.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((card_w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return y + card_h;
+        };
+        let aq = AirQuality::from_aqi(aqi);
+
         // AQI number
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 34.0,
-            text: format!("AQI: {}", current.aqi),
+            text: format!("AQI: {aqi}"),
             font_size: 24.0,
             color: self.palette.ink(aq.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
@@ -2275,7 +2641,7 @@ impl WeatherApp {
         });
 
         // Filled portion (AQI 0-500 scale)
-        let fill_frac = (current.aqi as f32 / 500.0).min(1.0);
+        let fill_frac = (f32::from(aqi) / 500.0).min(1.0);
         let fill_w = bar_w * fill_frac;
         if fill_w > 0.0 {
             cmds.push(RenderCommand::FillRect {
@@ -2513,17 +2879,19 @@ impl WeatherApp {
         });
         cy += 36.0;
 
+        // Open-Meteo gives no warnings, so an empty list here is not "none in
+        // force", and "No active alerts" -- what this said -- would have read
+        // as exactly that. Said as it is, with where warnings do come from.
         if self.alerts.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: padding,
-                y: cy,
-                text: "No active alerts.".to_string(),
-                font_size: 14.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.paragraphs(
+                cmds,
+                cy,
+                &[
+                    "This app gives no severe-weather warnings.",
+                    "Open-Meteo, where its forecasts come from, has none to give, so nothing here means none are in force. Your national weather service gives them.",
+                ],
+                self.palette.ink(self.palette.yellow),
+            );
             return;
         }
 
@@ -2613,11 +2981,12 @@ impl WeatherApp {
     fn render_locations_view(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
+        let width = (self.width - padding * 2.0).max(0.0);
 
         cmds.push(RenderCommand::Text {
             x: padding,
             y: cy,
-            text: "Saved Locations".to_string(),
+            text: "Places".to_string(),
             font_size: 18.0,
             color: self.palette.text,
             font_weight: FontWeightHint::Bold,
@@ -2625,6 +2994,29 @@ impl WeatherApp {
             overflow: TextOverflow::Clip,
         });
         cy += 36.0;
+
+        if self.source.on {
+            cy = self.render_place_search(cmds, padding, cy, width);
+        } else {
+            // Searching asks Open-Meteo too, so it waits for forecasts.
+            let below = self.paragraphs(
+                cmds,
+                cy,
+                &[
+                    "Forecasts are off.",
+                    "Searching for a place sends its name to Open-Meteo, so it waits until forecasts are on.",
+                ],
+                self.palette.ink(self.palette.yellow),
+            );
+            self.button(
+                cmds,
+                padding,
+                below + 2.0,
+                "Turn on forecasts",
+                Target::TurnOn,
+            );
+            cy = below + 48.0;
+        }
 
         for (i, loc) in self.locations.iter().enumerate() {
             let row_h = 48.0;
@@ -2635,7 +3027,7 @@ impl WeatherApp {
                 cmds,
                 padding,
                 cy,
-                self.width - padding * 2.0,
+                width,
                 row_h,
                 8.0,
                 if is_active || self.hover == Some(Target::Location(i)) {
@@ -2644,9 +3036,11 @@ impl WeatherApp {
                     Surface::Card
                 },
             );
+            let remove_w = text::measure("Remove", 12.0, FontWeightHint::Bold) + 20.0;
+            let remove = Rect::new(padding + width - remove_w - 10.0, cy + 10.0, remove_w, 28.0);
             cmds.hit(
                 Target::Location(i),
-                Rect::new(padding, cy, self.width - padding * 2.0, row_h),
+                Rect::new(padding, cy, (width - remove_w - 20.0).max(0.0), row_h),
             );
 
             // Active indicator
@@ -2678,7 +3072,7 @@ impl WeatherApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(self.width - padding * 2.0 - 100.0),
+                max_width: Some((width - remove_w - 50.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
@@ -2709,8 +3103,170 @@ impl WeatherApp {
                 });
             }
 
+            // Take it out of the list.
+            self.palette.push_surface(
+                cmds,
+                remove.x,
+                remove.y,
+                remove.w,
+                remove.h,
+                6.0,
+                if self.hover == Some(Target::RemovePlace(i)) {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            cmds.push(RenderCommand::Text {
+                x: remove.x + 10.0,
+                y: remove.y + (remove.h - text::line_height(12.0, FontWeightHint::Bold)) / 2.0,
+                text: "Remove".to_string(),
+                font_size: 12.0,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            cmds.hit(Target::RemovePlace(i), remove);
+
             cy += row_h + 8.0;
         }
+    }
+
+    /// The place-name search: the box, its button, and what it found -- or
+    /// that it is asking, found nothing, or failed. Returns the y below.
+    fn render_place_search(&self, cmds: &mut Frame<Target>, x: f32, y: f32, width: f32) -> f32 {
+        let go_w = text::measure("Search", 13.0, FontWeightHint::Bold) + 28.0;
+        let field = Rect::new(x, y, (width - go_w - 8.0).max(0.0), 32.0);
+        guitk::field::draw(
+            cmds,
+            &self.palette,
+            field,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::SearchBox),
+                focused: true,
+                disabled: false,
+                invalid: false,
+            },
+            guitk::style::FOCUS_RING_WIDTH,
+        );
+        cmds.hit(Target::SearchBox, field);
+        let area = Rect::new(
+            field.x + 10.0,
+            field.y + 6.0,
+            (field.w - 20.0).max(0.0),
+            20.0,
+        );
+        let mut typed = RenderTree::new();
+        if self.search.text().is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: area.x,
+                y: area.y,
+                text: "Type a place's name, then Enter\u{2026}".to_string(),
+                color: self.palette.subtext0,
+                font_size: SEARCH_FONT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(area.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            textedit::push_caret(
+                &mut typed,
+                area.x,
+                area.y,
+                area.h,
+                self.palette.text,
+                textedit::CARET_WIDTH,
+            );
+        } else {
+            textedit::draw(
+                &mut typed,
+                &textedit::SingleLine {
+                    text: self.search.text(),
+                    cursor: self.search.cursor(),
+                    selection_anchor: self.search.selection_anchor(),
+                    focused: true,
+                    x: area.x,
+                    y: area.y,
+                    width: area.w,
+                    line_height: area.h,
+                    font_size: SEARCH_FONT,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        for command in typed.commands {
+            cmds.push(command);
+        }
+        self.button(
+            cmds,
+            field.right() + 8.0,
+            y + 1.0,
+            "Search",
+            Target::SearchGo,
+        );
+        let mut cy = y + 44.0;
+
+        // What the search found, or why it shows nothing.
+        let note = if let Some(name) = self.source.search_asked() {
+            Some(format!(
+                "Asking Open-Meteo for places called \u{201c}{name}\u{201d}\u{2026}"
+            ))
+        } else if let Some(error) = &self.source.search_error {
+            Some(error.clone())
+        } else if let (Some(name), true) = (&self.source.searched, self.source.found.is_empty()) {
+            Some(format!("No place called \u{201c}{name}\u{201d}"))
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            cmds.push(RenderCommand::Text {
+                x,
+                y: cy,
+                text: note,
+                color: self.palette.subtext0,
+                font_size: 13.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cy += 28.0;
+        }
+        for (i, place) in self.source.found.iter().enumerate() {
+            let row = Rect::new(x, cy, width, 32.0);
+            self.palette.push_surface(
+                cmds,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
+                6.0,
+                if self.hover == Some(Target::Found(i)) {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            cmds.push(RenderCommand::Text {
+                x: row.x + 12.0,
+                y: row.y + 8.0,
+                text: format!("+  {}", place.label()),
+                color: self.palette.text,
+                font_size: 13.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((row.w - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.hit(Target::Found(i), row);
+            cy += 38.0;
+        }
+        if !self.source.found.is_empty() {
+            cy += 8.0;
+        }
+        cy
     }
 
     /// Render settings view.
@@ -2737,6 +3293,20 @@ impl WeatherApp {
         // proper fix says the control should be absent until it drives
         // something).
         let settings_items: Vec<(Setting, &str, String)> = vec![
+            // First, because it decides whether anything leaves the machine
+            // (design-decisions §1236). Its value says what each answer
+            // means, so a press on it is made knowing what it sends.
+            (
+                Setting::Forecasts,
+                "Forecasts from Open-Meteo",
+                if self.source.on {
+                    "On \u{2014} each place's position goes to open-meteo.com, in plain text"
+                        .to_string()
+                } else {
+                    "Off \u{2014} nothing is sent; on, the places you add go to open-meteo.com"
+                        .to_string()
+                },
+            ),
             (
                 Setting::Temperature,
                 "Temperature Unit",
@@ -2783,7 +3353,11 @@ impl WeatherApp {
                 },
             );
             // What a press does, and the key that does the same.
-            let hint = format!("Click to change  ·  {}", setting.key());
+            let hint = match setting.key() {
+                Some(key) => format!("Click to change  ·  {key}"),
+                None => "Click to change".to_string(),
+            };
+            let hint_w = text::measure(&hint, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::Text {
                 x: text::right_x(&hint, row.right() - 16.0, 12.0, FontWeightHint::Regular),
                 y: cy + 18.0,
@@ -2807,6 +3381,8 @@ impl WeatherApp {
                 overflow: TextOverflow::Clip,
             });
 
+            // Up to the hint, not under it: the forecast row's value is a
+            // sentence, which a narrow window ends with an ellipsis.
             cmds.push(RenderCommand::Text {
                 x: padding + 16.0,
                 y: cy + 28.0,
@@ -2814,8 +3390,8 @@ impl WeatherApp {
                 font_size: 15.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((row.w - 48.0 - hint_w).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += row_h + 8.0;
@@ -2852,14 +3428,28 @@ pub enum Target {
     Setting(Setting),
     /// A saved place: a press makes it the one shown.
     Location(usize),
+    /// The button that takes a saved place out of the list.
+    RemovePlace(usize),
     /// The hourly strip, which the wheel scrolls.
     HourlyStrip,
     HelpCard,
+    /// "Turn on forecasts", on the panel that says what that sends.
+    TurnOn,
+    /// Ask again, after a request failed.
+    Retry,
+    /// The place-name search box on the Locations tab.
+    SearchBox,
+    /// Its Search button.
+    SearchGo,
+    /// A place a search offered: a press adds it and shows its weather.
+    Found(usize),
 }
 
 /// A row of the settings view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
+    /// Whether forecasts are on: whether anything is asked of Open-Meteo.
+    Forecasts,
     Temperature,
     Wind,
     Pressure,
@@ -2867,24 +3457,32 @@ pub enum Setting {
 }
 
 impl Setting {
-    /// The key that changes the same thing.
-    fn key(self) -> &'static str {
+    /// The key that changes the same thing, if one does. Forecasts have
+    /// none: turning them on sends things away, and a stray key should not.
+    fn key(self) -> Option<&'static str> {
         match self {
-            Self::Temperature => "U",
-            Self::Wind => "W",
-            Self::Pressure => "P",
-            Self::Time => "T",
+            Self::Forecasts => None,
+            Self::Temperature => Some("U"),
+            Self::Wind => Some("W"),
+            Self::Pressure => Some("P"),
+            Self::Time => Some("T"),
         }
     }
 }
 
-/// Where the units are kept (`settingsfile`), under `units`.
+/// Where the units, the forecast switch and the places are kept
+/// (`settingsfile`): `weather.yaml`.
 const CONFIG_NAME: &str = "weather";
 
 impl WeatherApp {
     /// Move `setting` to its next value, and keep the choice.
     fn change_setting(&mut self, setting: Setting) {
         match setting {
+            // Kept by `set_forecasts` itself, with the places.
+            Setting::Forecasts => {
+                self.set_forecasts(!self.source.on);
+                return;
+            }
             Setting::Temperature => self.toggle_temp_unit(),
             Setting::Wind => self.cycle_wind_unit(),
             Setting::Pressure => self.cycle_pressure_unit(),
@@ -3051,18 +3649,57 @@ impl WeatherApp {
                 self.change_setting(setting);
                 EventResult::Consumed
             }
+            // The place already shown is shown; asking for it again is Try
+            // again's, or R's.
             Target::Location(i) => {
-                if i == self.active_location_idx || i >= self.locations.len() {
+                if i >= self.locations.len() || i == self.active_location_idx {
                     return EventResult::Ignored;
                 }
-                self.set_active_location(i);
+                self.show_location(i);
                 EventResult::Consumed
+            }
+            Target::RemovePlace(i) => {
+                if self.remove_place(i) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
             Target::HelpCard => {
                 self.show_help = false;
                 EventResult::Consumed
             }
             Target::HourlyStrip => EventResult::Ignored,
+            // The user's own press, on the panel that says what it sends.
+            Target::TurnOn => {
+                self.set_forecasts(true);
+                EventResult::Consumed
+            }
+            Target::Retry => {
+                self.ask_forecast();
+                EventResult::Consumed
+            }
+            // The box has the keys while the tab is up; a press says so by
+            // putting the caret at the end, where typing goes.
+            Target::SearchBox => {
+                let end = self.search.text().len();
+                self.search.set_selection_anchor(None);
+                self.search.set_cursor(text::TextCursor::from(end));
+                EventResult::Consumed
+            }
+            Target::SearchGo => {
+                let name = self.search.text().to_owned();
+                self.search_places(&name);
+                EventResult::Consumed
+            }
+            Target::Found(i) => {
+                let Some(place) = self.source.found.get(i).cloned() else {
+                    return EventResult::Ignored;
+                };
+                self.add_place(&place);
+                self.search.set_text("");
+                EventResult::Consumed
+            }
         }
     }
 }
@@ -3077,7 +3714,23 @@ impl App for WeatherApp {
     }
 
     fn title(&self) -> String {
-        format!("Weather — {}", self.active_location_name())
+        match self.locations.get(self.active_location_idx) {
+            Some(place) => format!("Weather — {}", place.name),
+            None => String::from("Weather"),
+        }
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.source.attach_waker(waker);
+    }
+
+    /// An answer has come.
+    fn on_wake(&mut self) -> Response {
+        if self.pump() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -3091,17 +3744,21 @@ impl App for WeatherApp {
         }
     }
 
-    /// No clock, and that is a statement about the app rather than the trait.
-    ///
-    /// There is no weather source, so there is nothing to refresh: a clock
-    /// here would wake the machine on a schedule to redraw numbers that cannot
-    /// change, which is the cost `known-issues.md` lesson 47 is about. The
-    /// refresh interval the settings once offered -- a field written, clamped
-    /// and tested, and read by nothing -- is gone with its row; when a source
-    /// exists, the interval comes back with it, and this returns it.
-    /// See known-issues.md -> TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH.
+    /// A clock only while there is something to wait for: an answer out (the
+    /// waker brings it, and the clock is the fallback for a wake that is
+    /// missed), or the next time the place shown is asked for again -- half
+    /// an hour after its forecast came, five minutes after a request failed.
+    /// With forecasts off, or nothing asked, no clock at all -- one would wake
+    /// the machine on a schedule to redraw numbers that cannot change
+    /// (`known-issues.md` lesson 47).
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        if self.source.waiting() {
+            return Some(Duration::from_millis(500));
+        }
+        self.next_ask().map(|at| {
+            at.saturating_duration_since(std::time::Instant::now())
+                .max(Duration::from_secs(1))
+        })
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3128,8 +3785,14 @@ impl App for WeatherApp {
 
 fn main() -> ExitCode {
     let mut weather = WeatherApp::new(900.0, 800.0);
-    // The units the user chose last time.
-    weather.load_units(&settingsfile::load(CONFIG_NAME));
+    // The units, the forecast switch and the places the user chose last
+    // time. `new` reads no file, so a test's window starts with forecasts off
+    // whatever the user running the tests has chosen.
+    let settings = settingsfile::load(CONFIG_NAME);
+    weather.load_units(&settings);
+    weather.load_places(&settings);
+    // Turned on in an earlier session: the user's own choice, kept.
+    weather.ask_forecast();
     app::launch("weather", &mut weather)
 }
 
@@ -3196,19 +3859,25 @@ mod tests {
                     // for the view you are already looking at -- pressing `2` on
                     // the hourly page redraws nothing, on purpose. So no single
                     // state can answer all six digits, and the union of these two
-                    // answers every one.
-                    let answered = [ActiveView::Dashboard, ActiveView::HourlyDetail]
-                        .into_iter()
-                        .any(|view| {
-                            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
-                            app.active_view = view;
-                            app.scroll_hourly(40.0);
-                            // Off the first place, so `Up` has somewhere to go
-                            // back to -- stepping past either end is refused, and
-                            // correctly.
-                            app.step_location(1);
-                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
-                        });
+                    // answers every one. Enter is the place search's, so it is
+                    // tried on the places tab -- and only Enter: the search box
+                    // there takes every letter, and would answer for a letter
+                    // whose binding was broken.
+                    let views: &[ActiveView] = if stroke.key == Key::Enter {
+                        &[ActiveView::Locations]
+                    } else {
+                        &[ActiveView::Dashboard, ActiveView::HourlyDetail]
+                    };
+                    let answered = views.iter().copied().any(|view| {
+                        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+                        app.active_view = view;
+                        app.scroll_hourly(40.0);
+                        // Off the first place, so `Up` has somewhere to go
+                        // back to -- stepping past either end is refused, and
+                        // correctly.
+                        app.step_location(1);
+                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
                     assert!(
                         answered,
                         "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
@@ -3531,10 +4200,13 @@ mod tests {
         assert!(app.alerts.is_empty(), "a severe-weather alert was invented");
     }
 
-    /// And the window says so, including about alerts specifically.
+    /// **Forecasts are off, and the window says what turning them on sends**
+    /// -- to whom, what, when, and in the open -- and that there are no
+    /// warnings either way (design-decisions §1236).
     #[test]
-    fn the_window_says_it_cannot_fetch_or_warn() {
+    fn the_window_says_forecasts_are_off_and_what_turning_them_on_sends() {
         let app = WeatherApp::new(900.0, 800.0);
+        assert!(!app.source.on, "forecasts are on in a new window");
         let texts: Vec<String> = app
             .render_commands()
             .iter()
@@ -3543,17 +4215,25 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_FETCH_LINES {
+        // Wrapped to the window, so read as one text.
+        let said = texts.join(" ");
+        for phrase in [
+            "Forecasts are off.",
+            "open-meteo.com",
+            "latitude and longitude",
+            "names you search for",
+            "every half hour",
+            "plain text",
+            "Silence here is not an all-clear",
+        ] {
             assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
+                said.contains(phrase),
+                "the window never said {phrase:?}: {said}"
             );
         }
         assert!(
-            CANNOT_FETCH_LINES
-                .iter()
-                .any(|l| l.contains("Silence here is not an all-clear")),
-            "nothing tells the user the alert channel does not exist",
+            texts.iter().any(|t| t == "Turn on forecasts"),
+            "no way to turn them on"
         );
 
         // And no temperature is drawn. A default `CurrentWeather` would render
@@ -4128,6 +4808,23 @@ mod tests {
         assert!(app.active_location_idx < app.locations.len());
     }
 
+    /// **Removing a place above the one shown leaves it shown.** The index
+    /// stayed put while the list moved up under it, so it named the place
+    /// below, and the window jumped there -- and asked for its weather.
+    #[test]
+    fn removing_a_place_above_the_one_shown_leaves_it_shown() {
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
+        app.set_active_location(1);
+        let shown = app.locations[1].name.clone();
+        assert!(app.remove_location(0));
+        assert_eq!(app.locations[app.active_location_idx].name, shown);
+        // Below it: nothing moves.
+        app.set_active_location(0);
+        let shown = app.locations[0].name.clone();
+        assert!(app.remove_location(1));
+        assert_eq!(app.locations[app.active_location_idx].name, shown);
+    }
+
     #[test]
     fn test_app_reorder_location() {
         let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
@@ -4347,7 +5044,7 @@ mod tests {
         let cmds = app.render_commands();
         let has_no_alerts = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
-                text.contains("No active alerts")
+                text.contains("This app gives no severe-weather warnings")
             } else {
                 false
             }
@@ -4500,7 +5197,7 @@ mod tests {
         let cmds = app.render_commands();
         let has_locations = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
-                text.contains("Saved Locations")
+                text == "Places"
             } else {
                 false
             }
@@ -4839,8 +5536,8 @@ mod tests {
             assert!(shown.contains("Temperature Unit"), "{shown}");
             assert!(shown.contains("Celsius"));
             assert!(
-                !shown.contains(CANNOT_FETCH_LINES[0]),
-                "the settings are hidden behind the cannot-fetch notice"
+                !shown.contains(FORECASTS_OFF_LINES[0]),
+                "the settings are hidden behind the forecasts-off notice"
             );
             probe::click(&mut app, Target::Setting(Setting::Temperature));
             assert_eq!(app.settings.temp_unit, TempUnit::Fahrenheit);
@@ -4851,9 +5548,9 @@ mod tests {
             assert_eq!(app.settings.pressure_unit, PressureUnit::InHg);
             probe::click(&mut app, Target::Setting(Setting::Time));
             assert_eq!(app.settings.time_format, TimeFormat::H12);
-            // The other views still say nothing was fetched.
+            // The other views still say forecasts are off.
             probe::click(&mut app, Target::Tab(ActiveView::Dashboard));
-            assert!(drawn(&app).contains(CANNOT_FETCH_LINES[0]));
+            assert!(drawn(&app).contains(FORECASTS_OFF_LINES[0]));
         });
     }
 
@@ -5001,19 +5698,22 @@ mod tests {
 
     #[test]
     fn a_place_is_chosen_by_pressing_it() {
-        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
-        app.active_view = ActiveView::Locations;
-        assert_eq!(
-            probe::click(&mut app, Target::Location(2)),
-            EventResult::Consumed
-        );
-        assert_eq!(app.active_location_idx, 2);
-        assert!(oswindow::app::App::title(&app).contains(&app.locations[2].name));
-        assert_eq!(
-            probe::click(&mut app, Target::Location(2)),
-            EventResult::Ignored,
-            "the place already shown"
-        );
+        // Choosing a place keeps the choice, in a scratch copy of the settings.
+        settingsfile::testing::with_scratch_config("wx_choose", |_| {
+            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+            app.active_view = ActiveView::Locations;
+            assert_eq!(
+                probe::click(&mut app, Target::Location(2)),
+                EventResult::Consumed
+            );
+            assert_eq!(app.active_location_idx, 2);
+            assert!(oswindow::app::App::title(&app).contains(&app.locations[2].name));
+            assert_eq!(
+                probe::click(&mut app, Target::Location(2)),
+                EventResult::Ignored,
+                "the place already shown"
+            );
+        });
     }
 
     #[test]
@@ -5097,5 +5797,641 @@ mod tests {
         for kind in ["Tab", "Setting", "Location", "HourlyStrip", "HelpCard"] {
             assert!(kinds.contains(kind), "no state draws a {kind}: {kinds:?}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Forecasts from Open-Meteo, off until the user turns them on
+    // (design-decisions §1236). The requests go to a stand-in that answers
+    // with the service's own replies (`tests/data/`); no test reaches the
+    // network, and the default stand-in refuses everything.
+    // ------------------------------------------------------------------
+
+    const SEARCH_REPLY: &str = include_str!("../tests/data/openmeteo-search-berlin.json");
+    const FORECAST_REPLY: &str = include_str!("../tests/data/openmeteo-forecast-berlin.json");
+    const AIR_REPLY: &str = include_str!("../tests/data/openmeteo-air-berlin.json");
+
+    /// Open-Meteo as it answered on 2026-10-10.
+    fn open_meteo(host: &str, _path: &str) -> Result<String, String> {
+        match host {
+            openmeteo::SEARCH_HOST => Ok(SEARCH_REPLY.to_owned()),
+            openmeteo::FORECAST_HOST => Ok(FORECAST_REPLY.to_owned()),
+            openmeteo::AIR_HOST => Ok(AIR_REPLY.to_owned()),
+            other => Err(format!("{other} was never asked")),
+        }
+    }
+
+    /// Open-Meteo with its air-quality service down.
+    fn no_air(host: &str, path: &str) -> Result<String, String> {
+        if host == openmeteo::AIR_HOST {
+            Err(String::from(
+                "air-quality-api.open-meteo.com could not be reached",
+            ))
+        } else {
+            open_meteo(host, path)
+        }
+    }
+
+    /// Open-Meteo with its geocoding service down.
+    fn no_search(host: &str, path: &str) -> Result<String, String> {
+        if host == openmeteo::SEARCH_HOST {
+            Err(String::from("geocoding-api.open-meteo.com timed out"))
+        } else {
+            open_meteo(host, path)
+        }
+    }
+
+    /// Nobody answering.
+    fn unreachable(host: &str, _path: &str) -> Result<String, String> {
+        Err(format!("{host} could not be reached: connection refused"))
+    }
+
+    /// Open-Meteo, slowly: each forecast answered after a fifth of a second,
+    /// so that a test can do something while one is out.
+    fn slow_forecast(host: &str, path: &str) -> Result<String, String> {
+        if host == openmeteo::FORECAST_HOST {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        open_meteo(host, path)
+    }
+
+    /// Berlin, as a search would have offered it.
+    fn berlin() -> openmeteo::Place {
+        openmeteo::Place {
+            name: String::from("Berlin"),
+            region: String::from("State of Berlin"),
+            country: String::from("Germany"),
+            latitude: 52.524_37,
+            longitude: 13.410_53,
+        }
+    }
+
+    /// Paris, likewise.
+    fn paris() -> openmeteo::Place {
+        openmeteo::Place {
+            name: String::from("Paris"),
+            region: String::from("\u{ce}le-de-France"),
+            country: String::from("France"),
+            latitude: 48.853_41,
+            longitude: 2.3488,
+        }
+    }
+
+    /// The desktop saying `weather.yaml` changed.
+    fn weather_yaml_changed() -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(b"weather").expect("a settings name"),
+            ),
+        }
+    }
+
+    /// A key as a keyboard sends it: the key, and the text it types.
+    fn letter(key: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Wait until no request is out, taking in each answer as it comes.
+    fn settle(app: &mut WeatherApp) {
+        for _ in 0..500 {
+            app.pump();
+            if !app.source.waiting() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("a request was never answered");
+    }
+
+    /// Whether the forecast request out is for the place at `latitude`.
+    fn asking_at(app: &WeatherApp, latitude: f64) -> bool {
+        app.source
+            .forecast_asked()
+            .is_some_and(|asked| (asked.latitude - latitude).abs() < 1e-9)
+    }
+
+    /// A window with forecasts on, Berlin its one place, answered by `fetcher`,
+    /// its forecast taken in.
+    fn showing_berlin(fetcher: source::Fetcher) -> WeatherApp {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.source.fetcher = fetcher;
+        app.source.on = true;
+        app.add_place(&berlin());
+        settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn nothing_is_sent_until_forecasts_are_turned_on() {
+        settingsfile::testing::with_scratch_config("wx_off", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.source.fetcher = open_meteo;
+            app.locations.push(Location {
+                name: String::from("Berlin"),
+                is_default: true,
+                latitude: 52.524_37,
+                longitude: 13.410_53,
+            });
+            app.ask_forecast();
+            app.search_places("Berlin");
+            app.handle_event(&letter(Key::R, "r"));
+            assert!(
+                !app.source.waiting(),
+                "a request went out with forecasts off"
+            );
+            // Typing on the Locations tab goes nowhere while they are off:
+            // the unit keys keep their letters.
+            app.active_view = ActiveView::Locations;
+            app.handle_event(&letter(Key::U, "u"));
+            assert_eq!(app.settings.temp_unit, TempUnit::Fahrenheit);
+            assert_eq!(app.search.text(), "");
+            assert_eq!(
+                oswindow::app::App::tick_interval(&app),
+                None,
+                "a clock with nothing to wait for"
+            );
+        });
+    }
+
+    #[test]
+    fn turning_forecasts_on_asks_for_the_place_shown_and_keeps_the_choice() {
+        settingsfile::testing::with_scratch_config("wx_turn_on", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.source.fetcher = open_meteo;
+            app.locations.push(Location {
+                name: String::from("Berlin, State of Berlin, Germany"),
+                is_default: true,
+                latitude: 52.524_37,
+                longitude: 13.410_53,
+            });
+            assert_eq!(
+                probe::click(&mut app, Target::TurnOn),
+                EventResult::Consumed
+            );
+            assert!(app.source.on);
+            assert!(
+                asking_at(&app, 52.524_37),
+                "turning them on did not ask for the place shown: {:?}",
+                app.source.forecast_asked()
+            );
+            assert_eq!(
+                oswindow::app::App::tick_interval(&app),
+                Some(Duration::from_millis(500)),
+                "no clock to fall back on while the answer is out"
+            );
+            assert!(drawn(&app).contains("Asking Open-Meteo for the weather at Berlin"));
+            settle(&mut app);
+
+            let now = app.current.clone().expect("the forecast was not taken in");
+            assert!((now.temp_c - 11.9).abs() < 1e-4);
+            assert_eq!(now.aqi, Some(23));
+            assert_eq!(app.daily.len(), 7);
+            let shown = drawn(&app);
+            assert!(
+                shown.contains(openmeteo::ATTRIBUTION),
+                "the data is not credited: {shown}"
+            );
+            assert!(shown.contains("for 03:00 there"), "{shown}");
+            assert_eq!(
+                oswindow::app::App::title(&app),
+                "Weather \u{2014} Berlin, State of Berlin, Germany"
+            );
+            // Kept: the next window starts with them on.
+            let mut next = WeatherApp::new(900.0, 800.0);
+            next.load_places(&settingsfile::load(CONFIG_NAME));
+            assert!(next.source.on);
+            assert_eq!(next.locations.len(), 1);
+            assert!((next.locations[0].longitude - 13.410_53).abs() < 1e-9);
+        });
+    }
+
+    #[test]
+    fn a_place_is_found_by_name_and_added_with_where_it_is() {
+        settingsfile::testing::with_scratch_config("wx_search", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.source.fetcher = open_meteo;
+            app.source.on = true;
+            app.active_view = ActiveView::Locations;
+            for ch in "Berlin".chars() {
+                app.handle_event(&Event::Key(probe::typing(&ch.to_string())));
+            }
+            assert_eq!(app.search.text(), "Berlin");
+            app.handle_event(&press(Key::Enter));
+            assert_eq!(app.source.search_asked(), Some("Berlin"));
+            settle(&mut app);
+            assert_eq!(app.source.found.len(), 3);
+            assert!(drawn(&app).contains("+  Berlin, State of Berlin, Germany"));
+
+            assert_eq!(
+                probe::click(&mut app, Target::Found(0)),
+                EventResult::Consumed
+            );
+            assert_eq!(app.locations.len(), 1);
+            assert_eq!(app.locations[0].name, "Berlin, State of Berlin, Germany");
+            assert!(app.locations[0].is_default);
+            assert!((app.locations[0].latitude - 52.524_37).abs() < 1e-9);
+            assert!(app.source.found.is_empty(), "the offers stayed up");
+            assert_eq!(app.search.text(), "", "the search was left in the box");
+            assert!(asking_at(&app, 52.524_37));
+            settle(&mut app);
+            assert!(app.current.is_some());
+
+            // The same place again is shown, not added twice.
+            app.add_place(&berlin());
+            assert_eq!(app.locations.len(), 1);
+        });
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_says_so() {
+        #[expect(clippy::unnecessary_wraps, reason = "a Fetcher's shape")]
+        fn nothing(_host: &str, _path: &str) -> Result<String, String> {
+            Ok(String::from(r#"{"generationtime_ms":0.2}"#))
+        }
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.source.fetcher = nothing;
+        app.source.on = true;
+        app.active_view = ActiveView::Locations;
+        app.search_places("Nowhereville");
+        settle(&mut app);
+        assert!(drawn(&app).contains("No place called \u{201c}Nowhereville\u{201d}"));
+    }
+
+    /// **A search does not cost the forecast its answer.** One slot held
+    /// both, so a search started while the forecast was out replaced it:
+    /// the forecast's answer was dropped, and nothing asked for it again.
+    #[test]
+    fn a_search_while_the_forecast_is_out_leaves_it_out() {
+        settingsfile::testing::with_scratch_config("wx_both_out", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.source.fetcher = slow_forecast;
+            app.source.on = true;
+            app.add_place(&berlin());
+            assert!(asking_at(&app, 52.524_37));
+            app.search_places("Paris");
+            assert!(
+                asking_at(&app, 52.524_37),
+                "the search took the forecast's place"
+            );
+            assert_eq!(app.source.search_asked(), Some("Paris"));
+            settle(&mut app);
+            assert!(app.current.is_some(), "the forecast's answer was dropped");
+            assert_eq!(app.source.found.len(), 3);
+        });
+    }
+
+    /// **A search that failed says nothing about the forecast.** One error
+    /// held both, so the dashboard called a current forecast "from before"
+    /// because a search had timed out.
+    #[test]
+    fn a_failed_search_is_said_under_the_box_and_not_over_the_forecast() {
+        settingsfile::testing::with_scratch_config("wx_search_fails", |_| {
+            let mut app = showing_berlin(no_search);
+            app.search_places("Paris");
+            settle(&mut app);
+            assert!(app.source.error.is_none(), "the forecast was marked stale");
+            assert!(!drawn(&app).contains("from before"));
+            app.active_view = ActiveView::Locations;
+            assert!(drawn(&app).contains("Could not search for \u{201c}Paris\u{201d}"));
+        });
+    }
+
+    #[test]
+    fn a_failed_forecast_says_why_and_try_again_asks_again() {
+        settingsfile::testing::with_scratch_config("wx_fail", |_| {
+            let mut app = showing_berlin(unreachable);
+            assert!(app.current.is_none());
+            let shown = drawn(&app);
+            assert!(shown.contains("connection refused"), "{shown}");
+            assert!(shown.contains("Try again"));
+            app.source.fetcher = open_meteo;
+            assert_eq!(probe::click(&mut app, Target::Retry), EventResult::Consumed);
+            settle(&mut app);
+            assert!(app.current.is_some(), "trying again did not get it");
+            assert!(app.source.error.is_none());
+        });
+    }
+
+    /// **A failed request is tried again in five minutes, not every second.**
+    /// The refresh was due from the time the last forecast *arrived*, which a
+    /// failure does not move: once due, it stayed due, and the one-second
+    /// clock asked a server that was down once a second.
+    #[test]
+    fn a_failed_refresh_is_tried_again_after_a_while_not_at_once() {
+        settingsfile::testing::with_scratch_config("wx_retry", |_| {
+            let mut app = showing_berlin(open_meteo);
+            app.source.fetched_at =
+                std::time::Instant::now().checked_sub(source::REFRESH + Duration::from_secs(1));
+            app.source.fetcher = unreachable;
+            assert_eq!(
+                app.handle_event(&Event::Tick { elapsed_ms: 1 }),
+                EventResult::Consumed,
+                "the line along the bottom was not redrawn to say it is asking"
+            );
+            assert!(drawn(&app).contains("asking again"));
+            settle(&mut app);
+            assert!(app.source.error.is_some());
+            assert!(
+                app.current.is_some(),
+                "the forecast from before went with the failure"
+            );
+            let shown = drawn(&app);
+            assert!(
+                shown.contains("this is the forecast from before"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains(openmeteo::ATTRIBUTION),
+                "the error took the credit's place"
+            );
+
+            let now = std::time::Instant::now();
+            assert!(!app.refresh_due(now), "asked again straight after failing");
+            let interval = oswindow::app::App::tick_interval(&app).expect("no clock");
+            assert!(
+                interval > source::RETRY.saturating_sub(Duration::from_secs(5))
+                    && interval <= source::RETRY,
+                "{interval:?}"
+            );
+            app.handle_event(&Event::Tick { elapsed_ms: 1 });
+            assert!(app.source.forecast_asked().is_none());
+            // Five minutes on, it is.
+            app.source.tried_at = now.checked_sub(source::RETRY);
+            assert!(app.refresh_due(now));
+        });
+    }
+
+    #[test]
+    fn the_forecast_stands_when_the_air_quality_service_does_not_answer() {
+        settingsfile::testing::with_scratch_config("wx_no_air", |_| {
+            let app = showing_berlin(no_air);
+            let now = app
+                .current
+                .clone()
+                .expect("the forecast fell with the air quality");
+            assert_eq!(now.aqi, None, "an index nobody gave was shown");
+            assert!(drawn(&app).contains("Not known"));
+        });
+    }
+
+    #[test]
+    fn turning_forecasts_off_takes_what_was_fetched_from_the_window() {
+        settingsfile::testing::with_scratch_config("wx_turn_off", |_| {
+            let mut app = showing_berlin(open_meteo);
+            assert!(app.current.is_some());
+            probe::click(&mut app, Target::Tab(ActiveView::SettingsView));
+            probe::click(&mut app, Target::Setting(Setting::Forecasts));
+            assert!(!app.source.on);
+            assert!(
+                app.current.is_none(),
+                "a forecast stayed up that will never be refreshed"
+            );
+            probe::click(&mut app, Target::Tab(ActiveView::Dashboard));
+            assert!(drawn(&app).contains(FORECASTS_OFF_LINES[0]));
+            assert_eq!(oswindow::app::App::tick_interval(&app), None);
+            // And off is kept, places and all.
+            let mut next = WeatherApp::new(900.0, 800.0);
+            next.load_places(&settingsfile::load(CONFIG_NAME));
+            assert!(!next.source.on);
+            assert_eq!(next.locations.len(), 1);
+        });
+    }
+
+    #[test]
+    fn the_forecast_is_asked_for_again_on_the_half_hour() {
+        settingsfile::testing::with_scratch_config("wx_refresh", |_| {
+            let mut app = showing_berlin(open_meteo);
+            let interval =
+                oswindow::app::App::tick_interval(&app).expect("no clock with a forecast up");
+            assert!(interval > Duration::from_mins(25), "{interval:?}");
+            assert!(!app.refresh_due(std::time::Instant::now()));
+            app.source.fetched_at =
+                std::time::Instant::now().checked_sub(source::REFRESH + Duration::from_secs(1));
+            app.handle_event(&Event::Tick { elapsed_ms: 1 });
+            assert!(
+                asking_at(&app, 52.524_37),
+                "half an hour on, nothing was asked"
+            );
+        });
+    }
+
+    #[test]
+    fn an_answer_for_a_place_no_longer_shown_is_not_shown_under_it() {
+        settingsfile::testing::with_scratch_config("wx_stale", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.source.fetcher = open_meteo;
+            app.source.on = true;
+            app.add_place(&berlin());
+            // The place moved under the request: the answer is Berlin's, not
+            // this one's.
+            app.locations[0].latitude = 48.856_61;
+            settle(&mut app);
+            assert!(
+                app.current.is_none(),
+                "Berlin's weather was shown for another place"
+            );
+        });
+    }
+
+    #[test]
+    fn removing_the_place_shown_shows_the_next_and_asks_for_it() {
+        settingsfile::testing::with_scratch_config("wx_remove", |_| {
+            let mut app = showing_berlin(open_meteo);
+            app.add_place(&paris());
+            settle(&mut app);
+            app.show_location(0);
+            settle(&mut app);
+            app.active_view = ActiveView::Locations;
+            assert_eq!(
+                probe::click(&mut app, Target::RemovePlace(0)),
+                EventResult::Consumed
+            );
+            assert_eq!(app.locations.len(), 1);
+            assert_eq!(app.locations[0].name, "Paris, \u{ce}le-de-France, France");
+            assert!(app.locations[0].is_default, "the default went with Berlin");
+            assert!(
+                asking_at(&app, 48.853_41),
+                "{:?}",
+                app.source.forecast_asked()
+            );
+            // The last one gone, nothing is out: an answer would have no
+            // place to be shown under.
+            assert_eq!(
+                probe::click(&mut app, Target::RemovePlace(0)),
+                EventResult::Consumed
+            );
+            assert!(app.locations.is_empty());
+            assert!(app.source.forecast_asked().is_none());
+            assert!(drawn(&app).contains("Places"));
+            app.active_view = ActiveView::Dashboard;
+            assert!(drawn(&app).contains("No place chosen."));
+        });
+    }
+
+    /// **A window's own save, announced back, leaves it where it was.** The
+    /// settings watcher announces every write, this window's own among them,
+    /// and re-reading the file showed its default place: adding a place, the
+    /// window jumped back to the default and asked for its weather instead.
+    #[test]
+    fn a_windows_own_save_announced_back_leaves_it_showing_the_same_place() {
+        settingsfile::testing::with_scratch_config("wx_echo", |_| {
+            let mut app = showing_berlin(open_meteo);
+            app.add_place(&paris());
+            settle(&mut app);
+            assert_eq!(app.active_location_idx, 1);
+            assert!(!app.locations[1].is_default, "Berlin is still the default");
+            assert_eq!(
+                app.handle_event(&weather_yaml_changed()),
+                EventResult::Ignored,
+                "nothing changed, and the window said something had"
+            );
+            assert_eq!(app.active_location_idx, 1, "the window went back to Berlin");
+            assert!(app.current.is_some());
+            assert!(!app.source.waiting(), "the forecast was asked for again");
+            // And after a unit is changed, which saves the file too.
+            app.handle_event(&letter(Key::U, "u"));
+            app.handle_event(&weather_yaml_changed());
+            assert_eq!(app.active_location_idx, 1);
+        });
+    }
+
+    /// **Places and the switch, changed in one window, reach the others.**
+    #[test]
+    fn forecasts_turned_on_and_off_in_one_window_reach_the_others() {
+        settingsfile::testing::with_scratch_config("wx_two_windows", |_| {
+            let mut other = WeatherApp::new(900.0, 800.0);
+            other.source.fetcher = open_meteo;
+            let first = showing_berlin(open_meteo);
+            drop(first);
+
+            assert_eq!(
+                other.handle_event(&weather_yaml_changed()),
+                EventResult::Consumed
+            );
+            assert!(other.source.on, "turned on there, still off here");
+            assert_eq!(other.locations.len(), 1);
+            assert!(
+                asking_at(&other, 52.524_37),
+                "turned on here, nothing was asked"
+            );
+            settle(&mut other);
+            assert!(other.current.is_some());
+
+            // Off in a third window: off here too, and what was fetched goes.
+            let mut third = WeatherApp::new(900.0, 800.0);
+            third.load_places(&settingsfile::load(CONFIG_NAME));
+            third.set_forecasts(false);
+            assert_eq!(
+                other.handle_event(&weather_yaml_changed()),
+                EventResult::Consumed
+            );
+            assert!(!other.source.on);
+            assert!(other.current.is_none());
+            assert!(!other.source.waiting());
+        });
+    }
+
+    /// The Locations tab's box has the letters while forecasts are on; on
+    /// every other tab they are what they always were.
+    #[test]
+    fn the_search_box_has_the_letters_only_on_its_own_tab() {
+        settingsfile::testing::with_scratch_config("wx_keys", |_| {
+            let mut app = showing_berlin(open_meteo);
+            app.active_view = ActiveView::Locations;
+            app.handle_event(&letter(Key::R, "r"));
+            app.handle_event(&letter(Key::U, "u"));
+            assert_eq!(app.search.text(), "ru");
+            assert!(!app.source.waiting(), "R asked again while typing a name");
+            assert_eq!(app.settings.temp_unit, TempUnit::Celsius);
+            // Escape empties the box, and with it empty is nobody's.
+            assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+            assert_eq!(app.search.text(), "");
+
+            app.active_view = ActiveView::Dashboard;
+            app.handle_event(&letter(Key::U, "u"));
+            assert_eq!(app.settings.temp_unit, TempUnit::Fahrenheit);
+            assert_eq!(
+                app.handle_event(&letter(Key::R, "r")),
+                EventResult::Consumed
+            );
+            assert!(asking_at(&app, 52.524_37), "R did not ask again");
+            settle(&mut app);
+        });
+    }
+
+    /// **What the file holds is read back only as far as it can be a place.**
+    /// A place without a name or a coordinate, or with one off the globe, is
+    /// left out; a default naming no place is the first; and anything but
+    /// `forecasts: true` is off -- the switch is the user's consent to send
+    /// where they are, so a misspelt one is not taken as it.
+    #[test]
+    fn places_read_back_leave_out_what_cannot_be_a_place() {
+        let doc = yamldoc::Document::parse(concat!(
+            "forecasts: yes\n",
+            "places:\n",
+            "  p0:\n    name: Nowhere\n    latitude: 91.0\n    longitude: 0.0\n",
+            "  p1:\n    latitude: 1.0\n    longitude: 1.0\n",
+            "  p2:\n    name: Berlin\n    latitude: 52.52437\n    longitude: 13.41053\n",
+            "  p3:\n    name: Far east\n    latitude: 0.0\n    longitude: 180.5\n",
+            "  p4:\n    name: Paris\n    latitude: 48.85341\n    longitude: east\n",
+            "  p5:\n    name: Paris\n    latitude: 48.85341\n    longitude: 2.3488\n",
+            "default: 7\n",
+        ));
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.load_places(&doc);
+        assert!(!app.source.on, "`yes` was taken as the user's consent");
+        let names: Vec<&str> = app.locations.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Berlin", "Paris"]);
+        assert_eq!(app.active_location_idx, 0);
+        assert!(app.locations[0].is_default);
+        assert!(!app.locations[1].is_default);
+
+        let doc = yamldoc::Document::parse(concat!(
+            "forecasts: true\n",
+            "places:\n",
+            "  p0:\n    name: Berlin\n    latitude: 52.52437\n    longitude: 13.41053\n",
+            "  p1:\n    name: Paris\n    latitude: 48.85341\n    longitude: 2.3488\n",
+            "default: 1\n",
+        ));
+        app.load_places(&doc);
+        assert!(app.source.on);
+        assert_eq!(
+            app.active_location_idx, 1,
+            "the default is not the place shown"
+        );
+        assert!(app.locations[1].is_default);
+        assert!(!app.locations[0].is_default);
+    }
+
+    /// Turned on in another window, with the same place shown here: its
+    /// forecast is asked for here too, though the place did not change.
+    #[test]
+    fn forecasts_turned_on_elsewhere_ask_for_the_place_already_shown_here() {
+        settingsfile::testing::with_scratch_config("wx_on_elsewhere", |_| {
+            let mut first = WeatherApp::new(900.0, 800.0);
+            first.add_place(&berlin());
+            assert!(!first.source.waiting(), "asked with forecasts off");
+            let mut other = WeatherApp::new(900.0, 800.0);
+            other.source.fetcher = open_meteo;
+            other.load_places(&settingsfile::load(CONFIG_NAME));
+            assert_eq!(other.locations.len(), 1);
+
+            first.set_forecasts(true);
+            assert_eq!(
+                other.handle_event(&weather_yaml_changed()),
+                EventResult::Consumed
+            );
+            assert!(
+                asking_at(&other, 52.524_37),
+                "turned on there, nothing asked here"
+            );
+            settle(&mut other);
+            settle(&mut first);
+            assert!(other.current.is_some());
+        });
     }
 }

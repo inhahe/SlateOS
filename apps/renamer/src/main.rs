@@ -59,7 +59,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
@@ -1185,6 +1185,10 @@ struct RenamerApp {
     draft_invalid: bool,
     /// The Add Rule menu, while it is up.
     rule_menu: Option<ContextMenu>,
+    /// A box's right-click menu -- Cut, Copy, Paste, Delete, Select all --
+    /// while it is up, and the box it is for
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<Focus>,
     /// What the pointer is over.
     hover: Option<Target>,
     /// Every box the last paint recorded, for hover and the wheel.
@@ -1233,6 +1237,7 @@ impl RenamerApp {
             history: Vec::new(),
             search_text: String::new(),
             focus: Focus::List,
+            field_menu: fieldmenu::FieldMenu::new(),
             draft: TextInput::new(),
             draft_invalid: false,
             rule_menu: None,
@@ -1840,6 +1845,22 @@ impl RenamerApp {
             }
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
+        }
+        // A box's right-click menu takes the presses and the keys while it is
+        // up, as any menu does.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(focus, id) => return self.do_menu_row(focus, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
+        if let Event::Tick { elapsed_ms } = event
+            && self.field_menu.tick(*elapsed_ms)
+        {
+            return EventResult::Consumed;
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
@@ -4047,6 +4068,7 @@ impl RenamerApp {
                 };
                 self.activate(target)
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             // A double press on a file ticks or unticks it -- the row's own
             // press already moved the cursor there. (Nothing produces this
             // event until `oswindow` synthesises it; see known-issues.md.)
@@ -4341,6 +4363,14 @@ impl RenamerApp {
             // shortcuts -- so no key typed into a box can add a rule.
             return EventResult::Ignored;
         }
+        self.draft_changed();
+        EventResult::Consumed
+    }
+
+    /// What the box with the keys now holds takes effect, as it is typed:
+    /// a rule's value (or the red rule under a box it cannot take), the
+    /// search, the extension filter.
+    fn draft_changed(&mut self) {
         let typed = self.draft.text().to_string();
         match self.focus {
             Focus::Field(slot) => {
@@ -4362,6 +4392,44 @@ impl RenamerApp {
                 self.file_scroll = 0;
             }
             Focus::List => {}
+        }
+    }
+
+    /// The box a target is, if it is one.
+    fn box_at(&self, x: f32, y: f32) -> Option<Focus> {
+        match self.target_at(x, y)? {
+            Target::Field(slot) => Some(Focus::Field(slot)),
+            Target::SearchBox => Some(Focus::Search),
+            Target::ExtensionBox => Some(Focus::Extension),
+            _ => None,
+        }
+    }
+
+    /// A right press: over a box, its menu where the press landed -- the box
+    /// given the keyboard, its caret and selection left as they are when it
+    /// had it already (design-decisions 1454). Anywhere else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(focus) = self.box_at(x, y) else {
+            return EventResult::Ignored;
+        };
+        if self.focus != focus {
+            self.set_focus(focus);
+        }
+        let viewport = (self.last_width, self.last_height);
+        self.field_menu
+            .open(focus, self.draft.edit_menu(), x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for the box `focus`: done to it as its key
+    /// would be, and taking effect as typing does.
+    fn do_menu_row(&mut self, focus: Focus, id: guitk::menu::MenuItemId) -> EventResult {
+        // The menu is modal, so the box it was opened on still has the keys.
+        if self.focus != focus {
+            return EventResult::Consumed;
+        }
+        if self.draft.edit_command(id) == KeyEdit::Changed {
+            self.draft_changed();
         }
         EventResult::Consumed
     }
@@ -4439,9 +4507,11 @@ impl App for RenamerApp {
         (WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX)
     }
 
-    /// No clock: nothing here ages. A rename's time is read when it happens.
+    /// A clock only while a box's menu is up and a dimmed row the pointer
+    /// rests on is waiting to say why; nothing else here ages -- a rename's
+    /// time is read when it happens.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.field_menu.due_in().map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4465,6 +4535,8 @@ impl App for RenamerApp {
         // it. A dialog that takes input and paints nothing is invisible and
         // still swallowing keys.
         commands.extend(self.picker.render(&self.palette, width, height));
+        // A box's right-click menu, over everything.
+        commands.extend(self.field_menu.render(&self.palette));
         RenderTree { commands }
     }
 }
@@ -5738,25 +5810,29 @@ mod tests {
         // The whole point of the preview is to show what changes. Both of
         // these names differ only in their tail, so a name cut the usual way
         // would render the two rows identically and hide the rename.
+        //
+        // Row 1 is found by its tail, which the cut must keep. It was found by
+        // "Episode 07", near the cut: how much of a name a column lets through
+        // depends on the face's widths, and with a wider face the cut fell
+        // inside "Episode" and no cell matched
+        // (`requests/b-ec-renamer-overlong-preview-test-fails.md`).
+        let tail = "The One With The Long Title.mkv";
         let originals = cells_in_column(&cmds, COL_ORIGINAL);
         let old = originals
             .iter()
-            .find(|t| t.contains("Episode 07"))
-            .unwrap_or_else(|| panic!("row 1's original name should be drawn, got {originals:?}"));
+            .find(|t| t.ends_with(tail))
+            .unwrap_or_else(|| {
+                panic!("row 1's original name should be drawn, its tail kept, got {originals:?}")
+            });
         assert!(
             old.starts_with('…'),
             "the cut should be marked at the front, got {old:?}"
         );
-        assert!(
-            old.ends_with("The One With The Long Title.mkv"),
-            "the tail identifies the file and must survive, got {old:?}"
-        );
 
         let news = cells_in_column(&cmds, COL_NEW);
-        let new = news
-            .iter()
-            .find(|t| t.contains("Ep 07"))
-            .unwrap_or_else(|| panic!("row 1's new name should be drawn, got {news:?}"));
+        let new = news.iter().find(|t| t.ends_with(tail)).unwrap_or_else(|| {
+            panic!("row 1's new name should be drawn, its tail kept, got {news:?}")
+        });
         assert!(
             new.ends_with(".mkv"),
             "a rename preview that drops the extension is unreviewable, got {new:?}"
@@ -6340,6 +6416,106 @@ mod tests {
             "the fixture did not load, or this test asserts nothing: {said}"
         );
         app
+    }
+
+    /// **A right-click in a box offers its menu, and a row chosen takes
+    /// effect as typing does** -- a paste into the search filters the list --
+    /// the box given the keyboard; the menu is modal while it is up, and a
+    /// right-click on no box offers nothing
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    #[test]
+    fn a_boxs_right_click_menu_edits_it_and_takes_effect() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with(&["apple.txt", "banana.txt", "cherry.txt"]);
+        let (w, h) = (app.last_width, app.last_height);
+        let _frame = App::render(&mut app, w, h);
+        guitk::clipboard::set_text("ban");
+        probe::click_with(&mut app, Target::SearchBox, MouseButton::Right);
+        assert_eq!(app.field_menu.field(), Some(Focus::Search));
+        assert_eq!(
+            app.focus,
+            Focus::Search,
+            "the right-click did not give the box the keys"
+        );
+        let tree = App::render(&mut app, w, h);
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "Paste"
+            )),
+            "the menu is not drawn"
+        );
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(app.search_text, "ban", "the paste did not take effect");
+        assert_eq!(app.filtered_files().len(), 1, "the list was not filtered");
+
+        // Escape puts the menu away, and leaves the box with the keys.
+        probe::click_with(&mut app, Target::SearchBox, MouseButton::Right);
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.focus,
+            Focus::Search,
+            "Escape reached the box through the menu"
+        );
+
+        // A press outside puts it away and works nothing under it.
+        probe::click_with(&mut app, Target::SearchBox, MouseButton::Right);
+        probe::click(&mut app, Target::ConflictsOnly);
+        assert!(!app.field_menu.is_up());
+        assert!(!app.filter_conflicts, "the press went through the menu");
+
+        // A right-click on no box offers nothing.
+        assert_eq!(
+            probe::click_with(&mut app, Target::ConflictsOnly, MouseButton::Right),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**,
+    /// which the window asks for only while the menu waits.
+    #[test]
+    fn a_dimmed_row_of_the_menu_says_why_on_the_clock() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with(&["apple.txt"]);
+        let (w, h) = (app.last_width, app.last_height);
+        let _frame = App::render(&mut app, w, h);
+        assert_eq!(App::tick_interval(&app), None, "a clock with no menu up");
+        probe::click_with(&mut app, Target::SearchBox, MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
     }
 
     /// An app holding a list of names and no directory.

@@ -516,19 +516,16 @@ xfail_pipe 'GNU dies of SIGPIPE (141); SlateOS has no signals'
 
 # Closed stdin. GNU diagnoses twice — `tee: read error: Bad file descriptor`
 # from the failed read, then `tee: standard input: Bad file descriptor` from
-# gnulib's `close_stdin` atexit hook — and exits 1. We print nothing and exit
-# 0, and the reason is neither of those diagnostics: Rust's std reopens any
-# closed standard descriptor onto `/dev/null` before `main` is entered (a
-# deliberate hardening — otherwise the first file a program opens becomes its
-# stdout). So our `main` is handed an empty stdin, copies zero bytes, and is
-# right to call that a success. Nothing in `tee.rs` can see the difference, and
-# on SlateOS proper the behaviour is our std port's to decide, not tee's.
+# the `close (STDIN_FILENO)` at the end of its `main` — and exits 1.
 #
-# `tee /proc/self/fd/0 <&-` is the direct readout: that symlink exists only
-# while the descriptor is open, so it opens for us and is `No such file or
-# directory` for GNU.
-STDIN_CLOSED=1; xfail_case "Rust's std reopens closed stdin on /dev/null before main" out
-STDIN_CLOSED=1; xfail_case "Rust's std reopens closed stdin on /dev/null before main" -a out
+# These two were expected failures until 2026-10-03: Rust's std reopens any
+# closed standard descriptor onto `/dev/null` before `main`, so `tee` was handed
+# an empty stdin and called it a success. `guard_std_fds!` and `stdfd::restore`
+# undo that, and `tee` now reads descriptor 0 itself (`stdfd::RawStdin`) rather
+# than through `io::stdin()`, which turns `EBADF` into end of input. See
+# `known-issues/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+STDIN_CLOSED=1; run_case out
+STDIN_CLOSED=1; run_case -a out
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

@@ -1,6 +1,6 @@
 ## B-SED-COMPILED-SCRIPTS-GNU-REFUSES-AND-REFUSED-M-AND-0R (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-tested on main (394c97655, published as 109a26eec).
 
 **In short:** sed reads its script before it reads any input, and GNU's
 reader refuses some scripts that cannot mean anything -- `1,2q` (quit on a

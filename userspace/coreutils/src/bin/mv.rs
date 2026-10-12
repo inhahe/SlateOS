@@ -229,6 +229,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// `mv`'s usage status is 1, like almost every utility's; see
 /// [`coreutils::getopt::Error`] for the two that differ and why.
 const MV: Program = Program::new("mv", 1);
@@ -536,16 +539,14 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("mv (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1.
+        Ok(Request::Help) => say(help_text().as_bytes()),
+        Ok(Request::Version) => say(b"mv (SlateOS coreutils) 0.1.0\n"),
         Ok(Request::Run(mut flags, dest, paths)) => {
             // GNU's `mv.c:152`. Sampled here rather than inside the check that
             // reads it, so that the answer is the one the process started with.
@@ -578,14 +579,25 @@ fn run_main() -> ExitCode {
             // `--verbose` is the only thing `mv` ever writes to stdout, and a
             // line of it that never arrived has to change the status the same
             // way a lost diagnostic does — otherwise `mv -v … | head -1`
-            // reports success for output nobody received.
-            stdfd::close_stdout("mv", out, earned)
+            // reports success for output nobody received. And before it,
+            // upstream's `atexit (close_stdin)`: the answers' read-ahead goes
+            // back to a seekable standard input, and a read that failed is
+            // reported.
+            stdfd::close_stdin_and_stdout("mv", answers.into_stream(), out, earned)
         }
         Err(e) => {
             diag!("mv: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("mv", out, ExitCode::SUCCESS)
 }
 
 fn help_text() -> String {

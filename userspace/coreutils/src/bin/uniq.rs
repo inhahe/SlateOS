@@ -69,6 +69,9 @@ use coreutils::stdfd;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 use std::process::ExitCode;
 
 /// `uniq` exits 1 on a bad command line — measured, not assumed; the utilities
@@ -282,16 +285,14 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args, Env::from_process()) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("uniq (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1.
+        Ok(Request::Help) => say(help_text().as_bytes()),
+        Ok(Request::Version) => say(b"uniq (SlateOS coreutils) 0.1.0\n"),
         Ok(Request::Run(options, input, output)) => run(&options, &input, &output),
         Err(e) => {
             // Only the first line carries the `uniq: ` prefix, and the referral
@@ -300,6 +301,14 @@ fn run_main() -> ExitCode {
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("uniq", out, ExitCode::SUCCESS)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names
@@ -1038,23 +1047,34 @@ fn uniq_stream<R: BufRead, W: Write>(
 fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
     // Input is opened first, so a bad input name leaves the output file
     // untouched rather than truncating it and then failing.
-    let source: Box<dyn Read> = if input == OsStr::new("-") {
-        Box::new(io::stdin())
+    let opened = if input == OsStr::new("-") {
+        None
     } else {
         match File::open(input) {
-            Ok(f) => Box::new(f),
+            Ok(f) => Some(f),
             Err(e) => {
+                let e = freopen_errno(0, e);
                 diag!("uniq: {}: {}", quotef_os(input), strerror(&e));
                 return ExitCode::from(1);
             }
         }
     };
+    // Descriptor 0 itself for `-`: `io::stdin()` reads a closed one as empty,
+    // where upstream's `uniq <&-` is `uniq: error reading '-': Bad file
+    // descriptor`.
+    let source: Box<dyn Read + '_> = match &opened {
+        Some(f) => Box::new(f),
+        None => Box::new(stdfd::RawStdin),
+    };
     let sink: Box<dyn Write> = if output == OsStr::new("-") {
-        Box::new(io::stdout())
+        // Descriptor 1 itself: `io::stdout()` answers a closed one's `EBADF`
+        // with success, where upstream's `uniq f >&-` is a write error.
+        Box::new(stdfd::RawStdout)
     } else {
         match File::create(output) {
             Ok(f) => Box::new(f),
             Err(e) => {
+                let e = freopen_errno(1, e);
                 diag!("uniq: {}: {}", quotef_os(output), strerror(&e));
                 return ExitCode::from(1);
             }
@@ -1078,7 +1098,34 @@ fn run(options: &Options, input: &OsString, output: &OsString) -> ExitCode {
         diag!("uniq: error reading {}: {}", quoteaf_os(input), strerror(e));
         return ExitCode::from(1);
     }
+    // Upstream's `if (ferror (stdin) || fclose (stdin) != 0) error
+    // (EXIT_FAILURE, errno, _("error reading %s"), …)`: the input -- standard
+    // input, or the file `freopen`ed onto it -- is closed, and a failure to
+    // close it is the same complaint as a failure to read it.
+    drop(reader);
+    let closed = match opened {
+        Some(f) => stdfd::close(f),
+        None => stdfd::close_stdin(),
+    };
+    if let Err(e) = closed {
+        diag!(
+            "uniq: error reading {}: {}",
+            quoteaf_os(input),
+            strerror(&e)
+        );
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
+}
+
+/// The `errno` upstream reports when `freopen (name, mode, stream)` fails to
+/// open `name`: glibc's `freopen` then closes the stream's descriptor `fd`, so
+/// the reason is whatever that close left -- `EBADF` when the descriptor was
+/// already closed, the open's own error otherwise. Measured: `uniq nosuch <&-`
+/// says `uniq: nosuch: Bad file descriptor`. The descriptor is closed here as
+/// glibc closes it; the process exits next, so nothing else notices.
+fn freopen_errno(fd: i32, open_error: io::Error) -> io::Error {
+    stdfd::close_descriptor(fd).err().unwrap_or(open_error)
 }
 
 /// A failed write. GNU dies of `SIGPIPE` when the reader goes away, printing

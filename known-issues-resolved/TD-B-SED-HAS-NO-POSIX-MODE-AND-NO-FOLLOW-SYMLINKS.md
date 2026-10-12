@@ -1,6 +1,6 @@
 ## TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending -- `--follow-symlinks` in `B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD`, the modes in the change described under "Fixed" below.
+**Status:** FIXED 2026-10-03 (lane B); boot-tested on main (394c97655, published as 109a26eec) -- `--follow-symlinks` in `B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD`, the modes in the change described under "Fixed" below.
 
 **In short:** GNU sed has three levels of strictness -- its default, the one
 it switches to when the environment variable `POSIXLY_CORRECT` is set, and

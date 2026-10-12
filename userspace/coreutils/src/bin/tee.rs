@@ -104,6 +104,9 @@ use coreutils::stdfd;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 use std::process::ExitCode;
 
 /// `tee -Z; echo $?` is 1. Measured, not assumed: `ls`, `sort` and `grep` are 2.
@@ -200,22 +203,28 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
-        Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
-        }
-        Ok(Request::Version) => {
-            println!("tee (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
-        }
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1.
+        Ok(Request::Help) => say(help_text().as_bytes()),
+        Ok(Request::Version) => say(b"tee (SlateOS coreutils) 0.1.0\n"),
         Ok(Request::Run(settings)) => run(&settings),
         Err(e) => {
             diag!("tee: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("tee", out, ExitCode::SUCCESS)
 }
 
 /// Read the command line. Upstream's option loop, one arm per case.
@@ -339,8 +348,6 @@ fn run(settings: &Settings) -> ExitCode {
         ignore_sigint();
     }
 
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
     let mut ok = true;
 
     // Standard output is upstream's `descriptors[0]`, which is why it is
@@ -374,8 +381,9 @@ fn run(settings: &Settings) -> ExitCode {
         }
     }
 
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    // upstream's `tee <&-` is `tee: read error: Bad file descriptor`.
+    let mut stdin = stdfd::RawStdin;
     let mut buf = [0u8; BUFSIZ];
     let mut read_error: Option<io::Error> = None;
 
@@ -400,11 +408,13 @@ fn run(settings: &Settings) -> ExitCode {
         while i < outputs.len() {
             let Some(out) = outputs.get_mut(i) else { break };
             let result = match &mut out.sink {
-                // Flushed here rather than at exit: upstream makes every
+                // Written straight to descriptor 1: upstream makes every
                 // output unbuffered, and a `tee` that reports success for
                 // bytes still sitting in a buffer is the bug this file exists
-                // to not have.
-                Sink::Stdout => stdout.write_all(chunk).and_then(|()| stdout.flush()),
+                // to not have. Not through `io::stdout()`, which answers a
+                // closed descriptor's `EBADF` with success, where upstream's
+                // `tee >&-` says `tee: 'standard output': Bad file descriptor`.
+                Sink::Stdout => stdfd::write_all(1, chunk),
                 Sink::File(f) => f.write_all(chunk),
             };
             match result {
@@ -431,6 +441,26 @@ fn run(settings: &Settings) -> ExitCode {
     if let Some(e) = read_error {
         diag!("tee: read error: {}", strerror(&e));
         ok = false;
+    }
+
+    // "Close the files, but not standard output": `if (descriptors[i] && !
+    // fclose_wait (descriptors[i])) error (0, errno, "%s", quotef (files[i]))`.
+    for out in outputs {
+        if let Sink::File(f) = out.sink
+            && let Err(e) = stdfd::close(f)
+        {
+            diag!("tee: {}: {}", out.label, strerror(&e));
+            ok = false;
+        }
+    }
+
+    // Upstream's `if (close (STDIN_FILENO) != 0) error (EXIT_FAILURE, errno,
+    // "%s", _("standard input"))`. Measured, `tee <&-` says `tee: read error:
+    // Bad file descriptor` and then `tee: standard input: Bad file
+    // descriptor` for this.
+    if let Err(e) = stdfd::close_stdin() {
+        diag!("tee: standard input: {}", strerror(&e));
+        return ExitCode::from(1);
     }
 
     if ok {

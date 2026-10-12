@@ -110,6 +110,9 @@ use coreutils::quote::{quote_glibc, quotef};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 const CMP: Program = Program::new("cmp", 2);
 
 /// The inputs are the same. GNU's `EXIT_SUCCESS`.
@@ -586,12 +589,14 @@ enum Outcome {
     },
 }
 
-/// A failure that ends the run with status 2, remembering whose it was.
+/// A failure that ends the comparison, remembering whose it was.
 enum Trouble {
-    /// Reading input 0 or 1 failed.
+    /// Reading input 0 or 1 failed: status 2.
     Input(usize, io::Error),
-    /// Writing the report failed.
-    Output(io::Error),
+    /// Writing the report failed. Only a reader that went away gets here --
+    /// any other failure is latched for `check_stdout` -- so there is nothing
+    /// to say about it, and the answer is that the inputs differ.
+    Output,
 }
 
 /// Big enough that the syscall cost disappears, small enough to stay off the
@@ -674,7 +679,7 @@ impl Compare {
                             y,
                             self.print_bytes,
                         );
-                        writeln!(out, "{row}").map_err(Trouble::Output)?;
+                        writeln!(out, "{row}").map_err(|_| Trouble::Output)?;
                     } else {
                         return Ok(Outcome::Diff {
                             byte: compared.saturating_add(i as u64).saturating_add(1),
@@ -749,12 +754,120 @@ mod imp {
     use coreutils::errmsg::strerror;
     use coreutils::locale::{Category, hard_locale};
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
+    use coreutils::stdfd;
+    use coreutils::stdio::StdioFile;
     use std::fs::File;
     use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::mem::ManuallyDrop;
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::MetadataExt;
     use std::process::ExitCode;
+
+    /// `cmp: NAME: REASON`. diffutils passes the raw `file[f]` to `"%s"` --
+    /// measured, `cmp 'a b' f` says `cmp: a b: No such file or directory` --
+    /// but every name `cmp` prints is quoted here, the result line and the
+    /// `EOF on` note included, so that no name can forge a line of output
+    /// (design-decisions 373). An ordinary name is left untouched.
+    fn report(name: &[u8], e: &io::Error) {
+        diag!("cmp: {}: {}", quotef(name), strerror(e));
+    }
+
+    /// diffutils' standard output: glibc's buffer ([`StdioFile`]), every
+    /// write a `printf` whose failure latches as `ferror` and is reported
+    /// only at the end, by [`check_stdout`] -- the comparison goes on, as
+    /// upstream's does. The exception is a reader that went away: upstream
+    /// dies of `SIGPIPE` at that write, so the error is handed back to stop
+    /// the engine, and nothing more is said (design-decisions 377).
+    struct Out {
+        file: StdioFile,
+        reader_gone: bool,
+        /// The failure of the flush made early for the `EOF on` note (see
+        /// [`compare`]), kept aside rather than latched: upstream makes no
+        /// such flush, and its `fclose` would have met the same failure, so
+        /// [`check_stdout`] reports it as the close's -- `standard output:
+        /// REASON`, not `write failed`.
+        deferred: Option<io::Error>,
+    }
+
+    impl Write for Out {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.file.write(buf) {
+                Err(e) if stdfd::reader_gone(&e) => {
+                    self.reader_gone = true;
+                    Err(e)
+                }
+                // Latched in the stream (`ferror`); see the type's docs.
+                Ok(()) | Err(_) => Ok(buf.len()),
+            }
+        }
+
+        /// The early flush before the `EOF on` note -- the one place this
+        /// `cmp` flushes before the end, and upstream never does. See
+        /// [`Out::deferred`].
+        fn flush(&mut self) -> io::Result<()> {
+            if let Err(e) = self.file.flush() {
+                if stdfd::reader_gone(&e) {
+                    self.reader_gone = true;
+                } else {
+                    self.file.clear_error();
+                    self.deferred.get_or_insert(e);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// diffutils' `check_stdout`: a write that already failed is
+    /// `write failed`, with no reason (`die (EXIT_TROUBLE, 0, …)`); otherwise
+    /// the `fclose` -- the last flush, then the close -- is
+    /// `standard output: REASON`. Measured: `cmp f g >/dev/full` is the
+    /// second, `cmp -l` over 300 kB of differences is the first.
+    fn check_stdout(out: &mut Out) -> Result<(), u8> {
+        if out.file.has_error() {
+            diag!("cmp: write failed");
+            return Err(EXIT_TROUBLE);
+        }
+        let closed = match out.deferred.take() {
+            Some(e) => Err(e),
+            None => out.file.close(),
+        };
+        match closed {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                diag!("cmp: standard output: {}", strerror(&e));
+                Err(EXIT_TROUBLE)
+            }
+        }
+    }
+
+    /// `usage ()` or `version_etc`, then `check_stdout ()`: `cmp --help >&-`
+    /// is `cmp: standard output: Bad file descriptor`, 2. `print!` panicked
+    /// on a full disk, and a closed standard output went unreported.
+    fn say(text: &[u8]) -> ExitCode {
+        let mut out = Out {
+            file: StdioFile::stdout(),
+            reader_gone: false,
+            deferred: None,
+        };
+        // A failed write latches (`ferror`), as `printf`'s does.
+        let _ = out.file.write(text);
+        match check_stdout(&mut out) {
+            Ok(()) => ExitCode::from(EXIT_SAME),
+            Err(code) => ExitCode::from(code),
+        }
+    }
+
+    /// Upstream's `type_no_stdout`: standard output is the null device, so
+    /// nothing is written to it and nothing can fail there -- the comparison
+    /// stops at the first difference, saying nothing, as `-s` does, but an
+    /// `EOF on` still goes to stderr. After `stdopen`, a standard output that
+    /// was closed *is* the null device: `cmp f g >&-` exits 1, silently.
+    fn stdout_is_null() -> bool {
+        let (Ok(out), Ok(null)) = (stdfd::metadata(1), std::fs::metadata("/dev/null")) else {
+            return false;
+        };
+        out.dev() == null.dev() && out.ino() == null.ino()
+    }
 
     /// One opened input.
     struct Opened {
@@ -778,6 +891,23 @@ mod imp {
                 // SAFETY: `owned` is set only for a `File` this process opened
                 // and has not otherwise dropped, so this is its one close.
                 unsafe { ManuallyDrop::drop(&mut self.file) };
+            }
+        }
+    }
+
+    impl Opened {
+        /// Upstream's `close (file_desc[f])`, standard input's included, with
+        /// the failure that dropping would discard.
+        fn close(mut self) -> io::Result<()> {
+            if self.owned {
+                self.owned = false;
+                // SAFETY: `owned` was true, so `file` holds a descriptor this
+                // process opened and nothing has closed; clearing `owned`
+                // first keeps `Drop` from closing it a second time.
+                let file = unsafe { ManuallyDrop::take(&mut self.file) };
+                stdfd::close(file)
+            } else {
+                stdfd::close_stdin()
             }
         }
     }
@@ -851,6 +981,16 @@ mod imp {
     }
 
     pub fn main() -> ExitCode {
+        stdfd::restore();
+        // Upstream's `xstdopen ()`, before the options are read: a closed
+        // standard descriptor is reopened on the null device the wrong way
+        // round, so that reading a closed standard input fails with `EBADF`
+        // -- `cmp - f <&-` is `cmp: -: Bad file descriptor`, 2 -- and no file
+        // opened later can land on 0, 1 or 2.
+        if let Err(e) = stdfd::stdopen() {
+            diag!("cmp: standard file descriptors: {}", strerror(&e));
+            return ExitCode::from(EXIT_TROUBLE);
+        }
         let full: Vec<std::ffi::OsString> = std::env::args_os().collect();
         let last_word = full
             .last()
@@ -859,14 +999,8 @@ mod imp {
         let argv = full.get(1..).unwrap_or(&[]).to_vec();
 
         let settings = match parse_args(&argv, &last_word) {
-            Ok(Request::Help) => {
-                print!("{}", help_text());
-                return ExitCode::from(EXIT_SAME);
-            }
-            Ok(Request::Version) => {
-                println!("cmp (SlateOS coreutils) 0.1.0");
-                return ExitCode::from(EXIT_SAME);
-            }
+            Ok(Request::Help) => return say(help_text().as_bytes()),
+            Ok(Request::Version) => return say(b"cmp (SlateOS coreutils) 0.1.0\n"),
             Ok(Request::Run(settings)) => *settings,
             Err(e) => {
                 diag!("{}", diagnostic(&e));
@@ -893,7 +1027,7 @@ mod imp {
                     // exactly as `cmp -s nosuch a` does. The status is the
                     // whole answer, which is the point of the option.
                     if !settings.quiet {
-                        diag!("cmp: {}: {}", quotef(name), strerror(&e));
+                        report(name, &e);
                     }
                     return Err(EXIT_TROUBLE);
                 }
@@ -906,7 +1040,7 @@ mod imp {
                 break;
             };
             if let Err(e) = skip(input, count) {
-                diag!("cmp: {}: {}", quotef(&input.name), strerror(&e));
+                report(&input.name, &e);
                 return Err(EXIT_TROUBLE);
             }
         }
@@ -930,10 +1064,41 @@ mod imp {
             }
         }
 
-        compare(settings, &mut inputs)
+        let no_stdout = !settings.quiet && stdout_is_null();
+        let mut out = Out {
+            file: StdioFile::stdout(),
+            reader_gone: false,
+            deferred: None,
+        };
+        let status = compare(settings, &mut inputs, &mut out, no_stdout)?;
+        // Upstream died of `SIGPIPE` at the write; nothing after it ran.
+        if out.reader_gone {
+            return Ok(status);
+        }
+        // `if (close (file_desc[f]) != 0) die (EXIT_TROUBLE, errno, "%s",
+        // file[f]);`, both of them, standard input's included.
+        for input in inputs {
+            let name = input.name.clone();
+            if let Err(e) = input.close() {
+                report(&name, &e);
+                return Err(EXIT_TROUBLE);
+            }
+        }
+        // `if (exit_status != EXIT_SUCCESS && comparison_type <
+        // type_no_stdout) check_stdout ();` -- identical inputs wrote nothing,
+        // and neither did `-s` or a null standard output.
+        if status != EXIT_SAME && !settings.quiet && !no_stdout {
+            check_stdout(&mut out)?;
+        }
+        Ok(status)
     }
 
-    fn compare(settings: &Settings, inputs: &mut [Opened]) -> Result<u8, u8> {
+    fn compare(
+        settings: &Settings,
+        inputs: &mut [Opened],
+        out: &mut Out,
+        no_stdout: bool,
+    ) -> Result<u8, u8> {
         let remaining = [
             inputs.first().and_then(|i| {
                 i.size
@@ -944,8 +1109,10 @@ mod imp {
                     .map(|s| s.saturating_sub(settings.skip.get(1).copied().unwrap_or(0)))
             }),
         ];
+        // Upstream's `type_no_stdout` replaces `-l`'s `type_all_diffs` as it
+        // replaces the default: the comparison stops at the first difference.
         let engine = Compare {
-            verbose: settings.verbose,
+            verbose: settings.verbose && !no_stdout,
             print_bytes: settings.print_bytes,
             limit: settings.limit,
             offset_width: offset_width(settings.limit, remaining),
@@ -962,51 +1129,45 @@ mod imp {
                 .to_vec(),
         ];
 
-        let stdout = io::stdout();
-        let mut out = io::BufWriter::new(stdout.lock());
         let (head, tail) = inputs.split_at_mut(1);
         let (Some(a), Some(b)) = (head.first_mut(), tail.first_mut()) else {
             return Err(EXIT_TROUBLE);
         };
-        // Under `-s` the rows and the `differ:` line are suppressed, so the
-        // engine writes into a sink that costs nothing.
+        // Under `-s`, and when standard output is the null device, nothing is
+        // written to standard output, so the engine writes into a sink that
+        // costs nothing.
         let mut sink = io::sink();
-        let outcome = if settings.quiet {
+        let outcome = if settings.quiet || no_stdout {
             engine.run(
                 &mut a.file as &mut File,
                 &mut b.file as &mut File,
                 &mut sink,
             )
         } else {
-            engine.run(&mut a.file as &mut File, &mut b.file as &mut File, &mut out)
+            engine.run(&mut a.file as &mut File, &mut b.file as &mut File, out)
         };
 
         let outcome = match outcome {
             Ok(outcome) => outcome,
+            // `die (EXIT_TROUBLE, errno, "%s", file[f])`: standard output is
+            // not flushed first, and nothing written to it is checked.
             Err(Trouble::Input(which, e)) => {
                 let name = if which == 0 { &name_a } else { &name_b };
-                let _ = out.flush();
-                diag!("cmp: {}: {}", quotef(name), strerror(&e));
+                report(name, &e);
                 return Err(EXIT_TROUBLE);
             }
-            // The engine writes nothing but difference rows, so a failed write
-            // is proof that a difference was found. A closed downstream reader
-            // — `cmp -l a b | head -1` — is an ordinary end to a pipeline and
-            // gets that answer; anything else is a genuine failure.
-            Err(Trouble::Output(e)) if e.kind() == io::ErrorKind::BrokenPipe => {
-                return Ok(EXIT_DIFFER);
-            }
-            Err(Trouble::Output(e)) => {
-                diag!("cmp: write error: {}", strerror(&e));
-                return Err(EXIT_TROUBLE);
-            }
+            // The only write error [`Out`] hands back is a reader that went
+            // away -- `cmp -l a b | head -1` -- and a failed write is proof
+            // that a difference was found. Any other failure is latched in
+            // the stream for `check_stdout`.
+            Err(Trouble::Output) => return Ok(EXIT_DIFFER),
         };
 
         let status = match outcome {
             Outcome::Same => EXIT_SAME,
             Outcome::Differed => EXIT_DIFFER,
             Outcome::Diff { byte, line, a, b } => {
-                if !settings.quiet {
+                if !settings.quiet && !no_stdout {
                     let pair = settings.print_bytes.then_some((a, b));
                     let line = differ_line(
                         [name_a.as_slice(), name_b.as_slice()],
@@ -1015,12 +1176,9 @@ mod imp {
                         pair,
                         hard_locale(Category::Messages),
                     );
-                    if let Err(e) = writeln!(out, "{line}")
-                        && e.kind() != io::ErrorKind::BrokenPipe
-                    {
-                        diag!("cmp: write error: {}", strerror(&e));
-                        return Err(EXIT_TROUBLE);
-                    }
+                    // Only a reader that left can fail here, and [`Out`] has
+                    // recorded it; the run is answered either way.
+                    let _ = writeln!(out, "{line}");
                 }
                 EXIT_DIFFER
             }
@@ -1030,29 +1188,34 @@ mod imp {
                 newlines,
                 at_line_start,
             } => {
+                // Still said with standard output on the null device.
                 if !settings.quiet {
-                    // The rows go to stdout and this goes to stderr, so the
-                    // buffer has to be emptied first or `-l` reports the end of
-                    // a file before the differences inside it.
+                    // Deliberate difference 4 in the module docs: upstream
+                    // writes this to stderr with `fprintf` and never flushes
+                    // standard output first, so into a pipe the note comes
+                    // before the rows it summarises; this flush keeps the
+                    // terminal's order everywhere. A failure of it is kept
+                    // aside as upstream's `fclose` would have met it -- see
+                    // [`Out::deferred`].
                     let _ = out.flush();
                     let name = if which == 0 { &name_a } else { &name_b };
                     diag!(
                         "{}",
-                        eof_message(name, byte, newlines, at_line_start, settings.verbose)
+                        // Upstream adds the line only for `type_first_diff`,
+                        // the default: not for `-l`, nor for a null output.
+                        eof_message(
+                            name,
+                            byte,
+                            newlines,
+                            at_line_start,
+                            settings.verbose || no_stdout,
+                        )
                     );
                 }
                 EXIT_DIFFER
             }
         };
-
-        match out.flush() {
-            Ok(()) => Ok(status),
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(status),
-            Err(e) => {
-                diag!("cmp: write error: {}", strerror(&e));
-                Err(EXIT_TROUBLE)
-            }
-        }
+        Ok(status)
     }
 }
 

@@ -957,8 +957,10 @@ impl From<(io::Error, usize)> for Stop {
 
 /// `do_stdin`: tokens separated by any of newline, tab and space.
 fn read_tokens(mut each: impl FnMut(&[u8]) -> Result<(), (io::Error, usize)>) -> Result<(), Stop> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    // upstream's `factor <&-` is `factor: error reading input: Bad file
+    // descriptor`.
+    let mut input = io::BufReader::new(stdfd::RawStdin);
     let mut token: Vec<u8> = Vec::new();
     loop {
         let buf = match input.fill_buf() {

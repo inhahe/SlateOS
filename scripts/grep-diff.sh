@@ -1352,6 +1352,23 @@ grep -o a abc >&-
 grep -r foo sub >&-
 grep a /nonexistent 2>&-
 
+# Standard input closed, or a directory. Both name it `(standard input)` (or
+# `--label`'s name), unquoted, with status 2; but `fstat` failing ends the file
+# before its `-c` count, while a read failing does not -- `grep -c a < sub`
+# prints `0` after the error and `grep -c a <&-` prints nothing. Ours read a
+# closed descriptor as an empty file until 2026-10-03.
+grep a <&-
+grep -c a <&-
+grep -c a - <&-
+grep a - abc <&-
+grep -H --label=L a <&-
+grep -s a <&-
+grep -f - abc <&-
+grep a < sub
+grep -c a < sub
+grep -c a - < sub
+grep -H --label=L a < sub
+
 # --- POSIXLY_CORRECT: the first operand ends option parsing -------------------
 # glibc's getopt stops there while the variable is set -- to anything, the empty
 # string included -- so `-n` after the file is a second file, and so is a `--`.

@@ -50,7 +50,7 @@
 //! the *binaries*, which are separate compilation units from this library, and
 //! a `cfg(test)` item here would be invisible to every one of them.
 
-use std::io::{self, BufRead};
+use crate::stdio::StdioReader;
 
 /// Where a prompt's answer comes from.
 ///
@@ -68,19 +68,36 @@ pub trait Answers {
 
 /// The shipped source: standard input, held open across the whole run.
 ///
-/// One value rather than a fresh `io::stdin()` per prompt, because several
-/// prompts consume several lines of *one* stream — `rm -i a b c` with `y\ny\nn`
-/// on stdin removes two files. Rust's `Stdin` is a handle to one shared
-/// buffered reader, so this would in fact work either way; holding it is how
-/// the code says that it means to.
+/// One value rather than a stream per prompt, because several prompts consume
+/// several lines of *one* stream — `rm -i a b c` with `y\ny\nn` on stdin
+/// removes two files.
+///
+/// It is C's `stdin`, not Rust's ([`StdioReader`]), and that is measurable.
+/// Rust's reads 8 KiB at a time and keeps whatever it read, so
+/// `{ rm -i a; cat; } < answers` left `cat` nothing; stdio's is given back
+/// when the stream is closed, and `cat` gets every line `rm` did not use. An
+/// end of input is sticky, as `feof` is, so later prompts do not read again.
+/// And a read that failed is remembered, so that the program can say so as
+/// upstream does on the way out: give the stream to
+/// [`crate::stdfd::close_stdin_and_stdout`] with [`StdinAnswers::into_stream`]
+/// (or, where upstream registers no `close_stdin`, call
+/// [`StdioReader::exit_sync`] on it).
 pub struct StdinAnswers {
-    stdin: io::Stdin,
+    stdin: StdioReader,
 }
 
 impl StdinAnswers {
     #[must_use]
     pub fn new() -> Self {
-        StdinAnswers { stdin: io::stdin() }
+        StdinAnswers {
+            stdin: StdioReader::stdin(),
+        }
+    }
+
+    /// The stream the answers were read through, for closing.
+    #[must_use]
+    pub fn into_stream(self) -> StdioReader {
+        self.stdin
     }
 }
 
@@ -97,7 +114,7 @@ impl Answers for StdinAnswers {
         // not necessarily UTF-8, and `read_line` would fail the whole read on a
         // stray high byte and report end of input. That is the bug `find -ok`
         // had. See the module docs.
-        match self.stdin.lock().read_until(b'\n', &mut buf) {
+        match self.stdin.read_until(b'\n', &mut buf) {
             Ok(0) | Err(_) => None,
             Ok(_) => Some(buf),
         }

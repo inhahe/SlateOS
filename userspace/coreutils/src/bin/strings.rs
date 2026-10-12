@@ -1642,6 +1642,33 @@ fn run_main() -> ExitCode {
     stdfd::close_stdout("strings", out, earned)
 }
 
+/// Standard input as binutils reads it: `getc` until `EOF`, with no `ferror`
+/// check anywhere, so a read that fails is simply where the input ends.
+/// Measured: `strings < dir` prints nothing and exits 0, as `strings <&-`
+/// does; a directory used to be reported here as `Is a directory`. Descriptor
+/// 0 is read itself rather than through `io::stdin()`, so that nothing depends
+/// on which errors `std` happens to mask.
+struct StdinToFirstError {
+    ended: bool,
+}
+
+impl Read for StdinToFirstError {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.ended {
+            return Ok(0);
+        }
+        match stdfd::read(0, buf) {
+            Ok(n) => Ok(n),
+            // `getc` answers an error with `EOF`, as it answers the end, and
+            // the stream stays at `EOF` after it.
+            Err(_) => {
+                self.ended = true;
+                Ok(0)
+            }
+        }
+    }
+}
+
 fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
     let mut failed = false;
     // `-U h` colours only for a terminal, as upstream's `isatty (1)` decides.
@@ -1650,10 +1677,11 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
     for source in sources {
         match source {
             Source::Stdin => {
+                let input = StdinToFirstError { ended: false };
                 let result = if options.unicode == Unicode::Default {
-                    scan(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0)
+                    scan(input, out, Some(STDIN_LABEL), options, 0)
                 } else {
-                    scan_unicode_stream(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0, tty)
+                    scan_unicode_stream(input, out, Some(STDIN_LABEL), options, 0, tty)
                 };
                 if let Err(e) = result {
                     stdfd::diag_bytes(&read_failed(STDIN_LABEL, &strerror(&e)));

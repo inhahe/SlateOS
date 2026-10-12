@@ -23,6 +23,13 @@ are deleted afterwards. Each reviewer's report is kept in
 `<git-common-dir>/reviews/`. Run it in the background: a `max` review of a
 large batch takes an hour.
 
+After the reviews, cargo-mutants breaks the batch's changed Rust lines one at
+a time -- `<` for `<=`, a function's body for a default value -- and runs the
+crate's tests against each (`--mutants-budget`, half an hour by default, at
+idle priority; a large batch is sampled). A mutant no test notices is a
+finding like a reviewer's: add the test that catches it, or say why the change
+cannot matter (`|` for `^` on flags that never share a bit cannot).
+
 THE RECORD. A run ends by printing trailers for the follow-up commit -- the one
 that fixes what the review found, or an empty one (`git commit --allow-empty`)
 when nothing needed fixing -- to go in its message's last paragraph, beside
@@ -52,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -59,6 +67,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -480,7 +489,139 @@ def remove_scratch(top: Path, scratch: Path) -> None:
               "remove it, and any target/ in it, by hand", flush=True)
 
 
-def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str) -> int:
+# ---------------------------------------------------------------------------
+# Mutation testing: does any test notice when the batch's code is broken?
+# ---------------------------------------------------------------------------
+
+#: Seconds of mutation testing a batch gets at most, shared by its crates.
+#: A mutant costs a rebuild and its package's whole test suite -- a minute
+#: for a crate with fixture tests -- so a large batch is sampled, not run
+#: whole: the mutants are shuffled, and the budget ends the run.
+MUTANTS_BUDGET = 30 * 60
+
+#: Packages whose tests cannot run on the host, so a mutant of theirs can
+#: only fail to build or be untested: the kernel is a bare-metal binary.
+NO_HOST_TESTS = {"kernel"}
+
+#: Windows' idle priority class, which every process a mutation run starts
+#: inherits: a boot test's QEMU guest, or a lane's own build, comes first.
+IDLE_PRIORITY_CLASS = 0x00000040
+
+
+def owning_workspaces(tree: Path, files: list[str]) -> dict[str, set[str]]:
+    """Each Cargo workspace root under `tree` that `files` (repo-relative
+    `.rs` paths) belong to, repo-relative ("" for the tree's own), with the
+    names of the packages they are in."""
+    out: dict[str, set[str]] = {}
+    for f in files:
+        d = (tree / f).parent
+        while d != tree and not (d / "Cargo.toml").is_file():
+            d = d.parent
+        manifest = d / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        try:
+            package = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]["name"]
+        except (KeyError, OSError, tomllib.TOMLDecodeError):
+            continue
+        r = subprocess.run(["cargo", "locate-project", "--workspace", "--message-format",
+                            "plain"], cwd=d, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", stdin=subprocess.DEVNULL, env=gitenv.clean_env())
+        if r.returncode != 0:
+            continue
+        root = Path(r.stdout.strip()).parent.resolve()
+        rel = "" if root == tree.resolve() else str(root.relative_to(tree.resolve())).replace(
+            os.sep, "/")
+        out.setdefault(rel, set()).add(package)
+    return out
+
+
+def mutants_tally(out_dir: Path) -> tuple[int, list[str], int]:
+    """(mutants tested, the ones no test caught, mutants found) from a
+    cargo-mutants output directory."""
+    mo = out_dir / "mutants.out"
+    lines = {}
+    for name in ("caught", "missed", "timeout", "unviable"):
+        p = mo / f"{name}.txt"
+        lines[name] = [x for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] \
+            if p.is_file() else []
+    # Every mutant it found, tested or not, is listed in mutants.json.
+    try:
+        found = len(json.loads((mo / "mutants.json").read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        found = 0
+    tested = sum(len(v) for v in lines.values())
+    return tested, lines["missed"], max(found, tested)
+
+
+def mutation_round(top: Path, scratch: Path, base: str, tip: str, stamp: str,
+                   budget: int) -> str | None:
+    """Mutate the batch's changed Rust lines in `scratch` with cargo-mutants,
+    for at most `budget` seconds, at idle priority; keep the results in the
+    reports directory and answer the `Review-mutants` trailer's value (None
+    when there was nothing to mutate or no cargo-mutants)."""
+    if subprocess.run(["cargo", "mutants", "--version"], capture_output=True,
+                      stdin=subprocess.DEVNULL).returncode != 0:
+        print("review-batch: cargo-mutants is not installed (cargo install cargo-mutants "
+              "--locked); no mutation testing this time", flush=True)
+        return None
+    files = [f for f in git("diff", "--name-only", "--no-renames", base, tip, "--", "*.rs",
+                            cwd=scratch).split() if (scratch / f).is_file()]
+    groups = owning_workspaces(scratch, files)
+    for rel in list(groups):
+        skipped = groups[rel] & NO_HOST_TESTS
+        if skipped:
+            print(f"review-batch: no mutation testing for {', '.join(sorted(skipped))}: its "
+                  "tests do not run on the host", flush=True)
+            groups[rel] -= skipped
+        if not groups[rel]:
+            del groups[rel]
+    if not groups:
+        return None
+    dest = reports_dir(top) / f"{stamp}-{tip[:12]}-mutants"
+    deadline = time.monotonic() + budget
+    runner = Path(__file__).resolve().parent / "run-timeout.py"
+    tested, missed, found = 0, [], 0
+    for rel, packages in sorted(groups.items()):
+        left = int(deadline - time.monotonic())
+        if left < 60:
+            break
+        ws = scratch / rel if rel else scratch
+        diff = git("diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
+                   *([f"--relative={rel}/"] if rel else []), base, tip, "--",
+                   *(f for f in files if not rel or f.startswith(rel + "/")), cwd=scratch)
+        diff_file = scratch / f".mutants-{len(rel)}.diff"
+        diff_file.write_text(diff, encoding="utf-8", newline="\n")
+        out = dest / (rel.replace("/", "_") or "workspace")
+        out.mkdir(parents=True, exist_ok=True)
+        cmd = ["cargo", "mutants", "-d", str(ws), "--in-place", "--in-diff", str(diff_file),
+               "--shuffle", "--timeout", "300", "-o", str(out)]
+        if os.name == "nt":
+            # The workspace's own config builds for bare metal.
+            cmd.append("--cargo-arg=--target=x86_64-pc-windows-gnu")
+        if not rel:
+            for p in sorted(packages):
+                cmd += ["-p", p]
+        print(f"review-batch: mutation testing {rel or 'the workspace'} "
+              f"({', '.join(sorted(packages))}), at most {left // 60} minutes", flush=True)
+        subprocess.run([sys.executable, str(runner), str(left), *cmd], cwd=scratch,
+                       env=gitenv.clean_env(), capture_output=True, stdin=subprocess.DEVNULL,
+                       creationflags=IDLE_PRIORITY_CLASS if os.name == "nt" else 0)
+        t, m, f = mutants_tally(out)
+        tested, found = tested + t, found + f
+        missed += [f"{rel + '/' if rel else ''}{x}" for x in m]
+    if not found:
+        return None
+    print(f"review-batch: mutants: {tested} of {found} tested, {len(missed)} not caught by any "
+          f"test -- each is a finding to triage: add the test that catches it, or say why the "
+          f"change cannot matter. Results: {dest}", flush=True)
+    for x in missed:
+        print(f"  missed: {x}")
+    return f"{len(missed)} missed of {tested} tested ({found} found) {dest.name}"
+
+
+def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str,
+           mutants_budget: int = MUTANTS_BUDGET) -> int:
     top = Path(git("rev-parse", "--show-toplevel").strip())
     base_rev, _, tip_rev = rng.partition("..")
     if not tip_rev:
@@ -525,12 +666,18 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
                 runs.append(f"{model}-{level} {name}")
                 print(f"review-batch: {model} at {level} -- done; report {report}", flush=True)
                 print(said[-6000:], flush=True)
+        mutants = None
+        if mutants_budget > 0:
+            wait_for_no_qemu(qemu_wait)
+            mutants = mutation_round(top, scratch, base, tip, stamp, mutants_budget)
         print("\nTrailers for the follow-up commit (fill in the findings after triage):\n")
         print(f"Reviewed: {base}..{tip}")
         print(f"Review-tier: {tier}")
         print(f"Review-runs: {', '.join(runs)}")
         print(f"Review-lane: {lane_letter(top)}")
         print(f"Review-written-at: {written_at}")
+        if mutants:
+            print(f"Review-mutants: {mutants}")
         print("Review-findings: <n> fixed, <m> dismissed", flush=True)
     finally:
         remove_scratch(top, scratch)
@@ -722,7 +869,7 @@ def self_test() -> int:
         expect("xhigh record: max commits still refused", refused(problems),
                sorted(s[:10] for s in (kern, tip)))
 
-        fix1 = commit("apps/c.rs", "fn fix1() {}", "first fix, no record")
+        commit("apps/c.rs", "fn fix1() {}", "first fix, no record")
         rec_m = commit("apps/b.rs", "// fix 2", record(
             root, tip, "max", f"opus-max {report('r2.md')}, fable-xhigh unavailable",
             "\nCo-Authored-By: someone <x@y>"))
@@ -774,6 +921,27 @@ def self_test() -> int:
         # Three records: two of root..tip, and one of an empty range.
         expect("stats", rows, [("F", "max", 3, 2 * lines, 6, 3)])
 
+    # Which workspace each changed file is mutation-tested from: the tree's
+    # own for its members, its own for a crate with a [workspace] of its own.
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp)
+        (tree / "Cargo.toml").write_text('[workspace]\nmembers = ["a"]\n', encoding="utf-8")
+        for crate, extra in (("a", ""), ("solo", "\n[workspace]\n")):
+            (tree / crate / "src").mkdir(parents=True)
+            (tree / crate / "src" / "lib.rs").write_text("", encoding="utf-8")
+            (tree / crate / "Cargo.toml").write_text(
+                f'[package]\nname = "{crate}"\nversion = "0.0.0"\nedition = "2021"\n{extra}',
+                encoding="utf-8")
+        expect("owning workspaces", owning_workspaces(tree, ["a/src/lib.rs", "solo/src/lib.rs"]),
+               {"": {"a"}, "solo": {"solo"}})
+        mo = tree / "out" / "mutants.out"
+        mo.mkdir(parents=True)
+        (mo / "mutants.json").write_text(json.dumps([{}] * 9), encoding="utf-8")
+        (mo / "caught.txt").write_text("x\ny\n", encoding="utf-8")
+        (mo / "missed.txt").write_text("src/a.rs:1:1: replace f with g\n", encoding="utf-8")
+        expect("mutants tally", mutants_tally(tree / "out"),
+               (3, ["src/a.rs:1:1: replace f with g"], 9))
+
     cmds = review_commands("a" * 40, "b" * 40, "max")
     expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
     expect("max prompt", cmds[0][2][-1], f"/code-review max commits {'a' * 40}..{'b' * 40}")
@@ -804,6 +972,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the reviews; run none")
     ap.add_argument("--qemu-wait", type=int, default=4 * 3600,
                     help="seconds to wait for a QEMU guest to finish before reviewing")
+    ap.add_argument("--mutants-budget", type=int, default=MUTANTS_BUDGET,
+                    help="seconds of mutation testing after the reviews; 0 for none")
     ap.add_argument("--written-at", default=os.environ.get("CLAUDE_EFFORT", "unknown"),
                     help="the effort level the batch was written at (default: this "
                          "session's, CLAUDE_EFFORT)")
@@ -831,7 +1001,8 @@ def main(argv: list[str]) -> int:
         for w in why:
             print(f"  {w}")
         return 0
-    return review(a.range[0], a.remote, a.dry_run, a.qemu_wait, a.written_at)
+    return review(a.range[0], a.remote, a.dry_run, a.qemu_wait, a.written_at,
+                  a.mutants_budget)
 
 
 if __name__ == "__main__":

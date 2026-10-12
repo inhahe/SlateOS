@@ -50,10 +50,42 @@ cprintf = { path = "../cprintf" }
 # a program links (design-decisions 768). `hostname` is upstream's calls to
 # those, and nothing else would give the answer every C program gets.
 libcall = { path = "../../libcall" }
+# The journal `systemd-cat` files its lines in: the record journald would make
+# of each (`journalrec`, shared with `syslogd` and `logger`), appended under
+# the journal's lock so that a vacuum or a rotation meanwhile loses none
+# (`journalio`, design-decisions §1037). Both are what `userspace/systemctl`
+# used for its `systemd-cat` personality, which this replaces.
+journalrec = { path = "../journalrec" }
+journalio = { path = "../journalio" }
+# journald's forwarding, which `systemd-cat`'s helper does as journald would:
+# an `emerg` line broadcast to every logged-in user's terminal, and a writer's
+# command name escaped as journald escapes it. Shared with `syslogd`.
+journalfwd = { path = "../journalfwd" }
 # util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).
 ulstrutils = { path = "../ulstrutils" }
+# The C library's syslog(3), for killall5 and pidof, whose complaints go
+# there unless standard input is a terminal.
+libcsyslog = { path = "../libcsyslog" }
+# util-linux's closestream.h, for the util-linux port that lives in this
+# crate (`renice`): its standard output is buffered and judged at exit by
+# util-linux's rule, which forgives a closed descriptor gnulib's reports.
+ulclosestream = { path = "../ulclosestream" }
+# util-linux's lib/colors.c and lib/color-names.c -- `--color`, the
+# terminal-colors.d files and the colour names -- for the util-linux ports
+# here that colour their output: `hexdump -L`, and `cal`'s today, week
+# number, header, workdays and weekend.
+ulcolors = { path = "../ulcolors" }
+# ncurses' terminfo layer -- setupterm's verdicts, tgetent's trimmed sgr0,
+# tparm, tputs -- for `pstree`'s symbol choice and its `-h`/`-H` highlight.
+terminfo = { path = "../terminfo" }
+# C's strtol and strtoul at any base, 0 included: `xxd` reads every number
+# with them, and `hexdump`'s `_L` colour units at bases 8, 10 and 16.
+cstrtol = { path = "../cstrtol" }
+# util-linux's lib/timeutils.c -- parse_timestamp and parse_sec -- for `cal`'s
+# timestamp operand, and the util-linux ports that take times.
+ultimeutils = { path = "../ultimeutils" }
 # strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
 # until 2026-09-26; `coreutils::errmsg` re-exports it.
 errmsg = { path = "../errmsg" }

@@ -16,7 +16,7 @@ says so), and cmake, the first large one ported, uses exceptions.
 | `_dl_find_object` (glibc 2.35) | absent | the program's segment holding an address, and its `.eh_frame_hdr` -- what GCC's unwinder asks, where glibc has it |
 | `__tls_get_addr` | NULL for everything | module 1's variable in the calling thread's block |
 | `dlopen(NULL)`, `dlopen("")` | NULL, "dynamic linking not supported" | the program's handle, which POSIX requires for NULL |
-| `dlsym`, `dlvsym` | NULL, the same message | NULL, `<program>: undefined symbol: <name>`, glibc's static answer |
+| `dlsym`, `dlvsym` | NULL, the same message | NULL, `<program>: undefined symbol: <name>`, glibc's static answer -- and since 2026-10-07, for a program linked to export its symbols, the symbol (design-decisions §1184) |
 | `dlclose` of the program's handle | -1 | 0 |
 | `dlerror` | one slot for the process: a thread could read, or clear, another's message | the calling thread's own, as in glibc |
 | `dlinfo` | -1 for every request | the program's link map, namespace, directory, TLS module and block, program headers; glibc's refusals for the rest |

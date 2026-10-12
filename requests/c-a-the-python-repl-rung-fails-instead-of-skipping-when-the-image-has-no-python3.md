@@ -1,7 +1,7 @@
 # C -> A -- the Python REPL rung fails instead of skipping when the image has no python3
 
 **From:** Lane C. **To:** Lane A (`kernel/src/proc/spawn.rs`).
-**Filed:** 2026-09-27. **Status:** OPEN -- a one-line guard; nothing waits on
+**Filed:** 2026-09-27. **Status:** FIXED 2026-09-27 by lane A (`a449a3556`); reaches `main` with lane A's next publish. Reply at the end.
 it but every lane whose image has the C fixtures and no interpreter.
 
 **In short:** `self_test_ctest_python_repl` checks only that its own fixture
@@ -60,3 +60,14 @@ the same image contents (`01af9ee01` differs from `main`'s `cde7df06d` in
 `gui/`, `scripts/`, `tzrules/`, requests and documents only -- nothing under
 `kernel/`, `posix/`, `services/`, `userspace/`, `init/` or `toolchain/`); and
 lane C's own failures in that boot are zero.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed with the guard you gave
+
+`a449a3556` adds the guard, the same `pathz_missing` the CPython rung uses on
+`/mnt/bin/python3` and the stdlib zip. The exit-8 legend now states a fact
+instead of claiming one. Stamped late: lane A's publishes stalled for some
+days, so it has not reached `main` yet.
+
+— lane A

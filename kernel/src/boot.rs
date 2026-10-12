@@ -284,6 +284,43 @@ pub fn parse_boot_info() -> Option<BootInfo> {
     })
 }
 
+/// The bootloader's framebuffers, as its response describes them -- every
+/// field, which [`parse_boot_info`]'s `FramebufferInfo` keeps only some of --
+/// for `kexec`, which hands a restarted kernel the same screen. Empty when the
+/// bootloader answered with none. The descriptors live as long as the kernel
+/// (bootloader-reclaimable memory, which SlateOS never reclaims).
+#[must_use]
+pub fn framebuffers() -> &'static [&'static crate::limine::Framebuffer] {
+    match FRAMEBUFFER_REQUEST.response() {
+        Some(r) => r.framebuffers(),
+        None => &[],
+    }
+}
+
+/// The bootloader's physical memory map, without the logging [`parse_boot_info`]
+/// does — the same slice it returns in `BootInfo::memory_map`.
+///
+/// The entries live for the whole kernel lifetime (Limine's responses are in
+/// bootloader-reclaimable memory, which SlateOS never reclaims), so this is a
+/// `'static` slice and remains valid at any later point — which is what
+/// `kexec` needs when it recreates the handoff. Returns an empty slice if the
+/// bootloader did not answer the memory-map request.
+#[must_use]
+pub fn memory_map() -> &'static [&'static MemmapEntry] {
+    match MEMORY_MAP_REQUEST.response() {
+        Some(r) => r.entries(),
+        None => &[],
+    }
+}
+
+/// The RSDP address the bootloader reported, physical under base revision 3, or
+/// `None` if it answered no RSDP request. `kexec` passes it through to the new
+/// kernel so it finds ACPI without re-scanning.
+#[must_use]
+pub fn rsdp_address() -> Option<u64> {
+    RSDP_REQUEST.response().map(|r| r.address)
+}
+
 /// Get the kernel file's virtual address and size.
 ///
 /// Returns `Some((address, size))` where `address` is a pointer to
@@ -312,10 +349,21 @@ pub fn kernel_file_address() -> Option<(u64, usize)> {
 ///
 /// Returns the null-terminated cmdline string from the Limine kernel-file
 /// descriptor. Returns `None` when no cmdline was provided, it is empty, or it
-/// is not valid UTF-8. The returned slice lives for the entire kernel lifetime
-/// (Limine guarantees its boot info persists). This is the single source of
-/// truth for boot parameters — nothing should fabricate a command line.
+/// is not valid UTF-8 -- [`kernel_cmdline_bytes`] has it whatever its bytes.
+/// The returned slice lives for the entire kernel lifetime (Limine guarantees
+/// its boot info persists). This is the single source of truth for boot
+/// parameters — nothing should fabricate a command line.
 pub fn kernel_cmdline() -> Option<&'static str> {
+    kernel_cmdline_bytes().and_then(|bytes| core::str::from_utf8(bytes).ok())
+}
+
+/// The kernel command line as the bootloader passed it: bytes, without the
+/// terminator. `None` when none was provided or it is empty.
+///
+/// For a reader that must show the line exactly -- `/proc/cmdline` -- rather
+/// than parse it; a line that is not UTF-8 is still the line the machine was
+/// started with.
+pub fn kernel_cmdline_bytes() -> Option<&'static [u8]> {
     let response = KERNEL_FILE_REQUEST.response()?;
     let file_ptr = response.kernel_file;
     if file_ptr.is_null() {
@@ -346,6 +394,5 @@ pub fn kernel_cmdline() -> Option<&'static str> {
     }
     // SAFETY: bytes 0..len are valid, initialized, and live for the kernel
     // lifetime per the Limine guarantee above.
-    let bytes = unsafe { core::slice::from_raw_parts(file.cmdline, len) };
-    core::str::from_utf8(bytes).ok()
+    Some(unsafe { core::slice::from_raw_parts(file.cmdline, len) })
 }

@@ -604,6 +604,31 @@ ls --hyperlink=always t/dangle
 dir --hyperlink=always t
 vdir --hyperlink=always t
 
+# --- the descriptors, as the program was given them ---
+# Standard output full or closed is gnulib's `close_stdout` with `ls`'s
+# failure status, 2: a reason when the failure comes at the close, none when
+# a write before it failed. Until 2026-10-07 `ls` wrote through Rust's own
+# `Stdout`, which calls a closed descriptor's EBADF success, and the runtime
+# had put `/dev/null` there anyway, so `ls t >&-` exited 0.
+ls t >/dev/full
+ls -l t >/dev/full
+ls -R r >/dev/full
+ls -lR t r >/dev/full
+ls t >&-
+ls -l t >&-
+ls nosuchfile >&-
+ls nosuchfile t >&-
+ls t nosuchfile >/dev/full
+dir t >&-
+vdir t >/dev/full
+ls --version >/dev/full
+ls --version >&-
+ls nosuchfile 2>/dev/full
+ls t 2>/dev/full
+ls nosuchfile 2>&-
+ls t 2>&-
+ls t </dev/null <&-
+
 # --- deliberately different ---
 !--help text is ours|ls --help
 !--version text is ours|ls --version

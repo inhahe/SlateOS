@@ -122,6 +122,28 @@ pub fn clear() -> u32 {
     0
 }
 
+/// Set the mask to `mask`, and answer the mask it replaced: `mkdir`'s `umask
+/// (options.umask_self)`, and the switch to and from `umask_ancestor` around
+/// each ancestor `-p` makes.
+///
+/// Like [`clear`], a utility's `main` may call this and a test may not: the
+/// mask is the whole process's, so under `cargo test` it is every other
+/// test's too. Code that wants testing takes the setter as a parameter, and
+/// its tests hand it one that records instead.
+#[cfg(unix)]
+pub fn set(mask: u32) -> u32 {
+    // SAFETY: `umask` takes and returns a plain integer, touches no memory and
+    // cannot fail.
+    unsafe { umask(mask & 0o777) }
+}
+
+/// A host with no mask has nothing to set; it stays `0`, as [`current`]
+/// answers there.
+#[cfg(not(unix))]
+pub fn set(_mask: u32) -> u32 {
+    0
+}
+
 /// The POSIX idiom, used only where [`from_proc`] could not answer.
 ///
 /// See the module docs for why `0` and not `0777`.

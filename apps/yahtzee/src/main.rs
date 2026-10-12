@@ -20,6 +20,7 @@
 //! Themed with the Catppuccin Mocha palette.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use gamechrome::Chrome;
 use guitk::color::Color;
@@ -647,6 +648,8 @@ struct Yahtzee {
     /// first frame. A new game resets only the game's own fields, so they
     /// carry over.
     palette: Palette,
+    /// Why a greyed button is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl Yahtzee {
@@ -670,7 +673,16 @@ impl Yahtzee {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            reasons: gamechrome::why::Reasons::new(),
         }
+    }
+
+    /// Why the button `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. Roll is greyed exactly when the turn's rolls
+    /// are spent.
+    fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        (target == Target::RollButton && self.phase() == GamePhase::MustScore)
+            .then_some("Three rolls are used: score this turn in a category first.")
     }
 
     /// Remember the size the window last reported.
@@ -1344,7 +1356,9 @@ impl Yahtzee {
             l.font,
             guitk::button::Kind::Primary,
             guitk::button::State {
-                disabled: self.phase() == GamePhase::MustScore,
+                // Greyed exactly when there is a reason to give for it: one
+                // answer for the paint and the words.
+                disabled: self.why_greyed(Target::RollButton).is_some(),
                 ..guitk::button::State::default()
             },
             c.chrome.page,
@@ -1654,7 +1668,10 @@ enum Target {
 // ── Event dispatch ──────────────────────────────────────────────────
 
 fn handle_event(game: &mut Yahtzee, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed
+    // button gives, before the event does anything else.
+    let why = game.reasons.event(event);
+    let result = match event {
         Event::Key(key) => game.handle_key(key),
         Event::Mouse(MouseEvent {
             x,
@@ -1666,7 +1683,8 @@ fn handle_event(game: &mut Yahtzee, event: &Event) -> EventResult {
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for Yahtzee {
@@ -1688,6 +1706,12 @@ impl App for Yahtzee {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// A clock only while a greyed button's reason is waiting to appear:
+    /// nothing on the table moves on its own.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.reasons.due_in()
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
@@ -1702,7 +1726,14 @@ impl App for Yahtzee {
         // The size the frame is drawn at is the size the next click is read
         // against, which is the only reason it is stored at all.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed buttons this frame drew, for the reason the one under
+        // the pointer gives.
+        let greyed = gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target));
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -1761,6 +1792,61 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Why a greyed button is greyed ----------------------------------------
+
+    /// Draw the window, then move the pointer onto Roll, where it was drawn.
+    fn point_at_roll(game: &mut Yahtzee) {
+        App::render(game, WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (x, y) = game
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::RollButton)
+            .expect("the table draws Roll")
+            .centre();
+        handle_event(
+            game,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// **A spent Roll says why**, while the pointer rests on it, after the
+    /// delay and drawn over everything -- and one with rolls left says
+    /// nothing.
+    #[test]
+    fn a_greyed_roll_says_why_while_the_pointer_rests_on_it() {
+        let mut game = Yahtzee::new();
+        point_at_roll(&mut game);
+        assert_eq!(
+            App::tick_interval(&game),
+            None,
+            "a live Roll waits to explain itself"
+        );
+
+        game.roll_number = MAX_ROLLS;
+        assert_eq!(game.phase(), GamePhase::MustScore);
+        point_at_roll(&mut game);
+        assert_eq!(game.reasons.showing(), None, "the reason came at once");
+        assert_eq!(
+            App::tick_interval(&game),
+            Some(Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        handle_event(&mut game, &Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            game.reasons.showing(),
+            Some("Three rolls are used: score this turn in a category first.")
+        );
+        let tree = App::render(&mut game, WINDOW_WIDTH, WINDOW_HEIGHT);
+        let reason = game.reasons.render(&game.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+    }
 
     /// **The window is drawn in the user's colours**, light or dark -- a
     /// fresh game, a roll with a die held and a score taken, and a game with

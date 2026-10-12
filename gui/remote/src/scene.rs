@@ -55,8 +55,9 @@
 //! decodes every one -- each frame of a VP9 stream is coded against the ones
 //! before it -- and shows the latest as the window's content. When the
 //! window goes back to commands, the frame says so ([`VideoUpdate::Stop`]).
-//! The codec is the sender's and the viewer's business; this crate only
-//! carries the bytes.
+//! The coding is the sender's and the viewer's business; this crate carries
+//! the bytes, and says what colour they are ([`VIDEO_VP9_COLOUR`]), as a
+//! video file's container does.
 //!
 //! ## Pictures
 //!
@@ -101,8 +102,44 @@ pub const SCENE_MAGIC: [u8; 4] = *b"SCEN";
 pub const SCENE_VERSION: u8 = 3;
 
 /// [`SceneVideo::codec`] for VP9 (profile 0: 8-bit 4:2:0), the only codec
-/// so far.
+/// so far. Its pictures are [`VIDEO_VP9_COLOUR`].
 pub const VIDEO_VP9: u8 = 1;
+
+/// A video's colour, as H.273 (ISO/IEC 23091-2) numbers it -- the four code
+/// points a Matroska file's `Colour` or an MP4's `colr` box gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoColour {
+    /// `MatrixCoefficients`: the weights brightness and colour differences
+    /// were made with.
+    pub matrix: u8,
+    /// `ColourPrimaries`: which red, green and blue the pixels are of.
+    pub primaries: u8,
+    /// `TransferCharacteristics`: the curve the pixels are encoded on.
+    pub transfer: u8,
+    /// Samples span every code, rather than the studio range (16 to 235).
+    pub full_range: bool,
+}
+
+/// The colour of a [`VIDEO_VP9`] stream's pictures: a desktop's pixels,
+/// sRGB's primaries and curve, made YUV with BT.601's weights (H.273's 6,
+/// SMPTE 170M) at the studio range -- what the compositor codes a window's
+/// pixels with (`vp9::rgb::argb_to_yuv420`).
+///
+/// A viewer gives this to its decoder as a file's colour, which a VP9
+/// decoder takes before the bitstream's. The bitstream says BT.601 too, in
+/// VP9's one colour field, so that a reader of it alone takes the right
+/// weights rather than guessing BT.709's for a picture 1280 wide or more.
+/// But that field cannot say sRGB's primaries, and Chrome -- whose way with
+/// video colour SlateOS follows -- reads it as SMPTE 170M's primaries and
+/// curve as well, which it converts to the screen's: a viewer going by the
+/// bitstream alone would shift the desktop's colours, a strong red by
+/// several levels. Design-decisions §1383.
+pub const VIDEO_VP9_COLOUR: VideoColour = VideoColour {
+    matrix: 6,
+    primaries: 1,
+    transfer: 13,
+    full_range: false,
+};
 
 /// Upper bound on one compressed video frame, to reject corrupt or hostile
 /// input before allocating: a VP9 frame of a 4K picture at a generous

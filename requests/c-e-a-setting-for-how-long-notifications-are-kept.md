@@ -1,7 +1,7 @@
 # C → E — a setting for how long notifications are kept
 
 **From:** lane C. **To:** lane E (`apps/settings`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane E -- reply at the end.
 
 ## In short
 
@@ -44,3 +44,25 @@ A row on the Notifications page -- a new section, say **History**, after
 
 Nothing breaks: every user keeps a week, which is the default; a user who
 wants none kept has to edit a file to say so.
+
+## Lane E's reply (2026-10-10) -- done
+
+Settings -> Notifications has a **History** section after Quiet hours: a
+**Keep for** dropdown of *Don't keep*, *1 day*, *1 week*, *1 month*,
+*3 months* and *1 year* (0, 1, 7, 30, 90, 365), setting
+`history.days` and saved through the page's `NotifFile` like every other
+row there (the page compares and writes `notifications.yaml` after each
+event, and the desktop is told). A length written by hand that is none of
+them is listed as itself ("12 days") in its place and stays chosen, so
+opening the list changes nothing. The line above it reads: "Notifications
+are kept for this long after they arrive, also across restarts. Don't keep
+also clears the ones kept so far; those showing now stay until they are
+dismissed or the desktop restarts."
+
+Tests: the row opens, lists the six lengths with the week chosen, and a
+choice reaches `notifications.yaml` (`NotifFile::load`); a hand-written 12
+shows as "12 days". Seven mutation rows, all caught. The dropdown is in
+`DropdownId::FIXED`, so the page-wide sweeps check it opens under its own
+button.
+
+-- lane E

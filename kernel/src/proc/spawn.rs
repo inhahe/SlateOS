@@ -490,11 +490,11 @@ pub mod fd_handle_type {
     /// same read or write end safely (matching Linux fork() pipe
     /// inheritance).
     pub const PIPE: u8 = 1;
-    /// TCP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel TCP connection or listener handle (`net::native_socket`).
+    /// Spawn dups via `native_socket::dup()`, one more holder of the same
+    /// socket, as for a pipe.
     pub const TCP_SOCKET: u8 = 2;
-    /// UDP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel UDP socket handle (`net::native_socket`), duped the same way.
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
@@ -531,6 +531,19 @@ pub mod fd_handle_type {
     /// is the shape of `script(1)`, a multiplexer spawning a helper to drive
     /// the pty, and sshd's server side.
     pub const PTY: u8 = 7;
+    /// A Unix-domain socket with a name, or either end of one of its pairs
+    /// (from `ipc::unix_socket`, the `SYS_UNIX_*` calls): a listener, a
+    /// connection, a datagram socket. Spawn dups via `unix_socket::dup()`, one
+    /// more holder of the same socket -- the handle is the socket, so the
+    /// child's is numerically the parent's -- which ends with its last
+    /// holder, as an inherited socket does on Linux. What an inetd or a
+    /// socket-activating supervisor hands the service it starts.
+    pub const UNIX_SOCKET: u8 = 8;
+
+    /// The highest type the kernel knows. A list naming a higher one is
+    /// refused whole (`SYS_PROCESS_SET_EXEC_CLOSE`), and the spawn dup loop
+    /// refuses the entry.
+    pub const LAST: u8 = UNIX_SOCKET;
 }
 
 /// Which [`ResourceType`](crate::cap::ResourceType) owns the kernel object
@@ -545,11 +558,10 @@ pub mod fd_handle_type {
 ///
 /// `CONSOLE` maps to `None` because it is a *virtual* handle — it names "the
 /// console" rather than any refcounted object, so there is nothing to reclaim.
-/// `TCP_SOCKET`/`UDP_SOCKET` also map to `None`, but for a different reason:
-/// the dup loop has no arm for them at all, so no handle of either type can
-/// reach registration.  They are listed explicitly rather than swept into the
-/// wildcard so that adding the missing dup arm forces this decision to be made
-/// again rather than defaulting to "leaks silently".
+/// `TCP_SOCKET`/`UDP_SOCKET` map to `NativeSocket`: since 2026-10-02 the
+/// kernel's own TCP and UDP sockets are counted per holder
+/// (`net::native_socket`), so a spawn can pass one on as it passes a pipe.
+/// Until then the dup loop had no arm for them and refused both types.
 #[must_use]
 const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
     use crate::cap::ResourceType;
@@ -559,7 +571,9 @@ const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
         fd_handle_type::STREAM_SOCKET => Some(ResourceType::StreamSocket),
         fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
         fd_handle_type::PTY => Some(ResourceType::Pty),
-        // CONSOLE: virtual. TCP_SOCKET/UDP_SOCKET: unreachable (no dup arm).
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => Some(ResourceType::NativeSocket),
+        fd_handle_type::UNIX_SOCKET => Some(ResourceType::UnixSocket),
+        // CONSOLE: virtual.
         _ => None,
     }
 }
@@ -731,6 +745,72 @@ pub struct SpawnEx2Args {
     pub cwd_ptr: u64,
     /// Length of the path at `cwd_ptr`, at most `pcb::CWD_MAX_LEN`.
     pub cwd_len: u64,
+    /// `POSIX_SPAWN_SETPGROUP`: 0 leaves the child in its parent's process
+    /// group; 1 puts it in `pgid`. Any other value is `InvalidArgument`.
+    ///
+    /// These six fields are `posix_spawnattr_t`'s flags
+    /// (`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`),
+    /// applied before the child's first instruction ([`SpawnAttrs`]). Zero in
+    /// all six -- an older caller's missing tail -- asks for nothing, and the
+    /// child starts with its parent's group, session, blocked mask and ignored
+    /// signals. A value with no meaning is refused, never ignored: the kernel
+    /// cannot tell an unset field from one a newer caller set.
+    pub pgid_mode: u64,
+    /// With `pgid_mode` 1, the group: one in the child's session, or 0 for a
+    /// new group the child leads. Must be 0 with `pgid_mode` 0, and a `pid_t`
+    /// (at most `i32::MAX`).
+    pub pgid: u64,
+    /// `POSIX_SPAWN_SETSIGMASK`: 0 gives the child its parent's blocked mask;
+    /// 1 gives it `sigmask`. Any other value is `InvalidArgument`.
+    pub sigmask_set: u64,
+    /// With `sigmask_set` 1, the child's blocked set, bit `n - 1` for signal
+    /// `n`; `SIGKILL` and `SIGSTOP` are dropped from it, as `SYS_SIGNAL_MASK`
+    /// drops them. Must be 0 with `sigmask_set` 0.
+    pub sigmask: u64,
+    /// `POSIX_SPAWN_SETSIGDEF`: signals the child does not inherit as ignored
+    /// (`SYS_SIGNAL_SET_IGNORED`). Any bits.
+    pub sigdefault: u64,
+    /// `POSIX_SPAWN_SETSID`: 1 starts the child in a new session it leads;
+    /// 0 leaves it in its parent's. Any other value is `InvalidArgument`.
+    pub setsid: u64,
+}
+
+/// Read [`SpawnEx2Args`]'s six `posix_spawnattr_t` fields into the
+/// [`SpawnAttrs`] they ask for.
+///
+/// Pure, so the rules can be tested without a ring-3 caller; the syscall
+/// applies it to its kernel copy of the struct, before the image is read.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a mode other than 0 or 1 (`pgid_mode`,
+/// `sigmask_set`, `setsid`), a value set beside a mode of 0 that does not use
+/// it (`pgid`, `sigmask`), or a group that is not a `pid_t`.
+pub fn ex2_attrs(ex2: &SpawnEx2Args) -> KernelResult<SpawnAttrs> {
+    // A `pid_t` group, as glibc's `posix_spawnattr_setpgroup` takes one; a
+    // negative one sign-extended into the field is not a group.
+    const PID_MAX: u64 = 0x7FFF_FFFF;
+    let pgroup = match (ex2.pgid_mode, ex2.pgid) {
+        (0, 0) => None,
+        (1, g) if g <= PID_MAX => Some(g),
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    let sigmask = match (ex2.sigmask_set, ex2.sigmask) {
+        (0, 0) => None,
+        (1, mask) => Some(mask),
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    let setsid = match ex2.setsid {
+        0 => false,
+        1 => true,
+        _ => return Err(KernelError::InvalidArgument),
+    };
+    Ok(SpawnAttrs {
+        pgroup,
+        sigmask,
+        sigdefault: ex2.sigdefault,
+        setsid,
+    })
 }
 
 /// `cap_mode`: the child inherits the parent's entire capability table.
@@ -934,6 +1014,35 @@ pub struct SpawnOptions<'a> {
     pub uid_gid: Option<(u32, u32)>,
 }
 
+/// What a spawn asks of the child's process group, session and signals --
+/// `posix_spawnattr_t`'s `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`
+/// and `SETSID` -- in force before the child's first instruction, which is
+/// the point: done by the parent after the spawn, each would race the child.
+///
+/// Applied over what a spawned child starts with when it has a parent: the
+/// parent's process group and session, the parent's blocked mask, and the
+/// parent's ignored signals ([`start_job_and_signals`]). The default
+/// ([`SpawnAttrs::default`]) asks for nothing and leaves exactly that.
+///
+/// A parameter of [`spawn_process_with_attrs`] rather than a field of
+/// [`SpawnOptions`], for [`CapInherit`]'s reason: the struct literal at ~170
+/// sites, none of which asks for any of this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpawnAttrs {
+    /// `POSIX_SPAWN_SETPGROUP`: the child joins group `g`, which must exist
+    /// in its session, or with `Some(0)` leads a new group of its own.
+    pub pgroup: Option<ProcessId>,
+    /// `POSIX_SPAWN_SETSIGMASK`: the child's blocked set (bit `n - 1` for
+    /// signal `n`), in place of the parent's.
+    pub sigmask: Option<u64>,
+    /// `POSIX_SPAWN_SETSIGDEF`: signals the child does not inherit as
+    /// ignored. (A caught signal needs no reset: a new image has no handlers.)
+    pub sigdefault: u64,
+    /// `POSIX_SPAWN_SETSID`: the child starts a new session, with no
+    /// controlling terminal, and leads it.
+    pub setsid: bool,
+}
+
 impl<'a> SpawnOptions<'a> {
     /// Create default spawn options with the given name.
     #[must_use]
@@ -1116,7 +1225,14 @@ pub(crate) struct UserEntryInfo {
 ///
 /// [`BUDDY_MAX_ORDER`]: crate::mm::frame::BUDDY_MAX_ORDER
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        None,
+        &[],
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process, redirecting entries in its kernel-side Linux `fd` table
@@ -1146,7 +1262,14 @@ pub fn spawn_process_with_redirects(
     options: &SpawnOptions<'_>,
     linux_fd_redirects: &[(i32, u64, u32)],
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, linux_fd_redirects, CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        None,
+        linux_fd_redirects,
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process, forcing it to run under an explicit syscall ABI
@@ -1173,7 +1296,14 @@ pub fn spawn_process_with_abi(
     options: &SpawnOptions<'_>,
     abi: pcb::AbiMode,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, Some(abi), &[], CapInherit::All)
+    spawn_process_inner(
+        elf_data,
+        options,
+        Some(abi),
+        &[],
+        CapInherit::All,
+        SpawnAttrs::default(),
+    )
 }
 
 /// Spawn a process under an explicit ABI *and* with `linux_fd` redirects applied
@@ -1198,6 +1328,7 @@ pub fn spawn_process_with_abi_and_redirects(
         Some(abi),
         linux_fd_redirects,
         CapInherit::All,
+        SpawnAttrs::default(),
     )
 }
 
@@ -1225,10 +1356,186 @@ pub fn spawn_process_with_caps(
     options: &SpawnOptions<'_>,
     cap_inherit: CapInherit<'_>,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, &[], cap_inherit)
+    spawn_process_with_attrs(elf_data, options, cap_inherit, SpawnAttrs::default())
+}
+
+/// [`spawn_process_with_caps`], with the child's process group, session and
+/// signal state as `attrs` asks ([`SpawnAttrs`]) -- the whole of what
+/// `SYS_PROCESS_SPAWN_EX2` can say.
+///
+/// # Errors
+///
+/// Those of [`spawn_process_with_caps`], plus those of the attributes, in
+/// the order `posix_spawn` applies them (glibc's `__spawni_child`): a new
+/// session first, then the group. `NotPermitted` (`EPERM`) if the child
+/// cannot start a session (it already leads a group: a kernel-spawned child
+/// does) or cannot take the group -- a session leader's is fixed, and one
+/// joined must already exist in the child's session. The child is destroyed
+/// and no process is left behind.
+pub fn spawn_process_with_attrs(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    cap_inherit: CapInherit<'_>,
+    attrs: SpawnAttrs,
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, None, &[], cap_inherit, attrs)
+}
+
+/// Give a just-created child its process group, session and signal state,
+/// as `posix_spawn` promises them before its first instruction: its parent's
+/// group, session, blocked mask and ignored signals -- what a fork and an
+/// exec would have left -- then whatever `attrs` changes.
+///
+/// A kernel-spawned child (`parent` 0) has no parent to inherit from: it
+/// leads its own group and session, as `pcb::create` made it, and starts
+/// with no signal state but what `attrs` sets.
+///
+/// Until 2026-10-01 a spawned child inherited none of this. It led a session
+/// of its own -- so it had no controlling terminal, and a `^C` sent to its
+/// parent's foreground group missed it -- and started with nothing blocked or
+/// ignored, so `nohup` protected nothing it started.
+fn start_job_and_signals(pid: ProcessId, parent: ProcessId, attrs: SpawnAttrs) -> KernelResult<()> {
+    if parent != 0 {
+        pcb::inherit_job(pid, parent)?;
+    }
+    crate::proc::signal::start_spawned(parent, pid, attrs.sigmask, attrs.sigdefault);
+    // The order `posix_spawn` applies them in (glibc's and musl's child):
+    // a new session, then the group -- so asking for both fails, a session
+    // leader's group being fixed, as it does there.
+    //
+    // `NotPermitted`, not the `PermissionDenied` the two cores answer: that
+    // means EACCES to a caller, and posix_spawn's answer for both is EPERM.
+    let eperm = |e: KernelError| {
+        if e == KernelError::PermissionDenied {
+            KernelError::NotPermitted
+        } else {
+            e
+        }
+    };
+    if attrs.setsid {
+        pcb::setsid(pid).map_err(eperm)?;
+    }
+    if let Some(group) = attrs.pgroup {
+        // 0 is the child's own pid: a new group, led by the child.
+        let group = if group == 0 { pid } else { group };
+        pcb::set_pgid(pid, pid, group).map_err(eperm)?;
+    }
+    Ok(())
 }
 
 fn spawn_process_inner(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    abi_override: Option<pcb::AbiMode>,
+    linux_fd_redirects: &[(i32, u64, u32)],
+    cap_inherit: CapInherit<'_>,
+    attrs: SpawnAttrs,
+) -> KernelResult<SpawnResult> {
+    spawn_process_suspended(
+        elf_data,
+        options,
+        abi_override,
+        linux_fd_redirects,
+        cap_inherit,
+        attrs,
+    )?
+    .start()
+}
+
+/// A spawned process that has not started: everything of it is in place --
+/// address space, descriptors, identity, job and signals, a first thread --
+/// and none of it has run. What [`spawn_process_suspended`] returns, for a
+/// caller with something to do to the process before its first instruction;
+/// `container::run` is one, binding its init into the container's cgroup,
+/// namespaces and root.
+///
+/// [`start`](Self::start) makes the thread runnable. Dropped unstarted, the
+/// process is undone: its thread unregistered and killed, never having run,
+/// and its record destroyed -- so a caller's error path has nothing of its
+/// own to clean up.
+///
+/// The thread cannot start any other way. It is created awaiting admission
+/// (`sched::task::Task::awaiting_admission`): a stray wake leaves it be, and
+/// a container thawed while it joins returns it to waiting rather than
+/// running it.
+#[must_use = "an unstarted spawn is undone when dropped; call start() to run it"]
+pub struct SuspendedSpawn {
+    result: SpawnResult,
+    /// The first thread's [`UserEntryInfo`], which the trampoline frees when
+    /// the thread first runs -- and so which `drop` frees when it never does.
+    info_ptr: u64,
+    /// The thread was admitted, and the process is the scheduler's.
+    started: bool,
+}
+
+impl SuspendedSpawn {
+    /// The new process's id.
+    #[must_use]
+    pub fn pid(&self) -> ProcessId {
+        self.result.pid
+    }
+
+    /// Its first thread's task id.
+    #[must_use]
+    pub fn task_id(&self) -> TaskId {
+        self.result.task_id
+    }
+
+    /// Start the process: make its first thread runnable.
+    ///
+    /// A process joining a frozen container stays parked: its thread was
+    /// suspended before this, and the thaw is what runs it (`sched::admit`).
+    ///
+    /// # Errors
+    ///
+    /// [`KernelError::InternalError`] if the thread was killed while it
+    /// waited. The process is undone, as a drop would undo it.
+    pub fn start(mut self) -> KernelResult<SpawnResult> {
+        thread::admit(self.result.pid, self.result.task_id)?;
+        self.started = true;
+        serial_println!(
+            "[spawn] Process {} started (thread {})",
+            self.result.pid,
+            self.result.task_id
+        );
+        Ok(self.result)
+    }
+}
+
+impl Drop for SuspendedSpawn {
+    fn drop(&mut self) {
+        if self.started {
+            return;
+        }
+        // Harmless if `start`'s failed admission already did it.
+        thread::abandon(self.result.pid, self.result.task_id);
+        // SAFETY: `info_ptr` came from `Box::into_raw` in
+        // `spawn_process_suspended` and is consumed only by
+        // `userspace_entry_trampoline`, on the thread's first run. The thread
+        // never ran: it was never admitted, and nothing but admission starts a
+        // task created awaiting it (`sched::task::Task::awaiting_admission`)
+        // -- not a wake, not a resume. `abandon` has now killed it, so it never
+        // will. Nothing else holds the pointer.
+        drop(unsafe { Box::from_raw(self.info_ptr as *mut UserEntryInfo) });
+        pcb::destroy(self.result.pid);
+    }
+}
+
+/// Spawn a process and leave it unstarted: [`spawn_process_with_attrs`], with
+/// an ABI override and Linux fd redirects as [`spawn_process_with_abi`] and
+/// [`spawn_process_with_redirects`] take them, up to the moment its first
+/// thread would be made runnable -- and no further.
+///
+/// For a caller that must bind the process to something before it runs a
+/// single instruction. Doing that after an ordinary spawn leaves a window in
+/// which the child runs unbound: on more than one CPU, from the moment the
+/// spawn returns. [`SuspendedSpawn::start`] starts it; dropping it undoes it.
+///
+/// # Errors
+///
+/// Those of [`spawn_process_with_attrs`]. The redirect handles are this
+/// call's either way, as [`spawn_process_with_redirects`] describes.
+pub fn spawn_process_suspended(
     elf_data: &[u8],
     options: &SpawnOptions<'_>,
     abi_override: Option<pcb::AbiMode>,
@@ -1238,7 +1545,10 @@ fn spawn_process_inner(
     // How much of `options.parent`'s capability table the child receives.  An
     // argument rather than a `SpawnOptions` field: see [`CapInherit`].
     cap_inherit: CapInherit<'_>,
-) -> KernelResult<SpawnResult> {
+    // The child's process group, session and signals, where not its parent's.
+    // An argument for the same reason: see [`SpawnAttrs`].
+    attrs: SpawnAttrs,
+) -> KernelResult<SuspendedSpawn> {
     // Start of the span recorded into binfmt on success below.
     let elf_load_start_ns = crate::hrtimer::now_ns();
     // This function OWNS the `linux_fd_redirects` handles (see
@@ -1464,6 +1774,22 @@ fn spawn_process_inner(
         return Err(e);
     }
 
+    // Step 3a: the program headers, where the image's C library will look
+    // for them -- found in a loaded segment, or copied into a page of their
+    // own (`place_phdr_table`).
+    //
+    // SAFETY: as Step 3 -- the new process's address space, run by no CPU.
+    let main_phdr = match unsafe { place_phdr_table(&elf_file, pml4_phys, exec_load_bias, pid) } {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!("[spawn] Failed to place the program headers: {:?}", e);
+            pcb::destroy(pid);
+            return Err(e);
+        }
+    };
+    // `pid` was created above and nothing has removed it.
+    let _ = pcb::set_main_phdr(pid, main_phdr);
+
     // Step 3b (Linux ABI, dynamically-linked only): load the program
     // interpreter (ld.so) named in the executable's PT_INTERP segment.
     //
@@ -1544,6 +1870,7 @@ fn spawn_process_inner(
             options.envp,
             interp_base,
             exec_load_bias,
+            main_phdr.map(|p| p.vaddr),
         ) {
             Ok(installed) => {
                 serial_println!(
@@ -1672,17 +1999,27 @@ fn spawn_process_inner(
         }
     }
 
-    // Step 5c: Inherit the parent's filesystem namespace.
-    //
-    // If the parent process is in a non-root namespace, the child
-    // inherits it automatically (same isolation applies by default).
-    // The parent can override this by attaching the child to a
-    // different namespace before starting it.
+    // Step 5c: Inherit the parent's view: its filesystem namespace, root
+    // jail, volumes, read-only root and hostname (`namespace::inherit`), so
+    // a container process's child is in the container. The container layer
+    // may change it before the child starts. A view that cannot be given
+    // fails the spawn: the child would run outside it.
+    if options.parent != 0
+        && let Err(e) = crate::ipc::namespace::inherit(options.parent, pid)
+    {
+        serial_println!(
+            "[spawn] Process {}: parent {}'s view could not be given: {:?} -- spawn aborted",
+            pid,
+            options.parent,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
+    }
+    // And in its parent's UTS namespace, as a fork's child is.
     if options.parent != 0 {
-        let parent_ns = crate::ipc::namespace::query(options.parent);
-        if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
-            let _ = crate::ipc::namespace::attach(pid, parent_ns);
-        }
+        pcb::inherit_uts_ns(options.parent, pid);
+        crate::fs::mntns::inherit(options.parent, pid);
     }
 
     // Step 5d: Apply fd inheritance map.
@@ -1717,6 +2054,15 @@ fn spawn_process_inner(
     if !options.fd_map.is_empty() {
         let mut initial_fds = alloc::vec::Vec::with_capacity(options.fd_map.len());
         for &(fd_num, handle_type, parent_handle) in options.fd_map {
+            // A parent can pass on only what it holds. The file and pty arms
+            // check it their own way; the pipe, socket-pair and eventfd arms
+            // did not, so a spawn could hand a child another process's pipe,
+            // and the child would then hold it properly
+            // (A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS). A kernel-spawned
+            // child (parent 0) is handed what the kernel chose.
+            let parent_lacks = |rt: crate::cap::ResourceType| {
+                options.parent != 0 && !pcb::owns_ipc_handle(options.parent, rt, parent_handle)
+            };
             let dup_result = match handle_type {
                 fd_handle_type::FILE => {
                     // A file handle is `NEXT_HANDLE.fetch_add(1)` from 1, so
@@ -1751,8 +2097,12 @@ fn spawn_process_inner(
                     // write) and returns the same handle.  The child
                     // closes its reference independently when it dies
                     // or when its fd-table layer claims the handle.
-                    crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(parent_handle))
-                        .map(|h| h.raw())
+                    if parent_lacks(crate::cap::ResourceType::Pipe) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::pipe::dup(crate::ipc::pipe::PipeHandle::from_raw(parent_handle))
+                            .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::STREAM_SOCKET => {
                     // Stream socket endpoints are ref-counted per
@@ -1760,10 +2110,14 @@ fn spawn_process_inner(
                     // returns the same handle.  The child closes its
                     // reference independently when it dies or hands the
                     // handle to its fd-table.
-                    crate::ipc::stream_socket::dup(
-                        crate::ipc::stream_socket::StreamSocketHandle::from_raw(parent_handle),
-                    )
-                    .map(|h| h.raw())
+                    if parent_lacks(crate::cap::ResourceType::StreamSocket) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::stream_socket::dup(
+                            crate::ipc::stream_socket::StreamSocketHandle::from_raw(parent_handle),
+                        )
+                        .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::CONSOLE => {
                     // Console is a virtual handle — just pass the value.
@@ -1776,10 +2130,14 @@ fn spawn_process_inner(
                     // (or when SYS_PROCESS_GET_INITIAL_FDS hands the
                     // handle off to the child's fd-table, which then
                     // owns the close).
-                    crate::ipc::eventfd::dup(crate::ipc::eventfd::EventFdHandle::from_raw(
-                        parent_handle,
-                    ))
-                    .map(|h| h.raw())
+                    if parent_lacks(crate::cap::ResourceType::EventFd) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        crate::ipc::eventfd::dup(crate::ipc::eventfd::EventFdHandle::from_raw(
+                            parent_handle,
+                        ))
+                        .map(|h| h.raw())
+                    }
                 }
                 fd_handle_type::PTY => {
                     // A pty end's raw value is *guessable*: it is
@@ -1813,6 +2171,37 @@ fn spawn_process_inner(
                         // `ipc_handles` each appears in.
                         crate::tty::pty::dup(crate::tty::pty::PtyHandle::from_raw(parent_handle))
                             .map(|h| h.raw())
+                    }
+                }
+                fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => {
+                    // A kernel TCP or UDP socket the parent holds: one more
+                    // holder (`net::native_socket`) -- an inetd handing its
+                    // accepted connection to the service it starts. The type
+                    // must say what the handle is: TCP for a connection or a
+                    // listener, UDP for a datagram socket.
+                    use crate::net::native_socket::{self, Kind};
+                    let kind_agrees = match native_socket::kind_of(parent_handle) {
+                        Some(Kind::TcpConnection | Kind::TcpListener) => {
+                            handle_type == fd_handle_type::TCP_SOCKET
+                        }
+                        Some(Kind::Udp) => handle_type == fd_handle_type::UDP_SOCKET,
+                        None => false,
+                    };
+                    if parent_lacks(crate::cap::ResourceType::NativeSocket) || !kind_agrees {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        native_socket::dup(parent_handle)
+                    }
+                }
+                fd_handle_type::UNIX_SOCKET => {
+                    // A Unix-domain socket the parent holds: one more holder of
+                    // it (`unix_socket::dup`), the same handle -- a supervisor
+                    // handing a listener or a connection to what it starts.
+                    use crate::ipc::unix_socket::{self, UnixHandle};
+                    if parent_lacks(crate::cap::ResourceType::UnixSocket) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        unix_socket::dup(UnixHandle::from_raw(parent_handle)).map(|h| h.raw())
                     }
                 }
                 _ => {
@@ -1953,11 +2342,15 @@ fn spawn_process_inner(
         }
     }
 
-    // Apply the initial user/group identity if one was requested (honors a
-    // container image's `User` config / the Docker `--user`/`-u` flag). The
-    // child's credentials are replaced with a fresh numeric identity (no
-    // supplementary groups). A failure here is logged but never fails the
-    // spawn — the child simply keeps the inherited (root) credentials.
+    // The child's identity. An initial user/group identity, when one was
+    // requested (a container image's `User` config, the Docker `--user`/`-u`
+    // flag -- kernel callers only), replaces the credentials with a fresh
+    // numeric identity (no supplementary groups); a failure there is logged,
+    // and the child keeps root's, which only the kernel asks for. Otherwise a
+    // process's child is its parent's user, as `posix_spawn` -- a fork and an
+    // exec -- leaves it (`pcb::inherit_credentials`), and a spawn whose parent
+    // cannot be read fails rather than start a child as root. A
+    // kernel-spawned child (`parent == 0`) is root.
     if let Some((uid, gid)) = options.uid_gid {
         if let Err(e) = pcb::set_credentials(pid, pcb::ProcessCredentials::new(uid, gid)) {
             serial_println!(
@@ -1966,6 +2359,33 @@ fn spawn_process_inner(
                 e,
             );
         }
+    } else if options.parent != 0
+        && let Err(e) = pcb::inherit_credentials(options.parent, pid)
+    {
+        serial_println!(
+            "[spawn] Process {}: parent {}'s credentials could not be read: {:?} -- spawn \
+             aborted",
+            pid,
+            options.parent,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
+    }
+
+    // Step 5f: the child's process group, session and signal state -- its
+    // parent's, then whatever the spawn's attributes change. Before the
+    // thread exists, so that all of it holds from the child's first
+    // instruction; an attribute that cannot be had fails the spawn rather
+    // than starting a child that is not what was asked for.
+    if let Err(e) = start_job_and_signals(pid, options.parent, attrs) {
+        serial_println!(
+            "[spawn] Process {}: process group/session/signals refused: {:?}",
+            pid,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
     }
 
     // Step 6: Create the entry info struct (heap-allocated, freed by
@@ -1980,12 +2400,15 @@ fn spawn_process_inner(
     });
     let info_ptr = Box::into_raw(info) as u64;
 
-    let task_id = match thread::spawn(
+    // Created suspended: runnable only when `SuspendedSpawn::start` admits it.
+    let task_id = match thread::spawn_suspended_with_tls(
         pid,
         options.name.as_bytes(),
         options.priority,
         userspace_entry_trampoline,
         info_ptr,
+        0,
+        0,
     ) {
         Ok(id) => id,
         Err(e) => {
@@ -2000,17 +2423,21 @@ fn spawn_process_inner(
     };
 
     serial_println!(
-        "[spawn] Process {} running (thread {}, entry={:#x}, user_rsp={:#x})",
+        "[spawn] Process {} ready (thread {}, entry={:#x}, user_rsp={:#x})",
         pid,
         task_id,
         entry_rip,
         user_rsp
     );
 
-    Ok(SpawnResult {
-        pid,
-        task_id,
-        entry_point,
+    Ok(SuspendedSpawn {
+        result: SpawnResult {
+            pid,
+            task_id,
+            entry_point,
+        },
+        info_ptr,
+        started: false,
     })
 }
 
@@ -2021,6 +2448,33 @@ fn spawn_process_inner(
 /// Maximum visible length of a task `comm` name (Linux's
 /// `TASK_COMM_LEN - 1`).  The full field is 16 bytes including the NUL.
 const COMM_MAX_VISIBLE: usize = 15;
+
+/// Close the handles of process `pid`'s dropped close-on-exec descriptors
+/// (`exec_process` step 5b), each as `close()` would. A failure is
+/// reported and the rest still closed: the exec has already happened.
+fn close_handles_at_exec(pid: ProcessId, handles: &[(u8, u64)]) {
+    let mut closed = 0usize;
+    for &(handle_type, handle) in handles {
+        match crate::syscall::handlers::close_handle_at_exec(pid, handle_type, handle) {
+            Ok(true) => closed = closed.saturating_add(1),
+            Ok(false) => {}
+            Err(e) => serial_println!(
+                "[exec] WARNING: close-on-exec of type {} handle {:#x} on process {} failed: {:?}",
+                handle_type,
+                handle,
+                pid,
+                e
+            ),
+        }
+    }
+    if closed > 0 {
+        serial_println!(
+            "[exec] Closed {} close-on-exec handle(s) on process {}",
+            closed,
+            pid
+        );
+    }
+}
 
 /// Compute the `comm` basename for a new exec image the way Linux's
 /// `kbasename()` does: the path component after the final `/`, truncated
@@ -2050,7 +2504,11 @@ fn exec_comm_basename(src: &[u8]) -> &[u8] {
 ///    mapped frames and intermediate page table pages).
 /// 3. Loads the new ELF segments into the clean address space.
 /// 4. Allocates and maps a fresh user stack.
-/// 5. Returns [`ExecResult`] with the new entry point and stack pointer.
+/// 5. Closes the handles of the old native image's close-on-exec
+///    descriptors, which libc named beforehand (`SYS_PROCESS_SET_EXEC_CLOSE`;
+///    a Linux image's are closed from its kernel fd table). Any return before
+///    this point leaves them open, as POSIX requires of a failed exec.
+/// 6. Returns [`ExecResult`] with the new entry point and stack pointer.
 ///
 /// ## What It Does NOT Do
 ///
@@ -2102,6 +2560,11 @@ pub fn exec_process(
 ) -> KernelResult<ExecResult> {
     // Start of the span recorded into binfmt on success below.
     let elf_load_start_ns = crate::hrtimer::now_ns();
+    // The close-on-exec handles libc named for this attempt
+    // (`SYS_PROCESS_SET_EXEC_CLOSE`), taken now so that every attempt
+    // consumes them: closed below once the new image is in, dropped -- left
+    // open, as POSIX requires -- by any return before that.
+    let close_at_exec = pcb::take_exec_close_handles(pid);
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
     // running its old code.
@@ -2160,6 +2623,37 @@ pub fn exec_process(
         KernelError::NoSuchProcess
     })?;
 
+    // What the calling thread registered in the old image -- its robust list,
+    // rseq area and clear-child-tid word -- is released while that image is
+    // still mapped, the robust list walked first (`thread_clone::
+    // release_for_exec`). A kernel caller (a spawn self-test) is no thread of
+    // the process, and has nothing registered.
+    let current = crate::sched::current_task_id();
+    if crate::proc::thread::owner_process(current) == Some(pid) {
+        // Every other thread of the process ends first, off its CPU before
+        // the address space it runs in is torn down (Linux's `de_thread`):
+        // left behind, it went on in the new program's address space, where
+        // nothing it was running is mapped. Until 2026-10-08 nothing ended
+        // them. (Linux also gives a non-leader thread that execs the leader's
+        // id; here it keeps its own -- `known-issues/A-ptrace-tier-2-*.md`.)
+        crate::proc::thread::kill_other_threads(pid, current);
+        crate::proc::thread_clone::release_for_exec(current);
+        // So are its hardware breakpoints: their addresses were in it.
+        crate::sched::clear_current_debug_regs();
+    }
+    // Its capability requests were the old program's -- the user would be
+    // answering a question it asked, for the new one -- so they are
+    // cancelled; and if it answered requests, the new program does not
+    // until it registers itself (`cap::request`, design-decisions 1548).
+    crate::cap::request::on_process_exit(pid);
+
+    // The old address space goes next: a `/proc/<pid>/mem` opened on it reads
+    // end-of-file from now on, as Linux's does (`pcb::note_exec`).
+    pcb::note_exec(pid);
+    // The saved and filesystem ids become the effective ones, as Linux's exec
+    // sets them (`pcb::exec_credentials`).
+    pcb::exec_credentials(pid);
+
     // Step 3: Tear down the old user address space.
     //
     // After this point, the process has an empty user address space.
@@ -2173,9 +2667,15 @@ pub fn exec_process(
     // entries will be flushed by the new mappings (or by the return to
     // ring 3 which will touch new pages).
     serial_println!("[exec] Tearing down old address space for process {}", pid);
+    // Not under a `process_vm_readv`/`writev` walking these tables from
+    // another process: this frees them while keeping the PML4, which that
+    // caller's pin does not prevent. Waits out the pins there are, and gives
+    // out no new one until the space is empty (`pcb::ExecTeardown`).
+    let teardown = pcb::begin_exec_teardown(pml4_phys);
     unsafe {
         page_table::clear_user_address_space(pml4_phys);
     }
+    drop(teardown);
 
     // The page tables and frames are gone; drop the matching VMA metadata
     // (and release any file-backed mapping references) so the new image
@@ -2223,6 +2723,21 @@ pub fn exec_process(
         let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
         return Err(e);
     }
+
+    // Step 4a: the new image's program headers, as spawn's Step 3a.
+    //
+    // SAFETY: the process's freshly emptied address space; its only thread
+    // is this one, in the kernel.
+    let main_phdr = match unsafe { place_phdr_table(&elf_file, pml4_phys, exec_load_bias, pid) } {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!("[exec] Failed to place the program headers: {:?}", e);
+            let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+            return Err(e);
+        }
+    };
+    // The process is this exec's caller, and live.
+    let _ = pcb::set_main_phdr(pid, main_phdr);
 
     // Step 4b (Linux ABI, dynamically-linked only): load the program
     // interpreter (ld.so) for the new image.  Mirrors spawn_process's
@@ -2321,6 +2836,7 @@ pub fn exec_process(
             envp,
             interp_base,
             exec_load_bias,
+            main_phdr.map(|p| p.vaddr),
         ) {
             Ok(installed) => {
                 serial_println!(
@@ -2388,9 +2904,16 @@ pub fn exec_process(
             // Re-use the existing table: close cloexec entries (and
             // ensure stdio remains populated) via the kernel helper,
             // then close each returned handle.
-            if let Some(to_close) = pcb::linux_fd_exec_cloexec(pid) {
-                let count = to_close.len();
-                for entry in to_close {
+            if let Some(cloexec) = pcb::linux_fd_exec_cloexec(pid) {
+                // Each close-on-exec descriptor is closed, so the process's
+                // record locks on its file go -- even where another fd keeps
+                // the handle open. Before the closes: the key is the handle's
+                // file. The locks themselves otherwise survive the exec.
+                for entry in &cloexec.removed {
+                    crate::syscall::linux::release_record_locks_on_close(pid, entry);
+                }
+                let count = cloexec.to_close.len();
+                for entry in cloexec.to_close {
                     let res = crate::syscall::linux::close_handle(entry);
                     if res.value < 0 {
                         serial_println!(
@@ -2437,6 +2960,29 @@ pub fn exec_process(
         // design (design-decision #4), so drop any auxv carried over
         // from a previous Linux-ABI image.
         pcb::clear_linux_saved_auxv(pid);
+    }
+
+    // Step 5b: the old native image's close-on-exec descriptors.  Their
+    // fd table lived in userspace and is gone with the image; libc named
+    // their handles before this call, and this is past the point of no
+    // return, so they are closed now, as close() would close them -- a
+    // pipe's reader sees end-of-file now, not when the new program exits.
+    // A Linux image's were closed from its own fd table above.
+    if old_abi_mode != Some(pcb::AbiMode::Linux) {
+        close_handles_at_exec(pid, &close_at_exec.close);
+        // A dropped descriptor whose handle a kept one shares: the handle
+        // stays, but a descriptor for the file was closed, so the process's
+        // record locks on it go (POSIX). Only the process's own handles.
+        for &(handle_type, handle) in &close_at_exec.shared {
+            if handle_type == fd_handle_type::FILE
+                && pcb::owns_ipc_handle(pid, crate::cap::ResourceType::File, handle)
+            {
+                crate::syscall::record_lock::release_on_close(
+                    pid,
+                    crate::syscall::record_lock::Target::File(handle),
+                );
+            }
+        }
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.
@@ -2836,6 +3382,7 @@ fn build_linux_initial_stack(
     envp: &[&[u8]],
     interp_base: Option<u64>,
     exec_load_bias: u64,
+    phdr: Option<u64>,
 ) -> KernelResult<crate::proc::linux_stack::InstalledLinuxStack> {
     let stack_bottom = USER_STACK_TOP
         .checked_sub(USER_STACK_SIZE)
@@ -2852,7 +3399,136 @@ fn build_linux_initial_stack(
         &random16,
         interp_base,
         exec_load_bias,
+        phdr,
     )
+}
+
+// ---------------------------------------------------------------------------
+// The main image's program headers
+// ---------------------------------------------------------------------------
+
+/// Where a process's main image's program headers are in its address space:
+/// what its C library reads at start-up to find its thread-local storage
+/// template (`PT_TLS`). A Linux-ABI process is told through `AT_PHDR`,
+/// `AT_PHNUM` and `AT_PHENT`; a native one asks `SYS_PROCESS_GET_PHDR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainPhdr {
+    /// The table's address in the process.
+    pub vaddr: u64,
+    /// How many entries it has.
+    pub phnum: u16,
+    /// How large each entry is.
+    pub phentsize: u16,
+}
+
+/// Where [`place_phdr_table`] maps a copy of the program headers when no
+/// loaded segment holds them: one read-only frame, below the lowest address
+/// the stack can grow to ([`USER_STACK_GUARD`]) with a frame's gap between
+/// them, far above the interpreter window, the mmap window and the image.
+/// Recorded as a `Fixed` VMA, so nothing else is placed over it.
+///
+/// Below the stack's *growth* floor, not merely below the stack mapped at
+/// start: until 2026-10-07 it sat 96 KiB below the top, where the stack grows
+/// on demand (`idt::try_grow_user_stack`, down to 4 MiB), so a program whose
+/// stack passed 80 KiB wrote into a present read-only page and was killed --
+/// the persistent netstack daemon in every release build, whose inlined
+/// `main` probes its frame past that point at start.
+pub const PHDR_COPY_VADDR: u64 = USER_STACK_GUARD - 2 * FRAME_SIZE as u64;
+
+/// The end of the frame at [`PHDR_COPY_VADDR`].
+const PHDR_COPY_END: u64 = PHDR_COPY_VADDR + FRAME_SIZE as u64;
+
+// The copy must lie wholly below the stack's growth region, and above the
+// interpreter's randomised window.
+const _: () = assert!(PHDR_COPY_END < USER_STACK_GUARD);
+const _: () =
+    assert!(PHDR_COPY_VADDR > LINUX_INTERP_BASE + INTERP_ASLR_SPAN_PAGES * FRAME_SIZE as u64);
+
+/// Find the main image's program headers in its address space, or put them
+/// there -- `requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
+///
+/// Usually a loaded segment holds them (lld's default layout always maps
+/// them): then their address is that segment's, plus the load bias. When none
+/// does -- a linker script that leaves them out of every segment -- a copy is
+/// mapped read-only at [`PHDR_COPY_VADDR`], so a C library still finds its
+/// `PT_TLS` instead of starting every `__thread` variable at zero. Until
+/// 2026-10-02 such an image had no `AT_PHDR` at all, and a native process
+/// was never told.
+///
+/// `None` for an image with no program headers, or with a table larger than
+/// a frame (more than 292 entries), which no linker produces.
+///
+/// # Errors
+///
+/// Frame allocation and mapping failures.
+///
+/// # Safety
+///
+/// `pml4_phys` must be the process `pid`'s address space, which no other CPU
+/// is running (spawn and exec, before the image's first instruction).
+unsafe fn place_phdr_table(
+    elf_file: &elf::ElfFile<'_>,
+    pml4_phys: u64,
+    bias: u64,
+    pid: ProcessId,
+) -> KernelResult<Option<MainPhdr>> {
+    let (phnum, phentsize) = (elf_file.header.e_phnum, elf_file.header.e_phentsize);
+    if phnum == 0 {
+        return Ok(None);
+    }
+    if let Some(vaddr) = crate::proc::linux_stack::phdr_vaddr(elf_file) {
+        return Ok(Some(MainPhdr {
+            vaddr: vaddr.saturating_add(bias),
+            phnum,
+            phentsize,
+        }));
+    }
+    let Some(table) = elf_file
+        .phdr_table_bytes()
+        .filter(|t| t.len() <= FRAME_SIZE)
+    else {
+        return Ok(None);
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    let phys = frame::alloc_frame()?;
+    let virt_in_kernel = phys.to_virt(hhdm) as *mut u8;
+    // SAFETY: `phys` is freshly allocated and exclusively ours; its HHDM view
+    // is FRAME_SIZE writable bytes, and `table.len()` <= FRAME_SIZE.
+    unsafe {
+        core::ptr::write_bytes(virt_in_kernel, 0, FRAME_SIZE);
+        core::ptr::copy_nonoverlapping(table.as_ptr(), virt_in_kernel, table.len());
+    }
+    let flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+    // SAFETY: the caller's invariant on `pml4_phys`; `phys` is ours and
+    // unmapped; the address is in user space.
+    if let Err(e) =
+        unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(PHDR_COPY_VADDR), phys, flags) }
+    {
+        // SAFETY: never mapped, so ours alone to free.
+        let _ = unsafe { frame::free_frame(phys) };
+        return Err(e);
+    }
+    // Record it, so the mmap window's gap search never hands it out. The
+    // frame is freed with the address space either way.
+    let vma = crate::mm::vma::Vma {
+        start: PHDR_COPY_VADDR,
+        end: PHDR_COPY_END,
+        kind: crate::mm::vma::VmaKind::Fixed,
+        flags,
+        fork: crate::mm::vma::ForkPolicy::COPY,
+    };
+    if let Err(e) = pcb::add_vma(pid, vma) {
+        serial_println!(
+            "[spawn] WARNING: the program-header copy at {:#x} is mapped but not recorded: {:?}",
+            PHDR_COPY_VADDR,
+            e
+        );
+    }
+    Ok(Some(MainPhdr {
+        vaddr: PHDR_COPY_VADDR,
+        phnum,
+        phentsize,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2965,95 +3641,58 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
         user_rsp
     );
 
-    // GDT selectors for ring 3.
-    let user_cs = u64::from(crate::gdt::USER_CS); // 0x23
-    let user_ds = u64::from(crate::gdt::USER_DS); // 0x1B
-
     // RFLAGS: IF=1 (interrupts enabled), reserved bit 1 must be set.
-    // IOPL=0 (no direct I/O port access from ring 3).
-    let rflags: u64 = 0x202;
+    // IOPL=0 (no direct I/O port access from ring 3). Every general register
+    // zero. Two reasons this is required and not hygiene:
+    //
+    //   1. Without it, ring 3 reads kernel register residue at its first
+    //      instruction. Disassembled from the 2026-09-21 release kernel: rbp
+    //      still held a KERNEL STACK ADDRESS (push rbp; mov rbp, rsp with no
+    //      leave before the iretq), and rbx/r8..r15 were untouched by this
+    //      function entirely. That is a kernel-address leak handed to ring 3.
+    //   2. A user stub that sets only the registers it needs still has the
+    //      rest forwarded as syscall arguments. That is how SYS_PROCESS_EXEC
+    //      came to read argv from rdx = 0x1B -- the USER_DS selector this
+    //      function loaded into edx to push as SS -- so it read user address
+    //      27 and returned InvalidAddress (-101) for a perfectly valid ELF
+    //      (known-issues.md 2026-09-21). And rdx = 0x1B is an ABI violation
+    //      in its own right: System V x86-64 says rdx at process entry holds
+    //      a function pointer to register with atexit, or zero -- so zero is
+    //      not merely a defined value for rdx; it is the value the ABI
+    //      specifies.
+    //
+    // Why ZERO, and why that is not a matter of taste: every ring-3 entry
+    // defines this boundary as its own semantics demand. A forked child and a
+    // cloned thread take their creator's registers, because a child inherits;
+    // `sys_process_exec_with_frame_inner` zeroes them before returning to a
+    // new image, because a new image inherits nothing. A fresh spawn -- and a
+    // native thread, which starts at a function of its own -- is the new-image
+    // case. All of them now enter through `crate::proc::user_entry`, which
+    // loads every register from the image.
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip: entry_rip,
+        rsp: user_rsp,
+        rflags: 0x202,
+        ..crate::proc::user_entry::UserEntry::default()
+    };
 
-    // Transition to ring 3 via IRETQ.
-    //
-    // SAFETY: The user address space has been set up by spawn_process:
-    // - ELF segments are loaded at the correct virtual addresses.
-    // - A user stack is mapped at USER_STACK_TOP.
-    // - The GDT has valid ring 3 code and data descriptors.
-    // - TSS.RSP0 and PER_CPU.kernel_rsp are set by the scheduler
-    //   (do_switch) so that SYSCALL and interrupts from ring 3 will
-    //   use the correct kernel stack.
-    //
-    // The IRETQ pushes are in reverse order because the stack grows
-    // downward.  IRETQ pops: RIP, CS, RFLAGS, RSP, SS.
-    unsafe {
-        core::arch::asm!(
-            "push {ss}",       // SS
-            "push {rsp_val}",  // RSP
-            "push {rflags}",   // RFLAGS
-            "push {cs}",       // CS
-            "push {rip}",      // RIP
-            // Every IRETQ operand is now on the stack, so all GP registers
-            // are dead and may be cleared. Two reasons this is required and
-            // not hygiene:
-            //
-            //   1. Without it, ring 3 reads kernel register residue at its
-            //      first instruction. Disassembled from the 2026-09-21
-            //      release kernel: rbp still holds a KERNEL STACK ADDRESS
-            //      (push rbp; mov rbp, rsp with no leave before the iretq),
-            //      and rbx/r8..r15 are untouched by this function entirely.
-            //      That is a kernel-address leak handed to ring 3.
-            //   2. A user stub that sets only the registers it needs still
-            //      has the rest forwarded as syscall arguments. That is how
-            //      SYS_PROCESS_EXEC came to read argv from rdx = 0x1B --
-            //      the USER_DS selector this very function loads into edx
-            //      to push as SS -- so it read user address 27
-            //   3. And rdx=0x1B is an ABI VIOLATION in its own right.
-            //      System V x86-64 says rdx at process entry holds a
-            //      function pointer to register with atexit, or zero.
-            //      0x1B is neither. It is harmless here only because
-            //      our __libc_start_main names that parameter
-            //      `_rtld_fini` and never calls it -- a conforming
-            //      runtime would call (*rtld_fini)() at exit and jump
-            //      to address 27. So zero is not merely A defined
-            //      value for rdx; it is THE value the ABI specifies.
-            //      and return InvalidAddress (-101) for a perfectly valid
-            //      ELF -- see known-issues.md 2026-09-21.
-            //
-            // Why ZERO, and why that is not a matter of taste: all four
-            // ring-3 entries define this boundary in the way their own
-            // semantics demand. `fork.rs` and `thread_clone.rs` RESTORE the
-            // saved set, because a child inherits. And
-            // `sys_process_exec_with_frame_inner` ZEROES arg0..arg5, rbx,
-            // rbp and r12..r15 before returning to a new image, because a
-            // new image inherits nothing. Fresh spawn is that same
-            // new-image case, and was the only one defining nothing.
-            // rsp is deliberately untouched -- IRETQ
-            // pops its frame from it. 32-bit `xor` zero-extends, clearing
-            // the full 64-bit register in a shorter encoding.
-            "xor eax, eax",
-            "xor ebx, ebx",
-            "xor ecx, ecx",
-            "xor edx, edx",
-            "xor esi, esi",
-            "xor edi, edi",
-            "xor ebp, ebp",
-            "xor r8d, r8d",
-            "xor r9d, r9d",
-            "xor r10d, r10d",
-            "xor r11d, r11d",
-            "xor r12d, r12d",
-            "xor r13d, r13d",
-            "xor r14d, r14d",
-            "xor r15d, r15d",
-            "iretq",
-            ss = in(reg) user_ds,
-            rsp_val = in(reg) user_rsp,
-            rflags = in(reg) rflags,
-            cs = in(reg) user_cs,
-            rip = in(reg) entry_rip,
-            options(noreturn),
-        );
-    }
+    // A freeze that began while the process or thread was being made: its
+    // first entry to ring 3 passes no signal checkpoint, so it is looked for
+    // here, before its first instruction (`proc::freezer`).
+    crate::proc::freezer::park_if_frozen();
+
+    // A traced thread's first stop, before its first instruction -- a native
+    // thread its traced creator made (`ptrace::first_entry`).
+    crate::proc::ptrace::first_entry(&mut entry);
+
+    // SAFETY: The user address space has been set up by spawn_process (or
+    // the creating process, for a thread): its code is mapped at the entry
+    // point and its stack at the stack pointer, both user addresses -- or a
+    // tracer's, which `ptrace`'s register checks keep to user addresses; the
+    // GDT has valid ring 3 descriptors; and TSS.RSP0 and PER_CPU.kernel_rsp
+    // are set by the scheduler, so SYSCALL and interrupts from ring 3 use the
+    // right kernel stack.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -3086,12 +3725,18 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_fd_map_invalid_handle()?;
     test_spawn_with_pty_master()?;
     test_spawn_pty_master_not_owned()?;
+    test_spawn_with_unix_socket()?;
+    test_spawn_suspended()?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
     test_spawn_with_cwd()?;
     test_spawn_inherits_cwd_and_umask()?;
+    test_ex2_attrs()?;
+    test_spawn_job_and_signals()?;
+    test_spawn_child_of_sigchld_ignorer_is_reaped()?;
     test_spawn_with_uid_gid()?;
+    test_spawn_inherits_credentials()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
@@ -3445,8 +4090,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
             "[spawn]   FAIL: Linux SysV stack — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -3458,8 +4102,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
             "[spawn]   FAIL: Linux SysV stack — expected exit code 3 (argc), got {:?}",
             ec
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -3473,8 +4116,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                 Some(t) => t,
                 None => {
                     serial_println!("[spawn]   FAIL: saved auxv length underflow");
-                    thread::on_thread_exit(result.task_id);
-                    pcb::destroy(result.pid);
+                    teardown_fixture(result.pid, result.task_id);
                     return Err(KernelError::InternalError);
                 }
             };
@@ -3483,8 +4125,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                     "[spawn]   FAIL: saved auxv not AT_NULL-terminated (len={})",
                     auxv.len()
                 );
-                thread::on_thread_exit(result.task_id);
-                pcb::destroy(result.pid);
+                teardown_fixture(result.pid, result.task_id);
                 return Err(KernelError::InternalError);
             }
         }
@@ -3493,14 +4134,12 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                 "[spawn]   FAIL: saved auxv missing/misaligned: {:?}",
                 other.as_ref().map(alloc::vec::Vec::len)
             );
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Linux SysV initial-stack delivery (exit(argc)): OK");
     serial_println!("[spawn]   Linux auxv persisted for PR_GET_AUXV / procfs: OK");
@@ -3585,8 +4224,7 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(INTERP_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -3731,8 +4369,7 @@ pub fn self_test_file_handle_ownership() -> KernelResult<()> {
             crate::sched::yield_now();
             crate::sched::yield_now();
             let code = pcb::exit_code(result.pid);
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             match code {
                 Some(0) => {}
                 Some(1) => {
@@ -3790,8 +4427,7 @@ pub fn self_test_file_handle_ownership() -> KernelResult<()> {
                  handle {victim_handle}, which its claimed parent does not own; the child \
                  was handed a duplicate of another process's open file."
             );
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
         }
         Err(e) => {
             failed += 1;
@@ -3934,8 +4570,7 @@ pub fn self_test_openat2_beneath() -> KernelResult<()> {
         crate::sched::yield_now();
         crate::sched::yield_now();
         let code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         code
     };
 
@@ -4139,8 +4774,7 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -5010,7 +5644,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             // loopback inside one daemon session -- no upstream, no variance --
             // so an error is a real break. Diagnostic, not Integrity: the checks
             // after it still run.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack listen/accept",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5032,10 +5666,25 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => serial_println!(
             "[spawn]   net::socket server object layer: no daemon session — check skipped"
         ),
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: net::socket server object-layer error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket server object layer ({:?}) — the bind/listen/accept \
+                 state machine the syscalls use is broken",
+                e
+            );
+            // Fails the run. These four checks drive the daemon's in-process
+            // software loopback -- no upstream, no slirp peer, no variance -- so
+            // an error is a real break, not the environment. They used to end in
+            // a WARNING alone, which boot-test.sh does not count (it reds a run
+            // on `self-test failed`, never on a bare `FAIL:` or `WARNING:`), so a
+            // regression here passed the boot. Diagnostic, not Integrity: the
+            // checks after it still run.
+            crate::selftest::report_debug(
+                "net::socket server object layer",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // The head-of-line witness for D-NETSOCK-SYNC. The tests above prove the
@@ -5052,14 +5701,13 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         // The check prints its own OK line, including the byte count.
         Ok(Some(())) => {}
         Ok(None) => {
-            // Names no cause. There are two decline paths -- no IPv4 lease, and
-            // A-Q15's single-session netstack -- and this arm cannot tell them
-            // apart, so it used to report the wrong one half the time. The
-            // callee prints which it was, immediately above this line.
+            // The one decline left since A-Q15's fix retired the other
+            // (design-decisions §941): the loopback divert keys on a non-zero
+            // local address, so without a lease there is nothing to assert.
             serial_println!(
-                "[spawn]   net::socket head-of-line: declined -- see the reason on the \
-                 line above. The property is UNTESTED, not passing."
-            )
+                "[spawn]   net::socket head-of-line: no IPv4 lease -- check skipped. The \
+                 property is UNTESTED, not passing."
+            );
         }
         Err(e) => {
             serial_println!(
@@ -5078,12 +5726,119 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             // Diagnostic rather than Integrity: it must fail the run, but
             // `halt_loop()` would stop every later self-test and cost a whole
             // boot's worth of information for each regression.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "net::socket head-of-line",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
             );
             return Err(e);
+        }
+    }
+
+    // A blocking receive on a quiet connection waits for data that comes late:
+    // the end-to-end half of A-BLOCKING-TCP-RECV-REPORTS-EOF-AFTER-2S, which
+    // needs a listener, a client and the accepted connection alive at once --
+    // possible since A-Q15's shared ring. Loopback inside the daemon, so an
+    // error is a real break and fails the run.
+    match crate::net::socket::self_test_blocking_recv_waits_for_late_data() {
+        // The check prints its own OK line, with the wait it measured.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket late data: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket late data ({:?}) — a blocking recv did not wait \
+                 for data sent after the old two-second cut-off",
+                e
+            );
+            crate::selftest::report_debug(
+                "net::socket late data",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // FIONREAD on a TCP connection: the count the daemon carries in its poll
+    // completion, as the Linux `ioctl` reports it.
+    match crate::net::socket::self_test_fionread() {
+        // The check prints its own OK line.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket FIONREAD: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket FIONREAD ({:?}) — the count of bytes waiting is wrong",
+                e
+            );
+            crate::selftest::report_debug(
+                "net::socket FIONREAD",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // The same two witnesses on design B of A-Q15 (design-decisions §972): a ring
+    // per socket, each its own daemon session. Both designs run in every boot, so
+    // neither rots while the other is the default. The ring mode is restored
+    // before any result is judged, so a failure cannot leave later rungs on B.
+    serial_println!(
+        "[spawn]   A-Q15 design B: the head-of-line and late-data witnesses again, each \
+         socket on a ring of its own"
+    );
+    crate::net::netstack_client::set_ring_mode(Some(
+        crate::net::netstack_client::RingMode::PerSocket,
+    ));
+    let hol_b = crate::net::socket::self_test_no_head_of_line();
+    let late_b = crate::net::socket::self_test_blocking_recv_waits_for_late_data();
+    crate::net::netstack_client::set_ring_mode(None);
+    for (name, result) in [
+        ("net::socket head-of-line, ring per socket", hol_b),
+        ("net::socket late data, ring per socket", late_b),
+    ] {
+        match result {
+            // Each check prints its own OK line.
+            Ok(Some(())) => {}
+            Ok(None) => {
+                serial_println!("[spawn]   {}: no IPv4 lease -- check skipped", name);
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: {} ({:?}) — design B of A-Q15 is broken",
+                    name,
+                    e
+                );
+                crate::selftest::report_debug(
+                    name,
+                    crate::selftest::Severity::Diagnostic,
+                    Err::<(), _>(e),
+                );
+            }
+        }
+    }
+
+    // A-Q15's load harness, small: two connections, both loads, both designs.
+    // The full harness runs in the bench suite; this keeps it from rotting
+    // between bench boots. Loopback, so a failure is a real break.
+    match crate::net::ring_bench::self_test() {
+        // The harness prints its own result lines and OK line.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   ring-bench self-test: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: ring-bench self-test ({:?}) — A-Q15's load harness no longer runs",
+                e
+            );
+            crate::selftest::report_debug(
+                "ring-bench self-test",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
         }
     }
 
@@ -5101,10 +5856,20 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack connect6: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack connect6 error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack connect6 ({:?}) — an IPv6 connection over the \
+                 daemon's own loopback failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::report_debug(
+                "persistent netstack connect6",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // IPv6 UDP datagram parity (D-NETSOCK-SYNC): OP_UDP_SEND6 + v6-aware
@@ -5120,10 +5885,64 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack udp6: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack udp6 error ({:?})",
-            e
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp6 ({:?}) — an IPv6 datagram over the \
+                 daemon's own loopback failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::report_debug(
+                "persistent netstack udp6",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // The loop every blocking netstack socket call waits in, on synthetic
+    // answers: no daemon involved, so a failure is the loop's and fails the run.
+    match crate::net::socket::self_test_wait_until() {
+        Ok(()) => serial_println!(
+            "[spawn]   netstack socket wait loop: asks through would-block to the answer, \
+             never waits on a non-blocking call, returns EOF and errors at once, backs off \
+             to 10 ms"
         ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: netstack socket wait loop ({:?})", e);
+            crate::selftest::report_debug(
+                "netstack socket wait loop",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // A blocking datagram receive waits for a datagram that arrives after it
+    // asked (known-issues.md A-BLOCKING-UDP-RECV-DID-NOT-BLOCK): loopback, so an
+    // error is a real break and fails the run.
+    match crate::net::socket::self_test_dgram_blocking_recv() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack blocking udp recv: a blocking recvfrom waited for \
+             a datagram sent 50 ms after it asked, and a non-blocking one on the drained \
+             socket still said EAGAIN"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack blocking udp recv: no NIC MAC — check skipped"
+        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack blocking udp recv ({:?}) — a blocking \
+                 datagram receive did not wait",
+                e
+            );
+            crate::selftest::report_debug(
+                "persistent netstack blocking udp recv",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // UDP connect() default-peer parity (D-NETSOCK-SYNC): drive the net::socket
@@ -5138,10 +5957,48 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack udp-connect error ({:?})",
-            e
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp-connect ({:?}) — a connected UDP socket's \
+                 default-peer send or filter failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::report_debug(
+                "persistent netstack udp-connect",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // UDP multicast (design-decisions §1532): the socket options the Linux
+    // setsockopt/getsockopt translate to, group membership in the daemon, and
+    // the daemon's loop to its own members -- every send at TTL 0, so the
+    // check never touches the wire and an error is a real break.
+    match crate::net::netstack_client::self_test_udp_multicast() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack udp-multicast: joins, options and the group loop \
+             behave as Linux's -- UDP multicast proven"
         ),
+        Ok(None) => {
+            serial_println!(
+                "[spawn]   persistent netstack udp-multicast: no NIC MAC — check skipped"
+            );
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp-multicast ({:?}) — a multicast \
+                 option, membership or group delivery misbehaved",
+                e
+            );
+            crate::selftest::report_debug(
+                "persistent netstack udp-multicast",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;
@@ -5265,8 +6122,7 @@ fn run_ring3_http_capstone() {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -5361,8 +6217,7 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -5476,8 +6331,7 @@ fn run_ring3_udp6_capstone() {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -6926,8 +7780,7 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7047,8 +7900,7 @@ pub fn self_test_linux_sa_restart() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7153,8 +8005,7 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7268,8 +8119,7 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7382,8 +8232,7 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7496,8 +8345,7 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7611,8 +8459,7 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7724,8 +8571,7 @@ pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7814,8 +8660,7 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7934,8 +8779,7 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8053,8 +8897,7 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8181,8 +9024,7 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8309,8 +9151,7 @@ pub fn self_test_clibm() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8379,11 +9220,13 @@ pub fn self_test_clibm() -> KernelResult<()> {
 /// Rust and both sides share the same wrong convention, so a plain-C caller
 /// built by `zig cc` is the only way to observe them.
 ///
-/// Note that the sysroot still *computes* in `double`; that is the documented
-/// TD-POSIX-LONG-DOUBLE-PRECISION limitation and is deliberately not what
-/// this fixture tests.  Every value it uses is exactly representable in
-/// binary64, so a precision shortfall cannot make it fail and an ABI fault
-/// cannot hide behind a loose tolerance.
+/// Since 2026-09-28 the sysroot computes and converts `long double` in all 80
+/// bits -- `<math.h>` (design-decisions §1134), then `printf`, `scanf`,
+/// `strtold` and `wcstold` (§1138) -- and the fixture checks that too:
+/// codes 60-84 call every `<math.h>` thunk shape, and 85-91 the conversions,
+/// on values a `double` would round. Until then it computed in `double`
+/// (TD-POSIX-LONG-DOUBLE-PRECISION), and the fixture used only values exact
+/// in binary64 (`requests/d-a-clongdouble-doc-says-double.md`).
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-longdouble/main.c`).
@@ -8437,8 +9280,7 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8464,7 +9306,15 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
              pushed without the caller popping would overflow the 8-deep x87 stack and start \
              returning NaN after eight calls), 40-44 = scanf's %L, which must store all 16 \
              bytes (41 pre-poisons the destination so a partial 8-byte store leaves a \
-             detectable stale exponent), 50 = format-and-reparse round trip. See \
+             detectable stale exponent), 50 = format-and-reparse round trip, 60-84 = \
+             libm's long double functions, one thunk shape at a time (60 sqrtl exact to 64 \
+             bits -- also fails if the x87 precision control is not 64-bit --, 64 fmal's \
+             fused rounding, 66-68 scaling beyond double's range, 69-75 out-parameters, \
+             80-81 nexttoward with the double in %xmm0 and the long double on the stack, \
+             82-83 errno, 84 every shape 32 times, which a thunk leaking an x87 register \
+             would fail; design-decisions 1134), 85-91 = the conversions in all 80 bits \
+             (strtold(\"0.1\") must equal 0.1L, %.25Lf must print its own digits, 1e4000L \
+             must survive both ways; design-decisions 1138). See \
              BUG-POSIX-LONG-DOUBLE-ABI in known-issues.md and \
              services/ctest-longdouble/main.c",
             exit_code,
@@ -8475,8 +9325,8 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   long double (ring 3: a zig-cc C caller and the sysroot agree on the \
-         16-byte stack-passed X87 class through printf %L, scanf %L and strtold's %st(0) \
-         return): OK"
+         16-byte stack-passed X87 class through printf %L, scanf %L, strtold's %st(0) \
+         return and every libm long double thunk shape, in all 80 bits): OK"
     );
     Ok(())
 }
@@ -8562,8 +9412,7 @@ pub fn self_test_cfortify() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8729,8 +9578,7 @@ pub fn self_test_ctest_keylayout() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8826,6 +9674,20 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
         return Ok(());
     };
 
+    // The fixture execs /mnt/bin/python3, which reads its standard library out
+    // of the zip archive: an image with the C fixtures but no interpreter can
+    // run the fixture and nothing it exists to test.  Skip, as the CPython rung
+    // does on the same two paths.  Until 2026-09-27 this rung failed with exit 8
+    // on such an image, and the legend's "it IS on the image" below was text,
+    // not a check (lane C, requests/c-a-the-python-repl-rung-fails-instead-of-
+    // skipping-when-the-image-has-no-python3.md).  With this gate it is a fact.
+    if pathz_missing(
+        "CPython interactive REPL over a pty (ring 3)",
+        &["/mnt/bin/python3", "/mnt/usr/local/lib/python312.zip"],
+    ) {
+        return Ok(());
+    }
+
     serial_println!(
         "[spawn] Running CPython interactive REPL over a pty (ring 3, C, native \
          ABI) integration test ({} bytes ELF)...",
@@ -8890,8 +9752,7 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9109,8 +9970,7 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9298,8 +10158,7 @@ pub fn self_test_zombiewait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9392,8 +10251,7 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9418,8 +10276,11 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
              number is validated before the target is classified), 50-63 = the parent/child \
              case, of which 55 is the load-bearing one: the parent sees the child's new group \
              after setpgid(child, child), which a userspace static could never report, 70-74 = \
-             the group was backed by real membership, so it is ESRCH once the child is reaped. \
-             See services/ctest-pgroup/main.c",
+             the group was backed by real membership, so it is ESRCH once the child is reaped, \
+             80-88 = tgkill: this thread and a child's, named against the right process and the \
+             wrong one, and a real SIGUSR1 to the child's thread read back from waitpid as its \
+             death (84-87 check only the refusal branch when the fixture may not look in \
+             /proc). See services/ctest-pgroup/main.c",
             exit_code,
             EXPECTED
         );
@@ -9578,8 +10439,7 @@ pub fn self_test_jobctl() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9846,8 +10706,7 @@ pub fn self_test_cctty() -> KernelResult<()> {
     // the console, so this is what the session-exit release has to clean up.
     let held_at_exit = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // And after: destroying the session's last process must release it.
     let held_after_destroy = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
@@ -9961,10 +10820,24 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// 64 KiB buffer, including handlers that never asked and whose authors sized
 /// nothing for it.
 ///
+/// Checks 43-53 are lane D's (2026-09-30,
+/// `requests/d-a-ctest-altstack-now-takes-the-kernel-s-road-too.md`), and
+/// they are the case `87ef09d0b` made possible: a handler the *kernel* starts
+/// on the alternate stack.
+/// - 43-49 send `SIGUSR1`/`SIGUSR2` with `kill(0, sig)`, after `setpgid(0, 0)`
+///   gives the fixture a group of its own. libc dispatches in-process only a
+///   signal aimed at its own pid, so these go through `SYS_SIGNAL_SEND`, and
+///   `deliver_pending_signal` builds the frame on the alternate stack as that
+///   call returns. The handler uses 8 KiB of it.
+/// - 50-53 run an `SA_SIGINFO` handler there, raised and through the kernel,
+///   and read its `siginfo_t` and `ucontext_t`.
+///
 /// **It cannot hang, and that claim is lane B's, checked rather than asserted.**
-/// Every signal here is raised with `raise()`, which in our libc calls
-/// `dispatch_self_signal` directly: synchronous, in-process, no kernel round
-/// trip, nothing read, nothing slept on. The worst case is a wrong exit code.
+/// The signals are raised with `raise()`, which in our libc calls
+/// `dispatch_self_signal` directly, or sent with `kill(0, sig)`, which returns
+/// once the handler has run on that call's way back to userspace. Either way
+/// it is synchronous: nothing read, nothing slept on, no child. The worst
+/// case is a wrong exit code.
 /// The distinction matters because the previous fixture from the same lane
 /// arrived with "can fail but cannot hang" and then hung this boot test for two
 /// hours -- `O_NONBLOCK` was set on a descriptor the read arm never consulted.
@@ -9974,13 +10847,11 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// The kernel-side bound stays anyway: a bounded yield loop, so a fixture that
 /// somehow never exits costs a reported failure and not a boot.
 ///
-/// **What this does not cover.** The overflow case -- a handler running on the
-/// alternate stack *because the original one is gone* -- is not in the fixture
-/// yet. Lane B left it out deliberately while the kernel half was missing, since
-/// it would have failed by design rather than by regression. That half landed in
-/// `87ef09d0b`, so it can go in now; lane B said they would add it and I have
-/// told them it is unblocked. Until then this rung proves the decision and the
-/// libc path, not the recovery.
+/// **What this does not cover.** A handler recovering from a real stack
+/// overflow -- running on the alternate stack *because the original one is
+/// gone*. A native fault here is an exception, not a signal, so there is no
+/// overflow signal for the kernel to deliver; the frame placement itself is
+/// what 43-53 prove.
 pub fn self_test_ctest_altstack() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-altstack", "ctest-altstack")? else {
         return Ok(());
@@ -10032,8 +10903,7 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10197,8 +11067,7 @@ pub fn self_test_ctest_initfini() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10407,8 +11276,7 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10612,8 +11480,7 @@ pub fn self_test_ctest_pty() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10756,8 +11623,7 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10781,6 +11647,415 @@ pub fn self_test_cscanf() -> KernelResult<()> {
          v*scanf a correct va_list past the six-register boundary, so destination \
          pointers come from the caller's overflow area rather than a stack word past \
          a fixed array): OK"
+    );
+    Ok(())
+}
+
+/// Take down a fixture process a rung spawned, whatever state it is in.
+///
+/// A fixture that reached `Zombie` has no thread left, and is reaped as the
+/// rungs always reaped one. A fixture that did not -- its rung's deadline
+/// passed -- still has scheduler tasks, and `pcb::destroy` frees the address
+/// space they would run on next. So its threads are killed first, which is
+/// also what makes it a zombie, and only then is it destroyed: the order the
+/// `fastpy-nice` rung has always used for the tool it stops on purpose.
+///
+/// A fixture's own children are its to reap: one that forks waits for them
+/// before it exits, or leaves orphans no rung can see.
+///
+/// The guest agent's `run` ends its programs the same way (`guestagent`).
+pub(crate) fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
+    if pcb::state(pid) != Some(pcb::ProcessState::Zombie) {
+        thread::kill_process_threads(pid);
+        for _ in 0..2000 {
+            if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+            crate::sched::yield_now();
+        }
+    }
+    thread::on_thread_exit(task_id);
+    pcb::destroy(pid);
+}
+
+/// What a fixture that did not finish is doing, for its rung's failure line:
+/// its first thread's state and what it waits on (`/proc/<pid>/wchan`'s
+/// answer). Read before the fixture is torn down, while there is a task to
+/// ask. A run that only says "not a zombie" leaves the next boot to find out
+/// which call it sat in.
+pub(crate) fn unfinished_report(task_id: TaskId) -> alloc::string::String {
+    let wait = crate::sched::wait_of(task_id).map_or_else(
+        || alloc::string::String::from("nothing (no task)"),
+        |w| alloc::format!("{w}"),
+    );
+    alloc::format!(
+        "its thread {:?}, waiting on {}",
+        crate::sched::task_state(task_id),
+        wait
+    )
+}
+
+/// Where lane D lists the C fixtures [`self_test_ctest_generic`] runs:
+/// `services/ctest-generic.list`, staged by `scripts/create-ext4-rootfs.sh`.
+const CTEST_GENERIC_LIST: &str = "/mnt/tests/ctest-generic.list";
+
+/// The longest a listed fixture may ask for, in seconds: a bound, so that a
+/// typo (`300000`) is a line the rung cannot read rather than a boot held for
+/// days. Five times the longest any fixture has asked for so far.
+const CTEST_GENERIC_MAX_SECONDS: u64 = 600;
+
+/// One line of the list.
+struct GenericFixture<'a> {
+    /// `/mnt/tests/<name>.elf`, and its `argv[0]`.
+    name: &'a str,
+    /// The capabilities it is spawned holding.
+    grants: alloc::vec::Vec<(ResourceType, u64, Rights)>,
+    /// How long it may take, from spawn to `Zombie`.
+    seconds: u64,
+}
+
+/// What a listed fixture came to, when it did not fail.
+enum GenericOutcome {
+    Passed,
+    /// Its ELF is not staged: counted into the end-of-boot verdict by
+    /// [`pathz_test_elf`], as any absent fixture is.
+    Skipped,
+}
+
+/// The capability a grant word in the list stands for.
+///
+/// A closed vocabulary rather than capabilities spelled out in the list: the
+/// list is lane D's and grants are the kernel's decision, so a fixture that
+/// needs a new one asks for a new word, and this table says what it means.
+/// The guest agent's `run` takes the same words (`guestagent`), so a program
+/// tried in a running guest holds what its fixture would at boot.
+pub(crate) fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
+    match word {
+        // One wildcard File capability, which every file-touching fixture so
+        // far has needed (`requests/d-a-one-rung-for-every-c-fixture.md`).
+        "file" => Some((
+            ResourceType::File,
+            0,
+            Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::METADATA,
+        )),
+        // The right to change Secure Boot's lists: the granted arm of
+        // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1501).
+        "secureboot" => Some((ResourceType::Process, 0, Rights::ENROLL_SECUREBOOT)),
+        // The right to replace the running kernel: the granted arm of
+        // SYS_POWER_RELOAD (kexec).
+        "reload_kernel" => Some((ResourceType::Process, 0, Rights::RELOAD_KERNEL)),
+        _ => None,
+    }
+}
+
+/// A name the rung may turn into a path: letters, digits, `-`, `_` and `.`,
+/// not starting with `.`, at most 64 bytes. Anything else -- a `/` above all
+/// -- would load a file other than `/mnt/tests/<name>.elf`.
+fn ctest_generic_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Parse the list: one fixture a line, `name grants seconds` separated by
+/// blanks; `#` to the end of a line is a comment; blank lines are ignored.
+/// `grants` is `-` for none, or grant words joined by `,`.
+///
+/// # Errors
+///
+/// The 1-based number of the first line it cannot read, and why. A line is
+/// refused rather than skipped: the rootfs script refuses such a list, so one
+/// reaching the image is a fault in that script or in this parser, and a
+/// fixture silently not run is the thing this rung exists to prevent.
+fn parse_ctest_generic_list(
+    text: &str,
+) -> Result<alloc::vec::Vec<GenericFixture<'_>>, (usize, &'static str)> {
+    let mut fixtures: alloc::vec::Vec<GenericFixture<'_>> = alloc::vec::Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let number = index.saturating_add(1);
+        let line = raw.split('#').next().unwrap_or_default();
+        let mut fields = line.split_ascii_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let (Some(grants), Some(seconds), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err((number, "not three fields (name, grants, seconds)"));
+        };
+        if !ctest_generic_name_ok(name) {
+            return Err((
+                number,
+                "the name is not a fixture name (letters, digits, '-', '_', '.')",
+            ));
+        }
+        if fixtures.iter().any(|f| f.name == name) {
+            return Err((number, "the fixture is listed twice"));
+        }
+        let mut caps = alloc::vec::Vec::new();
+        if grants != "-" {
+            for word in grants.split(',') {
+                let Some(cap) = ctest_generic_grant(word) else {
+                    return Err((number, "a grant word this kernel does not know"));
+                };
+                caps.push(cap);
+            }
+        }
+        let Ok(seconds) = seconds.parse::<u64>() else {
+            return Err((number, "seconds is not a whole number"));
+        };
+        if seconds == 0 || seconds > CTEST_GENERIC_MAX_SECONDS {
+            return Err((number, "seconds is 0 or more than 600"));
+        }
+        fixtures.push(GenericFixture {
+            name,
+            grants: caps,
+            seconds,
+        });
+    }
+    Ok(fixtures)
+}
+
+/// Run one listed fixture: spawn it with its grants, wait for it until its
+/// deadline, take it down whatever happened, and judge its exit code.
+fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcome> {
+    /// Every C fixture's "every check passed".
+    const EXPECTED: i32 = 42;
+
+    let name = fixture.name;
+    let Some(elf) = pathz_test_elf(name, name)? else {
+        return Ok(GenericOutcome::Skipped);
+    };
+    serial_println!(
+        "[spawn] Running {} (ring 3, C fixture, generic rung, {} s allowed, {} bytes ELF)...",
+        name,
+        fixture.seconds,
+        elf.len()
+    );
+
+    let argv: &[&[u8]] = &[name.as_bytes()];
+    let options = SpawnOptions {
+        name,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &fixture.grants,
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): spawn returned {:?}",
+                name,
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // A time, not a count of yields: a fixture that sleeps is judged by the
+    // clock it reads, however busy the machine is.
+    let deadline =
+        crate::hrtimer::now_ns().saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
+    let finished = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break true;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            break false;
+        }
+        crate::sched::yield_now();
+    };
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if !finished {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): still running at its \
+             deadline, {} s after spawn, and taken down. Its codes are in services/{}/",
+            name,
+            fixture.seconds,
+            name
+        );
+        return Err(KernelError::TimedOut);
+    }
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): ended with exit code {:?}, \
+             expected {}. Its codes are in services/{}/",
+            name,
+            exit_code,
+            EXPECTED,
+            name
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   {} (ring 3, C fixture, generic rung): OK", name);
+    Ok(GenericOutcome::Passed)
+}
+
+/// One rung for every C fixture lane D lists in `/mnt/tests/ctest-generic.list`
+/// (`requests/d-a-one-rung-for-every-c-fixture.md`).
+///
+/// A rung per fixture was the same thirty lines each time, and a new fixture
+/// -- or a change to one's grants or time -- needed a kernel change. Lane D
+/// keeps the list, so neither does now. Each fixture is spawned with
+/// `argv = [<name>]`, no environment and the capabilities its grant words
+/// stand for ([`ctest_generic_grant`]), and given until a deadline in seconds.
+/// 42 is a pass, as for every C fixture; anything else names the fixture and
+/// points at the code legend at the top of its `main.c`, so the rung does not
+/// keep copies of legends that would drift.
+///
+/// Every listed fixture runs even after one fails, and the rung fails if any
+/// did. No list in the image is a counted skip, not a failure; a line that
+/// cannot be read is a failure.
+pub fn self_test_ctest_generic() -> KernelResult<()> {
+    const RUNG: &str = "ctest-generic";
+
+    if !crate::fs::selftest::is_mounted(FIXTURE_MOUNT) {
+        pathz_skip(
+            format_args!("{RUNG}"),
+            &alloc::format!("{CTEST_GENERIC_LIST} (nothing is mounted at {FIXTURE_MOUNT})"),
+        );
+        return Ok(());
+    }
+    let bytes = match crate::fs::Vfs::read_file(CTEST_GENERIC_LIST) {
+        Ok(b) => b,
+        Err(e) => return pathz_fixture_absent(RUNG, CTEST_GENERIC_LIST, &e),
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        serial_println!(
+            "[spawn]   FAIL: {}: {} is not UTF-8 text",
+            RUNG,
+            CTEST_GENERIC_LIST
+        );
+        return Err(KernelError::InternalError);
+    };
+    let fixtures = match parse_ctest_generic_list(text) {
+        Ok(f) => f,
+        Err((line, why)) => {
+            serial_println!(
+                "[spawn]   FAIL: {}: {} line {}: {} -- scripts/create-ext4-rootfs.sh should \
+                 have refused it",
+                RUNG,
+                CTEST_GENERIC_LIST,
+                line,
+                why
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    if fixtures.is_empty() {
+        serial_println!(
+            "[spawn]   {}: the list names no fixtures, so there is nothing to run: OK",
+            RUNG
+        );
+        return Ok(());
+    }
+
+    let (mut passed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    for fixture in &fixtures {
+        match run_ctest_generic(fixture) {
+            Ok(GenericOutcome::Passed) => passed = passed.saturating_add(1),
+            Ok(GenericOutcome::Skipped) => skipped = skipped.saturating_add(1),
+            // Its FAIL line, naming it and why, is already printed; what is
+            // left to do is count it, so the rung fails once every fixture
+            // has had its turn.
+            Err(_) => failed = failed.saturating_add(1),
+        }
+    }
+    serial_println!(
+        "[spawn]   {}: {} listed -- {} passed, {} failed, {} skipped",
+        RUNG,
+        fixtures.len(),
+        passed,
+        failed,
+        skipped
+    );
+    if failed > 0 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// The list parser's cases, run at boot because the kernel crate has no host
+/// tests: a list that parses, and each way a line is refused.
+pub fn self_test_ctest_generic_list() -> KernelResult<()> {
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: ctest-generic list parser: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let good = "# name grants seconds\n\
+                \n\
+                ctest-obstack  -            30\n\
+                ctest-stdio    file         60   # a comment after a line\r\n\
+                ctest-sb       file,secureboot 5\n";
+    let Ok(list) = parse_ctest_generic_list(good) else {
+        return fail("a well-formed list was refused");
+    };
+    let shape: alloc::vec::Vec<(&str, usize, u64)> = list
+        .iter()
+        .map(|f| (f.name, f.grants.len(), f.seconds))
+        .collect();
+    if shape
+        != [
+            ("ctest-obstack", 0, 30),
+            ("ctest-stdio", 1, 60),
+            ("ctest-sb", 2, 5),
+        ]
+    {
+        return fail("a well-formed list parsed to the wrong fixtures");
+    }
+    if list.get(2).and_then(|f| f.grants.get(1)).map(|g| g.0) != Some(ResourceType::Process) {
+        return fail("'secureboot' did not grant a Process capability");
+    }
+    if !matches!(parse_ctest_generic_list("# only a comment\n\n"), Ok(v) if v.is_empty()) {
+        return fail("a list of comments is not an empty list");
+    }
+
+    for (case, text, line) in [
+        ("two fields", "ok - 5\nctest-x -\n", 2),
+        ("four fields", "ctest-x - 5 extra\n", 1),
+        ("a path for a name", "../etc/x - 5\n", 1),
+        ("a dot name", ".hidden - 5\n", 1),
+        ("listed twice", "ctest-x - 5\nctest-x file 5\n", 2),
+        ("an unknown grant", "ctest-x root 5\n", 1),
+        ("an empty grant word", "ctest-x file, 5\n", 1),
+        ("seconds not a number", "ctest-x - 5s\n", 1),
+        ("zero seconds", "ctest-x - 0\n", 1),
+        ("seconds over the bound", "ctest-x - 601\n", 1),
+    ] {
+        match parse_ctest_generic_list(text) {
+            Err((n, _)) if n == line => {}
+            Err((n, why)) => {
+                serial_println!(
+                    "[spawn]   ctest-generic list parser: '{}' refused at line {} ({}), expected line {}",
+                    case,
+                    n,
+                    why,
+                    line
+                );
+                return fail("a bad line was refused at the wrong line");
+            }
+            Ok(_) => {
+                serial_println!(
+                    "[spawn]   ctest-generic list parser: '{}' was accepted",
+                    case
+                );
+                return fail("a bad line was accepted");
+            }
+        }
+    }
+    serial_println!(
+        "[spawn]   ctest-generic list parser: a good list parses, ten bad lines are refused at their line: OK"
     );
     Ok(())
 }
@@ -10856,8 +12131,7 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10965,8 +12239,7 @@ pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -11135,8 +12408,7 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAT_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11270,8 +12542,7 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(RUN_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11449,8 +12720,7 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     let sched_state = crate::sched::task_state(result.task_id);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(FE_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11631,8 +12901,7 @@ pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAP_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11823,8 +13092,7 @@ pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PIPE_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -12038,8 +13306,7 @@ pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -12241,8 +13508,7 @@ pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -12441,8 +13707,7 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie {
             return Err(KernelError::InternalError);
         }
@@ -13021,8 +14286,7 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -13156,8 +14420,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-grep (ring 3) did not reach Zombie (state {:?})",
@@ -13305,8 +14568,7 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(WC_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13405,8 +14667,7 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(HEAD_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13506,8 +14767,7 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(UNIQ_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13610,8 +14870,7 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TAIL_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13714,8 +14973,7 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SORT_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13818,8 +15076,7 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(FREQ_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13942,8 +15199,7 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14076,8 +15332,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let still_exists = crate::fs::Vfs::exists_or_err(RM_FILE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     // Best-effort cleanup in case the delete failed and the file survived.
     let _ = crate::fs::Vfs::remove(RM_FILE);
 
@@ -14228,8 +15483,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     let src_exists = crate::fs::Vfs::exists_or_err(MV_SRC);
     let dst_contents = crate::fs::Vfs::read_file(MV_DST);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14378,8 +15632,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
     // Capture the post-run type before teardown.
     let post_meta = crate::fs::Vfs::metadata(MK_DIR);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::rmdir(MK_DIR);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14514,8 +15767,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let still_exists = crate::fs::Vfs::exists_or_err(RM_DIR);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::rmdir(RM_DIR);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14647,8 +15899,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SIZE_FILE);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14765,8 +16016,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
             crate::sched::yield_now();
         }
         let code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie {
             return None;
         }
@@ -14898,8 +16148,7 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15044,8 +16293,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15231,8 +16479,7 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15389,8 +16636,7 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15574,8 +16820,7 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15732,8 +16977,7 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15914,8 +17158,7 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16092,8 +17335,7 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16299,8 +17541,7 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16483,8 +17724,7 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16713,8 +17953,7 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16946,8 +18185,7 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17139,8 +18377,7 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17360,8 +18597,7 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
     // spawn actually installed the identity the tool then read back.
     let stored = pcb::get_credentials(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17580,8 +18816,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     // MUTATED the credentials (not merely returned success).
     let stored = pcb::get_credentials(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17738,7 +18973,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
 /// queue), we read, *while the task still exists*, both (a) `pcb::get_nice(pid)`
 /// and (b) the task's base scheduler priority (`sched::get_base_priority`).  We
 /// assert the tool wrote exactly `"0,-7,-12,-12"` AND `pcb::get_nice == -12`
-/// AND the base priority equals `thread::nice_to_priority(-12)` (== 6).  Then
+/// AND the base priority equals `thread::nice_to_priority(-12)` (== 11).  Then
 /// we kill the (sleeping) process.  The old stub would leave `pcb::get_nice` at
 /// 0 and the scheduler priority at the spawn default (16) — two independent
 /// failures.  nice -12 → priority 6 is distinct from the default 16, ruling out
@@ -17753,7 +18988,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
 
     const OUT_PATH: &str = "/tmp/fastpy-nice.out";
     // Must match the literals baked into services/fastpy-nice/build.py's SRC:
-    // setpriority(-7), then nice(-5) ⇒ -12.  nice_to_priority(-12) == 6.
+    // setpriority(-7), then nice(-5) ⇒ -12.  nice_to_priority(-12) == 11.
     // Negative nice (a priority *raise*) is CAP_SYS_NICE-gated — the tool is
     // spawned as root so it holds the cap — and moves the tool ABOVE the
     // default priority.  The tool then *sleeps* (blocks) rather than spins, so
@@ -17891,8 +19126,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
         }
         crate::sched::yield_now();
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let Some((fields, stored_nice, base_prio)) = observed else {
         serial_println!(
@@ -18097,8 +19331,7 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
         }
         crate::sched::yield_now();
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let Some((fields, perms)) = observed else {
         serial_println!(
@@ -18271,8 +19504,7 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18412,8 +19644,7 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18663,8 +19894,7 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         hpet_after.saturating_sub(hpet_before),
     );
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18787,8 +20017,7 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18945,8 +20174,7 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19105,8 +20333,7 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19271,8 +20498,7 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19413,8 +20639,7 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19545,8 +20770,7 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19687,8 +20911,7 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -19824,8 +21047,7 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -19961,8 +21183,7 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -20086,8 +21307,7 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -20195,8 +21415,7 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(STORE_PATH);
     // The utility wrote this blob; clean it up regardless of outcome.
     let _ = crate::fs::Vfs::remove(STORE_BLOB_PATH);
@@ -20311,8 +21530,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -20527,8 +21745,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -20706,8 +21923,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -20923,8 +22139,7 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
     let keep_exists = crate::fs::Vfs::exists_or_err(KEEP_BLOB);
     let orphan_exists = crate::fs::Vfs::exists_or_err(ORPHAN_BLOB);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -21042,8 +22257,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21179,8 +22393,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21347,8 +22560,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21537,8 +22749,7 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -21639,8 +22850,7 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -21669,6 +22879,4379 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
         "[spawn]   Linux fork()+wait4() (ring 3: parent forked a child, blocked in wait4, \
          reaped it on the child's exit, decoded WEXITSTATUS == {}): OK",
         CHILD_EXIT
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of `madvise`'s promises:
+/// [`elf::build_linux_madvise_test_elf`] drops one 4 KiB page of a frame with
+/// `MADV_DONTNEED`, punches shared memory with `MADV_REMOVE`, marks one page
+/// wipe-on-fork and one don't-fork, forks, and has the child check what it
+/// got and the parent what it kept. It exits `0x2A` on success; any other
+/// code names the check that failed (see the builder).
+///
+/// What the kernel-context tests (`pcb`'s and `cow`'s) cannot reach, this
+/// does: `madvise` from a program, the policy carried from the parent's
+/// regions into the clone and the child's region list, the child's first
+/// touch of a wiped page beside pages it shares with its parent, and a
+/// program's own read of a page it dropped. Bounded like the fork test: the
+/// harness never blocks.
+pub fn self_test_linux_madvise() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    // Scheduling rounds for the parent and child to finish: a healthy run
+    // ends in a handful, and the loop stops the moment the parent is a
+    // zombie; counted in yields, not time, so a busy host cannot use it up.
+    const MAX_YIELDS: usize = 4096;
+
+    serial_println!("[spawn] Running Linux madvise (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_madvise_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-madvise"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-madvise",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: madvise spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: madvise (ring 3) — the parent did not finish in {} yields \
+             (state {:?})",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "mmap failed",
+            Some(0x31) => "madvise(MADV_WIPEONFORK) failed",
+            Some(0x32) => "madvise(MADV_DONTFORK) failed",
+            Some(0x36) => "MADV_WIPEONFORK on shared memory was not EINVAL",
+            Some(0x3A) => "MADV_REMOVE on shared memory failed",
+            Some(0x3B) => "shared memory was not zero after MADV_REMOVE",
+            Some(0x3C) => "MADV_REMOVE on private memory was not EINVAL",
+            Some(0x37) => "MADV_DONTNEED failed",
+            Some(0x38) => "a page dropped with MADV_DONTNEED did not read zero",
+            Some(0x39) => "MADV_DONTNEED of one page lost its neighbour's bytes",
+            Some(0x33) => "fork failed",
+            Some(0x34) => "wait4 failed",
+            Some(0x35) => "the child did not exit normally",
+            Some(0x41) => "the child's wipe-on-fork page was not zero",
+            Some(0x42) => "the child's copied page lost the parent's data",
+            Some(0x43) => "the child got the don't-fork page",
+            Some(0x44) => "the child could not write its wiped page",
+            Some(0x51) => "the parent's wipe-on-fork page lost its data",
+            Some(0x52) => "the parent's don't-fork page lost its data",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: madvise (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux madvise (ring 3: a DONTNEED'd page read zero beside a kept one, \
+         REMOVE zeroed shared memory and refused private; across fork the child got the \
+         wiped page zeroed, the copied page intact and no don't-fork page, and the parent \
+         kept both): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of the names for a process's own descriptors
+/// (`/dev/stdin`, `/dev/fd/N`): [`elf::build_linux_dev_stdin_test_elf`]
+/// re-opens a file through `/dev/stdin` at offset 0 while descriptor 0 keeps
+/// its own, stats it, finds a closed `/dev/fd/N` absent, opens a pipe's other
+/// end through `/dev/fd/N`, and stats a piped `/dev/stdin` as a FIFO. It exits
+/// `0x2A` on success; any other code names the check that failed (see the
+/// builder). Bounded like the fork test: the harness never blocks.
+pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const MAX_YIELDS: usize = 4096;
+
+    serial_println!("[spawn] Running Linux /dev/stdin and /dev/fd/N (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_dev_stdin_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-dev-stdin"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program makes the file it opens again by /dev/fd/N: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-dev-stdin",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: /dev/stdin spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: /dev/stdin (ring 3) — the program did not finish in {} yields \
+             (state {:?})",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => "setting up the file failed",
+            Some(0x34) => "opening /dev/stdin failed",
+            Some(0x35 | 0x36) => "/dev/stdin did not read from offset 0 (not a re-open)",
+            Some(0x37 | 0x38) => "descriptor 0 lost its offset to the re-open",
+            Some(0x39 | 0x3A) => "stat of /dev/stdin was not the file on descriptor 0",
+            Some(0x3B) => "a closed /dev/fd/N was not ENOENT",
+            Some(0x3C | 0x3D) => "the pipe setup failed",
+            Some(0x3E) => "opening a pipe's other end through /dev/fd/N failed",
+            Some(0x3F..=0x41) => "a byte written to the other end did not arrive",
+            Some(0x42 | 0x43) => "stat of a piped /dev/stdin was not a FIFO",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: /dev/stdin (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux /dev/stdin and /dev/fd/N (ring 3: a re-open from offset 0, the \
+         object's stat, ENOENT when closed, a pipe's other end, a FIFO): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of per-thread signal state with a real second thread:
+/// [`elf::build_linux_thread_signals_test_elf`] checks a new thread inherits
+/// its creator's mask and that changing it is the thread's own business, that
+/// a `kill` reaches the one thread not blocking it, and that `tgkill` waits
+/// for its thread alone. Exits `0x2A` on success.
+pub fn self_test_linux_thread_signals() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux per-thread signals (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_thread_signals_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-thread-signals"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-thread-signals",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: per-thread signals spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: per-thread signals (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x35) => "setting up the mailbox, handlers, mask or the worker failed",
+            Some(0x40) => "the worker did not start with its creator's mask",
+            Some(0x41) => "the worker unblocking for itself changed the main thread's mask",
+            Some(0x42 | 0x43) => "a kill did not run the handler on the one thread not blocking it",
+            Some(0x44 | 0x45) => "a tgkill to the main thread was taken by the worker",
+            Some(0x46) => "the main thread's sigpending did not show its own signal",
+            Some(0x47) => "the main thread could not take its own signal with sigtimedwait",
+            Some(0x48 | 0x49) => "a tgkill to the worker did not run the handler there",
+            Some(0x4A) => "the worker could not be joined",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: per-thread signals (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux per-thread signals (ring 3: a thread inherits and then changes its \
+         own mask, kill reaches the thread not blocking it, tgkill waits for its thread): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the alternate signal stack:
+/// [`elf::build_linux_sigaltstack_test_elf`] checks `sigaltstack`'s answers,
+/// that an `SA_ONSTACK` handler runs on the stack (and one without it does
+/// not), the frame's `uc_stack` and its restore by `rt_sigreturn`,
+/// `SS_AUTODISARM`, a signal nested on the stack, `AT_MINSIGSTKSZ`, a stack
+/// overflow's `SIGSEGV` handled on the stack, the main stack growing past
+/// 80 KiB (which the program-header copy stopped until 2026-10-07), a new
+/// thread's and a forked child's stacks, and the `SIGSEGV` that ends a
+/// process whose frame does not fit or whose fault is blocked. Exits `0x2A`
+/// on success; the same program passes on Linux 6.6.
+pub fn self_test_linux_sigaltstack() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux alternate signal stack (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_sigaltstack_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigaltstack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigaltstack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: alternate signal stack spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: alternate signal stack (ring 3) — the program did not finish in \
+             60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x3F) => "setting up the mailbox, the stack or a handler failed",
+            Some(0x31) => "a thread with no alternate stack did not report SS_DISABLE",
+            Some(0x32 | 0x34) => "a stack under MINSIGSTKSZ or a bad mode was not refused",
+            Some(0x33) => "a refused sigaltstack reported the old stack anyway",
+            Some(0x35 | 0x36) => "SS_DISABLE|SS_AUTODISARM was not kept as Linux keeps it",
+            Some(0x37 | 0x38) => "setting a stack did not report the old one, or the new",
+            Some(0x40 | 0x41) => "the SA_ONSTACK handler did not run",
+            Some(0x42) => "the SA_ONSTACK handler did not run on the alternate stack",
+            Some(0x43) => "the frame's uc_stack was not the stack as set",
+            Some(0x44) => "a query on the stack did not say SS_ONSTACK",
+            Some(0x45) => "a change while on the stack was not EPERM",
+            Some(0x46..=0x48) => "AT_MINSIGSTKSZ is missing or does not cover the frame",
+            Some(0x49) => "the stack changed across a handler",
+            Some(0x50..=0x52) => "a handler without SA_ONSTACK ran on the alternate stack",
+            Some(0x53..=0x55) => "a handler off the stack saw the wrong uc_stack or answers",
+            Some(0x56) => "rt_sigreturn did not restore the stack from uc_stack",
+            Some(0x60..=0x67) => "SS_AUTODISARM did not disarm in the handler and re-arm after",
+            Some(0x70..=0x73) => "a signal nested on the stack did not stay on it",
+            Some(0x80..=0x84) => "a stack overflow's SIGSEGV was not handled on the stack",
+            Some(0x90..=0x93) => "a new thread did not start without an alternate stack",
+            Some(0xA0 | 0xA1) => "a forked child did not keep the stack",
+            Some(0xA2..=0xA5) => {
+                "a frame that did not fit the stack did not end the child by SIGSEGV"
+            }
+            // The flooding child's own exits, passed on by the parent.
+            Some(0x3A) => "a signal nested on the alternate stack was not placed below the last",
+            Some(0x3B) => "4096 nested signals never ran out of alternate stack",
+            Some(0x2D) => "the flooding child's first signal returned instead of nesting",
+            Some(0xA6 | 0xA7) => "a fault with SIGSEGV blocked did not end the child by SIGSEGV",
+            Some(0xAF) => "wait4 for a child failed",
+            None => "no exit code: the program died -- a fault the stack should have caught?",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: alternate signal stack (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux alternate signal stack (ring 3: sigaltstack's answers, SA_ONSTACK, \
+         uc_stack and its restore, SS_AUTODISARM, nesting, AT_MINSIGSTKSZ, a stack \
+         overflow handled on it, SIGSEGV for a frame that does not fit): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SIGPIPE`: [`elf::build_linux_sigpipe_test_elf`] checks that
+/// a write into a pipe nobody reads raises `SIGPIPE` before `EPIPE` is seen --
+/// its default action ending a child, ignored giving `EPIPE` alone, a handler
+/// (`SI_USER`, from the process itself) having run, a blocked one pending for
+/// `sigtimedwait` -- through `write`, `writev`, `vmsplice`, `tee`, `splice` and
+/// `sendfile`; on a unix stream socket whose peer is gone or that was shut down
+/// for writing, and on a TCP socket never connected (when there is a network);
+/// and not with `MSG_NOSIGNAL`, nor on a datagram socket. Exits `0x2A` on
+/// success; the same program passes on Linux 6.6.
+pub fn self_test_linux_sigpipe() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux SIGPIPE (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_sigpipe_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigpipe"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigpipe",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SIGPIPE spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SIGPIPE (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31 | 0x3F) => {
+                "setting up the mailbox, a pipe, a socket pair or the action failed"
+            }
+            Some(0x32 | 0x33) => {
+                "the child for the default action could not be forked or waited for"
+            }
+            Some(0x34) => "SIGPIPE's default action did not end the writer",
+            Some(0x40) => "an ignored SIGPIPE's write was not EPIPE",
+            Some(0x41) => "a write into a broken pipe did not run the handler before EPIPE",
+            Some(0x42) => "writev into a broken pipe did not raise SIGPIPE",
+            Some(0x43) => "vmsplice into a broken pipe did not raise SIGPIPE",
+            Some(0x44..=0x46) => "tee or splice into a broken pipe did not raise SIGPIPE",
+            Some(0x47 | 0x48) => "sendfile into a broken pipe did not raise SIGPIPE",
+            Some(0x50 | 0x51) => {
+                "a write or send on a unix stream with its peer gone did not raise SIGPIPE"
+            }
+            Some(0x52) => "MSG_NOSIGNAL did not keep SIGPIPE back",
+            Some(0x53 | 0x54) => "a write after shutdown(SHUT_WR) did not raise SIGPIPE",
+            Some(0x55 | 0x56) => "a datagram socket's EPIPE raised SIGPIPE, or was not EPIPE",
+            Some(0x58 | 0x59) => "a send on a TCP socket never connected was not EPIPE and SIGPIPE",
+            Some(0x60..=0x64) => {
+                "a blocked SIGPIPE was not left pending for sigtimedwait (SI_USER)"
+            }
+            None => "no exit code: the program died -- by a SIGPIPE it should have caught?",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: SIGPIPE (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SIGPIPE (ring 3: default, ignored, handled and blocked; write, \
+         writev, vmsplice, tee, splice, sendfile; unix streams, SHUT_WR, TCP; not with \
+         MSG_NOSIGNAL or on a datagram socket): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of locked memory ([`crate::mm::mlock`]):
+/// [`elf::build_linux_mlock_test_elf`] checks that `mlock`, `munlock` and
+/// `mlock2` lock and unlock 4 KiB-page ranges (`VmLck` counts them), fault a
+/// range in unless `MLOCK_ONFAULT`, stop at the first unmapped page, answer
+/// `ENOMEM` for `PROT_NONE` and `EINVAL` for a range that wraps; that
+/// `mlockall` locks every mapping now or every later one, `MAP_LOCKED` one
+/// mapping, and a forked child inherits no lock; and that `RLIMIT_MEMLOCK`
+/// bounds all of it, a limit of 0 refusing every lock. Exits `0x2A` on
+/// success; the same program passes on Linux 6.6.
+pub fn self_test_linux_mlock() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mlock (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mlock_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mlock"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program reads /proc/self/status for VmLck: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mlock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mlock spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mlock (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "giving up root or setting RLIMIT_MEMLOCK failed",
+            Some(0x31) => "VmLck is missing from /proc/self/status, or not 0 at the start",
+            Some(0x32..=0x35) => "mlock/munlock of a 4 KiB-page range did not lock what it should",
+            Some(0x36 | 0x37) => "mlock2's flags were not checked as an int, or it did not lock",
+            Some(0x38) => "a range that wraps past the top was not EINVAL",
+            Some(0x39 | 0x3C) => "a range with nothing mapped was not ENOMEM",
+            Some(0x3A) => "a length that wraps to 0 was not an empty success",
+            Some(0x3B) => "a range past RLIMIT_MEMLOCK was not ENOMEM",
+            Some(0x3D) => "MLOCK_ONFAULT faulted pages in",
+            Some(0x3E) => "mlock did not fault its range in (mincore)",
+            Some(0x3F) => "VmLck after an ONFAULT and a plain lock was wrong",
+            Some(0x40..=0x42) => "a hole did not stop the lock at it with ENOMEM",
+            Some(0x43) => "PROT_NONE was not locked with ENOMEM (or ONFAULT not 0)",
+            Some(0x44) => "a PROT_NONE part did not stop the faulting in at it",
+            Some(0x45) => "mlockall's flag gate was wrong",
+            Some(0x46 | 0x47) => "mlockall(MCL_CURRENT) or munlockall did not lock or unlock all",
+            Some(0x48 | 0x49) => "a mapping made under MCL_FUTURE was not locked and faulted in",
+            Some(0x4A) => "mlockall(MCL_CURRENT) did not forget MCL_FUTURE",
+            Some(0x4B) => "MCL_FUTURE | MCL_ONFAULT faulted a new mapping in, or did not lock it",
+            Some(0x4C) => "MAP_LOCKED did not lock and fault in its mapping",
+            Some(0x4D) => "a forked child inherited a lock",
+            Some(0x50..=0x55) => "RLIMIT_MEMLOCK did not bound mlock as Linux's does",
+            Some(0x56) => "mlockall(MCL_CURRENT) past the limit was not ENOMEM",
+            Some(0x57 | 0x58) => "an mmap under MCL_FUTURE past the limit was not EAGAIN",
+            Some(0x59) => "MAP_LOCKED past the limit was not EAGAIN",
+            Some(0x5A) => "brk under MCL_FUTURE moved past the limit",
+            Some(0x5C) => "a limit of 0 did not refuse every lock with EPERM",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mlock (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mlock (ring 3: ranges, ONFAULT, holes, PROT_NONE, wrap; mlockall \
+         current and future; MAP_LOCKED; fork; RLIMIT_MEMLOCK on mlock, mlockall, mmap and \
+         brk; EPERM at 0): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of reads and writes whose buffer cannot be used:
+/// [`elf::build_linux_null_buffer_test_elf`] checks that a NULL buffer is
+/// `EFAULT` only where bytes would have moved, nothing consumed -- a file at
+/// its end reads 0, mid-file `EFAULT` with the offset unmoved; a handle open
+/// the other way is `EBADF` and a directory `EISDIR`; `/dev/null` takes the
+/// write; an empty non-blocking pipe or unix socket is `EAGAIN`, one with
+/// bytes `EFAULT` and the bytes still there, one with no writer 0; a pipe
+/// with no reader `EPIPE`. Exits `0x2A` on success; the same program passes
+/// on Linux 6.6.
+pub fn self_test_linux_null_buffer() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux NULL-buffer I/O (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_null_buffer_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-null-buffer"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program makes and reads its scratch file in /tmp: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-null-buffer",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: NULL-buffer spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: NULL-buffer I/O (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "ignoring SIGPIPE failed",
+            Some(0x31) => "the scratch file in /tmp could not be made",
+            Some(0x32) => "a NULL read mid-file was not EFAULT, or moved the offset",
+            Some(0x33) => "a NULL read at the end of a file was not 0",
+            Some(0x34) => "a NULL write to a file was not EFAULT, or changed it",
+            Some(0x35) => "a read through a write-only handle was not EBADF",
+            Some(0x36) => "a write through a read-only handle was not EBADF",
+            Some(0x37) => "a read of a directory was not EISDIR (for every count)",
+            Some(0x38) => "/dev/null did not read 0 and take a NULL write",
+            Some(0x39) => "a NULL read of /dev/zero was not EFAULT",
+            Some(0x3A) => "a NULL read of an empty non-blocking pipe was not EAGAIN",
+            Some(0x3B | 0x3C) => "a NULL read of a pipe with bytes was not EFAULT, or took them",
+            Some(0x3D) => "a NULL write to a pipe was not EFAULT, or wrote",
+            Some(0x3E) => "a NULL read of a pipe with no writer was not 0",
+            Some(0x3F) => "a NULL write to a pipe with no reader was not EPIPE",
+            Some(0x40..=0x43) => "a unix stream socket did not answer a NULL read as Linux does",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: NULL-buffer I/O (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux NULL-buffer I/O (ring 3: files mid-file and at the end, the wrong \
+         direction, directories, /dev/null and /dev/zero, pipes and unix sockets empty, with \
+         bytes, with no writer or reader): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of real-time scheduling through the Linux ABI:
+/// [`elf::build_linux_rt_sched_test_elf`] (`build/rtsched.c`) puts a thread
+/// under each policy and reads it back, meets Linux's refusals, forks under
+/// and without `SCHED_RESET_ON_FORK`, and spins as `SCHED_FIFO` beside an
+/// ordinary thread on one CPU, which must not run until the spinner is
+/// ordinary again (design-decisions 1544).
+///
+/// The process is given the right to raise priority -- `IO_REALTIME` on a
+/// `Thread` capability, this kernel's `CAP_SYS_NICE` -- as the fixture was
+/// run as root on Linux; without it the first `SCHED_FIFO` is `EPERM`, which
+/// `syscall::dispatch`'s `test_dispatch_thread_scheduler` checks.
+pub fn self_test_linux_rt_sched() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux real-time scheduling (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_rt_sched_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-rt-sched"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let capabilities = [(ResourceType::Thread, 0u64, Rights::IO_REALTIME)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-rt-sched",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &capabilities,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real-time scheduling spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real-time scheduling (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox could not be mapped",
+            Some(0x31 | 0x32) => "a new thread was not SCHED_OTHER at priority 0",
+            Some(0x33..=0x35) => "a priority that does not suit the policy was not EINVAL",
+            Some(0x36 | 0x37) => "an unknown policy, or SCHED_DEADLINE, was not EINVAL",
+            Some(0x38 | 0x39) => "a thread that does not exist was not ESRCH",
+            Some(0x3A) => "a NULL param was not EINVAL",
+            Some(0x40) => "SCHED_FIFO was refused: IO_REALTIME was not honoured",
+            Some(0x41..=0x44) => "SCHED_FIFO, or sched_setparam under it, did not read back",
+            Some(0x45 | 0x46) => "SCHED_RR did not read back, or its slice is not 100 ms",
+            Some(0x47 | 0x48) => "sched_getattr did not report SCHED_RR 5",
+            Some(0x49..=0x4C) => "SCHED_BATCH, SCHED_IDLE or the way back to SCHED_OTHER",
+            Some(0x50..=0x52) => "SCHED_RESET_ON_FORK was not kept or not reported",
+            Some(0x53) => "a child forked under SCHED_RESET_ON_FORK was not SCHED_OTHER",
+            Some(0x54 | 0x55) => {
+                "a child forked by a SCHED_FIFO thread was not SCHED_FIFO at its priority"
+            }
+            Some(0x56) => "could not return to SCHED_OTHER",
+            Some(0x60..=0x63) => "the CPU pin, or the ordinary spinner thread, failed",
+            Some(0x64 | 0x65) => "the policy was not the thread's own",
+            Some(0x66) => "an ordinary thread ran on the CPU of a spinning SCHED_FIFO thread",
+            Some(0x67..=0x6A) => "a thread made by a SCHED_FIFO thread did not inherit its policy",
+            Some(0x6B | 0x6C) => {
+                "the ordinary thread did not run again once the spinner was ordinary"
+            }
+            Some(0x70..=0x73) => "sched_setattr did not set, or read back, SCHED_RR 7",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: real-time scheduling (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux real-time scheduling (ring 3: every policy read back, Linux's refusals, \
+         RR's 100 ms, SCHED_RESET_ON_FORK across fork, a thread's own policy inherited by its \
+         threads, an ordinary thread kept off a spinning SCHED_FIFO thread's CPU): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of restartable sequences through the Linux ABI:
+/// [`elf::build_linux_rseq_test_elf`] (`build/rseqtest.c`) registers an area
+/// and reads `cpu_id` as it moves between CPUs, has a critical section
+/// switched out, one interrupted by a signal and one that faults -- each must
+/// land on the abort address, a signal frame already holding it -- has `membarrier`'s RSEQ
+/// barrier restart a section running on another CPU, has a child killed with
+/// `SIGSEGV` for a section without the signature, and unregisters
+/// (`crate::rseq`, design-decisions 1546).
+pub fn self_test_linux_rseq() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux rseq (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_rseq_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-rseq"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-rseq",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: rseq spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: rseq (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox could not be mapped",
+            Some(0x31 | 0x33) => "registering failed, or a second registration was not EBUSY",
+            Some(0x32) => "registration did not fill cpu_id and cpu_id_start with the CPU",
+            Some(0x34..=0x37) => "cpu_id did not follow the thread to another CPU",
+            Some(0x40) => "a section that was not interrupted did not commit",
+            Some(0x41..=0x43) => "the spinner thread could not start or register",
+            Some(0x44) => "a section switched out did not restart at its abort address",
+            Some(0x45) => "the kernel did not clear rseq_cs after the abort",
+            Some(0x50 | 0x51) => "installing SIGALRM's handler or arming the timer failed",
+            Some(0x52) => "a section interrupted by a signal did not come back aborted",
+            Some(0x53) => "a signal frame held an address inside the section, not its abort",
+            Some(0x54) => "no SIGALRM ever landed inside the section in 1000 tries",
+            Some(0x58) => "installing SIGILL's handler failed",
+            Some(0x59 | 0x5A) => {
+                "a section that faulted did not restart at its abort address (the SIGILL \
+                 frame held the faulting instruction)"
+            }
+            Some(0x5B) => "the kernel did not clear rseq_cs after a fault's abort",
+            Some(0x80) => "the main thread could not go back to CPU 0",
+            Some(0x81) => "membarrier's RSEQ barrier was not EPERM before registering",
+            Some(0x82) => "registering for membarrier's RSEQ barrier failed",
+            Some(0x83 | 0x84) => "the second spinner could not start, move to CPU 1 or register",
+            Some(0x85) => "membarrier's RSEQ barrier failed",
+            Some(0x86) => "membarrier's RSEQ barrier did not restart a section on another CPU",
+            Some(0x87) => "the second spinner kept being switched out: no clean try in 1000",
+            Some(0x88) => "the second spinner did not stop",
+            Some(0x60..=0x64) => "a section without the signature was not answered with SIGSEGV",
+            Some(0x70..=0x74) => {
+                "unregistering did not put cpu_id back to -1, or re-registering failed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: rseq (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux rseq (ring 3: cpu_id kept current across CPUs, a switched-out, a \
+         signalled and a faulting section restarted at their abort address, membarrier's RSEQ \
+         barrier restarting one on another CPU, a missing signature SIGSEGV, unregistration): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of ptrace through the Linux ABI: [`elf::build_linux_ptrace_test_elf`]
+/// (`build/ptracetest.c`) forks a child that consents with `PTRACE_TRACEME`
+/// and execs a small program from a memfd; it stops at the exec's `SIGTRAP`,
+/// has an `int3` written into its read-only text through `/proc/<pid>/mem`,
+/// stops at it, is single-stepped twice, stops for a `SIGUSR1` the tracer
+/// suppresses, and exits 7. A second child stops at `PTRACE_EVENT_EXEC` and
+/// is ended by `PTRACE_KILL`. A third, which runs on in the test program, has
+/// its debug and FPU registers read and written, then stops at a hardware
+/// execution breakpoint and a write watchpoint (`crate::proc::ptrace`,
+/// `crate::sched::debugreg`, design-decisions 1547).
+pub fn self_test_linux_ptrace() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux ptrace (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_ptrace_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ptrace"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The tracer opens its tracee's /proc/<pid>/mem: like every C fixture
+    // that opens a file, it needs a wildcard File capability to pass
+    // `sys_fs_open`'s `require_cap_type(File, ...)`.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ptrace",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ptrace spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ptrace (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "the program could not be put in a memfd",
+            Some(0x32) => "a request for a process the caller does not trace was not ESRCH",
+            Some(0x33 | 0x34) => "fork, or the wait for the child, failed",
+            Some(0x35) => "the child's exec did not stop it with SIGTRAP",
+            Some(0x36 | 0x37) => {
+                "at the exec stop, GETREGS failed or rip/orig_rax/rax were not the entry/59/0"
+            }
+            Some(0x38) => "GETREGS's cs/ss were not Linux's 0x33/0x2b",
+            Some(0x39 | 0x3a) => "PEEKTEXT did not read the program's code",
+            Some(0x3b) => "/proc/<pid>/mem could not be opened for writing",
+            Some(0x3c | 0x3d) => {
+                "an int3 could not be written into the text through /proc/<pid>/mem"
+            }
+            Some(0x3e) => "the write through /proc/<pid>/mem reached the memfd",
+            Some(0x3f | 0x40) => "PEEKTEXT did not see the int3",
+            Some(0x41..=0x46) => {
+                "the breakpoint did not stop the program with SIGTRAP, SI_KERNEL, rip past it"
+            }
+            Some(0x47 | 0x48) => "POKETEXT or SETREGS failed",
+            Some(0x49..=0x4d) => "a single step did not stop one instruction on with TRAP_TRACE",
+            Some(0x4e) => "GETREGS showed the tracer's trap flag",
+            Some(0x4f..=0x52) => "the second single step did not stop after mov eax, 60",
+            Some(0x53..=0x56) => "a signal sent to the tracee did not stop it",
+            Some(0x57..=0x59) => "a suppressed signal ended the program, or it did not exit 7",
+            Some(0x5a) => "after a single step, DR6 did not read 0xffff4ff0 (the step)",
+            Some(0x60 | 0x61) => "PTRACE_TRACEME failed, or a second one was not EPERM",
+            Some(0x62) => "the child's execveat failed",
+            Some(0x70..=0x72) => "the second child's SIGSTOP did not stop it for its tracer",
+            Some(0x73 | 0x74) => "SETOPTIONS refused TRACEEXEC|EXITKILL, or took an unknown bit",
+            Some(0x75..=0x79) => {
+                "the exec was not a PTRACE_EVENT_EXEC stop with the pid as its message"
+            }
+            Some(0x7a..=0x7c) => "PTRACE_KILL did not end the tracee with SIGKILL",
+            Some(0x90) => "the third child's PTRACE_TRACEME failed",
+            Some(0x91..=0x93) => "the third child's SIGSTOP did not stop it for its tracer",
+            Some(0x94..=0x96) => "a new thread's DR6, DR7 or DR4 did not read 0xffff0ff0, 0 and 0",
+            Some(0x97) => "a write of DR4 was not EIO",
+            Some(0x98..=0x9d) => {
+                "a debug register Linux refuses (a kernel address, an I/O or 2-byte execution \
+                 breakpoint, an unaligned watchpoint) was taken, or a refusal changed DR7"
+            }
+            Some(0x9e..=0xa0) => "GETFPREGS failed, or xmm0 or MXCSR was not what the child had",
+            Some(0xa1 | 0xa2) => "NT_PRFPREG did not read GETFPREGS's bytes",
+            Some(0xa3..=0xa5) => "NT_PRSTATUS did not read GETREGS's image",
+            Some(0xa6..=0xa9) => {
+                "NT_X86_XSTATE was not ENODEV without XSAVE, or not CPUID's size with XCR0 at \
+                 464, SSE in use and xmm0"
+            }
+            Some(0xaa..=0xae) => {
+                "a register-set refusal was not Linux's (EINVAL for a part word, an unknown set, \
+                 a short FXSAVE area or a reserved MXCSR bit; EFAULT for a short XSAVE area)"
+            }
+            Some(0xaf..=0xb1) => "SETFPREGS did not write xmm1",
+            Some(0xb2) => "ARCH_PRCTL(ARCH_GET_FS) did not read GETREGS's fs_base",
+            Some(0xb3..=0xb5) => "an execution breakpoint could not be set in DR0/DR7",
+            Some(0xb6..=0xbb) => {
+                "the execution breakpoint did not stop the child at the function with \
+                 TRAP_HWBKPT and DR6 B0"
+            }
+            Some(0xbc..=0xc3) => {
+                "the write watchpoint did not stop the child after the store with TRAP_HWBKPT \
+                 and DR6 B1 -- or the execution breakpoint fired again"
+            }
+            Some(0xc4..=0xc7) => {
+                "the child did not exit 0x21: the xmm1 its tracer wrote did not reach it"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ptrace (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ptrace (ring 3: TRACEME and the exec stop, Linux's registers, an int3 \
+         through /proc/<pid>/mem into read-only text, a breakpoint, single steps, a suppressed \
+         signal, PTRACE_EVENT_EXEC, PTRACE_KILL, the debug and FPU registers, a hardware \
+         breakpoint and a watchpoint): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `exit_group` and `exit` with threads, through the Linux ABI:
+/// [`elf::build_linux_exit_group_test_elf`] (`build/exitgrouptest.c`). A
+/// child's `exit_group` from either thread ends the other, waiting for ever,
+/// with the caller's status; a first thread's `exit` leaves the process
+/// running until its last thread's `exit`, whose code is the status; two
+/// racing `exit_group`s end it with one of their codes
+/// (`crate::proc::thread::exit_group_current`).
+pub fn self_test_linux_exit_group() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!("[spawn] Running Linux exit_group (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_exit_group_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-exit-group"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-exit-group",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: exit_group spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exit_group (ring 3) — the program did not finish in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32 | 0x34) => "the first child's clone or fork failed",
+            Some(0x33) => "exit_group returned",
+            Some(0x35) => {
+                "the first thread's exit_group did not end the process: the second thread, \
+                 waiting on a futex, lived on (20 s)"
+            }
+            Some(0x36) => "the first child's status was not exit_group's 5",
+            Some(0x37 | 0x38) => "the second child's clone or fork failed",
+            Some(0x39) => {
+                "the second thread's exit_group did not end the process: the first, waiting on \
+                 a futex, lived on (20 s)"
+            }
+            Some(0x3a) => "the second child's status was not exit_group's 6",
+            Some(0x3b..=0x3d) => "the third child's pipe, clone or fork failed",
+            Some(0x3e) => "the first thread's exit ended the process while the second still ran",
+            Some(0x3f) => "the write that releases the third child's second thread failed",
+            Some(0x42) => "the third child did not end after its last thread's exit (20 s)",
+            Some(0x43) => "the third child's status was not its last thread's 9",
+            Some(0x40 | 0x41 | 0x45) => "a racing thread's exit_group returned",
+            Some(0x44 | 0x46) => "the fourth child's clone or fork failed",
+            Some(0x47) => "two racing exit_groups did not end the process (20 s)",
+            Some(0x48) => "the fourth child's status was neither 11 nor 12",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: exit_group (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux exit_group (ring 3: either thread's exit_group ends the other, a first \
+         thread's exit leaves the process running and its last thread's code is the status, two \
+         racing exit_groups): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `execve` in a process with more than one thread, through
+/// the Linux ABI: [`elf::build_linux_exec_threads_test_elf`]
+/// (`build/execthreadstest.c`). Three children exec a program that exits 7
+/// -- from the first thread while a second spins, from the second while the
+/// first spins, from the first while a second waits for ever -- and each
+/// status is 7: the exec ended every other thread first (Linux's
+/// `de_thread`; `exec_process`).
+pub fn self_test_linux_exec_threads() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux exec with threads (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_exec_threads_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-exec-threads"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-exec-threads",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: exec with threads spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exec with threads (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32) => "execveat of the memfd failed",
+            Some(0x33 | 0x34) => "the program could not be put in a memfd",
+            Some(0x35 | 0x36 | 0x39 | 0x3a | 0x3d | 0x3e) => "a child's clone or fork failed",
+            Some(0x37 | 0x3b | 0x3f) => "an exec'd child did not end (20 s)",
+            Some(0x38) => {
+                "the first thread's exec, with a second spinning, did not end in the new \
+                 program's exit 7 -- the second ran on in the new address space"
+            }
+            Some(0x3c) => {
+                "the second thread's exec, with the first spinning, did not end in exit 7"
+            }
+            Some(0x40) => {
+                "the first thread's exec, with a second waiting for ever, did not end in exit 7"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: exec with threads (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux exec with threads (ring 3: an exec from either thread, the other \
+         spinning or waiting, ends it first): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of ptrace's threads, forks and system-call stops through the
+/// Linux ABI: [`elf::build_linux_ptrace_tier2_test_elf`]
+/// (`build/ptracetier2test.c`). A traced child's thread is traced from its
+/// first instruction (`PTRACE_EVENT_CLONE`, a `SIGSTOP` start), stopped by a
+/// `tgkill`, an `int3` and its exit (`PTRACE_EVENT_EXIT`), and reported as it
+/// exits; a fork and a vfork make their events (`VFORK_DONE` too) and a
+/// traced grandchild the tracer reads and detaches; `PTRACE_SYSCALL` stops at
+/// a call's entry and exit, with `PTRACE_GET_SYSCALL_INFO`, a changed result
+/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547); a
+/// tracer reads and sets a child's signal mask -- the one it set, not
+/// `rt_sigsuspend`'s, which restarts when its signal is taken away -- and
+/// lists its pending signals (`PTRACE_GETSIGMASK`, `SETSIGMASK`,
+/// `PEEKSIGINFO`), its rseq area and its syscall user dispatch; and a traced
+/// child's end is its tracer's to see before its parent's
+/// (`pcb::Process::exit_held`).
+pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux ptrace tier 2 (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_ptrace_tier2_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ptrace-tier2"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ptrace-tier2",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ptrace tier 2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ptrace tier 2 (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "a child's PTRACE_TRACEME failed",
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32) => "the traced child's clone failed",
+            Some(0x33 | 0x34) => "a traced child's own fork/vfork or wait for it failed",
+            Some(0x35) => "the system-call child did not see 12345 and 777",
+            Some(0x36) => "the signals child's MAP_FIXED page was not where it asked",
+            Some(0x37) => "the signals child's rseq registration failed",
+            Some(0x38) => "the signals child's rt_sigaction failed",
+            Some(0x39) => "the signals child's rt_sigqueueinfo failed",
+            Some(0x3a) => {
+                "rt_sigsuspend did not answer EINTR after the handled SIGUSR1 (it must restart, \
+                 not end, when its SIGWINCH is taken away)"
+            }
+            Some(0x3b) => "the signals child's SIGUSR1 handler did not run exactly once",
+            Some(0x3c) => {
+                "after rt_sigsuspend the child's mask was not the one its tracer set at the stop"
+            }
+            Some(0x3d) => "the holding child's fork failed",
+            Some(0x3e) => {
+                "a parent saw its traced child's end (wait4 WNOHANG) before the tracer waited \
+                 for it"
+            }
+            Some(0x3f) => {
+                "a parent could not reap its traced child's end, exit 7, after the tracer waited \
+                 for it"
+            }
+            Some(0x40 | 0x41) => "the thread child did not stop for its SIGSTOP",
+            Some(0x42 | 0x43) => "SETOPTIONS(TRACECLONE|TRACEEXIT) or CONT failed",
+            Some(0x44..=0x4b) => {
+                "the clone was not a PTRACE_EVENT_CLONE stop naming the thread, with the thread \
+                 starting in a SIGSTOP stop of its own (rax 0)"
+            }
+            Some(0x4c | 0x4d) => "CONT of the child or its thread failed",
+            Some(0x4e | 0x4f) => "a tgkill'd SIGSTOP did not stop the traced thread",
+            Some(0x50..=0x53) => "POKEDATA, or the thread's int3 stop, failed",
+            Some(0x54 | 0x55) => "the thread's exit did not stop at PTRACE_EVENT_EXIT (0x400)",
+            Some(0x56 | 0x57) => "the thread's exit was not reported to its tracer as WIFEXITED 4",
+            Some(0x5c | 0x5d) => "the first thread's own SIGSTOP did not stop it",
+            Some(0x58 | 0x59) => "exit_group did not stop at PTRACE_EVENT_EXIT (0x900)",
+            Some(0x5a | 0x5b) => "the thread child did not end 9",
+            Some(0x60..=0x63) => "the fork child's start, SETOPTIONS(TRACEFORK) or CONT failed",
+            Some(0x64 | 0x65) => "the fork was not a PTRACE_EVENT_FORK stop naming the grandchild",
+            Some(0x66 | 0x67) => {
+                "the grandchild did not start in a SIGSTOP stop, or its memory could not be read"
+            }
+            Some(0x68) => "DETACH of the grandchild failed",
+            Some(0x69 | 0x6a) => "the fork child did not end 0x15 (its grandchild's 5)",
+            Some(0x70..=0x73) => "the vfork child's start, SETOPTIONS or CONT failed",
+            Some(0x74 | 0x75) => {
+                "the vfork was not a PTRACE_EVENT_VFORK stop naming the grandchild"
+            }
+            Some(0x76 | 0x77) => "the vfork grandchild did not start stopped, or DETACH failed",
+            Some(0x78..=0x7a) => "no PTRACE_EVENT_VFORK_DONE stop naming the grandchild",
+            Some(0x7b | 0x7c) => "the vfork child did not end 0x16 (its grandchild's 6)",
+            Some(0x80..=0x83) => {
+                "the system-call child's start, SETOPTIONS or PTRACE_SYSCALL failed"
+            }
+            Some(0x84..=0x89) => {
+                "getpid's entry stop was not SIGTRAP|0x80 with orig_rax 39, rax -ENOSYS and \
+                 PTRACE_GET_SYSCALL_INFO's op 1"
+            }
+            Some(0x8a..=0x8f) => {
+                "getpid's exit stop was not op 2 with the pid, or its result could not be changed"
+            }
+            Some(0x90..=0x96) => {
+                "write(-1) could not be skipped at its entry with 777, its exit stopped at"
+            }
+            Some(0x97 | 0x98) => "the system-call child did not end 0x2B",
+            Some(0xa0 | 0xa1) => "the signals child did not start in its SIGSTOP stop",
+            Some(0xa2 | 0xa3) => "PTRACE_INTERRUPT or LISTEN of a tracee not seized was not EIO",
+            Some(0xa4) => "PTRACE_OLDSETOPTIONS failed",
+            Some(0xa5..=0xa8) => {
+                "PTRACE_GET_RSEQ_CONFIGURATION did not report the area, 32 and the signature \
+                 (24, however much was copied)"
+            }
+            Some(0xa9..=0xab) => {
+                "PTRACE_GET_SYSCALL_USER_DISPATCH_CONFIG did not report it off (EINVAL for a \
+                 wrong size)"
+            }
+            Some(0xac | 0xad) => "the signals child did not stop after sending itself signals",
+            Some(0xae | 0xaf) => "PTRACE_GETSIGMASK did not read the mask (EINVAL for size 4)",
+            Some(0xb0 | 0xb1) => "PTRACE_PEEKSIGINFO did not list SIGUSR2 in the thread's queue",
+            Some(0xb2..=0xb5) => {
+                "PTRACE_PEEKSIGINFO did not list SIGUSR1 then the queued SIGRTMIN in the \
+                 process's queue, from an offset"
+            }
+            Some(0xb6..=0xba) => {
+                "PTRACE_PEEKSIGINFO past the end, of none, of nr -1, of an unknown flag or into a \
+                 bad buffer was not 0, 0, EINVAL, EINVAL, EFAULT"
+            }
+            Some(0xbb | 0xbc) => "PTRACE_SETSIGMASK kept SIGKILL or SIGSTOP",
+            Some(0xbd..=0xc1) => {
+                "a mask that unblocked a pending SIGUSR1 did not have the child stop for it"
+            }
+            Some(0xc2..=0xc7) => {
+                "the SIGWINCH stop in rt_sigsuspend was not at its exit (130, -ERESTARTNOHAND) \
+                 with the child's own mask to read"
+            }
+            Some(0xc8..=0xcd) => {
+                "rt_sigsuspend did not start over, its SIGWINCH taken away, under the mask the \
+                 tracer set"
+            }
+            Some(0xce | 0xcf) => "the signals child did not end 0x2C",
+            Some(0xd0..=0xd6) => {
+                "the holding child's start, its PTRACE_EVENT_FORK or its traced grandchild's \
+                 SIGSTOP start failed"
+            }
+            Some(0xd7..=0xd9) => {
+                "the tracer's waitid(WNOWAIT) did not see the traced grandchild's exit 7"
+            }
+            Some(0xda | 0xdb) => "the holding child did not stop after its wait4(WNOHANG)",
+            Some(0xdc) => "the tracer's own wait for the traced grandchild did not reap exit 7",
+            Some(0xdd | 0xde) => "the holding child did not end 0x2D",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ptrace tier 2 (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ptrace tier 2 (ring 3: a traced thread from its first instruction, its \
+         tgkill, int3 and exit stops and its exit report; fork and vfork events and a traced \
+         grandchild; system-call entry and exit stops, a changed result, a skipped call; signal \
+         masks, pending signals, rseq and an rt_sigsuspend that restarts; a traced child's end \
+         its tracer's before its parent's): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of real, effective, saved and filesystem ids through the Linux
+/// ABI: [`elf::build_linux_setid_test_elf`] (`build/setidtest.c`), run as
+/// root. `seteuid(1000)` keeps the real and saved ids 0, shuts root's file,
+/// and `seteuid(0)` brings root back; the saved id alone keeps root within
+/// reach; `setfsuid` moves file access alone and answers the old id; the
+/// group ids move the same way; a child that leaves every id 0 cannot come
+/// back; `setreuid` moves the saved id as Linux's does, and a privileged
+/// `setuid` sets all three (`crate::proc::setid`).
+pub fn self_test_linux_setid() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux user and group ids (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_setid_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-setid"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-setid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: user and group ids spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x34) => {
+                "a child that left every user id 0 got root back (or could not leave it)"
+            }
+            Some(0x35) => "an unprivileged setfsuid to an id it holds none of changed something",
+            Some(0x40) => "root could not make its test file",
+            Some(0x5d) => {
+                "root could not give its test file an ACL (setxattr of system.posix_acl_access)"
+            }
+            Some(0x41..=0x44) => {
+                "seteuid(1000) as root did not leave the real and saved ids 0 (getresuid, getuid, \
+                 geteuid)"
+            }
+            Some(0x45) => {
+                "root's file, closed to others by its ACL, opened with the effective id 1000"
+            }
+            Some(0x46) => "seteuid to an id the process holds none of was allowed",
+            Some(0x47 | 0x48) => "seteuid(0) did not bring root and its file access back",
+            Some(0x49..=0x4c) => "the saved id alone did not keep root within reach",
+            Some(0x4d..=0x50) => "setfsuid did not move file access alone, or answer the old id",
+            Some(0x51..=0x55) => "the group ids did not move as the user ids do",
+            Some(0x56 | 0x57) => "the child that gave up root did not end 0x2B",
+            Some(0x58..=0x5c) => {
+                "setreuid did not move the saved id as Linux's does, or a privileged setuid did \
+                 not set all three for good"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux user and group ids (ring 3: seteuid away and back, the saved id, \
+         setfsuid, group ids, a drop for good, setreuid and setuid): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of UTS namespaces and the handles on them through the Linux
+/// ABI: [`elf::build_linux_uts_namespaces_test_elf`] (`build/nstest.c`), run
+/// as root. `/proc/self/ns/uts` is a link whose descriptor `stat`, `fstat`
+/// and `NS_GET_NSTYPE` describe alike; `unshare(CLONE_NEWUTS)` gives the
+/// process a host name of its own; a fork child shares its namespace and
+/// leaves it with `setns`; `setns` moves between two handles' namespaces;
+/// `clone(CLONE_NEWUTS)` makes one for the child; `setns` takes a pidfd; a
+/// process that gave up root is refused all of it; the system's names are
+/// untouched at the end (`crate::utsns`, `crate::nsfs`).
+pub fn self_test_linux_uts_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux UTS namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_uts_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-utsns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens `/proc` files: `sys_fs_open` wants a wildcard File capability.
+    // Nothing else: its right to make and enter namespaces is root's, an
+    // effective user id of 0, which its child gives up.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-utsns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: UTS namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => {
+                "a fork child was not in its parent's namespace, or setns did not take it to \
+                 the system's names"
+            }
+            Some(0x33..=0x35) => {
+                "clone(CLONE_NEWUTS) did not give the child a namespace of its own"
+            }
+            Some(0x36..=0x38) => "the pidfd test's child could not make a namespace and name it",
+            Some(0x39..=0x3d) => {
+                "a process that gave up root made or entered a namespace, or set its host name"
+            }
+            Some(0x3e) => "a process that gave up root could not open its own namespace",
+            Some(0x40 | 0x41) => "uname, or /proc/self/ns/uts's link text (uts:[N]), failed",
+            Some(0x42..=0x45) => {
+                "/proc/self/ns/uts did not open, or stat, fstat and lstat of it disagree with \
+                 Linux's"
+            }
+            Some(0x46 | 0x47) => "O_NOFOLLOW opened the link, or a read of the handle did not fail",
+            Some(0x48 | 0x49) => "NS_GET_NSTYPE or NS_GET_PARENT answered wrongly",
+            Some(0x4a | 0x4b) => "/proc/self/fd or /proc/self/ns did not name the namespace",
+            Some(0x4c..=0x4f) => "unshare(CLONE_NEWUTS) did not give a host name of its own",
+            Some(0x50 | 0x51) => "the fork child's setns moved its parent, or did not end 0x2B",
+            Some(0x52 | 0x53) => "setns did not move between the two handles' namespaces",
+            Some(0x54..=0x56) => {
+                "setns took a mismatched kind, or something that is not an open namespace handle"
+            }
+            Some(0x57 | 0x58) => "the clone(CLONE_NEWUTS) child did not end 0x2C, or renamed us",
+            Some(0x59..=0x5f) => "setns with a pidfd did not take its process's namespace",
+            Some(0x60) => "setns with the pidfd of a reaped process was not ESRCH",
+            Some(0x61 | 0x62) => "a namespace did not outlive its creator while still in use",
+            Some(0x63) => "the child that gave up root did not end 0x2D",
+            Some(0x64) => "back in the first namespace, the system's names were not as they were",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it made outlives it, and the system's name is as it was.
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — {} namespaces outlived the program, or \
+             the system's host name changed",
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux UTS namespaces (ring 3: /proc/self/ns/uts, unshare and sethostname, \
+         setns by handle and by pidfd, clone(CLONE_NEWUTS), refused without root, every \
+         namespace freed): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `mount(2)` and `umount2(2)` through the Linux ABI:
+/// [`elf::build_linux_mount_test_elf`] (`build/mounttest.c`), run as root in a
+/// directory of its own under `/tmp`. A tmpfs mounted there, listed in
+/// `/proc/self/mounts`, remounted read-only and back; propagation changes on a
+/// mount and refused elsewhere; `EBUSY` while a file is open, then unmounted;
+/// a lazy unmount that leaves an open file working; `MNT_EXPIRE`; the
+/// refusals; `EPERM` without root.
+pub fn self_test_linux_mount() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount and umount2 (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mount"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability, as every ring-3
+    // fixture that does is given. Its right to mount is root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mount",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount and umount2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => "a process that gave up root could mount or unmount",
+            Some(0x40) => "its directory under /tmp could not be made",
+            Some(0x41..=0x43) => "a tmpfs did not mount, hold a file, or show in /proc/self/mounts",
+            Some(0x44..=0x47) => {
+                "a remount read-only did not refuse a file, or back did not take one"
+            }
+            Some(0x48..=0x4b) => {
+                "MS_PRIVATE on a mount was refused, or a propagation change or remount of a \
+                 directory that is no mount was taken"
+            }
+            Some(0x4c..=0x4f) => {
+                "umount2 did not refuse while a file was open (EBUSY), or did not unmount after"
+            }
+            Some(0x50..=0x54) => {
+                "a lazy unmount did not take the mount away at once, or broke the open file"
+            }
+            Some(0x55..=0x58) => "MNT_EXPIRE did not answer EAGAIN, then unmount",
+            Some(0x59..=0x5d) => "ENODEV, EINVAL or ENOENT was not answered where Linux does",
+            Some(0x5e..=0x61) => "the unprivileged child's test did not run or end 0x2B",
+            Some(0x62) => "its directory could not be removed: something stayed mounted on it",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it mounted is left behind.
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- {} mounts before, {} after",
+            mounts_before,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount and umount2 (ring 3: a tmpfs mounted and listed, remounted \
+         read-only and back, propagation, EBUSY then unmounted, a lazy unmount, MNT_EXPIRE, the \
+         refusals, EPERM without root): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of mount namespaces through the Linux ABI:
+/// [`elf::build_linux_mount_namespaces_test_elf`] (`build/mntnstest.c`), run
+/// as root. `/proc/self/ns/mnt` as a handle; `unshare(CLONE_NEWNS)` and the
+/// private remount of `/`; a tmpfs of its own that a fork child shares until
+/// it `setns`'s out (and is put at `/`); `setns` out and back;
+/// `clone(CLONE_NEWNS)`; `EPERM` without root (`crate::fs::mntns`).
+pub fn self_test_linux_mount_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mntns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mntns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => {
+                "a fork child did not share its parent's mount namespace, or setns did not take \
+                 it out of it and put it at /"
+            }
+            Some(0x34 | 0x35) => "clone(CLONE_NEWNS) did not give the child a namespace and mount",
+            Some(0x36 | 0x37) => "a process that gave up root could unshare a mount namespace",
+            Some(0x40 | 0x41) => "/proc/self/ns/mnt did not open to a handle NS_GET_NSTYPE knows",
+            Some(0x42) => "its directory under /tmp could not be made",
+            Some(0x43..=0x46) => {
+                "unshare(CLONE_NEWNS) did not give a namespace of its own, or the private \
+                 remount of / was refused"
+            }
+            Some(0x47 | 0x48) => "a tmpfs in the new namespace did not mount or hold a file",
+            Some(0x49 | 0x4a) => "the fork child did not end 0x2B, or its setns moved its parent",
+            Some(0x4b | 0x4c) => "setns did not take it out of its namespace and back",
+            Some(0x4d..=0x50) => {
+                "the clone(CLONE_NEWNS) child's mount was seen by its parent, or CLONE_FS with \
+                 CLONE_NEWNS was taken"
+            }
+            Some(0x51) => "the unprivileged child did not end 0x2D",
+            Some(0x52..=0x54) => {
+                "its mount did not come off, or it could not go home and remove its directory"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount namespaces (ring 3: /proc/self/ns/mnt, unshare and a private /, a \
+         mount of its own, setns out and back, clone(CLONE_NEWNS), refused without root, every \
+         namespace freed): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of bind and move mounts through the Linux ABI:
+/// [`elf::build_linux_bind_mounts_test_elf`] (`build/bindtest.c`), run as
+/// root, in a mount namespace of its own. A directory and a file bound
+/// elsewhere, the same files through both paths and mountinfo's root field;
+/// `EBUSY` for the mount point and `EXDEV` between the two mounts; a bind
+/// remount read-only with the source writable, and a remount of the
+/// filesystem through every mount of it; `MS_REC`; unbindable mounts;
+/// `MS_MOVE`; `EPERM` without root (`crate::fs::Vfs::bind_mount`,
+/// `move_mount`, `remount_bind`, `set_propagation`).
+pub fn self_test_linux_bind_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux bind and move mounts (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_bind_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-bind"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make a namespace are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-bind",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: bind mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "a process that gave up root could bind a mount",
+            Some(0x40..=0x45) => {
+                "it could not make a namespace of its own, a tmpfs, or the directories and file \
+                 it works in"
+            }
+            Some(0x46..=0x49) => {
+                "a directory bound elsewhere did not show the same files, or a file made through \
+                 the bind was not in its source"
+            }
+            Some(0x4a) => "mountinfo's root field did not name the bound subtree",
+            Some(0x4b | 0x4c) => "the bind's mount point could be removed or renamed (not EBUSY)",
+            Some(0x4d | 0x4e) => {
+                "a rename or link between a bind and its source was taken (not EXDEV)"
+            }
+            Some(0x4f | 0x50) => "a rename inside the bind failed",
+            Some(0x51..=0x55) => {
+                "a bind remount did not make the bind alone read-only and back, or mountinfo did \
+                 not say the mount is ro and the filesystem rw"
+            }
+            Some(0x56..=0x59) => {
+                "a remount of the filesystem through the bind did not make it read-only through \
+                 every mount of it, and back"
+            }
+            Some(0x5a | 0x5b) => "the bind did not come off, or its source went with it",
+            Some(0x80 | 0x81) => {
+                "a file held open through a bind did not keep it (EBUSY), or it did not come off \
+                 once closed"
+            }
+            Some(0x82..=0x84) => {
+                "a bind did not outlive the unmount of its source, or the source would not come \
+                 off while bound elsewhere"
+            }
+            Some(0x5c..=0x5f) => "a file bound over a file did not show its source, or come off",
+            Some(0x60 | 0x61) => {
+                "a directory over a file, or a file over a directory, was not ENOTDIR"
+            }
+            Some(0x62..=0x64) => {
+                "no source, an empty one or a missing one was not EINVAL, EINVAL, ENOENT"
+            }
+            Some(0x65..=0x6c) => {
+                "MS_REC did not bind the mount beneath, or a bind without it did, or the \
+                 umount with one beneath was not EBUSY, or MNT_DETACH did not take both"
+            }
+            Some(0x6d..=0x74) => {
+                "an unbindable mount could be bound, was not left out of a recursive bind, was \
+                 not listed so, or MS_PRIVATE did not take it back"
+            }
+            Some(0x75..=0x7b) => {
+                "MS_MOVE did not move a mount with its files, or a move into itself was not \
+                 ELOOP, or one of a mount's subdirectory was not EINVAL"
+            }
+            Some(0x7c) => "the unprivileged child did not end 0x2B",
+            Some(0x7d | 0x7e) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Its namespace went with it, and the system's table is as it was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- {} namespaces and {} system mounts before, \
+             {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux bind and move mounts (ring 3: a directory and a file bound, the same \
+         files, mountinfo's root, EBUSY and EXDEV, read-only binds and filesystems, MS_REC, \
+         unbindable, MS_MOVE, EPERM without root): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of stacked mounts and `pivot_root(2)` through the Linux ABI:
+/// [`elf::build_linux_stacked_mounts_test_elf`] (`build/stacktest.c`), run as
+/// root, in a mount namespace of its own. A mount on a mount point covering
+/// the one below, with that one's ID as its parent; a mount covering what was
+/// beneath its directory first; a move and a bind on top; a recursive bind
+/// of a directory onto itself; `pivot_root`'s refusals, `pivot_root(new,
+/// new/old)` and `pivot_root(".", ".")` as runc does it
+/// (`crate::fs::Vfs::mount_on_top`, `pivot_root_tree`).
+pub fn self_test_linux_stacked_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux stacked mounts and pivot_root (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_stacked_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-stack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-stack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: stacked mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a process that gave up root was not refused pivot_root with EPERM"
+            }
+            Some(0x32..=0x37) => {
+                "pivot_root(new, new/old) did not make the new root / with the working directory \
+                 on it, the old root and its mounts under /old, or a lazy unmount of /old"
+            }
+            Some(0x38..=0x3d) => {
+                "pivot_root(\".\", \".\") as runc does it did not leave the new root alone at / \
+                 once umount2(\".\", MNT_DETACH) took the old one"
+            }
+            Some(0x40..=0x42) => "it could not make a namespace and a tmpfs of its own",
+            Some(0x43..=0x49) => {
+                "a mount on a mount point did not go on top, cover the one below, name it as \
+                 its parent in mountinfo, or uncover it when it went"
+            }
+            Some(0x4a..=0x4d) => {
+                "a mount on a directory did not cover the mount beneath it, or unmounting it was \
+                 refused for it, or it did not come back"
+            }
+            Some(0x4e..=0x56) => "a move or a bind onto a mount point did not go on top",
+            Some(0x57..=0x5e) => {
+                "a recursive bind of a directory onto itself was refused, did not copy the mount \
+                 beneath, or did not come off with MNT_DETACH alone"
+            }
+            Some(0x5f..=0x64) => {
+                "pivot_root's refusals (EBUSY for /, EINVAL, ENOTDIR, ENOENT) were not Linux's"
+            }
+            Some(0x65) => "the unprivileged child did not end 0x2B",
+            Some(0x66 | 0x67) => {
+                "the pivot_root(new, new/old) child did not end 0x2C, or its parent's namespace \
+                 changed"
+            }
+            Some(0x68 | 0x69) => {
+                "the pivot_root(\".\", \".\") child did not end 0x2D, or its parent's namespace \
+                 changed"
+            }
+            Some(0x6a | 0x6b) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux stacked mounts and pivot_root (ring 3: on top of a mount point and \
+         covering what was beneath, a move and a bind on top, a directory bound onto itself, \
+         pivot_root's refusals, pivot_root(new, new/old) and pivot_root(\".\", \".\")): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of named pipes through the Linux ABI:
+/// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
+/// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a
+/// writer with no reader `ENXIO`, a reader at once, with no `POLLHUP` until a
+/// writer has come), bytes through, `fstat` of an end naming the node; whole
+/// writes of at most `PIPE_BUF` and no `POLLOUT` without room for one;
+/// blocking opens across a fork in both orders and a blocking write of more
+/// than the FIFO holds; `O_RDWR`, which never waits; a broken pipe; an end
+/// opened again through `/proc/self/fd`; and a FIFO unlinked while open
+/// (`crate::ipc::fifo`).
+pub fn self_test_linux_fifo() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux named pipes (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_fifo_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fifo"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fifo",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: named pipes spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a child's blocking write-only open, or its 100000-byte blocking write, failed"
+            }
+            Some(0x32 | 0x33) => "a child's nonblocking writer did not open or write",
+            Some(0x3f) => "mmap of the test's buffers failed",
+            Some(0x40..=0x43) => {
+                "mknod(S_IFIFO) did not make a FIFO that stat, a second mknod and getdents see"
+            }
+            Some(0x44) => "a nonblocking writer with no reader was not ENXIO",
+            Some(0x45..=0x47) => {
+                "a nonblocking reader did not open at once, read end of file, and poll nothing"
+            }
+            Some(0x48..=0x4c) => {
+                "bytes did not go from a writer to the reader (or EAGAIN when empty)"
+            }
+            Some(0x4d | 0x4e) => "fstat of an end did not say S_IFIFO and the node's inode",
+            Some(0x4f | 0x50) => "the writer's close was not POLLHUP and end of file",
+            Some(0x51 | 0x52) => "a writer did not open, or F_GETPIPE_SZ was not 65536",
+            Some(0x53..=0x56) => {
+                "a 200-byte nonblocking write into a FIFO with 100 bytes of room was not EAGAIN \
+                 with no POLLOUT, or the fill and drain failed"
+            }
+            Some(0x57..=0x5b) => {
+                "a child's blocking writer did not meet the parent's reader, or its 100000 bytes \
+                 did not all arrive"
+            }
+            Some(0x5c..=0x60) => "the parent's blocking reader did not meet a child's writer",
+            Some(0x61..=0x67) => {
+                "O_RDWR waited, or did not read what it wrote, or its bytes outlived the last close"
+            }
+            Some(0x68..=0x6a) => "a writer whose reader had gone did not get EPIPE",
+            Some(0x6b..=0x6e) => "/proc/self/fd of an end did not name the FIFO or open it again",
+            Some(0x6f..=0x73) => "a FIFO unlinked while open did not go on",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux named pipes (ring 3: mknod S_IFIFO, nonblocking and blocking opens, \
+         whole writes, O_RDWR, a broken pipe, /proc/self/fd, unlinked while open): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the `SIGCHLD` a parent is sent when its child stops or
+/// continues, through the Linux ABI: [`elf::build_linux_sigchld_stop_test_elf`]
+/// (`build/sigchldstoptest.c`). The parent's handler is called with
+/// `CLD_STOPPED` for a child's own `SIGSTOP` and `CLD_CONTINUED` for the
+/// parent's `SIGCONT`; a `SIGSTOP` to the stopped child is no stop and a
+/// `SIGCONT` to the running child no continue (no call, nothing for
+/// `waitpid`); under `SA_NOCLDSTOP` a stop and
+/// a continue call nothing though `waitpid` sees both; the exit is told
+/// (`handlers::notify_parent_of_job_control`, `pcb::record_jc_continued`).
+pub fn self_test_linux_sigchld_stop() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux SIGCHLD on stop and continue (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_sigchld_stop_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigchld-stop"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigchld-stop",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SIGCHLD stop spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SIGCHLD on stop and continue (ring 3) — the program did not finish \
+             in 90 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "mmap of the handler's mailbox failed",
+            Some(0x31) => "rt_sigaction(SIGCHLD) failed",
+            Some(0x32 | 0x33) => "pipe or fork failed",
+            Some(0x40) => "the child's own SIGSTOP called no SIGCHLD handler (10 s)",
+            Some(0x41) => "the stop's SIGCHLD was not CLD_STOPPED, 19, from the child",
+            Some(0x42) => "waitpid(WUNTRACED) did not report the stop",
+            Some(0x43 | 0x47 | 0x4a | 0x4c | 0x53) => "a kill of the child failed",
+            Some(0x44) => "the parent's SIGCONT called no SIGCHLD handler (10 s)",
+            Some(0x45) => "the continue's SIGCHLD was not CLD_CONTINUED, 18, from the child",
+            Some(0x46) => "waitpid(WCONTINUED) did not report the continue",
+            Some(0x48) => "a SIGCONT to the running child sent SIGCHLD",
+            Some(0x49) => "a SIGCONT to the running child left a continue for waitpid",
+            Some(0x4b | 0x4d) => "under SA_NOCLDSTOP, waitpid did not see the stop or continue",
+            Some(0x4e) => "SA_NOCLDSTOP did not keep back the SIGCHLD of a stop or continue",
+            Some(0x4f) => "the write that releases the child failed",
+            Some(0x50) => "the child's exit called no SIGCHLD handler (10 s)",
+            Some(0x51) => "the exit's SIGCHLD was not CLD_EXITED, 7, from the child",
+            Some(0x52) => "the child's status was not exit 7",
+            Some(0x54) => "a SIGSTOP to the stopped child sent a second SIGCHLD",
+            Some(0x55) => "a SIGSTOP to the stopped child left a second stop for waitpid",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: SIGCHLD on stop and continue (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SIGCHLD on stop and continue (ring 3: CLD_STOPPED for a child's own \
+         SIGSTOP, none for a SIGSTOP to the stopped child, CLD_CONTINUED for a SIGCONT, none for \
+         a SIGCONT to a running child, none under SA_NOCLDSTOP, CLD_EXITED): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of signals sent to a stopped process, through the Linux ABI:
+/// [`elf::build_linux_stopped_signals_test_elf`] (`build/stoppedsigtest.c`).
+/// A stopped process takes only `SIGKILL` and `SIGCONT` until it is
+/// continued: a `SIGTERM` (with or without handlers installed) and a
+/// timer's default `SIGALRM` wait for a `SIGCONT` and then end it; a POSIX
+/// timer's `SIGCONT` continues it and a timer's `SIGKILL` ends it, through
+/// the work queue (`handlers::act_on_stopped`, `defer_act_on_stopped`).
+pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux signals to a stopped process (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_stopped_signals_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-stopped-signals"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-stopped-signals",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: stopped-signals spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: signals to a stopped process (ring 3) — the program did not finish \
+             in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "fork failed",
+            Some(0x40 | 0x44 | 0x48 | 0x4a | 0x4c | 0x50) => {
+                "a child's own SIGSTOP was not seen by WUNTRACED (a child failing its \
+                 rt_sigaction, timer_create, timer_settime or setitimer exits 0x31-0x33 or \
+                 0x60/0x61 instead)"
+            }
+            Some(0x41 | 0x45 | 0x51) => "the parent's kill(SIGTERM) failed",
+            Some(0x42 | 0x46) => "SIGTERM ended or changed a stopped child before its SIGCONT",
+            Some(0x43 | 0x47) => "after SIGCONT, the child did not end with its pending SIGTERM",
+            Some(0x49) => "a timer's SIGCONT did not continue the stopped child (exit 5)",
+            Some(0x4b) => "a timer's SIGKILL did not end the stopped child",
+            Some(0x4d) => "ITIMER_REAL's SIGALRM ended or changed a stopped child before SIGCONT",
+            Some(0x4e | 0x4f) => "after SIGCONT, the child did not end with its pending SIGALRM",
+            Some(0x52) => "an ignored SIGTERM changed the stopped child",
+            Some(0x53 | 0x54) => "after SIGCONT, the child that ignores SIGTERM did not exit 6",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: signals to a stopped process (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux signals to a stopped process (ring 3: SIGTERM and a default SIGALRM wait \
+         for SIGCONT, a timer's SIGCONT continues, a timer's SIGKILL ends, an ignored SIGTERM \
+         does nothing): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of ignored signals dropped as they are sent, through the Linux
+/// ABI: [`elf::build_linux_ignored_at_send_test_elf`] (`build/sigdfltest.c`).
+/// A program with a `SIGUSR1` handler -- so a trampoline is registered -- is
+/// not woken from a sleep by a child's `SIGCHLD`; a blocked `SIGCHLD` is
+/// kept, and discarded once unblocked at its default; a child that inherited
+/// the handler sleeps on through a `SIGWINCH` or an ignored `SIGURG` from its
+/// parent, and a `SIGUSR1` does wake it (`signal::classify`,
+/// `syscall::linux::post_linux_sigchld`). The parent signals the child --
+/// every 100 ms, so a child scheduled late still has some arrive during its
+/// sleep -- because a process may signal only what it started
+/// (design-decisions 1503).
+pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux ignored signals dropped at the send (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_ignored_at_send_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ignored-at-send"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ignored-at-send",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ignored-at-send spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ignored signals at the send (ring 3) — the program did not finish \
+             in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "rt_sigaction or rt_sigpending failed",
+            Some(0x32 | 0x33) => "fork or wait4 failed",
+            Some(0x34 | 0x35) => "pipe2, or reading the child's ready byte, failed",
+            Some(0x36) => "the parent's kill of its sleeping child failed",
+            Some(0x37) => "a child sent a signal every 100 ms was still asleep after 10 s",
+            Some(0x40) => "a child's exit (SIGCHLD at its default) cut a sleep short",
+            Some(0x41) => "a child's exit left SIGCHLD pending at its default",
+            Some(0x42 | 0x44) => "rt_sigprocmask failed",
+            Some(0x43) => "a blocked SIGCHLD was not kept pending",
+            Some(0x45) => "an unblocked SIGCHLD at its default was not discarded",
+            Some(0x46) => "a SIGWINCH at its default cut the child's sleep short",
+            Some(0x47) => "a SIGURG set to SIG_IGN cut the child's sleep short",
+            Some(0x48) => {
+                "a SIGUSR1 with an inherited handler did not cut the child's sleep short with \
+                 EINTR"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ignored signals at the send (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ignored signals dropped at the send (ring 3: SIGCHLD, SIGWINCH and an \
+         ignored SIGURG wake nothing, a blocked SIGCHLD is kept, a handled SIGUSR1 wakes): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the CPU-time clocks through the Linux ABI:
+/// [`elf::build_linux_cpu_clocks_test_elf`] (`build/cpuclocktest.c`).
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the clocks
+/// `clock_getcpuclockid` and `pthread_getcpuclockid` make
+/// (`syscall::linux::cpu_clock`): their resolutions and refusals, that they
+/// measure processor time -- advancing with a spin, not with a sleep -- that
+/// a worker thread's is readable by its process and stays in the process's
+/// after it exits (`pcb::process_counters`), that the process clock never
+/// goes back while threads come and go, and that a forked child's starts from
+/// zero and is readable until the child is reaped.
+pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time clocks (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_clocks_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-clocks"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-clocks",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time clocks spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — the program did not finish in 120 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox mmap failed",
+            Some(0x31..=0x33) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x35..=0x37) => "clock_getres took a clock id that names nothing",
+            Some(0x38) => "clock_getres refused a NULL result pointer",
+            Some(0x39 | 0x3A) => "clock_settime of clock 2 or 3 was not EINVAL",
+            Some(0x3B) => "clock_settime of a process's clock was not EPERM",
+            Some(0x3C) => "clock_settime with a NULL time was not EFAULT",
+            Some(0x3D) => "clock_settime of a pid that is no process's was not EINVAL",
+            Some(0x3E | 0x3F) => "clock_gettime took a clock id that names nothing",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45 | 0x46) => "the PROF/VIRT clocks did not move in whole ticks",
+            Some(0x47) => "the thread's PROF clock was ahead of the process's",
+            Some(0x50) => "the worker thread did not start",
+            Some(0x51) => "the worker's clock did not advance while it spun",
+            Some(0x52) => "another thread's tid named the process clock",
+            Some(0x53) => "the worker could not read its own clocks",
+            Some(0x54) => "the process clock did not cover both threads",
+            Some(0x55) => "the exited worker's clock was still readable",
+            Some(0x56) => "the exited worker's time left the process clock",
+            Some(0x57) => "a brief worker did not start",
+            Some(0x58) => "the process clock went back while threads came and went",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could read the child's thread clock",
+            Some(0x63) => "the parent could not read the running child's process clock",
+            Some(0x64) => "the zombie child's process clock was unreadable or short",
+            Some(0x65) => "wait4 failed",
+            Some(0x66) => "the reaped child's process clock was still readable",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time clocks (ring 3: resolutions and refusals; a spin advances the \
+         thread and process clocks and a sleep does not; PROF/VIRT in whole ticks; a worker's \
+         clock readable and its time kept after it exits; never back; a child's from zero until \
+         reaped): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the CPU-time timers through the Linux ABI:
+/// [`elf::build_linux_cpu_timers_test_elf`] (`build/cputimertest.c`). POSIX
+/// timers on the process and thread CPU clocks, `ITIMER_PROF` and
+/// `ITIMER_VIRTUAL`, `clock_nanosleep` on CPU clocks, timers on another
+/// thread's and a child's clock, `RLIMIT_CPU` and `RLIMIT_RTTIME` -- all fired from the tick
+/// (`sched::cpu_timers_due`, `proc::cputimer::expire`,
+/// `posix_timer::expire_cpu`).
+pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 180_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time timers (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_timers_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-timers"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // `RLIMIT_RTTIME` (step 8) needs a real-time thread: its child takes
+    // SCHED_FIFO, which a root program has by CAP_SYS_NICE on Linux and here
+    // by `IO_REALTIME` on a Thread capability (`priority::may_set_scheduler`).
+    // It had none, and the first boot to reach the step (a fast diagnostic
+    // boot of lane-a-wip, 2026-10-08) failed there with 0x81.
+    let capabilities = [(ResourceType::Thread, 0u64, Rights::IO_REALTIME)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-timers",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &capabilities,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time timers spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — the program did not finish in 180 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "a mailbox mmap failed",
+            Some(0x31) => "rt_sigaction failed",
+            Some(0x32) => "timer_create on a CPU-time clock failed",
+            Some(0x33 | 0x34) => "the worker thread did not start or stop",
+            Some(0x35) => "wait4 failed",
+            Some(0x40) => "timer_settime on the process clock failed",
+            Some(0x41) => "timer_gettime showed more than was set, or nothing",
+            Some(0x42) => "the process-clock timer fired while the process slept",
+            Some(0x43) => "the process-clock timer did not fire while the process spun",
+            Some(0x44) => "the process-clock timer fired before its time",
+            Some(0x45) => "an expired one-shot timer still read time left",
+            Some(0x46) => "timer_delete failed",
+            Some(0x48) => "timer_settime on the thread clock failed",
+            Some(0x49) => "the periodic thread-clock timer did not signal five times",
+            Some(0x4A) => "the periodic thread-clock timer ran ahead of its clock",
+            Some(0x4B) => "timer_getoverrun or timer_delete failed",
+            Some(0x50 | 0x52) => "setitimer(ITIMER_PROF / ITIMER_VIRTUAL) failed",
+            Some(0x51) => "getitimer(ITIMER_PROF) showed more than was set, or nothing",
+            Some(0x53) => "SIGPROF or SIGVTALRM did not come while the process spun",
+            Some(0x54) => "a fired one-shot itimer still read time left",
+            Some(0x55..=0x57) => "setitimer did not answer the old setting, or disarm",
+            Some(0x60 | 0x61) => "a sleep on the process clock did not end as a worker spun",
+            Some(0x62) => "an absolute sleep on the process clock did not end on time",
+            Some(0x63) => "a sleep on the worker's clock did not end",
+            Some(0x64..=0x66) => "a lone sleep on the process clock was not ended by a signal",
+            Some(0x67) => "a sleep on the caller's own thread clock was not EINVAL",
+            Some(0x68) => "a sleep on clock 3 or a CLOCKFD id was not EOPNOTSUPP",
+            Some(0x69) => "a sleep on a pid that is no process's was not EINVAL",
+            Some(0x70 | 0x71) => "a timer on the worker's clock did not fire as it spun",
+            Some(0x72) => "a timer on an exited thread's clock could still be set",
+            Some(0x73) => "a timer on an exited thread's clock did not read zeros",
+            Some(0x74 | 0x75) => "fork, or a timer on the child's clock, failed",
+            Some(0x76) => "a timer on the child's clock did not fire as it spun",
+            Some(0x77) => "the spinning child did not exit cleanly",
+            Some(0x78 | 0x7A) => "fork or setrlimit(RLIMIT_CPU) failed",
+            Some(0x79) => "RLIMIT_CPU's hard limit did not end the child with SIGKILL",
+            Some(0x7B) => "RLIMIT_CPU's hard limit never ended the child",
+            Some(0x7C) => "RLIMIT_CPU's soft limit did not send exactly one SIGXCPU",
+            Some(0x7D) => "the soft limit was not raised a second at SIGXCPU",
+            Some(0x80) => "setrlimit(RLIMIT_RTTIME) failed",
+            Some(0x81) => "sched_setscheduler(SCHED_FIFO) failed",
+            Some(0x82) => "RLIMIT_RTTIME's hard limit never ended the real-time child",
+            Some(0x83) => "fork for the RLIMIT_RTTIME child failed",
+            Some(0x84) => "RLIMIT_RTTIME's hard limit did not end the child with SIGKILL",
+            Some(0x85) => "RLIMIT_RTTIME's soft limit did not send exactly one SIGXCPU",
+            Some(0x86) => "RLIMIT_RTTIME's soft limit was not raised a second at SIGXCPU",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time timers (ring 3: process and thread CPU-clock timers fire on \
+         CPU time, not sleep; ITIMER_PROF/VIRTUAL; clock_nanosleep on CPU clocks; another \
+         thread's and a child's clock; RLIMIT_CPU and RLIMIT_RTTIME SIGXCPU then SIGKILL): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SYS_CPU_CLOCK`, the CPU-time clocks through the native
+/// door: [`elf::build_native_cpu_clock_test_elf`] (`build/cpuclocknative.c`).
+/// The same clock ids and answers as the Linux ABI's (`handlers::sys_cpu_clock`
+/// decodes them with `syscall::linux::cpu_clock`): resolutions, a spin
+/// advances the clocks and a sleep does not, the refusals, and a forked
+/// child's clock from zero, readable by its parent as a process's but not as
+/// a thread's.
+pub fn self_test_native_cpu_clock() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running native CPU-time clocks (ring 3) integration test...");
+    let exe_elf = elf::build_native_cpu_clock_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-cpu-clock"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-cpu-clock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native CPU-time clocks spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "SYS_PROCESS_ID failed",
+            Some(0x31 | 0x32) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x33 | 0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45) => "the PROF clock did not move in whole ticks",
+            Some(0x50) => "an unknown op was not -EINVAL",
+            Some(0x51) => "a clock that is not a CPU-time one was not -EINVAL",
+            Some(0x52 | 0x53) => "a CLOCKFD id or CPUCLOCK_WHICH 3 was not -EINVAL",
+            Some(0x54) => "a pid that is no process's was not -EINVAL",
+            Some(0x55) => "another process's thread clock was not -EINVAL",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could not read the child's process clock",
+            Some(0x63) => "the parent could read the child's thread clock",
+            Some(0x64) => "the child's exit code was lost",
+            Some(0x70) => "CPU_CLOCK_NANOSLEEP to a time already passed did not return at once",
+            Some(0x71) => "CPU_CLOCK_NANOSLEEP on clock 3 or a CLOCKFD id was not -EOPNOTSUPP",
+            Some(0x72) => "CPU_CLOCK_NANOSLEEP on a clock it cannot sleep on was not -EINVAL",
+            Some(0x73) => "CPU_CLOCK_NANOSLEEP with no request was not -EFAULT",
+            Some(0x74..=0x76) => "SYS_ITIMER_SET/GET of ITIMER_PROF did not arm, show, disarm",
+            Some(0x77) => "SYS_ITIMER_SET of ITIMER_VIRTUAL did not arm and disarm",
+            Some(0x78) => "SYS_ITIMER_SET of interval timer 3 was not refused",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native CPU-time clocks (ring 3: SYS_CPU_CLOCK reads and resolves the Linux \
+         clock ids, a spin advances them and a sleep does not, refusals, a child's from zero): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of signal delivery from an interrupt, with every register and
+/// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
+/// spins in a loop that makes no system calls, holding known values in every
+/// general register, the XMM registers, MXCSR and its red zone, until a
+/// `SIGALRM` handler has run; the signal can only reach it from the timer
+/// interrupt. Exits `0x2A` when the loop finds everything intact and the
+/// handler started from the initial FPU state.
+pub fn self_test_linux_signal_from_interrupt() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux signal-from-interrupt (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_signal_from_interrupt_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-signal-from-interrupt"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-signal-from-interrupt",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: signal-from-interrupt spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: signal from interrupt (ring 3) — the program did not finish in 60 s              (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => "setting up the mailbox, the handler or the timer failed",
+            Some(0x33) => "the handler did not run exactly once",
+            Some(0x34) => "the signal arrived before the loop, three times running",
+            Some(0x35) => "the handler's context did not show the loop as interrupted",
+            Some(0x36) => "the handler did not start from the initial MXCSR",
+            Some(0x37) => "rcx or r11 changed across the handler",
+            Some(0x38 | 0x39) => "a general register changed across the handler",
+            Some(0x3A) => "the signal frame overwrote the red zone",
+            Some(0x3B) => "MXCSR changed across the handler",
+            Some(0x3C) => "an XMM register changed across the handler",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: signal from interrupt (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux signal from interrupt (ring 3: a loop without system calls got its          SIGALRM handler, and every register, rcx/r11, the XMM registers, MXCSR and the red          zone came back; the handler started from the initial FPU state): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of POSIX timers through the Linux ABI:
+/// [`elf::build_linux_posix_timers_test_elf`] creates timers on several
+/// clocks and sigevents, takes their signals with `rt_sigtimedwait`, a
+/// `signalfd` and an `SA_SIGINFO` handler -- checking each `siginfo`'s code,
+/// timer id, value and overrun -- and forks a child that must have none. It
+/// exits `0x2A` on success; any other code names the check that failed.
+///
+/// The program sleeps (about 200 ms in all) while its timers run, so the wait
+/// is bounded by time, not yields: generously, since a guest second can take
+/// several host seconds under emulation.
+pub fn self_test_linux_posix_timers() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux POSIX timers (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_posix_timers_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-posix-timers"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-posix-timers",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: POSIX timers spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: POSIX timers (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "blocking the test's signals failed",
+            Some(0x31 | 0x32) => "the first two timers were not ids 0 and 1",
+            Some(0x33) => "a deleted timer could be deleted again",
+            Some(0x34) => "an unknown timer id was not EINVAL",
+            Some(0x35) => "an unknown clock was not EINVAL",
+            Some(0x36) => "CLOCK_MONOTONIC_RAW was not EOPNOTSUPP",
+            Some(0x37) => "CLOCK_REALTIME_ALARM was not EPERM",
+            Some(0x38) => "timer_create on a CPU-time clock (2, or -6) failed",
+            Some(0x39) => "a bad sigev_notify was not EINVAL",
+            Some(0x3A) => "SIGEV_THREAD_ID naming no thread of ours was not EINVAL",
+            Some(0x3B) => "SIGEV_THREAD_ID naming our own thread failed",
+            Some(0x3C | 0x3D) => "a fired one-shot did not read 0",
+            Some(0x3E | 0x3F) => "the default SIGALRM did not carry SI_TIMER and the timer id",
+            Some(0x40 | 0x41) => "arming the periodic timer failed",
+            Some(0x42) => "the periodic timer's gettime was not within an interval",
+            Some(0x43) => "timer_getoverrun was not 0 before any delivery",
+            Some(0x44 | 0x45) => "the periodic signal's record was wrong",
+            Some(0x46) => "si_overrun did not count the skipped expiries",
+            Some(0x47) => "timer_getoverrun did not match si_overrun",
+            Some(0x48 | 0x49) => "disarming did not report the old setting or read zero",
+            Some(0x4A) => "settime did not reset the overrun",
+            Some(0x4B..=0x50) => "two timers on one signal did not each deliver, in order",
+            Some(0x51..=0x54) => "SIGEV_NONE did not keep time",
+            Some(0x55..=0x57) => "an absolute CLOCK_REALTIME time in the past did not fire",
+            Some(0x58..=0x5B) => "a signalfd read did not report the timer's fields",
+            Some(0x5C..=0x61) => "the SA_SIGINFO handler did not see the timer's record",
+            Some(0x62 | 0x63) => "fork or wait4 failed",
+            Some(0x64) => "the forked child had timers, or its ids did not start at 0",
+            Some(0x65 | 0x66) => "the parent's timers did not survive its fork",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: POSIX timers (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux POSIX timers (ring 3: ids, clocks and sigevents; SI_TIMER records \
+         through rt_sigtimedwait, signalfd and a handler; a periodic timer's overrun; two \
+         timers on one signal; SIGEV_NONE; an absolute wall-clock time; none in a fork \
+         child): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of the SlateOS channel descriptors from a real
+/// Linux-ABI process: [`elf::build_linux_slate_channel_test_elf`] makes a
+/// channel with `slate_channel_create` (1000), round-trips a message, forks
+/// with the child writing through its inherited end, and checks end of file
+/// once every holder of the write end is gone. It exits `0x5C` on success;
+/// `0xC1`-`0xC7` name the step that failed (see the builder).
+///
+/// What the kernel-context self-test cannot reach, this does: the call's
+/// descriptor install and the copy of the two numbers to user memory, `read`
+/// and `write` through the descriptor table, and the holder counts across a
+/// real `fork` and a real process exit. Bounded like the fork test: the
+/// harness never blocks.
+pub fn self_test_linux_slate_channels() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5C;
+    /// Scheduler yields the parent, the child and their blocking reads may
+    /// take; the loop ends as soon as the parent is a zombie.
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!("[spawn] Running Linux slate channel descriptors (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_slate_channel_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-slate-channels"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-slate-channels",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: slate channels spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: slate channels (ring 3) -- not a zombie after {} yields, got {:?} \
+             (blocked in a read that nothing answers, or in wait4)",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: slate channels (ring 3) -- exit {:?}, expected {} \
+             (0xC1 create, 0xC2 write, 0xC3/0xC4 the read, 0xC5 fork, 0xC6 the child's message, \
+             0xC7 no end of file after every write end closed)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux slate channel descriptors (ring 3: create, one write one message, \
+         an end shared across fork, end of file with the last holder): OK"
+    );
+    Ok(())
+}
+
+/// The device door from a real native process
+/// ([`elf::build_native_device_door_test_elf`]): the sound card's PCM and
+/// control devices opened and driven with the Linux requests, answers in
+/// Linux errnos, a blocking write that outlasts the mixer ring and a blocking
+/// drain (both waiting on the audio output pump), a non-blocking write that
+/// fills one ring and then refuses, the handle its opener's and gone after
+/// close. Skipped without a sound card.
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x5E`; the exit code names
+/// the step that failed.
+pub fn self_test_native_device_door() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5E;
+    /// The program waits on the card twice -- about 85 ms of audio each --
+    /// so this only bounds a broken run.
+    const DEADLINE_NS: u64 = 10_000_000_000;
+
+    serial_println!("[spawn] Running native device door (ring 3) integration test...");
+    if !crate::audio_out::has_sink() {
+        serial_println!("[spawn]   SKIP: no sound card");
+        return Ok(());
+    }
+    let exe_elf = elf::build_native_device_door_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-device-door"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-device-door",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: device door spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: device door (ring 3) -- not a zombie after 10 s, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: device door (ring 3) -- exit {:?}, expected {} (0xC1 open of an \
+             unknown node not ENOENT; 0xC2 open of the playback node; 0xC3 HW_PARAMS; 0xC4 \
+             PREPARE; 0xC5 a blocking 32 KiB write not all taken; 0xC6 DRAIN; 0xC7 STATUS not \
+             SETUP; 0xC8 an unknown request not ENOTTY; 0xC9-0xCB PREPARE, START, PAUSE; 0xCC \
+             a non-blocking write not one ring; 0xCD a write into a full paused ring not \
+             EAGAIN; 0xCE DROP; 0xCF close; 0xD0 a second close not EBADF; 0xD1 the control \
+             node's open; 0xD2 CARD_INFO; 0xD3 a read of the control node not EINVAL)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native device door (ring 3: PCM configured, a blocking write and drain \
+         through the pump, a non-blocking write, pause, close; the control device): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the capability request broker's answering side, through
+/// the native ABI: [`elf::build_native_cap_broker_test_elf`]
+/// (`build/capbrokertest.c`), started holding `(CapBroker, 0, WRITE)`. It
+/// registers as the handler and forks a child that asks: the handler is told
+/// of each request on its channel and finds it in the list, approves one --
+/// the child then holds it -- denies another, cannot approve its own, and
+/// unregisters; a handle or the broker's own right cannot be asked for, and a
+/// wait times out and a cancel ends a request (`crate::cap::request`,
+/// design-decisions 1548).
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x2A`; the exit code names
+/// the step that failed.
+pub fn self_test_native_cap_broker() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running native capability broker (ring 3) integration test...");
+    let exe_elf = elf::build_native_cap_broker_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-cap-broker"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-cap-broker",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[(
+            crate::cap::ResourceType::CapBroker,
+            0,
+            crate::cap::Rights::WRITE,
+        )],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: capability broker spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: capability broker (ring 3) -- not a zombie after 60 s, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "a request with no handler was not refused as it was filed",
+            Some(0x32) => "registering as the handler failed",
+            Some(0x33) => "a second registration was not AlreadyExists",
+            Some(0x34) => "fork failed",
+            Some(0x50 | 0x51) => "no EVENT_NEW for the child's request",
+            Some(0x52 | 0x53) => "the record's id, pid, object, rights, time left, type or reason",
+            Some(0x54..=0x57) => "the list's size, its BufferTooSmall, or its record",
+            Some(0x58 | 0x59) => "the handler's own request, or its EVENT_NEW",
+            Some(0x5a) => "the handler approved its own request",
+            Some(0x5b | 0x5c) => "cancelling its own request, or its EVENT_ENDED",
+            Some(0x5d) => "the handler held what it asked for",
+            Some(0x5e) => "a verdict of 2 was not InvalidArgument",
+            Some(0x5f) => "allowing the child's request did not approve it",
+            Some(0x60) => "no EVENT_ENDED (Approved) for the allowed request",
+            Some(0x61) => "an ended request was decided again",
+            Some(0x62 | 0x63) => "no EVENT_NEW for the child's port 80 request",
+            Some(0x64 | 0x65) => "denying it did not deny, or no EVENT_ENDED (Denied)",
+            Some(0x66 | 0x67) => "no EVENT_NEW and EVENT_ENDED (Cancelled) for the cancelled one",
+            Some(0x68) => {
+                "the child did not end 0x2B (0x40-0x4E are its checks: 0x41/0x42 the \
+                 approval did not reach it, 0x44/0x45 the denial, 0x46/0x47/0x4E a handle, the \
+                 broker's right or an undeclared right could be asked for, 0x48 another's \
+                 request waited on, 0x4A/0x4B a wait that did not refuse or time out, 0x4C/0x4D \
+                 the cancel)"
+            }
+            Some(0x69 | 0x6a) => "unregistering failed, or a second one was not PermissionDenied",
+            Some(0x6b) => "the channel did not close at unregistration",
+            Some(0x6c) => "a request after unregistering was not refused",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: capability broker (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native capability broker (ring 3: refused with no handler, the handler told \
+         and listing, its own request refused, allow grants, deny, what cannot be asked for, \
+         a timed-out wait and a cancel, unregistration): OK"
+    );
+    Ok(())
+}
+
+/// Thaws whatever a freezer test froze, on every way out of it: a failed check
+/// must not leave the system's programs stopped.
+struct ThawOnDrop {
+    /// Processes frozen one by one, to thaw.
+    processes: alloc::vec::Vec<ProcessId>,
+}
+
+impl Drop for ThawOnDrop {
+    fn drop(&mut self) {
+        crate::proc::freezer::thaw_system();
+        crate::proc::freezer::thaw_processes(&self.processes);
+    }
+}
+
+/// Ring-3 test of the freezer (`crate::proc::freezer`, design-decisions
+/// 1562), through both ABIs at once: [`elf::build_linux_freezer_test_elf`]
+/// (`build/freezetest.c`) -- a parent in `wait4` and five children asleep in
+/// `nanosleep`, blocked on a pipe, in `FUTEX_WAIT`, about to write, and
+/// computing in ring 3 -- and [`elf::build_native_freezer_test_elf`]
+/// (`build/freezenative.c`), asleep in `SYS_SLEEP`.
+///
+/// While they are busy the system is frozen: every one of their threads must
+/// be parked, and the one computing must make no progress for the second it
+/// is held. Thawed, each blocking call must go on as if nothing had happened
+/// -- no `EINTR`, and the sleeps ending at their own deadlines, not a sleep's
+/// length after the thaw -- which the programs check themselves. Then the
+/// computing child is frozen alone, as a container's pause freezes its
+/// processes, while the others are not.
+pub fn self_test_freezer() -> KernelResult<()> {
+    use crate::proc::freezer;
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 30_000_000_000;
+    const HOLD_MS: u64 = 1000;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: freezer (ring 3) -- {}", what);
+        Err(KernelError::InternalError)
+    }
+    // The CPU time thread `task` has had, in scheduler ticks.
+    fn ticks(task: TaskId) -> u64 {
+        crate::sched::task_info(task).map_or(0, |i| i.total_ticks)
+    }
+    // Every thread of every process in `pids` is parked by the freezer.
+    fn all_parked(pids: &[ProcessId]) -> Option<(ProcessId, TaskId)> {
+        for &pid in pids {
+            for task in pcb::get_threads(pid).unwrap_or_default() {
+                if !freezer::is_parked(task) {
+                    return Some((pid, task));
+                }
+            }
+        }
+        None
+    }
+
+    serial_println!("[spawn] Running freezer (ring 3) integration test...");
+    let parks_before = freezer::stats().parks;
+    let spawn = |elf: &[u8], name: &'static str| {
+        let argv: &[&[u8]] = &[name.as_bytes()];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let options = SpawnOptions {
+            name,
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &[],
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        spawn_process(elf, &options)
+    };
+    let linux = match spawn(&elf::build_linux_freezer_test_elf(), "spawn-test-freezer") {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: freezer (ring 3) -- spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let native = match spawn(
+        &elf::build_native_freezer_test_elf(),
+        "spawn-test-freezer-native",
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            teardown_fixture(linux.pid, linux.task_id);
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- native spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    let outcome = (|| -> KernelResult<()> {
+        // The five children, in the order they were forked: sleeper, reader,
+        // writer, futex waiter, computer.
+        let children = |parent: ProcessId| -> alloc::vec::Vec<ProcessId> {
+            let mut kids: alloc::vec::Vec<ProcessId> = pcb::pids()
+                .into_iter()
+                .filter(|&p| pcb::parent(p) == Some(parent))
+                .collect();
+            kids.sort_unstable();
+            kids
+        };
+        // Wait for all five to exist and the parent to be in wait4. Polled by
+        // sleeping, not yielding: this runs at the idle level, and a yield
+        // there gives nothing below it a turn.
+        let ready = || {
+            children(linux.pid).len() == 5
+                && crate::sched::wait_of(linux.task_id)
+                    .is_some_and(|w| w.channel == crate::wchan::WaitChannel::Child)
+        };
+        let give_up = crate::hrtimer::now_ns().saturating_add(5_000_000_000);
+        while !ready() && crate::hrtimer::now_ns() < give_up {
+            crate::sched::sleep_ms(2);
+        }
+        if !ready() {
+            return fail("the parent did not fork its five children and wait for them in 5 s");
+        }
+        let kids = children(linux.pid);
+        let computer = *kids.get(4).ok_or(KernelError::InternalError)?;
+        let computer_task = pcb::get_threads(computer)
+            .and_then(|t| t.first().copied())
+            .ok_or(KernelError::InternalError)?;
+        let mut everyone = kids.clone();
+        everyone.push(linux.pid);
+        everyone.push(native.pid);
+        let mut guard = ThawOnDrop {
+            processes: alloc::vec::Vec::new(),
+        };
+
+        // ---- the whole system ----
+        let frozen = match freezer::freeze_system(5_000_000_000) {
+            Ok(f) => f,
+            Err(None) => return fail("the system was frozen already"),
+            Err(Some(stragglers)) => {
+                for s in stragglers.iter().take(8) {
+                    serial_println!(
+                        "[spawn]     would not freeze: process {} thread {} ({}, waiting on {})",
+                        s.pid,
+                        s.task,
+                        s.state,
+                        s.wait
+                    );
+                }
+                return fail("the system could not be frozen in 5 s");
+            }
+        };
+        if let Some((pid, task)) = all_parked(&everyone) {
+            serial_println!(
+                "[spawn]     process {} thread {} is not parked: {}",
+                pid,
+                task,
+                unfinished_report(task)
+            );
+            return fail("a thread of the test is not parked while the system is frozen");
+        }
+        let before = ticks(computer_task);
+        crate::sched::sleep_ms(HOLD_MS);
+        let after = ticks(computer_task);
+        if all_parked(&everyone).is_some() {
+            return fail("a thread came unparked while the system was frozen");
+        }
+        if after.saturating_sub(before) > 1 {
+            return fail("the computing child ran while the system was frozen");
+        }
+        serial_println!(
+            "[spawn]     froze {} thread(s) in {} us; held {} ms",
+            frozen.threads,
+            frozen.took_ns / 1000,
+            HOLD_MS
+        );
+        freezer::thaw_system();
+
+        // ---- one process alone, as a container's pause ----
+        crate::sched::sleep_ms(50);
+        if pcb::state(computer).is_some_and(|s| s != pcb::ProcessState::Zombie) {
+            guard.processes.push(computer);
+            let Ok(f) = freezer::freeze_processes(&[computer], 2_000_000_000) else {
+                return fail("the computing child could not be frozen alone: no room");
+            };
+            if f.pending != 0 {
+                return fail("the computing child alone did not freeze in 2 s");
+            }
+            if !freezer::is_parked(computer_task) {
+                return fail("the computing child, frozen alone, is not parked");
+            }
+            if freezer::is_parked(linux.task_id) {
+                return fail("the parent was frozen with its child");
+            }
+            let before = ticks(computer_task);
+            crate::sched::sleep_ms(300);
+            if ticks(computer_task).saturating_sub(before) > 1 {
+                return fail("the computing child ran while frozen alone");
+            }
+            freezer::thaw_processes(&[computer]);
+            guard.processes.clear();
+        }
+        drop(guard);
+
+        // ---- each program judges its own calls ----
+        let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+        while [linux.pid, native.pid]
+            .iter()
+            .any(|&p| pcb::state(p) != Some(pcb::ProcessState::Zombie))
+            && crate::hrtimer::now_ns() < deadline
+        {
+            crate::sched::sleep_ms(5);
+        }
+        for (r, which) in [(&linux, "Linux"), (&native, "native")] {
+            if pcb::state(r.pid) != Some(pcb::ProcessState::Zombie) {
+                serial_println!(
+                    "[spawn]     the {} program did not end: {}",
+                    which,
+                    unfinished_report(r.task_id)
+                );
+                return fail("a program did not end within 30 s of the thaw");
+            }
+        }
+        let linux_code = pcb::exit_code(linux.pid);
+        if linux_code != Some(PASS) {
+            let what = match linux_code {
+                Some(0x30) => "setting up the shared page, the pipe or a fork failed",
+                Some(0x31) => "nanosleep came back nonzero (EINTR?) across the freeze",
+                Some(0x32) => "nanosleep ended before its time",
+                Some(0x33) => "nanosleep ended late: restarted from scratch after the thaw",
+                Some(0x34) => "the pipe read did not get the writer's byte",
+                Some(0x35) => "the writer's sleep or write failed",
+                Some(0x36) => "FUTEX_WAIT came back with an error (EINTR?) across the freeze",
+                Some(0x37) => "the computing child could not make itself SCHED_IDLE",
+                Some(0x38) => "wait4 failed (EINTR?) across the freeze",
+                Some(0x39) => "a child was killed by a signal",
+                None => "no exit code: the program died",
+                _ => "unexpected exit code",
+            };
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- Linux program exit {:?}: {}",
+                linux_code,
+                what
+            );
+            return Err(KernelError::InternalError);
+        }
+        let native_code = pcb::exit_code(native.pid);
+        if native_code != Some(PASS) {
+            let what = match native_code {
+                Some(0x41) => "SYS_SLEEP came back nonzero across the freeze",
+                Some(0x42) => "SYS_SLEEP ended before its time",
+                Some(0x43) => "SYS_SLEEP ended late: restarted from scratch after the thaw",
+                None => "no exit code: the program died",
+                _ => "unexpected exit code",
+            };
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- native program exit {:?}: {}",
+                native_code,
+                what
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+
+    teardown_fixture(native.pid, native.task_id);
+    teardown_fixture(linux.pid, linux.task_id);
+    outcome?;
+    // The freezer's own account agrees: threads parked (seven at least: the
+    // parent, five children and the native program), and none parked now.
+    let stats = freezer::stats();
+    if stats.parks.saturating_sub(parks_before) < 7 || stats.parked_threads != 0 {
+        serial_println!(
+            "[spawn]   FAIL: freezer (ring 3) -- its counters: {} park(s) in the test, {} thread(s) \
+             still parked",
+            stats.parks.saturating_sub(parks_before),
+            stats.parked_threads
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   freezer (ring 3: a system freeze parks every thread -- in nanosleep, a pipe \
+         read, FUTEX_WAIT, wait4, SYS_SLEEP and ring 3 -- the thaw resumes each call to its own \
+         deadline with no EINTR, and one process freezes alone): OK"
+    );
+    Ok(())
+}
+
+/// Native ring-3 test of the namespace calls, `SYS_NAMESPACE_*` 1161-1166:
+/// [`elf::build_native_namespaces_test_elf`] (`build/nsnative.c`), run twice.
+/// Holding `(Namespace, WRITE)`, `(Process, SET_HOSTNAME)` and `(File,
+/// READ)`, it opens `/proc/self/ns/uts` to a handle, unshares a UTS
+/// namespace and names it, moves between two handles' namespaces, leaves a
+/// fork child to move alone, enters a child's namespace by its pid, and
+/// closes a handle exactly once (exit 0x2A). Holding `(File, READ)` alone, it
+/// may open and describe its namespace but neither unshare nor enter one
+/// (exit 0x2C). Either way, no namespace it made outlives it and the
+/// system's host name is as it was (`crate::nsfs`).
+pub fn self_test_native_namespaces() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+
+    serial_println!("[spawn] Running native namespace calls (ring 3) integration test...");
+    let with = [
+        (ResourceType::Namespace, 0u64, Rights::WRITE),
+        (ResourceType::Process, 0u64, Rights::SET_HOSTNAME),
+        (ResourceType::File, 0u64, Rights::READ),
+    ];
+    let without = [(ResourceType::File, 0u64, Rights::READ)];
+    run_native_namespaces(&with, 0x2A, "with the namespace right")?;
+    run_native_namespaces(&without, 0x2C, "without it")?;
+    serial_println!(
+        "[spawn]   native namespace calls (ring 3: a handle on /proc/self/ns/uts and its info, \
+         unshare and a host name of its own, enter by handle and by pid, a fork child moving \
+         alone, a handle closed once, refused without the Namespace right): OK"
+    );
+    Ok(())
+}
+
+/// One run of [`self_test_native_namespaces`]'s program, holding `caps`,
+/// which must end `pass`.
+fn run_native_namespaces(
+    caps: &[(crate::cap::ResourceType, u64, crate::cap::Rights)],
+    pass: i32,
+    which: &str,
+) -> KernelResult<()> {
+    const DEADLINE_NS: u64 = 60_000_000_000;
+    let exe_elf = elf::build_native_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-native-ns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-native-ns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native namespace calls ({}) spawn returned {:?}",
+                which,
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- not a zombie after 60 s, got {:?}",
+            which,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(pass) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "the fork child could not enter the first namespace by its inherited handle"
+            }
+            Some(0x32) => "the pid test's child could not unshare",
+            Some(0x40 | 0x41) => {
+                "/proc/self/ns/uts did not open to a handle SYS_NAMESPACE_INFO describes"
+            }
+            Some(0x42 | 0x43) => {
+                "a path that names no namespace, or a process that is not there, was not refused"
+            }
+            Some(0x44) => "info on a handle not held was not InvalidHandle",
+            Some(0x45..=0x47) => "unshare or enter worked without the Namespace right",
+            Some(0x48) => "the handle did not close",
+            Some(0x49) => "the host name could not be read",
+            Some(0x4a) => "unsharing a kind not built was not NotSupported",
+            Some(0x4b..=0x4d) => "unshare did not give a new namespace with a host name of its own",
+            Some(0x4e | 0x4f) => "enter took a mismatched kind or a handle not held",
+            Some(0x50 | 0x51) => "enter did not move between the two handles' namespaces",
+            Some(0x52 | 0x53) => "the fork child did not end 0x2B, or moved its parent",
+            Some(0x54..=0x57) => "enter by pid did not take the child's namespace",
+            Some(0x58 | 0x59) => "the pid test's child could not be ended",
+            Some(0x5a) => "enter by the pid of a reaped process was not NoSuchProcess",
+            Some(0x5b..=0x5d) => "a handle did not close exactly once",
+            Some(0x5e | 0x5f) => "back in the first namespace, the system's name was not as it was",
+            Some(0x2A) => {
+                "it ran the privileged half, so it held the Namespace right it was not given"
+            }
+            Some(0x2C) => "it ran the unprivileged half, so it did not hold the right it was given",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- exit {:?}: {}",
+            which,
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- {} namespaces outlived the program, \
+             or the system's host name changed",
+            which,
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// Unix-domain sockets by name from a real Linux-ABI process
+/// ([`elf::build_linux_unix_socket_test_elf`]): datagrams by abstract name
+/// and by path, a stream through listen/connect/accept with the kernel's
+/// record of the peer, end of file on close, the sender's credentials as an
+/// `SCM_CREDENTIALS` control message once `SO_PASSCRED` asks for them --
+/// recorded by the kernel, or stated by the sender and checked -- several
+/// messages a call (`sendmmsg`, `recvmmsg`), `ENOTSOCK` for a descriptor
+/// that is not a socket, and a node a second `bind` finds in use and
+/// `unlink` removes.
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x5D`; the exit code names
+/// the step that failed.
+pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5D;
+    /// How long the program may take. It waits once on purpose: 50 ms for
+    /// `SO_RCVTIMEO` to run out (0xFC). A count of yields measured nothing
+    /// there -- a yield returns at once when nothing else is runnable, and
+    /// 1024 of them passed inside those 50 ms and failed the rung mid-wait
+    /// (rq43) -- so this is a time, which only a broken run reaches.
+    const DEADLINE_NS: u64 = 5_000_000_000;
+    /// The path the program binds and then unlinks.
+    const NODE: &str = "/tmp/slt.sock";
+
+    serial_println!("[spawn] Running Linux Unix-domain sockets (ring 3) integration test...");
+
+    // A node left by an interrupted earlier run would make the first bind
+    // EADDRINUSE.
+    let _ = crate::fs::Vfs::remove(NODE);
+    let exe_elf = elf::build_linux_unix_socket_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-unix-sockets"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // File READ, for the one plain file the program opens: `/`, the
+    // descriptor that is not a socket. Spawned with none, its open was refused
+    // and the run ended at 0xFA without reaching the ENOTSOCK probes it was
+    // there for (rq42, 2026-10-02). And File WRITE, because the by-path probes
+    // make a node in /tmp (`bind`) and remove it (`unlink`): with READ alone the
+    // unlink was refused at 0xE7 (rq45), and since 2026-10-03 the bind is too.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-unix-sockets",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: Unix-domain sockets spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let started = crate::hrtimer::now_ns();
+    while crate::hrtimer::now_ns().saturating_sub(started) < DEADLINE_NS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
+    teardown_fixture(result.pid, result.task_id);
+    // Gone already unless a step after the bind failed.
+    let _ = crate::fs::Vfs::remove(NODE);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} s, got {:?}; {}",
+            DEADLINE_NS / 1_000_000_000,
+            state,
+            unfinished
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- exit {:?}, expected {} \
+             (0xD1-0xD6 datagrams by abstract name: socket, bind, socket, sendto, recvfrom, \
+             the bytes; 0xD7-0xE1 the stream: socket, bind, listen, socket, connect, accept, \
+             write, read, SO_PEERCRED, its pid, end of file; 0xE2-0xE8 by path: bind, a second \
+             bind not EADDRINUSE, sendto, recvfrom, the sender's address, unlink, sendto after \
+             unlink not ENOENT; 0xE9-0xED credentials: setsockopt(SO_PASSCRED), sendto, \
+             recvmsg and its bytes, the SCM_CREDENTIALS message's shape, its pid; 0xEE-0xF1 \
+             stated credentials: sendmsg with them, recvmsg not reporting them, a pid naming no \
+             process not ESRCH, a short message not EINVAL; 0xF2-0xFA batches: sendmmsg, its \
+             msg_lens, recvmmsg, what it received, MSG_DONTWAIT not EAGAIN, MSG_WAITFORONE, a \
+             NULL vector not EFAULT, a bad second entry not answered 1, a directory not \
+             ENOTSOCK; 0xFB-0xFD SO_RCVTIMEO: setsockopt, a blocking receive not EAGAIN when \
+             it ran out, a whole second of microseconds not EDOM; 0xFE the directory's own \
+             open)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux Unix-domain sockets (ring 3: datagrams by abstract name and by path, \
+         listen/connect/accept, SO_PEERCRED, SCM_CREDENTIALS received and stated, \
+         sendmmsg/recvmmsg, ENOTSOCK, SO_RCVTIMEO, end of file, EADDRINUSE, unlink): OK"
+    );
+    Ok(())
+}
+
+/// Descriptors passed over Unix-domain sockets from a real Linux process
+/// (`SCM_RIGHTS`, [`elf::build_linux_scm_rights_test_elf`]): a pipe's write
+/// end on a datagram and on a stream, close-on-exec, `MSG_CTRUNC`, a plain
+/// `read` releasing what it cannot hand on, `EBADF` -- every reference
+/// accounted for by its pipe's end of file.
+///
+/// # Errors
+///
+/// `InternalError` when the program does not exit `0x5F`.
+pub fn self_test_linux_scm_rights() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5F;
+    /// The program never blocks: every pipe is non-blocking and every
+    /// receive has its message queued. This only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!("[spawn] Running Linux SCM_RIGHTS (ring 3) integration test...");
+    let exe_elf = elf::build_linux_scm_rights_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-scm-rights"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-scm-rights",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SCM_RIGHTS spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
+    teardown_fixture(result.pid, result.task_id);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}; {}",
+            MAX_YIELDS,
+            state,
+            unfinished
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- exit {:?}, expected {} (0x01-0x0B a \
+             datagram: socketpair, pipe2, sendmsg, close, recvmsg, the control message's \
+             shape, FD_CLOEXEC, write through the passed end, read it, close it, no end of \
+             file; 0x0C-0x15 a stream: socketpair, pipe2, write, sendmsg, write, recvmsg not \
+             \"abcd\", not one descriptor, the bytes after, EAGAIN after closing ours, no end \
+             of file after closing the passed one; 0x16-0x1A room for one of two: pipe2, \
+             sendmsg, recvmsg, MSG_CTRUNC and the message, no end of file; 0x1B-0x1E read(2): \
+             pipe2, sendmsg, read, no end of file; 0x1F a descriptor not open not EBADF; \
+             0x20-0x25 SOCK_SEQPACKET: socketpair, the two sends, a short recvmsg not cut \
+             with MSG_TRUNC, the next read not the next message, no end of file after the \
+             peer closed, a send to it not EPIPE; 0x26-0x28 the order of refusals: a \
+             descriptor not open on too big a datagram not EBADF, one before a message past \
+             253 not EBADF, that message alone not EINVAL)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SCM_RIGHTS (ring 3: a datagram and a stream carry a pipe's write \
+         end, MSG_CMSG_CLOEXEC, the stream's marked bytes, a held object kept once, \
+         MSG_CTRUNC, read(2) releasing, EBADF ahead of a datagram's size and a later \
+         message's count, every pipe's end of file on time; SOCK_SEQPACKET's whole \
+         messages and end of file): OK"
+    );
+    Ok(())
+}
+
+/// A zombie keeps its `/proc/<pid>` until it is reaped, as on Linux, and reads
+/// as one there -- after the scheduler has freed its first thread's task, so
+/// every answer comes from what the process kept (`pcb::exited_leader`), not
+/// from a dead task that has not been swept up yet:
+/// - `/proc` lists it;
+/// - `stat` is `<pid> (<name>) Z ...` with a start time;
+/// - `status` says `State:\tZ (zombie)`, `comm` is its name, `wchan` is `0`;
+/// - a process-wide file, `mounts`, is still served;
+/// - its memory is gone, released at its exit as Linux's `exit_mm` does:
+///   nothing to pin, `maps` empty, `statm` zeros, `stat` vsize 0, `cmdline`
+///   and `environ` empty, no `exe`.
+///
+/// Reaped, the directory is gone and unlisted. Until 2026-10-02 a zombie's
+/// directory went with its first thread's task at the scheduler's next reap
+/// pass, so `ps` could never show one.
+///
+/// # Errors
+///
+/// `InternalError` naming the first answer that was wrong; the spawn's own.
+pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
+    /// The program exits at once; this only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+    /// At most 15 bytes, so `comm` is the whole of it.
+    const NAME: &str = "zombie-procdir";
+    const EXIT_CODE: u8 = 0x2A;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: zombie /proc: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    fn listed(pid: ProcessId) -> bool {
+        let name = alloc::format!("{pid}");
+        crate::fs::Vfs::readdir("/proc")
+            .is_ok_and(|entries| entries.iter().any(|e| e.name.as_bytes() == name.as_bytes()))
+    }
+
+    /// Every check made while the zombie is waiting to be reaped.
+    fn check_zombie(pid: ProcessId) -> KernelResult<()> {
+        if !listed(pid) {
+            return fail("/proc does not list it");
+        }
+        let dir = alloc::format!("/proc/{pid}");
+        let read = |file: &str| crate::fs::Vfs::read_file(alloc::format!("{dir}/{file}"));
+
+        let stat = match read("stat") {
+            Ok(s) => s,
+            Err(e) => {
+                serial_println!("[spawn]   reading its stat: {:?}", e);
+                return fail("its stat could not be read");
+            }
+        };
+        let expect_head = alloc::format!("{pid} ({NAME}) Z ");
+        if !stat.starts_with(expect_head.as_bytes()) {
+            serial_println!(
+                "[spawn]   its stat begins `{}`",
+                stat.get(..stat.len().min(48)).unwrap_or(&[]).escape_ascii()
+            );
+            return fail("stat is not `<pid> (<name>) Z ...`");
+        }
+        // Field 22, starttime: the 20th of the fields after the `)`.
+        let starttime = stat
+            .rsplit(|&b| b == b')')
+            .next()
+            .and_then(|rest| rest.split(|&b| b == b' ').filter(|f| !f.is_empty()).nth(19))
+            .and_then(|f| core::str::from_utf8(f).ok())
+            .and_then(|f| f.parse::<u64>().ok());
+        if starttime.is_none_or(|t| t == 0) {
+            serial_println!("[spawn]   its starttime field reads {:?}", starttime);
+            return fail("stat's start time is gone");
+        }
+
+        let status = read("status").unwrap_or_default();
+        if !status
+            .split(|&b| b == b'\n')
+            .any(|line| line == b"State:\tZ (zombie)")
+        {
+            return fail("status does not say `State:\\tZ (zombie)`");
+        }
+        let expect_comm = alloc::format!("{NAME}\n");
+        if read("comm").ok().as_deref() != Some(expect_comm.as_bytes()) {
+            return fail("comm is not its name");
+        }
+        if read("wchan").ok().as_deref() != Some(b"0".as_slice()) {
+            return fail("wchan is not 0");
+        }
+        let mounts = read("mounts").unwrap_or_default();
+        if !mounts
+            .split(|&b| b == b'\n')
+            .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
+        {
+            return fail("mounts has no line for the root mount");
+        }
+
+        // Its memory went at its exit, as Linux's does in `exit_mm`
+        // (`pcb::release_address_space`), and with it what is read from it.
+        if pcb::pin_address_space(pid).is_some() {
+            return fail("its address space outlived its exit");
+        }
+        if read("maps").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("maps is not empty");
+        }
+        let statm = read("statm").unwrap_or_default();
+        let statm_fields: alloc::vec::Vec<&[u8]> = statm
+            .split(|&b| b == b' ' || b == b'\n')
+            .filter(|f| !f.is_empty())
+            .collect();
+        if statm_fields.len() != 7 || statm_fields.iter().any(|&f| f != b"0") {
+            return fail("statm is not seven zeros");
+        }
+        // Field 23, vsize: the 21st of the fields after the `)`.
+        let vsize = stat
+            .rsplit(|&b| b == b')')
+            .next()
+            .and_then(|rest| rest.split(|&b| b == b' ').filter(|f| !f.is_empty()).nth(20));
+        if vsize != Some(b"0".as_slice()) {
+            return fail("stat's vsize is not 0");
+        }
+        if read("cmdline").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("cmdline is not empty");
+        }
+        if read("environ").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("environ is not empty");
+        }
+        match crate::fs::Vfs::readlink(alloc::format!("{dir}/exe")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!("[spawn]   its exe link reads {:?}", other);
+                return fail("exe still names a file");
+            }
+        }
+        Ok(())
+    }
+
+    serial_println!("[spawn] Running zombie /proc directory test...");
+    let exe = elf::build_linux_exit_elf(EXIT_CODE);
+    let argv: &[&[u8]] = &[NAME.as_bytes()];
+    let options = SpawnOptions {
+        name: NAME,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: zombie /proc: spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let (pid, task_id) = (result.pid, result.task_id);
+    // A zombie, and its first thread's task freed by the scheduler: what is
+    // read below must come from the process's own record.
+    let mut freed = false;
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+            crate::sched::reap_dead_tasks();
+            if !crate::sched::task_exists(task_id) {
+                freed = true;
+                break;
+            }
+        }
+    }
+    let state = pcb::state(pid);
+    let exit_code = pcb::exit_code(pid);
+    let verdict = if task_id != pid {
+        serial_println!("[spawn]   its first thread is {}, its pid {}", task_id, pid);
+        fail("the first thread's id is not the process's (§1504)")
+    } else if state != Some(pcb::ProcessState::Zombie) || exit_code != Some(i32::from(EXIT_CODE)) {
+        serial_println!(
+            "[spawn]   after {} yields: {:?}, exit {:?}",
+            MAX_YIELDS,
+            state,
+            exit_code
+        );
+        fail("the program did not become a zombie with its exit code")
+    } else if !freed {
+        fail("the scheduler never freed its dead thread's task")
+    } else {
+        check_zombie(pid)
+    };
+    teardown_fixture(pid, task_id);
+    verdict?;
+
+    // Reaped: gone, and no longer listed.
+    match crate::fs::Vfs::stat(alloc::format!("/proc/{pid}")) {
+        Err(KernelError::NotFound) => {}
+        other => {
+            serial_println!(
+                "[spawn]   /proc/{} after the reap: {:?}",
+                pid,
+                other.map(|_| ())
+            );
+            return fail("the directory outlived the reap");
+        }
+    }
+    if listed(pid) {
+        return fail("/proc still lists it after the reap");
+    }
+    serial_println!(
+        "[spawn]   zombie /proc directory (listed, stat `Z` with its name and start time, \
+         status, comm, wchan 0 and mounts from the process's own record after its thread \
+         was freed; its memory released at exit -- maps, statm, vsize, cmdline, environ \
+         and exe empty; gone with the reap): OK"
+    );
+    Ok(())
+}
+
+/// `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` from ring 3, as `lsattr` and
+/// `chattr` call them ([`elf::build_linux_file_flags_test_elf`]), run twice:
+/// as root, which may set the immutable flag and then finds a write, a
+/// writable open, an unlink and `access(W_OK)` refused with `EPERM`, a flag
+/// not kept refused with `EOPNOTSUPP`, and everything allowed again once it
+/// is cleared; and as uid 1000, the file's owner, which may not set it.
+///
+/// # Errors
+///
+/// `InternalError` with the program's sentinel exit, naming the step.
+pub fn self_test_linux_file_flags() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x60;
+    /// The program never blocks. This only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+    /// The file the program makes.
+    const PATH: &str = "/tmp/_fflags";
+
+    serial_println!(
+        "[spawn] Running Linux file flags (FS_IOC_GETFLAGS/SETFLAGS, ring 3) integration test..."
+    );
+    // A run that fails between setting the flag and clearing it leaves the
+    // file immutable, and the next run could not remove it: cleared and
+    // removed from here, before each run and after the last, best effort.
+    let leftover = || {
+        let _ = crate::fs::Vfs::set_attributes(PATH, crate::fs::FileAttr::NONE);
+        let _ = crate::fs::Vfs::remove(PATH);
+    };
+    let exe_elf = elf::build_linux_file_flags_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-file-flags"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    for (who, uid_gid) in [("root", None), ("uid 1000", Some((1000u32, 1000u32)))] {
+        leftover();
+        let options = SpawnOptions {
+            name: "spawn-test-file-flags",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid,
+        };
+        let result = match spawn_process(&exe_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: file flags ({}) spawn returned {:?}",
+                    who,
+                    e
+                );
+                leftover();
+                return Err(e);
+            }
+        };
+        for _ in 0..MAX_YIELDS {
+            crate::sched::yield_now();
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+        }
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+        teardown_fixture(result.pid, result.task_id);
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: file flags ({}) -- not a zombie after {} yields, got {:?}",
+                who,
+                MAX_YIELDS,
+                state
+            );
+            leftover();
+            return Err(KernelError::InternalError);
+        }
+        if exit_code != Some(OK_EXIT) {
+            serial_println!(
+                "[spawn]   FAIL: file flags ({}) -- exit {:?}, expected {} (0x01 the open; \
+                 0x02-0x03 GETFLAGS not 0; as root: 0x04 SETFLAGS immutable refused, 0x05 \
+                 GETFLAGS not 0x10, then not EPERM for 0x06 a write, 0x07 a writable open, \
+                 0x08 an unlink, 0x09 access(W_OK); 0x0A a flag not kept not EOPNOTSUPP, \
+                 0x0B clearing refused, 0x0C the write after it, 0x0D the unlink after it, \
+                 0x0E a pipe's GETFLAGS not ENOTTY, 0x13 F_SETFL O_APPEND or the rewind, \
+                 0x14 the write, 0x15 not appended, 0x16 F_SETFL clearing O_APPEND on an \
+                 append-only file not EPERM; as uid 1000: 0x10 setting immutable not EPERM, \
+                 0x11 a change of nothing refused, 0x12 the unlink)",
+                who,
+                exit_code,
+                OK_EXIT
+            );
+            leftover();
+            return Err(KernelError::InternalError);
+        }
+    }
+    leftover();
+    serial_println!(
+        "[spawn]   Linux file flags (ring 3: root sets FS_IMMUTABLE_FL and reads it back; a \
+         write through an open descriptor, a writable open, an unlink and access(W_OK) are \
+         EPERM; FS_NODUMP_FL is EOPNOTSUPP; cleared, the same descriptor writes; O_APPEND by \
+         F_SETFL appends, and stays on an append-only file; a pipe is ENOTTY; the owner, uid \
+         1000, may not set it): OK"
+    );
+    Ok(())
+}
+
+/// Where a process's program headers are (`place_phdr_table`,
+/// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
+/// page of their own when no segment holds them.
+///
+/// - A test ELF whose segment maps its headers, as a linker's first segment
+///   does (`elf::build_test_elf_mapping_headers`): they are found at their
+///   segment's address plus the bias, and nothing is mapped.
+/// - The hand-built Linux test programs map none (their one segment starts
+///   after the headers): spawned, the process records the copy at
+///   [`PHDR_COPY_VADDR`], the page holds exactly the file's table, and the
+///   process's auxiliary vector says so in `AT_PHDR`.
+pub fn self_test_main_phdr() -> KernelResult<()> {
+    /// A load bias for the found case.
+    const BIAS: u64 = 0x0000_0000_4000_0000;
+    /// `AT_PHDR`'s auxv tag.
+    const AT_PHDR: u64 = 3;
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: program headers: {}", what);
+        Err(KernelError::InternalError)
+    };
+    serial_println!("[spawn] Running program-header placement test...");
+
+    // Found: no mapping, the segment's address plus the bias.
+    let mapped = elf::build_test_elf_mapping_headers();
+    let mapped_elf = elf::ElfFile::parse(&mapped)?;
+    let Some(in_segment) = crate::proc::linux_stack::phdr_vaddr(&mapped_elf) else {
+        return fail("the test ELF widened to map its headers has none in a segment");
+    };
+    // SAFETY: a table a segment holds is answered before the address space
+    // is touched, so no address space is needed.
+    let found = unsafe { place_phdr_table(&mapped_elf, 0, BIAS, 0) }?;
+    if found.map(|p| p.vaddr) != Some(in_segment.saturating_add(BIAS)) {
+        return fail("headers in a segment were not found at its address plus the bias");
+    }
+
+    // Copied: a real spawn of a program whose segment leaves them out -- one
+    // that does not end by itself, since a process frees its memory as it
+    // exits (`pcb::release_address_space`) and an exit program could take
+    // the page away before it was read.
+    let exe = elf::build_linux_pause_elf();
+    let exe_elf = elf::ElfFile::parse(&exe)?;
+    let Some(table) = exe_elf.phdr_table_bytes() else {
+        return fail("the pause test ELF has no program-header table");
+    };
+    if crate::proc::linux_stack::phdr_vaddr(&exe_elf).is_some() {
+        return fail("the pause test ELF's segment holds its headers; the copy path is untested");
+    }
+    let argv: &[&[u8]] = &[b"spawn-test-phdr"];
+    let options = SpawnOptions {
+        name: "spawn-test-phdr",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let spawned = spawn_process(&exe, &options)?;
+    let recorded = pcb::main_phdr(spawned.pid);
+    let mut copy = alloc::vec![0u8; table.len()];
+    let read = pcb::pin_address_space(spawned.pid)
+        .ok_or(KernelError::NoSuchProcess)
+        .and_then(|pin| crate::mm::user::copy_from_user_as(pin.pml4(), PHDR_COPY_VADDR, &mut copy));
+    let auxv = pcb::linux_saved_auxv(spawned.pid).unwrap_or_default();
+    let le = |s: &[u8]| -> Option<u64> { Some(u64::from_le_bytes(s.try_into().ok()?)) };
+    let at_phdr = auxv
+        .chunks_exact(16)
+        .find(|e| e.get(..8).and_then(le) == Some(AT_PHDR))
+        .and_then(|e| e.get(8..16).and_then(le));
+    teardown_fixture(spawned.pid, spawned.task_id);
+
+    let want = MainPhdr {
+        vaddr: PHDR_COPY_VADDR,
+        phnum: exe_elf.header.e_phnum,
+        phentsize: exe_elf.header.e_phentsize,
+    };
+    if recorded != Some(want) {
+        serial_println!(
+            "[spawn]   FAIL: program headers: recorded {:?}, expected the copy {:?}",
+            recorded,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    if read.is_err() || copy.as_slice() != table {
+        return fail("the copied page does not hold the file's program-header table");
+    }
+    if at_phdr != Some(PHDR_COPY_VADDR) {
+        serial_println!(
+            "[spawn]   FAIL: program headers: AT_PHDR {:?}, expected the copy at {:#x}",
+            at_phdr,
+            PHDR_COPY_VADDR
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   program headers: found in a segment (+bias), copied to {:#x} when none holds them, AT_PHDR agrees: OK",
+        PHDR_COPY_VADDR
     );
     Ok(())
 }
@@ -21760,8 +27343,7 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TGT_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -21880,8 +27462,7 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TGT_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -21986,8 +27567,7 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
     // created a symlink resolving to "Z" before we tear it down.
     let kernel_readback = crate::fs::Vfs::readlink(LINK_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(LINK_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22164,8 +27744,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(dst_path);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(src_path);
     let _ = crate::fs::Vfs::remove(dst_path);
 
@@ -22473,8 +28052,7 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22585,8 +28163,7 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22711,8 +28288,7 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22829,8 +28405,7 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22948,8 +28523,7 @@ pub fn self_test_linux_evdev() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -23049,8 +28623,7 @@ pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23158,8 +28731,7 @@ pub fn self_test_linux_virtgpu_resource() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23254,8 +28826,7 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -23371,8 +28942,7 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
         Ok(r) => r,
         Err(e) => {
             // A was spawned; tear it down before bailing.
-            thread::on_thread_exit(a.task_id);
-            pcb::destroy(a.pid);
+            teardown_fixture(a.pid, a.task_id);
             serial_println!("[spawn]   FAIL: fs-tls proc B spawn returned {:?}", e);
             return Err(e);
         }
@@ -23394,10 +28964,8 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
     let a_exit = pcb::exit_code(a.pid);
     let b_exit = pcb::exit_code(b.pid);
 
-    thread::on_thread_exit(a.task_id);
-    thread::on_thread_exit(b.task_id);
-    pcb::destroy(a.pid);
-    pcb::destroy(b.pid);
+    teardown_fixture(a.pid, a.task_id);
+    teardown_fixture(b.pid, b.task_id);
 
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23489,8 +29057,7 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
         Ok(r) => r,
         Err(e) => {
             // A was spawned; tear it down before bailing.
-            thread::on_thread_exit(a.task_id);
-            pcb::destroy(a.pid);
+            teardown_fixture(a.pid, a.task_id);
             serial_println!("[spawn]   FAIL: gs-tls proc B spawn returned {:?}", e);
             return Err(e);
         }
@@ -23512,10 +29079,8 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
     let a_exit = pcb::exit_code(a.pid);
     let b_exit = pcb::exit_code(b.pid);
 
-    thread::on_thread_exit(a.task_id);
-    thread::on_thread_exit(b.task_id);
-    pcb::destroy(a.pid);
-    pcb::destroy(b.pid);
+    teardown_fixture(a.pid, a.task_id);
+    teardown_fixture(b.pid, b.task_id);
 
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23655,8 +29220,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -23756,8 +29320,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             crate::sched::yield_now();
             let st = pcb::state(r.pid);
             let ec = pcb::exit_code(r.pid);
-            thread::on_thread_exit(r.task_id);
-            pcb::destroy(r.pid);
+            teardown_fixture(r.pid, r.task_id);
             (st, ec)
         }
         Err(e) => {
@@ -23856,8 +29419,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             crate::sched::yield_now();
             let st = pcb::state(r.pid);
             let ec = pcb::exit_code(r.pid);
-            thread::on_thread_exit(r.task_id);
-            pcb::destroy(r.pid);
+            teardown_fixture(r.pid, r.task_id);
             (st, ec)
         }
         Err(e) => {
@@ -23951,8 +29513,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23975,6 +29536,549 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     serial_println!(
         "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 21 probes — size gate, \
          unknown tail, cap_mode, CapEntryInfo, cwd): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test that a futex on shared memory is one futex in every process
+/// that maps it: the kernel half of process-shared mutexes, condition
+/// variables and semaphores (lane D's request
+/// `d-a-futexes-keyed-by-physical-page-for-process-shared-objects`).
+///
+/// One shared-memory region, two processes:
+/// 1. the waiter ([`elf::build_shm_futex_waiter_elf`]) maps it and parks on
+///    the word at its start;
+/// 2. once the waiter is really queued -- under the word's physical key,
+///    which [`futex::waiters_on_shared_word`] reports -- the waker
+///    ([`elf::build_shm_futex_waker_elf`]) maps the region twice, stores 1
+///    through its *second* mapping, an address the waiter never used, and
+///    `FUTEX_WAKE`s it.  The wake must report one task woken, and the waiter
+///    must exit 0.
+///
+/// Before 2026-09-27 a futex was keyed by (address space, virtual address),
+/// so the waker's wake searched its own address space, woke nobody, and the
+/// waiter slept until this test killed it.
+///
+/// [`futex::waiters_on_shared_word`]: crate::ipc::futex::waiters_on_shared_word
+pub fn self_test_shm_futex() -> KernelResult<()> {
+    use crate::ipc::shm;
+
+    serial_println!("[spawn] Running cross-process shared-memory futex (ring 3) test...");
+    let region = shm::create(FRAME_SIZE)?;
+    let outcome = shm_futex_between_processes(region);
+    shm::close(region);
+    outcome
+}
+
+/// Spawn a shared-memory probe -- a side of [`self_test_shm_futex`], or
+/// [`self_test_shm_map_at`]'s -- and authorize it to map `region`.  Its
+/// program retries the map until the authorization lands.
+fn spawn_shm_probe(
+    region: crate::ipc::shm::ShmHandle,
+    image: &[u8],
+    name: &'static str,
+) -> KernelResult<SpawnResult> {
+    let argv: &[&[u8]] = &[name.as_bytes()];
+    let options = SpawnOptions {
+        name,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let side = spawn_process(image, &options)?;
+    if let Err(e) = crate::ipc::shm::authorize(region, side.pid) {
+        stop_shm_probe(&side);
+        return Err(e);
+    }
+    Ok(side)
+}
+
+/// Yield until `pid` is a zombie, up to `rounds` times; whether it got there.
+fn shm_probe_exited(pid: ProcessId, rounds: u32) -> bool {
+    for _ in 0..rounds {
+        if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+            return true;
+        }
+        crate::sched::yield_now();
+    }
+    pcb::state(pid) == Some(pcb::ProcessState::Zombie)
+}
+
+/// Force a shared-memory probe down and reclaim it, as the other runners
+/// here do, so a parked probe cannot outlive its test.
+fn stop_shm_probe(side: &SpawnResult) {
+    if pcb::state(side.pid) != Some(pcb::ProcessState::Zombie) {
+        // A forced exit's code is not what anything reads: the caller has
+        // already decided the outcome.  Ignoring a failure is safe for the
+        // same reason -- the kill below is what matters.
+        let _ = pcb::set_exit_code(side.pid, -1);
+        let killed = thread::kill_process_threads(side.pid);
+        serial_println!(
+            "[spawn]   (killed {} thread(s) of a shm-futex probe)",
+            killed
+        );
+        let _ = shm_probe_exited(side.pid, 2000);
+    }
+    teardown_fixture(side.pid, side.task_id);
+}
+
+/// The body of [`self_test_shm_futex`], for one region the caller closes.
+fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResult<()> {
+    let phys = *crate::ipc::shm::frame_addrs(region)?
+        .first()
+        .ok_or(KernelError::InternalError)?;
+
+    let waiter = spawn_shm_probe(
+        region,
+        &elf::build_shm_futex_waiter_elf(region.raw()),
+        "spawn-test-shm-futex-waiter",
+    )?;
+
+    // Wait for the waiter to park under the word's *physical* key.  That is
+    // the first half of what is being tested -- a private key here would mean
+    // the mapping was not seen as shared -- and it is what makes the wake
+    // below meaningful: a wake that ran before the wait would find nobody for
+    // an innocent reason.
+    let mut queued = false;
+    for _ in 0..4000 {
+        if crate::ipc::futex::waiters_on_shared_word(phys) == 1 {
+            queued = true;
+            break;
+        }
+        if pcb::state(waiter.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    if !queued {
+        let code = pcb::exit_code(waiter.pid);
+        stop_shm_probe(&waiter);
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the waiter never queued under the word's \
+             physical key (exit {:?}; 0x81: it could not map the region)",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let waker = match spawn_shm_probe(
+        region,
+        &elf::build_shm_futex_waker_elf(region.raw()),
+        "spawn-test-shm-futex-waker",
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            stop_shm_probe(&waiter);
+            return Err(e);
+        }
+    };
+
+    let waker_done = shm_probe_exited(waker.pid, 4000);
+    let waiter_done = shm_probe_exited(waiter.pid, 4000);
+    let waker_code = pcb::exit_code(waker.pid);
+    let waiter_code = pcb::exit_code(waiter.pid);
+    stop_shm_probe(&waker);
+    stop_shm_probe(&waiter);
+
+    if !waker_done || waker_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the waker exited {:?} (finished: {}); \
+             0x85 means its FUTEX_WAKE woke nobody, see build_shm_futex_waker_elf",
+            waker_code,
+            waker_done
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !waiter_done || waiter_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the woken waiter exited {:?} (finished: {})",
+            waiter_code,
+            waiter_done
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   shm futex across processes (ring 3): a waiter parked on a shared word \
+         was woken by another process through a different mapping of it: OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SYS_SHM_MAP_AT`: a shared-memory region mapped at the
+/// address the caller chooses (lane D's `d-a-shm-map-at-an-address`, what
+/// System V `shmat` does with a non-null address).  The probe program is
+/// [`elf::build_shm_map_at_probe_elf`]; its doc has the table of exit codes.
+pub fn self_test_shm_map_at() -> KernelResult<()> {
+    use crate::ipc::shm;
+
+    serial_println!("[spawn] Running SYS_SHM_MAP_AT (ring 3) test...");
+    let region = shm::create(FRAME_SIZE)?;
+    let outcome = (|| -> KernelResult<()> {
+        let probe = spawn_shm_probe(
+            region,
+            &elf::build_shm_map_at_probe_elf(region.raw()),
+            "spawn-test-shm-map-at",
+        )?;
+        let done = shm_probe_exited(probe.pid, 4000);
+        let code = pcb::exit_code(probe.pid);
+        stop_shm_probe(&probe);
+        if !done || code != Some(0) {
+            serial_println!(
+                "[spawn]   FAIL: SYS_SHM_MAP_AT (ring 3) -- probe {:#04x} disagreed (exit {:?}, \
+                 finished: {}); see build_shm_map_at_probe_elf's table",
+                code.unwrap_or(-1),
+                code,
+                done
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+    shm::close(region);
+    outcome?;
+    serial_println!(
+        "[spawn]   SYS_SHM_MAP_AT (ring 3: 10 probes -- a region mapped at a chosen address is \
+         the region, an occupied range is refused and replaced only with MAP_FIXED, a \
+         misaligned, kernel-half or out-of-window address is refused, 0 lets the kernel \
+         choose): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of native `SYS_MUNMAP`'s argument checks, run as an attacker
+/// would run them: from a process, holding no capability.
+///
+/// Until 2026-09-26 any process could unmap kernel pages this way and hand
+/// their frames back to the allocator (known-issues.md
+/// `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  The probe program is
+/// [`elf::build_munmap_abi_test_elf`]; its doc has the table of what each exit
+/// code checks.
+pub fn self_test_munmap_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running SYS_MUNMAP argument-ABI (ring 3) test...");
+
+    let probe_elf = elf::build_munmap_abi_test_elf();
+
+    let argv: &[&[u8]] = &[b"munmapabi"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-munmap-abi",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: munmap-abi probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Eight syscalls that do not block: the probe exits within its first
+    // slice.  The yields let the scheduler reap it, as the other probes do.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: munmap ABI (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: munmap ABI (ring 3) — probe {:#04x} disagreed (exit {:?}); \
+             see build_munmap_abi_test_elf's probe table for what that code checks",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   SYS_MUNMAP argument ABI (ring 3: 8 probes — kernel half, a range \
+         past USER_SPACE_END, overflow, zero length, misalignment refused; an empty \
+         user range and the last user frame accepted): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the payload size gates on the channel and UDP send
+/// syscalls: an oversize request is refused from its length alone, before the
+/// kernel reads -- or allocates for -- a byte of it.  The probe program is
+/// [`elf::build_sizegate_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_sizegate_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running send-size gate (ring 3) test...");
+
+    let probe_elf = elf::build_sizegate_abi_test_elf();
+    let argv: &[&[u8]] = &[b"sizegate"];
+    let envp: &[&[u8]] = &[];
+    // `udp_send` checks for a Socket capability before anything else, so
+    // without one probes 0x45 and 0x47 measure that check and never reach the
+    // gate. rq13, this rung's first boot, failed at 0x45 for exactly that
+    // reason. With the capability, the probe binds a socket of its own and
+    // every answer below is decided before a byte of payload is read, which
+    // is what the probes pin.
+    let caps = [(ResourceType::Socket, 0u64, Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-sizegate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: sizegate probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Eight syscalls that fail fast and never block.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: send-size gate (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: send-size gate (ring 3) — probe {:#04x} disagreed (exit {:?}); \
+             see build_sizegate_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   send-size gate (ring 3: 8 probes — four channel sends and a UDP send \
+         over their limits refused before the payload is read; in-limit controls and the \
+         64 KiB boundary reach the copy): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the per-call copy bound on the pipe and socketpair data
+/// syscalls: a 2 GiB request moves one buffer's worth, and a claim that runs
+/// out of user space is still refused.  The probe program is
+/// [`elf::build_callmax_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_callmax_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running pipe/socketpair per-call copy bound (ring 3) test...");
+
+    let probe_elf = elf::build_callmax_abi_test_elf();
+    let argv: &[&[u8]] = &[b"callmax"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-callmax",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: callmax probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Nine calls, four of which copy a megabyte: not three yields' worth on a
+    // loaded host.  Bounded, so a regression that blocks -- `0x55` without
+    // the span check reads an empty pipe forever -- fails rather than wedging
+    // the boot.
+    //
+    // What fails is a probe that has *waited* -- blocked, the regression's
+    // shape -- for 5 s, judged by its task's scheduler state rather than by
+    // the clock alone. A probe still running when 5 s are up is only slow
+    // (TCG with another lane compiling beside it); it gets up to 120 s, and
+    // still fails then. The process's own state says nothing here: it reads
+    // `Running` while its only thread is blocked, which is how debug boot 13
+    // of lane-a (2026-10-08) reported a probe blocked in a 2 GiB blocking
+    // `pipe_write` -- whole since that morning's e0ed7bd41 -- as one still
+    // running; the probe writes with `pipe_try_write` now.
+    const BLOCKED_NS: u64 = 5_000_000_000;
+    const RUNNING_NS: u64 = 120_000_000_000;
+    let start = crate::hrtimer::now_ns();
+    let mut blocked_since: Option<u64> = None;
+    let verdict = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break None;
+        }
+        let now = crate::hrtimer::now_ns();
+        let task = crate::sched::task_state(result.task_id);
+        if task == Some(crate::sched::task::TaskState::Blocked) {
+            let since = *blocked_since.get_or_insert(now);
+            if now.saturating_sub(since) >= BLOCKED_NS {
+                break Some("blocked for 5 s");
+            }
+        } else {
+            blocked_since = None;
+        }
+        if now.saturating_sub(start) >= RUNNING_NS {
+            break Some("still not done after 120 s");
+        }
+        crate::sched::yield_now();
+    };
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    if let Some(why) = verdict {
+        serial_println!(
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit: {} \
+             (state {:?}, task {:?}); a blocked 0x55 means the span check is gone",
+            why,
+            state,
+            crate::sched::task_state(result.task_id)
+        );
+        // Forced down, as the other runners here do, so a blocked probe
+        // cannot outlive its test.
+        let killed = thread::kill_process_threads(result.pid);
+        serial_println!("[spawn]   (killed the probe's {} thread(s))", killed);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+    teardown_fixture(result.pid, result.task_id);
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe {:#04x} disagreed \
+             (exit {:?}); see build_callmax_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   per-call copy bound (ring 3: 12 probes — 2 GiB pipe and socketpair \
+         transfers move one 64 KiB buffer from a 1 MiB segment, a pty master write \
+         takes one 4 KiB input queue and its read one ring; a claim past user space \
+         is still InvalidAddress): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of streamed file I/O: 2.5 MiB written in one call and read
+/// back with a 2 GiB length arrive whole and in order across the bounce
+/// buffer's chunk boundaries, and a 1.5 GiB write -- bigger than the vmalloc
+/// region -- writes what is mapped. The probe program is
+/// [`elf::build_filestream_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_filestream_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running streamed file I/O (ring 3) test...");
+
+    let probe_elf = elf::build_filestream_abi_test_elf();
+    let argv: &[&[u8]] = &[b"filestream"];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-filestream",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: filestream probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // About 8 MiB of file I/O on the memfs, and 2.5 MiB of `rep` scans.
+    let deadline = crate::hrtimer::now_ns().saturating_add(30_000_000_000); // 30 s
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: streamed file I/O (ring 3) — probe did not exit within 30s \
+             (state {:?})",
+            state
+        );
+        let killed = thread::kill_process_threads(result.pid);
+        serial_println!("[spawn]   (killed the probe's {} thread(s))", killed);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+    teardown_fixture(result.pid, result.task_id);
+    // The probe's file: tidy, not judged.
+    let _ = crate::fs::Vfs::remove("/tmp/.filestream-probe");
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: streamed file I/O (ring 3) — probe {:#04x} disagreed \
+             (exit {:?}); see build_filestream_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   streamed file I/O (ring 3: 14 probes — 2.5 MiB written in one call \
+         and read back with a 2 GiB length arrive whole and in order across the \
+         bounce buffer's chunks; a 1.5 GiB write from 3 MiB writes the 3 MiB; \
+         pread/pwrite leave the position where it was): OK"
     );
     Ok(())
 }
@@ -24116,8 +30220,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -24290,8 +30393,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     // are visible.)
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid); // closes the child's fd 1 → releases capture_handle
+    teardown_fixture(result.pid, result.task_id); // closes the child's fd 1 → releases capture_handle
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -24505,8 +30607,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     // Read the captured output before teardown releases the child's fd 1.
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid); // closes child fds 0 & 1 → releases both handles
+    teardown_fixture(result.pid, result.task_id); // closes child fds 0 & 1 → releases both handles
     let _ = crate::fs::Vfs::remove(INPUT);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
@@ -24692,8 +30793,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -24890,8 +30990,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25084,8 +31183,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25279,8 +31377,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25475,8 +31572,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25693,8 +31789,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
     // Release our own (open) reference to the capture handle.  The
     // parent's reference (dup_shared + register above) was already
@@ -25871,8 +31966,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26050,8 +32144,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26235,8 +32328,7 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26287,6 +32379,199 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// Run the genuine Oils shell once -- `argv` from `exe_path` -- with stdout and
+/// stderr captured to files, as `cmake_invoke` does. Returns the exit status
+/// and both streams.
+///
+/// # Errors
+///
+/// The capture files' open, or the spawn.
+fn oils_invoke(
+    exe_elf: &[u8],
+    exe_path: &str,
+    argv: &[&[u8]],
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    /// A shell starting up and running one line; bounds a hang.
+    const MAX_YIELDS: usize = 1_048_576;
+    const OUT: &str = "/tmp/oils-rung.out";
+    const ERR: &str = "/tmp/oils-rung.err";
+
+    // Fresh files per run, so a read-back can only see this run's bytes.
+    let _ = crate::fs::Vfs::remove(OUT);
+    let _ = crate::fs::Vfs::remove(ERR);
+    let flags = handle::OpenFlags::WRITE
+        .union(handle::OpenFlags::CREATE)
+        .union(handle::OpenFlags::TRUNCATE);
+    let out_handle = handle::open(OUT, flags)?;
+    let err_handle = handle::open(ERR, flags)?;
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::FILE, err_handle),
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"HOME=/tmp"];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-oils",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        exe_path: Some(exe_path.as_bytes()),
+        cwd: Some(b"/tmp"),
+        uid_gid: None,
+    };
+    let result = spawn_process(exe_elf, &options)?;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let finished = pcb::state(result.pid) == Some(pcb::ProcessState::Zombie);
+    let exit_code = pcb::exit_code(result.pid).filter(|_| finished);
+    let out = crate::fs::Vfs::read_file(OUT).unwrap_or_default();
+    let err = crate::fs::Vfs::read_file(ERR).unwrap_or_default();
+    teardown_fixture(result.pid, result.task_id);
+    Ok((exit_code, out, err))
+}
+
+/// The genuine Oils shell (`oils-for-unix`: OSH and YSH, built from upstream's
+/// C++ against SlateOS's C library) runs here, by lane B's request
+/// (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`; the operator's
+/// choice of default shell, design-decisions 1043). Four lines, each measured
+/// from the same release on Linux:
+///
+/// | Case | What it runs | What it shows |
+/// |---|---|---|
+/// | 1 | OSH: a command substitution, a function's status, extended globs in `[[ ]]` and `case` | a fork, a pipe and a wait; `fnmatch`'s `FNM_EXTMATCH` |
+/// | 2 | OSH: an unset variable's `?` | a C++ exception thrown and caught -- an abort here means libunwind found no unwind tables |
+/// | 3 | YSH: `json write` | YSH and its JSON writer |
+/// | 4 | YSH: a division by zero | the same exception path from YSH, status 3 |
+///
+/// Skips, counted, until lane D stages `/bin/oils-for-unix` and `/bin/ysh`
+/// on the image (`/mnt/bin/...` while the self-tests run).
+///
+/// # Errors
+///
+/// `InternalError` naming the case whose status, stdout or stderr differed.
+pub fn self_test_oils() -> KernelResult<()> {
+    const RUNG: &str = "genuine Oils (OSH and YSH)";
+    // Where the programs will be once the image is the root. argv[0] names
+    // these, since Oils picks OSH or YSH by the name it was run as.
+    const OILS: &str = "/bin/oils-for-unix";
+    const YSH: &str = "/bin/ysh";
+    // Where they are during the boot's self-tests: the image is at /mnt
+    // until the pivot, as the bash and CPython rungs read theirs.
+    const OILS_ON_IMAGE: &str = "/mnt/bin/oils-for-unix";
+    const YSH_ON_IMAGE: &str = "/mnt/bin/ysh";
+
+    struct Case {
+        label: &'static str,
+        exe: &'static str,
+        argv: &'static [&'static [u8]],
+        stdout: &'static [u8],
+        /// What stderr must end with (after trailing newlines), or empty for
+        /// nothing at all.
+        stderr_tail: &'static [u8],
+        status: i32,
+    }
+    const CASES: &[Case] = &[
+        Case {
+            label: "1 OSH: substitution, status, extended globs",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo osh-ok; [[ ab == @(ab|cd) ]] && echo extglob-ok; f() { return 3; }; f; \
+                  echo status=$?; x=$(echo sub); echo \"$x\"; \
+                  case abc in @(x|abc)) echo case-ok;; esac",
+            ],
+            stdout: b"osh-ok\nextglob-ok\nstatus=3\nsub\ncase-ok\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "2 OSH: an exception from an unset variable",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo before; : ${undefined_var?boom}; echo not-reached",
+            ],
+            stdout: b"before\n",
+            stderr_tail: b"[ -c flag ]:1: fatal: Var undefined_var is unset: 'boom'",
+            status: 1,
+        },
+        Case {
+            label: "3 YSH: json write",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"json write ({x: 42})"],
+            stdout: b"{\n  \"x\": 42\n}\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "4 YSH: an exception from a division by zero",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"var x = 1 / 0"],
+            stdout: b"",
+            stderr_tail: b"[ -c flag ]:1: fatal: Divide by zero",
+            status: 3,
+        },
+    ];
+
+    if pathz_missing(RUNG, &[OILS_ON_IMAGE, YSH_ON_IMAGE]) {
+        return Ok(());
+    }
+    serial_println!("[spawn] Running {} test...", RUNG);
+    let oils = crate::fs::Vfs::read_file(OILS_ON_IMAGE)?;
+    let ysh = crate::fs::Vfs::read_file(YSH_ON_IMAGE)?;
+
+    for case in CASES {
+        let elf = if case.exe == YSH { &ysh } else { &oils };
+        let (status, out, err) = oils_invoke(elf, case.exe, case.argv)?;
+        // Without its trailing newlines.
+        let kept = err
+            .iter()
+            .rposition(|&b| b != b'\n')
+            .map_or(0, |last| last.saturating_add(1));
+        let err_trimmed = err.get(..kept).unwrap_or(&[]);
+        let stderr_ok = if case.stderr_tail.is_empty() {
+            err.is_empty()
+        } else {
+            err_trimmed.ends_with(case.stderr_tail)
+        };
+        if status != Some(case.status) || out.as_slice() != case.stdout || !stderr_ok {
+            serial_println!(
+                "[spawn]   FAIL: Oils {} -- status {:?} (want {}), stdout `{}`, stderr `{}`",
+                case.label,
+                status,
+                case.status,
+                out.escape_ascii(),
+                err.escape_ascii()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[spawn]   {} (OSH's substitution, status and extended globs; C++ exceptions from \
+         OSH and YSH; YSH's JSON writer): OK",
+        RUNG
+    );
+    Ok(())
 }
 
 /// **CPython 3.12.3**, cross-compiled from source and linked against **our own
@@ -26516,8 +32801,7 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26751,8 +33035,7 @@ fn pkgconf_invoke(
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(out_path);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27064,6 +33347,408 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
     Ok(())
 }
 
+/// eSpeak NG's data directory on the image, which the battery sees at `/mnt`
+/// (the image becomes `/` only after it, design-decisions §1513).
+const ESPEAK_DATA_DIR: &str = "/mnt/usr/share/espeak-ng-data";
+
+/// `--path` for [`ESPEAK_DATA_DIR`]: eSpeak takes the directory that *holds*
+/// `espeak-ng-data`. Its compiled-in default, `/usr/share/espeak-ng-data`, is
+/// where the data is once the image is the root; during the battery it is
+/// not.
+const ESPEAK_PATH_ARG: &[u8] = b"--path=/mnt/usr/share";
+
+/// Run the staged eSpeak NG once with `args` (argv\[0\] is supplied), and
+/// return its exit code once it has exited.
+///
+/// stdout goes to a scratch file that is thrown away (with `-w` eSpeak writes
+/// nothing there), stderr to the console so a refusal is in the log. eSpeak
+/// opens and `stat`s its data files and writes its WAV: `(File, READ | WRITE |
+/// METADATA)`, the grant pkgconf's rung learnt the `METADATA` half of the hard
+/// way ([`pkgconf_invoke`]). It needs no environment: its data path is
+/// compiled in, or given by `--path`.
+///
+/// Waits on the clock, not on a yield count: synthesis is floating-point work
+/// whose cost under QEMU's emulation is the one thing here with no measured
+/// bound.
+fn espeak_invoke(label: &str, exe_elf: &[u8], args: &[&[u8]]) -> KernelResult<Option<i32>> {
+    use crate::fs::handle;
+
+    /// Scratch file for eSpeak's stdout.
+    const OUT_PATH: &str = "/espeak-out.txt";
+    /// How long one run may take, emulated.
+    const PATIENCE_NS: u64 = 300_000_000_000;
+
+    // Absent on a first run, which is the case to want; any other failure
+    // shows up as the open below failing.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    let out_handle = handle::open(
+        OUT_PATH,
+        handle::OpenFlags::WRITE
+            .union(handle::OpenFlags::CREATE)
+            .union(handle::OpenFlags::TRUNCATE),
+    )?;
+    let mut argv: alloc::vec::Vec<&[u8]> =
+        alloc::vec::Vec::with_capacity(args.len().saturating_add(1));
+    argv.push(b"/bin/espeak-ng".as_slice());
+    argv.extend_from_slice(args);
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::CONSOLE, 2_u64),
+    ];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-espeak",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv: &argv,
+        envp: &[],
+        exe_path: Some(b"/bin/espeak-ng"),
+        cwd: None,
+        uid_gid: None,
+    };
+    let spawned = spawn_process(exe_elf, &options);
+    // The child has its own dup of the capture file; ours goes before the `?`.
+    if let Err(e) = handle::close(out_handle) {
+        serial_println!(
+            "[spawn]   espeak {}: WARNING: closing the parent's capture handle failed: {:?}",
+            label,
+            e
+        );
+    }
+    let result = spawned?;
+
+    let start = crate::hrtimer::now_ns();
+    let mut exited = false;
+    while crate::hrtimer::now_ns().saturating_sub(start) < PATIENCE_NS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            exited = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let exit_code = pcb::exit_code(result.pid);
+    let state = pcb::state(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+    // Scratch; nothing reads it, and the next run truncates it anyway.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    if !exited {
+        serial_println!(
+            "[spawn]   FAIL: espeak {} did not exit within {} s (state={:?})",
+            label,
+            PATIENCE_NS / 1_000_000_000,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+    Ok(exit_code)
+}
+
+/// What [`self_test_espeak_on_slateos_libc`] reads out of a WAV file.
+struct WavFacts<'a> {
+    /// `fmt ` chunk: format tag (1 = PCM).
+    format: u16,
+    /// `fmt ` chunk: channels.
+    channels: u16,
+    /// `fmt ` chunk: samples per second.
+    rate: u32,
+    /// `fmt ` chunk: bits per sample.
+    bits: u16,
+    /// The `data` chunk's samples.
+    data: &'a [u8],
+}
+
+/// Read a RIFF/WAVE file's format and samples, walking its chunks -- and
+/// require the two sizes its writer patches in on close to be the file's
+/// own: `RIFF`'s (the file less 8) and `data`'s (to the end of the file).
+/// eSpeak writes placeholders and `fseek`s back to fix both, so a wrong one
+/// is our libc's `fseek`/`ftell`, not eSpeak.
+fn wav_facts(bytes: &[u8]) -> Result<WavFacts<'_>, &'static str> {
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(
+            bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+        ))
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+    if bytes.get(0..4) != Some(b"RIFF".as_slice()) || bytes.get(8..12) != Some(b"WAVE".as_slice()) {
+        return Err("not a RIFF/WAVE file");
+    }
+    let riff_size = u32_at(4).ok_or("no RIFF size")?;
+    if usize::try_from(riff_size).ok() != bytes.len().checked_sub(8) {
+        return Err("the RIFF size is not the file's (the close-time fseek/write went wrong)");
+    }
+    let mut format = None;
+    let mut at = 12usize;
+    while let (Some(id), Some(size)) = (
+        bytes.get(at..at.saturating_add(4)),
+        u32_at(at.saturating_add(4)),
+    ) {
+        let body = at.saturating_add(8);
+        let size = usize::try_from(size).map_err(|_| "a chunk size does not fit")?;
+        let end = body.checked_add(size).ok_or("a chunk size overflows")?;
+        if id == b"fmt " {
+            format = Some((
+                u16_at(body).ok_or("short fmt chunk")?,
+                u16_at(body.saturating_add(2)).ok_or("short fmt chunk")?,
+                u32_at(body.saturating_add(4)).ok_or("short fmt chunk")?,
+                u16_at(body.saturating_add(14)).ok_or("short fmt chunk")?,
+            ));
+        } else if id == b"data" {
+            if end != bytes.len() {
+                return Err(
+                    "the data size is not the rest of the file (the close-time fseek/write went wrong)",
+                );
+            }
+            let (format, channels, rate, bits) = format.ok_or("data before fmt")?;
+            let data = bytes.get(body..end).ok_or("data runs past the file")?;
+            return Ok(WavFacts {
+                format,
+                channels,
+                rate,
+                bits,
+                data,
+            });
+        }
+        // Chunks are padded to an even length.
+        at = end.checked_add(size & 1).ok_or("a chunk size overflows")?;
+    }
+    Err("no data chunk")
+}
+
+/// Path Z: **eSpeak NG 1.52**, the speech synthesizer Linux screen readers
+/// use, linked against OUR `libc.a` -- made to speak into a WAV file, and the
+/// file judged (`requests/e-a-espeak-ng-needs-a-ring-3-rung.md`).
+///
+/// A link with no missing symbols proves nothing is *missing*; this proves the
+/// program runs. It needs no sound device: the samples go to a file, and a
+/// file can be read back. Lane E measured every expectation on Linux, with
+/// the same source and data:
+///
+/// | # | run | expect |
+/// |---|---|---|
+/// | 1 | `espeak-ng -w fox.wav "The quick brown fox jumps over the lazy dog."` | exit 0; a PCM WAV, 1 channel, 22050 Hz, 16 bits, whose two patched-in sizes are the file's own |
+/// | 2 | its `data` | 2.0-4.0 s of samples (Linux: 2.8 s, 122,804 bytes) |
+/// | 3 | its samples | **not silence**: peak above 10,000 (Linux: 26,536), more than half non-zero (Linux: 78%) -- the row that proves synthesis ran; 1 and 2 pass for a correct header over zeros |
+/// | 4 | run 1 again | **byte-identical** -- eSpeak is deterministic, so a difference is uninitialised memory or a clock leaking into the synthesis |
+/// | 5 | `--path=/nonexistent ... "hi"` | **non-zero exit** -- without a case that must fail, the rung passes for a program that writes a plausible file whatever it is given |
+///
+/// Runs 1-4 pass `--path` ([`ESPEAK_PATH_ARG`]): the battery sees the image
+/// at `/mnt`, not where the compiled-in path points. Also prints, without
+/// asserting, whether the file's SHA-256 matches Linux's (`84388329afc664fb…`):
+/// synthesis is floating-point, so a match says our `libm` agrees with
+/// musl's to the last bit on this input, and a one-ulp difference is not the
+/// program failing.
+///
+/// No-op (returns `Ok(())`), loudly, when the image has no `/bin/espeak-ng` or
+/// its English data.
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] if any row above does not hold;
+/// [`KernelError::TimedOut`] if eSpeak never exits; staging and spawn
+/// failures.
+pub fn self_test_espeak_on_slateos_libc() -> KernelResult<()> {
+    const SRC: &str = "/mnt/bin/espeak-ng";
+    const DST: &str = "/bin/espeak-ng";
+    const WAV: &str = "/espeak-fox.wav";
+    const WAV_AGAIN: &str = "/espeak-fox2.wav";
+    const WAV_NONE: &str = "/espeak-none.wav";
+    const TEXT: &[u8] = b"The quick brown fox jumps over the lazy dog.";
+    const RUNG: &str = "eSpeak NG 1.52 linked against OUR libc.a (ring 3)";
+    /// The first 8 bytes of Linux's file's SHA-256, as lane E measured it.
+    const LINUX_SHA256_PREFIX: [u8; 8] = [0x84, 0x38, 0x83, 0x29, 0xaf, 0xc6, 0x64, 0xfb];
+
+    let required = [
+        SRC,
+        "/mnt/usr/share/espeak-ng-data/phondata",
+        "/mnt/usr/share/espeak-ng-data/phonindex",
+        "/mnt/usr/share/espeak-ng-data/phontab",
+        "/mnt/usr/share/espeak-ng-data/intonations",
+        "/mnt/usr/share/espeak-ng-data/en_dict",
+    ];
+    if pathz_missing(RUNG, &required) {
+        return Ok(());
+    }
+    serial_println!("[spawn] Running {} test...", RUNG);
+    serial_println!("[spawn]   espeak: data from {}", ESPEAK_DATA_DIR);
+
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    let exe_elf = match crate::fs::Vfs::read_file(SRC) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: espeak: reading {} failed: {:?}", SRC, e);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = crate::fs::Vfs::write_file(DST, &exe_elf) {
+        serial_println!("[spawn]   FAIL: espeak: staging {} failed: {:?}", DST, e);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   espeak: staged {} bytes -> {}",
+        exe_elf.len(),
+        DST
+    );
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: espeak: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let speak = |label: &str, wav: &str| -> KernelResult<Option<i32>> {
+        // A stale file from an earlier boot must not pass for this run's;
+        // absent is the usual answer.
+        let _ = crate::fs::Vfs::remove(wav);
+        espeak_invoke(
+            label,
+            &exe_elf,
+            &[ESPEAK_PATH_ARG, b"-w", wav.as_bytes(), TEXT],
+        )
+    };
+
+    // 1-3: speak, and judge the file.
+    let code = speak("the fox", WAV)?;
+    if code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: run 1 exited {:?}, expected 0",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+    let Ok(wav) = crate::fs::Vfs::read_file(WAV) else {
+        return fail("run 1 exited 0 and wrote no WAV file");
+    };
+    let facts = match wav_facts(&wav) {
+        Ok(f) => f,
+        Err(why) => {
+            serial_println!(
+                "[spawn]   FAIL: espeak: the WAV ({} bytes): {}",
+                wav.len(),
+                why
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    if (facts.format, facts.channels, facts.rate, facts.bits) != (1, 1, 22050, 16) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: format {} channels {} rate {} bits {}, expected PCM 1 x 22050 Hz x 16",
+            facts.format,
+            facts.channels,
+            facts.rate,
+            facts.bits
+        );
+        return Err(KernelError::InternalError);
+    }
+    // 22050 samples of 2 bytes a second: 2.0-4.0 s.
+    const BYTES_PER_S: usize = 22_050 * 2;
+    let len = facts.data.len();
+    if !(BYTES_PER_S * 2..=BYTES_PER_S * 4).contains(&len) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: {} bytes of samples is {} ms, expected 2000-4000 (Linux: 122804 bytes, 2785 ms)",
+            len,
+            len.saturating_mul(1000) / BYTES_PER_S
+        );
+        return Err(KernelError::InternalError);
+    }
+    let (mut peak, mut nonzero, mut samples) = (0u32, 0usize, 0usize);
+    for pair in facts.data.chunks_exact(2) {
+        let s = i16::from_le_bytes([
+            pair.first().copied().unwrap_or(0),
+            pair.get(1).copied().unwrap_or(0),
+        ]);
+        peak = peak.max(u32::from(s.unsigned_abs()));
+        nonzero = nonzero.saturating_add(usize::from(s != 0));
+        samples = samples.saturating_add(1);
+    }
+    if peak <= 10_000 || nonzero.saturating_mul(2) <= samples {
+        serial_println!(
+            "[spawn]   FAIL: espeak: peak {} and {} of {} samples non-zero -- silence, or nearly (Linux: peak 26536, 78% non-zero)",
+            peak,
+            nonzero,
+            samples
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   espeak: PCM 22050 Hz mono 16-bit, {} ms, peak {}, {}% non-zero: OK",
+        len.saturating_mul(1000) / BYTES_PER_S,
+        peak,
+        nonzero
+            .saturating_mul(100)
+            .checked_div(samples)
+            .unwrap_or(0)
+    );
+
+    // 4: the same words, the same bytes.
+    let code = speak("the fox again", WAV_AGAIN)?;
+    let again = crate::fs::Vfs::read_file(WAV_AGAIN).unwrap_or_default();
+    if code != Some(0) || again != wav {
+        serial_println!(
+            "[spawn]   FAIL: espeak: run 2 exited {:?} with {} bytes; run 1 wrote {} -- not byte-identical",
+            code,
+            again.len(),
+            wav.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 5: no data, no speech.
+    // As in `speak`: no stale file may stand in for this run's.
+    let _ = crate::fs::Vfs::remove(WAV_NONE);
+    let code = espeak_invoke(
+        "with no data",
+        &exe_elf,
+        &[b"--path=/nonexistent", b"-w", WAV_NONE.as_bytes(), b"hi"],
+    )?;
+    if code == Some(0) || code.is_none() {
+        serial_println!(
+            "[spawn]   FAIL: espeak: with no data directory it exited {:?}, expected non-zero",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Informational: does our libm agree with musl's to the last bit here?
+    let digest = crate::crypto::sha256(&wav);
+    let prefix = digest.get(..8).unwrap_or(&[]);
+    let hex = prefix
+        .iter()
+        .fold(alloc::string::String::with_capacity(16), |mut s, b| {
+            // Writing to a String cannot fail.
+            let _ = core::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+            s
+        });
+    serial_println!(
+        "[spawn]   espeak: SHA-256 {}... {} Linux's 84388329afc664fb (not asserted: a one-ulp libm difference is not a failure)",
+        hex,
+        if prefix == LINUX_SHA256_PREFIX.as_slice() {
+            "matches"
+        } else {
+            "differs from"
+        }
+    );
+
+    for wav_path in [WAV, WAV_AGAIN, WAV_NONE] {
+        // Scratch files of this rung; a leftover is harmless, as `speak`
+        // removes it before the next run anyway.
+        let _ = crate::fs::Vfs::remove(wav_path);
+    }
+    serial_println!(
+        "[spawn]   eSpeak NG on our own libc.a (ring 3: synthesis into a WAV, judged for format, \
+         length and sound; deterministic across two runs; refuses without its data): OK"
+    );
+    Ok(())
+}
+
 /// Path Z Part 10: run an **unmodified, prebuilt POSIX shell** (`dash`)
 /// that performs an output redirection itself.
 ///
@@ -27184,8 +33869,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27361,8 +34045,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27547,8 +34230,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27723,8 +34405,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27950,8 +34631,7 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SCRIPT);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
@@ -28137,8 +34817,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
     let _ = crate::fs::Vfs::remove(GLOB_A);
     let _ = crate::fs::Vfs::remove(GLOB_B);
@@ -28316,8 +34995,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28475,8 +35153,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28631,8 +35308,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28790,8 +35466,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28948,8 +35623,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29114,8 +35788,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29276,8 +35949,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29447,8 +36119,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let wrong_exists = crate::fs::Vfs::exists_or_err(WRONG_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(GOOD_PATH);
     let _ = crate::fs::Vfs::remove(WRONG_PATH);
 
@@ -29626,8 +36297,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29780,8 +36450,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29934,8 +36603,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -30194,8 +36862,7 @@ pub fn self_test_linux_slateos_make() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
     let _ = crate::fs::Vfs::remove(MAKEFILE_PATH);
 
@@ -30418,8 +37085,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 
     let cc_state = pcb::state(cc_result.pid);
     let cc_exit = pcb::exit_code(cc_result.pid);
-    thread::on_thread_exit(cc_result.task_id);
-    pcb::destroy(cc_result.pid);
+    teardown_fixture(cc_result.pid, cc_result.task_id);
 
     if !cc_reaped || cc_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -30559,8 +37225,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // opens an independent handle onto the same inode).
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(run_result.task_id);
-    pcb::destroy(run_result.pid);
+    teardown_fixture(run_result.pid, run_result.task_id);
     let _ = crate::fs::Vfs::remove(SRC_PATH);
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -30896,8 +37561,7 @@ fn spawn_reap_tcc(tcc_elf: &[u8], argv: &[&[u8]], label: &str) -> KernelResult<O
 
     let state = pcb::state(cc_result.pid);
     let exit = pcb::exit_code(cc_result.pid);
-    thread::on_thread_exit(cc_result.task_id);
-    pcb::destroy(cc_result.pid);
+    teardown_fixture(cc_result.pid, cc_result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -31065,8 +37729,7 @@ fn run_dynamic_capture(
     let exit = pcb::exit_code(run_result.pid);
     let out = crate::fs::Vfs::read_file(out_path);
 
-    thread::on_thread_exit(run_result.task_id);
-    pcb::destroy(run_result.pid);
+    teardown_fixture(run_result.pid, run_result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -31788,8 +38451,7 @@ int main(void){\n\
 
     let state = pcb::state(result.pid);
     let make_exit = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -32891,8 +39553,7 @@ fn test_spawn_from_elf() -> KernelResult<()> {
     // The process should now be a zombie (SYS_EXIT called
     // on_thread_exit automatically).  The manual call below is a
     // harmless no-op (the mapping was already removed).
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn from ELF (ring 3): OK");
     Ok(())
@@ -32947,8 +39608,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
     // Let thread run (ring 3 → SYS_EXIT) and clean up.
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with capabilities: OK");
     Ok(())
@@ -33033,8 +39693,7 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(heir.task_id);
-    pcb::destroy(heir.pid);
+    teardown_fixture(heir.pid, heir.task_id);
 
     if !inherited || !kept_write {
         serial_println!(
@@ -33065,8 +39724,7 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(orphan.task_id);
-    pcb::destroy(orphan.pid);
+    teardown_fixture(orphan.pid, orphan.task_id);
     pcb::destroy(parent);
 
     // `usize::MAX` is the "process vanished before we looked" sentinel from the
@@ -33197,8 +39855,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(heir.task_id);
-    pcb::destroy(heir.pid);
+    teardown_fixture(heir.pid, heir.task_id);
 
     if !has_read || has_write || has_secret || heir_count != 1 {
         serial_println!(
@@ -33302,8 +39959,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
                     what,
                     r.pid
                 );
-                thread::on_thread_exit(r.task_id);
-                pcb::destroy(r.pid);
+                teardown_fixture(r.pid, r.task_id);
                 pcb::destroy(parent);
                 return Err(KernelError::InternalError);
             }
@@ -33375,8 +40031,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(pauper.task_id);
-    pcb::destroy(pauper.pid);
+    teardown_fixture(pauper.pid, pauper.task_id);
     pcb::destroy(parent);
 
     if pauper_count != 0 {
@@ -33407,13 +40062,14 @@ fn test_ex2_copy_plan() -> KernelResult<()> {
     // The constants must describe the struct they gate, or every case below is
     // testing the wrong boundary.  `SPAWN_EX2_MIN_SIZE` is "version 1 plus the
     // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`,
-    // `cwd_ptr` and `cwd_len`.
-    if known != SPAWN_EX2_MIN_SIZE + 5 * 8 {
+    // `cwd_ptr`, `cwd_len`, and the six `posix_spawnattr_t` fields
+    // (`pgid_mode`, `pgid`, `sigmask_set`, `sigmask`, `sigdefault`, `setsid`).
+    if known != SPAWN_EX2_MIN_SIZE + 11 * 8 {
         serial_println!(
             "[spawn]   FAIL: SpawnEx2Args is {} bytes but SPAWN_EX2_MIN_SIZE implies {} \
              — a field was added without revisiting the minimum",
             known,
-            SPAWN_EX2_MIN_SIZE + 5 * 8
+            SPAWN_EX2_MIN_SIZE + 11 * 8
         );
         return Err(KernelError::InternalError);
     }
@@ -33549,8 +40205,7 @@ fn test_spawn_faulting_process() -> KernelResult<()> {
         serial_println!(
             "[spawn]          the null write did not fault; the process ran to SYS_EXIT instead"
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
     pcb::destroy(result.pid);
@@ -33601,8 +40256,7 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
             code_growth
         );
         serial_println!("[spawn]          stack growth failed and an unresolvable #PF killed it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
     pcb::destroy(result.pid);
@@ -33803,8 +40457,7 @@ fn test_exec_process() -> KernelResult<()> {
             state
         );
         // Clean up.
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -33819,14 +40472,12 @@ fn test_exec_process() -> KernelResult<()> {
         );
         serial_println!("[spawn]          the process DIED instead of exec-ing");
         // Clean up.
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
     // Clean up.
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Exec (replace process image): OK");
     Ok(())
@@ -33863,8 +40514,7 @@ fn test_seh_handler_exit() -> KernelResult<()> {
             "[spawn]   FAIL: SEH exit test — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -33880,12 +40530,10 @@ fn test_seh_handler_exit() -> KernelResult<()> {
             seh_code
         );
         serial_println!("[spawn]          the handler never ran and the #PF killed it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   SEH handler catches fault (calls SYS_EXIT): OK");
     Ok(())
@@ -33924,8 +40572,7 @@ fn test_seh_handler_resume() -> KernelResult<()> {
             "[spawn]   FAIL: SEH resume test — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -33941,12 +40588,10 @@ fn test_seh_handler_resume() -> KernelResult<()> {
             seh_code
         );
         serial_println!("[spawn]          the ud2 killed it instead of resuming past it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   SEH handler resumes execution (SYS_EXCEPTION_RETURN): OK");
     Ok(())
@@ -34036,8 +40681,7 @@ fn test_no_frame_leak() -> KernelResult<()> {
     crate::sched::reap_dead_tasks();
 
     // Now destroy the process (should free all user AS frames).
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let after = frame::stats().ok_or(KernelError::InternalError)?;
 
@@ -34207,8 +40851,7 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
 
@@ -34234,8 +40877,7 @@ fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with empty fd_map: OK");
     Ok(())
@@ -34255,8 +40897,7 @@ fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
             crate::sched::yield_now();
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             serial_println!("[spawn]   FAIL: spawn with invalid handle should fail");
             Err(KernelError::InternalError)
         }
@@ -34355,8 +40996,7 @@ fn test_spawn_with_pty_master() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // With both master references gone, closing the slave destroys the device.
     pty::close(slave);
@@ -34408,8 +41048,7 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
             serial_println!("[spawn]   FAIL: unowned pty master was accepted");
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             false
         }
     };
@@ -34427,6 +41066,161 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[spawn]   Spawn refuses a pty master the parent does not own: OK");
+    Ok(())
+}
+
+/// Test: a spawn hands its child a Unix-domain socket (`UNIX_SOCKET`), as a
+/// supervisor hands a listener or a connection to the service it starts.
+///
+/// The same three things as [`test_spawn_with_pty_master`]: the entry arrives
+/// tagged `UNIX_SOCKET` with the parent's value (the handle is the socket); the
+/// child owns it, so its `SYS_UNIX_*` calls are let through; and it is a hold
+/// of its own -- the socket outlives the parent's close, and ends with the
+/// child, which its peer sees as a hang-up. Then the refusal: a socket the
+/// spawning process does not hold is `InvalidHandle`, and takes no hold.
+fn test_spawn_suspended() -> KernelResult<()> {
+    use crate::sched::task::TaskState;
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: unstarted spawn: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let elf_data = elf::build_test_elf_public();
+    let unstarted = |name| {
+        spawn_process_suspended(
+            &elf_data,
+            &SpawnOptions::new(name),
+            None,
+            &[],
+            CapInherit::All,
+            SpawnAttrs::default(),
+        )
+    };
+
+    // Unstarted, it waits -- a wake is no start -- and dropped, it is undone:
+    // its thread dead without having run, its record gone.
+    let spawned = unstarted("spawn-test-unstarted")?;
+    let (pid, task_id) = (spawned.pid(), spawned.task_id());
+    let woke = crate::sched::wake(task_id);
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    let waited = crate::sched::task_state(task_id) == Some(TaskState::Blocked)
+        && pcb::state(pid).is_some_and(|s| s != pcb::ProcessState::Zombie)
+        && thread::owner_process(task_id) == Some(pid);
+    drop(spawned);
+    crate::sched::reap_dead_tasks();
+    let undone = pcb::state(pid).is_none()
+        && thread::owner_process(task_id).is_none()
+        && crate::sched::task_state(task_id).is_none_or(|s| s == TaskState::Dead);
+
+    // Started, it runs to its exit.
+    let result = unstarted("spawn-test-started")?.start()?;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let exited = pcb::state(result.pid) == Some(pcb::ProcessState::Zombie)
+        && pcb::exit_code(result.pid) == Some(0);
+    let report = if exited {
+        alloc::string::String::new()
+    } else {
+        unfinished_report(result.task_id)
+    };
+    crate::sched::reap_dead_tasks();
+    teardown_fixture(result.pid, result.task_id);
+
+    if woke || !waited {
+        return fail("it ran, or a wake started it, before it was started");
+    }
+    if !undone {
+        return fail("dropped unstarted, its process or thread was left behind");
+    }
+    if !exited {
+        serial_println!("[spawn]   started, it did not run to its exit: {}", report);
+        return fail("started, it did not run to its exit");
+    }
+    serial_println!(
+        "[spawn]   An unstarted spawn waits, is undone when dropped, and runs when started: OK"
+    );
+    Ok(())
+}
+
+fn test_spawn_with_unix_socket() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::ipc::unix_socket::{self, Kind};
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: unix socket: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let (mine, peer) = unix_socket::pair(Kind::Stream)?;
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(3_i32, fd_handle_type::UNIX_SOCKET, mine.raw())];
+
+    // Refused first, while the parent's hold is the only one: attributed to a
+    // pid that holds no socket.
+    let unowned = SpawnOptions::new("spawn-test-unix-unowned")
+        .fd_map(&fd_map)
+        .parent(1);
+    let refused = match spawn_process(&elf_data, &unowned) {
+        Err(KernelError::InvalidHandle) => true,
+        Err(_) => false,
+        Ok(result) => {
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            teardown_fixture(result.pid, result.task_id);
+            false
+        }
+    };
+
+    // `parent` 0: kernel-spawned, nobody's ownership to check.
+    let options = SpawnOptions::new("spawn-test-unix").fd_map(&fd_map);
+    let result = match spawn_process(&elf_data, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            unix_socket::close(mine);
+            unix_socket::close(peer);
+            return Err(e);
+        }
+    };
+    let child_fds = pcb::take_initial_fds(result.pid);
+    let arrived = child_fds.first().copied();
+    let owned = arrived
+        .is_some_and(|(_, _, h)| pcb::owns_ipc_handle(result.pid, ResourceType::UnixSocket, h));
+
+    // The parent lets go; the child's hold keeps the socket.
+    unix_socket::close(mine);
+    let survived = unix_socket::kind(mine).is_some();
+
+    // The child ends; its hold was the last, so the peer sees the hang-up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    teardown_fixture(result.pid, result.task_id);
+    let ended = unix_socket::kind(mine).is_none();
+    let hung_up = unix_socket::poll_status(peer) & 0x10 != 0;
+    unix_socket::close(peer);
+
+    if !refused {
+        return fail("a socket the spawning process does not hold was not InvalidHandle");
+    }
+    if child_fds.len() != 1 || arrived != Some((3, fd_handle_type::UNIX_SOCKET, mine.raw())) {
+        return fail("the child's entry was not (fd 3, UNIX_SOCKET, the parent's handle)");
+    }
+    if !owned {
+        return fail("the child does not own the inherited socket");
+    }
+    if !survived {
+        return fail("the socket ended with the parent's hold: the child had none of its own");
+    }
+    if !ended || !hung_up {
+        return fail("the socket outlived the child's hold, or its peer saw no hang-up");
+    }
+    serial_println!(
+        "[spawn]   Spawn passes on a Unix-domain socket (a hold of its own, owned; unowned refused): OK"
+    );
     Ok(())
 }
 
@@ -34498,8 +41292,7 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::Vfs::remove("/test_fd_oneshot.tmp");
 
@@ -34572,8 +41365,7 @@ fn test_spawn_with_argv() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with argv (3 args): OK");
     Ok(())
@@ -34616,8 +41408,7 @@ fn test_spawn_with_argv_envp() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with argv + envp: OK");
     Ok(())
@@ -34645,16 +41436,14 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // A relative (invalid) cwd is rejected by set_cwd → child stays at `/`.
     let bad = SpawnOptions::new("spawn-test-cwd-bad").cwd(b"relative/dir");
@@ -34668,16 +41457,14 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result2.task_id);
-            pcb::destroy(result2.pid);
+            teardown_fixture(result2.pid, result2.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result2.task_id);
-    pcb::destroy(result2.pid);
+    teardown_fixture(result2.pid, result2.task_id);
 
     serial_println!("[spawn]   Spawn with initial cwd (valid + invalid): OK");
     Ok(())
@@ -34753,12 +41540,338 @@ fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
     for &(pid, task) in spawned.iter().rev() {
-        thread::on_thread_exit(task);
-        pcb::destroy(pid);
+        teardown_fixture(pid, task);
     }
     if result.is_ok() {
         serial_println!(
             "[spawn]   Spawned child inherits cwd and umask; an explicit cwd wins; no parent keeps defaults: OK"
+        );
+    }
+    result
+}
+
+/// Test: [`ex2_attrs`] -- `SpawnEx2Args`'s six `posix_spawnattr_t` fields
+/// read into [`SpawnAttrs`], every value with no meaning refused.
+fn test_ex2_attrs() -> KernelResult<()> {
+    // SAFETY: `SpawnEx2Args` is `#[repr(C)]` and every field is a `u64`, so
+    // all-zero is a valid value -- the one the ABI defines as "ask for
+    // nothing".
+    let zero: SpawnEx2Args = unsafe { core::mem::zeroed() };
+    let with = |f: &dyn Fn(&mut SpawnEx2Args)| {
+        let mut a = zero;
+        f(&mut a);
+        ex2_attrs(&a)
+    };
+    let cases: [(&str, KernelResult<SpawnAttrs>, KernelResult<SpawnAttrs>); 12] = [
+        (
+            "all zero asks for nothing",
+            ex2_attrs(&zero),
+            Ok(SpawnAttrs::default()),
+        ),
+        (
+            "pgid_mode 1, pgid 0: a new group",
+            with(&|a| a.pgid_mode = 1),
+            Ok(SpawnAttrs {
+                pgroup: Some(0),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "pgid_mode 1, pgid 7: group 7",
+            with(&|a| {
+                a.pgid_mode = 1;
+                a.pgid = 7;
+            }),
+            Ok(SpawnAttrs {
+                pgroup: Some(7),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "a pgid without its mode is refused",
+            with(&|a| a.pgid = 7),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "a pgid that is not a pid_t is refused",
+            with(&|a| {
+                a.pgid_mode = 1;
+                a.pgid = 0x8000_0000;
+            }),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "pgid_mode 2 is refused",
+            with(&|a| a.pgid_mode = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigmask_set 1: that mask, 0 included",
+            with(&|a| a.sigmask_set = 1),
+            Ok(SpawnAttrs {
+                sigmask: Some(0),
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "a sigmask without its flag is refused",
+            with(&|a| a.sigmask = 1),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigmask_set 2 is refused",
+            with(&|a| a.sigmask_set = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "sigdefault takes any bits",
+            with(&|a| a.sigdefault = u64::MAX),
+            Ok(SpawnAttrs {
+                sigdefault: u64::MAX,
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "setsid 1",
+            with(&|a| a.setsid = 1),
+            Ok(SpawnAttrs {
+                setsid: true,
+                ..SpawnAttrs::default()
+            }),
+        ),
+        (
+            "setsid 2 is refused",
+            with(&|a| a.setsid = 2),
+            Err(KernelError::InvalidArgument),
+        ),
+    ];
+    for (what, got, want) in cases {
+        if got != want {
+            serial_println!(
+                "[spawn]   FAIL: ex2_attrs: {}: got {:?}, want {:?}",
+                what,
+                got,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[spawn]   SpawnEx2Args process group / session / signal fields: OK");
+    Ok(())
+}
+
+/// Test: a spawned child with a parent starts in its parent's process group
+/// and session, with its parent's blocked mask and ignored signals, and
+/// [`SpawnAttrs`] changes each before the child runs; an attribute that
+/// cannot be had fails the spawn with `NotPermitted` and leaves no process.
+///
+/// The parent is a process record with no thread (`pcb::create`): a spawn
+/// needs nothing more of its parent, and a parent that never runs cannot
+/// change anything under the test.
+fn test_spawn_job_and_signals() -> KernelResult<()> {
+    use crate::proc::signal;
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("spawn-job-parent", 0);
+    let bit = |sig: u32| signal::signal_bit(sig).unwrap_or(0);
+    let (sighup, sigint, sigquit, sigusr1) = (bit(1), bit(2), bit(3), bit(10));
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        signal::set_ignored(parent, sighup | sigquit, false)?;
+        let _ = signal::set_blocked(parent, sigint);
+        let mut spawn_with = |name: &'static str, attrs: SpawnAttrs| {
+            let r = spawn_process_with_attrs(
+                &elf_data,
+                &SpawnOptions::new(name).parent(parent),
+                CapInherit::All,
+                attrs,
+            );
+            if let Ok(ok) = &r {
+                spawned.push((ok.pid, ok.task_id));
+            }
+            r
+        };
+
+        // Nothing asked: the parent's group, session, mask and ignored set.
+        let plain = spawn_with("spawn-job-plain", SpawnAttrs::default())?.pid;
+        if pcb::get_pgid(plain) != Some(parent) || pcb::get_sid(plain) != Some(parent) {
+            return fail("a spawned child is not in its parent's group and session");
+        }
+        if signal::blocked(plain) != sigint || signal::ignored(plain) != sighup | sigquit {
+            return fail("a spawned child does not have its parent's mask and ignored set");
+        }
+
+        // Each attribute.
+        let attrs = SpawnAttrs {
+            pgroup: Some(0),
+            sigmask: Some(sigusr1),
+            sigdefault: sigquit,
+            setsid: false,
+        };
+        let grouped = spawn_with("spawn-job-grouped", attrs)?.pid;
+        if pcb::get_pgid(grouped) != Some(grouped) || pcb::get_sid(grouped) != Some(parent) {
+            return fail("POSIX_SPAWN_SETPGROUP 0 did not give the child a new group");
+        }
+        if signal::blocked(grouped) != sigusr1 || signal::ignored(grouped) != sighup {
+            return fail("SETSIGMASK / SETSIGDEF were not applied");
+        }
+        let joined = spawn_with(
+            "spawn-job-joined",
+            SpawnAttrs {
+                pgroup: Some(grouped),
+                ..SpawnAttrs::default()
+            },
+        )?
+        .pid;
+        if pcb::get_pgid(joined) != Some(grouped) {
+            return fail("POSIX_SPAWN_SETPGROUP did not join an existing group");
+        }
+        let leader = spawn_with(
+            "spawn-job-session",
+            SpawnAttrs {
+                setsid: true,
+                ..SpawnAttrs::default()
+            },
+        )?
+        .pid;
+        if pcb::get_sid(leader) != Some(leader) || pcb::get_pgid(leader) != Some(leader) {
+            return fail("POSIX_SPAWN_SETSID did not make the child a session leader");
+        }
+
+        // What cannot be had fails the spawn, and leaves nothing behind.
+        let before = pcb::count();
+        let refused = [
+            (
+                "a new session and a group",
+                SpawnAttrs {
+                    setsid: true,
+                    pgroup: Some(0),
+                    ..SpawnAttrs::default()
+                },
+            ),
+            (
+                "a group that does not exist",
+                SpawnAttrs {
+                    pgroup: Some(0x7FFF_FFF0),
+                    ..SpawnAttrs::default()
+                },
+            ),
+        ];
+        for (what, attrs) in refused {
+            if spawn_with("spawn-job-refused", attrs).err() != Some(KernelError::NotPermitted) {
+                serial_println!("[spawn]   FAIL: {} was not refused with NotPermitted", what);
+                return Err(KernelError::InternalError);
+            }
+        }
+        if pcb::count() != before {
+            return fail("a refused spawn left a process behind");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        teardown_fixture(pid, task);
+    }
+    crate::proc::signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   Spawned child: parent's group, session, mask, ignored set; attributes applied: OK"
+        );
+    }
+    result
+}
+
+/// Test: the child of a parent that ignores `SIGCHLD` is reaped by its own
+/// exit -- it never waits as a zombie, and the parent is sent nothing; with
+/// `SA_NOCLDWAIT` it is reaped and the parent still told; with neither it
+/// waits as a zombie for the parent.
+///
+/// End to end through a real exit: the child runs a program that exits at
+/// once, so the release under test is the one `thread::on_thread_exit`
+/// performs in the exiting thread's own context.
+fn test_spawn_child_of_sigchld_ignorer_is_reaped() -> KernelResult<()> {
+    use crate::proc::signal;
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("autoreap-parent", 0);
+    let sigchld = signal::signal_bit(signal::SIGCHLD).unwrap_or(0);
+    // A trampoline, so that a SIGCHLD the parent is sent is kept pending
+    // where the test can see it, rather than dropped as SIGCHLD's default.
+    signal::register_trampoline(parent, 0x4000);
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    // Spawn a child of `parent` and wait for its exit to settle: gone, or a
+    // zombie.
+    let mut run_child =
+        |name: &'static str| -> KernelResult<(ProcessId, Option<pcb::ProcessState>)> {
+            let child = spawn_process(&elf_data, &SpawnOptions::new(name).parent(parent))?;
+            spawned.push((child.pid, child.task_id));
+            for _ in 0..2000 {
+                match pcb::state(child.pid) {
+                    None | Some(pcb::ProcessState::Zombie) => break,
+                    _ => crate::sched::yield_now(),
+                }
+            }
+            Ok((child.pid, pcb::state(child.pid)))
+        };
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+
+        signal::set_ignored(parent, sigchld, false)?;
+        let (_, ignored) = run_child("autoreap-ignored")?;
+        if ignored.is_some() {
+            return fail("the child of a parent ignoring SIGCHLD was left behind");
+        }
+        if signal::pending(parent) & sigchld != 0 {
+            return fail("a parent ignoring SIGCHLD was sent it");
+        }
+
+        signal::set_ignored(parent, 0, true)?;
+        let (_, nocldwait) = run_child("autoreap-nocldwait")?;
+        if nocldwait.is_some() {
+            return fail("the child of a parent with SA_NOCLDWAIT was left behind");
+        }
+        if signal::pending(parent) & sigchld == 0 {
+            return fail("a parent with SA_NOCLDWAIT was not sent SIGCHLD");
+        }
+        signal::clear_pending(parent, sigchld);
+
+        signal::set_ignored(parent, 0, false)?;
+        let (collected, zombie) = run_child("autoreap-default")?;
+        if zombie != Some(pcb::ProcessState::Zombie) {
+            return fail("an ordinary child did not wait for its parent as a zombie");
+        }
+        if !matches!(pcb::try_reap(parent, collected), Ok(Some(_))) {
+            return fail("the ordinary child could not be reaped by its parent");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        // Already gone for all three when the test passed; this is for a
+        // failure part-way.
+        if pcb::state(pid).is_some() {
+            teardown_fixture(pid, task);
+        }
+    }
+    signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   SIGCHLD ignored / SA_NOCLDWAIT: the child is reaped at exit; otherwise a zombie: OK"
         );
     }
     result
@@ -34781,16 +41894,14 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // No uid_gid → child keeps the default root (uid 0) credentials.
     let dflt = SpawnOptions::new("spawn-test-uid-default");
@@ -34804,19 +41915,98 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result2.task_id);
-            pcb::destroy(result2.pid);
+            teardown_fixture(result2.pid, result2.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result2.task_id);
-    pcb::destroy(result2.pid);
+    teardown_fixture(result2.pid, result2.task_id);
 
     serial_println!("[spawn]   Spawn with initial uid/gid (explicit + default): OK");
     Ok(())
+}
+
+/// Test: a process's spawned child is its parent's user -- the parent's ids
+/// as an exec leaves them -- and keeps root's rights put aside only while
+/// one of its user ids is 0. Until 2026-10-08 every spawned child was root.
+fn test_spawn_inherits_credentials() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("cred-parent", 0);
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        pcb::grant_capability(parent, ResourceType::SystemClock, 0, Rights::WRITE)?;
+        // Root puts its authority aside: real and saved uid 0, effective
+        // 1000, and group 100 with a supplementary group.
+        let mut aside = pcb::ProcessCredentials::root();
+        aside.uid = 1000;
+        aside.fsuid = 1000;
+        aside.set_all_gids(100);
+        aside.groups = alloc::vec![7];
+        pcb::change_credentials(parent, aside)?;
+        if pcb::suspended_rights(parent) != 1 {
+            return fail("the parent's clock right was not put aside");
+        }
+        let child = spawn_process(&elf_data, &SpawnOptions::new("cred-child").parent(parent))?;
+        spawned.push((child.pid, child.task_id));
+        let mut want = pcb::ProcessCredentials::new(1000, 100);
+        want.ruid = 0;
+        want.groups = alloc::vec![7];
+        let got = pcb::get_credentials(child.pid);
+        if got.as_ref() != Some(&want) {
+            serial_println!("[spawn]   got {:?}, want {:?}", got, want);
+            return fail("the child is not its parent's user, as an exec leaves it");
+        }
+        if pcb::suspended_rights(child.pid) != 1
+            || pcb::has_capability_type(child.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail(
+                "the child of a parent with root's rights put aside does not have them aside",
+            );
+        }
+        // Every id 1000: the parent's authority is gone for good, and its
+        // child has no root id and nothing put aside.
+        pcb::change_credentials(parent, pcb::ProcessCredentials::new(1000, 100))?;
+        let user = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("cred-child-user").parent(parent),
+        )?;
+        spawned.push((user.pid, user.task_id));
+        if pcb::get_credentials(user.pid) != Some(pcb::ProcessCredentials::new(1000, 100)) {
+            return fail("a user's child is not that user");
+        }
+        if pcb::suspended_rights(user.pid) != 0
+            || pcb::has_capability_type(user.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail("a user's child has root's clock right");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        if pcb::state(pid).is_some() {
+            teardown_fixture(pid, task);
+        }
+    }
+    crate::proc::signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   A spawned child is its parent's user, root's rights aside only while a \
+             user id of its is 0: OK"
+        );
+    }
+    result
 }
 
 /// Test: take_initial_args is one-shot.
@@ -34853,8 +42043,7 @@ fn test_spawn_args_one_shot() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   take_initial_args is one-shot: OK");
     Ok(())
@@ -34900,10 +42089,8 @@ fn test_spawn_records_parent() -> KernelResult<()> {
     )?;
 
     let cleanup = |fail: bool| {
-        thread::on_thread_exit(child.task_id);
-        pcb::destroy(child.pid);
-        thread::on_thread_exit(parent.task_id);
-        pcb::destroy(parent.pid);
+        teardown_fixture(child.pid, child.task_id);
+        teardown_fixture(parent.pid, parent.task_id);
         if fail {
             Err(KernelError::InternalError)
         } else {
@@ -35082,8 +42269,7 @@ fn cmake_invoke(
     let out = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
     let err = crate::fs::Vfs::read_file(err_path).unwrap_or_default();
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(

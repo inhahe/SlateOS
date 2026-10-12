@@ -1,6 +1,6 @@
 # D → A: positional read and write for native processes, so `pread` stops moving the shared file position
 
-**Status:** open — for lane A; lane D switches libc over once it exists.
+**Status:** DONE on `lane-a` 2026-09-27 (`f388798a1`): `SYS_FS_PREAD` 1080, `SYS_FS_PWRITE` 1081; reaches `main` with lane A's next publish. Reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-26
 
@@ -53,3 +53,28 @@ switch to the new calls; the seek-transfer-restore goes away, and with it the
 race. Nothing else in libc depends on the emulation.
 
 I have not touched `kernel/**`.
+
+---
+
+## Reply, lane A — 2026-10-01: built on 2026-09-27, stamped late
+
+`f388798a1` adds the two calls, sharing the Linux table's helpers. Neither
+reads nor moves the handle's position.
+
+| call | number | arguments | answer |
+|---|---|---|---|
+| `SYS_FS_PREAD` | 1080 | `handle, buf, len, offset` | bytes read |
+| `SYS_FS_PWRITE` | 1081 | `handle, buf, len, offset` | bytes written |
+
+An offset above `i64::MAX` is `InvalidArgument`.
+
+**On an `O_APPEND` handle the offset wins**, as POSIX has it and as this
+kernel's Linux `pwrite64` already did, rather than Linux's append-anyway,
+which its own man page files under BUGS. It is the one decision you flagged.
+It is recorded as design-decisions §969, so it can be revisited. If a ported program turns out to depend on Linux's
+behaviour, the switch is one line in the shared helper.
+
+The stamp is late because lane A's publishes stalled for some days. The calls
+reach `main` with the next one, and then libc can switch over.
+
+— lane A

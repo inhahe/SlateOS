@@ -129,6 +129,21 @@ impl Stdout {
     /// write -- at a newline on a terminal, when the buffer overflows
     /// otherwise.
     pub fn write(&mut self, data: &[u8]) {
+        // A failure is the stream's error flag, which `fwrite` has set and
+        // `close_stdout` reports; `fputs`'s own answer is not looked at.
+        let _ = self.fwrite(data);
+    }
+
+    /// `fwrite (data, 1, len, stdout)` with its answer looked at: as
+    /// [`Stdout::write`], and the failure of a write this call forced out of
+    /// the buffer -- what makes `fwrite` come back short -- returned, its
+    /// `errno` with it. A program that checks (ncurses' `cat_file`) reports
+    /// it there; held in the buffer, the bytes have not failed yet.
+    ///
+    /// # Errors
+    ///
+    /// The failed `write(2)`'s, after which the stream's error flag is set.
+    pub fn fwrite(&mut self, data: &[u8]) -> io::Result<()> {
         self.held.extend_from_slice(data);
         self.held_units = self.held_units.saturating_add(self.units(data));
         let buffering = *self.buffering.get_or_insert_with(allocate);
@@ -143,13 +158,19 @@ impl Stdout {
         if let Some(n) = due {
             let chunk: Vec<u8> = self.held.drain(..n).collect();
             self.held_units = self.units(&self.held);
-            if let Err(e) = sys::write_all(sys::STDOUT, &chunk)
-                && self.failed.is_none()
-            {
-                // glibc drops what it could not write and sets the flag.
-                self.failed = Some(e);
+            if let Err(e) = sys::write_all(sys::STDOUT, &chunk) {
+                let answer = e.raw_os_error().map_or_else(
+                    || io::Error::new(e.kind(), e.to_string()),
+                    io::Error::from_raw_os_error,
+                );
+                if self.failed.is_none() {
+                    // glibc drops what it could not write and sets the flag.
+                    self.failed = Some(e);
+                }
+                return Err(answer);
             }
         }
+        Ok(())
     }
 
     /// `fflush(stdout)`: what is held, written now. A failure sets the
@@ -192,7 +213,17 @@ impl Stdout {
     /// `close_stdout`: flush what is held, report a failure as util-linux
     /// does, then judge stderr. Returns the status to exit with -- `status`,
     /// or `CLOSE_EXIT_CODE`.
-    pub fn close(mut self, status: u8, short: &[u8]) -> u8 {
+    pub fn close(self, status: u8, short: &[u8]) -> u8 {
+        self.close_exits(status, short).0
+    }
+
+    /// [`Stdout::close`], and whether `close_stdout` ended the process with
+    /// `_exit` -- which it does on every failure it judges, and which skips
+    /// what glibc's `exit` would have done afterwards: above all, giving a
+    /// shared standard input back what was read ahead of what was used
+    /// (`coreutils::stdio::StdioReader::exit_sync`). A caller that does such
+    /// a thing at the end does it only when this is `false`.
+    pub fn close_exits(mut self, status: u8, short: &[u8]) -> (u8, bool) {
         let earlier = self.failed.take();
         // `ferror(stdout) || fflush(stdout)`: with the flag set, nothing more
         // is written.
@@ -208,12 +239,10 @@ impl Stdout {
             Outcome::FailedBefore => warnx(short, "write error"),
             Outcome::FailedAtClose(e) => warn(short, "write error", e),
         }
-        verdict(
-            &stdout,
-            STDERR_FAILED.load(Ordering::Relaxed),
-            status,
-            self.close_exit_code,
-        )
+        let stderr_failed = STDERR_FAILED.load(Ordering::Relaxed);
+        let exited = stderr_failed || !matches!(stdout, Outcome::Fine);
+        let code = verdict(&stdout, stderr_failed, status, self.close_exit_code);
+        (code, exited)
     }
 }
 

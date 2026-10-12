@@ -220,7 +220,7 @@ TREE=
 # `POSIXLY_CORRECT` whether that is warned about. Exported, they would reach
 # this harness's own tools too.
 ENVV=()
-reset_knobs() { TREE='mktree'; ENVV=(); }
+reset_knobs() { TREE='mktree'; ENVV=(); CLOSING=; }
 reset_knobs
 
 scrub() { sed -e "s|$1|<DIR>|g"; }
@@ -238,7 +238,13 @@ run_one() {
     # `set_program_name` takes `argv[0]` whole, so GNU invoked by a long path
     # prefixes every diagnostic with that path while ours prints `touch:`.
     PATH="$bindir/$side:$PATH"
-    diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} touch "$@" >"$out" 2>"$err"
+    if [ -n "$CLOSING" ]; then
+      # Standard input or output closed for `touch` alone, after the
+      # captures; not `2>&-`, since `diff_run` duplicates standard error.
+      eval "diff_run timeout -k 2 30 env \${ENVV[@]+\"\${ENVV[@]}\"} touch \"\$@\" >\"\$out\" 2>\"\$err\" $CLOSING"
+    else
+      diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} touch "$@" >"$out" 2>"$err"
+    fi
   ) </dev/null
   echo $? >"$rcf"
   return 0
@@ -279,6 +285,7 @@ compare() {
   local o_rc=$work/or$case_no g_rc=$work/gr$case_no
   local label="${ENVV[*]:+${ENVV[*]} }touch $*"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
+  [ -n "$CLOSING" ] && label="$label   [$CLOSING]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
@@ -661,6 +668,17 @@ xfail_case 'version names SlateOS' --version
 # Measured: an option *after* `--help` is never looked at, while one before it
 # is an error. Both sides agree on the second, so it is a real case.
 run_case --bogus --help
+
+# Standard input or output closed. Upstream opens each file onto descriptor 0
+# (`fd_reopen`), sets its times through it and closes it; ours opens it where
+# it lands. Nothing reads standard input and nothing is written to standard
+# output but `--help`, so the two cannot be told apart -- these hold that.
+CLOSING='<&-'; run_case file
+CLOSING='<&-'; run_case newfile
+CLOSING='>&-'; run_case newfile
+CLOSING='<&- >&-'; run_case newfile file
+CLOSING='<&-'; run_case nosuchdir/x
+CLOSING='>&-'; run_case --help
 
 # The wording is the family's, not this harness's own: `scripts/all-diff.sh`
 # decides green by matching " 0 differed" in the tail line, so a summary that

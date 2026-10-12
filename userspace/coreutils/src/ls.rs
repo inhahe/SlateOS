@@ -2722,10 +2722,6 @@ struct Out<'a> {
     /// subtracting this counter from the real stream position gives
     /// `dired_pos`.
     uncounted: usize,
-    /// Whether a write to `sink` failed. A listing that could not be written is
-    /// an exit status, not a diagnostic — there is nowhere to report it that is
-    /// not the stream that just failed.
-    broken: bool,
     /// GNU's `used_color`: whether any escape has been emitted yet. It is a
     /// latch and not a copy of "colour is on", and the difference is visible:
     /// the *first* indicator to be written is preceded by a
@@ -2750,7 +2746,6 @@ impl std::fmt::Debug for Out<'_> {
             .field("sink", &self.sink.as_ref().map(|_| "<write>"))
             .field("flushed", &self.flushed)
             .field("uncounted", &self.uncounted)
-            .field("broken", &self.broken)
             .field("used_color", &self.used_color)
             .field("dired", &self.dired)
             .field("subdired", &self.subdired)
@@ -2788,6 +2783,15 @@ impl Out<'_> {
     /// their order are identical either way, and `--dired`'s offsets are
     /// counted from `flushed`, not from the start of the buffer. What matters
     /// is only that no write to stderr happens while stdout has bytes waiting.
+    ///
+    /// The bytes go into the sink -- standard output's `Stream`, stdio's
+    /// buffer -- and no further. The stream itself writes standard output out
+    /// before anything is written to standard error, which is `error()`'s
+    /// `fflush`; and what is still held at the end is written by
+    /// `close_stdout`, whose verdict depends on it: `ls >/dev/full` is `write
+    /// error: No space left on device` because the failure comes at the close,
+    /// and a flush here first would make it the reasonless `write error` of a
+    /// failure that came before. A failed write is the stream's to remember.
     fn flush(&mut self) {
         let Some(sink) = self.sink.as_mut() else {
             return;
@@ -2795,9 +2799,8 @@ impl Out<'_> {
         if self.buf.is_empty() {
             return;
         }
-        if sink.write_all(&self.buf).is_err() || sink.flush().is_err() {
-            self.broken = true;
-        }
+        // `Stream::write` never fails; a failure is recorded for the close.
+        let _ = sink.write_all(&self.buf);
         self.flushed = self.flushed.saturating_add(self.buf.len());
         self.buf.clear();
     }
@@ -5495,6 +5498,11 @@ fn stat_of(meta: &std::fs::Metadata) -> Stat {
 #[cfg(unix)]
 #[must_use]
 pub fn main(mode: Mode) -> ExitCode {
+    // The descriptors as the program was given them, which the binary's
+    // `guard_std_fds!` recorded before Rust's runtime put `/dev/null` on a
+    // closed one: `ls >&-` is `ls: write error: Bad file descriptor`, status
+    // 2, as GNU's is, not a listing written into nothing and called success.
+    stdfd::restore();
     // Ignored: set once, by the first call, which is the only call.
     let _ = MODE.set(mode);
     stdfd::close_stderr(run_main(), 2)
@@ -5534,14 +5542,22 @@ fn run_main() -> ExitCode {
         }
     };
 
+    // Standard output as stdio's: glibc's buffer, a failed write remembered
+    // rather than returned, and gnulib's `close_stdout` judging it at the end
+    // with `ls`'s failure status, 2 (`initialize_exit_failure (LS_FAILURE)`).
+    // It was `std::io::stdout()`, which turns a closed descriptor's `EBADF`
+    // into success, and `print!` for the help, which panicked on a full disk.
+    let mut stdout = Stream::stdout();
     let (cfg, operands) = match request {
         Request::Help => {
-            print!("{}", help_text());
-            return ExitCode::SUCCESS;
+            // Remembered by the stream, reported by the close.
+            let _ = stdout.write_all(help_text().as_bytes());
+            return stdfd::close_stdout_with(program_name(), stdout, ExitCode::SUCCESS, 2);
         }
         Request::Version => {
-            println!("{} (SlateOS coreutils) 0.1.0", program_name());
-            return ExitCode::SUCCESS;
+            // As above.
+            let _ = writeln!(stdout, "{} (SlateOS coreutils) 0.1.0", program_name());
+            return stdfd::close_stdout_with(program_name(), stdout, ExitCode::SUCCESS, 2);
         }
         Request::Run(cfg, operands) => (cfg, operands),
     };
@@ -5571,7 +5587,6 @@ fn run_main() -> ExitCode {
     // is no arrangement in which this streams a line at a time, and buffering
     // it deliberately is cheaper than a `BufWriter` flushing at arbitrary
     // points.
-    let mut stdout = std::io::stdout().lock();
     let tree = RealTree;
     let mut listing = Listing {
         tree: &tree,
@@ -5592,10 +5607,9 @@ fn run_main() -> ExitCode {
     };
     listing.run(&operands);
     listing.out.flush();
-    if listing.out.broken {
-        return ExitCode::from(2);
-    }
-    ExitCode::from(listing.status.0)
+    let status = listing.status.0;
+    drop(listing);
+    stdfd::close_stdout_with(program_name(), stdout, ExitCode::from(status), 2)
 }
 
 #[cfg(test)]

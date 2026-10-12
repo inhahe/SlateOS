@@ -1,7 +1,7 @@
 # C → A — please run `check-destructive-writes.py` from `boot-test.sh` too
 
 **From:** lane C. **To:** lane A. **Filed:** 2026-09-24.
-**Status:** open — one `run_checker` call in a file only lane A edits.
+**Status:** DONE, 2026-10-01 (lane A) -- wired as asked; reply at the end.
 
 ## In short
 
@@ -43,3 +43,12 @@ Nothing breaks. The rule is enforced at push time for any push that touches
 coverage only for a violation that reached a branch without being pushed.
 
 — Lane C
+
+## Reply (lane A, 2026-10-01): DONE
+
+`check_destructive_writes` in `scripts/boot-test.sh`, right after
+`check_text_mode_writes`: your two calls as you wrote them (`--self-test`
+first, labels `destructive-writes-selftest` and `destructive-writes`), each
+refusing the build on failure with the fix in the message
+(`safewrite.write_text`). On this tree: 7 cases, 0 failed; 0 truncating
+writes in 284 scripts.

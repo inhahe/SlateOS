@@ -1,4 +1,5 @@
-//! One spelling of a journal record, shared by everything that writes one.
+//! One spelling of a journal record, shared by everything that writes one
+//! and everything that reads one.
 //!
 //! `journalctl` reads JSON-lines records: `ts`, `level`, `service`, `msg`
 //! and `pid`, from `/var/log/syslog.jsonl` (and from `/var/log/journal/`,
@@ -12,12 +13,24 @@
 //! can forge entries around it. There is one escaper here and `syslogd`'s
 //! private copy is gone.
 //!
+//! The reading half -- [`parse_object`] and [`Value`] -- is shared for the
+//! same reason the other way round: two readers of one format drift apart,
+//! and did (see the `read` module).
+//!
 //! No dependencies and a `&str`/`String` API, so this stays a formatter and
-//! not a second libc -- §768's exemption.
+//! a parser, not a second libc -- §768's exemption.
 
 #![no_std]
 
 extern crate alloc;
+
+mod read;
+
+pub use read::{Value, parse_object};
+
+mod utc;
+
+pub use utc::Utc;
 
 use alloc::format;
 use alloc::string::String;
@@ -48,6 +61,36 @@ pub fn escape(s: &str) -> String {
     }
     out
 }
+/// A field's value as JSON: a string when the bytes are UTF-8, its control
+/// characters escaped as [`escape`] escapes them, and otherwise an array of
+/// the byte values -- the spelling `journalctl -o json` uses on Linux for a
+/// field that is not text (design-decisions §1063). Nothing is replaced or
+/// lost either way: a message of any bytes reads back as those bytes.
+#[must_use]
+pub fn json_value(bytes: &[u8]) -> String {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => {
+            let mut out = String::with_capacity(text.len().saturating_add(2));
+            out.push('"');
+            out.push_str(&escape(text));
+            out.push('"');
+            out
+        }
+        Err(_) => {
+            let mut out = String::with_capacity(bytes.len().saturating_mul(4).saturating_add(2));
+            out.push('[');
+            for (i, b) in bytes.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("{b}"));
+            }
+            out.push(']');
+            out
+        }
+    }
+}
+
 /// The eight syslog priorities, in the spellings `journalctl` prints.
 ///
 /// Indexed by the numeric priority, so `PRIORITY_NAMES[3]` is `err`.
@@ -76,6 +119,51 @@ pub fn priority_name(spec: &str) -> Option<&'static str> {
         _ => return None,
     };
     PRIORITY_NAMES.get(index).copied()
+}
+
+/// glibc's `facilitynames`, by number: the name a record's `facility` field
+/// carries. The first of two names for one number, so 4 is `auth`, not its
+/// alias `security`; 24 is `mark`, glibc's `INTERNAL_MARK`. Twelve to
+/// fifteen have no name there, nor does anything past 24 -- which a `<PRI>`
+/// or a stream's header can still say, since journald does not check.
+const FACILITY_NAMES: [Option<&str>; 25] = [
+    Some("kern"),
+    Some("user"),
+    Some("mail"),
+    Some("daemon"),
+    Some("auth"),
+    Some("syslog"),
+    Some("lpr"),
+    Some("news"),
+    Some("uucp"),
+    Some("cron"),
+    Some("authpriv"),
+    Some("ftp"),
+    None,
+    None,
+    None,
+    None,
+    Some("local0"),
+    Some("local1"),
+    Some("local2"),
+    Some("local3"),
+    Some("local4"),
+    Some("local5"),
+    Some("local6"),
+    Some("local7"),
+    Some("mark"),
+];
+
+/// The name glibc gives facility number `facility` (not shifted: `daemon` is
+/// 3), if it gives one. Shared by every writer that files a facility --
+/// `logger`, `syslogd`, `systemd-cat` -- so that one number is not two names.
+#[must_use]
+pub fn facility_name(facility: u32) -> Option<&'static str> {
+    usize::try_from(facility)
+        .ok()
+        .and_then(|i| FACILITY_NAMES.get(i))
+        .copied()
+        .flatten()
 }
 
 /// One journal record, in the fields `journalctl` reads.
@@ -132,11 +220,67 @@ impl Record {
     }
 }
 
+/// A record whose text may be any bytes: what a syslog daemon files, since a
+/// datagram from `/dev/log` is whatever its sender wrote. Written as
+/// [`Record`] is, field for field -- each value through [`json_value`], so a
+/// record whose text happens to be UTF-8 is byte for byte the one [`Record`]
+/// would write.
+#[derive(Debug, Clone, Copy)]
+pub struct ByteRecord<'a> {
+    /// Seconds since the epoch.
+    pub ts: u64,
+    /// `emerg`..`debug`.
+    pub level: &'a str,
+    /// The originating identifier.
+    pub service: &'a [u8],
+    /// The line itself.
+    pub msg: &'a [u8],
+    /// The process the line is attributed to, when one is known.
+    pub pid: Option<u32>,
+}
+
+impl ByteRecord<'_> {
+    /// The record as one JSON-lines entry, without the trailing newline, with
+    /// `extra` after the fields above, in order, as
+    /// [`Record::to_json_line_with`] writes its own.
+    #[must_use]
+    pub fn to_json_line_with(&self, extra: &[(&str, &[u8])]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("\"ts\":{}", self.ts));
+        parts.push(format!("\"level\":\"{}\"", escape(self.level)));
+        parts.push(format!("\"service\":{}", json_value(self.service)));
+        parts.push(format!("\"msg\":{}", json_value(self.msg)));
+        if let Some(pid) = self.pid {
+            parts.push(format!("\"pid\":{pid}"));
+        }
+        for (key, value) in extra {
+            parts.push(format!("\"{}\":{}", escape(key), json_value(value)));
+        }
+        let mut out = String::from("{");
+        out.push_str(&parts.join(","));
+        out.push('}');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::ToString;
     use alloc::vec;
+
+    #[test]
+    fn facility_names_are_glibcs() {
+        assert_eq!(facility_name(0), Some("kern"));
+        assert_eq!(facility_name(3), Some("daemon"));
+        assert_eq!(facility_name(4), Some("auth"), "not its alias, security");
+        assert_eq!(facility_name(10), Some("authpriv"));
+        assert_eq!(facility_name(12), None);
+        assert_eq!(facility_name(23), Some("local7"));
+        assert_eq!(facility_name(24), Some("mark"));
+        assert_eq!(facility_name(25), None);
+        assert_eq!(facility_name(u32::MAX), None);
+    }
 
     /// The reason this is one function and not two. A message is
     /// attacker-shaped text: a bare quote ends the field and a bare newline
@@ -176,6 +320,54 @@ mod tests {
         assert_eq!(
             r.to_json_line(),
             r#"{"ts":1716000000,"level":"info","service":"net.dhcp","msg":"lease renewed","pid":42}"#
+        );
+    }
+
+    #[test]
+    fn a_value_that_is_text_is_a_string_and_one_that_is_not_is_its_bytes() {
+        assert_eq!(json_value(b"plain"), "\"plain\"");
+        assert_eq!(json_value(b"a\"b\n"), "\"a\\\"b\\n\"");
+        // Valid UTF-8 with a control character is still text: escaped.
+        assert_eq!(json_value(b"\x01x"), "\"\\u0001x\"");
+        assert_eq!(json_value(b"bad \xff"), "[98,97,100,32,255]");
+        assert_eq!(json_value(b""), "\"\"");
+    }
+
+    #[test]
+    fn a_byte_record_of_text_is_the_record_a_record_would_write() {
+        let text = Record {
+            ts: 1_716_000_000,
+            level: "info".to_string(),
+            service: "net.dhcp".to_string(),
+            msg: "lease renewed".to_string(),
+            pid: Some(42),
+        };
+        let bytes = ByteRecord {
+            ts: 1_716_000_000,
+            level: "info",
+            service: b"net.dhcp",
+            msg: b"lease renewed",
+            pid: Some(42),
+        };
+        assert_eq!(bytes.to_json_line_with(&[]), text.to_json_line());
+        assert_eq!(
+            bytes.to_json_line_with(&[("facility", b"daemon")]),
+            text.to_json_line_with(&[("facility".to_string(), "daemon".to_string())])
+        );
+    }
+
+    #[test]
+    fn a_byte_record_keeps_a_message_that_is_not_text() {
+        let r = ByteRecord {
+            ts: 1,
+            level: "notice",
+            service: b"t",
+            msg: b"\xff\x00",
+            pid: None,
+        };
+        assert_eq!(
+            r.to_json_line_with(&[]),
+            r#"{"ts":1,"level":"notice","service":"t","msg":[255,0]}"#
         );
     }
 

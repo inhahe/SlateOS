@@ -248,6 +248,10 @@ pub fn register(service_id: u32, spec: SocketSpec) -> KernelResult<u32> {
         last_activity_ns: initial_activity_ns,
     });
 
+    // The log takes the event ring's lock, which may not nest under `STATE`
+    // -- a `PreemptSpinMutex`, and so a leaf (design-decisions 975; rq43's
+    // leaf check caught this pair).
+    drop(state);
     crate::syslog!(
         "service.sockact",
         Info,
@@ -269,6 +273,8 @@ pub fn unregister(entry_id: u32) -> KernelResult<()> {
         .position(|e| e.id == entry_id)
         .ok_or(KernelError::NotFound)?;
     let entry = state.entries.remove(idx);
+    // Logged without `STATE`, as `register` does.
+    drop(state);
 
     crate::syslog!(
         "service.sockact",
@@ -398,6 +404,8 @@ pub fn trigger(entry_id: u32) -> KernelResult<bool> {
             {
                 state.total_failed += 1;
             }
+            // Logged without `STATE`, as `register` does.
+            drop(state);
 
             crate::syslog!(
                 "service.sockact",
@@ -441,6 +449,8 @@ pub fn claim(service_id: u32) -> u32 {
     {
         state.total_claims += claims;
     }
+    // Logged without `STATE`, as `register` does.
+    drop(state);
 
     if total_pending > 0 {
         crate::syslog!(

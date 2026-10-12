@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Remote Desktop
+Comment=See and use another computer's screen
+Icon=preferences-desktop-remote-desktop
+Exec=remotedesktop
+Categories=Network;RemoteAccess;
+Keywords=vnc;remote;

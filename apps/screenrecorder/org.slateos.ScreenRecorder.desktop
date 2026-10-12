@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Screen Recorder
+Comment=Record what happens on the screen
+Icon=camera-video
+Exec=screenrecorder
+Categories=AudioVideo;Video;Recorder;
+Keywords=record;screencast;

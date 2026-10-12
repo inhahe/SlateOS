@@ -202,6 +202,14 @@ struct StorageState {
 static STATE: Mutex<Option<StorageState>> = Mutex::new(None);
 static OPS: AtomicU64 = AtomicU64::new(0);
 
+/// Run `f` on the state under `STATE`'s lock, and count it as an operation.
+///
+/// `STATE` is a `PreemptSpinMutex`, the kind that skips lockdep on the
+/// promise that nothing nests inside it (design-decisions 975), and it holds
+/// preemption off: `f` must take no other lock -- no filesystem call, no
+/// thumbnail cache -- and must not be slow. Copy out what the work needs, do
+/// the work without the lock, and come back to record the result, as `scan`,
+/// `clean` and `clean_paths` do.
 fn with_state<F, R>(f: F) -> KernelResult<R>
 where
     F: FnOnce(&mut StorageState) -> KernelResult<R>,
@@ -261,71 +269,65 @@ pub fn init_defaults() {
 pub fn scan() -> KernelResult<ScanReport> {
     let start_ns = crate::hpet::elapsed_ns();
 
-    with_state(|state| {
-        state.items.clear();
+    // What the scanners need, read under the lock; the scan itself runs
+    // without it. It walks the filesystem, and `STATE` is a leaf lock that
+    // nothing may be taken under (design-decisions 975) -- until 2026-10-02
+    // the whole scan ran inside it, with preemption off throughout (rq43's
+    // leaf check named fourteen locks taken under it).
+    let (excl, retention_days, large_threshold, download_days) = with_state(|state| {
+        Ok((
+            state.config.exclusions.clone(),
+            state.config.log_retention_days,
+            state.config.large_file_threshold,
+            state.config.old_download_days,
+        ))
+    })?;
 
-        // Snapshot the exclusion list up front: the scanners need to read it
-        // while `state.items` is mutably borrowed, which a borrow of
-        // `state.config` would forbid.
-        let excl = state.config.exclusions.clone();
-        let retention_days = state.config.log_retention_days;
-        let large_threshold = state.config.large_file_threshold;
-        let download_days = state.config.old_download_days;
+    let mut items: Vec<CleanItem> = Vec::new();
+    let trash_bytes = scan_trash(&mut items, &excl);
+    let temp_bytes = scan_temp_files(&mut items, &excl);
+    let thumb_bytes = scan_thumbnails(&mut items);
+    let log_bytes = scan_log_files(&mut items, &excl, retention_days);
+    let pkg_bytes = scan_package_cache(&mut items, &excl);
+    let large_bytes = scan_large_files(&mut items, &excl, large_threshold);
+    let download_bytes = scan_old_downloads(&mut items, &excl, download_days);
 
-        // Category: Trash — query trash module
-        let trash_bytes = scan_trash(&mut state.items, &excl);
-
-        // Category: TempFiles — query /tmp
-        let temp_bytes = scan_temp_files(&mut state.items, &excl);
-
-        // Category: Thumbnails — query thumbcache
-        let thumb_bytes = scan_thumbnails(&mut state.items);
-
-        // Category: LogFiles
-        let log_bytes = scan_log_files(&mut state.items, &excl, retention_days);
-
-        // Category: PackageCache
-        let pkg_bytes = scan_package_cache(&mut state.items, &excl);
-
-        // Category: LargeFiles
-        let large_bytes = scan_large_files(&mut state.items, &excl, large_threshold);
-
-        // Category: OldDownloads
-        let download_bytes = scan_old_downloads(&mut state.items, &excl, download_days);
-
-        // Build category summaries
-        let mut categories = Vec::new();
-        for cat in CleanCategory::all() {
-            let items: Vec<&CleanItem> =
-                state.items.iter().filter(|i| i.category == *cat).collect();
-            if !items.is_empty() {
-                let total: u64 = items.iter().map(|i| i.size_bytes).sum();
-                categories.push(CategorySummary {
-                    category: *cat,
-                    item_count: items.len(),
-                    total_bytes: total,
-                    recommended: total > 1024 * 1024, // Recommend if > 1 MiB
-                });
-            }
+    // Category summaries.
+    let mut categories = Vec::new();
+    for cat in CleanCategory::all() {
+        let in_cat: Vec<&CleanItem> = items.iter().filter(|i| i.category == *cat).collect();
+        if !in_cat.is_empty() {
+            let total: u64 = in_cat.iter().map(|i| i.size_bytes).sum();
+            categories.push(CategorySummary {
+                category: *cat,
+                item_count: in_cat.len(),
+                total_bytes: total,
+                recommended: total > 1024 * 1024, // Recommend if > 1 MiB
+            });
         }
+    }
 
-        let total_bytes = trash_bytes
-            + temp_bytes
-            + thumb_bytes
-            + log_bytes
-            + pkg_bytes
-            + large_bytes
-            + download_bytes;
+    let total_bytes = [
+        trash_bytes,
+        temp_bytes,
+        thumb_bytes,
+        log_bytes,
+        pkg_bytes,
+        large_bytes,
+        download_bytes,
+    ]
+    .iter()
+    .fold(0u64, |sum, &b| sum.saturating_add(b));
+    let elapsed_us = crate::hpet::elapsed_ns().saturating_sub(start_ns) / 1000;
+    let report = ScanReport {
+        total_reclaimable_bytes: total_bytes,
+        total_items: items.len(),
+        scan_duration_us: elapsed_us,
+        categories,
+    };
 
-        let elapsed_us = (crate::hpet::elapsed_ns() - start_ns) / 1000;
-
-        let report = ScanReport {
-            total_reclaimable_bytes: total_bytes,
-            total_items: state.items.len(),
-            scan_duration_us: elapsed_us,
-            categories,
-        };
-
+    with_state(|state| {
+        state.items = items;
         state.last_report = Some(report.clone());
         state.total_scans += 1;
         Ok(report)
@@ -558,69 +560,75 @@ pub fn items_for_category(cat: CleanCategory) -> Vec<CleanItem> {
 /// items stay in the cache and contribute nothing to `freed_bytes`. Use
 /// [`clean_paths`] to delete the specific files the user picked out of them.
 pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
-    with_state(|state| {
-        let mut freed = 0u64;
-        let mut cleaned = 0usize;
-        let mut errors = 0usize;
-        let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
+    // The scan's items in the categories asked for, copied under the lock;
+    // the deletions run without it, as `scan`'s walk does (design-decisions
+    // 975: `STATE` is a leaf).
+    let todo: Vec<CleanItem> = with_state(|state| {
+        Ok(state
+            .items
+            .iter()
+            .filter(|i| !i.category.is_advisory() && categories.contains(&i.category))
+            .cloned()
+            .collect())
+    })?;
 
-        for cat in categories {
-            if cat.is_advisory() {
-                continue;
-            }
-            let mut cat_freed = 0u64;
-            let items_to_clean: Vec<CleanItem> = state
-                .items
-                .iter()
-                .filter(|i| i.category == *cat)
-                .cloned()
-                .collect();
+    let mut freed = 0u64;
+    let mut cleaned = 0usize;
+    let mut errors = 0usize;
+    let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
 
-            for item in &items_to_clean {
-                match *cat {
-                    CleanCategory::Trash
-                    | CleanCategory::TempFiles
-                    | CleanCategory::LogFiles
-                    | CleanCategory::PackageCache => {
-                        // Every scanned item in these categories names a real
-                        // file, so a `None` path here is a scanner bug; count
-                        // it as an error rather than swallowing it.
-                        match item.path.as_ref() {
-                            Some(p) if crate::fs::Vfs::remove(p).is_ok() => {
-                                cat_freed = cat_freed.saturating_add(item.size_bytes);
-                                cleaned = cleaned.saturating_add(1);
-                            }
-                            _ => errors = errors.saturating_add(1),
+    for cat in categories {
+        if cat.is_advisory() {
+            continue;
+        }
+        let mut cat_freed = 0u64;
+        for item in todo.iter().filter(|i| i.category == *cat) {
+            match *cat {
+                CleanCategory::Trash
+                | CleanCategory::TempFiles
+                | CleanCategory::LogFiles
+                | CleanCategory::PackageCache => {
+                    // Every scanned item in these categories names a real
+                    // file, so a `None` path here is a scanner bug; count it
+                    // as an error rather than swallowing it.
+                    match item.path.as_ref() {
+                        Some(p) if crate::fs::Vfs::remove(p).is_ok() => {
+                            cat_freed = cat_freed.saturating_add(item.size_bytes);
+                            cleaned = cleaned.saturating_add(1);
                         }
-                    }
-                    CleanCategory::Thumbnails => {
-                        crate::fs::thumbcache::clear();
-                        cat_freed = cat_freed.saturating_add(item.size_bytes);
-                        cleaned = cleaned.saturating_add(1);
-                    }
-                    CleanCategory::DuplicateFiles
-                    | CleanCategory::LargeFiles
-                    | CleanCategory::OldDownloads => {
-                        unreachable!("advisory categories skipped above")
+                        _ => errors = errors.saturating_add(1),
                     }
                 }
+                CleanCategory::Thumbnails => {
+                    crate::fs::thumbcache::clear();
+                    cat_freed = cat_freed.saturating_add(item.size_bytes);
+                    cleaned = cleaned.saturating_add(1);
+                }
+                // Filtered out above: an advisory category's items are never
+                // in `todo`.
+                CleanCategory::DuplicateFiles
+                | CleanCategory::LargeFiles
+                | CleanCategory::OldDownloads => {}
             }
-
-            if cat_freed > 0 {
-                category_freed.push((*cat, cat_freed));
-            }
-            freed = freed.saturating_add(cat_freed);
         }
+        if cat_freed > 0 {
+            category_freed.push((*cat, cat_freed));
+        }
+        freed = freed.saturating_add(cat_freed);
+    }
 
-        // Drop the cleaned items from the cache. Advisory categories were left
-        // untouched on disk, so their items must survive here too — otherwise
-        // the UI would show the recommendations vanishing as if acted upon.
-        state
-            .items
-            .retain(|i| i.category.is_advisory() || !categories.contains(&i.category));
+    // Drop the items this call handled from the cache, and only those: a scan
+    // that ran while the lock was free has put its own there. Advisory
+    // categories were left untouched on disk, so their items stay -- otherwise
+    // the UI would show the recommendations vanishing as if acted upon.
+    with_state(|state| {
+        state.items.retain(|i| {
+            !todo
+                .iter()
+                .any(|t| t.category == i.category && t.path == i.path)
+        });
         state.total_freed = state.total_freed.saturating_add(freed);
         state.total_cleans = state.total_cleans.saturating_add(1);
-
         Ok(CleanResult {
             freed_bytes: freed,
             items_cleaned: cleaned,
@@ -640,44 +648,54 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
 /// rather than deleted — the cache is the record of what the user was shown,
 /// and this call is not a general-purpose `rm`.
 pub fn clean_paths<P: AsRef<Path>>(paths: &[P]) -> KernelResult<CleanResult> {
-    with_state(|state| {
-        let mut freed = 0u64;
-        let mut cleaned = 0usize;
-        let mut errors = 0usize;
-        let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
-        let mut removed: Vec<PathBuf> = Vec::new();
+    // Each path's item in the cached scan, looked up under the lock; the
+    // deletions run without it (design-decisions 975: `STATE` is a leaf). A
+    // path the cache does not hold stays `None` and is reported as an error.
+    let found: Vec<Option<CleanItem>> = with_state(|state| {
+        Ok(paths
+            .iter()
+            .map(|want| {
+                state
+                    .items
+                    .iter()
+                    .find(|i| i.path.as_deref() == Some(want.as_ref()))
+                    .cloned()
+            })
+            .collect())
+    })?;
 
-        for want in paths {
-            let want = want.as_ref();
-            let Some(item) = state
-                .items
-                .iter()
-                .find(|i| i.path.as_deref() == Some(want))
-                .cloned()
-            else {
-                errors = errors.saturating_add(1);
-                continue;
-            };
-            if crate::fs::Vfs::remove(want).is_err() {
-                errors = errors.saturating_add(1);
-                continue;
-            }
-            freed = freed.saturating_add(item.size_bytes);
-            cleaned = cleaned.saturating_add(1);
-            removed.push(want.to_path_buf());
-            match category_freed.iter_mut().find(|(c, _)| *c == item.category) {
-                Some((_, f)) => *f = f.saturating_add(item.size_bytes),
-                None => category_freed.push((item.category, item.size_bytes)),
-            }
+    let mut freed = 0u64;
+    let mut cleaned = 0usize;
+    let mut errors = 0usize;
+    let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
+    let mut removed: Vec<PathBuf> = Vec::new();
+
+    for (want, item) in paths.iter().zip(found) {
+        let want = want.as_ref();
+        let Some(item) = item else {
+            errors = errors.saturating_add(1);
+            continue;
+        };
+        if crate::fs::Vfs::remove(want).is_err() {
+            errors = errors.saturating_add(1);
+            continue;
         }
+        freed = freed.saturating_add(item.size_bytes);
+        cleaned = cleaned.saturating_add(1);
+        removed.push(want.to_path_buf());
+        match category_freed.iter_mut().find(|(c, _)| *c == item.category) {
+            Some((_, f)) => *f = f.saturating_add(item.size_bytes),
+            None => category_freed.push((item.category, item.size_bytes)),
+        }
+    }
 
+    with_state(|state| {
         state.items.retain(|i| match i.path.as_ref() {
             Some(p) => !removed.contains(p),
             None => true,
         });
         state.total_freed = state.total_freed.saturating_add(freed);
         state.total_cleans = state.total_cleans.saturating_add(1);
-
         Ok(CleanResult {
             freed_bytes: freed,
             items_cleaned: cleaned,

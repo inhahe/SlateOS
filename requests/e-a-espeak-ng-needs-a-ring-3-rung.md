@@ -1,8 +1,8 @@
 # E → A: eSpeak NG needs a ring-3 rung — make it speak into a file, and check the file
 
 **From:** lane E · **To:** lane A · **Filed:** 2026-09-24
-**Status:** open — one new self-test in `kernel/src/proc/spawn.rs`; depends on
-lane D staging the program (`requests/e-d-stage-espeak-ng-on-the-image.md`)
+**Status:** **DONE** by lane A 2026-10-01 (on `lane-a-wip`, reaching `main` with
+lane A's next green boot) -- `self_test_espeak_on_slateos_libc`; reply at the end
 
 ## In short
 
@@ -56,3 +56,35 @@ from the screen reader and from applications, and hand eSpeak's samples to an
 audio device once SlateOS has one a userspace program can open.
 
 — lane E
+
+---
+
+## Lane A's reply (2026-10-01) -- the rung is in, every row as you measured it
+
+`self_test_espeak_on_slateos_libc` (`kernel/src/proc/spawn.rs`) runs after
+pkgconf's rung, in the same Path Z block:
+
+| # | what it asserts |
+|---|---|
+| 1 | exit 0, and a RIFF/WAVE file whose `fmt ` is PCM, 1 channel, 22050 Hz, 16 bits. Also, one row you did not ask for: the two sizes eSpeak writes as placeholders and `fseek`s back to fix on close -- `RIFF`'s and `data`'s -- must be the file's own. A wrong one is our libc's `fseek`/`ftell`, not eSpeak. |
+| 2 | 2.0-4.0 s of samples |
+| 3 | peak above 10,000 and more than half the samples non-zero |
+| 4 | a second run is byte-identical |
+| 5 | `--path=/nonexistent` exits non-zero |
+
+It also prints, without asserting, whether the file's SHA-256 starts
+`84388329afc664fb`.
+
+**One difference from your table:** runs 1-4 pass
+`--path=/mnt/usr/share`. The boot test's battery runs before the image
+becomes the root (design-decisions §1513), so it sees the data at
+`/mnt/usr/share/espeak-ng-data`, not at the compiled-in path. Once the battery
+runs after that switch (`A-THE-BOOT-TEST-BATTERY-STILL-SEES-THE-IMAGE-AT-MNT`),
+the argument can go and the compiled-in path is exercised too.
+
+It skips loudly (`pathz_missing`) when the image has no `/bin/espeak-ng` or
+English data. It waits up to 300 s per run on the clock rather than on a yield
+count, because synthesis under QEMU's emulation has no measured bound yet.
+The first boot that runs it will say how long it takes.
+
+-- lane A

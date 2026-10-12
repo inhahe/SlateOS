@@ -147,7 +147,34 @@ impl Builder {
         h[10..12].copy_from_slice(&csum.to_be_bytes());
         h
     }
+
+    /// [`Self::build_header`] with the Router Alert option (RFC 2113): 24
+    /// bytes, IHL 6. IGMP messages carry it (RFC 2236 §2), so a router
+    /// examines a packet addressed to a group it is not a member of.
+    #[must_use]
+    pub fn build_header_router_alert(&self, payload_len: u16) -> [u8; ROUTER_ALERT_HEADER_LEN] {
+        let mut h = [0u8; ROUTER_ALERT_HEADER_LEN];
+        h[0] = (4 << 4) | 6; // version 4, IHL 6 (24 bytes)
+        h[1] = self.dscp_ecn;
+        let total = (ROUTER_ALERT_HEADER_LEN as u16).saturating_add(payload_len);
+        h[2..4].copy_from_slice(&total.to_be_bytes());
+        h[4..6].copy_from_slice(&self.id.to_be_bytes());
+        h[6..8].copy_from_slice(&self.flags_frag.to_be_bytes());
+        h[8] = self.ttl;
+        h[9] = self.protocol;
+        h[12..16].copy_from_slice(&self.src);
+        h[16..20].copy_from_slice(&self.dst);
+        // Router Alert: type 148 (copied, class 0, number 20), length 4,
+        // value 0 ("every router examines this packet").
+        h[20..24].copy_from_slice(&[0x94, 0x04, 0x00, 0x00]);
+        let csum = checksum::internet(&h);
+        h[10..12].copy_from_slice(&csum.to_be_bytes());
+        h
+    }
 }
+
+/// Length of an IPv4 header carrying only the Router Alert option.
+pub const ROUTER_ALERT_HEADER_LEN: usize = 24;
 
 /// Accumulate the IPv4 upper-layer pseudo-header (src, dst, protocol,
 /// upper-layer length) into a running checksum sum, per RFC 793 §3.1 and
@@ -228,6 +255,32 @@ mod tests {
         assert!(p.dont_fragment());
         assert!(!p.is_fragment());
         assert_eq!(p.payload, &[9, 8, 7, 6, 5, 4, 3, 2]);
+    }
+
+    #[test]
+    fn a_router_alert_header_parses_back_with_its_option() {
+        let b = Builder {
+            dscp_ecn: 0,
+            id: 7,
+            flags_frag: 0,
+            ttl: 1,
+            protocol: crate::igmp::PROTO_IGMP,
+            src: A,
+            dst: [224, 0, 0, 251],
+        };
+        let hdr = b.build_header_router_alert(8);
+        assert_eq!(checksum::internet(&hdr), 0);
+        let mut buf = [0u8; ROUTER_ALERT_HEADER_LEN + 8];
+        buf[..ROUTER_ALERT_HEADER_LEN].copy_from_slice(&hdr);
+        buf[ROUTER_ALERT_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let p = Packet::parse(&buf).unwrap();
+        assert_eq!(
+            (p.protocol, p.ttl, p.dst),
+            (crate::igmp::PROTO_IGMP, 1, [224, 0, 0, 251])
+        );
+        assert_eq!(p.total_len, (ROUTER_ALERT_HEADER_LEN + 8) as u16);
+        assert_eq!(p.payload, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&hdr[20..24], &[0x94, 0x04, 0x00, 0x00]);
     }
 
     #[test]

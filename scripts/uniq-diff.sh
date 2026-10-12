@@ -184,6 +184,36 @@ run_outfile() {
   report "uniq $* OUT"
 }
 
+# A case with standard descriptors closed. `$1` is the closing -- `<&-`, `>&-`,
+# `2>&-` or several -- applied to `uniq` alone, after the captures, so that it
+# wins; the rest is the command line. Not through `run_side`: its `diff_run`
+# duplicates the caller's standard error, which `2>&-` takes away. Whatever an
+# OUTPUT operand named `out` received is compared too, a missing file told
+# apart from an empty one.
+run_closed() {
+  local closing="$1"; shift
+  local side rc file
+  for side in ours gnu; do
+    rm -f out
+    eval "env PATH=\"\$bindir/\$side\" uniq \"\$@\" >\"\$DIFF_TMP/closed-\$side.out\" 2>\"\$DIFF_TMP/closed-\$side.err\" $closing"
+    rc=$?
+    file=$([ -e out ] && od -An -c < out || echo '<no file>')
+    printf 'rc=%s out=%s err=%s file=%s' "$rc" \
+      "$(od -An -c < "$DIFF_TMP/closed-$side.out" | tr -s ' \n' ' ')" \
+      "$(tr '\n' '|' < "$DIFF_TMP/closed-$side.err")" \
+      "$(printf '%s' "$file" | tr -s ' \n' ' ')" > "$DIFF_TMP/closed-$side.res"
+  done
+  rm -f out
+  if cmp -s "$DIFF_TMP/closed-ours.res" "$DIFF_TMP/closed-gnu.res"; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours: %s\n  gnu:  %s' "$(cat "$DIFF_TMP/closed-ours.res")" \
+    "$(cat "$DIFF_TMP/closed-gnu.res")")
+  report "uniq $* $closing"
+}
+
 xfail_case() {
   local reason="$1"; shift
   compare - "$@"
@@ -461,6 +491,32 @@ run_outfile -c runs.txt
 run_outfile -z nul.txt
 run_outfile runs.txt -c
 run_outfile nope.txt
+
+# --- standard descriptors closed ------------------------------------------------
+# Upstream takes INPUT with `freopen (INPUT, "r", stdin)` and OUTPUT with
+# `freopen (OUTPUT, "w", stdout)`: each file goes onto the stream's own
+# descriptor. Opened as ordinary files, ours put INPUT on descriptor 1 when
+# standard output was closed -- and then closed it while reporting that OUTPUT
+# could not be created, which the standard library answered by aborting. A
+# failed `freopen` reports the `errno` of glibc closing the stream's
+# descriptor: `Bad file descriptor` when it was closed already.
+mkdir -p adir
+run_closed '>&-' runs.txt out
+run_closed '<&-' runs.txt out
+run_closed '2>&-' runs.txt out
+run_closed '<&- >&-' runs.txt out
+run_closed '<&- >&- 2>&-' runs.txt out
+run_closed '>&-' runs.txt /nonexistent/x
+run_closed '>&- 2>&-' runs.txt /nonexistent/x
+run_closed '<&- >&-' runs.txt /nonexistent/x
+run_closed '>&-' runs.txt adir
+run_closed '<&-' nope.txt out
+run_closed '<&-' nope.txt
+run_closed '<&- >&-' nope.txt out
+run_closed '<&-' runs.txt
+run_closed '>&-' runs.txt
+run_closed '<&-' - out
+run_closed '<&-'
 run_outfile -x runs.txt
 run_case runs.txt -
 run_case - runs.txt

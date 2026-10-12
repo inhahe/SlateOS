@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VPN Connections
+Comment=Set up and connect to VPNs
+Icon=network-vpn
+Exec=vpnmanager
+Categories=Settings;Network;
+Keywords=vpn;tunnel;

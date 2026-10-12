@@ -203,8 +203,15 @@ pub fn mkancesdirs(file: &Path, make_dir: MakeDir<'_>) -> Result<(), Stopped> {
 ///
 /// One the walk just made is opened `O_NOFOLLOW` upstream, so a symbolic link
 /// there now is refused; one it found is entered with a plain `chdir`, which
-/// follows. Search permission is not asked about separately: lacking it fails
-/// the next `mkdir` with the `EACCES` the `chdir` would have given.
+/// follows.
+///
+/// Search permission is asked about separately, because `chdir` needs it on
+/// the directory itself and `stat` does not, and *which name* the failure is
+/// about depends on it. Measured against GNU 9.4, with `nox` a directory at
+/// `0666`: `mkdir -p nox/x/y` is ``cannot create directory ‘nox’: Permission
+/// denied`` -- the step into `nox` fails, and the walk stops there. Leaving the
+/// question to the next `mkdir` gave the same `EACCES` about `nox/x`, a name
+/// upstream never reaches.
 fn step_into(dir: &Path, made: bool) -> io::Result<()> {
     let meta = if made {
         fs::symlink_metadata(dir)?
@@ -212,12 +219,47 @@ fn step_into(dir: &Path, made: bool) -> io::Result<()> {
         fs::metadata(dir)?
     };
     if meta.is_dir() {
-        Ok(())
+        may_search(dir)
     } else if meta.file_type().is_symlink() {
         Err(eloop())
     } else {
         Err(io::Error::from(io::ErrorKind::NotADirectory))
     }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    /// `euidaccess(path, mode)`, where mode 1 is `X_OK`: the *effective* ids,
+    /// which are the ones `chdir` is judged by.
+    fn euidaccess(path: *const u8, mode: i32) -> i32;
+}
+
+/// Whether `chdir` into `dir` would be allowed: search permission on the
+/// directory itself, for the effective user. Root passes, as its `chdir`
+/// does.
+#[cfg(unix)]
+fn may_search(dir: &Path) -> io::Result<()> {
+    let mut c_path = os_bytes(dir.as_os_str()).into_owned();
+    // A name from argv cannot hold a NUL; one that somehow does names no file
+    // `chdir` could have entered either.
+    if c_path.contains(&0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    c_path.push(0);
+    // SAFETY: `c_path` is NUL-terminated, has no interior NUL, and outlives
+    // the call; `euidaccess` reads it and keeps nothing.
+    if unsafe { euidaccess(c_path.as_ptr(), 1) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// A host with no search bit: every directory may be entered.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // the unix arm's signature, which callers rely on
+fn may_search(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// `ELOOP`, which is what `open (…, O_NOFOLLOW)` says of a symbolic link.

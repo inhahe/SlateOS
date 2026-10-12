@@ -1,0 +1,16 @@
+[package]
+name = "terminfo"
+version = "0.1.0"
+edition = "2024"
+description = "ncurses 6.4's terminfo layer, as programs here ask it: setupterm, tgetent, tgetstr, tparm, tputs -- and tic's compiler library"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The terminal's output speed, which `tputs` counts padding in, and its
+# window's size.
+libcall = { path = "../../libcall" }
+# C's strtol, which reads `LINES` and `COLUMNS` (`_nc_getenv_num`), and the
+# compiler's numbers.
+cstrtol = { path = "../cstrtol" }

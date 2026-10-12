@@ -152,6 +152,8 @@ pub(crate) struct Picture<'a> {
     pub(crate) cicp_set: bool,
     /// The `colr` ICC profile, which is not applied.
     pub(crate) icc: Option<&'a [u8]>,
+    /// The `clli` content light level: MaxCLL and MaxPALL, in cd/m2.
+    pub(crate) clli: Option<(u16, u16)>,
     pub(crate) clap: Option<Clap>,
     pub(crate) irot: Option<u8>,
     pub(crate) imir: Option<u8>,
@@ -498,6 +500,7 @@ fn reset(mut file: File<'_>) -> Result<Picture<'_>, Error> {
         colour: Colour::DEFAULT,
         cicp_set: false,
         icc: None,
+        clli: None,
         clap: None,
         irot: None,
         imir: None,
@@ -523,6 +526,10 @@ fn reset(mut file: File<'_>) -> Result<Picture<'_>, Error> {
             Property::Clap(clap) if picture.clap.is_none() => picture.clap = Some(clap),
             Property::Irot(angle) if picture.irot.is_none() => picture.irot = Some(angle),
             Property::Imir(axis) if picture.imir.is_none() => picture.imir = Some(axis),
+            // `avifPropertyArrayFind`'s: the first.
+            Property::Clli { max_cll, max_pall } if picture.clli.is_none() => {
+                picture.clli = Some((max_cll, max_pall));
+            }
             _ => {}
         }
     }

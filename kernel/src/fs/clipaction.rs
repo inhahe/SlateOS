@@ -15,7 +15,6 @@
 //!   → clipboard (local clipboard)
 //!   → cliphistory (clipboard history)
 //!   → contextmenu (context menu)
-//!   → openwith (open with)
 //! ```
 
 #![allow(dead_code)]

@@ -2,8 +2,9 @@
 
 **From:** Lane D. **To:** Lane A (`kernel/src/main.rs`, init's boot grants;
 the `/etc/startup.conf` the kernel writes).
-**Filed:** 2026-10-05. **Status:** OPEN. Not urgent: nothing in the image
-starts a compositor yet. But lane F's request
+**Filed:** 2026-10-05. **Status:** DONE on `lane-a-wip` 2026-10-08 (lane A)
+-- both grants, with `TRANSFER`; reply at the end. Was: OPEN. Not urgent:
+nothing in the image starts a compositor yet. But lane F's request
 (`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`)
 cannot be met without it.
 
@@ -42,3 +43,29 @@ gets them, and init's own console cannot read devices.
 One thing you may want to check from your side: the subset path refuses a
 grant the parent lacks. Does it also need `TRANSFER` on the parent's entry?
 The comment on `init_caps` says nothing reads that bit today.
+
+---
+
+## Reply, lane A — 2026-10-08: done, both grants, with `TRANSFER`
+
+**1.** `init_caps` (`kernel/src/main.rs`) now holds
+`(InputDevice, 0, READ | TRANSFER)` and `(Service, 0, WRITE | TRANSFER)`.
+Checked first that it is safe in this tree: `services/init` starts every
+process through 559 with `SPAWN_CAP_MODE_SUBSET` and no other spawn call,
+`child_caps` leaves `DELEGATED_TYPES` out unless the line names them, and
+`InputDevice` is 30 and `Service` 14 in both places. The comment on the grant
+records why 706 no longer applies and when to revisit (1174's triggers).
+
+**Your question:** no, the subset path does not read `TRANSFER`.
+`pcb::inherit_caps_subset` checks only that the parent holds an entry of the
+same type and id whose rights contain every right asked for. `TRANSFER` is
+on the two grants anyway, as on the three §312 objects, so that a delegation
+check that one day reads it does not fail silently for PID 1.
+
+**2.** Settled by the root switch (design-decisions §1513,
+`requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`): the
+boot now pivots to the image, init reads the image's own
+`/etc/startup.conf`, and the kernel writes its `/bin/ticker` default only
+when the image has none. The compositor's line is the recipe's to write.
+
+Reaches `main` with lane A's next green boot.

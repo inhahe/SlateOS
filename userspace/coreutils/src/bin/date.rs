@@ -48,12 +48,18 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::parse_datetime::{Timespec, parse_datetime2};
 use coreutils::posixtm::{self, Syntax};
-use coreutils::quote::{os_bytes, quote, quote_os, quotef_os};
-use coreutils::stdfd;
+use coreutils::quote::{os_bytes, quote, quote_os, quotef, quotef_os};
+use coreutils::stdfd::{self, Stream};
 use localtime::{Zone, nstrftime_z};
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees the descriptors `date`
+// was given: a closed standard output is `write error`, and a closed standard
+// input a read error of `-f -`, as they are upstream -- not the `/dev/null`
+// Rust's runtime would put on each.
+coreutils::guard_std_fds!();
 
 /// GNU `date` exits 1 on a usage error.
 const DATE: Program = Program::new("date", 1);
@@ -463,19 +469,38 @@ fn check_options(cfg: &mut Config) -> Result<Option<OsString>, Failure> {
 }
 
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
+/// Upstream's `main`, through `atexit (close_stdout)`: every way out closes
+/// standard output and reports a failure to write it.
 fn run_main() -> ExitCode {
+    // Standard output as stdio's: one buffer, written at exit or when a
+    // diagnostic flushes it, as `error()` does. One handle for the whole run,
+    // since dropping a handle flushes the buffer.
+    let mut out = Stream::stdout();
+    let earned = run(&mut out);
+    stdfd::close_stdout("date", out, earned)
+}
+
+fn run(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let mut cfg = match parse_args(&args) {
         Ok(Request::Run(cfg)) => cfg,
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // In pieces, as `usage` writes it with one `fputs` a paragraph:
+            // the text is longer than stdio's buffer, and what decides
+            // whether a full disk's `write error` has a reason is whether
+            // some of it is still waiting when the stream is closed -- which,
+            // written in pieces, it is. Unchecked: the stream remembers.
+            for piece in help_text().split_inclusive('\n') {
+                let _ = out.write_all(piece.as_bytes());
+            }
             return ExitCode::SUCCESS;
         }
         Ok(Request::Version) => {
-            println!("date (SlateOS coreutils)");
+            let _ = out.write_all(b"date (SlateOS coreutils)\n");
             return ExitCode::SUCCESS;
         }
         Err(m) => {
@@ -516,7 +541,7 @@ fn run_main() -> ExitCode {
     };
 
     let ok = if let Some(batch) = &cfg.batch_file {
-        match session.batch_convert(batch) {
+        match session.batch_convert(batch, out) {
             Ok(ok) => ok,
             Err(m) => {
                 diag!("date: {}", m);
@@ -524,7 +549,7 @@ fn run_main() -> ExitCode {
             }
         }
     } else {
-        match session.single(&cfg, posix_operand) {
+        match session.single(&cfg, posix_operand, out) {
             Ok(ok) => ok,
             Err(m) => {
                 diag!("date: {}", m);
@@ -551,7 +576,10 @@ impl Session<'_> {
     /// `parse_datetime2` with this session's zone and `--debug` setting.
     fn parse(&self, text: &[u8]) -> Option<Timespec> {
         if self.debug {
-            let mut err = io::stderr().lock();
+            // A `Stream` on descriptor 2, not `io::stderr()`: a debug line that
+            // cannot be written is a lost diagnostic, the run's failure, as
+            // upstream's `ferror (stderr)` makes it.
+            let mut err = Stream::stderr();
             parse_datetime2(text, None, Some(&mut err), self.tz, self.tzstring)
         } else {
             parse_datetime2(text, None, None, self.tz, self.tzstring)
@@ -566,7 +594,12 @@ impl Session<'_> {
     ///
     /// A fatal error — an unreadable `-r` file or a date that does not parse —
     /// as the message to print after `date: `.
-    fn single(&self, cfg: &Config, posix_operand: Option<OsString>) -> Result<bool, Failure> {
+    fn single(
+        &self,
+        cfg: &Config,
+        posix_operand: Option<OsString>,
+        out: &mut Stream,
+    ) -> Result<bool, Failure> {
         let mut ok = true;
         let mut set_date = cfg.set_datestr.is_some();
         let (when, datestr) = if let Some(operand) = posix_operand {
@@ -614,7 +647,7 @@ impl Session<'_> {
                 ok = false;
             }
         }
-        Ok(self.show_date(when) && ok)
+        Ok(self.show_date(when, out) && ok)
     }
 
     /// Upstream's `batch_convert`: every line of `input` as a date, printed
@@ -623,21 +656,35 @@ impl Session<'_> {
     ///
     /// # Errors
     ///
-    /// The file not opening, or a read error, as the message to print after
-    /// `date: `.
-    fn batch_convert(&self, input: &OsString) -> Result<bool, Failure> {
+    /// The file not opening, a read error, or the input's close failing, as
+    /// the message to print after `date: ` -- each `error (EXIT_FAILURE, ...)`
+    /// upstream, naming the input with `quotef`: standard input is
+    /// `'standard input'`, quoted for its space.
+    fn batch_convert(&self, input: &OsString, out: &mut Stream) -> Result<bool, Failure> {
         let bytes = os_bytes(input);
-        let stdin;
-        let file;
-        let (mut reader, name): (Box<dyn BufRead>, String) = if bytes.as_ref() == b"-" {
-            stdin = io::stdin();
-            (Box::new(stdin.lock()), "standard input".to_string())
+        let is_stdin = bytes.as_ref() == b"-";
+        // `input_filename = _("standard input")`: what every message calls it.
+        let label: Vec<u8> = if is_stdin {
+            b"standard input".to_vec()
         } else {
-            file = std::fs::File::open(input)
-                .and_then(stdfd::fd_safer)
-                .map_err(|e| format!("{}: {}", quotef_os(input), strerror(&e)))?;
-            (Box::new(io::BufReader::new(file)), quotef_os(input))
+            bytes.to_vec()
         };
+        let file = if is_stdin {
+            None
+        } else {
+            Some(
+                std::fs::File::open(input)
+                    .and_then(stdfd::fd_safer)
+                    .map_err(|e| format!("{}: {}", quotef_os(input), strerror(&e)))?,
+            )
+        };
+        // Descriptor 0 itself for `-`: `io::stdin()` would answer a closed one
+        // with end of file, where upstream's `getline` fails.
+        let source: Box<dyn Read + '_> = match &file {
+            Some(file) => Box::new(file),
+            None => Box::new(stdfd::RawStdin),
+        };
+        let mut reader = io::BufReader::new(source);
 
         let mut ok = true;
         let mut line = Vec::new();
@@ -646,19 +693,12 @@ impl Session<'_> {
             match reader.read_until(b'\n', &mut line) {
                 Ok(0) => break,
                 Ok(_) => {}
-                Err(e) => {
-                    let what = if bytes.as_ref() == b"-" {
-                        "standard input".to_string()
-                    } else {
-                        name.clone()
-                    };
-                    return Err(format!("{what}: read error: {}", strerror(&e)));
-                }
+                Err(e) => return Err(format!("{}: read error: {}", quotef(&label), strerror(&e))),
             }
             // The line is a C string to upstream: it ends at a NUL.
             let text = line.split(|&b| b == 0).next().unwrap_or(&[]);
             match self.parse(text) {
-                Some(when) => ok &= self.show_date(when),
+                Some(when) => ok &= self.show_date(when, out),
                 None => {
                     let shown = text.strip_suffix(b"\n").unwrap_or(text);
                     diag!("date: invalid date {}", quote(shown));
@@ -666,12 +706,19 @@ impl Session<'_> {
                 }
             }
         }
+        drop(reader);
+        // "if (fclose (in_stream) == EOF)": the input's close, checked.
+        let closed = match file {
+            Some(file) => stdfd::close(file),
+            None => stdfd::close_stdin(),
+        };
+        closed.map_err(|e| format!("{}: {}", quotef(&label), strerror(&e)))?;
         Ok(ok)
     }
 
     /// Upstream's `show_date`: print `when` in the format, or say that it is
     /// out of range.
-    fn show_date(&self, when: Timespec) -> bool {
+    fn show_date(&self, when: Timespec, out: &mut Stream) -> bool {
         if self.debug {
             diag!("date: output format: {}", quote(self.format));
         }
@@ -684,12 +731,12 @@ impl Session<'_> {
         }
         let nanos = u32::try_from(when.tv_nsec).unwrap_or(0);
         let tm = self.tz.local(when.tv_sec, nanos);
-        let mut out = nstrftime_z(self.format, &tm, self.tz);
-        out.push(b'\n');
-        let mut stdout = io::stdout().lock();
-        // A failed write is caught when stdout is closed at exit; upstream's
-        // `close_stdout` reports it there, and so does `stdfd::close_stderr`.
-        stdout.write_all(&out).is_ok()
+        let mut text = nstrftime_z(self.format, &tm, self.tz);
+        text.push(b'\n');
+        // `fprintftime` and `fputc`, unchecked: a failure is the stream's, and
+        // `close_stdout` reports it at exit.
+        let _ = out.write_all(&text);
+        true
     }
 }
 

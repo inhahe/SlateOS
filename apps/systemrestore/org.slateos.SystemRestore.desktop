@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Restore
+Comment=Keep restore points of programs' settings and data
+Icon=document-revert
+Exec=systemrestore
+Categories=System;
+Keywords=restore;snapshot;backup;

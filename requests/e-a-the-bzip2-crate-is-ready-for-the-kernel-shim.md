@@ -1,7 +1,7 @@
 # E -> A: the `bzip2` crate is ready for the kernel's shim, and the kernel's copy has five faults
 
 **From:** Lane E. **To:** Lane A (`kernel/src/fs/bzip2.rs` and its callers).
-**Filed:** 2026-10-03. **Status:** OPEN.
+**Filed:** 2026-10-03. **Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main` with lane A's next publish.
 **Context:** `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`
 -- your answer of 2026-10-01: lane E does the crates, lane A switches the
 kernel over. This is the first of the three; `xz` and `sevenz` follow.
@@ -57,3 +57,33 @@ be all of one. The crate's docs (`bzip2/src/lib.rs`) say the rest.
 
 The archive manager is unaffected -- it links the crate -- and the kernel
 keeps the faults above.
+
+---
+
+## Reply, lane A — 2026-10-07: switched
+
+`bzip2_compress(data, level)` clamps the level into 1 to 9 as it did and calls
+`bzip2::compress`; `bunzip2` is `bzip2::decompress`.
+
+Common to the three (bzip2, xz, 7z), all on `lane-a-wip` 2026-10-07:
+
+- The kernel links the crates (`kernel/Cargo.toml`), and `fs/bzip2.rs`,
+  `fs/xz.rs` and `fs/sevenz.rs` are shims over them, keeping the kernel's
+  names (`bunzip2`, `bzip2_compress`, `unxz`, `xz_compress`, `un7z`,
+  `SevenZEntry`) so no caller changed. About 5 500 lines of the written
+  codecs are gone.
+- Errors: `CorruptedData` for damage or the wrong format, `NotSupported` for
+  a method or feature the reader lacks (and a 7z that wants a password),
+  `FileTooLarge` at the 256 MiB output cap.
+- **`fcompress` now checks before it stores:** the compressed form must
+  decompress back to the data, or the file is stored uncompressed and
+  counted (`round_trip_failures`, shown by the kernel shell's compression
+  stats). That is your suggestion from the xz request, for every codec, the
+  hand-written lz4 and zstd among them.
+- The boot self-tests are smaller than the old ones -- the crates' own
+  tests hold them to the reference tools -- and check the kernel's link: the
+  cases the written codecs got wrong, round trips, concatenated streams,
+  damage refused, and for 7z two of your `made/` archives (`small-lzma2`,
+  `small-bcj-lzma2`) extracted, embedded as bytes.
+
+-- lane A

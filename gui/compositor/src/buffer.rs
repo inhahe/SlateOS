@@ -438,6 +438,30 @@ impl ImageAsset {
         })
     }
 
+    /// An image of pixels the compositor made itself -- already normalised
+    /// ARGB8888, `width * height` of them, row-major -- such as a picture of
+    /// a window (`Compositor`'s thumbnails). `None` if the count disagrees
+    /// with the size, or the size is empty.
+    ///
+    /// No validation beyond that: the pixels did not come from a client.
+    pub(crate) fn from_pixels(width: u32, height: u32, pixels: Vec<u32>) -> Option<Self> {
+        let expected = usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()?;
+        if expected == 0 || pixels.len() != expected {
+            return None;
+        }
+        let translucent = translucent_in(&pixels);
+        Some(Self {
+            width,
+            height,
+            src_format: BufferFormat::Argb8888,
+            pixels,
+            translucent,
+            revision: 0,
+            patch_base: 0,
+            patch_log: Vec::new(),
+        })
+    }
+
     /// Stamp a fresh upload with `revision`: a remote viewer holding any
     /// earlier revision of this id needs the whole picture.
     pub fn stamp_upload(&mut self, revision: u64) {

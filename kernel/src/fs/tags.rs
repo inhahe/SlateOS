@@ -1,1108 +1,646 @@
-//! File tagging system for BFS-inspired metadata queries.
+//! File tags: short labels a person attaches to files and directories
+//! ("work", "taxes 2026", "Projects/SlateOS"), and finds them by. Unlike a
+//! comment (free text for a person to read, `fs::fcomment`) a tag is matched;
+//! unlike a queryable attribute (`fs::queryable`) it has no type and no value
+//! beyond itself.
 //!
-//! Attaches arbitrary string tags to files using extended attributes,
-//! enabling tag-based file organization and search.  Tags are stored
-//! in the `user.tags` xattr as comma-separated values, making them
-//! visible to any tool that reads xattrs.
+//! **A file's tags are its `user.xdg.tags` extended attribute**: a
+//! comma-separated list, the name and the format freedesktop.org's shared file
+//! metadata and KDE's Baloo use, so Dolphin, `getfattr -n user.xdg.tags` and
+//! `setfattr` read and write the same tags. The file's filesystem keeps them,
+//! which settles what an index here could not:
 //!
-//! ## Design Reference
+//! - they are the file's, not a name's: every hard link shows them, and a
+//!   rename carries them;
+//! - they go with the file, so a file that later reuses the inode does not
+//!   begin with a stranger's tags;
+//! - on ext4 they are on disk, and survive a reboot;
+//! - `cp -a`, `tar --xattrs` and `rsync -X` carry them to and from Linux.
 //!
-//! design.txt lines 35-37: "BFS (Be File System) had rich queryable
-//! metadata built in — you could search files by any attribute."
+//! Programs reach them with the extended-attribute calls they already have
+//! (`getxattr(2)` and its family, through either ABI), under the `user.`
+//! namespace's rules (`fs::xattr_policy`): regular files and directories only,
+//! read as the file's read permission allows, written as its write permission
+//! does. That is the door design-decisions §978 asked for. What this module
+//! adds is for the kernel shell: reading and changing one file's list, and
+//! [`search`], [`search_multi`] and [`list_tags`], which walk a subtree --
+//! bounded, and saying when they could not see all of it, since nothing
+//! indexes tags (`design.txt`: "user-facing tagging is better done at the
+//! GUI/search-index level, not in filesystem metadata"; a search index is a
+//! userspace service's to keep).
 //!
-//! design.txt line 249: "Database-as-filesystem — rich metadata and
-//! queries built into the filesystem."
+//! Until 2026-10-09 the tags were in a `user.tags` attribute, and an index
+//! here mapped each tag to the *names* of its files, in memory: a rename left
+//! the file out of every search until the index was rebuilt by hand, a reboot
+//! emptied it, and `/proc/tags` listed every tag in use to any reader, whether
+//! or not it could read the files (design-decisions §1560). Nothing outside the
+//! kernel shell and this module's self-test ever set one -- the self-test on
+//! `/tmp`, in memory -- so no file carries the old name to carry over.
 //!
-//! design.txt line 377: "arbitrary string/comment?" → stored as tags.
+//! ## A tag
 //!
-//! ## Architecture
-//!
-//! ```text
-//! tag::add("/home/doc.pdf", "work")      → xattr user.tags = "work"
-//! tag::add("/home/doc.pdf", "important") → xattr user.tags = "work,important"
-//! tag::search("work", "/")               → Vec of matching paths
-//! tag::search_multi(&["work","2024"],"/") → intersection search
-//! ```
-//!
-//! Tags are:
-//! - Case-insensitive for matching, preserved-case for storage
-//! - ASCII alphanumeric + hyphen + underscore + dot (validated)
-//! - Max 64 characters each, max 32 tags per file
-//! - Stored in `user.tags` xattr as comma-separated values
-//!
-//! ## Tag Index
-//!
-//! An in-memory reverse index (tag → set of paths) accelerates
-//! tag-based searches.  The index is rebuilt from a filesystem scan
-//! and updated incrementally on add/remove operations.
+//! - At most [`MAX_TAG_LEN`] bytes of text: a label a person types, so UTF-8,
+//!   as Baloo writes it. An attribute that is not UTF-8 reads as
+//!   `CorruptedData` rather than as some other list.
+//! - No comma (the separator), no control character, and no space at either
+//!   end; spaces inside, `/` (Baloo's nesting) and any letter are fine.
+//! - Matched with ASCII letters' case ignored, kept as written.
+//! - At most [`MAX_TAGS_PER_FILE`] on a file.
 
-#![allow(dead_code)]
-
-use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::fswalk::{self, WalkAction, WalkOptions};
+use super::path::{Path, PathBuf};
+use super::{EntryType, Vfs};
 use crate::error::{KernelError, KernelResult};
-use crate::fs::path::{Path, PathBuf};
-use crate::fs::pathutil::{is_dot_entry, path_in_subtree};
-use crate::fs::{EntryType, Vfs};
-use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Xattr key used to store tags.
-const TAG_XATTR_KEY: &[u8] = b"user.tags";
+/// The extended attribute a file's tags are kept in.
+pub const XATTR: &[u8] = b"user.xdg.tags";
 
-/// Maximum number of tags per file.
-const MAX_TAGS_PER_FILE: usize = 32;
+/// The most tags one file may carry.
+pub const MAX_TAGS_PER_FILE: usize = 32;
 
-/// Maximum length of a single tag string.
-const MAX_TAG_LEN: usize = 64;
+/// The longest tag, in bytes.
+pub const MAX_TAG_LEN: usize = 64;
 
-/// Maximum number of entries in the tag index.
-const MAX_INDEX_ENTRIES: usize = 100_000;
+/// The most entries one walk visits: each visit is a path lookup and a read
+/// of the attribute, under the filesystem's lock, in the caller's time.
+const MAX_VISITED: u64 = 65536;
 
-/// Maximum recursion depth for filesystem walks.
-const MAX_SCAN_DEPTH: usize = 32;
+/// The most files one search returns.
+const MAX_RESULTS: usize = 4096;
+
+/// The most distinct tags one [`list_tags`] counts.
+const MAX_DISTINCT: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/// A tagged file entry.
-#[derive(Debug, Clone)]
+/// A file and its tags, as a search found them.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaggedFile {
-    /// Full path to the file.  A path is a byte string, not text: a file whose
-    /// name contains a byte that is not valid UTF-8 must still be findable by
-    /// tag and openable from the result.
+    /// The path the walk reached it by. A path is bytes, not text: a file
+    /// whose name is not UTF-8 is still found, and openable from the result.
     pub path: PathBuf,
-    /// Tags attached to this file.
+    /// Its tags, as written.
     pub tags: Vec<String>,
 }
 
-/// Statistics about the tag system.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TagStats {
-    /// Total unique tags in the index.
-    pub unique_tags: u64,
-    /// Total tagged files in the index.
-    pub tagged_files: u64,
-    /// Total tag→file associations.
-    pub total_associations: u64,
-    /// Number of tag add operations.
-    pub adds: u64,
-    /// Number of tag remove operations.
-    pub removes: u64,
-    /// Number of tag searches.
-    pub searches: u64,
-    /// Whether the index has been built.
-    pub index_built: bool,
+/// What a [`search`] or [`search_multi`] found under its root.
+#[derive(Debug)]
+pub struct Found {
+    /// Each matching file, in the order the walk met them.
+    pub files: Vec<TaggedFile>,
+    /// Whether it stopped short of seeing everything under the root: too
+    /// many entries or results, a directory or an attribute that could not be
+    /// read, or a directory the walk left unread. Without it, "nothing found"
+    /// and "not all looked at" would read the same.
+    pub incomplete: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
+/// Every tag in use under a root, with how many files carry it.
+#[derive(Debug)]
+pub struct Census {
+    /// Each tag as first met, with its count; ordered by the tag with ASCII
+    /// letters' case ignored.
+    pub tags: Vec<(String, usize)>,
+    /// As [`Found::incomplete`].
+    pub incomplete: bool,
+}
 
-/// Master enable flag.
-static ENABLED: AtomicBool = AtomicBool::new(true);
+/// How many tag changes, removals and searches there have been since boot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TagStats {
+    /// Lists set, and tags added.
+    pub adds: u64,
+    /// Tags removed, and lists cleared.
+    pub removes: u64,
+    /// Searches and listings.
+    pub searches: u64,
+}
 
-/// Operation counters.
 static ADDS: AtomicU64 = AtomicU64::new(0);
 static REMOVES: AtomicU64 = AtomicU64::new(0);
 static SEARCHES: AtomicU64 = AtomicU64::new(0);
 
-/// Reverse index: tag → set of file paths.
-struct TagIndex {
-    /// Tag → set of paths.
-    by_tag: BTreeMap<String, BTreeSet<PathBuf>>,
-    /// Path → set of tags (for fast removal).
-    by_path: BTreeMap<PathBuf, BTreeSet<String>>,
-    /// Whether the index has been built.
-    built: bool,
-}
-
-impl TagIndex {
-    /// The state a fresh boot starts with.
-    ///
-    /// Extracted from the initialiser of `INDEX` so that the self-test can
-    /// be handed a pristine table without disturbing the live one; see
-    /// `crate::fs::selftest`.
-    const fn new() -> Self {
-        Self {
-            by_tag: BTreeMap::new(),
-            by_path: BTreeMap::new(),
-            built: false,
-        }
-    }
-}
-
-/// The tag index.
-///
-/// **Never enter the VFS while holding this.** `read_tags`/`write_tags` call
-/// `Vfs::get_xattr`/`Vfs::set_xattr`, which resolve through the filesystem's
-/// own lock -- and the VFS holds that lock across content generation, which
-/// for procfs reaches back into arbitrary module-global state. The live order
-/// is `filesystem lock -> module state`, so `INDEX -> filesystem lock` is an
-/// AB/BA inversion that wedges two CPUs. Collect the paths under the lock,
-/// release it, then read the xattrs.
-/// `scripts/check-vfs-under-lock.py` enforces this.
-static INDEX: Mutex<TagIndex> = Mutex::new(TagIndex::new());
-
-// ---------------------------------------------------------------------------
-// Configuration API
-// ---------------------------------------------------------------------------
-
-/// Enable or disable the tag system.
-pub fn set_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
-}
-
-/// Check if the tag system is enabled.
-pub fn is_enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
-}
-
-/// Get tag system statistics.
+/// The counters.
+#[must_use]
 pub fn stats() -> TagStats {
-    let idx = INDEX.lock();
     TagStats {
-        unique_tags: idx.by_tag.len() as u64,
-        tagged_files: idx.by_path.len() as u64,
-        total_associations: idx.by_tag.values().map(|s| s.len() as u64).sum(),
         adds: ADDS.load(Ordering::Relaxed),
         removes: REMOVES.load(Ordering::Relaxed),
         searches: SEARCHES.load(Ordering::Relaxed),
-        index_built: idx.built,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tag validation
+// A tag, and a list of them
 // ---------------------------------------------------------------------------
 
-/// Validate a tag string.
-///
-/// Tags must be 1-64 characters, ASCII alphanumeric plus hyphen,
-/// underscore, and dot.  No commas (used as separator in xattr).
-fn validate_tag(tag: &str) -> KernelResult<()> {
-    if tag.is_empty() {
+/// Whether `tag` may be stored: see the module documentation's "A tag".
+fn validate(tag: &str) -> KernelResult<()> {
+    if tag.is_empty()
+        || tag.len() > MAX_TAG_LEN
+        || tag.contains(',')
+        || tag.chars().any(char::is_control)
+        || tag.trim() != tag
+    {
         return Err(KernelError::InvalidArgument);
-    }
-    if tag.len() > MAX_TAG_LEN {
-        return Err(KernelError::InvalidArgument);
-    }
-    for c in tag.chars() {
-        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.' {
-            return Err(KernelError::InvalidArgument);
-        }
     }
     Ok(())
 }
 
-/// Normalize a tag for comparison (lowercase).
-fn normalize_tag(tag: &str) -> String {
-    tag.chars()
-        .map(|c| {
-            if c.is_ascii_uppercase() {
-                (c as u8 + 32) as char
-            } else {
-                c
-            }
-        })
-        .collect()
+/// Whether two tags are the same one: ASCII letters' case ignored.
+fn same(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// The tags an attribute's value holds: comma-separated, empty pieces
+/// skipped, as Baloo reads them.
+fn parse(raw: &[u8]) -> KernelResult<Vec<String>> {
+    let text = core::str::from_utf8(raw).map_err(|_| KernelError::CorruptedData)?;
+    Ok(text
+        .split(',')
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Keep `tags` as the file's list: the attribute removed when it is empty,
+/// and removing none is not an error.
+fn store(path: &Path, tags: &[String]) -> KernelResult<()> {
+    if tags.is_empty() {
+        return match Vfs::remove_xattr(path, XATTR) {
+            Ok(()) | Err(KernelError::NoAttribute) => Ok(()),
+            Err(e) => Err(e),
+        };
+    }
+    Vfs::set_xattr(path, XATTR, tags.join(",").as_bytes())
 }
 
 // ---------------------------------------------------------------------------
-// Xattr ←→ tag list conversion
+// One file's tags
 // ---------------------------------------------------------------------------
 
-/// Read tags from a file's xattr.
-fn read_tags(path: &Path) -> KernelResult<Vec<String>> {
-    match Vfs::get_xattr(path, TAG_XATTR_KEY) {
-        Ok(data) => {
-            let s = core::str::from_utf8(&data).map_err(|_| KernelError::CorruptedData)?;
-            if s.is_empty() {
-                return Ok(Vec::new());
-            }
-            let tags: Vec<String> = s.split(',').map(|t| String::from(t.trim())).collect();
-            Ok(tags)
-        }
-        // "This file carries no tags" is an ordinary answer, and it is the only
-        // one we may turn into an empty list.  `NotFound` means the *path* did
-        // not resolve, which must keep propagating: swallowing it here reported
-        // "no tags" for a file that does not exist, so `list` printed nothing
-        // and `has` answered a confident false for a typo'd path.
+/// The tags on the file at `path`, as written; none is an empty list. Asked as
+/// the caller, through a trailing symlink, as `getxattr` asks.
+///
+/// # Errors
+///
+/// `CorruptedData` for an attribute that is not UTF-8; the path's, the `user.`
+/// namespace's and the filesystem's.
+pub fn get<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Vec<String>> {
+    match Vfs::get_xattr(path.as_ref(), XATTR) {
+        Ok(raw) => parse(&raw),
+        // Carrying no tags is an ordinary answer. `NotFound` -- the path did
+        // not resolve -- is not, and goes on to the caller.
         Err(KernelError::NoAttribute) => Ok(Vec::new()),
         Err(e) => Err(e),
     }
 }
 
-/// Write tags to a file's xattr.
-fn write_tags(path: &Path, tags: &[String]) -> KernelResult<()> {
-    if tags.is_empty() {
-        // Remove the xattr entirely when no tags remain.
-        match Vfs::remove_xattr(path, TAG_XATTR_KEY) {
-            Ok(()) => Ok(()),
-            // Only the attribute being absent is "already gone" and harmless.
-            // A missing file is a real failure to report, not a success.
-            Err(KernelError::NoAttribute) => Ok(()),
-            Err(e) => Err(e),
+/// Make `tags` the file's whole list, in that order, a second spelling of
+/// one tag dropped; an empty list clears it. Asked as the caller: `setxattr`'s
+/// rules decide who may.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a tag that may not be stored, or more than
+/// [`MAX_TAGS_PER_FILE`], with nothing changed; otherwise as [`get`], and a
+/// filesystem that keeps no attributes (FAT) answers `NotSupported`.
+pub fn set<P: AsRef<Path> + ?Sized>(path: &P, tags: &[&str]) -> KernelResult<()> {
+    let mut list: Vec<String> = Vec::new();
+    list.try_reserve(tags.len())
+        .map_err(|_| KernelError::OutOfMemory)?;
+    for &tag in tags {
+        validate(tag)?;
+        if !list.iter().any(|t| same(t, tag)) {
+            list.push(String::from(tag));
         }
-    } else {
-        let joined = tags.join(",");
-        Vfs::set_xattr(path, TAG_XATTR_KEY, joined.as_bytes())
     }
+    if list.len() > MAX_TAGS_PER_FILE {
+        return Err(KernelError::InvalidArgument);
+    }
+    store(path.as_ref(), &list)?;
+    ADDS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core tag operations
-// ---------------------------------------------------------------------------
-
-/// Add a tag to a file.
+/// Add `tag` to the file's list; one it carries already, in any case, leaves
+/// the list as it is.
 ///
-/// If the file already has this tag (case-insensitive), this is a no-op.
-/// Tags are stored in the file's extended attributes.
+/// # Errors
+///
+/// `InvalidArgument` for a tag that may not be stored, or a file at
+/// [`MAX_TAGS_PER_FILE`] already; otherwise as [`set`].
 pub fn add<P: AsRef<Path> + ?Sized>(path: &P, tag: &str) -> KernelResult<()> {
     let path = path.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
+    validate(tag)?;
+    let mut list = get(path)?;
+    if list.iter().any(|t| same(t, tag)) {
+        return Ok(());
     }
-
-    validate_tag(tag)?;
-    let norm = normalize_tag(tag);
-
-    let mut tags = read_tags(path)?;
-
-    // Check if already present (case-insensitive).
-    if tags.iter().any(|t| normalize_tag(t) == norm) {
-        return Ok(()); // Already tagged.
+    if list.len() >= MAX_TAGS_PER_FILE {
+        return Err(KernelError::InvalidArgument);
     }
-
-    if tags.len() >= MAX_TAGS_PER_FILE {
-        return Err(KernelError::DiskFull); // Reusing error for "too many tags".
-    }
-
-    tags.push(String::from(tag));
-    write_tags(path, &tags)?;
-
-    // Update index.
-    {
-        let mut idx = INDEX.lock();
-        idx.by_tag
-            .entry(norm.clone())
-            .or_default()
-            .insert(path.to_path_buf());
-        idx.by_path
-            .entry(path.to_path_buf())
-            .or_default()
-            .insert(norm);
-    }
-
+    list.push(String::from(tag));
+    store(path, &list)?;
     ADDS.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
-/// Remove a tag from a file.
+/// Take `tag`, in any case, off the file's list.
 ///
-/// Case-insensitive removal.  Returns `NotFound` if the tag wasn't present.
+/// # Errors
+///
+/// `NotFound` when the file does not carry it; otherwise as [`set`].
 pub fn remove<P: AsRef<Path> + ?Sized>(path: &P, tag: &str) -> KernelResult<()> {
     let path = path.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
-
-    let norm = normalize_tag(tag);
-    let mut tags = read_tags(path)?;
-
-    let before = tags.len();
-    tags.retain(|t| normalize_tag(t) != norm);
-
-    if tags.len() == before {
+    let mut list = get(path)?;
+    let before = list.len();
+    list.retain(|t| !same(t, tag));
+    if list.len() == before {
         return Err(KernelError::NotFound);
     }
-
-    write_tags(path, &tags)?;
-
-    // Update index.
-    {
-        let mut idx = INDEX.lock();
-        if let Some(set) = idx.by_tag.get_mut(&norm) {
-            set.remove(path);
-            if set.is_empty() {
-                idx.by_tag.remove(&norm);
-            }
-        }
-        if let Some(set) = idx.by_path.get_mut(path) {
-            set.remove(&norm);
-            if set.is_empty() {
-                idx.by_path.remove(path);
-            }
-        }
-    }
-
+    store(path, &list)?;
     REMOVES.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
-/// Get all tags on a file.
-pub fn get<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Vec<String>> {
-    read_tags(path.as_ref())
-}
-
-/// Set all tags on a file (replacing any existing tags).
-pub fn set<P: AsRef<Path> + ?Sized>(path: &P, tags: &[&str]) -> KernelResult<()> {
-    let path = path.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
-
-    // Validate all tags first.
-    for tag in tags {
-        validate_tag(tag)?;
-    }
-    if tags.len() > MAX_TAGS_PER_FILE {
-        return Err(KernelError::DiskFull);
-    }
-
-    // Clear existing index entries for this path.
-    {
-        let mut idx = INDEX.lock();
-        if let Some(old_tags) = idx.by_path.remove(path) {
-            for t in &old_tags {
-                if let Some(set) = idx.by_tag.get_mut(t) {
-                    set.remove(path);
-                    if set.is_empty() {
-                        idx.by_tag.remove(t);
-                    }
-                }
-            }
-        }
-    }
-
-    let tag_strings: Vec<String> = tags.iter().map(|t| String::from(*t)).collect();
-    write_tags(path, &tag_strings)?;
-
-    // Re-index.
-    {
-        let mut idx = INDEX.lock();
-        let mut path_tags = BTreeSet::new();
-        for tag in tags {
-            let norm = normalize_tag(tag);
-            idx.by_tag
-                .entry(norm.clone())
-                .or_default()
-                .insert(path.to_path_buf());
-            path_tags.insert(norm);
-        }
-        if !path_tags.is_empty() {
-            idx.by_path.insert(path.to_path_buf(), path_tags);
-        }
-    }
-
-    ADDS.fetch_add(1, Ordering::Relaxed);
-    Ok(())
-}
-
-/// Remove all tags from a file.
+/// Take every tag off the file; one with none is not an error.
+///
+/// # Errors
+///
+/// As [`set`].
 pub fn clear<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
-    let path = path.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
-
-    write_tags(path, &[])?;
-
-    // Remove from index.
-    {
-        let mut idx = INDEX.lock();
-        if let Some(old_tags) = idx.by_path.remove(path) {
-            for t in &old_tags {
-                if let Some(set) = idx.by_tag.get_mut(t) {
-                    set.remove(path);
-                    if set.is_empty() {
-                        idx.by_tag.remove(t);
-                    }
-                }
-            }
-        }
-    }
-
+    store(path.as_ref(), &[])?;
     REMOVES.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Tag search
+// Many files' tags
 // ---------------------------------------------------------------------------
 
-/// Find all files with a specific tag.
+/// The files and directories under `root`, `root` included, that carry `tag`,
+/// ASCII letters' case ignored. `/proc`, `/sys` and `/dev` are not walked
+/// (their files keep no attributes), and symlinks are not followed.
 ///
-/// If the index is built, uses the in-memory index for O(1) lookup.
-/// Otherwise falls back to a filesystem walk scanning xattrs.
-pub fn search<R: AsRef<Path> + ?Sized>(tag: &str, root: &R) -> KernelResult<Vec<TaggedFile>> {
-    let root = root.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
-
-    let norm = normalize_tag(tag);
-    SEARCHES.fetch_add(1, Ordering::Relaxed);
-
-    // Fast path: take the candidate paths out of the index and release it.
-    // The xattr reads below go through the VFS and so may not run under
-    // `INDEX` -- see the static's doc comment.
-    let candidates: Option<Vec<PathBuf>> = {
-        let idx = INDEX.lock();
-        if idx.built {
-            Some(idx.by_tag.get(&norm).map_or_else(Vec::new, |set| {
-                set.iter()
-                    // Component-boundary subtree test, not a byte prefix: a
-                    // byte prefix would let a search rooted at `/dev` also
-                    // return everything under `/devices`.
-                    .filter(|path| path_in_subtree(path, root))
-                    .cloned()
-                    .collect()
-            }))
-        } else {
-            None
-        }
-    };
-
-    let Some(candidates) = candidates else {
-        // Slow path: walk the filesystem, also with nothing held.
-        let mut results = Vec::new();
-        search_walk(root, &norm, &mut results, 0);
-        return Ok(results);
-    };
-
-    Ok(candidates
-        .into_iter()
-        .map(|path| {
-            // Re-read tags from xattr for accuracy. A file whose xattrs became
-            // unreadable since the index was built reports no tags rather than
-            // failing the whole search -- the index entry is then merely stale,
-            // which `rebuild` corrects.
-            let tags = read_tags(&path).unwrap_or_default();
-            TaggedFile { path, tags }
-        })
-        .collect())
+/// # Errors
+///
+/// `root`'s: `NotFound`, `NotADirectory`.
+pub fn search<R: AsRef<Path> + ?Sized>(tag: &str, root: &R) -> KernelResult<Found> {
+    search_multi(&[tag], root)
 }
 
-/// Find all files that have ALL of the specified tags (intersection).
-pub fn search_multi<R: AsRef<Path> + ?Sized>(
-    tags: &[&str],
-    root: &R,
-) -> KernelResult<Vec<TaggedFile>> {
-    let root = root.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
+/// The files and directories under `root` that carry every one of `tags`,
+/// walked as [`search`] walks; no tags at all matches nothing.
+///
+/// # Errors
+///
+/// As [`search`].
+pub fn search_multi<R: AsRef<Path> + ?Sized>(tags: &[&str], root: &R) -> KernelResult<Found> {
+    SEARCHES.fetch_add(1, Ordering::Relaxed);
+    let mut files = Vec::new();
     if tags.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Found {
+            files,
+            incomplete: false,
+        });
     }
-
-    SEARCHES.fetch_add(1, Ordering::Relaxed);
-
-    let norms: Vec<String> = tags.iter().map(|t| normalize_tag(t)).collect();
-
-    // Fast path: the whole intersection happens under the lock, but the xattr
-    // reads it feeds must not -- see `INDEX`'s doc comment. So the critical
-    // section ends with a plain list of paths.
-    let candidates: Option<Vec<PathBuf>> = {
-        let idx = INDEX.lock();
-        if idx.built {
-            // Start with the smallest tag set for efficiency.
-            let mut sets: Vec<&BTreeSet<PathBuf>> = Vec::new();
-            for norm in &norms {
-                match idx.by_tag.get(norm) {
-                    Some(set) => sets.push(set),
-                    None => return Ok(Vec::new()), // If any tag has no files, result is empty.
-                }
+    let incomplete = each_tagged(root.as_ref(), |path, carried| {
+        if tags
+            .iter()
+            .all(|wanted| carried.iter().any(|t| same(t, wanted)))
+        {
+            if files.len() >= MAX_RESULTS {
+                return false;
             }
-
-            // Sort by size (smallest first).
-            sets.sort_by_key(|s| s.len());
-
-            // Intersect iteratively.  `split_first` rather than `sets[0]`/`sets[1..]`:
-            // `tags` is non-empty so `sets` is too, but indexing to prove that would
-            // be a panic path the compiler cannot check.
-            let Some((first, rest)) = sets.split_first() else {
-                return Ok(Vec::new());
-            };
-            let mut inter: BTreeSet<PathBuf> = (*first).clone();
-            for set in rest {
-                inter = inter.intersection(set).cloned().collect();
-                if inter.is_empty() {
-                    return Ok(Vec::new());
-                }
-            }
-
-            Some(
-                inter
-                    .into_iter()
-                    .filter(|path| path_in_subtree(path, root))
-                    .collect(),
-            )
-        } else {
-            None
+            files.push(TaggedFile {
+                path: path.to_path_buf(),
+                tags: carried,
+            });
         }
-    };
-
-    let Some(candidates) = candidates else {
-        // Slow path: walk the filesystem, also with nothing held.
-        let mut results = Vec::new();
-        search_walk_multi(root, &norms, &mut results, 0);
-        return Ok(results);
-    };
-
-    Ok(candidates
-        .into_iter()
-        .map(|path| {
-            // As in `search`: an unreadable xattr yields no tags rather than
-            // failing every other match alongside it.
-            let tags = read_tags(&path).unwrap_or_default();
-            TaggedFile { path, tags }
-        })
-        .collect())
+        true
+    })?;
+    Ok(Found { files, incomplete })
 }
 
-/// Virtual filesystems carry no persistent xattrs, so walking them can only
-/// waste time.  This is a subtree test rather than a byte-prefix test: the old
-/// `path.starts_with("/dev")` also silently skipped a real `/devices` tree.
-fn is_virtual_fs(path: &Path) -> bool {
-    const VIRTUAL: [&str; 3] = ["/proc", "/dev", "/sys"];
-    VIRTUAL.iter().any(|d| path_in_subtree(path, d))
-}
-
-/// Walk the filesystem looking for files with a specific tag.
-fn search_walk(path: &Path, norm_tag: &str, results: &mut Vec<TaggedFile>, depth: usize) {
-    if depth > MAX_SCAN_DEPTH || results.len() >= 1000 {
-        return;
-    }
-
-    if is_virtual_fs(path) {
-        return;
-    }
-
-    let Ok(entries) = Vfs::readdir(path) else {
-        return;
-    };
-
-    for entry in &entries {
-        if is_dot_entry(&entry.name) {
-            continue;
-        }
-        if results.len() >= 1000 {
-            return;
-        }
-
-        // `Path::join` inserts exactly one separator, so a root `path` needs no
-        // special case: `/` joined with `etc` is `/etc`, not `//etc`.
-        let full = path.join(&entry.name);
-
-        // Check tags on this entry.
-        if let Ok(tags) = read_tags(&full) {
-            if tags.iter().any(|t| normalize_tag(t) == norm_tag) {
-                results.push(TaggedFile {
-                    path: full.clone(),
-                    tags,
-                });
-            }
-        }
-
-        // Recurse into directories.
-        if entry.entry_type == EntryType::Directory {
-            search_walk(&full, norm_tag, results, depth.saturating_add(1));
-        }
-    }
-}
-
-/// Walk the filesystem looking for files with ALL specified tags.
-fn search_walk_multi(
-    path: &Path,
-    norm_tags: &[String],
-    results: &mut Vec<TaggedFile>,
-    depth: usize,
-) {
-    if depth > MAX_SCAN_DEPTH || results.len() >= 1000 {
-        return;
-    }
-
-    if is_virtual_fs(path) {
-        return;
-    }
-
-    let Ok(entries) = Vfs::readdir(path) else {
-        return;
-    };
-
-    for entry in &entries {
-        if is_dot_entry(&entry.name) {
-            continue;
-        }
-        if results.len() >= 1000 {
-            return;
-        }
-
-        let full = path.join(&entry.name);
-
-        // Check tags on this entry.
-        if let Ok(tags) = read_tags(&full) {
-            let norms: Vec<String> = tags.iter().map(|t| normalize_tag(t)).collect();
-            if norm_tags.iter().all(|nt| norms.contains(nt)) {
-                results.push(TaggedFile {
-                    path: full.clone(),
-                    tags,
-                });
-            }
-        }
-
-        if entry.entry_type == EntryType::Directory {
-            search_walk_multi(&full, norm_tags, results, depth.saturating_add(1));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Index management
-// ---------------------------------------------------------------------------
-
-/// Build (or rebuild) the tag index by scanning the filesystem.
+/// Every tag in use under `root`, `root` included, with how many files and
+/// directories carry it, walked as [`search`] walks.
 ///
-/// Walks the specified root path and indexes all files that have
-/// the `user.tags` xattr.
-pub fn build_index<R: AsRef<Path> + ?Sized>(root: &R) -> KernelResult<u64> {
-    let root = root.as_ref();
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Err(KernelError::NotSupported);
-    }
-
-    let mut new_by_tag: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
-    let mut new_by_path: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
-    let mut count: u64 = 0;
-
-    index_walk(root, &mut new_by_tag, &mut new_by_path, &mut count, 0);
-
-    let mut idx = INDEX.lock();
-    idx.by_tag = new_by_tag;
-    idx.by_path = new_by_path;
-    idx.built = true;
-
-    serial_println!("[tags] Index built: {} tagged files", count);
-    Ok(count)
-}
-
-/// Walk the filesystem to build the tag index.
-fn index_walk(
-    path: &Path,
-    by_tag: &mut BTreeMap<String, BTreeSet<PathBuf>>,
-    by_path: &mut BTreeMap<PathBuf, BTreeSet<String>>,
-    count: &mut u64,
-    depth: usize,
-) {
-    if depth > MAX_SCAN_DEPTH {
-        return;
-    }
-
-    // Total entries cap.
-    let total: usize = by_path.len();
-    if total >= MAX_INDEX_ENTRIES {
-        return;
-    }
-
-    // Skip virtual filesystems, plus the kernel's own `/_*` scratch mounts.
-    if is_virtual_fs(path)
-        || path
-            .components()
-            .next()
-            .is_some_and(|c| c.as_bytes().starts_with(b"_"))
-    {
-        return;
-    }
-
-    let Ok(entries) = Vfs::readdir(path) else {
-        return;
-    };
-
-    for entry in &entries {
-        if is_dot_entry(&entry.name) {
-            continue;
-        }
-        if by_path.len() >= MAX_INDEX_ENTRIES {
-            return;
-        }
-
-        let full = path.join(&entry.name);
-
-        // Check for tags.
-        if let Ok(tags) = read_tags(&full) {
-            if !tags.is_empty() {
-                let mut path_tags = BTreeSet::new();
-                for tag in &tags {
-                    let norm = normalize_tag(tag);
-                    by_tag.entry(norm.clone()).or_default().insert(full.clone());
-                    path_tags.insert(norm);
-                }
-                by_path.insert(full.clone(), path_tags);
-                *count = count.saturating_add(1);
+/// # Errors
+///
+/// As [`search`].
+pub fn list_tags<R: AsRef<Path> + ?Sized>(root: &R) -> KernelResult<Census> {
+    SEARCHES.fetch_add(1, Ordering::Relaxed);
+    // Keyed by the tag with ASCII letters lowered: one entry per tag however
+    // its files spell it, shown as the first file spelled it.
+    let mut counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    let incomplete = each_tagged(root.as_ref(), |_, carried| {
+        let mut seen_here: Vec<String> = Vec::new();
+        for tag in carried {
+            let key = tag.to_ascii_lowercase();
+            if seen_here.contains(&key) {
+                continue;
             }
+            if !counts.contains_key(&key) && counts.len() >= MAX_DISTINCT {
+                return false;
+            }
+            let entry = counts.entry(key.clone()).or_insert((tag, 0));
+            entry.1 = entry.1.saturating_add(1);
+            seen_here.push(key);
         }
+        true
+    })?;
+    Ok(Census {
+        tags: counts.into_values().collect(),
+        incomplete,
+    })
+}
 
-        // Recurse into directories.
-        if entry.entry_type == EntryType::Directory {
-            index_walk(&full, by_tag, by_path, count, depth.saturating_add(1));
+/// Walk `root` handing each regular file and directory that carries tags to
+/// `found`, which answers whether to go on. Answers whether the walk stopped
+/// short of seeing everything (see [`Found::incomplete`]).
+fn each_tagged(
+    root: &Path,
+    mut found: impl FnMut(&Path, Vec<String>) -> bool,
+) -> KernelResult<bool> {
+    let opts = WalkOptions {
+        show_hidden: true,
+        include_root: true,
+        ..WalkOptions::default()
+    };
+    let mut incomplete = false;
+    let mut visited: u64 = 0;
+    let stats = fswalk::walk_visit(root, &opts, |entry| {
+        visited = visited.saturating_add(1);
+        if visited > MAX_VISITED {
+            incomplete = true;
+            return WalkAction::Stop;
         }
+        // Only these two carry `user.` attributes.
+        if !matches!(entry.entry_type, EntryType::File | EntryType::Directory) {
+            return WalkAction::Continue;
+        }
+        match Vfs::get_xattr_no_follow(&entry.path, XATTR).and_then(|raw| parse(&raw)) {
+            Ok(carried) if carried.is_empty() => {}
+            Ok(carried) => {
+                if !found(&entry.path, carried) {
+                    incomplete = true;
+                    return WalkAction::Stop;
+                }
+            }
+            // No tags, or a filesystem that keeps no attributes and so no
+            // tags: nothing missed.
+            Err(KernelError::NoAttribute | KernelError::NotSupported) => {}
+            // Anything else -- the entry gone mid-walk, a read that failed, a
+            // list that is not text -- may be a match that was not seen.
+            Err(_) => incomplete = true,
+        }
+        WalkAction::Continue
+    })?;
+    if stats.errors > 0 || stats.unwalked > 0 {
+        incomplete = true;
     }
-}
-
-/// Clear the tag index.
-pub fn clear_index() {
-    let mut idx = INDEX.lock();
-    idx.by_tag.clear();
-    idx.by_path.clear();
-    idx.built = false;
-}
-
-/// List all known tags (from the index).
-pub fn list_tags() -> Vec<(String, usize)> {
-    let idx = INDEX.lock();
-    idx.by_tag
-        .iter()
-        .map(|(tag, paths)| (tag.clone(), paths.len()))
-        .collect()
-}
-
-/// List all files with any tag in the index.
-pub fn list_tagged_files() -> Vec<TaggedFile> {
-    let idx = INDEX.lock();
-    idx.by_path
-        .iter()
-        .map(|(path, tags)| TaggedFile {
-            path: path.clone(),
-            tags: tags.iter().cloned().collect(),
-        })
-        .collect()
+    Ok(incomplete)
 }
 
 // ---------------------------------------------------------------------------
-// Self-tests
+// Self-test
 // ---------------------------------------------------------------------------
 
-/// Unlike most of its neighbours this suite never wiped the table — its
-/// `test_clear` exercises the per-entry clear rather than emptying the
-/// store — and it removes its own fixtures one call at a time.  That is a
-/// claim nobody re-checks when a test is added to the list below.  Running
-/// against a table moved aside for the duration makes "leaves no trace"
-/// structural instead: whatever the suite creates goes away with the
-/// substitute.  See `crate::fs::selftest`.
+/// Tags as the file's attribute, on a scratch tree in `/tmp` (memfs):
+///
+/// 1. set and read back, and what a program's `getxattr` sees is the same
+///    list, under the attribute's name;
+/// 2. add and remove with case ignored, removing one not there `NotFound`,
+///    clearing removes the attribute;
+/// 3. what may be a tag -- refusals change nothing, and spaces inside,
+///    nesting and letters beyond ASCII are fine;
+/// 4. the file's, not a name's: a hard link shows the tags, a rename carries
+///    them, and a file made at the name of a deleted one has none;
+/// 5. search ignores case, keeps to its root (which must exist), finds a
+///    directory's own tags and files whose names are not UTF-8, and says it
+///    saw everything; all-of searches; a census counts each tag once per file;
+/// 6. a list that is not text reads as `CorruptedData`, and a search that met
+///    one says it may have missed something.
+///
+/// The counters are put back as they were: this is reachable from the shell,
+/// and a test run is not the user's activity.
+///
+/// # Errors
+///
+/// `InternalError` naming the first step that answered wrongly; the setup's.
 pub fn self_test() -> KernelResult<()> {
-    // These counters live outside the table, so `with_pristine` cannot
-    // see them; save and restore them here so a run leaves no trace.
-    let saved_enabled = ENABLED.load(Ordering::Relaxed);
-    let saved_adds = ADDS.load(Ordering::Relaxed);
-    let saved_removes = REMOVES.load(Ordering::Relaxed);
-    let saved_searches = SEARCHES.load(Ordering::Relaxed);
-    let result = crate::fs::selftest::with_pristine(&INDEX, TagIndex::new(), self_test_inner);
-    ENABLED.store(saved_enabled, Ordering::Relaxed);
-    ADDS.store(saved_adds, Ordering::Relaxed);
-    REMOVES.store(saved_removes, Ordering::Relaxed);
-    SEARCHES.store(saved_searches, Ordering::Relaxed);
-    result
-}
-
-fn self_test_inner() -> KernelResult<()> {
-    serial_println!("[tags] Running self-test...");
-
-    test_validate_tag();
-    test_add_remove();
-    test_get_set();
-    test_clear();
-    test_search();
-    test_multi_search();
-    test_index();
-    test_byte_paths();
-    test_subtree_filter();
-    test_stats();
-
-    serial_println!("[tags] Self-test passed (10 tests).");
+    const DIR: &str = "/tmp/_tags";
+    let saved = stats();
+    // Best effort, both ends: this test's own scratch tree.
+    let _ = Vfs::remove_recursive(DIR);
+    let result = self_test_on(DIR);
+    let _ = Vfs::remove_recursive(DIR);
+    ADDS.store(saved.adds, Ordering::Relaxed);
+    REMOVES.store(saved.removes, Ordering::Relaxed);
+    SEARCHES.store(saved.searches, Ordering::Relaxed);
+    result?;
+    crate::serial_println!(
+        "[tags] Self-test passed (6 tests): the file's user.xdg.tags, case, what a tag may be, \
+         links and renames, search and census, a list that is not text"
+    );
     Ok(())
 }
 
-fn test_validate_tag() {
-    assert!(validate_tag("work").is_ok());
-    assert!(validate_tag("my-project").is_ok());
-    assert!(validate_tag("v2.0").is_ok());
-    assert!(validate_tag("under_score").is_ok());
-    assert!(validate_tag("").is_err());
-    assert!(validate_tag("has space").is_err());
-    assert!(validate_tag("has,comma").is_err());
-    assert!(validate_tag("has/slash").is_err());
+#[allow(clippy::too_many_lines)] // one linear script
+fn self_test_on(dir: &str) -> KernelResult<()> {
+    use crate::serial_println;
 
-    // Max length.
-    let long = "a".repeat(64);
-    assert!(validate_tag(&long).is_ok());
-    let too_long = "a".repeat(65);
-    assert!(validate_tag(&too_long).is_err());
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[tags]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let at = |name: &[u8]| {
+        let mut p = PathBuf::from(dir);
+        p.push(Path::new(name));
+        p
+    };
+    let doc = at(b"doc.txt");
+    let alias = at(b"alias.txt");
+    let moved = at(b"moved.txt");
+    let odd = at(b"\xFFodd.txt");
+    let sub = at(b"sub");
+    let deep = at(b"sub/deep.txt");
+    let strange = at(b"strange.txt");
 
-    serial_println!("[tags]   validate tag: ok");
-}
+    Vfs::mkdir(dir)?;
+    Vfs::mkdir(&sub)?;
+    Vfs::write_file(&doc, b"doc")?;
+    Vfs::write_file(&odd, b"odd")?;
+    Vfs::write_file(&deep, b"deep")?;
+    Vfs::write_file(&strange, b"strange")?;
 
-fn test_add_remove() {
-    let _ = Vfs::mkdir("/tmp/tag_test");
-    Vfs::write_file("/tmp/tag_test/doc.txt", b"hello").expect("write");
+    // 1: set, read back, and the attribute a program reads.
+    set(&doc, &["work", "Important"])?;
+    let read = get(&doc)?;
+    let program = Vfs::get_xattr(&doc, XATTR)?;
+    let listed = Vfs::list_xattrs(&doc)?;
+    if read != ["work", "Important"]
+        || program != b"work,Important"
+        || !listed.iter().any(|n| n.as_slice() == XATTR)
+    {
+        return fail("a list did not read back as the file's user.xdg.tags");
+    }
+    serial_println!("[tags]   1: set and read back, as the file's attribute: ok");
 
-    // Add tags.
-    add("/tmp/tag_test/doc.txt", "work").expect("add work");
-    add("/tmp/tag_test/doc.txt", "important").expect("add important");
+    // 2: case, removal, clearing.
+    add(&doc, "WORK")?;
+    add(&doc, "draft")?;
+    let added = get(&doc)?;
+    remove(&doc, "IMPORTANT")?;
+    let removed = get(&doc)?;
+    let absent = remove(&doc, "never-there");
+    clear(&doc)?;
+    let cleared = Vfs::get_xattr(&doc, XATTR);
+    let cleared_again = clear(&doc);
+    if added != ["work", "Important", "draft"]
+        || removed != ["work", "draft"]
+        || absent != Err(KernelError::NotFound)
+        || cleared != Err(KernelError::NoAttribute)
+        || cleared_again.is_err()
+    {
+        serial_println!(
+            "[tags]     added {:?}, removed {:?}, absent {:?}, cleared {:?}",
+            added,
+            removed,
+            absent,
+            cleared.map(|v| v.len())
+        );
+        return fail("adding or removing with case ignored, or clearing, went wrong");
+    }
+    serial_println!("[tags]   2: case ignored, removing one not there, clearing: ok");
 
-    // Verify tags are stored.
-    let tags = get("/tmp/tag_test/doc.txt").expect("get");
-    assert_eq!(tags.len(), 2);
-    assert!(tags.contains(&String::from("work")));
-    assert!(tags.contains(&String::from("important")));
+    // 3: what may be a tag.
+    set(&doc, &["kept"])?;
+    let long = "t".repeat(MAX_TAG_LEN.saturating_add(1));
+    let many: Vec<String> = (0..=MAX_TAGS_PER_FILE)
+        .map(|i| alloc::format!("t{i}"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let refused = [
+        add(&doc, ""),
+        add(&doc, "a,b"),
+        add(&doc, "tab\there"),
+        add(&doc, " padded"),
+        add(&doc, long.as_str()),
+        set(&doc, &many),
+    ];
+    let unchanged = get(&doc)?;
+    let fine = set(&doc, &["two words", "Projects/SlateOS", "Résumé"]);
+    let fine_read = get(&doc)?;
+    if refused
+        .iter()
+        .any(|r| *r != Err(KernelError::InvalidArgument))
+        || unchanged != ["kept"]
+        || fine.is_err()
+        || fine_read != ["two words", "Projects/SlateOS", "Résumé"]
+    {
+        serial_println!(
+            "[tags]     refusals {:?}, after them {:?}, the fine ones {:?} -> {:?}",
+            refused,
+            unchanged,
+            fine,
+            fine_read
+        );
+        return fail("what may be a tag was judged wrongly");
+    }
+    serial_println!("[tags]   3: what may be a tag, refusals changing nothing: ok");
 
-    // Duplicate add (case-insensitive) is no-op.
-    add("/tmp/tag_test/doc.txt", "Work").expect("dup add");
-    let tags = get("/tmp/tag_test/doc.txt").expect("get after dup");
-    assert_eq!(tags.len(), 2);
+    // 4: the file's, not a name's.
+    Vfs::link(&doc, &alias)?;
+    let through_link = get(&alias)?;
+    Vfs::rename(&doc, &moved)?;
+    let after_rename = get(&moved)?;
+    Vfs::remove(&moved)?;
+    Vfs::remove(&alias)?;
+    Vfs::write_file(&doc, b"new")?;
+    let newcomer = get(&doc)?;
+    if through_link != fine_read || after_rename != fine_read || !newcomer.is_empty() {
+        serial_println!(
+            "[tags]     link {:?}, renamed {:?}, a new file at the old name {:?}",
+            through_link,
+            after_rename,
+            newcomer
+        );
+        return fail("tags did not follow their file");
+    }
+    serial_println!("[tags]   4: through a link, across a rename, gone with the file: ok");
 
-    // Remove a tag.
-    remove("/tmp/tag_test/doc.txt", "work").expect("remove");
-    let tags = get("/tmp/tag_test/doc.txt").expect("get after remove");
-    assert_eq!(tags.len(), 1);
-    assert!(tags.contains(&String::from("important")));
+    // 5: search and census.
+    set(&doc, &["work", "urgent"])?;
+    set(&deep, &["Work"])?;
+    set(&odd, &["work", "URGENT"])?;
+    set(&sub, &["folder"])?;
+    let work = search("WORK", Path::new(dir))?;
+    let both = search_multi(&["work", "urgent"], Path::new(dir))?;
+    let in_sub = search("work", &sub)?;
+    let folder = search("folder", &sub)?;
+    let missing_root = search("work", Path::new("/tmp/_tags/none"));
+    let census = list_tags(Path::new(dir))?;
+    let count_of = |tag: &str| {
+        census
+            .tags
+            .iter()
+            .find(|(t, _)| same(t, tag))
+            .map_or(0, |(_, n)| *n)
+    };
+    let found_odd = work.files.iter().any(|f| f.path == odd);
+    if work.files.len() != 3
+        || work.incomplete
+        || !found_odd
+        || both.files.len() != 2
+        || in_sub.files.len() != 1
+        || in_sub.files.first().map(|f| &f.path) != Some(&deep)
+        || folder.files.len() != 1
+        || missing_root.is_ok()
+        || census.tags.len() != 3
+        || count_of("work") != 3
+        || count_of("urgent") != 2
+        || count_of("folder") != 1
+        || census.incomplete
+    {
+        serial_println!(
+            "[tags]     work {} (odd name found {}), both {}, under sub {}, sub's own {}, a missing root {:?}, census {:?}",
+            work.files.len(),
+            found_odd,
+            both.files.len(),
+            in_sub.files.len(),
+            folder.files.len(),
+            missing_root.map(|f| f.files.len()),
+            census
+        );
+        return fail("a search or the census found the wrong files");
+    }
+    serial_println!("[tags]   5: search with case ignored, within its root, all-of, census: ok");
 
-    // Remove non-existent tag.
-    assert!(remove("/tmp/tag_test/doc.txt", "nonexistent").is_err());
-
-    let _ = Vfs::remove("/tmp/tag_test/doc.txt");
-    let _ = Vfs::rmdir("/tmp/tag_test");
-
-    serial_println!("[tags]   add/remove: ok");
-}
-
-fn test_get_set() {
-    let _ = Vfs::mkdir("/tmp/tag_gs");
-    Vfs::write_file("/tmp/tag_gs/f.txt", b"data").expect("write");
-
-    // Set multiple tags at once.
-    set("/tmp/tag_gs/f.txt", &["alpha", "beta", "gamma"]).expect("set");
-    let tags = get("/tmp/tag_gs/f.txt").expect("get");
-    assert_eq!(tags.len(), 3);
-
-    // Overwrite with new set.
-    set("/tmp/tag_gs/f.txt", &["one"]).expect("set2");
-    let tags = get("/tmp/tag_gs/f.txt").expect("get2");
-    assert_eq!(tags.len(), 1);
-    assert_eq!(tags[0], "one");
-
-    let _ = Vfs::remove("/tmp/tag_gs/f.txt");
-    let _ = Vfs::rmdir("/tmp/tag_gs");
-
-    serial_println!("[tags]   get/set: ok");
-}
-
-fn test_clear() {
-    let _ = Vfs::mkdir("/tmp/tag_clr");
-    Vfs::write_file("/tmp/tag_clr/f.txt", b"data").expect("write");
-
-    add("/tmp/tag_clr/f.txt", "x").expect("add");
-    add("/tmp/tag_clr/f.txt", "y").expect("add");
-    assert_eq!(get("/tmp/tag_clr/f.txt").expect("get").len(), 2);
-
-    clear("/tmp/tag_clr/f.txt").expect("clear");
-    assert!(get("/tmp/tag_clr/f.txt").expect("get").is_empty());
-
-    let _ = Vfs::remove("/tmp/tag_clr/f.txt");
-    let _ = Vfs::rmdir("/tmp/tag_clr");
-
-    serial_println!("[tags]   clear: ok");
-}
-
-fn test_search() {
-    let _ = Vfs::mkdir("/tmp/tag_search");
-    Vfs::write_file("/tmp/tag_search/a.txt", b"aa").expect("write");
-    Vfs::write_file("/tmp/tag_search/b.txt", b"bb").expect("write");
-    Vfs::write_file("/tmp/tag_search/c.txt", b"cc").expect("write");
-
-    add("/tmp/tag_search/a.txt", "red").expect("add");
-    add("/tmp/tag_search/b.txt", "red").expect("add");
-    add("/tmp/tag_search/b.txt", "blue").expect("add");
-    add("/tmp/tag_search/c.txt", "blue").expect("add");
-
-    // Search for "red" — should find a and b.
-    let results = search("red", "/tmp/tag_search").expect("search");
-    assert!(
-        results.len() >= 2,
-        "should find 2 red files, got {}",
-        results.len()
-    );
-
-    // Search for "blue" — should find b and c.
-    let results = search("blue", "/tmp/tag_search").expect("search");
-    assert!(
-        results.len() >= 2,
-        "should find 2 blue files, got {}",
-        results.len()
-    );
-
-    // Search for "green" — should find nothing.
-    let results = search("green", "/tmp/tag_search").expect("search");
-    assert!(results.is_empty(), "no green files");
-
-    // Cleanup.
-    let _ = Vfs::remove("/tmp/tag_search/a.txt");
-    let _ = Vfs::remove("/tmp/tag_search/b.txt");
-    let _ = Vfs::remove("/tmp/tag_search/c.txt");
-    let _ = Vfs::rmdir("/tmp/tag_search");
-
-    serial_println!("[tags]   search: ok");
-}
-
-fn test_multi_search() {
-    let _ = Vfs::mkdir("/tmp/tag_multi");
-    Vfs::write_file("/tmp/tag_multi/x.txt", b"xx").expect("write");
-    Vfs::write_file("/tmp/tag_multi/y.txt", b"yy").expect("write");
-
-    add("/tmp/tag_multi/x.txt", "hot").expect("add");
-    add("/tmp/tag_multi/x.txt", "urgent").expect("add");
-    add("/tmp/tag_multi/y.txt", "hot").expect("add");
-
-    // Search for files with BOTH "hot" AND "urgent".
-    let results = search_multi(&["hot", "urgent"], "/tmp/tag_multi").expect("multi");
-    assert_eq!(results.len(), 1, "only x.txt has both tags");
-    assert_eq!(
-        results.first().map(|r| r.path.as_path()),
-        Some(Path::new("/tmp/tag_multi/x.txt"))
-    );
-
-    // Single-tag multi-search.
-    let results = search_multi(&["hot"], "/tmp/tag_multi").expect("multi");
-    assert!(results.len() >= 2, "both files are hot");
-
-    // Cleanup.
-    let _ = Vfs::remove("/tmp/tag_multi/x.txt");
-    let _ = Vfs::remove("/tmp/tag_multi/y.txt");
-    let _ = Vfs::rmdir("/tmp/tag_multi");
-
-    serial_println!("[tags]   multi search: ok");
-}
-
-fn test_index() {
-    let _ = Vfs::mkdir("/tmp/tag_idx");
-    Vfs::write_file("/tmp/tag_idx/a.txt", b"aa").expect("write");
-    Vfs::write_file("/tmp/tag_idx/b.txt", b"bb").expect("write");
-
-    add("/tmp/tag_idx/a.txt", "indexed").expect("add");
-    add("/tmp/tag_idx/b.txt", "indexed").expect("add");
-    add("/tmp/tag_idx/b.txt", "special").expect("add");
-
-    // Build index.
-    let count = build_index("/tmp/tag_idx").expect("build_index");
-    assert!(count >= 2, "should index at least 2 files");
-
-    // Now search should use the fast index path.
-    let results = search("indexed", "/tmp/tag_idx").expect("search");
-    assert!(results.len() >= 2, "index search should find 2");
-
-    // List tags.
-    let all_tags = list_tags();
-    assert!(!all_tags.is_empty(), "should have tags");
-
-    // Clear index.
-    clear_index();
-    let s = stats();
-    assert!(!s.index_built, "should be cleared");
-
-    // Cleanup.
-    let _ = Vfs::remove("/tmp/tag_idx/a.txt");
-    let _ = Vfs::remove("/tmp/tag_idx/b.txt");
-    let _ = Vfs::rmdir("/tmp/tag_idx");
-
-    serial_println!("[tags]   index: ok");
-}
-
-/// A file whose name is not valid UTF-8 must still be taggable, findable by
-/// tag on both the walk and the index path, and its result path must round-trip
-/// back to the exact bytes — not to a U+FFFD-mangled name that names no file.
-fn test_byte_paths() {
-    let dir = Path::new("/tmp/tag_bytes");
-    let _ = Vfs::mkdir(dir);
-    let odd = Path::new(b"/tmp/tag_bytes/re\xffport.txt".as_slice());
-    Vfs::write_file(odd, b"raw").expect("write odd name");
-
-    add(odd, "byteish").expect("add");
-    assert_eq!(get(odd).expect("get").len(), 1);
-
-    // Slow path: no index, so `search` walks the filesystem.
-    clear_index();
-    let results = search("byteish", dir).expect("search");
-    assert_eq!(results.len(), 1, "walk must find the non-UTF-8 name");
-    assert_eq!(results.first().map(|r| r.path.as_path()), Some(odd));
-
-    // Fast path: served from the in-memory index.
-    build_index(dir).expect("build_index");
-    let results = search("byteish", dir).expect("indexed search");
-    assert_eq!(results.len(), 1, "index must hold the non-UTF-8 name");
-    assert_eq!(results.first().map(|r| r.path.as_path()), Some(odd));
-
-    // The returned path must be usable as a path.
-    assert_eq!(Vfs::read_file(odd).expect("read back"), b"raw");
-
-    clear(odd).expect("clear");
-    clear_index();
-    let _ = Vfs::remove(odd);
-    let _ = Vfs::rmdir(dir);
-
-    serial_println!("[tags]   byte paths: ok");
-}
-
-/// A search rooted at `/tmp/tag_sub` must not also return files under the
-/// sibling `/tmp/tag_subtree`.  The old byte-prefix filter matched both.
-fn test_subtree_filter() {
-    let _ = Vfs::mkdir("/tmp/tag_sub");
-    let _ = Vfs::mkdir("/tmp/tag_subtree");
-    Vfs::write_file("/tmp/tag_sub/in.txt", b"i").expect("write");
-    Vfs::write_file("/tmp/tag_subtree/out.txt", b"o").expect("write");
-
-    add("/tmp/tag_sub/in.txt", "subtest").expect("add");
-    add("/tmp/tag_subtree/out.txt", "subtest").expect("add");
-
-    build_index("/tmp").expect("build_index");
-
-    let results = search("subtest", "/tmp/tag_sub").expect("search");
-    assert_eq!(results.len(), 1, "sibling dir must not match as a prefix");
-    assert_eq!(
-        results.first().map(|r| r.path.as_path()),
-        Some(Path::new("/tmp/tag_sub/in.txt"))
-    );
-
-    // `search_multi` has its own copy of the filter; check it too.
-    let results = search_multi(&["subtest"], "/tmp/tag_sub").expect("multi");
-    assert_eq!(results.len(), 1, "sibling dir must not match as a prefix");
-
-    // A root of "/" still matches everything.
-    let results = search("subtest", "/").expect("root search");
-    assert_eq!(results.len(), 2, "root must match both");
-
-    clear_index();
-    let _ = Vfs::remove("/tmp/tag_sub/in.txt");
-    let _ = Vfs::remove("/tmp/tag_subtree/out.txt");
-    let _ = Vfs::rmdir("/tmp/tag_sub");
-    let _ = Vfs::rmdir("/tmp/tag_subtree");
-
-    serial_println!("[tags]   subtree filter: ok");
-}
-
-fn test_stats() {
-    let s = stats();
-    assert!(s.adds > 0, "should have add operations");
-    assert!(s.searches > 0, "should have search operations");
-
-    serial_println!("[tags]   stats: ok");
+    // 6: a list that is not text.
+    Vfs::set_xattr(&strange, XATTR, b"ok,\xFF\xFE")?;
+    let unreadable = get(&strange);
+    let after = search("work", Path::new(dir))?;
+    if unreadable != Err(KernelError::CorruptedData) || !after.incomplete {
+        serial_println!(
+            "[tags]     read {:?}, the search after it incomplete {}",
+            unreadable,
+            after.incomplete
+        );
+        return fail("a list that is not text was read as something, or passed unremarked");
+    }
+    serial_println!("[tags]   6: a list that is not text, reported: ok");
+    Ok(())
 }

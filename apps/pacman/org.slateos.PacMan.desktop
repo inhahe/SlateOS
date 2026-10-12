@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pac-Man
+Comment=Eat the dots and escape the ghosts
+Icon=applications-games
+Exec=pacman
+Categories=Game;ArcadeGame;
+Keywords=arcade;maze;ghosts;

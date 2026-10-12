@@ -985,7 +985,7 @@ mod imp {
                 1
             }
         };
-        stdfd::close_stdout("w", out, ExitCode::from(status))
+        stdfd::close_stdout_procps(b"w", out, ExitCode::from(status))
     }
 }
 

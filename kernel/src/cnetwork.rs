@@ -49,7 +49,7 @@
 #![allow(dead_code)]
 
 use crate::error::{KernelError, KernelResult};
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -150,7 +150,12 @@ impl NetworkTable {
     }
 }
 
-static TABLE: Mutex<NetworkTable> = Mutex::new(NetworkTable::new());
+/// Watched, not a `PreemptSpinMutex`: the bridge's and the veth table's locks
+/// are taken under it while a network's ports are wired, and a lock with
+/// another taken under it is the deadlock detector's to watch
+/// (design-decisions 975, A-Q16). Taken when a container network changes,
+/// not per packet.
+static TABLE: Mutex<NetworkTable> = Mutex::named(NetworkTable::new(), b"CNETWORK");
 
 // ---------------------------------------------------------------------------
 // Address arithmetic (clippy-clean: no bare +/-/<< on user-derived values)

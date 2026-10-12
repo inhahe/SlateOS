@@ -11,6 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 
 # The keys a one-line field answers, shared rather than copied.
 textline = { path = "../textline" }
+# The boxes' right-click menu -- Cut, Copy, Paste, Delete, Select all --
+# held, routed and drawn as every program's is.
+fieldmenu = { path = "../fieldmenu" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.

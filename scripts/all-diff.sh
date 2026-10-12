@@ -175,6 +175,15 @@ for h in scripts/*-diff.sh; do
     # not.
     case "$out" in
         *" 0 differed"* | *" 0 failed" | "no differences") ;;
+        # Two more wordings, both the util-linux ports': `N agree, 0 differ`
+        # (`blkid`, `blockdev`, `swapon`, `wipefs` ...), with a note in
+        # parentheses after it where there is one (`smartcols`), and a summary
+        # ending `0 failed, 0 broken` (`flock`, `getopt`, `logger`). Until
+        # 2026-10-07 neither was matched, so every sweep reported those ten
+        # harnesses red whatever they found -- ten false reds a run, which is
+        # how a red column stops being read. Anchored on the zero, as above.
+        *" agree, 0 differ" | *" agree, 0 differ ("*) ;;
+        *", 0 failed, 0 broken") ;;
         *) was_red=yes ;;
     esac
     # And an xfail that has started *agreeing* is red too, even though its

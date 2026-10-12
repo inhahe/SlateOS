@@ -212,13 +212,55 @@ impl Rights {
     /// authority, not because the operation is dangerous.
     pub const SET_BRIGHTNESS: Self = Self(1 << 22);
 
+    /// May enrol and remove Secure Boot entries (`PK`, `KEK`, `db`, `dbx`,
+    /// `MOK`): `SYS_SECUREBOOT_ENROLL` and `SYS_SECUREBOOT_REMOVE`.
+    ///
+    /// **The strongest of the setting rights.** A `db` entry decides which
+    /// images may run and a `dbx` entry which may not, so a holder decides
+    /// what the machine will boot. Its own bit for the reason every bit here
+    /// has one: granting "may set the keyboard layout" must not grant this.
+    ///
+    /// Verifying an image needs no right: asking whether an image may run
+    /// discloses nothing the entries' holder has not published in
+    /// `/proc/secureboot`.
+    pub const ENROLL_SECUREBOOT: Self = Self(1 << 23);
+
+    /// May replace the running kernel without a firmware reset: `SYS_POWER_RELOAD`
+    /// (kexec -- load a kernel image, quiesce, and jump to it).
+    ///
+    /// Its own bit, deliberately **not** implied by any "reboot" authority,
+    /// because the caller chooses the image: "restart into *this* kernel" is a
+    /// different and larger trust question than "restart the machine", which
+    /// hands control to firmware-verified boot. A holder decides what code the
+    /// machine runs next with full privilege, so this is among the strongest
+    /// rights -- granting "may set the keyboard layout" must not grant it.
+    pub const RELOAD_KERNEL: Self = Self(1 << 24);
+
+    /// May switch the machine off: `SYS_POWER_OFF`, and Linux's `reboot(2)`
+    /// with `LINUX_REBOOT_CMD_POWER_OFF` or `_HALT`.
+    ///
+    /// Its own bit, and not one with [`REBOOT`](Self::REBOOT): `roadmap-detailed`
+    /// §1.5 lists `power.shutdown` and `power.reboot` apart, because a program
+    /// allowed to restart the machine for an update has no business leaving it
+    /// off. Neither implies [`RELOAD_KERNEL`](Self::RELOAD_KERNEL), which chooses
+    /// the next kernel. The orderly part -- asking services and programs to
+    /// stop -- is the caller's (`powerctl`, the service manager); the kernel's is
+    /// the flush and the switch.
+    pub const POWER_OFF: Self = Self(1 << 25);
+
+    /// May restart the machine through the firmware: `SYS_POWER_REBOOT`, and
+    /// Linux's `reboot(2)` with `LINUX_REBOOT_CMD_RESTART` or `_RESTART2`.
+    ///
+    /// See [`POWER_OFF`](Self::POWER_OFF) for why it is a bit of its own.
+    pub const REBOOT: Self = Self(1 << 26);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 17] = [
+    const DISTINCT: [Self; 21] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -236,7 +278,28 @@ impl Rights {
         Self::SET_HOSTNAME,
         Self::SET_KEYLAYOUT,
         Self::SET_BRIGHTNESS,
+        Self::ENROLL_SECUREBOOT,
+        Self::RELOAD_KERNEL,
+        Self::POWER_OFF,
+        Self::REBOOT,
     ];
+
+    /// Every declared right and no other bit: the union of the distinct
+    /// rights. For a caller that must refuse bits meaning nothing today -- a
+    /// capability request for one would be approved as nothing, and come to
+    /// mean something the day the bit is declared (`cap::request`).
+    // Evaluated at compile time: an index out of range or an overflow fails
+    // the build, never the kernel.
+    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    pub const DECLARED: Self = {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < Self::DISTINCT.len() {
+            bits |= Self::DISTINCT[i].0;
+            i += 1;
+        }
+        Self(bits)
+    };
 
     // --- Convenience combinations ---
 
@@ -303,7 +366,31 @@ impl Rights {
             // Granted rather than withheld because the alternative is a
             // syscall nobody can invoke -- which is the same defect
             // `SYS_KEYLAYOUT_SET` was added to fix, one layer further in.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            // The same decision, for the same reason, for Secure Boot
+            // entries: init holds it, and so does every descendant nothing
+            // has narrowed. Withholding it would make the door a syscall
+            // nobody can invoke -- which is what design-decisions §978 (the
+            // operator's A-Q21 answer, "make them live") rules out. There is
+            // no narrower grant to give yet: the machinery for handing one
+            // administrative tool a right its parent lacks (`authbroker`) is
+            // the next module on the same list. See §1501.
+            | Self::ENROLL_SECUREBOOT.0
+            // The same decision, for the same reason, for replacing the kernel
+            // (kexec): init holds it, as it holds ENROLL_SECUREBOOT, because the
+            // alternative -- withholding it here -- is a narrowing smuggled in
+            // under an unrelated feature, which §930 rejected as a separate and
+            // larger change (the authbroker that hands one tool a right its
+            // parent lacks). `powerctl` reaches it as a root descendant until
+            // then.
+            | Self::RELOAD_KERNEL.0
+            // Switching the machine off and restarting it: init holds both, for
+            // the reason it holds RELOAD_KERNEL -- withheld, the doors would be
+            // syscalls nobody can invoke, and nothing could switch the machine
+            // off at all (it could not before them). `powerctl` and the service
+            // manager reach them as root descendants until authbroker lands.
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::File`].
@@ -343,7 +430,11 @@ impl Rights {
             // bookkeeping and not as a tightening. Omitting the bit here
             // would be a narrowing smuggled in under an unrelated feature,
             // and 930 rejected narrowing as a separate, larger change.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            | Self::ENROLL_SECUREBOOT.0
+            | Self::RELOAD_KERNEL.0
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::Socket`].
@@ -367,7 +458,11 @@ impl Rights {
             | Self::MEMORY_LOCK.0
             | Self::SET_HOSTNAME.0
             // Per 930, as for `INIT_FILE` above.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            | Self::ENROLL_SECUREBOOT.0
+            | Self::RELOAD_KERNEL.0
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// No rights.
@@ -493,25 +588,64 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        // 17 as of 2026-09-21: SET_BRIGHTNESS was added for
-        // SYS_BRIGHTNESS_SET. The decision this pin demands, made and
-        // recorded rather than merely unblocked:
+        // 21 as of 2026-10-09: POWER_OFF and REBOOT were added for
+        // SYS_POWER_OFF and SYS_POWER_REBOOT, the first way any program could
+        // switch the machine off or restart it. The decision this pin demands,
+        // for each of the two:
         //
-        //   INIT_PROCESS  no
-        //   INIT_FILE     no
-        //   INIT_SOCKET   no
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
         //
-        // Because that is what its three neighbours do. SET_CREDENTIALS,
-        // SET_HOSTNAME and SET_KEYLAYOUT are all system-wide-setting rights
-        // and none of them is in any INIT_* class -- those grant only the
-        // twelve generic rights, READ through DEBUG. init has no reason to
-        // dim a screen, and the compositor that does should hold the right
-        // explicitly rather than inherit it from being root.
+        // As RELOAD_KERNEL is, and for its reason: a right nobody holds is a
+        // door nobody can open, and `powerctl` and the service manager reach
+        // them as root descendants until `authbroker` can hand one tool a right
+        // its parent lacks. Also added to ROOT_PROCESS_RIGHTS, so a process that
+        // drops root drops them (Linux's CAP_SYS_BOOT is root's). Claude's call
+        // within the operator's scope, to revisit when authbroker lands.
         //
-        // This pin did its job: the right was added, committed and pushed
-        // before the build was run, and the const assertion is what caught
-        // it rather than a boot two hours later.
-        Rights::DISTINCT.len() == 17,
+        // 19 (2026-10-03): RELOAD_KERNEL was added for SYS_POWER_RELOAD
+        // (kexec -- replace the running kernel without the firmware). The
+        // decision this pin demands:
+        //
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
+        //
+        // As ENROLL_SECUREBOOT is, and for its reason: a right nobody holds is a
+        // door nobody can open, and there is no narrower grant to give until
+        // `authbroker` can hand one tool (powerctl) a right its parent lacks;
+        // until then powerctl reaches it as a root descendant. Also added to
+        // ROOT_PROCESS_RIGHTS, so it is dropped when uid leaves 0. Claude's call
+        // within the operator's scope, to revisit when authbroker lands.
+        //
+        // 18 (2026-09-27) was ENROLL_SECUREBOOT, added for
+        // SYS_SECUREBOOT_ENROLL / _REMOVE (design-decisions §978, §1501).
+        // The decision this pin demanded:
+        //
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
+        //
+        // As SET_HOSTNAME and SET_KEYLAYOUT are, and for their reason: a
+        // right nobody holds is a door nobody can open, which the operator's
+        // A-Q21 answer ("make them live") rules out, and there is no
+        // narrower grant to give until `authbroker` -- the next module on the
+        // same list -- can hand one tool a right its parent lacks. Claude's
+        // call within the operator's scope, recorded in §1501, to revisit
+        // when that lands.
+        //
+        // 17 (2026-09-21) was SET_BRIGHTNESS, decided the other way: in no
+        // INIT_* class, because init has no reason to dim a screen and the
+        // compositor that does should hold the right explicitly. That note
+        // also said SET_CREDENTIALS, SET_HOSTNAME and SET_KEYLAYOUT were in
+        // no INIT_* class; the lists above show they are in all three, and
+        // it is corrected here rather than left to mislead.
+        //
+        // This pin did its job then: the right was added, committed and
+        // pushed before the build was run, and the const assertion is what
+        // caught it rather than a boot two hours later.
+        Rights::DISTINCT.len() == 21,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

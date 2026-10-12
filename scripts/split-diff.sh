@@ -143,11 +143,21 @@ for _ in $(seq 1 700); do printf 'z'; done > wide.txt
 # With `IGNORE_PIPE` set, split starts with SIGPIPE ignored -- the subshell's
 # `trap '' PIPE` is inherited across `exec` -- which is what decides the
 # disposition a `--filter` command is handed.
+#
+# With `CLOSING` set (`<&-`, `>&-` or both), those descriptors are closed for
+# `split` alone, after the caller's captures so that the closing wins. Standard
+# input and output only: `diff_run` duplicates the caller's standard error,
+# which a `2>&-` would take away before `split` ever ran.
 run_side() {
   local side=$1 dir=$2; shift 2
   ( cd "$dir" || exit
     [ -n "${IGNORE_PIPE:-}" ] && trap '' PIPE
-    diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side:$PATH" split "$@" )
+    if [ -n "${CLOSING:-}" ]; then
+      eval "diff_run env \${ENVV[@]+\"\${ENVV[@]}\"} PATH=\"\$bindir/\$side:\$PATH\" \
+        split \"\$@\" $CLOSING"
+    else
+      diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side:$PATH" split "$@"
+    fi )
 }
 
 # Every file the run left behind, in name order, with its contents.
@@ -275,7 +285,7 @@ names_case() {
 raw_case() {
   local fixture=$1; shift
   compare_argv "$fixture" full - "$@"
-  report "${IGNORE_PIPE:+[SIGPIPE ignored] }${ENVV[*]:+${ENVV[*]} }split $*${TO_FULL:+  [>/dev/full]}"
+  report "${IGNORE_PIPE:+[SIGPIPE ignored] }${ENVV[*]:+${ENVV[*]} }split $*${TO_FULL:+  [>/dev/full]}${CLOSING:+  [$CLOSING]}"
 }
 
 # Reading the fixture from stdin rather than naming it.
@@ -695,6 +705,28 @@ raw_case seq20.txt -n r/1/2 -u in.txt
 raw_case seq20.txt --verbose -l 10 in.txt
 raw_case seq20.txt --help
 TO_FULL=
+
+# --- standard descriptors closed ----------------------------------------------
+
+# Upstream opens each piece with `open_safer` (`fcntl--.h`), so no piece is ever
+# descriptor 0, 1 or 2, and takes the input with `fd_reopen` onto descriptor 0.
+# Ours opens pieces plainly and agrees anyway, because each is announced,
+# written and closed before the next: no piece is open when the buffered
+# `creating file` lines reach descriptor 1. These hold that, round robin
+# included -- the one mode that keeps every piece open at once -- with enough
+# pieces (600) for the announcements to fill a buffer mid-run.
+seq 1 3000 > many.txt
+CLOSING='>&-'; raw_case seq20.txt --verbose -l 3 in.txt
+CLOSING='<&- >&-'; raw_case seq20.txt --verbose -l 3 in.txt
+CLOSING='<&-'; raw_case seq20.txt --verbose -l 3 in.txt
+CLOSING='>&-'; raw_case seq20.txt --verbose -n r/3 in.txt
+CLOSING='>&-'; raw_case seq20.txt --verbose -b 7 in.txt
+CLOSING='<&- >&-'; raw_case many.txt --verbose -n r/600 in.txt
+CLOSING='>&-'; raw_case many.txt --verbose -n l/600 in.txt
+CLOSING='<&-'; raw_case - --verbose -l 3 -
+CLOSING='<&-'; raw_case - --verbose -l 3
+CLOSING='>&-'; raw_case - -l 3 nosuch
+CLOSING=
 
 # --- not implemented ----------------------------------------------------------
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Asteroids
+Comment=Steer a ship and break up the rocks
+Icon=applications-games
+Exec=asteroids
+Categories=Game;ArcadeGame;
+Keywords=space;shooter;arcade;

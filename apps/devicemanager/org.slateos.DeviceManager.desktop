@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Device Manager
+Comment=See the computer's hardware and its drivers
+Icon=computer
+Exec=devicemanager
+Categories=System;HardwareSettings;Settings;
+Keywords=hardware;drivers;devices;

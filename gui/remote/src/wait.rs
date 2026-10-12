@@ -19,13 +19,14 @@
 //!
 //! # How, per platform
 //!
-//! - **SlateOS**, and Linux generally, has `poll(2)`: SlateOS's kernel
-//!   implements it (`kernel/src/syscall/linux.rs`, `sys_poll`) over its
-//!   multi-object wait (`kernel/src/ipc/multiwait.rs`). The call is made
-//!   directly, the way the compositor's DRM and evdev modules make theirs: the
-//!   workspace carries no `libc` crate, and one system call does not justify
-//!   one. Anything `poll` accepts can go in the set, so the compositor's
-//!   input devices wait beside its sockets.
+//! - **SlateOS**, and Linux generally, has `poll(2)`, called through the C
+//!   library (`crate::libc`): glibc's on a Linux host, and on SlateOS lane
+//!   D's, which builds it on the kernel's multi-object wait
+//!   (`SYS_WAIT_MULTIPLE`, `kernel/src/ipc/multiwait.rs`). Not as a `syscall`
+//!   instruction: a native SlateOS program's table numbers the calls
+//!   differently, and Linux's `poll` (7) is another call there. Anything
+//!   `poll` accepts can go in the set, so the compositor's input devices wait
+//!   beside its sockets.
 //!
 //!   How well that blocks is the kernel's business, and today it is uneven:
 //!   SlateOS's network sockets and evdev devices cannot yet push readiness
@@ -339,11 +340,6 @@ mod platform {
         Nothing,
     }
 
-    /// `poll` on x86-64 Linux, which the SlateOS kernel implements.
-    const SYS_POLL: u64 = 7;
-    /// A signal cut the wait short.
-    const EINTR: i64 = 4;
-
     pub(super) fn wait(
         entries: &mut [Entry],
         _os: &mut Resources,
@@ -354,36 +350,16 @@ mod platform {
         for entry in entries.iter_mut() {
             entry.revents = 0;
         }
-        let count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-        // The kernel reads the timeout as an `int`; a negative one goes in
-        // sign-extended, which is how every caller of `poll` passes `-1`.
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "a register holds the int's two's-complement bits; the kernel reads the low 32 as signed"
-        )]
-        let ms = i64::from(timeout_ms(timeout)) as u64;
-        let ret: i64;
+        let count = core::ffi::c_ulong::try_from(entries.len()).unwrap_or(core::ffi::c_ulong::MAX);
         // SAFETY: `poll(fds, nfds, timeout)` reads and writes `nfds` eight-byte
         // `struct pollfd`s at `fds`. `entries` is a live, exclusively borrowed
-        // slice of exactly `nfds` `#[repr(C)]` values of that layout (a null
-        // pointer with `nfds == 0` is also valid: nothing is touched). The
-        // `syscall` instruction clobbers `rcx` and `r11`, declared below, and
-        // returns in `rax`; the kernel preserves every other register.
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                inlateout("rax") SYS_POLL => ret,
-                in("rdi") entries.as_mut_ptr(),
-                in("rsi") count,
-                in("rdx") ms,
-                lateout("rcx") _,
-                lateout("r11") _,
-                options(nostack),
-            );
-        }
+        // slice of exactly `nfds` `#[repr(C)]` values of that layout (a
+        // dangling pointer with `nfds == 0` is also valid: nothing is touched).
+        let ret =
+            unsafe { crate::libc::poll(entries.as_mut_ptr().cast(), count, timeout_ms(timeout)) };
         if ret < 0 {
-            let errno = ret.checked_neg().unwrap_or(0);
-            if errno == EINTR {
+            let errno = crate::libc::last_errno();
+            if errno == crate::libc::EINTR {
                 // A signal is a spurious wake, not a failure: nothing was
                 // written back, so report nothing ready.
                 for entry in entries.iter_mut() {
@@ -391,9 +367,7 @@ mod platform {
                 }
                 return Ok(0);
             }
-            return Err(io::Error::from_raw_os_error(
-                i32::try_from(errno).unwrap_or(i32::MAX),
-            ));
+            return Err(io::Error::from_raw_os_error(errno));
         }
         Ok(usize::try_from(ret).unwrap_or(usize::MAX))
     }
@@ -883,45 +857,7 @@ mod wake {
     use std::io;
 
     use super::{DRAIN_CHUNK, DRAIN_READS, WaitHandle};
-
-    const SYS_READ: u64 = 0;
-    const SYS_WRITE: u64 = 1;
-    const SYS_CLOSE: u64 = 3;
-    const SYS_PIPE2: u64 = 293;
-    /// Neither end may ever block: a waker that blocked on a full pipe would
-    /// stall the thread that was only trying to say it had finished.
-    const O_NONBLOCK: u64 = 0o4000;
-    /// A child the process starts must not inherit a way to wake it.
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    const EINTR: i64 = 4;
-
-    /// A three-argument system call, returning the kernel's raw result:
-    /// `-errno` in `-4095..0`, anything else a success.
-    ///
-    /// # Safety
-    ///
-    /// The arguments must be valid for the call named by `n` — in particular
-    /// any pointer must cover the memory the kernel will read or write.
-    unsafe fn syscall3(n: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-        let ret: i64;
-        // SAFETY: the `syscall` instruction clobbers `rcx` and `r11`, both
-        // declared below, and returns in `rax`; the argument registers are the
-        // x86-64 Linux ABI's. Validity of the arguments is the caller's
-        // documented obligation.
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                inlateout("rax") n => ret,
-                in("rdi") a1,
-                in("rsi") a2,
-                in("rdx") a3,
-                lateout("rcx") _,
-                lateout("r11") _,
-                options(nostack),
-            );
-        }
-        ret
-    }
+    use crate::libc::{self, EINTR, O_CLOEXEC, O_NONBLOCK};
 
     /// A pipe end, closed exactly once, when this is dropped.
     #[derive(Debug)]
@@ -933,7 +869,7 @@ mod wake {
             // descriptor came from `pipe2` and is closed only here, since `Fd`
             // is neither `Clone` nor `Copy`. A failed close leaves nothing to
             // do.
-            let _ = unsafe { syscall3(SYS_CLOSE, u64::from(self.0.cast_unsigned()), 0, 0) };
+            let _ = unsafe { libc::close(self.0) };
         }
     }
 
@@ -945,20 +881,15 @@ mod wake {
 
     pub(super) fn channel() -> io::Result<(Sender, Receiver)> {
         let mut fds = [-1i32; 2];
+        // Neither end may ever block: a waker that blocked on a full pipe
+        // would stall the thread that was only trying to say it had finished.
+        // And a child the process starts must not inherit a way to wake it.
+        //
         // SAFETY: `pipe2` writes two `int`s at the pointer, which is a live,
         // exclusively borrowed array of exactly two.
-        let ret = unsafe {
-            syscall3(
-                SYS_PIPE2,
-                fds.as_mut_ptr() as u64,
-                O_NONBLOCK | O_CLOEXEC,
-                0,
-            )
-        };
+        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), O_NONBLOCK | O_CLOEXEC) };
         if ret < 0 {
-            return Err(io::Error::from_raw_os_error(
-                i32::try_from(ret.saturating_neg()).unwrap_or(i32::MAX),
-            ));
+            return Err(io::Error::from_raw_os_error(libc::last_errno()));
         }
         let [read_end, write_end] = fds;
         Ok((Sender(Fd(write_end)), Receiver(Fd(read_end))))
@@ -970,18 +901,11 @@ mod wake {
             loop {
                 // SAFETY: `write` reads one byte at the pointer, which is a
                 // live one-byte array.
-                let ret = unsafe {
-                    syscall3(
-                        SYS_WRITE,
-                        u64::from((self.0).0.cast_unsigned()),
-                        byte.as_ptr() as u64,
-                        1,
-                    )
-                };
+                let ret = unsafe { libc::write((self.0).0, byte.as_ptr().cast(), 1) };
                 // Retried only if a signal cut it short. `EAGAIN` is a full
                 // pipe, which already holds a wake; anything else means the
                 // reading end is gone, and there is nobody left to wake.
-                if ret != -EINTR {
+                if ret >= 0 || libc::last_errno() != EINTR {
                     return;
                 }
             }
@@ -996,15 +920,8 @@ mod wake {
                 // SAFETY: `read` writes at most `DRAIN_CHUNK` bytes at the
                 // pointer, which is a live, exclusively borrowed array of that
                 // many.
-                let ret = unsafe {
-                    syscall3(
-                        SYS_READ,
-                        u64::from((self.0).0.cast_unsigned()),
-                        buf.as_mut_ptr() as u64,
-                        DRAIN_CHUNK as u64,
-                    )
-                };
-                if ret == -EINTR {
+                let ret = unsafe { libc::read((self.0).0, buf.as_mut_ptr().cast(), DRAIN_CHUNK) };
+                if ret < 0 && libc::last_errno() == EINTR {
                     continue;
                 }
                 reads = reads.saturating_add(1);

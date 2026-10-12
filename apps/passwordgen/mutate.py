@@ -201,16 +201,13 @@ MUTATIONS = [
         "                Key::R if false => {",
         [DOTS],
     ),
-    (
-        "a control character is typed",
-        "                    if !textline::types_into_field(key) {",
-        "                    if key.text.is_empty() || textline::is_command(key.modifiers) {",
-        [CONTROL],
-    ),
+    # No row for "a control character is typed": since 2026-10-04 the
+    # analyser's typing is textline's, which keeps control characters out
+    # in its own crate and with its own tests.
     (
         "the analyser draws the password in the clear",
-        "        let shown = if self.analyzer_revealed {",
-        "        let shown = if true {",
+        "        let (shown, cursor, selection_anchor) = if self.analyzer_revealed {",
+        "        let (shown, cursor, selection_anchor) = if true {",
         [DOTS],
     ),
     (
@@ -255,18 +252,10 @@ MUTATIONS = [
         "                Key::R if key.modifiers.ctrl => {",
         ["altgr_types_into_the_analyser_and_runs_no_chord"],
     ),
-    (
-        "the analyser refuses what AltGr types",
-        "                    if !textline::types_into_field(key) {",
-        "                    if !textline::types_into_field(key) || key.modifiers.ctrl {",
-        ["altgr_types_into_the_analyser_and_runs_no_chord"],
-    ),
-    (
-        "the analyser types a command's letter",
-        "                    if !textline::types_into_field(key) {",
-        "                    if !key.types_text() {",
-        ["altgr_types_into_the_analyser_and_runs_no_chord"],
-    ),
+    # No rows for "the analyser refuses what AltGr types" or "types a
+    # command's letter": textline makes both distinctions now, and
+    # altgr_types_into_the_analyser_and_runs_no_chord still holds the box to
+    # them.
     (
         "a key held with Ctrl, Alt or the Windows key is a bare key",
         "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
@@ -362,9 +351,63 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the password",
-        "                cursor: text::TextCursor::from(shown.len()),\n",
-        "                cursor: text::TextCursor::from(0),\n",
-        [BOX],
+        "        let (cursor, anchor) = self.analyzer_caret();\n",
+        "        let (cursor, anchor) = (text::TextCursor::from(0), None::<usize>);\n",
+        ["the_password_being_measured_edits_at_a_caret"],
+    ),
+]
+
+# The analyser's box edits at a caret, the dots standing for characters
+# (2026-10-04, known-issues/E-twenty-nine-applications-type-only-at-the-end-of-
+# a-box): it took typing at its end and Backspace from it, and nothing else.
+EDITS = "the_password_being_measured_edits_at_a_caret"
+DOT = "a_dot_is_a_character_and_the_caret_steps_over_it"
+SHOWN = "the_analyser_edits_what_it_shows"
+
+MUTATIONS += [
+    (
+        "a hidden password copies",
+        "        let edit = if self.analyzer_revealed {\n",
+        "        let edit = if true {\n",
+        [EDITS],
+    ),
+    (
+        "a shown password does not copy",
+        "        let edit = if self.analyzer_revealed {\n",
+        "        let edit = if false {\n",
+        [EDITS],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit is not measured",
+        "            self.set_analyzer_input(&typed);\n            self.analyze_input();\n",
+        "            self.set_analyzer_input(&typed);\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another password",
+        "        if self.analyzer_editor.text() != self.analyzer_input {\n"
+        "            self.analyzer_editor.set_text(&self.analyzer_input);",
+        "        if false {\n"
+        "            self.analyzer_editor.set_text(&self.analyzer_input);",
+        [SHOWN],
+    ),
+    (
+        "every key the box answers is a redraw",
+        "        if after == before {\n",
+        "        if false {\n",
+        [DOT],
+    ),
+    (
+        "the selection is not drawn on the dots",
+        "                textline::masked(&self.analyzer_input, cursor.byte(), anchor, MASK);\n",
+        "                textline::masked(&self.analyzer_input, cursor.byte(), None, MASK);\n",
+        [EDITS],
     ),
 ]
 

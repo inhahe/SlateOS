@@ -11,7 +11,8 @@
 //! Each function is one call into the C library, allocating nothing and taking
 //! no lock of this crate's, and each C function behind it is on POSIX's list
 //! of async-signal-safe functions: `sigaction`, `signal`, `sigprocmask`,
-//! `sigsuspend`, `sigemptyset`, `sigaddset`, `raise`, `setitimer` and `alarm`.
+//! `sigsuspend`, `sigemptyset`, `sigaddset`, `sigismember`, `raise`, `setitimer`
+//! and `alarm`.
 //! That is a requirement rather than a courtesy: `timeout`'s handler re-arms
 //! the timer from inside itself, as upstream's does.
 //!
@@ -44,6 +45,8 @@ pub const SIGCHLD: i32 = 17;
 pub const SIGTTIN: i32 = 21;
 /// A background process wrote to its terminal, where that is not allowed.
 pub const SIGTTOU: i32 = 22;
+/// The window of the terminal the process is on changed size.
+pub const SIGWINCH: i32 = 28;
 
 /// `sigaction`'s flag for "resume a call this signal interrupted, rather than
 /// failing it with `EINTR`".
@@ -53,6 +56,8 @@ const SA_RESTART: i32 = 0x1000_0000;
 const SIG_BLOCK: i32 = 0;
 /// `sigprocmask`: take out of the blocked set.
 const SIG_UNBLOCK: i32 = 1;
+/// `sigprocmask`: replace the blocked set.
+const SIG_SETMASK: i32 = 2;
 /// `setitimer`'s timer that counts real time and ends in `SIGALRM`.
 #[cfg(any(unix, test))]
 const ITIMER_REAL: i32 = 0;
@@ -100,6 +105,13 @@ impl SigSet {
     pub fn add(&mut self, sig: i32) -> Result<(), i32> {
         add_one(self, sig)
     }
+
+    /// Whether signal `sig` is in the set: `sigismember`. A number that is no
+    /// signal is in no set; off Unix, no set holds anything.
+    #[must_use]
+    pub fn contains(&self, sig: i32) -> bool {
+        contains_one(self, sig)
+    }
 }
 
 /// C's `struct sigaction`, as glibc, musl and SlateOS's library lay it out.
@@ -140,6 +152,7 @@ mod sys {
     unsafe extern "C" {
         pub fn sigemptyset(set: *mut u64) -> i32;
         pub fn sigaddset(set: *mut u64, sig: i32) -> i32;
+        pub fn sigismember(set: *const u64, sig: i32) -> i32;
         pub fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
         pub fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32;
         pub fn sigsuspend(mask: *const u64) -> i32;
@@ -178,6 +191,20 @@ fn add_one(_set: &mut SigSet, _sig: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+#[cfg(unix)]
+fn contains_one(set: &SigSet, sig: i32) -> bool {
+    // SAFETY: `sigismember` only reads the live array it is handed, and
+    // answers -1 for a number that is no signal rather than reading beyond
+    // it.
+    let rc = unsafe { sys::sigismember(set.bits.as_ptr(), sig) };
+    rc == 1
+}
+
+#[cfg(not(unix))]
+fn contains_one(_set: &SigSet, _sig: i32) -> bool {
+    false
+}
+
 // ---------------------------------------------------------------------------
 // What a signal does
 // ---------------------------------------------------------------------------
@@ -212,6 +239,74 @@ fn set_handler_one(sig: i32, handler: Handler, restart: bool) -> Result<(), i32>
 
 #[cfg(not(unix))]
 fn set_handler_one(_sig: i32, _handler: Handler, _restart: bool) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Run `handler` whenever `sig` arrives, with every signal in `mask` blocked
+/// while it runs, and no `SA_RESTART`: `sigaction` with `sa_mask = mask` and
+/// `sa_flags = 0`, which is how GNU `sort` installs the handler that removes
+/// its temporary files before it dies of the signal.
+///
+/// # Errors
+///
+/// As [`set_handler`].
+pub fn set_handler_masked(sig: i32, handler: Handler, mask: &SigSet) -> Result<(), i32> {
+    set_handler_masked_one(sig, handler, mask)
+}
+
+#[cfg(unix)]
+fn set_handler_masked_one(sig: i32, handler: Handler, mask: &SigSet) -> Result<(), i32> {
+    let action = SigAction {
+        handler: handler as usize,
+        mask: *mask,
+        flags: 0,
+        restorer: 0,
+    };
+    // SAFETY: as in `set_handler_one`: a complete `struct sigaction` that
+    // lives for the call, which copies it, and a null `old`.
+    let rc = unsafe { sys::sigaction(sig, &raw const action, core::ptr::null_mut()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn set_handler_masked_one(_sig: i32, _handler: Handler, _mask: &SigSet) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Whether `sig` is ignored (`SIG_IGN`) -- `sigaction (sig, NULL, &old)` and
+/// a look at `old.sa_handler`. A program asks before catching a signal its
+/// parent chose to ignore, and leaves it ignored: GNU `sort` does, for the
+/// signals it would otherwise catch to remove its temporary files.
+///
+/// # Errors
+///
+/// `EINVAL` for a number that is no signal; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn is_ignored(sig: i32) -> Result<bool, i32> {
+    is_ignored_one(sig)
+}
+
+#[cfg(unix)]
+fn is_ignored_one(sig: i32) -> Result<bool, i32> {
+    /// `SIG_IGN`.
+    const SIG_IGN: usize = 1;
+    let mut old = SigAction {
+        handler: 0,
+        mask: SigSet { bits: [0; 16] },
+        flags: 0,
+        restorer: 0,
+    };
+    // SAFETY: a null `act` changes nothing; `old` is a complete, writable
+    // `struct sigaction`, which is all the call writes.
+    let rc = unsafe { sys::sigaction(sig, core::ptr::null(), &raw mut old) };
+    if rc == 0 {
+        Ok(old.handler == SIG_IGN)
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn is_ignored_one(_sig: i32) -> Result<bool, i32> {
     Err(ENOSYS)
 }
 
@@ -290,6 +385,18 @@ pub fn block(set: &SigSet) -> Result<SigSet, i32> {
 /// As [`block`].
 pub fn unblock(set: &SigSet) -> Result<SigSet, i32> {
     change_mask(SIG_UNBLOCK, set)
+}
+
+/// Make `set` the whole blocked set: `sigprocmask (SIG_SETMASK, ...)`.
+/// Returns the set that was blocked before. With [`SigSet::empty`], nothing
+/// is blocked any more -- what `wall`'s `ttymsg` does in the child it leaves
+/// writing to a slow terminal.
+///
+/// # Errors
+///
+/// As [`block`].
+pub fn set_mask(set: &SigSet) -> Result<SigSet, i32> {
+    change_mask(SIG_SETMASK, set)
 }
 
 #[cfg(unix)]
@@ -487,12 +594,14 @@ mod tests {
         assert_eq!(SIGCHLD, posix::signal::SIGCHLD);
         assert_eq!(SIGTTIN, posix::signal::SIGTTIN);
         assert_eq!(SIGTTOU, posix::signal::SIGTTOU);
+        assert_eq!(SIGWINCH, posix::signal::SIGWINCH);
         assert_eq!(
             u32::try_from(SA_RESTART).ok(),
             Some(posix::signal::SA_RESTART)
         );
         assert_eq!(SIG_BLOCK, posix::signal::SIG_BLOCK);
         assert_eq!(SIG_UNBLOCK, posix::signal::SIG_UNBLOCK);
+        assert_eq!(SIG_SETMASK, posix::signal::SIG_SETMASK);
         assert_eq!(ITIMER_REAL, posix::time::ITIMER_REAL);
     }
 
@@ -548,6 +657,29 @@ mod tests {
         set_default(SIGUSR1).unwrap();
         assert_eq!(set.add(0), Err(posix::errno::EINVAL));
         assert_eq!(set_handler(SIGKILL, count, true), Err(posix::errno::EINVAL));
+    }
+
+    /// `set_mask` replaces the blocked set and returns the one it replaced.
+    /// The mask is this thread's, so the test is too.
+    #[cfg(unix)]
+    #[test]
+    fn set_mask_replaces_the_whole_set() {
+        const SIGUSR2: i32 = 12;
+        let mut set = SigSet::empty();
+        set.add(SIGUSR2).unwrap();
+        let before = set_mask(&set).unwrap();
+        assert!(!before.contains(SIGUSR2));
+        // Blocking nothing more reports what is blocked now.
+        assert!(block(&SigSet::empty()).unwrap().contains(SIGUSR2));
+        let replaced = set_mask(&before).unwrap();
+        assert!(replaced.contains(SIGUSR2));
+        assert!(!block(&SigSet::empty()).unwrap().contains(SIGUSR2));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_mask_to_set() {
+        assert!(matches!(set_mask(&SigSet::empty()), Err(ENOSYS)));
     }
 
     /// The timer fires, and its signal reaches the handler.

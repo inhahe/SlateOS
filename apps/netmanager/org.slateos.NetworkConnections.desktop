@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Network Connections
+Comment=Set up the computer's network connections
+Icon=preferences-system-network
+Exec=netmanager
+Categories=Settings;Network;
+Keywords=network;wifi;ethernet;

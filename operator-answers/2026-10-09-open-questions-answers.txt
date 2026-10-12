@@ -1,0 +1,42 @@
+F-Q1: B
+C-Q31: A (i give my permission to edit claude.md for this)
+B-Q24: Claude's recommendation
+A-Q22: A
+A-Q23: A
+A-Q24: A
+A-Q25: Claude's recommendation
+A-Q26: B, but if it's not already planned or existent, have not only an "Always allow" option, but also an allow option that's only for that instance
+B-Q22: How about one kill command that does it all, and the user specifies whether to politely kill through the IPC mechanism or via the Linux way (or force kill), via command-line parameters? And/or the OS could choose which polite mode automatically based on wehther the program is a Linux program? The same choices should also be available when killing via the task manager. I think maybe there should be a third option for killing: don't force end the process, but send a signal to the program to stop but don't ask the user anything first (such as whether to save a file, etc.)? And yes, teach every program to answer the kill message(s) - this should already have been done, but I guess the problem was that it was in design.txt and not in roadmap-detailed.md...
+B-Q24: A
+B-Q25: A
+C-Q28: Done. It's in the main os directory.
+C-Q29: A, though I'm concerned that this way a headless program wouldn't be able to ask what's in the clipboard or write to it? By the way, we have planned for our clipboard program to remember past clips, kinda like Ditto, right? 
+C-Q32: A
+C-Q33: I think Claude told me that the reason to have a service manager is that some processes depend on other processes and they must all be loaded in the right order? Could that be the case with some startup programs too, that they need other startup programs and/or some services to be loaded? If so, then maybe option C so that it shares the same logic with the service management? Atherwise option A.
+C-Q34: Is B a better option if we don't worry about the fact that we have to change two hundred existing programs? Because I think having the best option in the long run is more important. What do other OSs do? As for "so a program that wants every physical pixel must say so," shouldn't it be able to say to scale or not scale any give screen element? So, for example, text could still be automatically scaled while an image it displays isn't. 
+D-Q3: I'm concerned that making them files could slow it down? And I also don't like Linux's philosophy of making things files that aren't really files, or aren't really within the purpose of files. And also I think we opted to have specific capabilities for sharing memory and other IPC abilities, and if we did it via files, wouldn't that just make those IPC features rely only on the file capabilities?
+D-Q4: B
+D-Q5: B
+D-Q6: B
+D-Q7: Claude's recommendatoin
+D-Q8: B, though the wording seems to suggest that swap only works on a disk that's only used for swapping? Shouldn't we allow a swap file or at least a swap partition? What did we agree on in the design files?
+E-Q1: Claude's recommendation
+E-Q2: Claude's recommendation, but I don't want weather reporting (or asking the user where they live for it) by default. And as for programs contacting other websites by default, I don't want that, so change those three things. If there any programs that obviously contact internet services by their very nature, those are okay to do by default.
+E-Q3: Claude's recommendation
+E-Q4: Claude's recommendation. By the way, I think the plan was to have other options for automatically deleting than just "the disk is getting full", such as automatically deleting files that have been there over a certain amount of time?
+E-Q5: Claude's recommendation
+F-Q3: Claude's recommendation, but for programs that capture on their own schedule, I think we should have three options: Just this once, every time for this instance of the program, or forever?
+F-Q4: A
+F-Q5: A, but maybe we should remember somehow to simplify this if we ever make the whole system depend on x86-64-3 or later?
+F-Q6: B. But Chrome Remote Desktop has the advantage that it goes through Google's servers so computers can find each other. We may not have central servers for this, and many or most users may have dynamic IP addresses and no domains. I think roadmap-detailed calls for offering a dynamic IP service like dynu.net out of the box, and this should be integrated with setting up/enabling the remote desktop feature? Also btw, I want the client to run in the browser like Chrome Remote Desktop does and to be compatible with mobile, tablet and desktop (with expanding and scrolling the remote screen for small screens).
+F-Q7: I'm concerned that we rewrite it cleanroom, it may not be as performant or as reliable? And the demand is smaller than D-Q6 since it's only one program, and if every other video player out there uses ffmpeg, then it seems to be okay? And wouldn't it be easier to accommodate the LGPL requirement than to do a cleanroom rewrite? I think the decision should not necessarily be tied with D-Q6's decision..
+F-Q8: Again, I'm concerned about a cleanroom write laking performance or reliability? And the time it would take. In what ways would we be limited if we translated FFmpeg and had to abide by their LGPL and patents? And what is the likelihood a user would want to view interlaced, 10-bit or 4:2:2 video?
+F-Q9: The same questions apply as above - performance, reliability, time it would take, how the license and patents would affect us, likelihood of a user needing features option C doesn't provide.
+F-Q10: A sounds like the best option, but I do wonder if the specs *should* have asked to drive printers' colors, and in that case, if Firefox's version could be worked to provide a reference for testing?
+
+
+
+
+
+
+

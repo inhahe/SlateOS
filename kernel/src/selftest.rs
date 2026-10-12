@@ -30,6 +30,7 @@
 use crate::serial_println;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
 // Severity classification (§914)
@@ -72,22 +73,62 @@ pub enum Severity {
 /// `cpu::halt_loop()` pattern scattered across `main.rs` with a single
 /// dispatch point that cannot misclassify a test's severity.
 ///
+/// The test is passed as a closure, not as its result, so that a boot with
+/// `selftest.skip=1` ([`skip`]) never runs it: an argument is evaluated
+/// before the call it is passed to, so a result-taking `dispatch` could only
+/// skip the reporting. The call stays written as a call (`|| x::self_test()`
+/// rather than `x::self_test`) because the wiring gates
+/// (`check-self-tests-wired`, `check-ran-if`) find a test by its call.
+///
 /// # Examples
 ///
 /// ```ignore
 /// use crate::selftest::{Severity, dispatch};
 ///
 /// // Integrity — halts on failure:
-/// dispatch("Frame allocator", Severity::Integrity, mm::frame::self_test());
+/// dispatch("Frame allocator", Severity::Integrity, || mm::frame::self_test());
 ///
 /// // Diagnostic — logs and continues:
-/// dispatch("ACPI", Severity::Diagnostic, acpi::self_test());
+/// dispatch("ACPI", Severity::Diagnostic, || acpi::self_test());
 /// ```
-pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: Result<(), E>) {
+pub fn dispatch<E: core::fmt::Display>(
+    name: &str,
+    severity: Severity,
+    test: impl FnOnce() -> Result<(), E>,
+) {
+    if skip() {
+        return;
+    }
+    report(name, severity, test());
+}
+
+/// Like [`dispatch`] but formats the error with `Debug` (`{:?}`) instead of
+/// `Display`.  Many subsystem self-tests return error types that derive
+/// `Debug` but do not implement `Display` — this variant covers those.
+pub fn dispatch_debug<E: core::fmt::Debug>(
+    name: &str,
+    severity: Severity,
+    test: impl FnOnce() -> Result<(), E>,
+) {
+    if skip() {
+        return;
+    }
+    report_debug(name, severity, test());
+}
+
+/// Report the result of a test that has already run, on its severity, as
+/// [`dispatch`] does. For a check inside a larger test whose outcome is
+/// computed before it is judged (`proc::spawn`'s ring-3 checks); a test to be
+/// run is passed to [`dispatch`], which can then not run it.
+pub fn report<E: core::fmt::Display>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {
                 serial_println!("FATAL: {} self-test failed: {}", name, e);
+                if keep_going() {
+                    serial_println!("[selftest] selftest.keep_going: carrying on past {}", name);
+                    return;
+                }
                 crate::cpu::halt_loop();
             }
             Severity::Diagnostic => {
@@ -97,20 +138,163 @@ pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: R
     }
 }
 
-/// Like [`dispatch`] but formats the error with `Debug` (`{:?}`) instead of
-/// `Display`.  Many subsystem self-tests return error types that derive
-/// `Debug` but do not implement `Display` — this variant covers those.
-pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, result: Result<(), E>) {
+/// [`report`] with the error formatted with `Debug`, as [`dispatch_debug`].
+pub fn report_debug<E: core::fmt::Debug>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {
                 serial_println!("FATAL: {} self-test failed: {:?}", name, e);
+                if keep_going() {
+                    serial_println!("[selftest] selftest.keep_going: carrying on past {}", name);
+                    return;
+                }
                 crate::cpu::halt_loop();
             }
             Severity::Diagnostic => {
                 serial_println!("WARNING: {} self-test failed: {:?}", name, e);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keeping going past a failure (`selftest.keep_going=1`)
+// ---------------------------------------------------------------------------
+
+/// Whether this boot carries on past a failed self-test: the kernel command
+/// line holds `selftest.keep_going=1`.
+///
+/// Without it a boot stops at the first failed integrity self-test, and every
+/// later test goes unrun: a change that breaks three tests takes three boots
+/// to find them -- about an hour each with the gates. With it, a failure is
+/// reported exactly as before (`FATAL: ...`, which the boot test counts as a
+/// failed boot) and the boot goes on, so one run lists every failure.
+///
+/// Nothing changes until something fails, so a boot with it set that passes
+/// is an ordinary pass. One that fails lists every failure -- but a test after
+/// a failed integrity test ran on a kernel whose invariants may already be
+/// broken, so a later failure is a lead, not a verdict, until a boot without
+/// the first one shows it again. Set it with
+/// `SLATE_CMDLINE="selftest.keep_going=1" scripts/boot-test.sh`.
+#[must_use]
+pub fn keep_going() -> bool {
+    static ANSWER: AtomicU8 = AtomicU8::new(0);
+    cmdline_flag(&ANSWER, b"selftest.keep_going")
+}
+
+// ---------------------------------------------------------------------------
+// Not running them at all (`selftest.skip=1`)
+// ---------------------------------------------------------------------------
+
+/// Whether this boot runs no self-tests: the kernel command line holds
+/// `selftest.skip=1`. [`dispatch`] and [`dispatch_debug`] then return
+/// without running the test they were given.
+///
+/// For a boot that is wanted for what it runs rather than for what it proves:
+/// `scripts/guest.py`'s guest (design-decisions 1534), which boots what the
+/// last boot test built so that a program can be copied in and tried. Its
+/// agent starts after the self-tests, which take about 13 minutes under
+/// emulation, and a test that halts would stop the guest before the agent
+/// answered at all (known-issues `A-GUEST-BOOTS-THE-WHOLE-SELF-TEST-SUITE-
+/// FIRST`).
+///
+/// A boot with it proves nothing, so `scripts/boot-test.sh` refuses it: a
+/// boot test that skipped its tests would pass on whatever kernel it was
+/// given. The first skip says so on the serial line, once.
+#[must_use]
+pub fn skip() -> bool {
+    static ANSWER: AtomicU8 = AtomicU8::new(0);
+    static SAID: AtomicBool = AtomicBool::new(false);
+    let yes = cmdline_flag(&ANSWER, b"selftest.skip");
+    if yes && !SAID.swap(true, Ordering::Relaxed) {
+        serial_println!(
+            "[selftest] selftest.skip: this boot runs no self-tests and proves nothing"
+        );
+    }
+    yes
+}
+
+/// Wait until `done()` holds, yielding between looks, for at most
+/// `timeout_ms` milliseconds; answer whether it held.
+///
+/// For a self-test that has handed work to another task -- woken it, sent it
+/// a message -- and must see that work finished before it checks the result.
+/// A fixed number of yields is not that wait. On one CPU the woken task runs
+/// inside them, so it looked like one; on more than one, the wake can place
+/// the task on another CPU (or another CPU can steal it), the yields return
+/// at once with nothing else to run here, and the check runs while the task
+/// is still starting. The futex PI-timeout and service blocking-accept tests
+/// failed exactly so on the first two-CPU boot with every self-test on
+/// (2026-10-09).
+///
+/// Bounded by the clock, not by a count of yields, since a yield's length
+/// is whatever the other tasks make it: a task that never finishes is a test
+/// failure at the deadline, never a hung boot. Yields rather than sleeps, so
+/// it works with interrupts off too, and on one CPU costs only the switches
+/// the old fixed yields cost.
+pub fn wait_until(timeout_ms: u64, done: impl Fn() -> bool) -> bool {
+    let start = crate::hrtimer::now_ns();
+    let limit = timeout_ms.saturating_mul(1_000_000);
+    while !done() {
+        if crate::hrtimer::now_ns().saturating_sub(start) > limit {
+            return done();
+        }
+        crate::sched::yield_now();
+    }
+    true
+}
+
+/// Whether the kernel command line sets the boolean `key`: a word that is
+/// `key`, or `key=` followed by `1`, `yes`, `true` or nothing -- the values
+/// `fs::kernparam::is_set` takes. Read here rather than there because the
+/// first self-tests run before `kernparam` is initialised.
+///
+/// `answer` caches it, as the command line never changes: 0 not looked yet,
+/// 1 no, 2 yes.
+fn cmdline_flag(answer: &AtomicU8, key: &[u8]) -> bool {
+    match answer.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let yes = crate::boot::kernel_cmdline_bytes().is_some_and(|line| {
+                line.split(u8::is_ascii_whitespace)
+                    .any(|word| flag_word_sets(word, key))
+            });
+            answer.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            yes
+        }
+    }
+}
+
+/// Whether one command-line word sets the boolean `key` (see [`cmdline_flag`]).
+fn flag_word_sets(word: &[u8], key: &[u8]) -> bool {
+    matches!(
+        word.strip_prefix(key),
+        Some(b"" | b"=" | b"=1" | b"=yes" | b"=true")
+    )
+}
+
+/// One part of a self-test made of many parts (`linux::self_test`'s are
+/// chained `part()?`): its failure is the whole test's at once -- or, with
+/// [`keep_going`], it is reported as `FATAL` (so the boot is still judged
+/// failed) and the next part runs.
+///
+/// # Errors
+///
+/// `part`'s own error, unless [`keep_going`].
+pub fn step<E: core::fmt::Debug>(part: Result<(), E>) -> Result<(), E> {
+    match part {
+        Err(e) if keep_going() => {
+            // "self-test failed" is what the boot test's
+            // check_selftest_failures looks for: the run still fails.
+            serial_println!(
+                "FATAL: self-test failed in one of its parts: {:?} (selftest.keep_going: \
+                 carrying on)",
+                e
+            );
+            Ok(())
+        }
+        other => other,
     }
 }
 
@@ -614,6 +798,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let found = suites.iter().any(|s| s.name == "kobject");
     assert!(found, "should find kobject test");
     serial_println!("[selftest]   Lookup: OK");
+
+    // Test 4: which command-line words set a boolean flag. `selftest.skip`
+    // turns every later test off, so a word that set it by accident -- a
+    // prefix match on `selftest.skipped=1`, a `=0` read as present -- would
+    // make a boot test pass on nothing; boot-test.sh refuses the flag, and
+    // this is the kernel's half of not being fooled by a near miss.
+    let key = b"selftest.skip".as_slice();
+    for (word, sets) in [
+        (b"selftest.skip".as_slice(), true),
+        (b"selftest.skip=", true),
+        (b"selftest.skip=1", true),
+        (b"selftest.skip=yes", true),
+        (b"selftest.skip=true", true),
+        (b"selftest.skip=0", false),
+        (b"selftest.skip=no", false),
+        (b"selftest.skip=10", false),
+        (b"selftest.skipped=1", false),
+        (b"xselftest.skip=1", false),
+        (b"selftest.keep_going=1", false),
+        (b"", false),
+    ] {
+        if flag_word_sets(word, key) != sets {
+            serial_println!(
+                "[selftest]   FAIL: {:?} {} selftest.skip",
+                core::str::from_utf8(word),
+                if sets { "should set" } else { "should not set" }
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    serial_println!("[selftest]   Command-line flags: 12 words read as kernparam reads them: OK");
 
     serial_println!("[selftest] Self-test PASSED");
     Ok(())

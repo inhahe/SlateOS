@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=App Launcher
+Comment=Start a program by typing its name
+Icon=system-run
+Exec=launcher
+Categories=Utility;
+Keywords=run;launch;
+NoDisplay=true

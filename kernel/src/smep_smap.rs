@@ -135,7 +135,7 @@ fn entry_paths_clear_ac_impl() -> bool {
 /// Whether every kernel path that touches user memory is wrapped in STAC/CLAC.
 ///
 /// **CR4.SMAP must not be set while this is `false`** — `smap_enable_blocker()`
-/// enforces that.  Unlike [`ENTRY_PATHS_CLEAR_AC`], this prerequisite fails
+/// enforces that.  Unlike [`entry_paths_clear_ac`], this prerequisite fails
 /// loudly (a #PF on the first unannotated user access), but gating it keeps
 /// both preconditions in one place.
 ///
@@ -172,7 +172,7 @@ const USER_ACCESSES_ANNOTATED: bool = true;
 /// Whether the kernel believes every entry path clears `EFLAGS.AC`.
 ///
 /// Exposed so `idt::ac_on_entry_self_test()` can hold this claim against what an
-/// actual IDT gate does — see [`ENTRY_PATHS_CLEAR_AC`] for why a wrong answer
+/// actual IDT gate does — see [`entry_paths_clear_ac`] for why a wrong answer
 /// here would otherwise fail silently.
 #[must_use]
 pub fn entry_paths_clear_ac() -> bool {
@@ -182,7 +182,7 @@ pub fn entry_paths_clear_ac() -> bool {
 /// Return the reason CR4.SMAP cannot be enabled yet, or `None` if it can.
 ///
 /// Enabling SMAP with either prerequisite unmet is worse than leaving it off:
-/// an unmet [`ENTRY_PATHS_CLEAR_AC`] yields a protection that silently does
+/// an unmet [`entry_paths_clear_ac`] yields a protection that silently does
 /// nothing while reporting itself as ACTIVE, which is precisely the "a defence
 /// that looks sufficient is not" failure mode recorded in design-decisions §118.
 fn smap_enable_blocker() -> Option<&'static str> {
@@ -239,7 +239,7 @@ pub fn init() {
     //    first time a syscall touches a user buffer through a raw pointer.
     //
     // 2. Every kernel entry path must clear EFLAGS.AC — see
-    //    `ENTRY_PATHS_CLEAR_AC` below.  *This one fails silently*, which is
+    //    `entry_paths_clear_ac()` below.  *This one fails silently*, which is
     //    why it is asserted rather than left to a comment.
     if features.smap {
         // Record that the hardware supports STAC/CLAC instructions (they

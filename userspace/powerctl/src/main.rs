@@ -435,38 +435,47 @@ fn try_sync_filesystems() {
     libcall::sync();
 }
 
-/// Power off the machine directly when the service manager is unreachable.
+/// Power off the machine directly when the service manager is unreachable:
+/// the C library's `reboot (RB_POWER_OFF)`, which asks the kernel
+/// (`SYS_POWER_OFF`). If the machine powers off, this process never returns;
+/// otherwise the reason it gave is reported.
 ///
-/// Slate OS has no power-off syscall, so the only non-IPC mechanism is the ACPI
-/// control file (if procfs exposes it).  If the machine powers off, this
-/// process never returns; otherwise we report that no mechanism worked.
+/// Until 2026-10-09 this wrote "off" to `/proc/acpi/power`, which no kernel
+/// here has ever had. `reboot` reaches the kernel once the C library asks it
+/// (`requests/b-d-reboot-should-call-the-new-power-syscalls.md`); until then
+/// it says `Function not implemented`, which is the truth.
 fn direct_shutdown() -> ! {
     try_sync_filesystems();
-
-    // Best-effort: a procfs ACPI knob, if the kernel exposes one, powers off.
-    let _ = fs::write("/proc/acpi/power", "off");
-
-    warn(
+    let reason = match libcall::power::reboot(libcall::power::RB_POWER_OFF) {
+        Ok(()) => String::from("the call returned"),
+        Err(errno) => strerror(errno),
+    };
+    warn(&format!(
         "powerctl: cannot power off directly — the service manager is \
-         unreachable and Slate OS exposes no power-off syscall or ACPI control \
-         file.  System NOT powered off.\n",
-    );
+         unreachable and the kernel refused: {reason}.  System NOT powered off.\n"
+    ));
     process::exit(1);
 }
 
-/// Reboot the machine directly when the service manager is unreachable.
+/// Reboot the machine directly when the service manager is unreachable: the
+/// C library's `reboot (RB_AUTOBOOT)`, which asks the kernel
+/// (`SYS_POWER_REBOOT`). As [`direct_shutdown`].
 fn direct_reboot() -> ! {
     try_sync_filesystems();
-
-    // Best-effort: a procfs ACPI knob, if present, reboots.
-    let _ = fs::write("/proc/acpi/power", "reboot");
-
-    warn(
+    let reason = match libcall::power::reboot(libcall::power::RB_AUTOBOOT) {
+        Ok(()) => String::from("the call returned"),
+        Err(errno) => strerror(errno),
+    };
+    warn(&format!(
         "powerctl: cannot reboot directly — the service manager is \
-         unreachable and Slate OS exposes no reboot syscall or ACPI control \
-         file.  System NOT rebooted.\n",
-    );
+         unreachable and the kernel refused: {reason}.  System NOT rebooted.\n"
+    ));
     process::exit(1);
+}
+
+/// The C library's words for an `errno`.
+fn strerror(errno: i32) -> String {
+    errmsg::strerror(&std::io::Error::from_raw_os_error(errno))
 }
 
 /// Enter ACPI S3 suspend directly when the service manager is unreachable.
@@ -823,14 +832,16 @@ fn capacity_bar(pct: u32) -> String {
 /// start menu's "Restart OS, keep the computer on" (`design.txt`; lane C's
 /// `requests/c-ab-a-restart-that-keeps-the-computer-on.md`).
 ///
-/// It needs a kernel call that loads the installed kernel and starts it
-/// without going back through the firmware (Linux's `kexec`), and this kernel
-/// has none yet -- asked of lane A in the same request. So it refuses, and
-/// refuses *first*: asking the service manager to stop everything and only
-/// then finding nothing to restart into would leave the machine running with
-/// its services stopped. When the call exists this takes `cmd_reboot`'s
-/// shape: the orderly stop (a `Reload` request on the service bus), then that
-/// call where `direct_reboot` asks the firmware.
+/// The kernel can do it now -- `SYS_POWER_RELOAD` (1139), lane A's answer
+/// to that request -- but nothing here can ask it yet: a program reaches it
+/// through the C library's `reboot (RB_KEXEC)`, which still answers `ENOSYS`
+/// (`requests/b-d-reboot-should-call-the-new-power-syscalls.md`). So it
+/// refuses, and refuses *first*: asking the service manager to stop
+/// everything and only then finding nothing to restart into would leave the
+/// machine running with its services stopped. When `reboot` reaches the
+/// kernel this takes `cmd_reboot`'s shape: the orderly stop (a `Reload`
+/// request on the service bus), then `libcall::power::reboot (RB_KEXEC)`
+/// where `direct_reboot` asks for `RB_AUTOBOOT`.
 fn cmd_reload() {
     warn(
         "powerctl: this kernel cannot restart without the firmware, so SlateOS \

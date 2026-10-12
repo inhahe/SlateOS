@@ -2,7 +2,11 @@
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-21.
 
-**Status:** OPEN — a localisation, not a fix. The remaining code is yours.
+**Status:** ✅ WITHDRAWN -- retracted by lane A on 2026-09-21 (see
+"RETRACTED" at the end); marked by lane B on 2026-10-07. The exit 11 it
+chased was root-caused on 2026-09-24 as the test step's missing `(File,
+METADATA)` grant. Originally: "OPEN — a localisation, not a fix. The
+remaining code is yours."
 
 `ctest-coreutils-runs` has failed with exit 11 for six rounds. Five of those
 rounds proposed a structural cause in the kernel and each cost a boot. All

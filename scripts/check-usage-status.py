@@ -69,7 +69,17 @@ message -- not by line number, which drifts on every edit and would make the
 allowlist rot into a rubber stamp.  Adding an entry is meant to require saying
 why.
 
-Exit status: 0 clean, 1 unaccounted sites found.
+Self-test
+---------
+``--self-test`` runs the scan over fixture functions, one per rule above --
+each trigger word, the enumeration shape, the ``} else {`` trap, a status
+named only in a comment, ``set_exit(0)``, ``end_help_arm``, a synopsis rustfmt
+wrapped onto its own line, the indented-field and ``Invalidated`` exclusions,
+an ALLOWED exemption and a stale one, and an empty file -- and checks each
+verdict. The push hook and the boot test run it before trusting the real
+verdict (design-decisions §974).
+
+Exit status: 0 clean, 1 unaccounted sites found, 2 bad arguments.
 """
 
 import pathlib
@@ -80,6 +90,7 @@ import sys
 # hyphens make it un-`import`able normally, hence the load by path.
 _SIBLING = pathlib.Path(__file__).resolve().parent / "check-recursive-locks.py"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402
 import srcload  # noqa: E402
 
 # Loaded from source rather than through `importlib`: a `SourceFileLoader`
@@ -327,14 +338,10 @@ FN = re.compile(r"(?:pub )?(?:async )?fn ([a-z_0-9]+)")
 # literals. See `check-recursive-locks.py::strip_noise`.
 
 
-def main(argv):
-    # An explicit path is how this checker gets tested: run it against an older
-    # revision of kshell.rs (`git show <rev>:kernel/src/kshell.rs`) and it must
-    # report the sites that revision had. A checker nobody has watched fail is
-    # a checker nobody knows works.
-    path = pathlib.Path(argv[1]) if len(argv) > 1 else PATH
-    text = path.read_text(encoding="utf-8", errors="surrogateescape")
-
+def scan(text, allowed, known_conflated):
+    """The whole rule, over one file's text: `(unaccounted, stale,
+    stale_allowed, conflated)`. Separate from `main` so the self-test runs
+    exactly this over fixture text with fixture tables."""
     # Three views of one file, identically numbered because `strip_noise`
     # blanks in place rather than deleting: `lines` verbatim for reporting,
     # `code` (comments gone, literals kept) for matching -- everything this
@@ -427,13 +434,13 @@ def main(argv):
         # because for a wrapped call `lines[i]` is a bare `shell_println!(`,
         # which tells the reader nothing about which message was flagged.
         allowed_by = next(
-            ((f, frag) for (f, frag) in ALLOWED if fn == f and frag in stmt),
+            ((f, frag) for (f, frag) in allowed if fn == f and frag in stmt),
             None,
         )
         if allowed_by is not None:
             seen_allowed.add(allowed_by)
             continue
-        if seen_conflated.get(fn, 0) < KNOWN_CONFLATED.get(fn, 0):
+        if seen_conflated.get(fn, 0) < known_conflated.get(fn, 0):
             seen_conflated[fn] = seen_conflated.get(fn, 0) + 1
             continue
         unaccounted.append((i + 1, fn, stmt[:88]))
@@ -443,7 +450,7 @@ def main(argv):
     # (so the entry is now exempting something it was never meant to).
     stale = [
         (fn, n - seen_conflated.get(fn, 0))
-        for fn, n in KNOWN_CONFLATED.items()
+        for fn, n in known_conflated.items()
         if seen_conflated.get(fn, 0) < n
     ]
 
@@ -472,9 +479,25 @@ def main(argv):
     #
     # So this both restores the discovery floor (an empty file leaves all 32
     # unmatched and fails) and catches allow-list rot, which are the same check.
-    stale_allowed = sorted(set(ALLOWED) - seen_allowed)
+    stale_allowed = sorted(set(allowed) - seen_allowed)
+    return unaccounted, stale, stale_allowed, sum(seen_conflated.values())
 
-    conflated = sum(seen_conflated.values())
+
+def main(argv):
+    unknown = selftestflag.unknown_options(argv[1:])
+    if unknown:
+        print(f"check-usage-status: unrecognised option {unknown[0]!r}", file=sys.stderr)
+        return 2
+    if selftestflag.wants_selftest(argv[1:]):
+        return self_test()
+    # An explicit path is how this checker gets tested against history: run it
+    # against an older revision of kshell.rs (`git show
+    # <rev>:kernel/src/kshell.rs`) and it must report the sites that revision
+    # had. A checker nobody has watched fail is a checker nobody knows works.
+    path = pathlib.Path(argv[1]) if len(argv) > 1 else PATH
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    lines = text.split("\n")
+    unaccounted, stale, stale_allowed, conflated = scan(text, ALLOWED, KNOWN_CONFLATED)
     if not unaccounted and not stale and not stale_allowed:
         print(
             f"[usage-status] kshell.rs: every usage diagnostic sets a failure status "
@@ -530,6 +553,173 @@ def main(argv):
             for fn, frag in stale_allowed:
                 print(f"  {fn}: {frag!r}", file=sys.stderr)
     return 1
+
+
+
+
+# --- Self-test ---------------------------------------------------------------
+#
+# One fixture function per rule in the docstring. `_REPORTED` is the set that
+# must come back unaccounted; every other function in the fixture must not.
+
+_FIXTURE = r'''
+fn cmd_bare_return(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: bare <x>");
+        return;
+    }
+}
+
+fn cmd_with_status(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: good <x>");
+        set_exit(1);
+        return;
+    }
+}
+
+fn cmd_match_arm(x: &str) {
+    match x {
+        "on" => enable(),
+        _ => shell_println!("Usage: arm <on|off>"),
+    }
+}
+
+fn cmd_else_trap(parts: &[&str]) {
+    if parts.len() < 2 {
+        shell_println!("Usage: trap <x>");
+    } else {
+        set_exit(1);
+    }
+}
+
+fn cmd_comment_status(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: noted <x>");
+        // No set_exit(1) here, deliberately.
+        return;
+    }
+}
+
+fn cmd_unknown(sub: &str) {
+    if sub != "go" {
+        shell_println!("Unknown subcommand '{}'", sub);
+    }
+}
+
+fn cmd_field(n: u32) {
+    shell_println!("  Unknown drops:    {}", n);
+}
+
+fn cmd_invalidated(n: u32) {
+    shell_println!("Invalidated {} entries", n);
+}
+
+fn cmd_enumeration(m: &str) {
+    if m.is_empty() {
+        shell_println!("Modes: open, prompt, disabled");
+    }
+}
+
+fn cmd_exit_zero(args: &str) {
+    if args.is_empty() {
+        shell_println!("Invalid argument");
+        set_exit(0);
+    }
+}
+
+fn cmd_help_arm(cmd: &str, sub: &str) {
+    match sub {
+        "x" => run(),
+        _ => {
+            shell_println!("Usage: helped <x>");
+            end_help_arm(cmd, sub);
+        }
+    }
+}
+
+fn cmd_wrapped(args: &str) {
+    if args.is_empty() {
+        shell_println!(
+            "Usage: wrapped <a synopsis long enough that rustfmt moved it here>"
+        );
+        return;
+    }
+}
+
+fn cmd_after_return(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: late <x>");
+        return;
+        set_exit(1);
+    }
+}
+
+fn cmd_exempt(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: exempt <x>");
+        return;
+    }
+}
+'''
+
+_REPORTED = {
+    "cmd_bare_return",
+    "cmd_match_arm",
+    "cmd_else_trap",
+    "cmd_comment_status",
+    "cmd_unknown",
+    "cmd_enumeration",
+    "cmd_exit_zero",
+    "cmd_wrapped",
+    "cmd_after_return",
+}
+
+_FIXTURE_ALLOWED = {
+    ("cmd_exempt", "Usage: exempt <x>"): "the fixture's one used exemption",
+    ("cmd_gone", "Usage: gone"): "matches nothing, so it must be reported stale",
+}
+
+
+def self_test():
+    """Run `scan` over the fixture; 0 if every verdict is right."""
+    failures = 0
+
+    def check(ok, what):
+        nonlocal failures
+        print(f"  {'ok  ' if ok else 'FAIL'}  {what}")
+        if not ok:
+            failures += 1
+
+    names = re.findall(r"^fn (\w+)", _FIXTURE, re.MULTILINE)
+    unaccounted, stale, stale_allowed, conflated = scan(_FIXTURE, _FIXTURE_ALLOWED, {})
+    got = {fn for _, fn, _ in unaccounted}
+    for fn in names:
+        want = fn in _REPORTED
+        verdict = "reported" if fn in got else "passed"
+        check((fn in got) == want, f"{fn}: {verdict}")
+    check(not stale and conflated == 0, "no conflation table, no conflations")
+    check(
+        stale_allowed == [("cmd_gone", "Usage: gone")],
+        "a used ALLOWED entry exempts its site; an unused one is reported stale",
+    )
+    _, stale_c, _, conflated_c = scan(
+        _FIXTURE, _FIXTURE_ALLOWED, {"cmd_bare_return": 1, "cmd_nothing": 1}
+    )
+    check(
+        conflated_c == 1 and stale_c == [("cmd_nothing", 1)],
+        "KNOWN_CONFLATED absorbs exactly its count, and one matching nothing is reported",
+    )
+    _, _, stale_empty, _ = scan("", _FIXTURE_ALLOWED, {})
+    check(
+        len(stale_empty) == len(_FIXTURE_ALLOWED),
+        "an empty file leaves every ALLOWED entry unmatched: the discovery floor",
+    )
+    if failures:
+        print(f"[usage-status] self-test: {failures} check(s) FAILED", file=sys.stderr)
+        return 1
+    print(f"[usage-status] self-test passed ({len(names) + 4} checks)")
+    return 0
 
 
 if __name__ == "__main__":

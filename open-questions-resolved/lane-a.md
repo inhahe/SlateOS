@@ -1,5 +1,40 @@
 ## Resolved — lane A
 
+- A-Q21 Seven security modules are built but nothing uses them. Staged for
+  later, or believed to be working? — resolved 2026-09-27 (978): **B, wire them
+  in, each fixed first.** `secureboot` gets a real fingerprint check before its
+  door, and `diskencrypt` a real key derivation. `sealing`, `capsettings` and
+  `secpolicy` are re-keyed by file identity before they are connected. The
+  per-file metadata tables get syscall doors in the same work.
+- A-Q18 Every lane appends to the end of `known-issues.md`: give it a per-lane
+  seam? — resolved 2026-09-27 (977): **A, a section per lane for new
+  entries.** Six `## Lane X: new entries` sections at the end; the entries
+  already in the file stay where they are.
+- A-Q17 Moving or scaling a video or cursor layer silently does nothing: refuse
+  the request, or honour it? — resolved 2026-09-27 (976): **B, honour it.** The
+  software backends compose the planes at flip time, and virtio-gpu's cursor
+  uses the device's cursor queue. A rectangle a backend cannot do is refused at
+  commit.
+- A-Q16 One kind of kernel lock skips the deadlock checker on a premise that
+  turned out false: which way? — resolved 2026-09-27 (975): **A, convert the
+  locks that have another lock taken under them, then revert by measurement**
+  any conversion whose cost on a hot path outweighs the check.
+- A-Q15 A program can only have one network connection open at a time: which
+  fix? — resolved 2026-09-27 (972): **measure A against B.** Both designs are
+  built behind one switch, and a load harness decides between them. Anything
+  QEMU cannot judge is deferred to bare metal.
+- A-Q14 A kept copy of a file: its content from before the save, or after it?
+  — resolved 2026-09-27 (971): **A, after it.** A version-history entry holds
+  the file as it stands after the save that made it.
+- A-Q13 One agent's push has cost another a full test run eight times in two
+  days: should pushing be gated? — resolved 2026-09-27 (974): **move the fast
+  checks to push time, and fix the checks that raise false alarms** before
+  they are moved.
+- A-Q11 Who owns `scripts/hooks/pre-push`? — resolved 2026-09-27 (973):
+  **every file gets one owner, and a gate refuses a file with none.** The hook
+  is lane A's. The rest of `scripts/`, `requests/`, the root crates and the
+  root files get owners by the rules §973 lists, and a lane wanting a change
+  asks the owner.
 - A-Q20 A lane may only publish work after a green test run, and lane A's has
   been red for days on another lane's faults. What should a blocked lane do?
   — resolved 2026-09-26 (968), the operator leaving it to Claude: **publish,
@@ -94,3 +129,8 @@
   antivirus exclusion should be requested. Re-runnable:
   `python bench/file-read-latency.py`.
 
+- A-Q22 [does a file's version history follow it through a rename?] -- resolved 2026-10-09, **A: it follows the file** (§1564).
+- A-Q23 [capsettings and secpolicy: make live, merge or remove?] -- resolved 2026-10-09, **A: capsettings becomes a view of the enforced groups and tags; secpolicy parked** (§1565).
+- A-Q24 [writable shared file mappings, refused in June?] -- resolved 2026-10-09, **A: build them** (§1566, reversing §22/§23).
+- A-Q25 [who lets a debugger take over a running program?] -- resolved 2026-10-09, **Claude's recommendation: the user, asked at the moment, or the program's own advance consent** (§1567).
+- A-Q26 [what does "Always allow" mean?] -- resolved 2026-10-09, **B, remembered for that program by fingerprint, plus an Allow for this run only** (§1568).

@@ -40,7 +40,11 @@
 # we have deliberately not implemented. `C.UTF-8` is not a collating locale —
 # glibc gives it codepoint order, the same as `C`. Measured, not assumed: every
 # fixture in this file, under every ordering option it uses, produces
-# byte-identical output from glibc's sort under the two.
+# byte-identical output from glibc's sort under the two -- except `-R`. Under
+# `C.UTF-8` GNU hashes each key through `strxfrm` with its terminating NUL, and
+# under `C` the bare key, so a fixed `--random-source` shuffles differently in
+# the two; ours is the UTF-8 locale's, as SlateOS is UTF-8 throughout (§351),
+# and `order::random` in the sort crate says how it was found.
 #
 # What `C.UTF-8` additionally buys is the `argmatch` rows, which used to need a
 # reference of their own: gnulib's `quote()` prints U+2018/U+2019 under a UTF-8
@@ -275,6 +279,200 @@ run_case --human-numeric-sort human.txt
 run_case --month-sort months.txt
 run_case --general-numeric-sort general.txt
 
+# Every ordering but the default one is handed a *copy* of the key, with what
+# -d/-i ignore dropped and the rest translated by -f (upstream's keycompare).
+# So -f makes `1m` a mebi-number for -h -- `m` is no unit, `M` is -- and -d
+# takes the punctuation out of a version before -V reads it.
+printf '1m\n2K\n1k\n3g\n1M\n900\n'                      > humancase.txt
+printf 'v1.10\nV1.9\nv1-2\n1.10a\nv1_9\n'               > vcase.txt
+run_case -h humancase.txt
+run_case -hf humancase.txt
+run_case -k1,1hf humancase.txt
+run_case -Vf vcase.txt
+run_case -Vd vcase.txt
+run_case -Vi control.txt
+run_case -Vdf vcase.txt
+run_case -gf general.txt
+run_case -Mf months.txt
+run_case -nf spellings.txt
+
+# -g reads with strtold, into an 80-bit long double: a key it cannot read at
+# all sorts before everything, the NaNs next (-nan before nan), then the
+# numbers -- and two numbers a double cannot tell apart are still two. Its
+# leading white space is isspace's, vertical tab and form feed included.
+printf 'abc\n0\n-1\nnan\n\n x\n-nan\ninf\n-inf\n'        > gwords.txt
+printf '9223372036854775809\n9223372036854775808\n1.0000000000000000009\n1\n' > gprec.txt
+printf '\v5\n4\n\f3\n\r2\n'                             > gspace.txt
+run_case -g gwords.txt
+run_case -gr gwords.txt
+run_case -gu gwords.txt
+run_case -gs gwords.txt
+run_case -k1,1g gwords.txt
+run_case -g gprec.txt
+run_case -gs gprec.txt
+run_case -gsr gprec.txt
+run_case -g gspace.txt
+# -h knows ronna and quetta, the SI prefixes of 2022.
+printf '1Q\n1Y\n1R\n2Z\n-1Q\n1k\n-1R\n'                   > units.txt
+run_case -h units.txt
+run_case -hr units.txt
+# Under -z a record may hold a newline, and the newline is a blank: it
+# separates fields, -b skips it, and -d keeps it.
+printf 'x\n1\0y 2\0z\n\n0\0'                            > znl.txt
+run_case -z -k2,2n znl.txt
+run_case -z -k2,2 znl.txt
+run_case -z -k2 znl.txt
+run_case -z -k2b,2 znl.txt
+run_stdin '\nb\0a\0' -zb
+run_stdin 'a\nc\0a\nb\0ab\0' -zd
+run_stdin ' \n2\0 1\0' -zn
+
+# --- -R: shuffled by a salted MD5 of the key ---------------------------------
+# With a fixed --random-source the "random" order is a function of the salt
+# (the source's first sixteen bytes) and the keys, so it compares byte for
+# byte. Equal keys hash equally, which is what keeps them together.
+head -c 16 /dev/zero                                    > zero.src
+printf '\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020' > count.src
+printf 'abc'                                            > short.src
+seq 1 30                                                > thirty.txt
+printf 'b\na\nc\nb\na\nd\nA\nB\n a\n'                   > shuffle.txt
+run_case -R --random-source=zero.src shuffle.txt
+run_case -R --random-source=count.src shuffle.txt
+run_case -R --random-source=count.src thirty.txt
+run_case --random-sort --random-source=count.src thirty.txt
+run_case --sort=random --random-source=count.src thirty.txt
+run_case -Rr --random-source=count.src thirty.txt
+run_case -Ru --random-source=count.src shuffle.txt
+run_case -Rs --random-source=count.src shuffle.txt
+run_case -Rf --random-source=count.src shuffle.txt
+run_case -Rfu --random-source=count.src shuffle.txt
+run_case -Rb --random-source=count.src shuffle.txt
+run_case -Rd --random-source=count.src punct.txt
+run_case -Ri --random-source=count.src control.txt
+run_case -RV --random-source=count.src versions.txt
+run_case -VR --random-source=count.src versions.txt
+run_case -k2,2R --random-source=count.src cols.txt
+run_case -k2,2R -k1,1 --random-source=count.src ties.txt
+run_case -k1,1 -k2,2R --random-source=count.src cols.txt
+run_case -k2bR,2 --random-source=count.src cols.txt
+run_case -R -k2,2 --random-source=count.src cols.txt
+run_case -R -k2,2n --random-source=count.src cols.txt
+run_case -t: -k2,2R --random-source=count.src colons.txt
+run_case -c -R --random-source=count.src thirty.txt
+run_case -C -R --random-source=count.src thirty.txt
+run_case -m -R --random-source=count.src merge1.txt merge2.txt
+run_case -z -R --random-source=count.src nul.txt
+run_case -R --random-source=count.src bytes.txt
+run_case -R --random-source=count.src empty.txt
+# A longer source: only its first sixteen bytes are the salt.
+run_case -R --random-source=thirty.txt shuffle.txt
+# The source is opened only when a key will be compared at random.
+run_case --random-source=nosuchfile cols.txt
+run_case -R -k1,1n --random-source=nosuchfile cols.txt
+run_case -R --random-source=nosuchfile cols.txt
+run_case -R --random-source=short.src cols.txt
+run_case -R --random-source=. cols.txt
+run_case -R --random-source=count.src --random-source=count.src cols.txt
+run_case -R --random-source=count.src --random-source=zero.src cols.txt
+run_case -R --random-source=count.src --random-source=./count.src cols.txt
+run_case -nR cols.txt
+run_case -k1MR cols.txt
+run_case -k1RV --random-source=count.src cols.txt
+# Without a source the order cannot be known, but a run of equal lines reads
+# the same in any order, and the status and the silence are there to compare.
+run_stdin 'a\na\na\n' -R
+run_stdin '' -R
+run_stdin 'x\nx\n' -Ru
+
+# --- --debug: the notes and the underlines -------------------------------------
+# Here the stderr *text* is compared as well as stdout and the status: the
+# notes are half of what --debug is for. Its stdout is every output line with
+# its tabs drawn as `>`, then an underline per key and one for the whole line
+# (unless -s or -u), each in columns -- so wide and invalid bytes are cases.
+run_debug() {
+  local stdin=$1; shift
+  local o_err g_err o_bin g_bin o_rc g_rc label
+  o_err=$(mktemp); g_err=$(mktemp); o_bin=$(mktemp); g_bin=$(mktemp)
+  if [ "$stdin" = "-" ]; then
+    $OURS_RUN --debug "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    $GNU_RUN  --debug "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    label="sort --debug $*"
+  else
+    printf '%b' "$stdin" | $OURS_RUN --debug "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | $GNU_RUN  --debug "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    label="printf '$stdin' | sort --debug $*"
+  fi
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_bin" "$g_bin" && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
+      "$o_rc" "$(od -An -c <"$o_bin" | tr -s ' \n' ' ')" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(od -An -c <"$g_bin" | tr -s ' \n' ' ')" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err" "$o_bin" "$g_bin"
+  report "$label"
+}
+run_debug - cols.txt
+run_debug - -k2,2 cols.txt
+run_debug - -k2,2n cols.txt
+run_debug - -k2,1 cols.txt
+run_debug - -k3,3 cols.txt
+run_debug - -u -k1,1 cols.txt
+run_debug - -s -k2b,2 cols.txt
+run_debug - -n cols.txt
+run_debug - -r cols.txt
+run_debug - -r -k1,1 cols.txt
+run_debug - -r -k1,1n cols.txt
+run_debug - -r -s -k1,1n cols.txt
+run_debug - -r -u -k1,1n cols.txt
+run_debug - -b cols.txt
+run_debug - -k1b,1 cols.txt
+run_debug - -k1.2b cols.txt
+run_debug - -k1.2,1.3 cols.txt
+run_debug - -k1,1.2 cols.txt
+run_debug - -k1,1 -k2,2n cols.txt
+run_debug - -t ' ' -k2,2n cols.txt
+run_debug - -t . -k1n cols.txt
+run_debug - -t . -k2,2n cols.txt
+run_debug - -t - -k1n cols.txt
+run_debug - -t + -k1g cols.txt
+run_debug - -t + -k1n cols.txt
+run_debug - -t : -k2,2n colons.txt
+run_debug - -M months.txt
+run_debug - -k1,1M months.txt
+run_debug - -h human.txt
+run_debug - -g general.txt
+run_debug - -k1g,1 general.txt
+run_debug - -V versions.txt
+run_debug - -R --random-source=count.src cols.txt
+run_debug - -d -k1,1n cols.txt
+run_debug - -d -f -k1,1n cols.txt
+run_debug - -i -b -k1,1 cols.txt
+run_debug - -n -k1,1 cols.txt
+run_debug - +1 -2 cols.txt
+run_debug - +0 cols.txt
+run_debug - +1.2 -3.4 cols.txt
+run_debug - +1 cols.txt
+run_debug - -z nul.txt
+run_debug - bytes.txt
+run_debug - -u dupes.txt
+run_debug - -m merge1.txt merge2.txt
+run_debug - empty.txt
+run_debug - -c cols.txt
+run_debug - -C cols.txt
+run_debug - --check=quiet cols.txt
+run_debug - -o debug.out cols.txt
+run_debug - -c -o debug.out cols.txt
+run_debug 'a\tb\n\tx\n'
+run_debug 'a\tb\n\tx\n' -k2,2
+run_debug '\303\251 z\n\346\227\245\346\234\254 y\n' -k2,2
+run_debug '1.5K\n-2\nx\n1.\n.5\n-\n2k\n3m\n' -h
+run_debug '1.\n.5\n-.5\n-\nx1\n 1\n12a\n' -n
+run_debug '1e3\n0x10\nnan\n  -inf\n\v5\nx\n' -g
+run_debug 'jan 1\nxyz\n FEB\nJu\n' -M
+run_debug 'a b\n' -k2,2 -k1,1 -k3,3
+
 # --- -z ---------------------------------------------------------------------
 run_case -z nul.txt
 run_case -zu nul.txt
@@ -318,6 +516,19 @@ run_case -S 1M cols.txt
 run_case -T . cols.txt
 run_case --parallel=2 cols.txt
 run_case --buffer-size=1M cols.txt
+run_case -S 0 cols.txt
+run_case -S 1b cols.txt
+run_case -S 50% cols.txt
+run_case -S 2k -S 1M cols.txt
+run_case --batch-size=2 cols.txt
+run_case -T /nonexistent cols.txt
+run_case -y cols.txt
+run_case -y 10 cols.txt
+run_case -y10 cols.txt
+run_case -y '' cols.txt
+run_case -y -r cols.txt
+run_case -ry 5 cols.txt
+run_case cols.txt -y
 
 # --- failure, and the exit status that reports it ---------------------------
 run_case nosuchfile.txt
@@ -535,6 +746,49 @@ xfail_msg() {
   return 0
 }
 
+# The resource options are read and checked as upstream's specify_sort_size,
+# specify_nmerge and specify_nthreads read them, though the input fits in
+# memory: xstrtol_fatal's straight quotes, specify_nmerge's curly pairs, and
+# a --batch-size ceiling from this process's descriptor limit.
+run_msg -S x
+run_msg -S 10Q
+run_msg -S 1x
+run_msg -S 1bb
+run_msg -S ''
+run_msg --buffer-size=x
+run_msg --buf=x
+run_msg -S 1 -S x
+run_msg --batch-size=1
+run_msg --batch-size=0
+run_msg --batch-size=x
+run_msg --batch-size=-2
+run_msg --batch-size=99999999999
+run_msg --batch-size=4294967298
+run_msg --parallel=0
+run_msg --parallel=x
+run_msg --parallel=99999999999999999999999
+run_msg --compress-program=a --compress-program=b
+run_msg --compress-program=a --compress-program=a
+run_msg -T /nonexistent
+# -y is Solaris's, accepted and ignored. Its argument is the rest of its
+# word, or the next word only when that is all digits; any other next word
+# is read as an option or an operand.
+run_msg -y
+run_msg -y 10
+run_msg -y10
+
+# -R's failures, worded: an unopenable, a short and an unreadable source, two
+# different sources, and the orderings it cannot be combined with.
+run_msg -R --random-source=nosuchfile
+run_msg -R --random-source=short.src
+run_msg -R --random-source=.
+run_msg -R --random-source=count.src --random-source=zero.src
+run_msg --random-source=count.src --random-source=zero.src
+run_msg -nR
+run_msg -k1MR
+run_msg -k1,1Rh
+run_msg --sort=random -g
+
 # Abbreviation: unambiguous ones resolve, ambiguous ones are refused, and an
 # exact match wins even when it is a prefix of a longer option.
 run_msg --rev
@@ -737,6 +991,144 @@ run_fd stdout-full big.txt
 run_fd stdout-full -m big.txt big.txt
 run_fd stdout-full -o /dev/full unsorted.txt
 run_fd stdout-full -o /dev/full big.txt
+
+# --- what does not fit: temporary files, and the merge that reads them ---------
+# With -S 1k the input outgrows the buffer, each buffer is sorted into a
+# temporary file, and the files are merged -- the output is the sort of the
+# whole. What shows is *whether* a temporary file was wanted: -T naming a
+# directory that is not there is an error then and only then, upstream's
+# buffer arithmetic (sort_buffer_size, fillbuf) deciding which. Round-robin
+# over several -T, then $TMPDIR, then /tmp.
+seq 1 20000                                             > seq20k.txt
+seq 20000 -1 1                                          > seq20krev.txt
+seq 1 300 | sed 's/$/ x/'                               > mid.txt
+head -c 5000 /dev/zero | tr '\0' x                      > long.txt
+printf '\na\n'                                          >> long.txt
+run_case -S 1k seq20k.txt
+run_case -S 1k -n seq20krev.txt
+run_case -S 1k -nr seq20k.txt
+run_case -S 1k -nu seq20k.txt seq20krev.txt
+run_case -S 1k -s -k1,1.1 seq20krev.txt
+run_case -S 1k -R --random-source=count.src mid.txt
+run_case -S 1k --batch-size=2 seq20krev.txt
+run_case -S 1k --batch-size=3 -n seq20krev.txt seq20k.txt
+run_case -S 1k -T /nonexistent seq20k.txt
+run_case -S 1k -T /nonexistent cols.txt
+run_case -S 1k -T /nonexistent mid.txt
+run_case -S 1k -T . -T /nonexistent seq20k.txt
+run_case -S 1k -T /nonexistent long.txt
+run_case -S 2k -T /nonexistent mid.txt
+run_case -S 4k -T /nonexistent mid.txt
+run_case -S 8k -T /nonexistent mid.txt
+run_case -S 1k -z -T /nonexistent nul.txt
+# By absolute path: each side runs with nothing but its own `sort` on PATH,
+# where a bare `gzip` is a program that cannot be found -- which is the
+# next case, not this one.
+gzip_path=$(command -v gzip)
+run_case -S 1k --compress-program="$gzip_path" -n seq20krev.txt
+run_case -S 1k --compress-program="$gzip_path" -u -n seq20krev.txt seq20k.txt
+# A compress program that cannot be run is a race upstream: its child dies
+# with `couldn't execute compress program: errno 2`, and the parent dies
+# either of SIGPIPE writing into the dead pipe (141) or, having written into
+# the pipe's buffer first, saying `'PROG' [-d] terminated abnormally` (2).
+# Ours is the second, always. Either way nothing reaches the output.
+o_err=$(mktemp); g_err=$(mktemp)
+o_out=$($OURS_RUN -S 1k --compress-program=nosuchprog seq20k.txt 2>"$o_err"); o_rc=$?
+g_out=$($GNU_RUN -S 1k --compress-program=nosuchprog seq20k.txt 2>"$g_err"); g_rc=$?
+if [ "$o_rc" = 2 ] && { [ "$g_rc" = 2 ] || [ "$g_rc" = 141 ]; } \
+   && [ -z "$o_out" ] && [ -z "$g_out" ] \
+   && grep -q "terminated abnormally" "$o_err"; then
+  AGREED=yes
+else
+  AGREED=no
+  REPORT="  ours rc=$o_rc out=${#o_out} bytes, gnu rc=$g_rc out=${#g_out} bytes"
+fi
+rm -f "$o_err" "$g_err"
+report "sort -S 1k --compress-program=nosuchprog seq20k.txt [status 2, or GNU's 141]"
+ENVV=(TMPDIR=/nonexistent)
+run_case -S 1k seq20k.txt
+run_case -S 1k -T . seq20k.txt
+ENVV=(TMPDIR=)
+run_case -S 1k seq20k.txt
+ENVV=()
+# -m merges --batch-size files at a time; more files than that is a pass
+# into a temporary file first.
+seq 1 3 > m1.txt; seq 4 6 > m2.txt; seq 7 9 > m3.txt
+run_case -m --batch-size=2 m1.txt m2.txt m3.txt
+run_case -m --batch-size=2 -T /nonexistent m1.txt m2.txt m3.txt
+run_case -m --batch-size=3 -T /nonexistent m1.txt m2.txt m3.txt
+run_case -m -u --batch-size=2 m1.txt m1.txt m2.txt
+run_case -m --batch-size=2 m3.txt m2.txt m1.txt m3.txt m2.txt
+
+# -o naming an input: sorting reads every input before the output is
+# emptied; merging copies such an input to a temporary file first
+# (avoid_trashing_input) -- which is why -T matters there.
+run_o() {
+  local out=$1; shift
+  local o_rc g_rc o_err g_err
+  o_err=$(mktemp); g_err=$(mktemp)
+  rm -rf o_dir g_dir; mkdir o_dir g_dir
+  cp ./*.txt o_dir/ 2>/dev/null; cp ./*.txt g_dir/ 2>/dev/null
+  ( cd o_dir && $OURS_RUN "$@" >/dev/null 2>"$o_err" ); o_rc=$?
+  ( cd g_dir && $GNU_RUN  "$@" >/dev/null 2>"$g_err" ); g_rc=$?
+  local o_loud=no g_loud=no o_has=no g_has=no
+  [ -s "$o_err" ] && o_loud=yes
+  [ -s "$g_err" ] && g_loud=yes
+  [ -e "o_dir/$out" ] && o_has=yes
+  [ -e "g_dir/$out" ] && g_has=yes
+  if [ "$o_rc" = "$g_rc" ] && [ "$o_loud" = "$g_loud" ] && [ "$o_has" = "$g_has" ] \
+     && { [ "$o_has" = no ] || cmp -s "o_dir/$out" "g_dir/$out"; }; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): %s {%s}\n  gnu  (rc=%s): %s {%s}' \
+      "$o_rc" "$(od -An -c "o_dir/$out" 2>/dev/null | tr -s ' \n' ' ' | cut -c1-200)" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(od -An -c "g_dir/$out" 2>/dev/null | tr -s ' \n' ' ' | cut -c1-200)" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"; rm -rf o_dir g_dir
+  report "sort $* [then $out]"
+}
+run_o m1.txt -m -o m1.txt m1.txt m2.txt
+run_o m1.txt -m -o m1.txt m2.txt m1.txt m1.txt
+run_o m1.txt -m -T /nonexistent -o m1.txt m1.txt m2.txt
+run_o seq20k.txt -S 1k -o seq20k.txt seq20k.txt seq20krev.txt
+run_o seq20krev.txt -n -o seq20krev.txt seq20krev.txt
+run_o new.txt -o new.txt nosuchfile.txt
+
+# Nothing is left behind: in a directory of its own, after a sort that
+# spilled, after one that failed for want of a directory, and after one
+# killed while it was reading.
+run_clean() {
+  local o_left g_left
+  rm -rf o_tmp g_tmp; mkdir o_tmp g_tmp
+  TMPDIR=$PWD/o_tmp $OURS_RUN "$@" >/dev/null 2>&1
+  TMPDIR=$PWD/g_tmp $GNU_RUN  "$@" >/dev/null 2>&1
+  o_left=$(find o_tmp -mindepth 1 | wc -l); g_left=$(find g_tmp -mindepth 1 | wc -l)
+  if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+    AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+  rm -rf o_tmp g_tmp
+  report "sort $* [temporary files left]"
+}
+run_clean -S 1k seq20k.txt
+run_clean -S 1k --batch-size=2 seq20krev.txt
+run_clean -S 1k -m --batch-size=2 m1.txt m2.txt m3.txt
+run_clean -S 1k seq20k.txt nosuchfile.txt
+run_killed() {
+  local side=$1 dir=$2 pid
+  mkdir "$dir"
+  { cat seq20k.txt; sleep 3; } | TMPDIR=$PWD/$dir env PATH="$bindir/$side" sort -S 1k >/dev/null 2>&1 &
+  pid=$!
+  sleep 1
+  kill -INT "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  find "$dir" -mindepth 1 | wc -l
+}
+rm -rf o_kill g_kill
+o_left=$(run_killed ours o_kill); g_left=$(run_killed gnu g_kill)
+if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+  AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+rm -rf o_kill g_kill
+report "sort -S 1k, interrupted while reading [temporary files left]"
 
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # glibc's getopt ends option parsing at the first operand while it is set -- to

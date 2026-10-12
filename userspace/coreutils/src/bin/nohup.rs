@@ -348,7 +348,7 @@ mod imp {
     use coreutils::stdfd;
     use std::ffi::OsString;
     use std::fs::{File, OpenOptions};
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
@@ -356,7 +356,6 @@ mod imp {
     unsafe extern "C" {
         fn isatty(fd: i32) -> i32;
         fn dup2(oldfd: i32, newfd: i32) -> i32;
-        fn close(fd: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn signal(signum: i32, handler: usize) -> usize;
         fn umask(mask: u32) -> u32;
@@ -497,38 +496,6 @@ mod imp {
         ExitCode::from(u8::try_from(NOHUP_FAILURE).unwrap_or(1))
     }
 
-    /// Point `fd` at whatever `file` refers to, consuming `file`.
-    ///
-    /// This is gnulib's `fd_reopen` in the shape Rust makes natural: open
-    /// first, then move the descriptor into place. Doing it in that order —
-    /// rather than closing `fd` and relying on the open to land on the lowest
-    /// free number — is what makes it correct when some *lower* descriptor is
-    /// also closed, e.g. `nohup cmd <&-` with stdout a terminal.
-    ///
-    /// The `raw == fd` case is not a micro-optimisation but a correctness
-    /// requirement, and it is reachable precisely because
-    /// [`stdfd::restore`] runs first: with descriptor 1 closed, the
-    /// `open` of `nohup.out` lands *on* descriptor 1, and a `dup2(1, 1)`
-    /// followed by dropping the `File` would close the descriptor that was just
-    /// put in place — leaving the command with no stdout at all.
-    fn redirect(file: File, fd: i32) -> std::io::Result<()> {
-        let raw = file.into_raw_fd();
-        if raw == fd {
-            return Ok(());
-        }
-        // SAFETY: `dup2` acts only on the descriptor table, and `raw` is a live
-        // descriptor this function now owns.
-        let rc = unsafe { dup2(raw, fd) };
-        let failure = (rc < 0).then(std::io::Error::last_os_error);
-        // SAFETY: `raw` is owned here — `into_raw_fd` gave up the `File`'s claim
-        // on it — and is closed exactly once, on both paths.
-        unsafe { close(raw) };
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
-    }
-
     /// Open the file stdout will be appended to: `./nohup.out`, falling back to
     /// `$HOME/nohup.out`, and put it on descriptor 1.
     ///
@@ -540,7 +507,7 @@ mod imp {
     /// the first would leave the reader believing `$HOME` had not been tried.
     fn open_nohup_out() -> Result<PathBuf, Vec<(PathBuf, std::io::Error)>> {
         let local = PathBuf::from("nohup.out");
-        let first = match open_append(&local).and_then(|f| redirect(f, 1)) {
+        let first = match open_append(&local).and_then(|f| stdfd::move_to(f, 1)) {
             Ok(()) => return Ok(local),
             Err(e) => e,
         };
@@ -554,7 +521,7 @@ mod imp {
             return Err(vec![(local, first)]);
         };
         let in_home = Path::new(&home).join("nohup.out");
-        match open_append(&in_home).and_then(|f| redirect(f, 1)) {
+        match open_append(&in_home).and_then(|f| stdfd::move_to(f, 1)) {
             Ok(()) => Ok(in_home),
             Err(second) => Err(vec![(local, first), (in_home, second)]),
         }
@@ -587,7 +554,7 @@ mod imp {
             match OpenOptions::new()
                 .write(true)
                 .open("/dev/null")
-                .and_then(|f| redirect(f, 0))
+                .and_then(|f| stdfd::move_to(f, 0))
             {
                 Ok(()) => {}
                 Err(e) => {

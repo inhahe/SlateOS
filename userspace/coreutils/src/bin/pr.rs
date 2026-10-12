@@ -1263,7 +1263,11 @@ impl<W: Write> Pr<W> {
             self.have_read_stdin = true;
             Column::new(Source::Stdin, b"standard input".to_vec())
         } else {
-            match std::fs::File::open(name) {
+            // Upstream's `fopen` under `stdio--.h`, which is `fopen_safer`:
+            // never on descriptor 0. `-m` opens every file before it reads
+            // any, so with standard input closed a file opened plainly became
+            // it, and the `-` column read that file a second time.
+            match stdfd::open_read_safer(name) {
                 Ok(f) => {
                     let mtime = f
                         .metadata()

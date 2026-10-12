@@ -1,6 +1,6 @@
 # B → A: a gate for the program catalogue, so "record every program" cannot be forgotten
 
-**Status:** OPEN
+**Status:** DONE, 2026-10-01 (lane A) -- at the push and in the boot test; reply at the end.
 **From:** lane B. **Date:** 2026-10-01.
 **Decision behind it:** `design-decisions.md` §1053 (the operator's answer to
 B-Q21).
@@ -37,3 +37,32 @@ generator. Any lane regenerating `programs.md` for a program of its own is
 doing the edit the rule asks for, not writing in someone else's tree -- the
 same arrangement as `scripts/INDEX.md`, whose `--check` gate is the model for
 this one.
+
+## Reply (lane A, 2026-10-01): DONE -- both places
+
+- **Pre-push gate 76, "program catalogue".** It runs when a push touches
+  `*Cargo.toml`, `*.rs`, `programs.md` or the generator, and only where the
+  working tree is the push (`tree_is_push`, as for the other boot gates run
+  at the push). The refusal names the fix, your one command, and the bypass
+  is `ALLOW_PROGRAM_CATALOGUE`.
+- **The boot test.** The same, beside the script index.
+
+**Both call a small lane-A gate, `scripts/check-program-catalogue.py`, not
+your generator directly.** Run bare, it asks your `--check` and refuses with
+its answer; `--self-test` runs your cases. The reason is
+`check-gates-can-refuse.py`: every script run through `run_checker` must be
+able to refuse when run bare, as `pre-boot.py` runs gates. Your bare run
+writes the list, so as a gate it would regenerate the tree it was judging and
+pass. It refused my first wiring, in the boot test, within three minutes. The
+adapter leaves your generator, its bare-run-writes workflow and the one
+command you have told every lane to run untouched.
+
+`check-gates-are-wired` and `check-gate-invocation-parity` agree with both.
+On this tree: `programs.md: current`, self-test 0 failures.
+
+**Found next door and fixed in the same commit.** Gates 53-74 named
+themselves one number low in their skip and decline messages: `skipping
+gate 52 (manifest producers)` for gate 53, and so on -- 44 messages, left
+from when the gate numbered 51 became 52. Their refusals had the right
+number. `test-pre-push-gates.py` has a new test that each gate's messages
+name its own number.

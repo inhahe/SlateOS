@@ -1,6 +1,6 @@
 //! The libc calls util-linux's `logger` makes that std does not wrap, reached
 //! through the C ABI as the one-libc rule requires (design-decisions §768):
-//! `getlogin`, `getpwuid`, `getuid`/`geteuid`, `gethostname`, `ntp_gettime`
+//! `getpwuid`, `getuid`/`geteuid`, `gethostname`, `ntp_gettime`
 //! (as `adjtimex`), name resolution for `-n`, and the `sendmsg` that attaches
 //! a claimed PID to a local message (`SCM_CREDENTIALS`).
 //!
@@ -10,11 +10,17 @@
 
 use std::net::SocketAddr;
 
-/// `xgetlogin()` (util-linux `lib/pwdutils.c`): `getlogin()`, else the name
-/// of the real uid, else `None`.
+/// `xgetlogin()` (util-linux 2.39.3's `lib/pwdutils.c`): the name of the real
+/// uid, else `None`.
+///
+/// Not `getlogin()`, which this asked first until 2026-10-08: upstream's
+/// comment is that `getlogin(3)` "shouldn't be used as actual
+/// identification", and it names whoever logged in on the terminal -- so
+/// after `su`, a root shell's `logger` tagged its messages with the user who
+/// typed `su`, where util-linux's tags them `root`.
 #[must_use]
 pub fn xgetlogin() -> Option<Vec<u8>> {
-    imp::getlogin().or_else(|| imp::getpwuid_name(imp::getuid()?))
+    imp::getpwuid_name(imp::getuid()?)
 }
 
 /// `xgethostname()`: the host's name, or `None` if it cannot be read.
@@ -183,7 +189,6 @@ mod imp {
         use std::ffi::c_char;
 
         unsafe extern "C" {
-            pub fn getlogin() -> *const c_char;
             pub fn getpwuid(uid: u32) -> *mut Passwd;
             pub fn getuid() -> u32;
             pub fn geteuid() -> u32;
@@ -199,19 +204,6 @@ mod imp {
             ) -> i32;
             pub fn freeaddrinfo(res: *mut AddrInfo);
             pub fn gai_strerror(errcode: i32) -> *const c_char;
-        }
-    }
-
-    pub fn getlogin() -> Option<Vec<u8>> {
-        // SAFETY: `getlogin` takes no arguments and returns null or a
-        // NUL-terminated string in static storage, valid until the next call
-        // into the utmp family; it is copied before anything else runs.
-        unsafe {
-            let p = ffi::getlogin();
-            if p.is_null() {
-                return None;
-            }
-            Some(CStr::from_ptr(p).to_bytes().to_vec())
         }
     }
 
@@ -410,9 +402,6 @@ mod imp {
     //! is "unknown", which the callers already handle.
     use std::net::SocketAddr;
 
-    pub fn getlogin() -> Option<Vec<u8>> {
-        None
-    }
     pub fn getuid() -> Option<u32> {
         None
     }

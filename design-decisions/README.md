@@ -69,7 +69,7 @@ number. `scripts/check-docs.py` enforces the numbering; it replaced
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
 | §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
 | §800–§899 | **lane C** | closed early at §885 — 14 numbers unused | immediately after §579; C's own run ascends |
-| §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
+| §900–§999 | **lane A** | closed early at §979 — 20 numbers unused | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 | §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
 | §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |

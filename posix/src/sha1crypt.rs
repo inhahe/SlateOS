@@ -172,8 +172,8 @@ pub(crate) fn crypt(phrase: &[u8], setting: &[u8], out: &mut [u8]) -> Result<usi
     }
     // Three bytes to four characters, the first byte the top; the last two
     // bytes with the first again.
-    for group in digest[..18].chunks_exact(3) {
-        let v = (u32::from(group[0]) << 16) | (u32::from(group[1]) << 8) | u32::from(group[2]);
+    for &[a, b, c] in digest[..18].as_chunks::<3>().0 {
+        let v = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
         to64(&mut out[at..], v, 4);
         at += 4;
     }

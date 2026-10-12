@@ -46,7 +46,6 @@ userspace/bootctl  # bare deny(clippy::all)
 userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
 userspace/chattr  # bare deny(clippy::all)
-userspace/chpasswd
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
 userspace/crond
@@ -67,7 +66,6 @@ userspace/getent  # bare deny(clippy::all)
 userspace/getty
 userspace/gzip
 userspace/hardlink  # bare deny(clippy::all)
-userspace/hexdump
 userspace/hostnamectl  # bare deny(clippy::all)
 userspace/htop
 userspace/hwclock
@@ -79,10 +77,8 @@ userspace/ip
 userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)
 userspace/irqbalance  # bare deny(clippy::all)
-userspace/journalctl
 userspace/jq
 userspace/kill
-userspace/last
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex
@@ -90,7 +86,6 @@ userspace/localectl  # bare deny(clippy::all)
 userspace/login
 userspace/loginctl  # bare deny(clippy::all)
 userspace/logrotate  # bare deny(clippy::all)
-userspace/look
 userspace/losetup  # bare deny(clippy::all)
 userspace/lp
 userspace/lsmod
@@ -115,7 +110,6 @@ userspace/oils  # bare deny(clippy::all)
 userspace/passwd
 userspace/ping
 userspace/pkg
-userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
 userspace/rfkill  # bare deny(clippy::all)
@@ -125,14 +119,10 @@ userspace/sanitize
 userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
-userspace/shell
 userspace/ss
-userspace/sysctl
-userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/top
-userspace/tput
 userspace/traceroute
 userspace/udevd
 userspace/unshare  # bare deny(clippy::all)
@@ -140,8 +130,6 @@ userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
-userspace/vmstat
-userspace/wall
 userspace/watch
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg

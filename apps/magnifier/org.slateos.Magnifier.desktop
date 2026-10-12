@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Magnifier
+Comment=Enlarge part of the screen
+Icon=zoom-in
+Exec=magnifier
+Categories=Utility;Accessibility;
+Keywords=zoom;enlarge;accessibility;

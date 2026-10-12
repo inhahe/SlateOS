@@ -476,20 +476,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // then yield to let the workqueue worker execute the callback.
     let now = crate::apic::tick_count();
     crate::sched::sleep_until_tick(now.saturating_add(5));
-    for _ in 0..10 {
-        crate::sched::yield_now();
-    }
+    // Then wait, by the clock, for the workqueue worker to run the callback:
+    // a fixed number of yields waited for it only on one CPU, where a yield
+    // runs it -- which is why this used to report "pending" rather than fail
+    // (`selftest::wait_until`).
+    crate::selftest::wait_until(5_000, || TEST_ONESHOT.load(Ordering::Relaxed) == 42);
 
     let val = TEST_ONESHOT.load(Ordering::Relaxed);
-    if val == 42 {
-        serial_println!("[ktimer]   One-shot fired: OK (val=42)");
-    } else {
-        // Timing-dependent — may need more yields under heavy load.
+    if val != 42 {
         serial_println!(
-            "[ktimer]   One-shot fired: pending (val={}, may need more time)",
-            val,
+            "[ktimer]   FAIL: the one-shot timer had not fired 5 s after its deadline (val={})",
+            val
         );
+        return Err(crate::error::KernelError::InternalError);
     }
+    serial_println!("[ktimer]   One-shot fired: OK (val=42)");
 
     // --- 2. Periodic timer ---
     static TEST_PERIODIC: AtomicU64 = AtomicU64::new(0);

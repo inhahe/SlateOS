@@ -5,20 +5,36 @@
 //! control-ring protocol — `netipc::ring` opcodes driven over an `OP_RING_TCP`
 //! control channel to the persistent daemon session — that was previously
 //! hand-inlined in the `spawn.rs` boot self-tests, into a single reusable
-//! [`NetstackConn`] type: **one** shared-memory ring plus **one** TCP connection,
-//! driven `connect → send → recv → close`, where each operation is a control
+//! [`NetstackConn`] type: **one** connection id on the daemon, driven
+//! `connect → send → recv → close`, where each operation is a control
 //! round-trip against the daemon's *persistent* session.
+//!
+//! ## One ring for every socket, or one each
+//!
+//! The operator's question A-Q15 (`design-decisions.md` §972) asks for two
+//! designs behind one switch, [`RingMode`], so they can be measured:
+//! - **A, the default:** every [`NetstackConn`] submits on **one**
+//!   shared-memory ring, `SHARED_RING`.
+//! - **B:** each `NetstackConn` gets a ring of its own, which the daemon keeps
+//!   as a session of its own.
+//!
+//! Either way, connections are addressed by ids unique system-wide
+//! ([`alloc_conn_id`]), and the daemon's tables are daemon-wide, so a frame for
+//! any socket is routed whichever ring is being served. Until 2026-09-27 every
+//! `NetstackConn` allocated a ring of its own while the daemon kept a single
+//! session and reset it whenever a different ring arrived: opening a second
+//! socket destroyed the first.
 //!
 //! ## Persistence
 //!
 //! Each operation opens a fresh `net.stack` service channel, hands the daemon the
-//! shared ring handle (`OP_RING_TCP`), the daemon drains the queued SQE(s)
-//! against its persistent per-ring session, and posts one completion each. The
-//! kernel keeps the single ring mapped across all rounds. Because the connection
-//! is opened in one round and driven (send/recv) in later rounds, a successful
-//! send after a connect *is itself* proof that the daemon's session survived
-//! between submissions — exactly the property the persistent socket daemon needs
-//! for the staged cutover (§66, Q22b).
+//! ring handle (`OP_RING_TCP`), the daemon drains the queued SQE(s) against its
+//! persistent session, and posts one completion each. The kernel keeps the ring
+//! mapped for the whole boot. Because a connection is opened in one round and
+//! driven (send/recv) in later rounds, a successful send after a connect *is
+//! itself* proof that the daemon's session survived between submissions --
+//! exactly the property the persistent socket daemon needs for the staged
+//! cutover (§66, Q22b).
 //!
 //! ## Data window layout
 //!
@@ -43,6 +59,9 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::{channel, service, shm};
+use crate::sched::kmutex::{KMutex, KMutexGuard};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 /// Send-staging window offset within the ring data area.
 const SND_OFF: u32 = 0;
@@ -61,11 +80,6 @@ const DATA_LEN: u32 = SND_CAP + RCV_CAP;
 /// keeps the geometry identical to the original self-tests.
 const SQ_ENTRIES: u32 = 8;
 const CQ_ENTRIES: u32 = 8;
-
-/// The one connection id used within a [`NetstackConn`]'s session. A single
-/// client owns a single connection, so a fixed id is sufficient and keeps the
-/// daemon-side session table trivial.
-const CONN_ID: u32 = 1;
 
 /// `user_data` base ("NSCL" = net-stack-client). Every SQE gets a distinct,
 /// monotonically increasing tag so completions can be matched 1:1 in FIFO order.
@@ -99,61 +113,147 @@ pub fn userspace_enabled() -> bool {
         .is_none_or(|v| v.is_empty() || v == "1" || v == "yes" || v == "true")
 }
 
-/// A connection's local endpoint, as reported by the daemon for `getsockname`.
+// ---------------------------------------------------------------------------
+// The one ring (A-Q15 design A)
+// ---------------------------------------------------------------------------
+
+/// The one shared-memory ring every socket's daemon traffic goes through,
+/// created on first use and never torn down.
 ///
-/// The address family is carried by the variant (the daemon distinguishes them by
-/// the length it writes to the ring: 6 bytes for v4, 18 for v6).
+/// One ring means one daemon session, and a session holds every socket's
+/// connections, listeners and datagram sockets side by side. Until 2026-09-27
+/// each [`NetstackConn`] allocated a ring of its own, while the daemon kept one
+/// session and reset it whenever a different ring arrived. Opening a second
+/// socket therefore destroyed the first: the operator's question A-Q15.
+/// `design-decisions.md` §972 asks for this design (A) and the per-socket one
+/// (B) behind a switch ([`RingMode`]), and for a measurement between them.
+/// This is A, and the default.
+///
+/// A sleeping lock, because it is held across a daemon round-trip and a
+/// round-trip blocks on the daemon's reply. It is always the innermost lock a
+/// socket operation takes: a socket's own lock, then this.
+static SHARED_RING: KMutex<Option<RingHandle>> = KMutex::new(None);
+
+/// Which ring a newly opened socket submits on: design A or B of A-Q15
+/// (`design-decisions.md` §972), which asks for both behind one switch so the
+/// two can be measured against each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalEndpoint {
-    /// IPv4 local address `(ip, port)`.
-    V4([u8; 4], u16),
-    /// IPv6 local address `(ip6, port)`.
-    V6([u8; 16], u16),
+pub enum RingMode {
+    /// Design A: every socket on [`SHARED_RING`], one daemon session in all.
+    /// Sockets share one queue, so one socket's slow round-trip delays the
+    /// next socket's.
+    Shared,
+    /// Design B: each socket on a ring of its own, which the daemon keeps as a
+    /// session of its own. Costs a region per socket, and the daemon's session
+    /// table (64) caps the number of sockets.
+    PerSocket,
 }
 
-/// A single client connection to the userspace `net.stack` daemon.
+/// [`set_ring_mode`]'s override: 0 none, 1 shared, 2 per-socket.
+static RING_MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Rings alive now: the shared one once created, plus one per socket opened in
+/// per-socket mode and not yet closed. See [`rings_live`].
+static RINGS_LIVE: AtomicU32 = AtomicU32::new(0);
+
+/// Bytes of shared memory one ring takes, once a ring has been created.
+static RING_BYTES: AtomicU32 = AtomicU32::new(0);
+
+/// How many rings are alive, and the shared memory they hold in all.
 ///
-/// Owns one shared-memory ring and one daemon-side TCP connection. Drive it with
-/// [`connect`](Self::connect) → [`send`](Self::send) → [`recv`](Self::recv) →
-/// [`close`](Self::close). Dropping without calling `close` still tears the
-/// daemon session down (best effort) and always releases the shared memory.
-pub struct NetstackConn {
+/// The memory half of A-Q15's measurement is exact rather than sampled: under
+/// design A this stays at one ring whatever the number of sockets, under B it
+/// grows by one ring per socket. A ring is mapped by the daemon too, but it is
+/// the same pages, so the bytes are counted once.
+#[must_use]
+pub fn rings_live() -> (u32, u64) {
+    let n = RINGS_LIVE.load(Ordering::Acquire);
+    let each = RING_BYTES.load(Ordering::Acquire);
+    (n, u64::from(n).saturating_mul(u64::from(each)))
+}
+
+/// The mode a socket opened now gets.
+///
+/// [`set_ring_mode`]'s override if one is set, else the `net.ring` boot switch
+/// (`per-socket` for design B; anything else, or absent, for A).
+#[must_use]
+pub fn ring_mode() -> RingMode {
+    match RING_MODE_OVERRIDE.load(Ordering::Acquire) {
+        1 => RingMode::Shared,
+        2 => RingMode::PerSocket,
+        _ => {
+            if crate::fs::kernparam::get("net.ring").is_some_and(|v| v == "per-socket") {
+                RingMode::PerSocket
+            } else {
+                RingMode::Shared
+            }
+        }
+    }
+}
+
+/// Override the ring mode for sockets opened from now on (`None` returns the
+/// choice to the boot switch). Sockets already open keep the ring they have.
+/// For the load harness and the design-B self-tests, which run both designs in
+/// one boot.
+pub fn set_ring_mode(mode: Option<RingMode>) {
+    let v = match mode {
+        None => 0,
+        Some(RingMode::Shared) => 1,
+        Some(RingMode::PerSocket) => 2,
+    };
+    RING_MODE_OVERRIDE.store(v, Ordering::Release);
+}
+
+/// Next id [`alloc_conn_id`] hands out.
+static NEXT_CONN_ID: AtomicU32 = AtomicU32::new(1);
+
+/// A connection id no other live socket holds.
+///
+/// Every socket shares one daemon session, so the daemon's ids are one
+/// namespace for the whole system: a connection, a listener, an accepted
+/// connection and a datagram socket each need an id nothing else is using. The
+/// counter is 32 bits and never reuses an id before it wraps, which at one
+/// allocation per socket does not happen within a boot. 0 is never returned.
+#[must_use]
+pub fn alloc_conn_id() -> u32 {
+    loop {
+        let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
+/// A shared-memory ring to the daemon: the region, its size, and the
+/// `user_data` tags handed out on it.
+struct RingHandle {
     /// Shared-memory region backing the ring, shared with the daemon.
     handle: shm::ShmHandle,
     /// Region size in bytes (as passed to the daemon in each `OP_RING_TCP`).
     size: u32,
-    /// The single connection id this client drives.
-    conn_id: u32,
     /// Next `user_data` tag to hand out.
     next_ud: u64,
-    /// Whether a connection is currently open (a successful `connect` that has
-    /// not yet been closed). Guards the teardown `OP_CLOSE`.
-    connected: bool,
-    /// Whether the daemon has served at least one round-trip for our ring (and
-    /// therefore may hold a session for it). Set the first time a submission
-    /// succeeds; cleared once we send `OP_STOP`. Guards teardown so a
-    /// created-but-never-used connection never contacts the daemon, and so
-    /// teardown runs at most once.
-    session_open: bool,
+    /// Whether the daemon has served a round for this ring, and so may hold a
+    /// session for it: an own ring's teardown stops that session only if so.
+    served: bool,
 }
 
-// Note: every field is plain data (a `ShmHandle` u64 newtype, integers, bools),
-// so `NetstackConn` is automatically `Send + Sync`. Crucially it does *not* hold
-// an owned `Ring` view (whose raw `*mut u8` would make it `!Send`): the ring is
-// re-`attach`ed on demand from the shared-memory handle inside each operation.
-// This is what lets a `NetstackConn` live in the global socket table. Callers
-// that share one must still serialize access with their own lock, because the
-// daemon-side session is single-producer/single-consumer.
+impl Drop for RingHandle {
+    /// Free the region. Only an own ring (design B) is ever dropped -- the
+    /// shared ring lives in a static for the whole boot -- and its teardown has
+    /// already stopped the daemon's session for it.
+    fn drop(&mut self) {
+        shm::close(self.handle);
+        // Saturating: an unbalanced decrement must not wrap the count.
+        let _ = RINGS_LIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1))
+        });
+    }
+}
 
-impl NetstackConn {
-    /// Allocate the shared ring and prepare a client. Does **not** contact the
-    /// daemon yet — the first round-trip happens on [`connect`](Self::connect).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the shared memory cannot be created/mapped or the ring
-    /// geometry cannot be initialized.
-    pub fn open() -> KernelResult<Self> {
+impl RingHandle {
+    /// Allocate the region and initialise the ring header in it.
+    fn create() -> KernelResult<Self> {
         let need = netipc::ring::region_size(SQ_ENTRIES, CQ_ENTRIES, DATA_LEN);
         let handle = shm::create(need)?;
         let size = match shm::size(handle) {
@@ -172,49 +272,357 @@ impl NetstackConn {
         };
         // SAFETY: `kaddr` is valid and writable for `size` (>= need) bytes and is
         // exclusively ours until the daemon attaches during a submit round. The
-        // ring header is published with a release fence inside `init`. We only
-        // need the header written here — the driver view is re-`attach`ed on
-        // demand per op (see `attach_ring`), so the `Ring` value is discarded.
+        // ring header is published with a release fence inside `init`. Only the
+        // header is needed here -- the driver view is re-`attach`ed per round-trip
+        // (see `attach`) -- so the `Ring` value is discarded.
         if unsafe { netring::Ring::init(kaddr, size, SQ_ENTRIES, CQ_ENTRIES, DATA_LEN) }.is_none() {
             shm::close(handle);
             return Err(KernelError::InternalError);
         }
-        let size_u32 = u32::try_from(size).map_err(|_| KernelError::InternalError)?;
+        let Ok(size) = u32::try_from(size) else {
+            shm::close(handle);
+            return Err(KernelError::InternalError);
+        };
+        RINGS_LIVE.fetch_add(1, Ordering::AcqRel);
+        RING_BYTES.store(size, Ordering::Release);
         Ok(Self {
             handle,
-            size: size_u32,
-            conn_id: CONN_ID,
+            size,
             next_ud: UD_BASE,
-            connected: false,
-            session_open: false,
+            served: false,
         })
     }
 
-    /// The fixed connection id this client drives.
+    /// Re-attach the ring driver view from the shared-memory handle.
     ///
-    /// A client stream/datagram socket drives [`CONN_ID`]; a server-side accepted
+    /// Attaching is stateless -- the free-running SQ/CQ indices live in the
+    /// shared region, so re-deriving the view each round-trip is correct, and
+    /// keeps a non-`Send` raw pointer out of any struct that outlives it.
+    fn attach(&self) -> KernelResult<netring::Ring> {
+        let kaddr = shm::kernel_addr(self.handle)?;
+        let len = self.size as usize;
+        // SAFETY: `kaddr` is the stable kernel VA of our shm region, valid and
+        // aligned for `len` bytes for the region's lifetime (closed only when
+        // this `RingHandle` drops, and `&self` keeps it alive meanwhile); `attach`
+        // only reads the header (published by `create`) and bounds-checks the
+        // geometry, so it can never read or write outside the region.
+        unsafe { netring::Ring::attach(kaddr, len) }.ok_or(KernelError::InternalError)
+    }
+}
+
+/// Where a socket's round-trips go.
+enum RingRef {
+    /// [`SHARED_RING`] (design A).
+    Shared,
+    /// A ring of the socket's own (design B), guarded by whatever guards the
+    /// `NetstackConn`: the socket's own lock.
+    Own(RingHandle),
+}
+
+/// How a [`RingGuard`] holds its ring.
+enum RingLock<'a> {
+    /// The shared ring's lock.
+    Shared(KMutexGuard<'static, Option<RingHandle>>),
+    /// A socket's own ring, borrowed from its `NetstackConn`.
+    Own(&'a mut RingHandle),
+}
+
+/// Exclusive use of a ring for one daemon round-trip -- the shared ring's lock,
+/// or a socket's own ring -- and an attached view of it.
+///
+/// Everything a round-trip touches -- the data window written before it, the
+/// completion, the window read after it -- happens while one of these is alive,
+/// so no other socket's round-trip can use the window in between. Operations
+/// that make several round-trips take one guard per round-trip, so other
+/// sockets interleave between them rather than waiting for the whole call.
+struct RingGuard<'a> {
+    lock: RingLock<'a>,
+    view: netring::Ring,
+}
+
+impl<'a> RingGuard<'a> {
+    /// Take `ring`: the shared ring's lock, created on first use, or the
+    /// socket's own ring.
+    fn acquire(ring: &'a mut RingRef) -> KernelResult<Self> {
+        match ring {
+            RingRef::Shared => {
+                let mut lock = SHARED_RING.lock();
+                if lock.is_none() {
+                    *lock = Some(RingHandle::create()?);
+                }
+                let view = lock.as_ref().ok_or(KernelError::InternalError)?.attach()?;
+                Ok(Self {
+                    lock: RingLock::Shared(lock),
+                    view,
+                })
+            }
+            RingRef::Own(h) => {
+                let view = h.attach()?;
+                Ok(Self {
+                    lock: RingLock::Own(h),
+                    view,
+                })
+            }
+        }
+    }
+
+    /// The ring handle. Always there once `acquire` returned.
+    fn handle(&self) -> KernelResult<&RingHandle> {
+        match &self.lock {
+            RingLock::Shared(g) => g.as_ref().ok_or(KernelError::InternalError),
+            RingLock::Own(h) => Ok(h),
+        }
+    }
+
+    /// The ring handle, mutably.
+    fn handle_mut(&mut self) -> KernelResult<&mut RingHandle> {
+        match &mut self.lock {
+            RingLock::Shared(g) => g.as_mut().ok_or(KernelError::InternalError),
+            RingLock::Own(h) => Ok(h),
+        }
+    }
+
+    /// Hand out the next `user_data` tag.
+    fn next_ud(&mut self) -> u64 {
+        match self.handle_mut() {
+            Ok(h) => {
+                let ud = h.next_ud;
+                h.next_ud = h.next_ud.wrapping_add(1);
+                ud
+            }
+            Err(_) => UD_BASE,
+        }
+    }
+
+    /// Stage bytes in the ring's data window at `off`.
+    fn write_data(&self, off: usize, data: &[u8]) -> bool {
+        self.view.write_data(off, data)
+    }
+
+    /// Read bytes back from the ring's data window at `off`.
+    fn read_data(&self, off: usize, out: &mut [u8]) -> bool {
+        self.view.read_data(off, out)
+    }
+
+    /// Push one SQE, run control round-trips until its completion arrives,
+    /// and reap exactly that one, checking that no extra completion is posted
+    /// after it. Late completions of earlier round-trips that gave up are
+    /// discarded on the way. Returns the completion result.
+    fn submit_and_reap(&mut self, sqe: &netipc::ring::Sqe) -> KernelResult<i32> {
+        self.submit_and_reap_cqe(sqe).map(|cqe| cqe.result)
+    }
+
+    /// [`submit_and_reap`](Self::submit_and_reap), answering the whole
+    /// completion: for an op whose completion carries more than its result
+    /// (`OP_POLL`'s byte count in `flags`, with
+    /// [`POLL_COUNTED`](netipc::ring::POLL_COUNTED)).
+    fn submit_and_reap_cqe(&mut self, sqe: &netipc::ring::Sqe) -> KernelResult<netipc::ring::Cqe> {
+        let want_ud = sqe.user_data;
+        if !self.view.sq_push(sqe) {
+            return Err(KernelError::ResourceExhausted);
+        }
+        // Bounded poll, matching the eight loops elsewhere in this file and
+        // for the reason they all state: a round drives the daemon's pump
+        // once, so one round is not guaranteed to produce the completion.
+        //
+        // Re-rounding is safe and is NOT a re-submission: `sq_push` above ran
+        // once, and a round carries no SQE -- its contract is "the daemon
+        // drains whatever SQEs are queued against its persistent session". A
+        // later round on an already-drained queue finds nothing to do and the
+        // completion is already in the CQ.
+        //
+        // Reaped by tag. Tags are handed out in increasing order and every SQE
+        // gets exactly one completion, so one with a lower tag answers an SQE
+        // that an earlier round-trip gave up on -- the daemon got to it late.
+        // On the shared ring that completion would otherwise fail whichever
+        // socket's round-trip came next, so it is discarded, and said so. A
+        // higher tag cannot exist: nothing later has been submitted.
+        let mut got = None;
+        let mut rounds = 0u32;
+        let mut stale = 0u32;
+        'rounds: for _ in 0..8u32 {
+            rounds = rounds.saturating_add(1);
+            self.submit_round()?;
+            if let Ok(h) = self.handle_mut() {
+                h.served = true;
+            }
+            while let Some(c) = self.view.cq_pop() {
+                if c.user_data == want_ud {
+                    got = Some(c);
+                    break 'rounds;
+                }
+                if c.user_data > want_ud {
+                    return Err(KernelError::InternalError);
+                }
+                stale = stale.saturating_add(1);
+            }
+        }
+        if stale > 0 {
+            crate::serial_println!(
+                "[netstack-client]   discarded {} late completion(s) of round-trips that \
+                 had already given up",
+                stale
+            );
+        }
+        // Say so when one round was not enough: if this line never appears the
+        // loop is insurance, and if it does, the number says how close a
+        // single poll would have come to failing.
+        if rounds > 1 {
+            crate::serial_println!(
+                "[netstack-client]   submit_and_reap needed {} rounds for one \
+                 completion -- a single poll would have failed here",
+                rounds
+            );
+        }
+        // `TimedOut` rather than `InternalError`: "the daemon never answered"
+        // and "the daemon answered wrongly" want different words.
+        let cqe = got.ok_or(KernelError::TimedOut)?;
+        // No SQE should ever produce more than one completion.
+        if self.view.cq_pop().is_some() {
+            return Err(KernelError::InternalError);
+        }
+        Ok(cqe)
+    }
+
+    /// One `OP_RING_TCP` control round-trip: open a fresh `net.stack` channel,
+    /// hand the daemon the ring's handle and size, wait for the
+    /// acknowledgement. The daemon drains whatever SQEs are queued.
+    fn submit_round(&self) -> KernelResult<()> {
+        let client = service::connect(b"net.stack")?;
+        // Everything from here is fallible; make sure the channel is always
+        // closed regardless of which step fails.
+        let outcome = self.submit_round_on(client);
+        channel::close(client);
+        outcome
+    }
+
+    fn submit_round_on(&self, client: channel::ChannelHandle) -> KernelResult<()> {
+        let ring = self.handle()?;
+        // Authorize the daemon backing `net.stack` to `SYS_SHM_MAP` the ring
+        // region before we hand it the handle. Idempotent, so re-doing it every
+        // round is cheap. Skipped when the service is kernel-provided (PID 0):
+        // the kernel is the TCB and never needs a grant. `authorize` can only
+        // fail with `InvalidHandle`, which is impossible here -- the region
+        // lives for the whole boot -- so the result is ignorable.
+        if let Some(pid) = service::provider_pid(b"net.stack")
+            && pid != 0
+        {
+            let _ = shm::authorize(ring.handle, pid);
+        }
+        let mut req = [0u8; 16];
+        let n = netipc::encode_ring_tcp(&mut req, ring.handle.raw(), ring.size)
+            .ok_or(KernelError::InternalError)?;
+        let encoded = req.get(..n).ok_or(KernelError::InternalError)?;
+        let msg = channel::Message::from_bytes(encoded)?;
+        channel::send(client, msg)?;
+        let reply = channel::recv_timeout(client, RECV_TIMEOUT_NS)?;
+        match netipc::parse_bytes_reply(reply.data()) {
+            netipc::BytesReply::Ok(_) => Ok(()),
+            netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
+                Err(KernelError::InternalError)
+            }
+        }
+    }
+}
+
+/// A connection's local endpoint, as reported by the daemon for `getsockname`.
+///
+/// The address family is carried by the variant (the daemon distinguishes them by
+/// the length it writes to the ring: 6 bytes for v4, 18 for v6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalEndpoint {
+    /// IPv4 local address `(ip, port)`.
+    V4([u8; 4], u16),
+    /// IPv6 local address `(ip6, port)`.
+    V6([u8; 16], u16),
+}
+
+/// A client of the userspace `net.stack` daemon: one connection id of its own
+/// on the shared ring, plus any listener or accepted-connection ids it installs.
+///
+/// Drive it with [`connect`](Self::connect) → [`send`](Self::send) →
+/// [`recv`](Self::recv) → [`close`](Self::close). Dropping it without `close`
+/// still closes, best effort, everything it installed in the daemon.
+pub struct NetstackConn {
+    /// This client's own connection id, from [`alloc_conn_id`].
+    conn_id: u32,
+    /// The ring its round-trips go through, fixed at [`open`](Self::open) by
+    /// [`ring_mode`].
+    ring: RingRef,
+    /// Every id this client has installed in the daemon's session and not yet
+    /// closed: its own connection or datagram socket, a listener, connections
+    /// it accepted. Teardown closes each one.
+    ///
+    /// The shared session is never stopped, so nothing is cleaned up for this
+    /// client unless it names it. Each id's space is reserved *before* the
+    /// round-trip that installs it, so recording it cannot fail afterwards and
+    /// leak a daemon slot.
+    installed: Vec<u32>,
+}
+
+// Note: every field is plain data (an id and a vector of ids), so
+// `NetstackConn` is automatically `Send + Sync`. Crucially it does *not* hold a
+// `Ring` view (whose raw `*mut u8` would make it `!Send`): each round-trip takes
+// a `RingGuard` for the shared ring and drops it again. This is what lets a
+// `NetstackConn` live in the global socket table. Callers that share one must
+// still serialize access to it with their own lock, because `installed` is
+// state the round-trips update.
+
+impl NetstackConn {
+    /// Prepare a client with a fresh connection id, on the ring [`ring_mode`]
+    /// chooses now: the shared ring (design A), or a new ring of its own
+    /// (design B). Does **not** contact the daemon yet — the first round-trip
+    /// happens on [`connect`](Self::connect).
+    ///
+    /// # Errors
+    ///
+    /// In per-socket mode, an error creating the ring's shared memory.
+    pub fn open() -> KernelResult<Self> {
+        let ring = match ring_mode() {
+            RingMode::Shared => RingRef::Shared,
+            RingMode::PerSocket => RingRef::Own(RingHandle::create()?),
+        };
+        Ok(Self {
+            conn_id: alloc_conn_id(),
+            ring,
+            installed: Vec::new(),
+        })
+    }
+
+    /// This client's own connection id.
+    ///
+    /// A client stream/datagram socket drives this id; a server-side accepted
     /// connection is addressed by its own id via the `*_on` methods. Exposed so the
     /// socket object layer ([`crate::net::socket`]) can record the effective id for a
-    /// socket that shares a listener's ring session.
+    /// socket that shares a listener's `NetstackConn`.
     #[must_use]
     pub fn conn_id(&self) -> u32 {
         self.conn_id
     }
 
-    /// Re-attach the ring driver view from the shared-memory handle.
-    ///
-    /// Attaching is stateless — the free-running SQ/CQ indices live in the shared
-    /// region, so re-deriving the view each op is correct (and avoids caching a
-    /// non-`Send` raw pointer in the struct). The header was published by
-    /// [`open`](Self::open)'s `init`.
-    fn attach_ring(&self) -> KernelResult<netring::Ring> {
-        let kaddr = shm::kernel_addr(self.handle)?;
-        let len = self.size as usize;
-        // SAFETY: `kaddr` is the stable kernel VA of our shm region, valid and
-        // aligned for `len` bytes for the region's lifetime; `attach` only reads
-        // the header (published by `open`) and bounds-checks the geometry, so it
-        // can never read/write outside the region.
-        unsafe { netring::Ring::attach(kaddr, len) }.ok_or(KernelError::InternalError)
+    // The three below take the `installed` field, not `self`: a `RingGuard`
+    // borrows `self.ring`, and these run while one is alive.
+
+    /// Make room to record one more installed id, before the round-trip that
+    /// installs it (see the `installed` field).
+    fn reserve_install(installed: &mut Vec<u32>) -> KernelResult<()> {
+        installed
+            .try_reserve(1)
+            .map_err(|_| KernelError::OutOfMemory)
+    }
+
+    /// Record that `id` now names something in the daemon's session.
+    fn install(installed: &mut Vec<u32>, id: u32) {
+        if !installed.contains(&id) {
+            // Cannot reallocate: `reserve_install` made room before the
+            // round-trip that installed `id`.
+            installed.push(id);
+        }
+    }
+
+    /// Record that `id` no longer names anything in the daemon's session.
+    fn uninstall(installed: &mut Vec<u32>, id: u32) {
+        installed.retain(|&i| i != id);
     }
 
     /// Open the TCP connection to `ip:port`.
@@ -242,8 +650,13 @@ impl NetstackConn {
     /// completion, service-channel failure) — distinct from a `< 0` connect
     /// result, which is a normal "no upstream" outcome.
     pub fn connect(&mut self, ip: &[u8; 4], port: u16, nonblock: bool) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, dropped only on a definite refusal:
+        // if the round-trip itself fails, the daemon may still have installed
+        // the connection, and a teardown OP_CLOSE for an unknown id is harmless.
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let mut aux = netipc::ring::Sqe::pack_endpoint(ip, port);
         if nonblock {
             aux |= netipc::ring::CONNECT_NONBLOCK;
@@ -255,11 +668,12 @@ impl NetstackConn {
             aux,
             ..netipc::ring::Sqe::default()
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         // Both an established (`res >= 0`) and an in-progress non-blocking connect
-        // leave a live connection installed in the daemon session.
-        if res >= 0 || res == netipc::ring::ERR_IN_PROGRESS {
-            self.connected = true;
+        // leave a live connection installed in the daemon session; anything else
+        // installed nothing.
+        if res < 0 && res != netipc::ring::ERR_IN_PROGRESS {
+            Self::uninstall(&mut self.installed, self.conn_id);
         }
         Ok(res)
     }
@@ -278,11 +692,14 @@ impl NetstackConn {
     ///
     /// Returns an error on a control-protocol fault (see [`connect`](Self::connect)).
     pub fn connect6(&mut self, ip6: &[u8; 16], port: u16, nonblock: bool) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, as in `connect`.
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         if !ring.write_data(SND_OFF as usize, ip6) {
             return Err(KernelError::InternalError);
         }
-        let ud = self.next_ud();
+        let ud = ring.next_ud();
         let mut aux = u64::from(port);
         if nonblock {
             aux |= netipc::ring::CONNECT_NONBLOCK;
@@ -295,9 +712,9 @@ impl NetstackConn {
             user_data: ud,
             aux,
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
-        if res >= 0 || res == netipc::ring::ERR_IN_PROGRESS {
-            self.connected = true;
+        let res = ring.submit_and_reap(&sqe)?;
+        if res < 0 && res != netipc::ring::ERR_IN_PROGRESS {
+            Self::uninstall(&mut self.installed, self.conn_id);
         }
         Ok(res)
     }
@@ -334,7 +751,7 @@ impl NetstackConn {
     /// Send `buf` on an explicit connection id (see [`send`](Self::send)).
     ///
     /// Used to drive a *server-side* accepted connection whose id differs from the
-    /// client's fixed [`CONN_ID`] within the same ring session (the listen/accept
+    /// client's own [`conn_id`](Self::conn_id) on the shared ring (the listen/accept
     /// loopback self-test). The public [`send`](Self::send) is the `self.conn_id`
     /// specialization.
     ///
@@ -342,7 +759,6 @@ impl NetstackConn {
     ///
     /// Same as [`send`](Self::send).
     pub fn send_on(&mut self, conn_id: u32, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
         let send_aux = if nonblock {
             netipc::ring::SEND_NONBLOCK
         } else {
@@ -351,13 +767,16 @@ impl NetstackConn {
         let mut total: i32 = 0;
         let mut off = 0usize;
         while off < buf.len() {
+            // The ring per chunk, not for the whole buffer: a large send by one
+            // socket lets other sockets' round-trips in between its chunks.
+            let mut ring = RingGuard::acquire(&mut self.ring)?;
             let end = off.saturating_add(SND_CAP as usize).min(buf.len());
             let chunk = buf.get(off..end).ok_or(KernelError::InternalError)?;
             if !ring.write_data(SND_OFF as usize, chunk) {
                 return Err(KernelError::InternalError);
             }
             let chunk_len = u32::try_from(chunk.len()).map_err(|_| KernelError::InternalError)?;
-            let ud = self.next_ud();
+            let ud = ring.next_ud();
             let sqe = netipc::ring::Sqe {
                 op: netipc::ring::OP_SEND,
                 conn_id,
@@ -366,7 +785,7 @@ impl NetstackConn {
                 user_data: ud,
                 aux: send_aux,
             };
-            let res = self.submit_and_reap(&ring, &sqe)?;
+            let res = ring.submit_and_reap(&sqe)?;
             if res == netipc::ring::ERR_WOULD_BLOCK {
                 // Non-blocking send hit a full window. Report progress if any bytes
                 // were already accepted (Linux returns the short count); otherwise
@@ -383,6 +802,14 @@ impl NetstackConn {
                     return Ok(total);
                 }
                 return Err(KernelError::BrokenPipe);
+            }
+            if res == netipc::ring::ERR_TIMED_OUT {
+                // The connection timed out (every resend unanswered). As above:
+                // the short count if any bytes were accepted, else ETIMEDOUT.
+                if total > 0 {
+                    return Ok(total);
+                }
+                return Err(KernelError::TimedOut);
             }
             if res < 0 {
                 // Peer gone mid-stream: report bytes already queued, or the raw
@@ -435,8 +862,8 @@ impl NetstackConn {
     /// Receive on an explicit connection id (see [`recv`](Self::recv)).
     ///
     /// The server-side counterpart to [`send_on`](Self::send_on): reads from an
-    /// accepted connection whose id differs from the client's fixed [`CONN_ID`]
-    /// within one ring session. The public [`recv`](Self::recv) is the
+    /// accepted connection whose id differs from the client's own [`conn_id`](Self::conn_id)
+    /// on the shared ring. The public [`recv`](Self::recv) is the
     /// `self.conn_id` specialization.
     ///
     /// # Errors
@@ -449,10 +876,10 @@ impl NetstackConn {
         nonblock: bool,
         peek: bool,
     ) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
-        let ud = self.next_ud();
+        let ud = ring.next_ud();
         let mut aux = if nonblock {
             netipc::ring::RECV_NONBLOCK
         } else {
@@ -469,10 +896,16 @@ impl NetstackConn {
             user_data: ud,
             aux,
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         if res == netipc::ring::ERR_WOULD_BLOCK {
-            // Non-blocking recv with nothing ready: the caller's O_NONBLOCK.
+            // Nothing ready. `net::socket` asks this way on purpose and waits
+            // itself (`wait_until`); an O_NONBLOCK caller gets EAGAIN.
             return Err(KernelError::WouldBlock);
+        }
+        if res == netipc::ring::ERR_TIMED_OUT {
+            // Every resend of our last segment went unanswered: the peer is
+            // gone. ETIMEDOUT -- never the 0 that would read as its EOF.
+            return Err(KernelError::TimedOut);
         }
         if res <= 0 {
             return Ok(res);
@@ -500,8 +933,14 @@ impl NetstackConn {
     /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_bind(&mut self, port: u16) -> KernelResult<u16> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        // An unbound socket `udp_open` made is in the daemon already: a refused
+        // bind leaves it there, so must leave it recorded for teardown too.
+        let opened = self.installed.contains(&self.conn_id);
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, as in `connect`.
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_UDP_BIND,
             conn_id: self.conn_id,
@@ -509,7 +948,10 @@ impl NetstackConn {
             aux: u64::from(port),
             ..netipc::ring::Sqe::default()
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
+        if res < 0 && !opened {
+            Self::uninstall(&mut self.installed, self.conn_id);
+        }
         if res == netipc::ring::ERR_ADDR_IN_USE {
             return Err(KernelError::AddrInUse);
         }
@@ -517,11 +959,129 @@ impl NetstackConn {
             // Table full (daemon `-1`) or any other bind failure.
             return Err(KernelError::ResourceExhausted);
         }
-        // A bound UDP socket holds a daemon-side session; mark it so teardown
+        // A bound UDP socket holds a daemon-side slot, recorded above so teardown
         // emits the OP_CLOSE that unbinds it (the daemon routes OP_CLOSE to
-        // `udp.remove` when the id isn't a TCP connection).
-        self.connected = true;
+        // `udp.take` when the id isn't a TCP connection).
         u16::try_from(res).map_err(|_| KernelError::InternalError)
+    }
+
+    /// Create the daemon-side UDP socket **without a port**
+    /// (daemon [`OP_UDP_BIND`](netipc::ring::OP_UDP_BIND) with
+    /// [`UDP_BIND_UNBOUND`](netipc::ring::UDP_BIND_UNBOUND)): what a socket
+    /// needs to take multicast options before `bind(2)`, as Linux's does. A
+    /// later [`udp_bind`](Self::udp_bind) gives it its port, keeping its
+    /// options and groups. Teardown closes it like a bound one.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
+    /// - [`KernelError::AddrInUse`] — the daemon already holds a socket under
+    ///   this id (a caller bug: open it once).
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_open(&mut self) -> KernelResult<()> {
+        Self::reserve_install(&mut self.installed)?;
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_BIND,
+            conn_id: self.conn_id,
+            user_data: ud,
+            aux: netipc::ring::UDP_BIND_UNBOUND,
+            ..netipc::ring::Sqe::default()
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            0 => Ok(()),
+            // Whatever is under this id was there before: not ours to forget.
+            netipc::ring::ERR_ADDR_IN_USE => Err(KernelError::AddrInUse),
+            _ => {
+                Self::uninstall(&mut self.installed, self.conn_id);
+                Err(KernelError::ResourceExhausted)
+            }
+        }
+    }
+
+    /// Set one of the UDP socket's multicast options
+    /// (daemon [`OP_UDP_SETOPT`](netipc::ring::OP_UDP_SETOPT)): the scalar
+    /// `value`, or the group in `window` for a join or leave
+    /// ([`netipc::sockopt::Set`]). The socket must exist in the daemon —
+    /// bound, or [opened](Self::udp_open).
+    ///
+    /// Returns `Ok(Ok(()))`, or `Ok(Err(errno))` with the positive Linux errno
+    /// the daemon refused it with (`EINVAL`, `EADDRINUSE`, `EADDRNOTAVAIL`,
+    /// `ENOBUFS`, `ENODEV`), which the socket layer hands to the caller as
+    /// it is: these are Linux's own answers to the same call, and have no
+    /// [`KernelError`] of their own.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::MsgSize`] — `window` is larger than the ring's
+    ///   send window (a caller bug: a group window is at most 16 bytes).
+    /// - [`KernelError::InternalError`] — the daemon holds no socket under
+    ///   this id, or answered something no setsockopt can.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_setopt(
+        &mut self,
+        option: u16,
+        value: u32,
+        window: &[u8],
+    ) -> KernelResult<Result<(), i32>> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        if window.len() > SND_CAP as usize {
+            return Err(KernelError::MsgSize);
+        }
+        if !window.is_empty() && !ring.write_data(SND_OFF as usize, window) {
+            return Err(KernelError::InternalError);
+        }
+        let data_len = u32::try_from(window.len()).map_err(|_| KernelError::InternalError)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_SETOPT,
+            conn_id: self.conn_id,
+            data_off: SND_OFF,
+            data_len,
+            user_data: ud,
+            aux: netipc::ring::Sqe::pack_udp_opt(option, value),
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            0 => Ok(Ok(())),
+            netipc::ring::ERR_INVALID
+            | netipc::ring::ERR_ADDR_IN_USE
+            | netipc::ring::ERR_ADDR_NOT_AVAIL
+            | netipc::ring::ERR_NO_BUFS
+            | netipc::ring::ERR_NO_DEVICE => Ok(Err(res.saturating_neg())),
+            _ => Err(KernelError::InternalError),
+        }
+    }
+
+    /// Read one of the UDP socket's scalar multicast options back
+    /// (daemon [`OP_UDP_GETOPT`](netipc::ring::OP_UDP_GETOPT)). The socket
+    /// must exist in the daemon, as for [`udp_setopt`](Self::udp_setopt).
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::InvalidArgument`] — `option` has no value to read.
+    /// - [`KernelError::InternalError`] — the daemon holds no socket under
+    ///   this id.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_getopt(&mut self, option: u16) -> KernelResult<i32> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_GETOPT,
+            conn_id: self.conn_id,
+            user_data: ud,
+            aux: netipc::ring::Sqe::pack_udp_opt(option, 0),
+            ..netipc::ring::Sqe::default()
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            v if v >= 0 => Ok(v),
+            netipc::ring::ERR_INVALID => Err(KernelError::InvalidArgument),
+            _ => Err(KernelError::InternalError),
+        }
     }
 
     /// Send one UDP datagram from the bound socket to `ip:port`
@@ -539,7 +1099,7 @@ impl NetstackConn {
     /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to(&mut self, ip: &[u8; 4], port: u16, buf: &[u8]) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         // A single datagram must fit the ring send window (the daemon also caps it
         // to its per-datagram maximum and returns ERR_MSG_SIZE). Rather than
         // silently truncate a payload larger than the window, reject it as EMSGSIZE
@@ -553,7 +1113,7 @@ impl NetstackConn {
             return Err(KernelError::InternalError);
         }
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
-        let ud = self.next_ud();
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_UDP_SEND,
             conn_id: self.conn_id,
@@ -562,7 +1122,7 @@ impl NetstackConn {
             user_data: ud,
             aux: netipc::ring::Sqe::pack_endpoint(ip, port),
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         if res == netipc::ring::ERR_MSG_SIZE {
             return Err(KernelError::MsgSize);
         }
@@ -589,7 +1149,7 @@ impl NetstackConn {
     /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to6(&mut self, ip6: &[u8; 16], port: u16, buf: &[u8]) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         // The 16-byte destination address plus the payload must fit the ring send
         // window; reject an oversized datagram as EMSGSIZE rather than truncating
         // (a datagram is all-or-nothing).
@@ -608,7 +1168,7 @@ impl NetstackConn {
             }
         }
         let data_len = u32::try_from(want + 16).map_err(|_| KernelError::InternalError)?;
-        let ud = self.next_ud();
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_UDP_SEND6,
             conn_id: self.conn_id,
@@ -617,7 +1177,7 @@ impl NetstackConn {
             user_data: ud,
             aux: u64::from(port),
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         if res == netipc::ring::ERR_MSG_SIZE {
             return Err(KernelError::MsgSize);
         }
@@ -674,7 +1234,7 @@ impl NetstackConn {
         buf: &mut [u8],
         nonblock: bool,
     ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
-        let ring = self.attach_ring()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
         // The daemon writes a 24-byte address header + payload into the recv
         // window, so the window must be at least the header plus whatever payload
@@ -682,7 +1242,7 @@ impl NetstackConn {
         let room = buf.len().min((RCV_CAP as usize).saturating_sub(hdr_len));
         let cap = hdr_len.saturating_add(room);
         let cap_u32 = u32::try_from(cap).map_err(|_| KernelError::InternalError)?;
-        let ud = self.next_ud();
+        let ud = ring.next_ud();
         let aux = if nonblock {
             netipc::ring::RECV_NONBLOCK
         } else {
@@ -696,7 +1256,7 @@ impl NetstackConn {
             user_data: ud,
             aux,
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         if res == netipc::ring::ERR_WOULD_BLOCK {
             return Err(KernelError::WouldBlock);
         }
@@ -756,21 +1316,21 @@ impl NetstackConn {
     /// The server-side counterpart to [`poll_ready`](Self::poll_ready): reports the
     /// readiness of an accepted connection — or a listener, for which `readable`
     /// signals a pending connection in the backlog — whose id differs from the
-    /// client's fixed [`CONN_ID`] within one ring session.
+    /// client's own [`conn_id`](Self::conn_id) on the shared ring.
     ///
     /// # Errors
     ///
     /// Same as [`poll_ready`](Self::poll_ready).
     pub fn poll_on(&mut self, conn_id: u32) -> KernelResult<(bool, bool, bool)> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_POLL,
             conn_id,
             user_data: ud,
             ..netipc::ring::Sqe::default()
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         if res < 0 {
             // Daemon reports no such connection (`-1`).
             return Err(KernelError::NotConnected);
@@ -779,6 +1339,38 @@ impl NetstackConn {
         let writable = res & netipc::ring::POLL_WRITABLE != 0;
         let error = res & netipc::ring::POLL_ERR != 0;
         Ok((readable, writable, error))
+    }
+
+    /// How many bytes a receive on connection (or datagram socket) `conn_id`
+    /// would find waiting -- `FIONREAD`: a TCP connection's buffered in-order
+    /// bytes, a UDP socket's next datagram's payload, 0 for a listener. One
+    /// [`OP_POLL`](netipc::ring::OP_POLL) round trip, read from its
+    /// completion's `flags` ([`POLL_COUNTED`](netipc::ring::POLL_COUNTED));
+    /// like [`poll_on`](Self::poll_on), it moves no data.
+    ///
+    /// # Errors
+    ///
+    /// [`KernelError::NotConnected`] for an id the daemon does not know;
+    /// [`KernelError::NotSupported`] if the daemon's poll does not count (one
+    /// older than this kernel -- never the embedded one); a control-protocol
+    /// fault as for [`connect`](Self::connect).
+    pub fn readable_bytes_on(&mut self, conn_id: u32) -> KernelResult<u32> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_POLL,
+            conn_id,
+            user_data: ud,
+            ..netipc::ring::Sqe::default()
+        };
+        let cqe = ring.submit_and_reap_cqe(&sqe)?;
+        if cqe.result < 0 {
+            return Err(KernelError::NotConnected);
+        }
+        if cqe.result & netipc::ring::POLL_COUNTED == 0 {
+            return Err(KernelError::NotSupported);
+        }
+        Ok(cqe.flags)
     }
 
     /// Register a passive TCP listener on `port` under `listener_id`
@@ -796,8 +1388,11 @@ impl NetstackConn {
     ///
     /// Returns a control-protocol fault (see [`connect`](Self::connect)).
     pub fn listen(&mut self, listener_id: u32, port: u16) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, as in `connect`.
+        Self::install(&mut self.installed, listener_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_LISTEN,
             conn_id: listener_id,
@@ -805,7 +1400,11 @@ impl NetstackConn {
             aux: u64::from(port),
             ..netipc::ring::Sqe::default()
         };
-        self.submit_and_reap(&ring, &sqe)
+        let res = ring.submit_and_reap(&sqe)?;
+        if res != 0 {
+            Self::uninstall(&mut self.installed, listener_id);
+        }
+        Ok(res)
     }
 
     /// Dequeue one established connection from `listener_id`'s backlog into
@@ -831,10 +1430,14 @@ impl NetstackConn {
         new_conn_id: u32,
         peer: &mut [u8; 6],
     ) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
-        // Reuse the recv-landing window for the 6-byte peer address: accept is
-        // issued before any data recv on this ring, so there is no clash.
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, as in `connect`.
+        Self::install(&mut self.installed, new_conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        // Reuse the recv-landing window for the 6-byte peer address: the guard
+        // holds the ring for this whole round-trip, so no other receive can land
+        // in the window before the address is read back.
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_ACCEPT,
             conn_id: listener_id,
@@ -843,8 +1446,12 @@ impl NetstackConn {
             user_data: ud,
             aux: u64::from(new_conn_id),
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
-        if res == 0 && !ring.read_data(RCV_OFF as usize, peer) {
+        let res = ring.submit_and_reap(&sqe)?;
+        if res != 0 {
+            // Nothing accepted (an empty backlog, or a refusal): nothing to close.
+            Self::uninstall(&mut self.installed, new_conn_id);
+        } else if !ring.read_data(RCV_OFF as usize, peer) {
+            // Accepted, so it stays recorded for teardown to close.
             return Err(KernelError::InternalError);
         }
         Ok(res)
@@ -868,8 +1475,11 @@ impl NetstackConn {
         new_conn_id: u32,
         peer: &mut [u8; 18],
     ) -> KernelResult<i32> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        Self::reserve_install(&mut self.installed)?;
+        // Recorded before the round-trip, as in `connect`.
+        Self::install(&mut self.installed, new_conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_ACCEPT,
             conn_id: listener_id,
@@ -878,8 +1488,12 @@ impl NetstackConn {
             user_data: ud,
             aux: u64::from(new_conn_id),
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
-        if res == 0 && !ring.read_data(RCV_OFF as usize, peer) {
+        let res = ring.submit_and_reap(&sqe)?;
+        if res != 0 {
+            // Nothing accepted (an empty backlog, or a refusal): nothing to close.
+            Self::uninstall(&mut self.installed, new_conn_id);
+        } else if !ring.read_data(RCV_OFF as usize, peer) {
+            // Accepted, so it stays recorded for teardown to close.
             return Err(KernelError::InternalError);
         }
         Ok(res)
@@ -910,14 +1524,14 @@ impl NetstackConn {
     ///
     /// The server-side counterpart to [`local_addr`](Self::local_addr): reports the
     /// local address of an accepted connection whose id differs from the client's
-    /// fixed [`CONN_ID`] within one ring session.
+    /// own [`conn_id`](Self::conn_id) on the shared ring.
     ///
     /// # Errors
     ///
     /// Same as [`local_addr`](Self::local_addr).
     pub fn local_addr_on(&mut self, conn_id: u32) -> KernelResult<LocalEndpoint> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         // Ask for the 18-byte (v6) form; the daemon writes 6 for a v4 connection.
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_LOCALADDR,
@@ -927,7 +1541,7 @@ impl NetstackConn {
             user_data: ud,
             aux: 0,
         };
-        let res = self.submit_and_reap(&ring, &sqe)?;
+        let res = ring.submit_and_reap(&sqe)?;
         match res {
             6 => {
                 let mut buf = [0u8; 6];
@@ -982,15 +1596,15 @@ impl NetstackConn {
     /// (see [`shutdown`](Self::shutdown)).
     ///
     /// The server-side counterpart to [`shutdown`](Self::shutdown): shuts down an
-    /// accepted connection whose id differs from the client's fixed [`CONN_ID`]
-    /// within one ring session.
+    /// accepted connection whose id differs from the client's own [`conn_id`](Self::conn_id)
+    /// on the shared ring.
     ///
     /// # Errors
     ///
     /// Same as [`shutdown`](Self::shutdown).
     pub fn shutdown_on(&mut self, conn_id: u32, how: u64) -> KernelResult<()> {
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_SHUTDOWN,
             conn_id,
@@ -999,48 +1613,48 @@ impl NetstackConn {
             user_data: ud,
             aux: how,
         };
-        match self.submit_and_reap(&ring, &sqe)? {
+        match ring.submit_and_reap(&sqe)? {
             0 => Ok(()),
             _ => Err(KernelError::NotConnected), // -1 → unknown connection
         }
     }
 
-    /// Close a single connection id on this session (daemon
-    /// [`OP_CLOSE`](netipc::ring::OP_CLOSE)), leaving the session — and any other
-    /// connections or listeners sharing its ring — alive.
+    /// Close a single id this client installed (daemon
+    /// [`OP_CLOSE`](netipc::ring::OP_CLOSE)): a connection, an accepted
+    /// connection, a datagram socket or a listener. Everything else on the
+    /// shared ring stays alive.
     ///
-    /// This is how a server releases one accepted connection when its socket closes,
-    /// without tearing down the shared listener session (which happens only on the
-    /// final [`close`](Self::close)/teardown). A no-op if the daemon never opened a
-    /// session for this ring.
+    /// This is how a server releases one accepted connection when its socket
+    /// closes while the listener stays up. A no-op for an id this client never
+    /// installed.
     ///
     /// # Errors
     ///
     /// Returns a control-protocol fault (see [`connect`](Self::connect)). A daemon
-    /// `-1` (unknown connection) is treated as success — the connection is already
-    /// gone, which is the desired end state.
+    /// `-1` (unknown id) is treated as success — the id is already gone, which is
+    /// the desired end state.
     pub fn close_conn(&mut self, conn_id: u32) -> KernelResult<()> {
-        if !self.session_open {
+        if !self.installed.contains(&conn_id) {
             return Ok(());
         }
-        let ring = self.attach_ring()?;
-        let ud = self.next_ud();
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_CLOSE,
             conn_id,
             user_data: ud,
             ..netipc::ring::Sqe::default()
         };
-        // A `-1` (unknown connection) is fine: the connection is already gone.
-        let _ = self.submit_and_reap(&ring, &sqe)?;
+        // A `-1` (unknown id) is fine: it is already gone.
+        let _ = ring.submit_and_reap(&sqe)?;
+        Self::uninstall(&mut self.installed, conn_id);
         Ok(())
     }
 
-    /// Close the connection and end the daemon session.
+    /// Close everything this client installed in the daemon.
     ///
-    /// Consumes the client. Best effort: any per-op failure during teardown is
-    /// ignored (the daemon also reaps idle sessions on its own deadline). The
-    /// shared memory is released when the returned value is dropped.
+    /// Consumes the client. Best effort: a failure closing one id does not stop
+    /// the others from being closed.
     ///
     /// # Errors
     ///
@@ -1053,169 +1667,55 @@ impl NetstackConn {
 
     // ---- internals --------------------------------------------------------
 
-    /// Hand out the next `user_data` tag.
-    fn next_ud(&mut self) -> u64 {
-        let ud = self.next_ud;
-        self.next_ud = self.next_ud.wrapping_add(1);
-        ud
-    }
-
-    /// Push one SQE, run one control round-trip, and reap exactly one completion,
-    /// verifying it echoes the SQE's `user_data` and that no extra completion is
-    /// posted. Returns the completion result.
-    fn submit_and_reap(
-        &mut self,
-        ring: &netring::Ring,
-        sqe: &netipc::ring::Sqe,
-    ) -> KernelResult<i32> {
-        let want_ud = sqe.user_data;
-        if !ring.sq_push(sqe) {
-            return Err(KernelError::ResourceExhausted);
-        }
-        // Bounded poll, matching the eight loops elsewhere in this file and
-        // for the reason they all state: a round drives the daemon's pump
-        // once, so one round is not guaranteed to produce the completion.
-        // This function polled exactly once, and was the only place in the
-        // module that did -- which cost one boot in twenty as
-        // `[netsock] FAIL: head-of-line setup step listen failed:
-        // InternalError`, the control path failing where every data path
-        // already retried.
-        //
-        // Re-rounding is safe and is NOT a re-submission: `sq_push` above
-        // ran once, and `submit_round` carries no SQE -- its contract is
-        // "the daemon drains whatever SQEs are queued against its
-        // persistent session". A later round on an already-drained queue
-        // finds nothing to do and the completion is already in the CQ.
-        let mut got = None;
-        let mut rounds = 0u32;
-        for _ in 0..8u32 {
-            rounds = rounds.saturating_add(1);
-            self.submit_round()?;
-            // The daemon served us, so it now holds a session for our ring —
-            // mark it so teardown emits an `OP_STOP`. (A created-but-never-
-            // submitted client leaves this false and never contacts the
-            // daemon.)
-            self.session_open = true;
-            if let Some(c) = ring.cq_pop() {
-                got = Some(c);
-                break;
-            }
-        }
-        // `TimedOut` rather than `InternalError`: four conditions used to
-        // arrive at the caller as one word -- an absent ring, a missing
-        // completion, a `user_data` mismatch and an unexpected second
-        // completion. "The daemon never answered" and "the daemon answered
-        // wrongly" want different words, and a rung that prints the error
-        // is the only thing that will ever read them.
-        // Say so when one round was not enough. The retry above is claimed
-        // structurally -- the control path now polls the way its eight
-        // neighbours do -- and a green boot cannot tell "the race is fixed"
-        // from "the race did not fire". This line answers it directly: if it
-        // never appears the loop is insurance and the 1-in-20 `listen`
-        // failure had another cause; if it appears, the race was real and is
-        // now absorbed, and the number says how close the single poll was.
-        if rounds > 1 {
-            crate::serial_println!(
-                "[netstack-client]   submit_and_reap needed {} rounds for one \
-                 completion -- a single poll would have failed here",
-                rounds
-            );
-        }
-        let cqe = got.ok_or(KernelError::TimedOut)?;
-        if cqe.user_data != want_ud {
-            return Err(KernelError::InternalError);
-        }
-        // No SQE should ever produce more than one completion.
-        if ring.cq_pop().is_some() {
-            return Err(KernelError::InternalError);
-        }
-        Ok(cqe.result)
-    }
-
-    /// One `OP_RING_TCP` control round-trip: open a fresh `net.stack` channel,
-    /// hand the daemon our ring handle+size, wait for the acknowledgement. The
-    /// daemon drains whatever SQEs are queued against its persistent session.
-    fn submit_round(&self) -> KernelResult<()> {
-        let client = service::connect(b"net.stack")?;
-        // Everything from here is fallible; make sure the channel is always
-        // closed regardless of which step fails.
-        let outcome = self.submit_round_on(client);
-        channel::close(client);
-        outcome
-    }
-
-    fn submit_round_on(&self, client: channel::ChannelHandle) -> KernelResult<()> {
-        // Authorize the daemon backing `net.stack` to `SYS_SHM_MAP` our ring
-        // region before we hand it the handle. Idempotent, so re-doing it every
-        // round is cheap. Skipped when the service is kernel-provided (PID 0):
-        // the kernel is the TCB and never needs a grant. `authorize` can only
-        // fail with `InvalidHandle`, which is impossible here — we hold the
-        // handle for the region's whole lifetime — so the result is ignorable.
-        if let Some(pid) = service::provider_pid(b"net.stack")
-            && pid != 0
-        {
-            let _ = shm::authorize(self.handle, pid);
-        }
-        let mut req = [0u8; 16];
-        let n = netipc::encode_ring_tcp(&mut req, self.handle.raw(), self.size)
-            .ok_or(KernelError::InternalError)?;
-        let encoded = req.get(..n).ok_or(KernelError::InternalError)?;
-        let msg = channel::Message::from_bytes(encoded)?;
-        channel::send(client, msg)?;
-        let reply = channel::recv_timeout(client, RECV_TIMEOUT_NS)?;
-        match netipc::parse_bytes_reply(reply.data()) {
-            netipc::BytesReply::Ok(_) => Ok(()),
-            netipc::BytesReply::Fail | netipc::BytesReply::Malformed => {
-                Err(KernelError::InternalError)
-            }
-        }
-    }
-
-    /// Close the connection (if open) and stop the daemon session. Idempotent:
-    /// runs at most once thanks to `session_open`.
+    /// Close every installed id, one round-trip each. Idempotent: the list is
+    /// emptied as it goes. The shared session itself is never stopped -- other
+    /// sockets are using it.
     fn teardown(&mut self) {
-        if !self.session_open {
-            return;
-        }
-        // Attach once for the whole teardown. If the region can't be attached
-        // (should not happen while the handle is live), give up cleanly — the
-        // daemon reaps idle sessions on its own deadline anyway.
-        let ring = match self.attach_ring() {
-            Ok(r) => r,
-            Err(_) => {
-                self.session_open = false;
+        let ids = core::mem::take(&mut self.installed);
+        for id in ids {
+            // A guard per id, so other sockets interleave with a long teardown.
+            let Ok(mut ring) = RingGuard::acquire(&mut self.ring) else {
+                // No ring to reach the daemon through: nothing can be closed, and
+                // the daemon's own table is what outlives this.
                 return;
-            }
-        };
-        if self.connected {
-            let ud = self.next_ud();
-            let close_sqe = netipc::ring::Sqe {
+            };
+            let ud = ring.next_ud();
+            let sqe = netipc::ring::Sqe {
                 op: netipc::ring::OP_CLOSE,
-                conn_id: self.conn_id,
+                conn_id: id,
                 user_data: ud,
                 ..netipc::ring::Sqe::default()
             };
-            // Best effort — the session is torn down next regardless.
-            let _ = self.submit_and_reap(&ring, &close_sqe);
-            self.connected = false;
+            // Best effort, per id: a daemon that restarted has nothing to close.
+            let _ = ring.submit_and_reap(&sqe);
         }
-        let ud = self.next_ud();
-        let stop_sqe = netipc::ring::Sqe {
-            op: netipc::ring::OP_STOP,
-            user_data: ud,
-            ..netipc::ring::Sqe::default()
-        };
-        let _ = self.submit_and_reap(&ring, &stop_sqe);
-        self.session_open = false;
+        // A ring of our own is a daemon session of its own (design B): stop it,
+        // so the daemon unmaps the region before `RingHandle`'s drop frees it.
+        // Only if the daemon ever served it -- a never-used ring has no session
+        // to stop, and must not contact the daemon at all.
+        if matches!(&self.ring, RingRef::Own(h) if h.served) {
+            if let Ok(mut ring) = RingGuard::acquire(&mut self.ring) {
+                let ud = ring.next_ud();
+                let sqe = netipc::ring::Sqe {
+                    op: netipc::ring::OP_STOP,
+                    user_data: ud,
+                    ..netipc::ring::Sqe::default()
+                };
+                // Best effort: the region is freed either way.
+                let _ = ring.submit_and_reap(&sqe);
+            }
+            if let RingRef::Own(h) = &mut self.ring {
+                h.served = false;
+            }
+        }
     }
 }
 
 impl Drop for NetstackConn {
     fn drop(&mut self) {
-        // Tear the daemon session down if the caller didn't call close(), then
-        // always release the shared memory.
+        // Close whatever the caller did not close, and stop an own ring's
+        // session; the `RingHandle` field's own drop then frees its region.
         self.teardown();
-        shm::close(self.handle);
     }
 }
 
@@ -1405,7 +1905,7 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 /// looped-back datagram is delivered to the very socket that sent it. A received
 /// datagram whose source header reports `AF_INET6`, the local link-local address,
 /// and the sent payload proves: kernel client → `OP_UDP_SEND6` → daemon v6 TX →
-/// loopback → daemon v6 RX classify (`recv_udp_any` IPv6 arm) → `OP_UDP_RECV` with
+/// loopback → daemon v6 RX classify (`parse_udp` IPv6 arm) → `OP_UDP_RECV` with
 /// the `UDP_AF_INET6` in-band header → kernel client.
 ///
 /// The EUI-64 link-local derivation is inlined (the kernel crate cannot depend on
@@ -1712,6 +2212,373 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
     Ok(Some(()))
 }
 
+/// Boot self-test: UDP **multicast** end to end through the
+/// [`crate::net::socket`] layer the Linux `setsockopt`/`getsockopt` use, and
+/// the daemon's group membership, delivery and send options behind it.
+///
+/// Every send uses TTL / hop limit 0, so nothing leaves the machine: what
+/// comes back is the daemon's loop to its own members (`IP_MULTICAST_LOOP`,
+/// on by default), which makes the test deterministic. In order, for IPv4:
+///
+/// 1. An unbound socket reads its TTL as the default (1) without the daemon
+///    creating anything; setting it to 0 opens the daemon's socket
+///    *unbound*, and reads back 0.
+/// 2. Joining the group before `bind(2)` succeeds (as Linux allows); joining
+///    again is `EADDRINUSE`; joining on an interface address that is not the
+///    host's is `ENODEV`; a unicast "group" is `EINVAL`.
+/// 3. `bind` gives the open socket its port, keeping the membership: a send
+///    to the group comes back to it, from its own port.
+/// 4. A second socket, opened by a join, refused a `bind` to the same port
+///    (`EADDRINUSE`), still has its daemon socket -- the `udp_bind`
+///    bookkeeping must not forget it -- and closing it leaves the first
+///    socket's membership intact.
+/// 5. With the loop off, the send does not come back; after leaving the
+///    group, nor does it with the loop on, and leaving again is
+///    `EADDRNOTAVAIL`.
+///
+/// Then for IPv6: join before bind, hop limit 0 read back, bind, and the
+/// send to the group comes back as an `AF_INET6` datagram.
+///
+/// Returns `Ok(Some(()))` when every step held, `Ok(None)` with no NIC (the
+/// daemon then has no interface to be a member on), `Err` on any break.
+///
+/// # Errors
+///
+/// A step that answered wrongly is [`KernelError::InternalError`], after a
+/// serial line naming it; a control-protocol fault propagates as itself.
+pub fn self_test_udp_multicast() -> KernelResult<Option<()>> {
+    use crate::net::socket;
+    if crate::net::interface::mac().0 == [0u8; 6] {
+        return Ok(None);
+    }
+    let h = socket::create_dgram(2)?;
+    let v4 = multicast_v4_steps(h);
+    socket::close(h);
+    v4?;
+    let h6 = socket::create_dgram(10)?;
+    let v6 = multicast_v6_steps(h6);
+    socket::close(h6);
+    v6?;
+    crate::serial_println!(
+        "[netstack-client]   UDP multicast proven: options before bind, join refusals \
+         (EADDRINUSE/ENODEV/EINVAL), group send looped back on v4 and v6, loop-off and \
+         leave stop it, a refused bind keeps its open socket"
+    );
+    Ok(Some(()))
+}
+
+/// Ports and groups of [`self_test_udp_multicast`], apart from every other
+/// self-test's.
+const MCAST_PORT: u16 = 9330;
+const MCAST_PORT6: u16 = 9332;
+const MCAST_GROUP4: [u8; 4] = [239, 255, 77, 1];
+const MCAST_GROUP6: [u8; 16] = [0xFF, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x51, 0x57];
+/// The groups' Ethernet addresses: 01:00:5e and the low 23 bits, 33:33 and
+/// the low 32.
+const MCAST_GROUP4_MAC: [u8; 6] = [0x01, 0x00, 0x5E, 0x7F, 77, 1];
+const MCAST_GROUP6_MAC: [u8; 6] = [0x33, 0x33, 0, 0, 0x51, 0x57];
+const MCAST_PAYLOAD: &[u8] = b"slate-udp:multicast-loop";
+
+/// An IPv4 join (or leave) of `group` on the interface with address `iface`.
+fn mcast_group4(group: [u8; 4], iface: [u8; 4], join: bool) -> netipc::sockopt::Set {
+    let mut window = [0u8; 16];
+    window[..4].copy_from_slice(&group);
+    window[4..8].copy_from_slice(&iface);
+    netipc::sockopt::Set::Group {
+        option: if join {
+            netipc::ring::UDP_OPT_MCAST_JOIN4
+        } else {
+            netipc::ring::UDP_OPT_MCAST_LEAVE4
+        },
+        window,
+        len: netipc::ring::UDP_MREQ4_LEN,
+    }
+}
+
+/// A scalar multicast option.
+fn mcast_scalar(option: u16, value: u32) -> netipc::sockopt::Set {
+    netipc::sockopt::Set::Scalar { option, value }
+}
+
+/// Set `set` on `h` and check the daemon's answer is `want` (`Err` holding
+/// the positive errno).
+fn mcast_expect_set(
+    h: crate::net::socket::SocketHandle,
+    what: &str,
+    set: netipc::sockopt::Set,
+    want: Result<(), i32>,
+) -> KernelResult<()> {
+    match crate::net::socket::dgram_setopt(h, set) {
+        Ok(got) if got == want => Ok(()),
+        Ok(got) => {
+            crate::serial_println!(
+                "[netstack-client]   multicast: {} answered {:?}, want {:?}",
+                what,
+                got,
+                want
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            crate::serial_println!("[netstack-client]   multicast: {} failed: {:?}", what, e);
+            Err(e)
+        }
+    }
+}
+
+/// Read option `option` of `h` and check it is `want`.
+fn mcast_expect_get(
+    h: crate::net::socket::SocketHandle,
+    what: &str,
+    option: u16,
+    want: i32,
+) -> KernelResult<()> {
+    let got = crate::net::socket::dgram_getopt(h, option)?;
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} read {}, want {}",
+        what,
+        got,
+        want
+    );
+    Err(KernelError::InternalError)
+}
+
+/// Whether the datagram [`MCAST_PAYLOAD`] from port `port` of family `family`
+/// is (`true`) or is not (`false`) waiting on `h`, polling a few times: the
+/// daemon queues a looped-back datagram while it serves the send, so the
+/// first poll finds it, and the rest only guard against a slow pump.
+fn mcast_arrives(
+    h: crate::net::socket::SocketHandle,
+    family: u16,
+    port: u16,
+) -> KernelResult<bool> {
+    let mut buf = [0u8; 64];
+    for _ in 0..8u32 {
+        match crate::net::socket::dgram_recv_from(h, &mut buf, true) {
+            Ok((n, fam, _src, src_port)) => {
+                let len = usize::try_from(n).unwrap_or(0).min(buf.len());
+                if fam == family && src_port == port && buf.get(..len) == Some(MCAST_PAYLOAD) {
+                    return Ok(true);
+                }
+                crate::serial_println!(
+                    "[netstack-client]   multicast: a stray datagram ({} bytes, family {}, \
+                     port {}) -- ignored",
+                    len,
+                    fam,
+                    src_port
+                );
+            }
+            Err(KernelError::WouldBlock) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// Check the network cards' multicast filter, which the daemon sets through
+/// `SYS_NET_RAW_MCAST` (`net::mcast_filter`), is the daemon's and does
+/// (`want`) or does not pass `mac`.
+fn mcast_filter_check(what: &str, mac: [u8; 6], want: bool) -> KernelResult<()> {
+    let (owner, addrs) = crate::net::mcast_filter::current()?;
+    if owner == crate::net::mcast_filter::Owner::Raw && addrs.contains(&mac) == want {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} -- the cards' filter ({:?}, {} addresses) {} \
+         {:02x?}",
+        what,
+        owner,
+        addrs.len(),
+        if want { "lacks" } else { "still passes" },
+        mac
+    );
+    Err(KernelError::InternalError)
+}
+
+/// Fail with `what` unless `got == want`.
+fn mcast_check(what: &str, got: bool, want: bool) -> KernelResult<()> {
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} -- the datagram {} arrive",
+        what,
+        if want { "did not" } else { "did" }
+    );
+    Err(KernelError::InternalError)
+}
+
+/// The IPv4 steps of [`self_test_udp_multicast`] on the fresh socket `h`.
+fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    use netipc::ring as r;
+    let af = netipc::ring::UDP_AF_INET;
+    // 1. Options on an unbound socket.
+    mcast_expect_get(h, "default TTL", r::UDP_OPT_MCAST_TTL, 1)?;
+    mcast_expect_set(h, "TTL 0", mcast_scalar(r::UDP_OPT_MCAST_TTL, 0), Ok(()))?;
+    mcast_expect_get(h, "TTL set unbound", r::UDP_OPT_MCAST_TTL, 0)?;
+    // 2. Joins before bind, and the daemon's refusals. The daemon's filter
+    // has the base groups from the start, and the group from its join.
+    mcast_filter_check("all-hosts", crate::net::mcast_filter::ALL_HOSTS_MAC, true)?;
+    mcast_filter_check("all-nodes", crate::net::mcast_filter::ALL_NODES_MAC, true)?;
+    mcast_filter_check("the group before the join", MCAST_GROUP4_MAC, false)?;
+    let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
+    mcast_expect_set(h, "join", join, Ok(()))?;
+    mcast_filter_check("the joined group", MCAST_GROUP4_MAC, true)?;
+    mcast_expect_set(
+        h,
+        "join twice",
+        join,
+        Err(r::ERR_ADDR_IN_USE.saturating_neg()),
+    )?;
+    mcast_expect_set(
+        h,
+        "join on a foreign address",
+        mcast_group4([239, 255, 77, 2], [192, 0, 2, 1], true),
+        Err(r::ERR_NO_DEVICE.saturating_neg()),
+    )?;
+    mcast_expect_set(
+        h,
+        "join a unicast address",
+        mcast_group4([10, 0, 0, 1], [0; 4], true),
+        Err(r::ERR_INVALID.saturating_neg()),
+    )?;
+    // 3. Bind keeps the membership; the send loops back.
+    let port = socket::dgram_bind(h, MCAST_PORT)?;
+    if port != MCAST_PORT {
+        crate::serial_println!("[netstack-client]   multicast: bind gave port {}", port);
+        return Err(KernelError::InternalError);
+    }
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check("send to the group", mcast_arrives(h, af, MCAST_PORT)?, true)?;
+    // 4. A refused bind keeps its open socket.
+    let h2 = socket::create_dgram(2)?;
+    let second = multicast_refused_bind(h2);
+    socket::close(h2);
+    second?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check(
+        "send after the second socket closed",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        true,
+    )?;
+    // 5. Loop off, then leave.
+    mcast_expect_set(
+        h,
+        "loop off",
+        mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 0),
+        Ok(()),
+    )?;
+    mcast_expect_get(h, "loop read back", r::UDP_OPT_MCAST_LOOP4, 0)?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check(
+        "send with the loop off",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        false,
+    )?;
+    mcast_expect_set(
+        h,
+        "loop on",
+        mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 1),
+        Ok(()),
+    )?;
+    let leave = mcast_group4(MCAST_GROUP4, [0; 4], false);
+    mcast_expect_set(h, "leave", leave, Ok(()))?;
+    mcast_filter_check(
+        "the group after its last member left",
+        MCAST_GROUP4_MAC,
+        false,
+    )?;
+    mcast_expect_set(
+        h,
+        "leave twice",
+        leave,
+        Err(r::ERR_ADDR_NOT_AVAIL.saturating_neg()),
+    )?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check(
+        "send after leaving",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        false,
+    )
+}
+
+/// Step 4 of [`self_test_udp_multicast`]: `h2` joins the group (opening its
+/// daemon socket unbound), is refused [`MCAST_PORT`], and must still have
+/// that socket -- reading an option from it answers from the daemon.
+fn multicast_refused_bind(h2: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
+    mcast_expect_set(h2, "second socket's join", join, Ok(()))?;
+    match socket::dgram_bind(h2, MCAST_PORT) {
+        Err(KernelError::AddrInUse) => {}
+        other => {
+            crate::serial_println!(
+                "[netstack-client]   multicast: second bind to a taken port answered {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The daemon still holds the socket, membership and all: a second join
+    // is refused as a duplicate, which only a live daemon socket can say.
+    mcast_expect_set(
+        h2,
+        "second socket's join after the refused bind",
+        join,
+        Err(netipc::ring::ERR_ADDR_IN_USE.saturating_neg()),
+    )?;
+    mcast_expect_get(
+        h2,
+        "second socket's TTL",
+        netipc::ring::UDP_OPT_MCAST_TTL,
+        1,
+    )
+}
+
+/// The IPv6 steps of [`self_test_udp_multicast`] on the fresh `AF_INET6`
+/// socket `h`.
+fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    use netipc::ring as r;
+    let join = netipc::sockopt::Set::Group {
+        option: r::UDP_OPT_MCAST_JOIN6,
+        window: MCAST_GROUP6,
+        len: r::UDP_MREQ6_LEN,
+    };
+    mcast_expect_set(h, "v6 join", join, Ok(()))?;
+    mcast_filter_check("the joined v6 group", MCAST_GROUP6_MAC, true)?;
+    mcast_expect_set(
+        h,
+        "hop limit 0",
+        mcast_scalar(r::UDP_OPT_MCAST_HOPS, 0),
+        Ok(()),
+    )?;
+    mcast_expect_get(h, "hop limit read back", r::UDP_OPT_MCAST_HOPS, 0)?;
+    mcast_expect_get(h, "default v6 loop", r::UDP_OPT_MCAST_LOOP6, 1)?;
+    let port = socket::dgram_bind(h, MCAST_PORT6)?;
+    if port != MCAST_PORT6 {
+        crate::serial_println!("[netstack-client]   multicast: v6 bind gave port {}", port);
+        return Err(KernelError::InternalError);
+    }
+    socket::dgram_send_to6(h, &MCAST_GROUP6, MCAST_PORT6, MCAST_PAYLOAD)?;
+    mcast_check(
+        "v6 send to the group",
+        mcast_arrives(h, netipc::ring::UDP_AF_INET6, MCAST_PORT6)?,
+        true,
+    )?;
+    let leave = netipc::sockopt::Set::Group {
+        option: r::UDP_OPT_MCAST_LEAVE6,
+        window: MCAST_GROUP6,
+        len: r::UDP_MREQ6_LEN,
+    };
+    mcast_expect_set(h, "v6 leave", leave, Ok(()))?;
+    mcast_filter_check("the v6 group after the leave", MCAST_GROUP6_MAC, false)
+}
+
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected
 /// daemon socket returns "would block" rather than stalling for the full receive
 /// deadline — the `O_NONBLOCK` parity property (`D-NETSOCK-SYNC`).
@@ -1853,10 +2720,12 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
 /// Sequence: open a client, issue a non-blocking [`connect`](NetstackConn::connect)
 /// (which returns `0` if the handshake already completed within the daemon's single
 /// post-SYN pump, or [`netipc::ring::ERR_IN_PROGRESS`] if it is still pending), then
-/// drive [`poll_ready`](NetstackConn::poll_ready) in a bounded loop until the socket
-/// reports **writable** (the connect resolved) — checking that it never reports the
-/// error bit for a good endpoint. A writable, error-free result is the parity
-/// property: a `poll(POLLOUT)` waiter is woken exactly when the connect completes.
+/// drive [`poll_ready`](NetstackConn::poll_ready) -- [`NONBLOCK_CONNECT_BURST`]
+/// times back to back, then every 10 ms up to [`NONBLOCK_CONNECT_DEADLINE_MS`] --
+/// until the socket reports **writable** (the connect resolved), checking that it
+/// never reports the error bit for a good endpoint. A writable, error-free result
+/// is the parity property: a `poll(POLLOUT)` waiter is woken exactly when the
+/// connect completes, however often it asked before then.
 ///
 /// Returns `Ok(Some(()))` if the non-blocking-connect readiness path was exercised
 /// (connect started and the socket became writable without error), `Ok(None)` if
@@ -1889,14 +2758,30 @@ pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Optio
         );
     }
 
-    // Poll for writable (POLLOUT), exactly as a userspace non-blocking connect would.
+    // Poll for writable (POLLOUT), as a userspace non-blocking connect would:
+    // first a burst of back-to-back polls, then on a clock.
+    //
+    // The burst is the regression test for known-issues
+    // `A-NONBLOCK-CONNECT-GAVE-UP-AFTER-FIVE-POLLS`. The daemon used to resend
+    // the SYN on every poll and refuse the connect after five, so five polls
+    // inside the server's round trip refused a connect to a live server -- this
+    // test's own endpoint, which the blocking tests just before it reached. A
+    // pending connect must survive any number of polls; only time may end it.
+    let start = crate::hrtimer::now_ns();
+    let mut polls = 0u32;
     let mut writable = false;
-    for _ in 0..64u32 {
+    let mut waited_ms;
+    loop {
         let (_readable, w, error) = conn.poll_ready()?;
+        polls = polls.saturating_add(1);
+        waited_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
         if error {
             conn.close()?;
             crate::serial_println!(
-                "[netstack-client]   non-blocking connect reported POLL_ERR against a good endpoint"
+                "[netstack-client]   non-blocking connect reported POLL_ERR against a good \
+                 endpoint after {} poll(s) and {} ms",
+                polls,
+                waited_ms
             );
             return Err(KernelError::InternalError);
         }
@@ -1904,19 +2789,46 @@ pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Optio
             writable = true;
             break;
         }
+        if waited_ms >= NONBLOCK_CONNECT_DEADLINE_MS {
+            break;
+        }
+        if polls >= NONBLOCK_CONNECT_BURST {
+            crate::sched::sleep_ms(10);
+        }
     }
     conn.close()?;
 
     if writable {
         crate::serial_println!(
-            "[netstack-client]   non-blocking connect resolved to writable (POLLOUT) — connect parity ok"
+            "[netstack-client]   non-blocking connect resolved to writable (POLLOUT) after {} \
+             poll(s), the first {} back to back, in {} ms — connect parity ok",
+            polls,
+            polls.min(NONBLOCK_CONNECT_BURST),
+            waited_ms
         );
         Ok(Some(()))
     } else {
-        // Handshake never completed in-window (slirp variance); path still ran.
+        // Neither connected nor refused inside the deadline (slirp variance);
+        // the path still ran.
+        crate::serial_println!(
+            "[netstack-client]   non-blocking connect: no answer from the server in {} ms \
+             ({} polls) -- not refused, not connected",
+            waited_ms,
+            polls
+        );
         Ok(None)
     }
 }
+
+/// Back-to-back polls [`self_test_nonblock_connect`] makes before it starts
+/// pausing between them: well past the five that used to refuse a pending
+/// connect.
+const NONBLOCK_CONNECT_BURST: u32 = 16;
+
+/// How long [`self_test_nonblock_connect`] waits for the handshake, in ms: past
+/// the daemon's 12.6 s give-up (`netproto::tcp_rtx`), so a server that never
+/// answers is seen as refused rather than as a test that stopped looking.
+const NONBLOCK_CONNECT_DEADLINE_MS: u64 = 15_000;
 
 /// Boot self-test: prove the **non-blocking send** path (`send`/`write` with
 /// `O_NONBLOCK`), mirroring Linux (`D-NETSOCK-SYNC`).
@@ -1997,8 +2909,8 @@ pub fn self_test_nonblock_send(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
 /// is a real, addressable socket within the one ring session.
 ///
 /// The whole exchange happens over one [`NetstackConn`] ring: the listener id and
-/// the accepted-connection id are session-local ids distinct from the client's
-/// fixed [`CONN_ID`], all demuxed by the daemon by 4-tuple.
+/// the accepted-connection id are allocated ids distinct from the client's
+/// own ([`alloc_conn_id`]), all demuxed by the daemon by 4-tuple.
 ///
 /// Returns `Ok(Some(()))` if the listen→connect→accept→data round-trip completed,
 /// `Ok(None)` if the interface has no IPv4 address yet (no DHCP lease — loopback
@@ -2053,10 +2965,6 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         Ok(Some(readable == want_readable))
     }
 
-    /// Session-local listener id (distinct from any connection id).
-    const LISTENER_ID: u32 = 100;
-    /// Id under which the accepted server-side connection is installed.
-    const ACCEPTED_ID: u32 = 101;
     /// Loopback listen port (arbitrary, unused elsewhere).
     const PORT: u16 = 9099;
     const CLIENT_MSG: &[u8] = b"slate-listen-accept:ping";
@@ -2069,10 +2977,15 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     }
 
     let mut conn = NetstackConn::open()?;
+    // The listener's and the accepted connection's ids come from the one
+    // namespace every socket shares on the ring, like the client's own.
+    let listener_id = alloc_conn_id();
+    let accepted_id = alloc_conn_id();
+    let client_id = conn.conn_id();
 
     // 1. Register the passive listener BEFORE connecting, so the SYN routed over
     //    the loopback FIFO finds a listening port.
-    let listen_res = conn.listen(LISTENER_ID, PORT)?;
+    let listen_res = conn.listen(listener_id, PORT)?;
     if listen_res != 0 {
         conn.close()?;
         crate::serial_println!(
@@ -2089,7 +3002,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     //     "not connected", so no poll/select/epoll caller was ever woken by an
     //     incoming connection (lane F's requests/f-a-poll-never-reports-a-
     //     connection-waiting-on-a-listening-socket.md).
-    if listener_polls(&mut conn, LISTENER_ID, false, "before any connection")? != Some(true) {
+    if listener_polls(&mut conn, listener_id, false, "before any connection")? != Some(true) {
         conn.close()?;
         return Err(KernelError::InternalError);
     }
@@ -2138,7 +3051,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     //     few chances to land.
     let mut listener_readable = false;
     for _ in 0..16u32 {
-        match listener_polls(&mut conn, LISTENER_ID, true, "once a connection completed")? {
+        match listener_polls(&mut conn, listener_id, true, "once a connection completed")? {
             Some(true) => {
                 listener_readable = true;
                 break;
@@ -2164,7 +3077,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     //    the first accept must succeed. A retry would hide exactly the
     //    disagreement that shared predicate exists to prevent.
     let mut peer = [0u8; 6];
-    let ares = conn.accept(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
+    let ares = conn.accept(listener_id, accepted_id, &mut peer)?;
     if ares != 0 {
         conn.close()?;
         crate::serial_println!(
@@ -2177,7 +3090,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     // 3b. Its one connection taken, the listener is quiet again.
     if listener_polls(
         &mut conn,
-        LISTENER_ID,
+        listener_id,
         false,
         "after its connection was accepted",
     )? != Some(true)
@@ -2212,7 +3125,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         peer_port
     );
 
-    // 4. Client → server: send on CONN_ID, receive on the accepted id.
+    // 4. Client → server: send on the client's id, receive on the accepted id.
     let sent = conn.send(CLIENT_MSG, false)?;
     if sent <= 0 {
         conn.close()?;
@@ -2222,7 +3135,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         );
         return Err(KernelError::InternalError);
     }
-    if !recv_exact(&mut conn, ACCEPTED_ID, CLIENT_MSG)? {
+    if !recv_exact(&mut conn, accepted_id, CLIENT_MSG)? {
         conn.close()?;
         crate::serial_println!(
             "[netstack-client]   server did not receive the client's message intact — parity broken"
@@ -2230,8 +3143,8 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         return Err(KernelError::InternalError);
     }
 
-    // 5. Server → client: send on the accepted id, receive on CONN_ID.
-    let sent2 = conn.send_on(ACCEPTED_ID, SERVER_MSG, false)?;
+    // 5. Server → client: send on the accepted id, receive on the client's id.
+    let sent2 = conn.send_on(accepted_id, SERVER_MSG, false)?;
     if sent2 <= 0 {
         conn.close()?;
         crate::serial_println!(
@@ -2240,7 +3153,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         );
         return Err(KernelError::InternalError);
     }
-    if !recv_exact(&mut conn, CONN_ID, SERVER_MSG)? {
+    if !recv_exact(&mut conn, client_id, SERVER_MSG)? {
         conn.close()?;
         crate::serial_println!(
             "[netstack-client]   client did not receive the server's message intact — parity broken"
@@ -2248,7 +3161,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         return Err(KernelError::InternalError);
     }
 
-    // 6. shutdown(2) parity on the established client stream (CONN_ID):
+    // 6. shutdown(2) parity on the established client stream (the client's id):
     //    SHUT_WR closes the write side (a later send must fail with EPIPE), then
     //    SHUT_RD closes the read side (a later recv must report EOF = 0 bytes).
     conn.shutdown(netipc::ring::SHUT_WR)?;
@@ -2317,10 +3230,6 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
 /// Propagates control-protocol faults from the client; reports a failed
 /// connect6/accept over loopback, or a data mismatch, as an error.
 pub fn self_test_connect6() -> KernelResult<Option<()>> {
-    /// Session-local listener id.
-    const LISTENER_ID: u32 = 110;
-    /// Id under which the accepted server-side connection is installed.
-    const ACCEPTED_ID: u32 = 111;
     /// Loopback listen port (arbitrary, distinct from the v4 self-test's).
     const PORT: u16 = 9101;
     const CLIENT_MSG: &[u8] = b"slate-connect6:ping";
@@ -2354,9 +3263,14 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
     ];
 
     let mut conn = NetstackConn::open()?;
+    // The listener's and the accepted connection's ids come from the one
+    // namespace every socket shares on the ring, like the client's own.
+    let listener_id = alloc_conn_id();
+    let accepted_id = alloc_conn_id();
+    let client_id = conn.conn_id();
 
     // 1. Register the passive listener BEFORE connecting (family-agnostic port).
-    let listen_res = conn.listen(LISTENER_ID, PORT)?;
+    let listen_res = conn.listen(listener_id, PORT)?;
     if listen_res != 0 {
         conn.close()?;
         crate::serial_println!(
@@ -2407,7 +3321,7 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
     let mut peer = [0u8; 18];
     let mut accepted = false;
     for _ in 0..16u32 {
-        let ares = conn.accept6(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
+        let ares = conn.accept6(listener_id, accepted_id, &mut peer)?;
         if ares == 0 {
             accepted = true;
             break;
@@ -2458,7 +3372,7 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
         );
         return Err(KernelError::InternalError);
     }
-    if !recv_exact(&mut conn, ACCEPTED_ID, CLIENT_MSG)? {
+    if !recv_exact(&mut conn, accepted_id, CLIENT_MSG)? {
         conn.close()?;
         crate::serial_println!(
             "[netstack-client]   v6 server did not receive the client's message intact — IPv6 parity broken"
@@ -2467,7 +3381,7 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
     }
 
     // 5. Server → client.
-    let sent2 = conn.send_on(ACCEPTED_ID, SERVER_MSG, false)?;
+    let sent2 = conn.send_on(accepted_id, SERVER_MSG, false)?;
     if sent2 <= 0 {
         conn.close()?;
         crate::serial_println!(
@@ -2476,7 +3390,7 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
         );
         return Err(KernelError::InternalError);
     }
-    if !recv_exact(&mut conn, CONN_ID, SERVER_MSG)? {
+    if !recv_exact(&mut conn, client_id, SERVER_MSG)? {
         conn.close()?;
         crate::serial_println!(
             "[netstack-client]   v6 client did not receive the server's message intact — IPv6 parity broken"

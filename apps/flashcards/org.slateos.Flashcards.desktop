@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Flashcards
+Comment=Learn with spaced-repetition flashcards
+Icon=applications-science
+Exec=flashcards
+Categories=Education;
+Keywords=study;learn;cards;memory;

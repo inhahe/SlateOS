@@ -28,6 +28,15 @@ name = "aes"
 version = "0.1.0"
 
 [[package]]
+name = "aes"
+version = "0.9.3"
+dependencies = [
+ "cipher",
+ "cpubits",
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -43,6 +52,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
  "tzrules",
 ]
 
@@ -83,6 +93,7 @@ dependencies = [
  "quoting",
  "sevenz",
  "tararchive",
+ "themeicons",
  "xz",
  "ziparchive",
 ]
@@ -93,7 +104,7 @@ version = "0.6.0"
 dependencies = [
  "base64ct",
  "blake2 0.11.0",
- "cpufeatures",
+ "cpufeatures 0.3.1",
  "password-hash",
 ]
 
@@ -191,6 +202,7 @@ dependencies = [
 name = "autoopts"
 version = "0.1.0"
 dependencies = [
+ "cstrtol",
  "errmsg",
  "localtime",
  "quoting",
@@ -467,7 +479,7 @@ version = "0.10.2"
 dependencies = [
  "cfg-if 1.0.5",
  "cipher",
- "cpufeatures",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -549,14 +561,20 @@ dependencies = [
 name = "chpasswd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]
 name = "cipher"
 version = "0.5.2"
 dependencies = [
+ "blobby",
  "block-buffer",
  "crypto-common",
  "inout",
@@ -593,6 +611,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -628,6 +647,7 @@ dependencies = [
  "inputsettings",
  "keylayout",
  "osfont",
+ "randrange",
  "settingsfile",
  "videocodec",
  "vp9",
@@ -652,6 +672,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -674,13 +695,18 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstrtol",
  "embed-manifest",
  "ere",
  "errmsg",
  "fnmatch",
  "getoptlong",
  "gnubase64",
+ "journalfwd",
+ "journalio",
+ "journalrec",
  "libcall",
+ "libcsyslog",
  "localtime",
  "md5",
  "modechange",
@@ -696,7 +722,11 @@ dependencies = [
  "sm3",
  "stdfdguard",
  "sysroot-dep",
+ "terminfo",
+ "ulclosestream",
+ "ulcolors",
  "ulstrutils",
+ "ultimeutils",
  "userspec",
  "utmpfile",
 ]
@@ -715,6 +745,14 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "cpubits"
+version = "0.1.1"
+
+[[package]]
+name = "cpufeatures"
+version = "0.2.17"
 
 [[package]]
 name = "cpufeatures"
@@ -764,16 +802,25 @@ name = "credmanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "credvault",
  "guitk",
  "oswindow",
  "pathtext",
+ "scratchdir",
+ "sha2",
+ "textfmt",
+ "textline",
+]
+
+[[package]]
+name = "credvault"
+version = "0.1.0"
+dependencies = [
  "safeio",
  "scratchdir",
  "seal",
  "settingsfile",
- "sha2",
  "textfmt",
- "textline",
 ]
 
 [[package]]
@@ -818,6 +865,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cstrtol"
+version = "0.1.0"
+
+[[package]]
 name = "ctags"
 version = "0.1.0"
 dependencies = [
@@ -836,6 +887,27 @@ name = "curl"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+dependencies = [
+ "cfg-if 1.0.5",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -925,6 +997,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktopentries"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+]
+
+[[package]]
 name = "desktopentry"
 version = "0.1.0"
 dependencies = [
@@ -978,6 +1057,9 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "settingsfile",
+ "textline",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1013,6 +1095,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -1125,6 +1208,7 @@ dependencies = [
  "oswindow",
  "pathcodec",
  "pathtext",
+ "recordfile",
  "safeio",
  "scratchdir",
  "settingsfile",
@@ -1144,6 +1228,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
  "unsaved",
 ]
 
@@ -1168,6 +1253,7 @@ name = "email"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathcodec",
@@ -1231,10 +1317,12 @@ dependencies = [
  "programs",
  "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "tararchive",
  "textfind",
  "textline",
+ "themeicons",
  "thumbs",
  "yamldoc",
  "ziparchive",
@@ -1243,6 +1331,13 @@ dependencies = [
 [[package]]
 name = "fdisk"
 version = "0.1.0"
+
+[[package]]
+name = "fieldmenu"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
 
 [[package]]
 name = "file"
@@ -1320,11 +1415,13 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
  "textline",
  "tzrules",
+ "unsaved",
 ]
 
 [[package]]
@@ -1384,10 +1481,12 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textline",
  "tzrules",
+ "unsaved",
 ]
 
 [[package]]
@@ -1422,7 +1521,12 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "osfont",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -1647,13 +1751,6 @@ name = "hex-literal"
 version = "1.1.0"
 
 [[package]]
-name = "hexdump"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "hexeditor"
 version = "0.1.0"
 dependencies = [
@@ -1732,6 +1829,9 @@ dependencies = [
 name = "iconv"
 version = "0.1.0"
 dependencies = [
+ "coreutils",
+ "errmsg",
+ "getoptlong",
  "quoting",
 ]
 
@@ -1867,9 +1967,20 @@ version = "0.1.0"
 name = "journalctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "journalio",
+ "journalrec",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "journalfwd"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "localtime",
+ "utmpfile",
 ]
 
 [[package]]
@@ -1889,6 +2000,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "jsonvalue"
+version = "0.1.0"
 
 [[package]]
 name = "jsonviewer"
@@ -1912,6 +2027,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -1923,8 +2039,9 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "bitflags",
+ "bzip2",
  "crc32",
  "deflate",
  "ere",
@@ -1933,9 +2050,13 @@ dependencies = [
  "netipc",
  "netproto",
  "netring",
+ "planecompose",
+ "seal",
+ "sevenz",
  "sha2",
  "spin",
  "tzrules",
+ "xz",
  "ziparchive",
 ]
 
@@ -1969,13 +2090,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "last"
-version = "0.1.0"
-dependencies = [
- "utmpfile",
 ]
 
 [[package]]
@@ -2041,14 +2155,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "libmagic"
 version = "0.1.0"
 dependencies = [
- "charwidth",
  "cprintf",
+ "cstrtol",
  "ere",
  "errmsg",
  "localtime",
+ "quoting",
 ]
 
 [[package]]
@@ -2192,6 +2313,7 @@ dependencies = [
  "authlib",
  "guitk",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -2222,17 +2344,11 @@ dependencies = [
  "ere",
  "guitk",
  "journalrec",
+ "jsonvalue",
  "oswindow",
  "pathtext",
  "safeio",
  "textline",
-]
-
-[[package]]
-name = "look"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2467,6 +2583,7 @@ dependencies = [
 name = "mediaprobe"
 version = "0.1.0"
 dependencies = [
+ "matroska",
  "md5",
  "vp9",
 ]
@@ -2616,7 +2733,7 @@ dependencies = [
 name = "net80211"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "crc32",
  "hmac",
 ]
@@ -2738,6 +2855,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -3064,6 +3182,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "planecompose"
+version = "0.1.0"
+
+[[package]]
 name = "pngwrite"
 version = "0.1.0"
 dependencies = [
@@ -3098,7 +3220,7 @@ dependencies = [
 name = "poly1305"
 version = "0.9.1"
 dependencies = [
- "cpufeatures",
+ "cpufeatures 0.3.1",
  "universal-hash",
 ]
 
@@ -3128,7 +3250,7 @@ version = "0.1.0"
 dependencies = [
  "charwidth",
  "journalrec",
- "libm",
+ "libm 0.2.16",
  "pwhash",
  "tzrules",
 ]
@@ -3175,6 +3297,7 @@ name = "procexplorer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "libcall",
  "oswindow",
@@ -3195,14 +3318,6 @@ dependencies = [
  "desktopentry",
  "guitk",
  "scratchdir",
-]
-
-[[package]]
-name = "pstree"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -3233,6 +3348,7 @@ name = "qrcode"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -3262,6 +3378,10 @@ dependencies = [
  "oswindow",
  "textline",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
 
 [[package]]
 name = "randdist"
@@ -3312,12 +3432,23 @@ name = "readpass"
 version = "0.1.0"
 
 [[package]]
+name = "recordfile"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "scratchdir",
+]
+
+[[package]]
 name = "recyclebin"
 version = "0.1.0"
 dependencies = [
  "pathcodec",
  "pathtext",
+ "safeio",
  "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3379,6 +3510,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -3405,6 +3537,7 @@ dependencies = [
  "appearance",
  "coreutils",
  "ere",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -3468,6 +3601,15 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
 ]
 
 [[package]]
@@ -3557,17 +3699,27 @@ name = "seal"
 version = "0.1.0"
 dependencies = [
  "aead",
+ "aes 0.9.3",
  "argon2",
  "blake2 0.11.0",
  "chacha20",
  "chacha20poly1305",
+ "cipher",
  "hex-literal",
  "poly1305",
+ "x25519-dalek",
+ "xts-mode",
 ]
 
 [[package]]
 name = "secret"
 version = "0.1.0"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde_core"
@@ -3625,7 +3777,10 @@ dependencies = [
  "compositor",
  "datetimesettings",
  "desktopentry",
+ "fieldmenu",
  "guitk",
+ "hwquery",
+ "imagecodec",
  "inputsettings",
  "loginusers",
  "notices",
@@ -3634,9 +3789,14 @@ dependencies = [
  "pathtext",
  "programs",
  "quoting",
+ "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
+ "sound",
  "textline",
+ "themeicons",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -3666,7 +3826,7 @@ dependencies = [
 name = "sevenz"
 version = "0.1.0"
 dependencies = [
- "aes",
+ "aes 0.1.0",
  "bzip2",
  "crc32",
  "deflate",
@@ -3785,6 +3945,7 @@ dependencies = [
 name = "snapstore"
 version = "0.1.0"
 dependencies = [
+ "jsonvalue",
  "pathcodec",
  "pathtext",
  "safeio",
@@ -3801,6 +3962,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textarea",
@@ -3846,6 +4008,7 @@ name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -4047,6 +4210,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+
+[[package]]
 name = "sudo"
 version = "0.1.0"
 dependencies = [
@@ -4142,13 +4309,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysctl"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "sysinfo"
 version = "0.1.0"
 dependencies = [
@@ -4174,6 +4334,8 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "journalfwd",
  "journalio",
  "journalrec",
  "quoting",
@@ -4211,8 +4373,6 @@ dependencies = [
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
- "journalio",
- "journalrec",
  "procinfo",
  "quoting",
  "scratchdir",
@@ -4276,8 +4436,17 @@ dependencies = [
  "guitk",
  "libcall",
  "oswindow",
+ "pathtext",
  "termchild",
  "textline",
+]
+
+[[package]]
+name = "terminfo"
+version = "0.1.0"
+dependencies = [
+ "cstrtol",
+ "libcall",
 ]
 
 [[package]]
@@ -4311,6 +4480,15 @@ name = "textline"
 version = "0.1.0"
 dependencies = [
  "guitk",
+]
+
+[[package]]
+name = "themeicons"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -4381,6 +4559,7 @@ name = "torrent"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",
@@ -4398,14 +4577,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "tput"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
 ]
 
 [[package]]
@@ -4495,6 +4666,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulcolors"
+version = "0.1.0"
+dependencies = [
+ "terminfo",
+]
+
+[[package]]
 name = "ulmount"
 version = "0.1.0"
 dependencies = [
@@ -4509,6 +4687,7 @@ dependencies = [
 name = "ulstrutils"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
  "quoting",
 ]
 
@@ -4518,6 +4697,14 @@ version = "0.1.0"
 dependencies = [
  "quoting",
  "scratchdir",
+ "ulstrutils",
+]
+
+[[package]]
+name = "ultimeutils"
+version = "0.1.0"
+dependencies = [
+ "localtime",
  "ulstrutils",
 ]
 
@@ -4662,6 +4849,8 @@ name = "videocodec"
 version = "0.1.0"
 dependencies = [
  "flac",
+ "imagecodec",
+ "libc",
  "matroska",
  "md5",
  "mp3",
@@ -4686,20 +4875,13 @@ dependencies = [
  "pathtext",
  "settingsfile",
  "textline",
+ "videocodec",
  "yamldoc",
 ]
 
 [[package]]
 name = "vkloader"
 version = "0.1.0"
-
-[[package]]
-name = "vmstat"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
 
 [[package]]
 name = "vorbis"
@@ -4734,15 +4916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wall"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "quoting",
- "userdb",
-]
-
-[[package]]
 name = "wallvideo"
 version = "0.1.0"
 dependencies = [
@@ -4768,6 +4941,8 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "httpclient",
+ "jsonvalue",
  "oswindow",
  "settingsfile",
  "textline",
@@ -4873,12 +5048,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "zeroize",
+]
+
+[[package]]
 name = "xdg"
 version = "0.1.0"
 dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "xts-mode"
+version = "0.6.0"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -4919,6 +5110,9 @@ version = "0.1.0"
 [[package]]
 name = "yuv"
 version = "0.1.0"
+dependencies = [
+ "libm 0.2.16 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "zerocopy"
@@ -4935,6 +5129,22 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -28,7 +28,9 @@ use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::TextCursor;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -60,6 +62,14 @@ const NICK_LIST_HEADER_HEIGHT: f32 = 24.0;
 const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
 /// How many lines Page Up and Page Down move it.
 const PAGE_SCROLL_LINES: isize = 10;
+/// The most the message line holds, in characters: a guard against a paste
+/// of a page, far past any line a server takes.
+const INPUT_CAPACITY: usize = 2048;
+/// The size the message line's text is drawn at, which the caret keys and a
+/// press measure against as well.
+const INPUT_TEXT_SIZE: f32 = 12.0;
+/// How far the message line's text sits inside each side of its box.
+const INPUT_TEXT_INSET: f32 = 8.0;
 /// A window smaller than this has no chat column left between the panels.
 const MIN_WINDOW_WIDTH: f32 = 560.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
@@ -989,6 +999,12 @@ pub struct IrcClientApp {
     /// the latest message", which is where every conversation opens.
     pub chat_scroll: usize,
     pub input_text: String,
+    /// The message line's editor -- its caret and selection over
+    /// `input_text` -- reloaded when the line changed under it: a line
+    /// recalled from history, or sent.
+    input_editor: TextInput,
+    /// What the message line's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    input_clipboard: String,
     pub input_history: Vec<String>,
     pub input_history_idx: Option<usize>,
     pub nick_list_visible: bool,
@@ -1065,6 +1081,8 @@ impl IrcClientApp {
             channel_list_filter: String::new(),
             chat_scroll: 0,
             input_text: String::new(),
+            input_editor: TextInput::new(),
+            input_clipboard: String::new(),
             input_history: Vec::new(),
             input_history_idx: None,
             nick_list_visible: true,
@@ -1942,6 +1960,11 @@ impl IrcClientApp {
         }
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
+                let band = self.input_band();
+                if Self::input_field_rect(band.x, band.y, band.w, band.h).contains(x, y) {
+                    self.press_input(x);
+                    return true;
+                }
                 if let Some(panel) = self.sidebar_panel_at(x, y) {
                     self.switch_panel(panel);
                     return true;
@@ -2007,27 +2030,14 @@ impl IrcClientApp {
             }
             return closes;
         }
-        // What a key typed goes into the message line -- AltGr's among it,
-        // and not a command's letter. The compositor hands a chord its letter
-        // as text (Ctrl+K arrives carrying `k`, Alt+X carrying `x`), and with
-        // no check here every chord typed its letter into the line, ready to
-        // be sent to the channel by the next Enter.
-        if textline::types_into_field(event) {
-            self.input_text.extend(event.typed());
-            // Typing leaves the history: the line being edited is the user's
-            // own, not the recalled one it started from.
-            self.input_history_idx = None;
-            return true;
-        }
-        // The line's own keys are plain. A chord with Alt or the Windows key
-        // is the window's or the desktop's, and arrives carrying its key:
+        // The window's own keys are plain. A chord with Alt or the Windows
+        // key is the window's or the desktop's, and arrives carrying its key:
         // Alt+Enter sent the line.
         if !textline::is_plain(event.modifiers) {
-            return false;
+            return self.input_key(event);
         }
         match event.key {
             Key::Enter => self.submit_input(),
-            Key::Backspace => self.input_text.pop().is_some(),
             Key::Up => self.recall_history(1),
             Key::Down => self.recall_history(-1),
             Key::PageUp => {
@@ -2057,8 +2067,83 @@ impl IrcClientApp {
                 self.show_help = !self.show_help;
                 true
             }
-            _ => false,
+            _ => self.input_key(event),
         }
+    }
+
+    /// A key for the message line, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// what `AltGr` types among it, and no command's letter (the compositor
+    /// hands a chord its letter as text, so Ctrl+K arrived carrying `k`, and
+    /// every chord typed its letter into the line, ready to be sent by the
+    /// next Enter). Whether the line changed, or its caret or selection
+    /// moved: Backspace in an empty line is not a redraw.
+    ///
+    /// The line took typing at its end and Backspace from it, and nothing
+    /// else.
+    fn input_key(&mut self, event: &KeyEvent) -> bool {
+        if self.input_editor.text() != self.input_text {
+            self.input_editor.set_text(&self.input_text);
+        }
+        let before = (
+            self.input_editor.cursor(),
+            self.input_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.input_editor,
+            event,
+            INPUT_CAPACITY,
+            &self.input_clipboard,
+            INPUT_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.input_clipboard = copied;
+        }
+        if self.input_editor.text() != self.input_text {
+            self.input_text = self.input_editor.text().to_owned();
+            // Editing leaves the history: the line being edited is the
+            // user's own, not the recalled one it started from.
+            self.input_history_idx = None;
+            return true;
+        }
+        before
+            != (
+                self.input_editor.cursor(),
+                self.input_editor.selection_anchor(),
+            )
+    }
+
+    /// Where the message line's caret is: the editor's, or the end of the
+    /// line where the line changed under the editor -- a line recalled from
+    /// history is edited from its end. One answer for the drawing and for a
+    /// press.
+    fn input_cursor(&self) -> TextCursor {
+        if self.input_editor.text() == self.input_text {
+            self.input_editor.cursor()
+        } else {
+            TextCursor::from(self.input_text.len())
+        }
+    }
+
+    /// A press in the message line at `x`: the caret under the pointer,
+    /// measured against the line as it was drawn.
+    fn press_input(&mut self, x: f32) {
+        let band = self.input_band();
+        let rect = Self::input_field_rect(band.x, band.y, band.w, band.h);
+        let drawn = self.input_cursor();
+        if self.input_editor.text() != self.input_text {
+            self.input_editor.set_text(&self.input_text);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.input_text,
+            drawn,
+            (rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
+            INPUT_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - INPUT_TEXT_INSET,
+        );
+        self.input_editor.set_selection_anchor(None);
+        self.input_editor.set_cursor(cursor);
     }
 
     /// Step back (`1`) or forward (`-1`) through what has been typed before.
@@ -2958,7 +3043,7 @@ impl IrcClientApp {
 
         // The message line: the toolkit's field. It has the keyboard whenever
         // the key list is not over it -- every key that types goes into it --
-        // and is never lit under the pointer, having no press of its own.
+        // and is never lit under the pointer: this window does not follow it.
         let field_rect = Self::input_field_rect(x, y, w, h);
         let state = self.input_field_state();
         field::draw(
@@ -2969,21 +3054,22 @@ impl IrcClientApp {
             self.focus_ring_width,
         );
 
-        // The line, with the caret after it -- scrolled so the end being
-        // typed stays in view rather than cut off with an ellipsis -- or,
-        // empty, what it is for.
-        let line = guitk::text::line_height(12.0, FontWeightHint::Regular);
+        // The line, with its caret and selection where they are -- scrolled
+        // so the caret stays in view rather than cut off with an ellipsis --
+        // or, empty, what it is for. The caret was fixed at the end, the only
+        // place the keys could type.
+        let line = guitk::text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
         let (tx, ty, tw) = (
-            field_rect.x + 8.0,
+            field_rect.x + INPUT_TEXT_INSET,
             field_rect.y + (field_rect.h - line) / 2.0,
-            (field_rect.w - 16.0).max(0.0),
+            (field_rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
         );
         if self.input_text.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: tx,
                 y: ty,
                 text: "Type a message... (/help for commands)".to_string(),
-                font_size: 12.0,
+                font_size: INPUT_TEXT_SIZE,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw),
@@ -2995,16 +3081,20 @@ impl IrcClientApp {
             &mut tree,
             &textedit::SingleLine {
                 text: &self.input_text,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: guitk::text::TextCursor::from(self.input_text.len()),
-                selection_anchor: None,
+                cursor: self.input_cursor(),
+                // The editor's selection only while it is the line's: a line
+                // changed under it has not been reloaded into it yet.
+                selection_anchor: if self.input_editor.text() == self.input_text {
+                    self.input_editor.selection_anchor()
+                } else {
+                    None
+                },
                 focused: state.focused,
                 x: tx,
                 y: ty,
                 width: tw,
                 line_height: line,
-                font_size: 12.0,
+                font_size: INPUT_TEXT_SIZE,
                 weight: FontWeightHint::Regular,
                 color: self.palette.text,
                 selection_bg: self.palette.accent,
@@ -5389,5 +5479,159 @@ mod tests {
             caret > rect.x && caret < rect.right(),
             "the caret of a long line is at {caret}, outside the box {rect:?}"
         );
+    }
+
+    // -- The message line edits at a caret --------------------------------------
+
+    fn input_rect(app: &IrcClientApp) -> Rect {
+        let band = app.input_band();
+        IrcClientApp::input_field_rect(band.x, band.y, band.w, band.h)
+    }
+
+    /// The x of every caret drawn in the message line.
+    fn input_carets(app: &IrcClientApp) -> Vec<f32> {
+        let rect = input_rect(app);
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The message line edits at a caret**: the arrows, Home and End move
+    /// it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are. The line took typing at
+    /// its end and Backspace from it, and nothing else: a typo at the start
+    /// of a message was fixed by deleting the whole message.
+    #[test]
+    fn the_message_line_edits_at_a_caret() {
+        let mut app = joined();
+        type_line(&mut app, "helo");
+        app.handle_event(&key(Key::Left));
+        type_line(&mut app, "l");
+        assert_eq!(app.input_text, "hello", "the caret did not move");
+        let rect = input_rect(&app);
+        let at = rect.x
+            + INPUT_TEXT_INSET
+            + guitk::text::measure("hell", INPUT_TEXT_SIZE, FontWeightHint::Regular);
+        let carets = input_carets(&app);
+        assert_eq!(carets.len(), 1, "one caret in the line");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `hell` it follows at {at}"
+        );
+
+        app.handle_event(&key(Key::Home));
+        app.handle_event(&key(Key::Delete));
+        assert_eq!(app.input_text, "ello", "Delete at the caret");
+        app.handle_event(&key(Key::End));
+        app.handle_event(&chord(Key::Home, "", Modifiers::shift()));
+        let line = guitk::text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + INPUT_TEXT_INSET,
+            guitk::text::measure("ello", INPUT_TEXT_SIZE, FontWeightHint::Regular),
+        );
+        assert!(
+            app.render_commands().iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        app.handle_event(&chord(Key::C, "", Modifiers::ctrl()));
+        type_line(&mut app, "h");
+        assert_eq!(app.input_text, "h", "Shift+Home did not select");
+        app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(app.input_text, "hello", "Ctrl+C or Ctrl+V");
+        app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
+        app.handle_event(&chord(Key::X, "", Modifiers::ctrl()));
+        assert_eq!(app.input_text, "", "Ctrl+A and Ctrl+X");
+        app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(app.input_text, "hello", "Ctrl+X took nothing");
+
+        // A press at the start of the line puts the caret there, and one
+        // past its end at its end.
+        let mid = rect.y + rect.h / 2.0;
+        assert!(app.handle_event(&click(rect.x + INPUT_TEXT_INSET + 0.5, mid)));
+        type_line(&mut app, "<");
+        assert_eq!(
+            app.input_text, "<hello",
+            "the press did not put the caret there"
+        );
+        app.handle_event(&click(rect.right() - 2.0, mid));
+        type_line(&mut app, ">");
+        assert_eq!(app.input_text, "<hello>");
+    }
+
+    /// **A line recalled from history is edited from its end, and editing it
+    /// leaves the history**: Up brings back what was said, the caret after
+    /// it, wherever the caret stood in the line before -- and a key that
+    /// changes the line makes it the user's own, so Down does not throw the
+    /// edit away for a newer line.
+    #[test]
+    fn a_recalled_line_is_edited_from_its_end() {
+        let mut app = joined();
+        type_line(&mut app, "first");
+        app.handle_event(&key(Key::Enter));
+        type_line(&mut app, "draft");
+        app.handle_event(&key(Key::Home));
+        app.handle_event(&key(Key::Up));
+        assert_eq!(app.input_text, "first");
+        type_line(&mut app, "!");
+        assert_eq!(
+            app.input_text, "first!",
+            "the recalled line was not edited at its end"
+        );
+        assert_eq!(
+            app.input_history_idx, None,
+            "an edit kept the line in the history"
+        );
+        assert!(
+            !app.handle_event(&key(Key::Down)),
+            "Down went on through the history from an edited line"
+        );
+        assert_eq!(app.input_text, "first!");
+    }
+
+    /// **A key that changes nothing in the line is not a redraw**, while one
+    /// that moves only the caret is: Backspace in an empty line, Right at the
+    /// end -- and Left.
+    #[test]
+    fn a_key_that_changes_nothing_in_the_line_is_not_a_redraw() {
+        let mut app = joined();
+        assert!(!app.handle_event(&key(Key::Backspace)));
+        type_line(&mut app, "hi");
+        assert!(!app.handle_event(&key(Key::Right)));
+        assert!(
+            app.handle_event(&key(Key::Left)),
+            "a caret moved is not drawn"
+        );
+    }
+
+    /// **The line edits the text it shows**, however that text came to be in
+    /// it: its editor is loaded from the line whenever a press or a key finds
+    /// the two apart.
+    #[test]
+    fn the_message_line_edits_the_text_it_shows() {
+        let mut app = joined();
+        app.input_text = String::from("hello");
+        let rect = input_rect(&app);
+        app.handle_event(&click(
+            rect.x + INPUT_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+        ));
+        type_line(&mut app, "<");
+        assert_eq!(app.input_text, "<hello", "the press missed the shown text");
+        app.input_text = String::from("bye");
+        type_line(&mut app, "?");
+        assert_eq!(app.input_text, "bye?", "the key edited another line");
     }
 }

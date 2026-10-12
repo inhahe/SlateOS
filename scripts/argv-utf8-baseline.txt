@@ -50,12 +50,10 @@ userspace/fw/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
-userspace/hexdump/src/main.rs:argv-as-string
 userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string
 userspace/hwinfo/src/main.rs:argv-as-string
-userspace/iconv/src/main.rs:argv-as-string
 userspace/ifconfig/src/main.rs:argv-as-string
 userspace/indexer/src/main.rs:argv-as-string
 userspace/inetd/src/main.rs:argv-as-string
@@ -65,9 +63,7 @@ userspace/ip/src/main.rs:argv-as-string
 userspace/ipcalc/src/main.rs:argv-as-string
 userspace/iptables/src/main.rs:argv-as-string
 userspace/irqbalance/src/main.rs:argv-as-string
-userspace/journalctl/src/main.rs:argv-as-string
 userspace/jq/src/main.rs:argv-as-string
-userspace/last/src/main.rs:argv-as-string
 userspace/ldd/src/main.rs:argv-as-string
 userspace/less/src/main.rs:argv-as-string
 userspace/lex/src/main.rs:argv-as-string
@@ -99,7 +95,6 @@ userspace/objdump/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
 userspace/pkg/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
-userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
 userspace/rfkill/src/main.rs:argv-as-string
@@ -114,15 +109,12 @@ userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
-userspace/sysctl/src/main.rs:argv-as-string
 userspace/sysinfo/src/main.rs:argv-as-string
-userspace/syslogd/src/main.rs:argv-as-string
 userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
-userspace/tput/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/unshare/src/main.rs:argv-as-string
@@ -130,8 +122,6 @@ userspace/update-alternatives/src/main.rs:argv-as-string
 userspace/updatedb/src/main.rs:argv-as-string
 userspace/useradm/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:argv-as-string
-userspace/vmstat/src/main.rs:argv-as-string
-userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string

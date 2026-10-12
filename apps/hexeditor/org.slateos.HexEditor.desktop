@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hex Editor
+Comment=See and edit a file's bytes
+Icon=accessories-text-editor
+Exec=hexeditor %F
+Categories=Development;
+Keywords=hex;binary;bytes;
+MimeType=application/octet-stream;

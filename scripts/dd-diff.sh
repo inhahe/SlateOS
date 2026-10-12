@@ -246,8 +246,9 @@ scrub_progress() {
 #
 # stdin is one of `-` (nothing, from `/dev/null`), `f:NAME` (the fixture as a
 # regular, seekable file), `p:SPEC` (a `printf '%b'` payload through a pipe),
-# or `s:SPEC1|SPEC2` (the same in two halves with a pause between, so that the
-# first read is guaranteed short).
+# `s:SPEC1|SPEC2` (the same in two halves with a pause between, so that the
+# first read is guaranteed short), or `c:CLOSING` (`/dev/null`, then standard
+# input or output closed by CLOSING).
 compare() {
   local stdin=$1 scrubber=$2; shift 2
   local o_err g_err o_rc g_rc o_out g_out o_msg g_msg o_man g_man
@@ -286,6 +287,14 @@ compare() {
         | run_side ours o "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
       { printf '%b' "$head"; sleep 0.4; printf '%b' "$tail"; } \
         | run_side gnu  g "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+      ;;
+    c:*)
+      # Standard descriptors closed for `dd` alone -- `<&-`, `>&-` or both --
+      # after the captures, so that the closing wins. Not `2>&-`: `diff_run`
+      # duplicates the caller's standard error, which that would take away.
+      local closing=${stdin#c:}
+      eval "run_side ours o \"\$@\" >\"\$o_bin\" 2>\"\$o_err\" </dev/null $closing"; o_rc=$?
+      eval "run_side gnu  g \"\$@\" >\"\$g_bin\" 2>\"\$g_err\" </dev/null $closing"; g_rc=$?
       ;;
     *) echo "dd-diff: bad stdin spec '$stdin'" >&2; exit 1 ;;
   esac
@@ -328,6 +337,9 @@ stdin_case() { local f=$1; shift; compare "f:$f" scrub "$@"; report "dd $* < $f"
 
 # A `printf '%b'` payload on standard input, through a pipe.
 pipe_case()  { local d=$1; shift; compare "p:$d" scrub "$@"; report "printf '$d' | dd $*"; }
+
+# Standard input or output closed (`$1`, e.g. `<&-`) for `dd` alone.
+closed_case() { local c=$1; shift; compare "c:$c" scrub "$@"; report "dd $*  [$c]"; }
 
 # The same in two halves, with a pause between, so the first read is short.
 slowpipe_case() {
@@ -725,6 +737,32 @@ run_case -x if=alpha
 run_case --bogus if=alpha
 run_case --help=x
 run_case --version=x
+
+# --- standard descriptors closed ------------------------------------------------
+
+# Upstream puts `if=` on descriptor 0 and `of=` on descriptor 1 (`fd_reopen`),
+# and reads and writes only those two. Ours left each file wherever its open
+# landed, so with standard input closed `of=` became descriptor 0 -- and `dd`
+# read "standard input" out of its own output file: the first case below turned
+# `alpha` into `abcdefghefgh`, where GNU's leaves it alone and reports `error
+# reading 'standard input': Bad file descriptor`. Its cleanup then closed the
+# wrong file under the wrong name: `closing output file 'out'` where GNU says
+# `closing input file 'standard input'`.
+closed_case '<&-' of=alpha seek=1 bs=4 conv=notrunc
+closed_case '<&-' of=alpha seek=1 bs=4
+closed_case '<&-' of=alpha conv=notrunc
+closed_case '<&-' of=out
+closed_case '<&- >&-' of=out
+closed_case '<&- >&-' of=alpha seek=1 bs=4 conv=notrunc
+closed_case '>&-' of=out
+closed_case '<&-' if=alpha of=out
+closed_case '>&-' if=alpha of=out
+closed_case '<&- >&-' if=alpha of=out
+closed_case '<&- >&-' if=k10 of=out bs=100 seek=3
+closed_case '<&-' if=alpha
+closed_case '>&-' if=alpha
+closed_case '<&-' if=nosuch of=out
+closed_case '>&-' if=alpha of=nosuchdir/x
 
 # --- differ on purpose --------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block, the SIGUSR1 paragraph and the flags we cannot honour' --help

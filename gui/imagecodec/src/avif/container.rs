@@ -232,8 +232,10 @@ pub(super) enum Property<'a> {
     Lsel(u16),
     /// `a1lx`: the sizes of an AV1 image's first three layers.
     A1lx([u32; 3]),
-    /// `clli`: content light level, reported and not applied.
-    Clli,
+    /// `clli`: the content light level (CTA-861.3), MaxCLL and MaxPALL in
+    /// cd/m2 -- by which an HDR picture is tone mapped
+    /// (`gui/video/yuv`'s `hdr`).
+    Clli { max_cll: u16, max_pall: u16 },
     /// Anything else, kept by type: an item's unknown *essential* property
     /// makes it unusable, and its type still answers `avifPropertyArrayFind`.
     Opaque(FourCc),
@@ -255,7 +257,7 @@ impl Property<'_> {
             Self::A1op(_) => *b"a1op",
             Self::Lsel(_) => *b"lsel",
             Self::A1lx(_) => *b"a1lx",
-            Self::Clli => *b"clli",
+            Self::Clli { .. } => *b"clli",
         }
     }
 }
@@ -833,9 +835,9 @@ fn parse_property(kind: FourCc, body: &[u8], is_track: bool) -> Result<Property<
         b"clli" => {
             // `avifParseContentLightLevelInformationBox`: two numbers.
             let bad = bad("AVIF clli box");
-            s.bits(16).map_err(bad)?;
-            s.bits(16).map_err(bad)?;
-            Property::Clli
+            let max_cll = u16::try_from(s.bits(16).map_err(bad)?).unwrap_or(u16::MAX);
+            let max_pall = u16::try_from(s.bits(16).map_err(bad)?).unwrap_or(u16::MAX);
+            Property::Clli { max_cll, max_pall }
         }
         _ => Property::Opaque(kind),
     })

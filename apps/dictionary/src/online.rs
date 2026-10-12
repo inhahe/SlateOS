@@ -3,9 +3,12 @@
 //!
 //! The built-in list is thirty words, and a dictionary of thirty words is a
 //! demonstration. A word it lacks is looked up here -- **when the reader asks,
-//! never as they type**. What is sent is the word, to a server this program
-//! does not run; a lookup per keystroke would send every prefix of every word
-//! typed into the box, including the ones the reader thought better of.
+//! never as they type**, and only once the reader has turned online lookups
+//! on: they are off by default (design-decisions §1236), and the window, not
+//! this module, keeps that switch. What is sent is the word, to a server this
+//! program does not run; a lookup per keystroke would send every prefix of
+//! every word typed into the box, including the ones the reader thought
+//! better of.
 //!
 //! # The conversation
 //!

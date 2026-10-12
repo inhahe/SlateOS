@@ -101,25 +101,62 @@ pub enum VmaKind {
     },
 }
 
+/// What `fork` gives the child for a VMA's range: Linux's `VM_WIPEONFORK`
+/// (set and cleared by `madvise(MADV_WIPEONFORK / MADV_KEEPONFORK)`) and
+/// `VM_DONTCOPY` (`MADV_DONTFORK / MADV_DOFORK`).
+///
+/// Two independent flags, as on Linux, rather than one three-way choice:
+/// `MADV_DOFORK` clears only `dont_copy`, so a range that was both wiped and
+/// not copied is wiped once it is copied again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ForkPolicy {
+    /// The child gets the range zero-filled -- demand-zero, as if freshly
+    /// mapped -- instead of the parent's pages. Private anonymous memory
+    /// only. What it is for: a secret such as a random generator's state,
+    /// which a child must not inherit and then reproduce (BoringSSL keeps
+    /// its fork-detection word in such a page and trusts a zero there).
+    pub wipe: bool,
+    /// The child does not get the range at all: no region, no pages.
+    pub dont_copy: bool,
+}
+
+impl ForkPolicy {
+    /// The default for every mapping: the child gets a copy.
+    pub const COPY: Self = Self {
+        wipe: false,
+        dont_copy: false,
+    };
+
+    /// Whether the child gets the parent's pages for this range.
+    #[must_use]
+    pub const fn copies_pages(self) -> bool {
+        !self.wipe && !self.dont_copy
+    }
+}
+
 /// A Virtual Memory Area: a contiguous range of virtual addresses
 /// with uniform properties.
 ///
 /// Invariants:
-/// - `start` is 16 KiB frame-aligned.
+/// - `start` and `end` are 4 KiB (hardware-page) aligned -- see
+///   `pcb::add_vma` on why not 16 KiB: shared objects pack segments with
+///   different permissions into one 16 KiB frame.
 /// - `end > start`.
-/// - `end` is 16 KiB frame-aligned.
 /// - VMAs within an address space do not overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vma {
-    /// Start virtual address (inclusive, frame-aligned).
+    /// Start virtual address (inclusive).
     pub start: u64,
-    /// End virtual address (exclusive, frame-aligned).
+    /// End virtual address (exclusive).
     pub end: u64,
     /// What kind of memory this is.
     pub kind: VmaKind,
     /// Page table flags applied to new mappings in this VMA.
     /// For guard VMAs this is unused (pages are never mapped).
     pub flags: PageFlags,
+    /// What `fork` gives the child for this range. Every new mapping starts
+    /// as [`ForkPolicy::COPY`]; a piece split off a VMA keeps the VMA's.
+    pub fork: ForkPolicy,
 }
 
 impl Vma {
@@ -476,6 +513,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: 0x0000_4000_0000_0000 + 4 * frame_size,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     addr_space.add_vma(vma1).expect("add_vma should succeed");
     serial_println!("[vma]   Add VMA: OK");
@@ -497,6 +535,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: 0x0000_4000_0000_0000 + 6 * frame_size,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     let result = addr_space.add_vma(overlap);
     assert!(result.is_err(), "overlapping VMA should be rejected");
@@ -508,6 +547,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: 0x0000_4000_0001_0000 + 2 * frame_size,
         kind: VmaKind::Stack,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     addr_space
         .add_vma(vma2)
@@ -534,6 +574,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: 0x0000_4000_0000_4000,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     let result = addr_space.add_vma(misaligned);
     assert!(result.is_err(), "misaligned VMA should be rejected");
@@ -545,6 +586,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: 0x1000_0000 + 3 * frame_size,
         kind: VmaKind::Guard,
         flags: PageFlags::empty(),
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     assert!(vma3.contains(0x1000_0000));
     assert!(vma3.contains(0x1000_0000 + frame_size));
@@ -570,6 +612,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         end: e,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
 
     // Test 11: a single VMA at the base pushes the allocation past it.

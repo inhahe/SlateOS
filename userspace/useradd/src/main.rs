@@ -197,6 +197,13 @@ struct Database {
     groups: Vec<GroupEntry>,
     gshadow: Vec<GshadowEntry>,
     etc: std::path::PathBuf,
+    /// The account database, held from before anything was read until this
+    /// is dropped, after the save. Every command here changes the accounts or
+    /// the groups, and every account tool takes this hold, so it also keeps
+    /// two of these from interleaving their edits to the group files, which
+    /// only this crate writes.
+    /// `None` only for a database a test builds in memory.
+    _lock: Option<userdb::Lock>,
 }
 
 impl Database {
@@ -228,12 +235,17 @@ impl Database {
         // account just created. The crate below did the work correctly and
         // this caller discarded it.
         let users_path = etc.join(USERS_NAME);
+        // Held before the first read: see the `_lock` field. shadow-utils'
+        // tools say the same thing in the same words when they cannot lock.
+        let lock = userdb::UserDb::lock(&users_path)
+            .map_err(|_| format!("cannot lock {}; try again later.", quotef_os(&users_path)))?;
         Ok(Database {
             users: userdb::UserDb::load(&users_path)
                 .map_err(|e| format!("cannot read {}: {e}", quotef_os(&users_path)))?,
             groups: Self::load_file(&etc.join(GROUP_NAME), GroupEntry::parse)?,
             gshadow: Self::load_file(&etc.join(GSHADOW_NAME), GshadowEntry::parse)?,
             etc: etc.to_path_buf(),
+            _lock: Some(lock),
         })
     }
 
@@ -2206,6 +2218,7 @@ mod tests {
             groups: Vec::new(),
             gshadow: Vec::new(),
             etc: std::path::PathBuf::from(ETC_DIR),
+            _lock: None,
         }
     }
 
@@ -3106,6 +3119,9 @@ mod tests {
             .expect("the pinned salt is one crypt can carry");
         db.users.push(user);
         db.save().expect("save");
+        // Done with it, as the program is once it has saved: the hold on the
+        // database ends here, and the reload below takes it next.
+        drop(db);
 
         // The database itself.
         let reloaded = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
@@ -3145,6 +3161,9 @@ mod tests {
         db.users.push(record("root", 0, 0));
         db.add_to_group("root", "wheel");
         db.save().expect("save");
+        // Done with it, as the program is once it has saved: the hold on the
+        // database ends here, and the reload below takes it next.
+        drop(db);
 
         let reloaded = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         assert_eq!(

@@ -35,14 +35,13 @@
 
 #![cfg_attr(not(test), no_main)]
 
-use quoting::quotef_os;
+use journalrec::Value;
+use quoting::{os_bytes, quotef_os};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -155,51 +154,47 @@ struct JournalEntry {
     timestamp_usec: u64,
     /// Severity / priority level.
     priority: Priority,
-    /// Service or unit name (e.g. "net.dhcp", "kernel").
-    unit: String,
-    /// Log message text.
-    message: String,
+    /// Service or unit name (e.g. "net.dhcp", "kernel"). Bytes, as the
+    /// record gave them: a sender's name need not be text.
+    unit: Vec<u8>,
+    /// Log message, as the record gave it -- any bytes (design-decisions
+    /// §1063), shown as they are.
+    message: Vec<u8>,
     /// Boot identifier string.
     boot_id: String,
     /// Process ID (0 if unknown).
     pid: u64,
     /// All key-value fields from the original JSON (preserves extras).
-    fields: BTreeMap<String, String>,
+    fields: BTreeMap<String, Value>,
 }
 
 impl JournalEntry {
-    /// Parse from a single JSON-lines record.
+    /// Parse from a single JSON-lines record, through `journalrec`'s reader
+    /// -- the one `syslogd`'s commands read with too.
     fn from_json_line(line: &str) -> Option<Self> {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-            return None;
-        }
+        let fields = journalrec::parse_object(line)?;
+        // A field read as text: a string or a scalar, not bytes.
+        let text = |key: &str| fields.get(key).and_then(Value::text);
 
-        let fields = parse_json_object(trimmed)?;
-
-        let timestamp = fields
-            .get("ts")
+        let timestamp = text("ts")
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
-                fields
-                    .get("__REALTIME_TIMESTAMP")
+                text("__REALTIME_TIMESTAMP")
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|us| us / 1_000_000)
             })
             .unwrap_or(0);
 
-        let timestamp_usec = fields
-            .get("ts_usec")
+        let timestamp_usec = text("ts_usec")
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
-                fields
-                    .get("__REALTIME_TIMESTAMP")
+                text("__REALTIME_TIMESTAMP")
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|us| us % 1_000_000)
             })
             .unwrap_or(0);
 
-        let priority_str = fields.get("level").or_else(|| fields.get("PRIORITY"));
+        let priority_str = text("level").or_else(|| text("PRIORITY"));
         let priority = priority_str
             .and_then(|s| {
                 Priority::from_name(s).or_else(|| s.parse::<u8>().ok().map(Priority::from_u8))
@@ -211,24 +206,22 @@ impl JournalEntry {
             .or_else(|| fields.get("_SYSTEMD_UNIT"))
             .or_else(|| fields.get("SYSLOG_IDENTIFIER"))
             .or_else(|| fields.get("unit"))
-            .cloned()
+            .map(|v| v.bytes().to_vec())
             .unwrap_or_default();
 
         let message = fields
             .get("msg")
             .or_else(|| fields.get("MESSAGE"))
-            .cloned()
+            .map(|v| v.bytes().to_vec())
             .unwrap_or_default();
 
-        let boot_id = fields
-            .get("boot_id")
-            .or_else(|| fields.get("_BOOT_ID"))
-            .cloned()
+        let boot_id = text("boot_id")
+            .or_else(|| text("_BOOT_ID"))
+            .map(str::to_string)
             .unwrap_or_default();
 
-        let pid = fields
-            .get("pid")
-            .or_else(|| fields.get("_PID"))
+        let pid = text("pid")
+            .or_else(|| text("_PID"))
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -253,14 +246,20 @@ impl JournalEntry {
         }
         parts.push(format!(
             "\"level\":\"{}\"",
-            json_escape(self.priority.name())
+            journalrec::escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
-            parts.push(format!("\"service\":\"{}\"", json_escape(&self.unit)));
+            parts.push(format!(
+                "\"service\":{}",
+                journalrec::json_value(&self.unit)
+            ));
         }
-        parts.push(format!("\"msg\":\"{}\"", json_escape(&self.message)));
+        parts.push(format!("\"msg\":{}", journalrec::json_value(&self.message)));
         if !self.boot_id.is_empty() {
-            parts.push(format!("\"boot_id\":\"{}\"", json_escape(&self.boot_id)));
+            parts.push(format!(
+                "\"boot_id\":\"{}\"",
+                journalrec::escape(&self.boot_id)
+            ));
         }
         if self.pid != 0 {
             parts.push(format!("\"pid\":{}", self.pid));
@@ -286,7 +285,7 @@ impl JournalEntry {
         ];
         for (k, v) in &self.fields {
             if !known_keys.contains(&k.as_str()) {
-                parts.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+                parts.push(format!("\"{}\":{}", journalrec::escape(k), v.to_json()));
             }
         }
         format!("{{{}}}", parts.join(","))
@@ -302,16 +301,22 @@ impl JournalEntry {
         }
         lines.push(format!(
             "    \"level\": \"{}\",",
-            json_escape(self.priority.name())
+            journalrec::escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
-            lines.push(format!("    \"service\": \"{}\",", json_escape(&self.unit)));
+            lines.push(format!(
+                "    \"service\": {},",
+                journalrec::json_value(&self.unit)
+            ));
         }
-        lines.push(format!("    \"msg\": \"{}\",", json_escape(&self.message)));
+        lines.push(format!(
+            "    \"msg\": {},",
+            journalrec::json_value(&self.message)
+        ));
         if !self.boot_id.is_empty() {
             lines.push(format!(
                 "    \"boot_id\": \"{}\",",
-                json_escape(&self.boot_id)
+                journalrec::escape(&self.boot_id)
             ));
         }
         if self.pid != 0 {
@@ -342,9 +347,9 @@ impl JournalEntry {
             .collect();
         for (k, v) in &extras {
             lines.push(format!(
-                "    \"{}\": \"{}\",",
-                json_escape(k),
-                json_escape(v)
+                "    \"{}\": {},",
+                journalrec::escape(k),
+                v.to_json()
             ));
         }
         // Remove trailing comma from last field line.
@@ -359,191 +364,6 @@ impl JournalEntry {
 }
 
 // ============================================================================
-// Minimal JSON parser (no external deps)
-// ============================================================================
-
-/// Parse a flat JSON object into key-value pairs.
-/// Handles string and numeric values. Does not handle nested objects or arrays.
-fn parse_json_object(json: &str) -> Option<BTreeMap<String, String>> {
-    let trimmed = json.trim();
-    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-        return None;
-    }
-    let inner = &trimmed[1..trimmed.len() - 1];
-    let mut map = BTreeMap::new();
-    let mut pos = 0;
-    let bytes = inner.as_bytes();
-
-    while pos < bytes.len() {
-        // Skip whitespace and commas.
-        while pos < bytes.len()
-            && (bytes[pos] == b' '
-                || bytes[pos] == b','
-                || bytes[pos] == b'\t'
-                || bytes[pos] == b'\n'
-                || bytes[pos] == b'\r')
-        {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Parse key (must be a string).
-        let key = match parse_json_string_value(inner, &mut pos) {
-            Some(k) => k,
-            None => break,
-        };
-
-        // Skip to colon.
-        while pos < bytes.len() && bytes[pos] != b':' {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        pos += 1; // skip ':'
-
-        // Skip whitespace.
-        while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Parse value (string or number/bool/null).
-        let value = if bytes[pos] == b'"' {
-            match parse_json_string_value(inner, &mut pos) {
-                Some(v) => v,
-                None => break,
-            }
-        } else {
-            let start = pos;
-            while pos < bytes.len() && bytes[pos] != b',' && bytes[pos] != b'}' {
-                pos += 1;
-            }
-            inner[start..pos].trim().to_string()
-        };
-
-        map.insert(key, value);
-    }
-
-    Some(map)
-}
-
-/// Parse a JSON string starting at `pos` (which should point to the opening `"`).
-fn parse_json_string_value(s: &str, pos: &mut usize) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.get(*pos) != Some(&b'"') {
-        return None;
-    }
-    *pos += 1; // skip opening "
-
-    let mut result = String::new();
-    // Where the current run of bytes needing no decoding began. A run always
-    // ends at an ASCII byte -- a quote, a backslash -- or at the end, so it is
-    // copied as the UTF-8 it already is. Pushing it byte by byte `as char`, as
-    // this did until 2026-09-26, turned every non-ASCII character into
-    // mojibake: a record saying `café` was shown as `cafÃ©`.
-    let mut run = *pos;
-    while let Some(&b) = bytes.get(*pos) {
-        match b {
-            b'"' => {
-                result.push_str(s.get(run..*pos).unwrap_or_default());
-                *pos += 1; // skip closing "
-                return Some(result);
-            }
-            b'\\' => {
-                result.push_str(s.get(run..*pos).unwrap_or_default());
-                *pos += decode_escape(bytes, *pos, &mut result);
-                run = *pos;
-            }
-            _ => *pos += 1,
-        }
-    }
-    // Unterminated string -- return what we have.
-    result.push_str(s.get(run..*pos).unwrap_or_default());
-    Some(result)
-}
-
-/// Decode the escape whose backslash is at `bytes[at]` into `out`, returning
-/// how many bytes it spans.
-///
-/// Every escape JSON defines is decoded, `\uXXXX` included and a surrogate
-/// pair as the one character it encodes. What cannot be decoded -- a lone
-/// surrogate, a malformed `\u`, an escape JSON does not define -- is kept as
-/// it was written, backslash and all: a log viewer that drops text it cannot
-/// interpret shows a record that was never written. (The old decoder dropped a
-/// lone surrogate, and a pair lost both halves.)
-fn decode_escape(bytes: &[u8], at: usize, out: &mut String) -> usize {
-    let simple = match bytes.get(at + 1) {
-        Some(b'"') => Some('"'),
-        Some(b'\\') => Some('\\'),
-        Some(b'/') => Some('/'),
-        Some(b'b') => Some('\u{8}'),
-        Some(b'f') => Some('\u{c}'),
-        Some(b'n') => Some('\n'),
-        Some(b'r') => Some('\r'),
-        Some(b't') => Some('\t'),
-        _ => None,
-    };
-    if let Some(c) = simple {
-        out.push(c);
-        return 2;
-    }
-    if bytes.get(at + 1) == Some(&b'u')
-        && let Some(unit) = hex4(bytes, at + 2)
-    {
-        if (0xD800..0xDC00).contains(&unit) {
-            if bytes.get(at + 6) == Some(&b'\\')
-                && bytes.get(at + 7) == Some(&b'u')
-                && let Some(low) = hex4(bytes, at + 8)
-                && (0xDC00..0xE000).contains(&low)
-                && let Some(ch) = char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
-            {
-                out.push(ch);
-                return 12;
-            }
-        } else if let Some(ch) = char::from_u32(unit) {
-            out.push(ch);
-            return 6;
-        }
-    }
-    // Kept as written: the backslash here, and whatever follows it copied by
-    // the caller as ordinary text.
-    out.push('\\');
-    1
-}
-
-/// Four hex digits at `bytes[at..at + 4]` as a number.
-fn hex4(bytes: &[u8], at: usize) -> Option<u32> {
-    let digits = bytes.get(at..at + 4)?;
-    digits.iter().try_fold(0u32, |acc, &d| {
-        char::from(d).to_digit(16).map(|v| acc * 16 + v)
-    })
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                // Use write! to a String -- infallible, no error to handle.
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-// ============================================================================
 // Timestamp formatting and parsing
 // ============================================================================
 
@@ -554,70 +374,21 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_leap_year(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn days_in_month(year: i64, month: u32) -> i64 {
-    match month {
-        1 => 31,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        3 => 31,
-        4 => 30,
-        5 => 31,
-        6 => 30,
-        7 => 31,
-        8 => 31,
-        9 => 30,
-        10 => 31,
-        11 => 30,
-        12 => 31,
-        _ => 30,
-    }
-}
-
 /// Convert unix timestamp to "YYYY-MM-DD HH:MM:SS" string.
+///
+/// Through `journalrec::Utc`, in a fixed number of steps: this counted a
+/// year at a time from 1970, so one record with a `ts` near `u64::MAX` --
+/// which anything able to write a line into the log can put there -- kept
+/// every listing busy for many minutes.
 fn format_timestamp(unix_secs: u64) -> String {
     if unix_secs == 0 {
         return "0000-00-00 00:00:00".to_string();
     }
-
-    let secs = unix_secs;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    let mut remaining_days = (secs / 86400) as i64;
-    let mut year: i64 = 1970;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    let mut month = 1u32;
-    loop {
-        let dim = days_in_month(year, month);
-        if remaining_days < dim {
-            break;
-        }
-        remaining_days -= dim;
-        month += 1;
-    }
-    let day = remaining_days + 1;
-
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}")
+    let t = journalrec::Utc::from_unix(unix_secs);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
 }
 
 /// Format with microsecond precision: "YYYY-MM-DD HH:MM:SS.UUUUUU".
@@ -629,11 +400,18 @@ fn format_timestamp_precise(unix_secs: u64, usec: u64) -> String {
 /// Parse a datetime string into a unix timestamp.
 ///
 /// Supported formats:
-/// - "YYYY-MM-DD HH:MM:SS"
+/// - "YYYY-MM-DD HH:MM:SS", with "HH" or "HH:MM" also allowed
 /// - "YYYY-MM-DD"
-/// - "today"
-/// - "yesterday"
-/// - "-Nd" / "-Nh" / "-Nm" (relative: N days/hours/minutes ago)
+/// - "now", "today", "yesterday"
+/// - "-Nd" / "-Nh" / "-Nm" / "-Ns" (relative: N days/hours/minutes/seconds ago)
+///
+/// A date that is not a real one -- February 30, an hour of 25 -- is
+/// refused, and so is one before 1970, where no record can be. Until
+/// 2026-10-08 such a date rolled over into the next month or hour, a date
+/// before 1970 was taken as the same day of 1970, a time field that did not
+/// parse was taken as 0, a year was counted to one step at a time (without
+/// end, for a large enough year), a large relative count overflowed, and a
+/// relative form ending in a multi-byte character panicked.
 fn parse_datetime(s: &str) -> Option<u64> {
     let s = s.trim();
 
@@ -643,72 +421,57 @@ fn parse_datetime(s: &str) -> Option<u64> {
     if s.eq_ignore_ascii_case("today") {
         let now = now_secs();
         // Round down to midnight.
-        return Some(now - (now % 86400));
+        return Some(now.saturating_sub(now % 86400));
     }
     if s.eq_ignore_ascii_case("yesterday") {
         let now = now_secs();
-        return Some(now - (now % 86400) - 86400);
+        return Some(now.saturating_sub(now % 86400).saturating_sub(86400));
     }
 
     // Relative: -Nd, -Nh, -Nm, -Ns
-    if s.starts_with('-') && s.len() >= 3 {
-        let suffix = s.as_bytes()[s.len() - 1];
-        let num_str = &s[1..s.len() - 1];
-        if let Ok(n) = num_str.parse::<u64>() {
-            let secs = match suffix {
-                b'd' => n * 86400,
-                b'h' => n * 3600,
-                b'm' => n * 60,
-                b's' => n,
-                _ => return None,
-            };
-            return Some(now_secs().saturating_sub(secs));
-        }
+    if let Some(rest) = s.strip_prefix('-') {
+        let per: u64 = match rest.as_bytes().last() {
+            Some(b'd') => 86400,
+            Some(b'h') => 3600,
+            Some(b'm') => 60,
+            Some(b's') => 1,
+            _ => return None,
+        };
+        // The unit is one ASCII byte, so this cut is between characters.
+        let n: u64 = rest.get(..rest.len().saturating_sub(1))?.parse().ok()?;
+        return Some(now_secs().saturating_sub(n.checked_mul(per)?));
     }
 
     // "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
-    let parts: Vec<&str> = s.splitn(2, ' ').collect();
-    let date_part = parts.first()?;
-    let time_part = if parts.len() > 1 {
-        Some(parts[1])
-    } else {
-        None
+    let (date_part, time_part) = match s.split_once(' ') {
+        Some((date, time)) => (date, Some(time)),
+        None => (s, None),
     };
-
     let date_fields: Vec<&str> = date_part.split('-').collect();
-    if date_fields.len() != 3 {
+    let [year, month, day] = date_fields.as_slice() else {
         return None;
-    }
-    let year: i64 = date_fields[0].parse().ok()?;
-    let month: u32 = date_fields[1].parse().ok()?;
-    let day: u32 = date_fields[2].parse().ok()?;
-
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    let (hours, minutes, seconds) = if let Some(t) = time_part {
-        let tf: Vec<&str> = t.split(':').collect();
-        let h: u64 = tf.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let m: u64 = tf.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let s: u64 = tf.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
-        (h, m, s)
-    } else {
-        (0, 0, 0)
     };
-
-    // Convert to unix timestamp (UTC).
-    let mut total_days: i64 = 0;
-    for y in 1970..year {
-        total_days += if is_leap_year(y) { 366 } else { 365 };
+    let (hour, minute, second) = match time_part {
+        None => (0, 0, 0),
+        Some(time) => {
+            let fields: Vec<&str> = time.split(':').collect();
+            if fields.len() > 3 {
+                return None;
+            }
+            // A field that is there must be a number; one left off is 0.
+            let field = |i: usize| fields.get(i).map_or(Some(0), |f| f.parse().ok());
+            (field(0)?, field(1)?, field(2)?)
+        }
+    };
+    journalrec::Utc {
+        year: year.parse().ok()?,
+        month: month.parse().ok()?,
+        day: day.parse().ok()?,
+        hour,
+        minute,
+        second,
     }
-    for m in 1..month {
-        total_days += days_in_month(year, m);
-    }
-    total_days += (day as i64) - 1;
-
-    let ts = (total_days as u64) * 86400 + hours * 3600 + minutes * 60 + seconds;
-    Some(ts)
+    .to_unix()
 }
 
 // ============================================================================
@@ -716,51 +479,49 @@ fn parse_datetime(s: &str) -> Option<u64> {
 // ============================================================================
 
 /// Parse a duration string like "2d", "1w", "3h", "30m", "7200s", "1M", "1y"
-/// into seconds.
+/// into seconds; a bare number is seconds.
+///
+/// `None` for a duration too long to count in seconds. It used to be
+/// multiplied out unchecked, wrapping round to a short one, so a vast enough
+/// `--vacuum-time` removed nearly every record; and a unit that was a
+/// multi-byte character was cut through, which panicked.
 fn parse_duration_secs(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let last = s.as_bytes()[s.len() - 1];
-    let num_str = &s[..s.len() - 1];
-    let n: u64 = num_str.parse().ok()?;
-
-    match last {
-        b's' => Some(n),
-        b'm' => Some(n * 60),
-        b'h' => Some(n * 3600),
-        b'd' => Some(n * 86400),
-        b'w' => Some(n * 7 * 86400),
-        b'M' => Some(n * 30 * 86400),
-        b'y' => Some(n * 365 * 86400),
-        _ => {
-            // Maybe the whole string is just a number (seconds).
-            s.parse::<u64>().ok()
-        }
-    }
+    let per: u64 = match s.as_bytes().last()? {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 3_600,
+        b'd' => 86_400,
+        b'w' => 604_800,
+        b'M' => 2_592_000,
+        b'y' => 31_536_000,
+        // Maybe the whole string is just a number (seconds).
+        _ => return s.parse().ok(),
+    };
+    // The unit is one ASCII byte, so this cut is between characters.
+    let n: u64 = s.get(..s.len().saturating_sub(1))?.parse().ok()?;
+    n.checked_mul(per)
 }
 
-/// Parse a size string like "100M", "1G", "500K" into bytes.
+/// Parse a size string like "100M", "1G", "500K" into bytes; a bare number
+/// is bytes.
+///
+/// `None` for a size too large to count in bytes. It used to be multiplied
+/// out unchecked: `--vacuum-size 17179869184G` is 2^64 bytes, which wrapped
+/// round to 0 and so removed the whole journal.
 fn parse_size_bytes(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let last = s.as_bytes()[s.len() - 1];
-    if last.is_ascii_digit() {
-        return s.parse::<u64>().ok();
-    }
-    let num_str = &s[..s.len() - 1];
-    let n: u64 = num_str.parse().ok()?;
-
-    match last {
-        b'B' | b'b' => Some(n),
-        b'K' | b'k' => Some(n * 1024),
-        b'M' => Some(n * 1024 * 1024),
-        b'G' | b'g' => Some(n * 1024 * 1024 * 1024),
-        _ => None,
-    }
+    let per: u64 = match s.as_bytes().last()? {
+        b'0'..=b'9' => return s.parse().ok(),
+        b'B' | b'b' => 1,
+        b'K' | b'k' => 1_024,
+        b'M' => 1_048_576,
+        b'G' | b'g' => 1_073_741_824,
+        _ => return None,
+    };
+    // The unit is one ASCII byte, so this cut is between characters.
+    let n: u64 = s.get(..s.len().saturating_sub(1))?.parse().ok()?;
+    n.checked_mul(per)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -937,9 +698,11 @@ fn is_blank(line: &[u8]) -> bool {
 struct Journal {
     /// All records, oldest first.
     entries: Vec<JournalEntry>,
-    /// For each file read: where the next read should start, and any
-    /// unterminated last line held back for it (see [`read_journal`]).
-    tails: BTreeMap<PathBuf, Tail>,
+    /// What has been read of each file -- known by its identity, so that a
+    /// rotation renaming the files does not lose the place -- and any
+    /// unterminated last line held back (see [`read_journal`]): where `-f`
+    /// goes on from.
+    follow: journalio::Follow,
     /// Files with lines that are not records, and how many.
     not_records: Vec<(PathBuf, usize)>,
     /// Files and directories that could not be read, and why.
@@ -949,10 +712,10 @@ struct Journal {
 /// Read every log file, as bytes, line by line.
 ///
 /// `hold_back_unterminated` is for `-f`: a last line with no newline may be a
-/// record still being written, so it is neither shown nor counted, but kept in
-/// the file's [`Tail`] for the follow loop to complete. A plain listing shows
-/// it if it parses -- a writer that never ends its last record is still a
-/// writer whose record should be seen.
+/// record still being written, so it is neither shown nor counted, but held
+/// in [`Journal::follow`] for the follow loop to complete. A plain listing
+/// shows it if it parses -- a writer that never ends its last record is still
+/// a writer whose record should be seen.
 fn read_journal(hold_back_unterminated: bool) -> Journal {
     let (files, unreadable) = discover();
     read_files(&files, unreadable, hold_back_unterminated)
@@ -966,45 +729,31 @@ fn read_files(
     hold_back_unterminated: bool,
 ) -> Journal {
     let mut entries = Vec::new();
-    let mut tails = BTreeMap::new();
+    let mut follow = journalio::Follow::new();
     let mut not_records = Vec::new();
 
     for file in files {
-        let bytes = match fs::read(file) {
-            Ok(b) => b,
+        let bytes = match follow.read(file, hold_back_unterminated) {
+            Ok(Some(b)) => b,
             // Gone between discovery and reading -- rotated away. Not an
             // error: there is nothing left that could have been shown.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Ok(None) => continue,
             Err(e) => {
                 unreadable.push((file.clone(), e));
                 continue;
             }
         };
-        let (complete, unterminated) = split_complete(&bytes);
         let mut bad = 0usize;
-        let mut take = |line: &[u8]| match record_of(line) {
-            Some(entry) => entries.push(entry),
-            None if is_blank(line) => {}
-            None => bad = bad.saturating_add(1),
-        };
-        for line in complete.split(|&b| b == b'\n') {
-            take(line);
-        }
-        let mut tail = Tail {
-            offset: len_u64(&bytes),
-            partial: Vec::new(),
-        };
-        if !unterminated.is_empty() {
-            if hold_back_unterminated {
-                tail.partial = unterminated.to_vec();
-            } else {
-                take(unterminated);
+        for line in journalio::lines(&bytes) {
+            match record_of(line) {
+                Some(entry) => entries.push(entry),
+                None if is_blank(line) => {}
+                None => bad = bad.saturating_add(1),
             }
         }
         if bad > 0 {
             not_records.push((file.clone(), bad));
         }
-        tails.insert(file.clone(), tail);
     }
 
     // Sort by timestamp.
@@ -1016,21 +765,9 @@ fn read_files(
 
     Journal {
         entries,
-        tails,
+        follow,
         not_records,
         unreadable,
-    }
-}
-
-/// `bytes` up to and including its last newline (without that newline), and
-/// what follows it -- an unterminated last line, or nothing.
-fn split_complete(bytes: &[u8]) -> (&[u8], &[u8]) {
-    match bytes.iter().rposition(|&b| b == b'\n') {
-        Some(nl) => (
-            bytes.get(..nl).unwrap_or_default(),
-            bytes.get(nl.saturating_add(1)..).unwrap_or_default(),
-        ),
-        None => (&[], bytes),
     }
 }
 
@@ -1045,13 +782,13 @@ fn len_u64(bytes: &[u8]) -> u64 {
 fn report_journal(journal: &Journal) -> bool {
     for (path, n) in &journal.not_records {
         let what = if *n == 1 { "line is" } else { "lines are" };
-        eprintln!(
+        say(&format!(
             "journalctl: {}: {n} {what} not a journal record and not shown",
             quotef_os(path)
-        );
+        ));
     }
     for (path, e) in &journal.unreadable {
-        eprintln!("journalctl: cannot read {}: {e}", quotef_os(path));
+        cannot("read", path, e);
     }
     !journal.unreadable.is_empty()
 }
@@ -1064,8 +801,8 @@ fn journal_disk_usage() -> (usize, u64) {
 
     for file in &files {
         if let Ok(meta) = fs::metadata(file) {
-            total_bytes += meta.len();
-            count += 1;
+            total_bytes = total_bytes.saturating_add(meta.len());
+            count = count.saturating_add(1);
         }
     }
 
@@ -1076,12 +813,25 @@ fn journal_disk_usage() -> (usize, u64) {
 // Substring matching (simple pattern -- not full regex, but handles basic cases)
 // ============================================================================
 
-/// Check if `haystack` contains `pattern` (case-insensitive simple substring match).
-/// Supports basic patterns: literal substring matching.
-fn pattern_matches(haystack: &str, pattern: &str) -> bool {
+/// Whether `pattern` occurs in `haystack`, ASCII letters matched in either
+/// case. Both are bytes, so a message that is not text is searched as it is,
+/// for a pattern that need not be text either.
+fn pattern_matches(haystack: &[u8], pattern: impl AsRef<[u8]>) -> bool {
     let h = haystack.to_ascii_lowercase();
-    let p = pattern.to_ascii_lowercase();
-    h.contains(&p)
+    let p = pattern.as_ref().to_ascii_lowercase();
+    p.is_empty() || h.windows(p.len()).any(|w| w == p.as_slice())
+}
+
+/// Whether `unit` names a unit `wanted` picks out: a substring, ASCII
+/// letters in either case.
+fn unit_matches(unit: &[u8], wanted: impl AsRef<[u8]>) -> bool {
+    pattern_matches(unit, wanted)
+}
+
+/// Whether `unit` is the kernel's, for `-k`.
+fn is_kernel_unit(unit: &[u8]) -> bool {
+    let u = unit.to_ascii_lowercase();
+    u == b"kernel" || u == b"kern" || u == b"dmesg"
 }
 
 // ============================================================================
@@ -1117,8 +867,8 @@ impl OutputFormat {
 // ============================================================================
 
 struct Config {
-    /// Filter by unit/service name (substring match).
-    unit_filter: Option<String>,
+    /// Filter by unit/service name (substring match), as the bytes given.
+    unit_filter: Option<Vec<u8>>,
     /// Filter by max priority level (show this level and more severe).
     priority_filter: Option<Priority>,
     /// Show entries since this timestamp.
@@ -1131,14 +881,14 @@ struct Config {
     reverse: bool,
     /// Output format.
     output_format: OutputFormat,
-    /// Filter by boot ID.
-    boot_filter: Option<String>,
+    /// Filter by boot ID, as the bytes given; empty for the latest boot.
+    boot_filter: Option<Vec<u8>>,
     /// Show only kernel messages.
     dmesg: bool,
     /// Number of entries to show (None = all).
     num_entries: Option<usize>,
-    /// Grep / pattern filter on message content.
-    grep_pattern: Option<String>,
+    /// Grep / pattern filter on message content, as the bytes given.
+    grep_pattern: Option<Vec<u8>>,
     /// Use colored output.
     color: bool,
 
@@ -1176,154 +926,132 @@ impl Config {
 
 /// Parse command-line arguments into a Config.
 /// Returns Err(message) on invalid arguments.
-fn parse_args(args: &[String]) -> Result<Config, String> {
+///
+/// The words are taken as they are, not as text: a unit name, a boot ID and a
+/// `--grep` pattern are matched against a record's bytes, so they may be any
+/// bytes as well, and a value that has to be text -- a priority, a date, a
+/// count -- and is not is refused like any other value that does not parse.
+/// `std::env::args()`, which this was handed until 2026-10-07, panicked on
+/// such a word instead.
+fn parse_args<S: AsRef<OsStr>>(args: &[S]) -> Result<Config, String> {
     let mut cfg = Config::new();
+    let word = |i: usize| args.get(i).map(AsRef::as_ref);
     let mut i = 1; // skip argv[0]
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "-u" | "--unit" => {
-                if i + 1 >= args.len() {
-                    return Err("-u requires a unit name".to_string());
-                }
-                cfg.unit_filter = Some(args[i + 1].clone());
-                i += 2;
+    while let Some(arg) = word(i) {
+        match arg.as_encoded_bytes() {
+            b"-u" | b"--unit" => {
+                let unit = word(i.saturating_add(1)).ok_or("-u requires a unit name")?;
+                cfg.unit_filter = Some(os_bytes(unit).into_owned());
+                i = i.saturating_add(2);
             }
-            "-p" | "--priority" => {
-                if i + 1 >= args.len() {
-                    return Err("-p requires a priority level".to_string());
-                }
-                let prio = Priority::from_name(&args[i + 1])
-                    .ok_or_else(|| format!("unknown priority: {}", args[i + 1]))?;
+            b"-p" | b"--priority" => {
+                let level = word(i.saturating_add(1)).ok_or("-p requires a priority level")?;
+                let prio = level
+                    .to_str()
+                    .and_then(Priority::from_name)
+                    .ok_or_else(|| format!("unknown priority: {}", quotef_os(level)))?;
                 cfg.priority_filter = Some(prio);
-                i += 2;
+                i = i.saturating_add(2);
             }
-            "--since" => {
-                if i + 1 >= args.len() {
-                    return Err("--since requires a datetime".to_string());
-                }
-                // Peek: might be two-part datetime "YYYY-MM-DD HH:MM:SS"
-                let datetime_str = if i + 2 < args.len()
-                    && args[i + 2].contains(':')
-                    && !args[i + 2].starts_with('-')
-                {
-                    let combined = format!("{} {}", args[i + 1], args[i + 2]);
-                    i += 3;
-                    combined
-                } else {
-                    i += 2;
-                    args[i - 1].clone()
-                };
-                let ts = parse_datetime(&datetime_str)
-                    .ok_or_else(|| format!("cannot parse datetime: {datetime_str}"))?;
+            b"--since" => {
+                let (ts, taken) = datetime_at(args, i.saturating_add(1), "--since")?;
                 cfg.since = Some(ts);
+                i = i.saturating_add(1).saturating_add(taken);
             }
-            "--until" => {
-                if i + 1 >= args.len() {
-                    return Err("--until requires a datetime".to_string());
-                }
-                let datetime_str = if i + 2 < args.len()
-                    && args[i + 2].contains(':')
-                    && !args[i + 2].starts_with('-')
-                {
-                    let combined = format!("{} {}", args[i + 1], args[i + 2]);
-                    i += 3;
-                    combined
-                } else {
-                    i += 2;
-                    args[i - 1].clone()
-                };
-                let ts = parse_datetime(&datetime_str)
-                    .ok_or_else(|| format!("cannot parse datetime: {datetime_str}"))?;
+            b"--until" => {
+                let (ts, taken) = datetime_at(args, i.saturating_add(1), "--until")?;
                 cfg.until = Some(ts);
+                i = i.saturating_add(1).saturating_add(taken);
             }
-            "-f" | "--follow" => {
+            b"-f" | b"--follow" => {
                 cfg.follow = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "-r" | "--reverse" => {
+            b"-r" | b"--reverse" => {
                 cfg.reverse = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "-o" | "--output" => {
-                if i + 1 >= args.len() {
-                    return Err("-o requires a format name".to_string());
-                }
-                cfg.output_format = OutputFormat::from_name(&args[i + 1])
-                    .ok_or_else(|| format!("unknown output format: {}", args[i + 1]))?;
-                i += 2;
+            b"-o" | b"--output" => {
+                let name = word(i.saturating_add(1)).ok_or("-o requires a format name")?;
+                cfg.output_format = name
+                    .to_str()
+                    .and_then(OutputFormat::from_name)
+                    .ok_or_else(|| format!("unknown output format: {}", quotef_os(name)))?;
+                i = i.saturating_add(2);
             }
-            "-b" | "--boot" => {
-                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                    cfg.boot_filter = Some(args[i + 1].clone());
-                    i += 2;
+            b"-b" | b"--boot" => {
+                if let Some(id) =
+                    word(i.saturating_add(1)).filter(|w| !w.as_encoded_bytes().starts_with(b"-"))
+                {
+                    cfg.boot_filter = Some(os_bytes(id).into_owned());
+                    i = i.saturating_add(2);
                 } else {
-                    // Current boot: empty string means "latest boot_id"
-                    cfg.boot_filter = Some(String::new());
-                    i += 1;
+                    // Current boot: empty means "latest boot_id"
+                    cfg.boot_filter = Some(Vec::new());
+                    i = i.saturating_add(1);
                 }
             }
-            "-k" | "--dmesg" => {
+            b"-k" | b"--dmesg" => {
                 cfg.dmesg = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "-n" | "--lines" => {
-                if i + 1 >= args.len() {
-                    return Err("-n requires a count".to_string());
-                }
-                let n: usize = args[i + 1]
-                    .parse()
-                    .map_err(|_| format!("invalid count: {}", args[i + 1]))?;
+            b"-n" | b"--lines" => {
+                let count = word(i.saturating_add(1)).ok_or("-n requires a count")?;
+                let n: usize = count
+                    .to_str()
+                    .and_then(|c| c.parse().ok())
+                    .ok_or_else(|| format!("invalid count: {}", quotef_os(count)))?;
                 cfg.num_entries = Some(n);
-                i += 2;
+                i = i.saturating_add(2);
             }
-            "--grep" => {
-                if i + 1 >= args.len() {
-                    return Err("--grep requires a pattern".to_string());
-                }
-                cfg.grep_pattern = Some(args[i + 1].clone());
-                i += 2;
+            b"--grep" => {
+                let pattern = word(i.saturating_add(1)).ok_or("--grep requires a pattern")?;
+                cfg.grep_pattern = Some(os_bytes(pattern).into_owned());
+                i = i.saturating_add(2);
             }
-            "--no-color" | "--nocolor" => {
+            b"--no-color" | b"--nocolor" => {
                 cfg.color = false;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "--no-pager" => {
+            b"--no-pager" => {
                 // We don't implement a pager; accept and ignore.
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "--list-fields" => {
+            b"--list-fields" => {
                 cfg.list_fields = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "--disk-usage" => {
+            b"--disk-usage" => {
                 cfg.disk_usage = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            "--vacuum-time" => {
-                if i + 1 >= args.len() {
-                    return Err("--vacuum-time requires a duration (e.g. 2d, 1w)".to_string());
-                }
-                let secs = parse_duration_secs(&args[i + 1])
-                    .ok_or_else(|| format!("invalid duration: {}", args[i + 1]))?;
+            b"--vacuum-time" => {
+                let duration = word(i.saturating_add(1))
+                    .ok_or("--vacuum-time requires a duration (e.g. 2d, 1w)")?;
+                let secs = duration
+                    .to_str()
+                    .and_then(parse_duration_secs)
+                    .ok_or_else(|| format!("invalid duration: {}", quotef_os(duration)))?;
                 cfg.vacuum_time = Some(secs);
-                i += 2;
+                i = i.saturating_add(2);
             }
-            "--vacuum-size" => {
-                if i + 1 >= args.len() {
-                    return Err("--vacuum-size requires a size (e.g. 100M, 1G)".to_string());
-                }
-                let bytes = parse_size_bytes(&args[i + 1])
-                    .ok_or_else(|| format!("invalid size: {}", args[i + 1]))?;
+            b"--vacuum-size" => {
+                let size = word(i.saturating_add(1))
+                    .ok_or("--vacuum-size requires a size (e.g. 100M, 1G)")?;
+                let bytes = size
+                    .to_str()
+                    .and_then(parse_size_bytes)
+                    .ok_or_else(|| format!("invalid size: {}", quotef_os(size)))?;
                 cfg.vacuum_size = Some(bytes);
-                i += 2;
+                i = i.saturating_add(2);
             }
-            "-h" | "--help" | "help" => {
+            b"-h" | b"--help" | b"help" => {
                 cfg.show_help = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
-            other => {
-                return Err(format!("unknown option: {other}"));
+            _ => {
+                return Err(format!("unknown option: {}", quotef_os(arg)));
             }
         }
     }
@@ -1336,6 +1064,31 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     Ok(cfg)
 }
 
+/// The datetime of `--since`/`--until` (named `option`), starting at
+/// `args[i]`: one word, or two -- `YYYY-MM-DD HH:MM:SS` as the shell splits
+/// it, the second word a time with a colon -- and how many words it took.
+fn datetime_at<S: AsRef<OsStr>>(
+    args: &[S],
+    i: usize,
+    option: &str,
+) -> Result<(u64, usize), String> {
+    let word = |i: usize| args.get(i).map(AsRef::as_ref);
+    let first = word(i).ok_or_else(|| format!("{option} requires a datetime"))?;
+    let Some(date) = first.to_str() else {
+        return Err(format!("cannot parse datetime: {}", quotef_os(first)));
+    };
+    let time = word(i.saturating_add(1))
+        .and_then(OsStr::to_str)
+        .filter(|t| t.contains(':') && !t.starts_with('-'));
+    let (text, taken) = match time {
+        Some(time) => (format!("{date} {time}"), 2),
+        None => (date.to_string(), 1),
+    };
+    let ts = parse_datetime(&text)
+        .ok_or_else(|| format!("cannot parse datetime: {}", quotef_os(&text)))?;
+    Ok((ts, taken))
+}
+
 // ============================================================================
 // Filtering
 // ============================================================================
@@ -1345,12 +1098,10 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
         .iter()
         .filter(|e| {
             // Unit filter.
-            if let Some(ref unit) = cfg.unit_filter {
-                let u_lower = unit.to_ascii_lowercase();
-                let entry_unit = e.unit.to_ascii_lowercase();
-                if !entry_unit.contains(&u_lower) {
-                    return false;
-                }
+            if let Some(ref unit) = cfg.unit_filter
+                && !unit_matches(&e.unit, unit)
+            {
+                return false;
             }
 
             // Priority filter: show entries at this level or more severe.
@@ -1377,7 +1128,7 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             // Boot filter.
             if let Some(ref boot) = cfg.boot_filter
                 && !boot.is_empty()
-                && e.boot_id != *boot
+                && e.boot_id.as_bytes() != boot.as_slice()
             {
                 return false;
             }
@@ -1385,11 +1136,8 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             // collecting entries (we pick the most recent boot_id).
 
             // Dmesg: only kernel messages.
-            if cfg.dmesg {
-                let u = e.unit.to_ascii_lowercase();
-                if u != "kernel" && u != "kern" && u != "dmesg" {
-                    return false;
-                }
+            if cfg.dmesg && !is_kernel_unit(&e.unit) {
+                return false;
             }
 
             // Grep filter.
@@ -1428,7 +1176,7 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             result.truncate(n);
         } else {
             // Take the last n entries.
-            let start = result.len() - n;
+            let start = result.len().saturating_sub(n);
             result = result.split_off(start);
         }
     }
@@ -1448,81 +1196,85 @@ fn find_latest_boot_id(entries: &[JournalEntry]) -> Option<String> {
 // Output rendering
 // ============================================================================
 
-fn render_entry(entry: &JournalEntry, cfg: &Config) {
+/// Write one entry to `out` in the configured format. The unit and the
+/// message go out as their bytes, whatever they are.
+///
+/// # Errors
+///
+/// The write's: the caller stops there.
+fn render_entry(out: &mut dyn Write, entry: &JournalEntry, cfg: &Config) -> io::Result<()> {
     match cfg.output_format {
-        OutputFormat::Short => render_short(entry, cfg.color),
-        OutputFormat::ShortPrecise => render_short_precise(entry, cfg.color),
-        OutputFormat::Json => println!("{}", entry.to_json()),
-        OutputFormat::JsonPretty => println!("{}", entry.to_json_pretty()),
-        OutputFormat::Cat => println!("{}", entry.message),
-        OutputFormat::Verbose => render_verbose(entry, cfg.color),
+        OutputFormat::Short => render_short(out, entry, cfg.color, false),
+        OutputFormat::ShortPrecise => render_short(out, entry, cfg.color, true),
+        OutputFormat::Json => writeln!(out, "{}", entry.to_json()),
+        OutputFormat::JsonPretty => writeln!(out, "{}", entry.to_json_pretty()),
+        OutputFormat::Cat => {
+            out.write_all(&entry.message)?;
+            out.write_all(b"\n")
+        }
+        OutputFormat::Verbose => render_verbose(out, entry, cfg.color),
     }
 }
 
-fn render_short(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp(entry.timestamp);
-    let unit_str = if entry.unit.is_empty() {
-        "unknown".to_string()
+/// `short` and `short-precise`: `TIME UNIT[PID]: MESSAGE`.
+fn render_short(
+    out: &mut dyn Write,
+    entry: &JournalEntry,
+    color: bool,
+    precise: bool,
+) -> io::Result<()> {
+    let ts = if precise {
+        format_timestamp_precise(entry.timestamp, entry.timestamp_usec)
     } else {
-        entry.unit.clone()
+        format_timestamp(entry.timestamp)
     };
-    let pid_str = if entry.pid != 0 {
-        format!("[{}]", entry.pid)
+    write!(out, "{ts} ")?;
+    if entry.unit.is_empty() {
+        out.write_all(b"unknown")?;
     } else {
-        String::new()
-    };
-
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{ts} {unit_str}{pid_str}: {c}{}{reset}", entry.message);
-    } else {
-        println!("{ts} {unit_str}{pid_str}: {}", entry.message);
-    }
-}
-
-fn render_short_precise(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
-    let unit_str = if entry.unit.is_empty() {
-        "unknown".to_string()
-    } else {
-        entry.unit.clone()
-    };
-    let pid_str = if entry.pid != 0 {
-        format!("[{}]", entry.pid)
-    } else {
-        String::new()
-    };
-
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{ts} {unit_str}{pid_str}: {c}{}{reset}", entry.message);
-    } else {
-        println!("{ts} {unit_str}{pid_str}: {}", entry.message);
-    }
-}
-
-fn render_verbose(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{c}{ts} [{:<8}] {}{reset}", entry.priority.label(), ts);
-    } else {
-        println!("{ts} [{:<8}]", entry.priority.label());
-    }
-    println!("    _PRIORITY={}", entry.priority as u8);
-    if !entry.unit.is_empty() {
-        println!("    _UNIT={}", entry.unit);
+        out.write_all(&entry.unit)?;
     }
     if entry.pid != 0 {
-        println!("    _PID={}", entry.pid);
+        write!(out, "[{}]", entry.pid)?;
+    }
+    out.write_all(b": ")?;
+    let c = if color {
+        entry.priority.ansi_color()
+    } else {
+        ""
+    };
+    out.write_all(c.as_bytes())?;
+    out.write_all(&entry.message)?;
+    if !c.is_empty() {
+        out.write_all(b"\x1b[0m")?;
+    }
+    out.write_all(b"\n")
+}
+
+fn render_verbose(out: &mut dyn Write, entry: &JournalEntry, color: bool) -> io::Result<()> {
+    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
+    if color {
+        let c = entry.priority.ansi_color();
+        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
+        writeln!(out, "{c}{ts} [{:<8}] {}{reset}", entry.priority.label(), ts)?;
+    } else {
+        writeln!(out, "{ts} [{:<8}]", entry.priority.label())?;
+    }
+    writeln!(out, "    _PRIORITY={}", entry.priority as u8)?;
+    if !entry.unit.is_empty() {
+        out.write_all(b"    _UNIT=")?;
+        out.write_all(&entry.unit)?;
+        out.write_all(b"\n")?;
+    }
+    if entry.pid != 0 {
+        writeln!(out, "    _PID={}", entry.pid)?;
     }
     if !entry.boot_id.is_empty() {
-        println!("    _BOOT_ID={}", entry.boot_id);
+        writeln!(out, "    _BOOT_ID={}", entry.boot_id)?;
     }
-    println!("    MESSAGE={}", entry.message);
+    out.write_all(b"    MESSAGE=")?;
+    out.write_all(&entry.message)?;
+    out.write_all(b"\n")?;
 
     let known_keys: &[&str] = &[
         "ts",
@@ -1544,10 +1296,88 @@ fn render_verbose(entry: &JournalEntry, color: bool) {
     ];
     for (k, v) in &entry.fields {
         if !known_keys.contains(&k.as_str()) {
-            println!("    {k}={v}");
+            write!(out, "    {k}=")?;
+            out.write_all(v.bytes())?;
+            out.write_all(b"\n")?;
         }
     }
-    println!();
+    out.write_all(b"\n")
+}
+
+/// Write `entries` to standard output through [`to_stdout`]. In follow mode
+/// each record is flushed as it is written.
+///
+/// # Errors
+///
+/// A failed write other than `EPIPE`.
+fn render_all<'a>(
+    entries: impl IntoIterator<Item = &'a JournalEntry>,
+    cfg: &Config,
+) -> io::Result<bool> {
+    to_stdout(|out| {
+        for entry in entries {
+            render_entry(out, entry, cfg)?;
+            // In follow mode a record must not wait in the buffer for the
+            // next one; flushing per record costs a short listing nothing
+            // that matters.
+            if cfg.follow {
+                out.flush()?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Write to standard output through `body`, buffered, and flush, stopping at
+/// the first write that fails. `Ok(true)` when it was all written. A reader
+/// that has gone (`EPIPE`) is an ordinary end to a pipeline such as
+/// `journalctl | head`, and is `Ok(false)`, said nothing about.
+///
+/// Every line this program prints goes through here: `println!`, which most
+/// of them used until 2026-10-07, panics when the write fails -- a full disk,
+/// or that reader gone -- so `journalctl --list-fields | head -1` ended in a
+/// panic and status 101.
+///
+/// # Errors
+///
+/// A failed write other than `EPIPE`, for the caller to report.
+fn to_stdout(body: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> io::Result<bool> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    match body(&mut out).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The status of a command whose output went through [`to_stdout`]: its own
+/// `status` when the output was written, or its reader went away; 1, after
+/// `journalctl: write error: REASON`, when it could not be written.
+fn settle(written: io::Result<bool>, status: i32) -> i32 {
+    match written {
+        Ok(_) => status,
+        Err(e) => {
+            write_error(&e);
+            1
+        }
+    }
+}
+
+/// A line on standard error. `eprintln!` panics when standard error cannot
+/// be written (`2>/dev/full`); there is nowhere left to say so, so it is not
+/// said.
+fn say(line: &str) {
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
+/// `journalctl: cannot WHAT PATH: REASON`, the reason in `strerror`'s words.
+fn cannot(what: &str, path: &Path, e: &io::Error) {
+    say(&format!(
+        "journalctl: cannot {what} {}: {}",
+        quotef_os(path),
+        errmsg::strerror(e)
+    ));
 }
 
 // ============================================================================
@@ -1572,25 +1402,30 @@ fn cmd_list_fields() -> i32 {
         field_names.insert("pid".to_string());
     }
 
-    if field_names.is_empty() {
-        println!("No journal entries found.");
-        return i32::from(failed);
-    }
-
-    println!("Known journal fields ({} total):", field_names.len());
-    for name in &field_names {
-        println!("  {name}");
-    }
-    i32::from(failed)
+    let written = to_stdout(|out| {
+        if field_names.is_empty() {
+            return out.write_all(b"No journal entries found.\n");
+        }
+        writeln!(out, "Known journal fields ({} total):", field_names.len())?;
+        for name in &field_names {
+            writeln!(out, "  {name}")?;
+        }
+        Ok(())
+    });
+    settle(written, i32::from(failed))
 }
 
-fn cmd_disk_usage() {
+fn cmd_disk_usage() -> i32 {
     let (file_count, total_bytes) = journal_disk_usage();
-    println!(
-        "Archived and active journals take up {} in {} file(s).",
-        format_size(total_bytes),
-        file_count,
-    );
+    let written = to_stdout(|out| {
+        writeln!(
+            out,
+            "Archived and active journals take up {} in {} file(s).",
+            format_size(total_bytes),
+            file_count,
+        )
+    });
+    settle(written, 0)
 }
 
 fn cmd_vacuum_time(max_age_secs: u64) -> i32 {
@@ -1598,15 +1433,21 @@ fn cmd_vacuum_time(max_age_secs: u64) -> i32 {
     let (files, unreadable) = discover();
     let vacuumed = vacuum_time(&files, cutoff, &is_rotated);
 
-    println!(
-        "Vacuumed by time: removed {} entries, kept {} entries.",
-        vacuumed.removed, vacuumed.kept
-    );
+    let written = to_stdout(|out| {
+        writeln!(
+            out,
+            "Vacuumed by time: removed {} entries, kept {} entries.",
+            vacuumed.removed, vacuumed.kept
+        )
+    });
     for (path, e) in &unreadable {
-        eprintln!("journalctl: cannot read {}: {e}", quotef_os(path));
+        cannot("read", path, e);
     }
     vacuumed.report();
-    i32::from(!vacuumed.failures.is_empty() || !unreadable.is_empty())
+    settle(
+        written,
+        i32::from(!vacuumed.failures.is_empty() || !unreadable.is_empty()),
+    )
 }
 
 /// Why one file of a vacuum was left as it was.
@@ -1639,7 +1480,7 @@ impl Vacuumed {
                 VacuumFailure::Read(e) => ("read", e),
                 VacuumFailure::Rewrite(e) => ("rewrite", e),
             };
-            eprintln!("journalctl: cannot {what} {}: {e}", quotef_os(path));
+            cannot(what, path, e);
         }
     }
 }
@@ -1668,7 +1509,7 @@ fn vacuum_file(
     let content = held.read_all().map_err(VacuumFailure::Read)?;
     let mut kept: Vec<&[u8]> = Vec::new();
     let mut removed = 0usize;
-    for line in lines_of(&content) {
+    for line in journalio::lines(&content) {
         if keep(line) {
             kept.push(line);
         } else {
@@ -1704,14 +1545,6 @@ fn vacuum_time(files: &[PathBuf], cutoff: u64, archive: &dyn Fn(&Path) -> bool) 
     vacuumed
 }
 
-/// The lines of a log file's bytes: split on newlines, with a final newline
-/// ending the last line rather than starting an empty one.
-fn lines_of(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    let empty = bytes.is_empty();
-    body.split(|&b| b == b'\n').filter(move |_| !empty)
-}
-
 /// Lines back into a file's bytes, each ended by a newline.
 fn joined_lines(lines: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1722,35 +1555,41 @@ fn joined_lines(lines: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-fn cmd_vacuum_size(max_bytes: u64) {
+fn cmd_vacuum_size(max_bytes: u64) -> i32 {
     let files = discover_journal_files();
     let (_, current_total) = journal_disk_usage();
 
     if current_total <= max_bytes {
-        println!(
-            "Journal size ({}) is already within limit ({}).",
-            format_size(current_total),
-            format_size(max_bytes)
-        );
-        return;
+        let written = to_stdout(|out| {
+            writeln!(
+                out,
+                "Journal size ({}) is already within limit ({}).",
+                format_size(current_total),
+                format_size(max_bytes)
+            )
+        });
+        return settle(written, 0);
     }
 
-    let vacuumed = vacuum_size(&files, current_total - max_bytes, &is_rotated);
+    let vacuumed = vacuum_size(&files, current_total.saturating_sub(max_bytes), &is_rotated);
 
     let (_, new_total) = journal_disk_usage();
-    println!(
-        "Vacuumed by size: removed {} entries. Journal now uses {}.",
-        vacuumed.removed,
-        format_size(new_total)
-    );
+    let written = to_stdout(|out| {
+        writeln!(
+            out,
+            "Vacuumed by size: removed {} entries. Journal now uses {}.",
+            vacuumed.removed,
+            format_size(new_total)
+        )
+    });
     vacuumed.report();
     if !vacuumed.failures.is_empty() {
-        eprintln!(
+        say(&format!(
             "journalctl: {} journal file(s) could not be read or truncated",
             vacuumed.failures.len()
-        );
-        process::exit(1);
+        ));
     }
+    settle(written, i32::from(!vacuumed.failures.is_empty()))
 }
 
 /// `--vacuum-size`: lines dropped from the front of `files` -- the oldest
@@ -1793,53 +1632,10 @@ fn vacuum_size(
 // Follow mode
 // ============================================================================
 
-/// Where `-f` has read a file up to, and the unterminated line it is waiting
-/// to see finished.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Tail {
-    /// Bytes of the file already consumed.
-    offset: u64,
-    /// The start of a line whose newline has not been written yet.
-    partial: Vec<u8>,
-}
-
-impl Tail {
-    /// Take the bytes past `offset` in a file that is now `len` long, and
-    /// return the complete lines they finish.
-    ///
-    /// A file SHORTER than the offset was truncated or replaced (rotation),
-    /// and is read again from the start: the records written to it since are
-    /// new, and skipping to the old offset would lose them -- which this did
-    /// before 2026-09-26.
-    fn advance(&mut self, file: &Path, len: u64) -> io::Result<Vec<Vec<u8>>> {
-        if len < self.offset {
-            *self = Tail::default();
-        }
-        if len == self.offset {
-            return Ok(Vec::new());
-        }
-        let mut f = fs::File::open(file)?;
-        f.seek(SeekFrom::Start(self.offset))?;
-        let mut fresh = Vec::new();
-        f.read_to_end(&mut fresh)?;
-        self.offset = self.offset.saturating_add(len_u64(&fresh));
-        self.partial.extend_from_slice(&fresh);
-        let (complete, unterminated) = split_complete(&self.partial);
-        let lines: Vec<Vec<u8>> = if complete.is_empty() && unterminated.len() == self.partial.len()
-        {
-            Vec::new()
-        } else {
-            complete
-                .split(|&b| b == b'\n')
-                .map(<[u8]>::to_vec)
-                .collect()
-        };
-        self.partial = unterminated.to_vec();
-        Ok(lines)
-    }
-}
-
-fn cmd_follow(cfg: &Config) {
+/// `-f`: the last records, then each new one as it is written, until the
+/// output cannot take more -- its reader gone (status 0) or a write failing
+/// (status 1).
+fn cmd_follow(cfg: &Config) -> i32 {
     // Print existing entries first (last N if -n specified, else last 10).
     // The offsets `-f` continues from come out of the SAME read: taking file
     // sizes afterwards, as this did, lost every record appended in between.
@@ -1850,60 +1646,74 @@ fn cmd_follow(cfg: &Config) {
     let filtered = apply_filters(entries, cfg);
 
     let display_entries = if filtered.len() > num {
-        &filtered[filtered.len() - num..]
+        filtered
+            .get(filtered.len().saturating_sub(num)..)
+            .unwrap_or_default()
     } else {
         &filtered
     };
 
-    for entry in display_entries {
-        render_entry(entry, cfg);
+    match render_all(display_entries, cfg) {
+        Ok(true) => {}
+        // The reader has gone: nothing left to follow for.
+        Ok(false) => return 0,
+        Err(e) => {
+            write_error(&e);
+            return 1;
+        }
     }
 
-    let mut tails = journal.tails;
+    let mut follow = journal.follow;
 
     // Poll for new content. Only the bytes past each file's offset are read
     // -- this used to re-read every file whole, twice a second, and then
     // slice the `String` at the old length, which panicked whenever that
-    // length fell inside a multi-byte character.
+    // length fell inside a multi-byte character. Each file is known by its
+    // identity, not its name: a rotation renames them all, and the place
+    // reached in each goes with it (journalio's `Follow`).
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let (current_files, _) = discover();
         for file in &current_files {
-            let len = match fs::metadata(file) {
-                Ok(m) => m.len(),
-                // Rotated away between discovery and now; its successor is
-                // found on the next round.
-                Err(_) => continue,
-            };
             // A file first seen now is read from its start.
-            let tail = tails.entry(file.clone()).or_default();
-            let lines = match tail.advance(file, len) {
-                Ok(lines) => lines,
+            let bytes = match follow.read(file, true) {
+                Ok(Some(bytes)) => bytes,
+                // Rotated away between discovery and now; it is found under
+                // its new name next round.
+                Ok(None) => continue,
                 Err(e) => {
-                    eprintln!("journalctl: cannot read {}: {e}", quotef_os(file));
+                    cannot("read", file, &e);
                     continue;
                 }
             };
-            for line in &lines {
-                if let Some(entry) = record_of(line) {
-                    // Apply filters except reverse and num_entries.
-                    if entry_passes_filters(&entry, cfg) {
-                        render_entry(&entry, cfg);
-                    }
+            // Apply filters except reverse and num_entries.
+            let fresh: Vec<JournalEntry> = journalio::lines(&bytes)
+                .filter_map(record_of)
+                .filter(|entry| entry_passes_filters(entry, cfg))
+                .collect();
+            match render_all(&fresh, cfg) {
+                Ok(true) => {}
+                Ok(false) => return 0,
+                Err(e) => {
+                    write_error(&e);
+                    return 1;
                 }
             }
         }
+        // A file not found this round -- vacuumed away, or past the last
+        // rotation -- is forgotten, so a new file given its identity is read
+        // from its start.
+        follow.end_round();
     }
 }
 
 /// Check if a single entry passes the configured filters (for follow mode).
 fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
-    if let Some(ref unit) = cfg.unit_filter {
-        let u_lower = unit.to_ascii_lowercase();
-        if !entry.unit.to_ascii_lowercase().contains(&u_lower) {
-            return false;
-        }
+    if let Some(ref unit) = cfg.unit_filter
+        && !unit_matches(&entry.unit, unit)
+    {
+        return false;
     }
     if let Some(max_prio) = cfg.priority_filter
         && (entry.priority as u8) > (max_prio as u8)
@@ -1920,11 +1730,8 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
     {
         return false;
     }
-    if cfg.dmesg {
-        let u = entry.unit.to_ascii_lowercase();
-        if u != "kernel" && u != "kern" && u != "dmesg" {
-            return false;
-        }
+    if cfg.dmesg && !is_kernel_unit(&entry.unit) {
+        return false;
     }
     if let Some(ref pattern) = cfg.grep_pattern
         && !pattern_matches(&entry.message, pattern)
@@ -1938,77 +1745,85 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
 // Help
 // ============================================================================
 
-fn print_usage() {
-    println!("Slate OS Journal Log Viewer v0.1.0");
-    println!();
-    println!("Query and display messages from the journal.");
-    println!();
-    println!("USAGE:");
-    println!("  journalctl [OPTIONS]");
-    println!();
-    println!("OPTIONS:");
-    println!("  -u, --unit <UNIT>           Show entries from this unit/service");
-    println!("  -p, --priority <LEVEL>      Show entries at this priority or higher");
-    println!("      --since <DATETIME>      Show entries since datetime");
-    println!("      --until <DATETIME>      Show entries until datetime");
-    println!("  -f, --follow                Follow/tail mode");
-    println!("  -r, --reverse               Show newest entries first");
-    println!("  -o, --output <FORMAT>       Output format:");
-    println!("                                short, short-precise, json,");
-    println!("                                json-pretty, cat, verbose");
-    println!("  -b, --boot [ID]             Show entries from boot (latest if no ID)");
-    println!("  -k, --dmesg                 Show kernel messages only");
-    println!("  -n, --lines <N>             Show last N entries");
-    println!("      --grep <PATTERN>        Filter messages by substring");
-    println!("      --no-color              Disable colored output");
-    println!("      --no-pager              Do not pipe through pager");
-    println!();
-    println!("INFORMATIONAL:");
-    println!("      --list-fields           List all known field names");
-    println!("      --disk-usage            Show disk usage of journal files");
-    println!();
-    println!("MAINTENANCE:");
-    println!("      --vacuum-time <DUR>     Remove entries older than duration");
-    println!("                                (e.g. 2d, 1w, 3h, 1M, 1y)");
-    println!("      --vacuum-size <SIZE>    Shrink journal to at most size");
-    println!("                                (e.g. 100M, 1G, 500K)");
-    println!();
-    println!("DATETIME FORMATS:");
-    println!("  YYYY-MM-DD HH:MM:SS        Absolute datetime");
-    println!("  YYYY-MM-DD                  Date only (midnight)");
-    println!("  today / yesterday / now     Relative names");
-    println!("  -Nd / -Nh / -Nm / -Ns      Relative offset");
-    println!();
-    println!("PRIORITY LEVELS (highest to lowest):");
-    println!("  emerg(0) alert(1) crit(2) err(3) warning(4) notice(5) info(6) debug(7)");
-    println!();
-    println!("EXAMPLES:");
-    println!("  journalctl -u net.dhcp              Show DHCP service logs");
-    println!("  journalctl -p err                   Show errors and above");
-    println!("  journalctl --since yesterday        Show last 24h");
-    println!("  journalctl -k -b                    Kernel messages, current boot");
-    println!("  journalctl -f -u kernel             Follow kernel messages");
-    println!("  journalctl -o json-pretty -n 5      Last 5 entries as JSON");
-    println!("  journalctl --vacuum-time 2w         Remove entries older than 2 weeks");
+/// `--help`'s text, a literal to a line: `scripts/check-help-vs-parser.py`
+/// reads each option line on its own.
+const USAGE: &[&str] = &[
+    "Slate OS Journal Log Viewer v0.1.0",
+    "",
+    "Query and display messages from the journal.",
+    "",
+    "USAGE:",
+    "  journalctl [OPTIONS]",
+    "",
+    "OPTIONS:",
+    "  -u, --unit <UNIT>           Show entries from this unit/service",
+    "  -p, --priority <LEVEL>      Show entries at this priority or higher",
+    "      --since <DATETIME>      Show entries since datetime",
+    "      --until <DATETIME>      Show entries until datetime",
+    "  -f, --follow                Follow/tail mode",
+    "  -r, --reverse               Show newest entries first",
+    "  -o, --output <FORMAT>       Output format:",
+    "                                short, short-precise, json,",
+    "                                json-pretty, cat, verbose",
+    "  -b, --boot [ID]             Show entries from boot (latest if no ID)",
+    "  -k, --dmesg                 Show kernel messages only",
+    "  -n, --lines <N>             Show last N entries",
+    "      --grep <PATTERN>        Filter messages by substring",
+    "      --no-color              Disable colored output",
+    "      --no-pager              Do not pipe through pager",
+    "",
+    "INFORMATIONAL:",
+    "      --list-fields           List all known field names",
+    "      --disk-usage            Show disk usage of journal files",
+    "",
+    "MAINTENANCE:",
+    "      --vacuum-time <DUR>     Remove entries older than duration",
+    "                                (e.g. 2d, 1w, 3h, 1M, 1y)",
+    "      --vacuum-size <SIZE>    Shrink journal to at most size",
+    "                                (e.g. 100M, 1G, 500K)",
+    "",
+    "DATETIME FORMATS:",
+    "  YYYY-MM-DD HH:MM:SS        Absolute datetime",
+    "  YYYY-MM-DD                  Date only (midnight)",
+    "  today / yesterday / now     Relative names",
+    "  -Nd / -Nh / -Nm / -Ns      Relative offset",
+    "",
+    "PRIORITY LEVELS (highest to lowest):",
+    "  emerg(0) alert(1) crit(2) err(3) warning(4) notice(5) info(6) debug(7)",
+    "",
+    "EXAMPLES:",
+    "  journalctl -u net.dhcp              Show DHCP service logs",
+    "  journalctl -p err                   Show errors and above",
+    "  journalctl --since yesterday        Show last 24h",
+    "  journalctl -k -b                    Kernel messages, current boot",
+    "  journalctl -f -u kernel             Follow kernel messages",
+    "  journalctl -o json-pretty -n 5      Last 5 entries as JSON",
+    "  journalctl --vacuum-time 2w         Remove entries older than 2 weeks",
+];
+
+fn print_usage(out: &mut dyn Write) -> io::Result<()> {
+    for line in USAGE {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
 }
 
 // ============================================================================
 // Application logic
 // ============================================================================
 
-fn run(args: &[String]) -> i32 {
+fn run<S: AsRef<OsStr>>(args: &[S]) -> i32 {
     let cfg = match parse_args(args) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("journalctl: {e}");
-            eprintln!("Try 'journalctl --help' for usage.");
+            say(&format!("journalctl: {e}"));
+            say("Try 'journalctl --help' for usage.");
             return 1;
         }
     };
 
     if cfg.show_help {
-        print_usage();
-        return 0;
+        return settle(to_stdout(print_usage), 0);
     }
 
     // Dispatch action commands.
@@ -2016,21 +1831,18 @@ fn run(args: &[String]) -> i32 {
         return cmd_list_fields();
     }
     if cfg.disk_usage {
-        cmd_disk_usage();
-        return 0;
+        return cmd_disk_usage();
     }
     if let Some(secs) = cfg.vacuum_time {
         return cmd_vacuum_time(secs);
     }
     if let Some(bytes) = cfg.vacuum_size {
-        cmd_vacuum_size(bytes);
-        return 0;
+        return cmd_vacuum_size(bytes);
     }
 
-    // Follow mode is special (never returns).
+    // Follow mode: returns only once its output cannot take more.
     if cfg.follow {
-        cmd_follow(&cfg);
-        return 0; // unreachable, but satisfies the type
+        return cmd_follow(&cfg);
     }
 
     // Normal display mode.
@@ -2038,22 +1850,23 @@ fn run(args: &[String]) -> i32 {
     let failed = report_journal(&journal);
     let entries = &journal.entries;
     if entries.is_empty() {
-        eprintln!("No journal entries found.");
-        eprintln!("(Looked in {} and fallback paths)", JOURNAL_DIR);
+        say("No journal entries found.");
+        say(&format!("(Looked in {JOURNAL_DIR} and fallback paths)"));
         return 1;
     }
 
     let filtered = apply_filters(entries, &cfg);
     if filtered.is_empty() {
-        eprintln!("No entries match the specified filters.");
+        say("No entries match the specified filters.");
         return i32::from(failed);
     }
 
-    for entry in &filtered {
-        render_entry(entry, &cfg);
-    }
+    settle(render_all(&filtered, &cfg), i32::from(failed))
+}
 
-    i32::from(failed)
+/// `journalctl: write error: REASON`, for output that could not be written.
+fn write_error(e: &io::Error) {
+    say(&format!("journalctl: write error: {}", errmsg::strerror(e)));
 }
 
 // ============================================================================
@@ -2063,7 +1876,9 @@ fn run(args: &[String]) -> i32 {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = std::env::args().collect();
+    // `args_os`: `std::env::args()` panics on an argument that is not UTF-8,
+    // which is a word this program can be handed (a unit name, a pattern).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     run(&args)
 }
 
@@ -2075,6 +1890,14 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 fn main() {}
 
 #[cfg(test)]
+// CLAUDE.md allows the defensive lints inside `#[cfg(test)]`, where panicking
+// on bad data is the point.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -2090,26 +1913,62 @@ mod tests {
     ) -> JournalEntry {
         let priority = Priority::from_name(level).unwrap_or(Priority::Info);
         let mut fields = BTreeMap::new();
-        fields.insert("ts".to_string(), ts.to_string());
-        fields.insert("level".to_string(), level.to_string());
-        fields.insert("service".to_string(), unit.to_string());
-        fields.insert("msg".to_string(), msg.to_string());
+        fields.insert("ts".to_string(), Value::Scalar(ts.to_string()));
+        fields.insert("level".to_string(), Value::Text(level.to_string()));
+        fields.insert("service".to_string(), Value::Text(unit.to_string()));
+        fields.insert("msg".to_string(), Value::Text(msg.to_string()));
         if !boot_id.is_empty() {
-            fields.insert("boot_id".to_string(), boot_id.to_string());
+            fields.insert("boot_id".to_string(), Value::Text(boot_id.to_string()));
         }
         if pid != 0 {
-            fields.insert("pid".to_string(), pid.to_string());
+            fields.insert("pid".to_string(), Value::Scalar(pid.to_string()));
         }
         JournalEntry {
             timestamp: ts,
             timestamp_usec: 0,
             priority,
-            unit: unit.to_string(),
-            message: msg.to_string(),
+            unit: unit.as_bytes().to_vec(),
+            message: msg.as_bytes().to_vec(),
             boot_id: boot_id.to_string(),
             pid,
             fields,
         }
+    }
+
+    /// A record whose message is not text: read as its bytes, shown as
+    /// them, and written back as the same array (design-decisions §1063).
+    #[test]
+    fn a_message_that_is_not_text_is_its_bytes_both_ways() {
+        let line =
+            r#"{"ts":5,"level":"notice","service":"t","msg":[98,97,100,32,255],"facility":"user"}"#;
+        let entry = JournalEntry::from_json_line(line).unwrap();
+        assert_eq!(entry.message, b"bad \xff");
+        assert_eq!(entry.unit, b"t");
+        assert!(entry.to_json().contains(r#""msg":[98,97,100,32,255]"#));
+        let mut out = Vec::new();
+        let mut cfg = Config::new();
+        cfg.color = false;
+        render_entry(&mut out, &entry, &cfg).unwrap();
+        assert!(out.ends_with(b": bad \xff\n"), "{out:?}");
+        // An array that is not bytes is kept as it was, not half-read.
+        let odd = r#"{"ts":1,"msg":"m","list":[1,2,300]}"#;
+        let entry = JournalEntry::from_json_line(odd).unwrap();
+        assert_eq!(
+            entry.fields.get("list"),
+            Some(&Value::Scalar("[1,2,300]".into()))
+        );
+        assert_eq!(entry.message, b"m");
+    }
+
+    /// A grep or a unit filter looks at the bytes, letters matched in
+    /// either case.
+    #[test]
+    fn filters_match_bytes() {
+        assert!(pattern_matches(b"bad \xff byte", "BYTE"));
+        assert!(pattern_matches(b"\xff", ""));
+        assert!(!pattern_matches(b"abc", "abcd"));
+        assert!(is_kernel_unit(b"Kernel"));
+        assert!(unit_matches(b"net.DHCP", "dhcp"));
     }
 
     fn sample_entries() -> Vec<JournalEntry> {
@@ -2244,61 +2103,8 @@ mod tests {
         assert!(Priority::Info.ansi_color().is_empty());
     }
 
-    // =========================================================================
-    // JSON parsing tests
-    // =========================================================================
-
-    #[test]
-    fn test_parse_json_object_basic() {
-        let json = r#"{"ts":1000,"level":"info","msg":"hello"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("ts").unwrap(), "1000");
-        assert_eq!(map.get("level").unwrap(), "info");
-        assert_eq!(map.get("msg").unwrap(), "hello");
-    }
-
-    #[test]
-    fn test_parse_json_object_empty() {
-        let map = parse_json_object("{}").unwrap();
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_parse_json_object_not_json() {
-        assert!(parse_json_object("not json").is_none());
-        assert!(parse_json_object("[1,2,3]").is_none());
-        assert!(parse_json_object("").is_none());
-    }
-
-    #[test]
-    fn test_parse_json_object_escaped_strings() {
-        let json = r#"{"msg":"line1\nline2","path":"c:\\temp"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("msg").unwrap(), "line1\nline2");
-        assert_eq!(map.get("path").unwrap(), "c:\\temp");
-    }
-
-    #[test]
-    fn test_parse_json_string_with_unicode() {
-        let json = r#"{"msg":"hello \u0041 world"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("msg").unwrap(), "hello A world");
-    }
-
-    #[test]
-    fn test_json_escape_basic() {
-        assert_eq!(json_escape("hello"), "hello");
-        assert_eq!(json_escape("a\"b"), "a\\\"b");
-        assert_eq!(json_escape("a\\b"), "a\\\\b");
-        assert_eq!(json_escape("a\nb"), "a\\nb");
-        assert_eq!(json_escape("a\tb"), "a\\tb");
-    }
-
-    #[test]
-    fn test_json_escape_control_chars() {
-        assert_eq!(json_escape("\x01"), "\\u0001");
-        assert_eq!(json_escape("\x1f"), "\\u001f");
-    }
+    // The parser's own tests -- JSON objects, strings, escapes, byte arrays
+    // -- are journalrec's, with the parser.
 
     // =========================================================================
     // JournalEntry parsing tests
@@ -2310,8 +2116,8 @@ mod tests {
         let entry = JournalEntry::from_json_line(&line).unwrap();
         assert_eq!(entry.timestamp, 1716000000);
         assert_eq!(entry.priority, Priority::Info);
-        assert_eq!(entry.unit, "net.dhcp");
-        assert_eq!(entry.message, "lease renewed");
+        assert_eq!(entry.unit, b"net.dhcp");
+        assert_eq!(entry.message, b"lease renewed");
         assert_eq!(entry.boot_id, "abc");
         assert_eq!(entry.pid, 42);
     }
@@ -2337,7 +2143,10 @@ mod tests {
     fn test_entry_from_json_line_extra_fields() {
         let line = r#"{"ts":100,"level":"info","service":"x","msg":"m","custom_key":"custom_val"}"#;
         let entry = JournalEntry::from_json_line(line).unwrap();
-        assert_eq!(entry.fields.get("custom_key").unwrap(), "custom_val");
+        assert_eq!(
+            entry.fields.get("custom_key").and_then(Value::text),
+            Some("custom_val")
+        );
     }
 
     #[test]
@@ -2347,8 +2156,8 @@ mod tests {
         let entry = JournalEntry::from_json_line(line).unwrap();
         assert_eq!(entry.timestamp, 1716000000);
         assert_eq!(entry.priority, Priority::Error);
-        assert_eq!(entry.unit, "sshd");
-        assert_eq!(entry.message, "auth failed");
+        assert_eq!(entry.unit, b"sshd");
+        assert_eq!(entry.message, b"auth failed");
         assert_eq!(entry.boot_id, "xyz");
         assert_eq!(entry.pid, 123);
     }
@@ -2361,8 +2170,8 @@ mod tests {
         let reparsed = JournalEntry::from_json_line(&serialized).unwrap();
         assert_eq!(reparsed.timestamp, 5000);
         assert_eq!(reparsed.priority, Priority::Warning);
-        assert_eq!(reparsed.unit, "net.tcp");
-        assert_eq!(reparsed.message, "retransmit");
+        assert_eq!(reparsed.unit, b"net.tcp");
+        assert_eq!(reparsed.message, b"retransmit");
         assert_eq!(reparsed.boot_id, "boot99");
         assert_eq!(reparsed.pid, 777);
     }
@@ -2536,17 +2345,17 @@ mod tests {
     fn test_filter_by_unit() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.unit_filter = Some("net.dhcp".to_string());
+        cfg.unit_filter = Some("net.dhcp".into());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|e| e.unit.contains("net.dhcp")));
+        assert!(filtered.iter().all(|e| unit_matches(&e.unit, "net.dhcp")));
     }
 
     #[test]
     fn test_filter_by_unit_case_insensitive() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.unit_filter = Some("NET.DHCP".to_string());
+        cfg.unit_filter = Some("NET.DHCP".into());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
     }
@@ -2596,7 +2405,7 @@ mod tests {
     fn test_filter_by_boot() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.boot_filter = Some("boot2".to_string());
+        cfg.boot_filter = Some("boot2".into());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|e| e.boot_id == "boot2"));
@@ -2606,7 +2415,7 @@ mod tests {
     fn test_filter_by_boot_latest() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.boot_filter = Some(String::new()); // empty = latest
+        cfg.boot_filter = Some(Vec::new()); // empty = latest
         let filtered = apply_filters(&entries, &cfg);
         // Latest boot is "boot2".
         assert!(filtered.iter().all(|e| e.boot_id == "boot2"));
@@ -2620,7 +2429,7 @@ mod tests {
         let filtered = apply_filters(&entries, &cfg);
         assert!(filtered.iter().all(|e| {
             let u = e.unit.to_ascii_lowercase();
-            u == "kernel" || u == "kern" || u == "dmesg"
+            u == b"kernel" || u == b"kern" || u == b"dmesg"
         }));
     }
 
@@ -2628,7 +2437,7 @@ mod tests {
     fn test_filter_grep() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.grep_pattern = Some("lease".to_string());
+        cfg.grep_pattern = Some("lease".into());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
     }
@@ -2637,7 +2446,7 @@ mod tests {
     fn test_filter_grep_case_insensitive() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.grep_pattern = Some("LEASE".to_string());
+        cfg.grep_pattern = Some("LEASE".into());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
     }
@@ -2685,7 +2494,7 @@ mod tests {
         let entries = sample_entries();
         let mut cfg = Config::new();
         cfg.priority_filter = Some(Priority::Error);
-        cfg.boot_filter = Some("boot1".to_string());
+        cfg.boot_filter = Some("boot1".into());
         let filtered = apply_filters(&entries, &cfg);
         // boot1 entries with priority <= Error: emerg, alert, crit, err.
         assert_eq!(filtered.len(), 4);
@@ -2695,7 +2504,7 @@ mod tests {
     fn test_filter_no_matches() {
         let entries = sample_entries();
         let mut cfg = Config::new();
-        cfg.unit_filter = Some("nonexistent.service".to_string());
+        cfg.unit_filter = Some("nonexistent.service".into());
         let filtered = apply_filters(&entries, &cfg);
         assert!(filtered.is_empty());
     }
@@ -2706,15 +2515,15 @@ mod tests {
 
     #[test]
     fn test_pattern_matches_basic() {
-        assert!(pattern_matches("hello world", "hello"));
-        assert!(pattern_matches("hello world", "world"));
-        assert!(!pattern_matches("hello world", "xyz"));
+        assert!(pattern_matches(b"hello world", "hello"));
+        assert!(pattern_matches(b"hello world", "world"));
+        assert!(!pattern_matches(b"hello world", "xyz"));
     }
 
     #[test]
     fn test_pattern_matches_case_insensitive() {
-        assert!(pattern_matches("Hello World", "hello"));
-        assert!(pattern_matches("hello", "HELLO"));
+        assert!(pattern_matches(b"Hello World", "hello"));
+        assert!(pattern_matches(b"hello", "HELLO"));
     }
 
     // =========================================================================
@@ -2770,7 +2579,7 @@ mod tests {
             "sshd".to_string(),
         ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.unit_filter.as_deref(), Some("sshd"));
+        assert_eq!(cfg.unit_filter.as_deref(), Some(&b"sshd"[..]));
     }
 
     #[test]
@@ -2825,7 +2634,7 @@ mod tests {
             "error".to_string(),
         ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.grep_pattern.as_deref(), Some("error"));
+        assert_eq!(cfg.grep_pattern.as_deref(), Some(&b"error"[..]));
     }
 
     #[test]
@@ -2847,14 +2656,14 @@ mod tests {
             "boot42".to_string(),
         ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.boot_filter, Some("boot42".to_string()));
+        assert_eq!(cfg.boot_filter, Some(b"boot42".to_vec()));
     }
 
     #[test]
     fn test_parse_args_boot_no_id() {
         let args = vec!["journalctl".to_string(), "-b".to_string()];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.boot_filter, Some(String::new()));
+        assert_eq!(cfg.boot_filter, Some(Vec::new()));
     }
 
     #[test]
@@ -2939,6 +2748,80 @@ mod tests {
         assert!(parse_args(&args).is_err());
     }
 
+    /// A value is quoted in the message when it needs to be -- a newline in
+    /// it would otherwise forge a line of the diagnostic -- and left bare
+    /// when it does not.
+    #[test]
+    fn a_rejected_value_is_quoted_when_it_must_be() {
+        let err = |words: &[&str]| parse_args(words).err().unwrap();
+        assert_eq!(err(&["j", "--bogus"]), "unknown option: --bogus");
+        assert_eq!(err(&["j", "a\nb"]), "unknown option: 'a'$'\\n''b'");
+        assert_eq!(err(&["j", "-p", "x y"]), "unknown priority: 'x y'");
+        assert_eq!(err(&["j", "-n", "-1"]), "invalid count: -1");
+        assert_eq!(
+            err(&["j", "--since", "2024-13-01", "10:00"]),
+            "cannot parse datetime: '2024-13-01 10:00'"
+        );
+        assert_eq!(err(&["j", "--until"]), "--until requires a datetime");
+    }
+
+    /// Words that are not text, which `std::env::args()` panicked on: taken
+    /// as bytes where a record's bytes are matched, refused where a value
+    /// must be text.
+    #[cfg(unix)]
+    #[test]
+    fn words_that_are_not_text_are_bytes_or_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let os = |b: &[u8]| OsStr::from_bytes(b).to_os_string();
+        let args = [
+            os(b"j"),
+            os(b"-u"),
+            os(b"u\xff"),
+            os(b"--grep"),
+            os(b"\xfe"),
+            os(b"-b"),
+            os(b"\xfd"),
+        ];
+        let cfg = parse_args(&args).unwrap();
+        assert_eq!(cfg.unit_filter.as_deref(), Some(&b"u\xff"[..]));
+        assert_eq!(cfg.grep_pattern.as_deref(), Some(&b"\xfe"[..]));
+        assert_eq!(cfg.boot_filter.as_deref(), Some(&b"\xfd"[..]));
+        for option in [
+            &b"-p"[..],
+            b"-o",
+            b"-n",
+            b"--since",
+            b"--vacuum-time",
+            b"--vacuum-size",
+        ] {
+            let args = [os(b"j"), os(option), os(b"\xff")];
+            let e = parse_args(&args).err().unwrap();
+            // GNU's shell-escape quoting of a lone byte that is not text.
+            assert!(e.ends_with(": ''$'\\377'"), "{e}");
+        }
+        assert!(parse_args(&[os(b"j"), os(b"--\xff")]).is_err());
+    }
+
+    /// A command's status after its output: its own when the output was
+    /// written or its reader went away, 1 when a write failed.
+    #[test]
+    fn a_failed_write_is_status_one() {
+        assert_eq!(settle(Ok(true), 0), 0);
+        assert_eq!(settle(Ok(false), 3), 3);
+        let full = io::Error::other("no space");
+        assert_eq!(settle(Err(full), 0), 1);
+    }
+
+    #[test]
+    fn the_usage_is_written_a_line_at_a_time() {
+        let mut out = Vec::new();
+        print_usage(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("Slate OS Journal Log Viewer"));
+        assert_eq!(text.lines().count(), USAGE.len());
+        assert!(text.contains("  -u, --unit <UNIT>"));
+    }
+
     // =========================================================================
     // Entry passes filters tests (follow mode helper)
     // =========================================================================
@@ -2954,7 +2837,7 @@ mod tests {
     fn test_entry_passes_filters_unit_fail() {
         let entry = make_entry(1000, "info", "net.dhcp", "lease renewed", "b1", 100);
         let mut cfg = Config::new();
-        cfg.unit_filter = Some("sshd".to_string());
+        cfg.unit_filter = Some("sshd".into());
         assert!(!entry_passes_filters(&entry, &cfg));
     }
 
@@ -2994,7 +2877,7 @@ mod tests {
     fn test_entry_passes_filters_grep_fail() {
         let entry = make_entry(1000, "info", "net", "hello world", "b1", 0);
         let mut cfg = Config::new();
-        cfg.grep_pattern = Some("foobar".to_string());
+        cfg.grep_pattern = Some("foobar".into());
         assert!(!entry_passes_filters(&entry, &cfg));
     }
 
@@ -3022,23 +2905,72 @@ mod tests {
     }
 
     // =========================================================================
-    // Leap year / date helpers
+    // Dates (the calendar itself is journalrec::Utc's, tested there)
     // =========================================================================
 
+    /// A date that is not a real one, or is before any record, is refused
+    /// rather than rolled over; a time field that does not parse is refused
+    /// rather than taken as 0.
     #[test]
-    fn test_is_leap_year() {
-        assert!(is_leap_year(2000));
-        assert!(is_leap_year(2024));
-        assert!(!is_leap_year(1900));
-        assert!(!is_leap_year(2023));
+    fn a_date_that_is_not_one_is_refused() {
+        for bad in [
+            "2024-02-30",
+            "2023-02-29",
+            "1969-12-31",
+            "1960-06-01",
+            "2024-01-01 25:00",
+            "2024-01-01 10:60",
+            "2024-01-01 10:00:60",
+            "2024-01-01 10:xx",
+            "2024-01-01 1:2:3:4",
+            "2024-01",
+            "2024-01-01-01",
+        ] {
+            assert_eq!(parse_datetime(bad), None, "{bad}");
+        }
+        assert_eq!(parse_datetime("2024-02-29"), Some(1_709_164_800));
+        assert_eq!(
+            parse_datetime("2024-02-29 12"),
+            Some(1_709_164_800 + 12 * 3600)
+        );
+        assert_eq!(
+            parse_datetime("2024-02-29 12:30"),
+            Some(1_709_164_800 + 12 * 3600 + 1800)
+        );
     }
 
+    /// A size or a duration too large to count is refused. Multiplied out
+    /// unchecked, `--vacuum-size 17179869184G` was 2^64 bytes, wrapped round
+    /// to 0, and removed the whole journal; a multi-byte unit panicked.
     #[test]
-    fn test_days_in_month() {
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2023, 2), 28);
-        assert_eq!(days_in_month(2024, 1), 31);
-        assert_eq!(days_in_month(2024, 4), 30);
+    fn a_vacuum_limit_too_large_to_count_is_refused() {
+        assert_eq!(parse_size_bytes("17179869184G"), None);
+        assert_eq!(
+            parse_size_bytes("17179869183G"),
+            Some(17_179_869_183 * 1_073_741_824)
+        );
+        assert_eq!(parse_duration_secs("600000000000y"), None);
+        assert_eq!(parse_duration_secs("2d"), Some(172_800));
+        assert_eq!(parse_duration_secs("1w"), Some(604_800));
+        assert_eq!(parse_duration_secs("5\u{e9}"), None);
+        assert_eq!(parse_size_bytes("5\u{e9}"), None);
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_size_bytes(""), None);
+        assert_eq!(parse_size_bytes("100"), Some(100));
+        assert_eq!(parse_duration_secs("120"), Some(120));
+        assert_eq!(parse_size_bytes("1x"), None);
+    }
+
+    /// What used to hang, overflow or panic is answered at once.
+    #[test]
+    fn extreme_dates_are_answered_at_once() {
+        assert_eq!(parse_datetime("9223372036854775807-01-01"), None);
+        assert_eq!(parse_datetime("-18446744073709551615d"), None);
+        assert_eq!(parse_datetime("-99999999999999999999d"), None);
+        assert_eq!(parse_datetime("-5\u{e9}"), None);
+        assert_eq!(parse_datetime("-d"), None);
+        assert_eq!(format_timestamp(u64::MAX), "584554051223-11-09 07:00:15");
+        assert_eq!(format_timestamp(1_716_000_000), "2024-05-18 02:40:00");
     }
 
     // =========================================================================
@@ -3106,64 +3038,24 @@ mod tests {
             "-r".to_string(),
         ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.unit_filter.as_deref(), Some("sshd"));
+        assert_eq!(cfg.unit_filter.as_deref(), Some(&b"sshd"[..]));
         assert_eq!(cfg.priority_filter, Some(Priority::Error));
         assert_eq!(cfg.num_entries, Some(50));
         assert!(cfg.reverse);
     }
 
-    // --- JSON string decoding ---
+    // --- Decoding (the cases themselves are journalrec's) ---
 
-    fn decoded(json: &str) -> Option<String> {
-        let mut pos = 0;
-        parse_json_string_value(json, &mut pos)
-    }
-
-    /// Non-ASCII text used to come back as mojibake, one Latin-1 character
-    /// per UTF-8 byte: `café` as `cafÃ©`.
+    /// What the shared reader decodes reaches the record: a message in UTF-8,
+    /// or escaped, keeps its characters. The private parser this replaced
+    /// was fixed for that on 2026-09-26; `syslogd`'s copy never was.
     #[test]
-    fn json_strings_decode_as_utf8() {
-        assert_eq!(decoded("\"caf\u{e9}\"").as_deref(), Some("caf\u{e9}"));
-        assert_eq!(
-            decoded("\"\u{65e5}\u{672c}\"").as_deref(),
-            Some("\u{65e5}\u{672c}")
-        );
-    }
-
-    #[test]
-    fn every_escape_json_defines_is_decoded() {
-        let cases = [
-            (r#""\u00e9""#, "\u{e9}"),
-            (r#""\ud83d\ude00""#, "\u{1f600}"),
-            (r#""\b\f\n\r\t\/\\\"""#, "\u{8}\u{c}\n\r\t/\\\""),
-        ];
-        for (json, want) in cases {
-            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
-        }
-    }
-
-    /// What cannot be decoded is kept as written, not dropped.
-    #[test]
-    fn undecodable_escapes_are_kept_as_written() {
-        let cases = [
-            (r#""a\ud83dz""#, "a\\ud83dz"),
-            (r#""\x41""#, "\\x41"),
-            (r#""\u12G4""#, "\\u12G4"),
-            (r#""\u00e""#, "\\u00e"),
-        ];
-        for (json, want) in cases {
-            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
-        }
-    }
-
-    /// `\u` followed by multi-byte characters used to slice the `&str`
-    /// inside one of them, which panics.
-    #[test]
-    fn a_multibyte_character_after_a_short_u_escape_does_not_panic() {
-        assert_eq!(
-            decoded("\"\\u\u{e9}\u{e9}\u{e9}\"").as_deref(),
-            Some("\\u\u{e9}\u{e9}\u{e9}")
-        );
+    fn a_record_keeps_its_characters() {
+        let entry =
+            JournalEntry::from_json_line("{\"ts\":1,\"msg\":\"caf\u{e9} \\u00e9 \\ud83d\\ude00\"}")
+                .unwrap();
+        assert_eq!(entry.message, "caf\u{e9} \u{e9} \u{1f600}".as_bytes());
+        assert_eq!(entry.timestamp, 1);
     }
 
     // --- Reading as bytes (B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-...) ---
@@ -3185,8 +3077,8 @@ mod tests {
         fs::write(&file, &bytes).unwrap();
 
         let j = read_files(std::slice::from_ref(&file), Vec::new(), false);
-        let msgs: Vec<&str> = j.entries.iter().map(|e| e.message.as_str()).collect();
-        assert_eq!(msgs, ["a", "b"]);
+        let msgs: Vec<&[u8]> = j.entries.iter().map(|e| e.message.as_slice()).collect();
+        assert_eq!(msgs, [&b"a"[..], &b"b"[..]]);
         assert_eq!(j.not_records, [(file, 1)]);
         assert!(j.unreadable.is_empty());
     }
@@ -3239,18 +3131,15 @@ mod tests {
         let listing = read_files(std::slice::from_ref(&file), Vec::new(), false);
         assert_eq!(listing.entries.len(), 2);
 
-        let follow = read_files(std::slice::from_ref(&file), Vec::new(), true);
-        assert_eq!(follow.entries.len(), 1);
-        let mut tail = follow.tails[&file].clone();
-        assert_eq!(tail.partial, rec(2, "b").into_bytes());
+        let mut held = read_files(std::slice::from_ref(&file), Vec::new(), true);
+        assert_eq!(held.entries.len(), 1);
+        assert_eq!(held.follow.read(&file, true).unwrap(), Some(Vec::new()));
 
         let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
         io::Write::write_all(&mut f, b"\n").unwrap();
         drop(f);
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
-        assert_eq!(lines, [rec(2, "b").into_bytes()]);
-        assert!(tail.partial.is_empty());
+        let bytes = held.follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(bytes, format!("{}\n", rec(2, "b")).into_bytes());
     }
 
     /// Only the bytes past the offset are read, and a record written in two
@@ -3261,7 +3150,7 @@ mod tests {
         let dir = ScratchDir::new("journalctl_torn");
         let file = dir.path("syslog.jsonl");
         fs::write(&file, b"").unwrap();
-        let mut tail = Tail::default();
+        let mut follow = journalio::Follow::new();
 
         let whole = format!("{}\n", rec(3, "caf\u{e9}"));
         let bytes = whole.as_bytes();
@@ -3270,31 +3159,30 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
 
         io::Write::write_all(&mut f, &bytes[..cut]).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        assert!(tail.advance(&file, len).unwrap().is_empty());
+        assert_eq!(follow.read(&file, true).unwrap(), Some(Vec::new()));
 
         io::Write::write_all(&mut f, &bytes[cut..]).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
+        let read = follow.read(&file, true).unwrap().unwrap();
+        let lines: Vec<&[u8]> = journalio::lines(&read).collect();
         assert_eq!(lines.len(), 1);
-        assert_eq!(record_of(&lines[0]).unwrap().message, "caf\u{e9}");
+        assert_eq!(record_of(lines[0]).unwrap().message, "caf\u{e9}".as_bytes());
     }
 
-    /// A file that got shorter was truncated or replaced, and is read again
-    /// from its start rather than from the old offset.
+    /// A file that got shorter was truncated, and is read again from its
+    /// start rather than from the old offset.
     #[test]
     fn follow_rereads_a_truncated_file_from_the_start() {
         let dir = ScratchDir::new("journalctl_truncated");
         let file = dir.path("syslog.jsonl");
         fs::write(&file, format!("{}\n{}\n", rec(1, "old"), rec(2, "older"))).unwrap();
-        let mut tail = Tail::default();
-        let len = fs::metadata(&file).unwrap().len();
-        assert_eq!(tail.advance(&file, len).unwrap().len(), 2);
+        let mut follow = journalio::Follow::new();
+        let read = follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(journalio::lines(&read).count(), 2);
 
+        // `fs::write` truncates the same file rather than replacing it.
         fs::write(&file, format!("{}\n", rec(3, "new"))).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
-        assert_eq!(lines, [rec(3, "new").into_bytes()]);
+        let read = follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(read, format!("{}\n", rec(3, "new")).into_bytes());
     }
 
     // --- Rotated files, and vacuums under the journal's lock ---
@@ -3396,7 +3284,7 @@ mod tests {
     #[test]
     fn lines_round_trip_through_vacuums_split_and_join() {
         for text in ["", "a\n", "a\nb\n", "a\nb", "\n", "a\n\nb\n"] {
-            let lines: Vec<&[u8]> = lines_of(text.as_bytes()).collect();
+            let lines: Vec<&[u8]> = journalio::lines(text.as_bytes()).collect();
             let back = joined_lines(&lines);
             let expected = if text.is_empty() || text.ends_with('\n') {
                 text.to_string()

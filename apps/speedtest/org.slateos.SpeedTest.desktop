@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Speed Test
+Comment=Measure the internet connection's speed
+Icon=network-transmit-receive
+Exec=speedtest
+Categories=Network;Monitor;
+Keywords=speed;bandwidth;latency;

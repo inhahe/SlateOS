@@ -61,8 +61,8 @@ const ROUNDS: [(u32, [usize; 16], [u32; 4]); 3] = [
 /// `body`: one block into the state.
 fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
     let mut x = [0u32; 16];
-    for (word, bytes) in x.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (word, bytes) in x.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*bytes);
     }
     let mut v = *state;
     for (round, (k, order, shifts)) in ROUNDS.iter().enumerate() {
@@ -117,8 +117,8 @@ pub fn digest(parts: &[&[u8]]) -> [u8; 16] {
     block[56..].copy_from_slice(&total.wrapping_mul(8).to_le_bytes());
     compress(&mut state, &block);
     let mut out = [0u8; 16];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
-        chunk.copy_from_slice(&word.to_le_bytes());
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *chunk = word.to_le_bytes();
     }
     for b in &mut block {
         // SAFETY: a byte of this function's own block, written volatile so

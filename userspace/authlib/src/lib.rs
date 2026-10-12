@@ -41,8 +41,10 @@
 //!
 //! - **A wrong answer costs the same as a right one, and an account that does
 //!   not exist costs the same as one that does.** Every path that does not run
-//!   a real verification runs a throwaway one first ([`burn`]), so the call
-//!   cannot be timed to enumerate accounts or to spot a locked one.
+//!   a real verification runs a throwaway one first, imitating the account
+//!   database's own entries ([`CostProfile`]), so the call cannot be timed to
+//!   enumerate accounts or to spot a locked one -- whatever method those
+//!   entries use.
 //! - **Failures are counted per user and answered with a growing delay.**
 //!   [`Authenticator`] refuses outright once a user is over budget. A refused
 //!   attempt does not extend the window — otherwise an attacker who keeps
@@ -105,16 +107,14 @@ pub const FREE_ATTEMPTS: u32 = 3;
 /// deliberate administrative act and not a side effect of someone guessing.
 pub const MAX_DELAY_SECS: u64 = 300;
 
-/// The salt of the throwaway hash computed on paths that verify nothing.
+/// The salt of the throwaway hash a [`CostProfile`] with no entry to imitate
+/// computes.
 ///
 /// Its value is irrelevant — nothing is ever compared against the result. What
-/// matters is that it is a *valid* setting for the same method as a real entry,
-/// so the work it costs matches the work a real verification costs.
+/// matters is that it is a *valid* setting for [`userdb::PASSWORD_METHOD`], so
+/// the work it costs matches the work checking a new password costs. A test
+/// pins that, so that changing the method without this fails there.
 const DUMMY_SALT: &[u8] = b"slateosnobody";
-
-/// The method the throwaway hash uses. The one real entries use, for the same
-/// reason: a cheaper method would make the fake path measurably cheaper.
-const DUMMY_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
 
 // ---------------------------------------------------------------------------
 // Outcome
@@ -202,19 +202,40 @@ impl Outcome {
 /// This is the whole policy, and it is pure — no files, no clock, no counters.
 /// [`Authenticator`] is this function plus a store to read the entry from and a
 /// rate limit on asking.
+///
+/// A path that verifies nothing spends what checking a *new* password costs
+/// ([`CostProfile::default`]). A caller that has the account database at hand
+/// and answers someone who could time it should use [`check_stored_costing`]
+/// with the database's own profile instead.
 #[must_use]
 pub fn check_stored(password: &[u8], stored: &[u8]) -> Outcome {
+    check_stored_costing(password, stored, &CostProfile::default())
+}
+
+/// [`check_stored`], spending what `profile` says a check costs on every path
+/// that verifies nothing.
+///
+/// One exception: an entry locked by a `!` or `*` in front of a hash that
+/// still verifies spends what that hash costs, since that is what checking the
+/// account would cost if it were unlocked.
+#[must_use]
+pub fn check_stored_costing(password: &[u8], stored: &[u8], profile: &CostProfile) -> Outcome {
     // A leading `!` or `*` marks the account disabled. `!` is conventionally
     // *prefixed* to an otherwise-valid hash so the password survives an
     // unlock, so this is a prefix test and not an equality test: `!$6$…` must
     // not fall through and be verified as if the `!` were part of the salt.
     if stored.first().is_some_and(|b| *b == b'!' || *b == b'*') {
-        burn(password);
+        let unlocked = strip_lock(stored);
+        if posix::crypt::stored_method(unlocked).is_some() {
+            spend(password, unlocked);
+        } else {
+            profile.burn(password);
+        }
         return Outcome::Locked;
     }
 
     if stored.is_empty() {
-        burn(password);
+        profile.burn(password);
         return Outcome::NoPassword;
     }
 
@@ -222,7 +243,7 @@ pub fn check_stored(password: &[u8], stored: &[u8]) -> Outcome {
     // reported as broken rather than counted as a wrong password. There is no
     // cleartext fallback: an entry that is not a hash is not a password.
     if posix::crypt::stored_method(stored).is_none() {
-        burn(password);
+        profile.burn(password);
         return Outcome::Unusable;
     }
 
@@ -233,26 +254,195 @@ pub fn check_stored(password: &[u8], stored: &[u8]) -> Outcome {
     }
 }
 
-/// Spend what a real verification would have spent, and throw the result away.
+/// Spend what checking a new password costs, and throw the result away.
 ///
-/// Called on every path that answers without verifying anything. Without it,
-/// "no such user" returns in microseconds while a real user's wrong password
-/// takes milliseconds, and the difference is an account-enumeration oracle that
-/// works over a network.
+/// [`CostProfile::default`]'s [`CostProfile::burn`]. A caller with the account
+/// database at hand should burn with that database's profile instead
+/// ([`CostProfile::of_store`]); see [`CostProfile`] for why.
 pub fn burn(password: &[u8]) {
-    let mut setting_buf = posix::crypt::buf();
-    let Some(setting) = posix::crypt::setting_into(DUMMY_METHOD, DUMMY_SALT, &mut setting_buf)
-    else {
-        // Unreachable for a constant salt that is valid crypt-base-64, and not
-        // worth a panic if the constant is ever edited badly: the cost is lost,
-        // the answer is not affected.
-        return;
-    };
-    let setting = setting.to_string();
+    CostProfile::default().burn(password);
+}
+
+/// What checking a password costs on a system, so that a path which checks
+/// nothing can cost the same.
+///
+/// Every path that answers without verifying -- no such user, a locked account,
+/// one with no password -- spends a throwaway hash first. Without it "no such
+/// user" returns in microseconds where a real user's wrong password takes
+/// milliseconds, and the difference is an account-enumeration oracle that works
+/// over a network.
+///
+/// The throwaway hash must cost what a real check costs, and that depends on the
+/// entry. A `$6$` entry costs about 2.5 ms on the development machine, a
+/// `$y$j9T$` one (yescrypt, the default of Ubuntu, Debian and Fedora) about 16,
+/// and a `$2b$10$` one (bcrypt) about 50 (`requests/d-b-yescrypt-entries-...`).
+/// A burn at one fixed method therefore leaks which accounts exist on any
+/// system whose entries use another. So the profile imitates the entries: the
+/// throwaway hash is computed under one of them, used whole as the setting,
+/// which costs exactly what checking against it costs. OpenSSH does the same
+/// (`pick_salt` in `xcrypt.c`), taking the first account with a `$`-style
+/// entry. This takes one of the *most common* cost class instead -- the method
+/// and its parameters, without the salt -- so that on a system whose entries
+/// differ, the fewest accounts stand out. Ties go to the class seen first, so
+/// the choice is stable for a given file.
+///
+/// A store with no entry that verifies has no profile, and then the method new
+/// passwords get ([`userdb::PASSWORD_METHOD`]) stands in: that is what the first
+/// account's check will cost once it has a password.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CostProfile {
+    /// An entry of the most common cost class, lock marks removed. `None` when
+    /// there is none, and then [`userdb::PASSWORD_METHOD`] stands in.
+    like: Option<Vec<u8>>,
+}
+
+impl CostProfile {
+    /// The profile of the account database at `path`. One that cannot be read
+    /// has none, and costs what a new password's check costs.
+    #[must_use]
+    pub fn of_store(path: &Path) -> Self {
+        userdb::UserDb::load(path).map_or_else(|_| Self::default(), |db| Self::of_db(&db))
+    }
+
+    /// The profile of a loaded account database: every record's stored entry,
+    /// locked or not -- a locked account's hash is still a cost an unlocked
+    /// one would have.
+    fn of_db(db: &userdb::UserDb) -> Self {
+        Self::of_entries(
+            db.records()
+                .iter()
+                .filter_map(|r| r.get(userdb::field::PASSWORD_HASH)),
+        )
+    }
+
+    /// The profile of a set of stored entries: one of their most common cost
+    /// class. Entries that do not verify are passed over.
+    #[must_use]
+    pub fn of_entries<I, S>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<[u8]>,
+    {
+        // (class, count, an entry of that class), in the order first seen.
+        let mut classes: Vec<(Vec<u8>, usize, Vec<u8>)> = Vec::new();
+        for entry in entries {
+            let entry = strip_lock(entry.as_ref());
+            let Some(class) = cost_class(entry) else {
+                continue;
+            };
+            if let Some(seen) = classes.iter_mut().find(|(c, _, _)| c.as_slice() == class) {
+                seen.1 = seen.1.saturating_add(1);
+            } else {
+                classes.push((class.to_vec(), 1, entry.to_vec()));
+            }
+        }
+        // `max_by_key` keeps the *last* of equal maxima, so the comparison is
+        // written out: a later class must have strictly more entries to win.
+        let mut best: Option<(usize, Vec<u8>)> = None;
+        for (_, count, entry) in classes {
+            if best.as_ref().is_none_or(|(most, _)| count > *most) {
+                best = Some((count, entry));
+            }
+        }
+        Self {
+            like: best.map(|(_, entry)| entry),
+        }
+    }
+
+    /// Spend what checking a password costs under this profile, and throw the
+    /// result away.
+    pub fn burn(&self, password: &[u8]) {
+        if let Some(entry) = &self.like
+            && spend(password, entry)
+        {
+            return;
+        }
+        // No entry to imitate, or one that would not hash -- which a verifiable
+        // entry always does, so this is the store with nothing to imitate.
+        let mut setting_buf = posix::crypt::buf();
+        let Some(setting) =
+            posix::crypt::setting_into(userdb::PASSWORD_METHOD, DUMMY_SALT, &mut setting_buf)
+        else {
+            // Unreachable for a salt the method accepts, which a test pins, and
+            // not worth a panic if that ever breaks: the cost is lost, the
+            // answer is not affected.
+            return;
+        };
+        spend(password, setting.as_bytes());
+    }
+}
+
+/// Hash `password` under `setting` and throw the result away: the cost of
+/// checking a password against an entry that `setting` is, or begins.
+/// Whether the hash was computed.
+fn spend(password: &[u8], setting: &[u8]) -> bool {
     let mut hash_buf = posix::crypt::buf();
-    let hashed = posix::crypt::hash_into(password, setting.as_bytes(), &mut hash_buf);
+    let hashed = posix::crypt::hash_into(password, setting, &mut hash_buf);
     // Observed so the optimiser cannot delete the work that is the point.
-    let _ = std::hint::black_box(hashed.is_some());
+    std::hint::black_box(hashed.is_some())
+}
+
+/// `stored` without the `!` and `*` that lock an account in front of it.
+fn strip_lock(stored: &[u8]) -> &[u8] {
+    let start = stored
+        .iter()
+        .position(|&b| b != b'!' && b != b'*')
+        .unwrap_or(stored.len());
+    stored.get(start..).unwrap_or_default()
+}
+
+/// The part of a stored entry that decides what checking it costs: the method
+/// and its parameters, without the salt or the hash. `None` for an entry that
+/// does not verify.
+///
+/// | entry | class |
+/// |---|---|
+/// | `$6$salt$hash`, `$6$rounds=9000$salt$hash` | `$6$`, `$6$rounds=9000$` (also `$5$`) |
+/// | `$y$j9T$salt$hash`, `$gy$j9T$salt$hash` | `$y$j9T$`, `$gy$j9T$` |
+/// | `$7$CU..../....salt$hash` | `$7$CU..../....` (N, r and p) |
+/// | `$2b$10$salthash` | `$2b$10$` |
+/// | `$sha1$40000$salt$hash` | `$sha1$40000$` |
+/// | `$md5,rounds=904$salt$hash`, `$md5$salt$$hash` | `$md5,rounds=904$`, `$md5$` |
+/// | `_J9..saltHASH` | `_J9..` (the count) |
+/// | `$1$salt$hash`, `$3$$hash`, DES | the method prefix: their cost is fixed |
+///
+/// Tested with `matches!` rather than an exhaustive `match`, so a method
+/// `posix::crypt` adds later is classed by its prefix -- as fixed-cost -- until
+/// it is classed here, rather than failing this crate's build in another lane's.
+fn cost_class(entry: &[u8]) -> Option<&[u8]> {
+    use posix::crypt::Method;
+    let method = posix::crypt::stored_method(entry)?;
+    let prefix = method.prefix().len();
+    // The class runs to the `$` that ends the parameters after the prefix.
+    let through_next_dollar = |from: usize| -> Option<usize> {
+        let after = entry.get(from..)?;
+        let at = after.iter().position(|&b| b == b'$')?;
+        from.checked_add(at)?.checked_add(1)
+    };
+    let len = if matches!(method, Method::Sha256 | Method::Sha512) {
+        if entry.get(prefix..)?.starts_with(b"rounds=") {
+            through_next_dollar(prefix)?
+        } else {
+            prefix
+        }
+    } else if matches!(
+        method,
+        Method::Yescrypt | Method::GostYescrypt | Method::Sha1crypt | Method::SunMd5
+    ) {
+        through_next_dollar(prefix)?
+    } else if method == Method::Scrypt {
+        // `$7$`, then N in one character and r and p in five each.
+        prefix.checked_add(11)?
+    } else if method == Method::Bcrypt {
+        // `$2b$` and a two-digit cost, then its `$`.
+        prefix.checked_add(3)?
+    } else if method == Method::BsdiDes {
+        // `_` and a four-character count.
+        prefix.checked_add(4)?
+    } else {
+        prefix
+    };
+    entry.get(..len)
 }
 
 // ---------------------------------------------------------------------------
@@ -266,8 +456,9 @@ enum Resolved {
     Entry(String),
     /// The account is disabled by something other than its password field —
     /// `locked: true` in the native database, which leaves the hash intact so
-    /// that unlocking restores the old password.
-    Locked,
+    /// that unlocking restores the old password. That entry is kept: refusing
+    /// spends what checking it would cost.
+    Locked(String),
     /// No store has this user.
     Unknown,
 }
@@ -478,14 +669,28 @@ impl Authenticator {
             return Outcome::RateLimited { retry_after_secs };
         }
 
-        let outcome = match self.resolve(username) {
-            Resolved::Entry(stored) => check_stored(password, stored.as_bytes()),
-            Resolved::Locked => {
-                burn(password);
+        // One read of the database answers both questions, and both are asked
+        // whoever the user is, so that the work before the hash does not
+        // differ between an account that exists and one that does not.
+        let db = userdb::UserDb::load(&self.users_yaml).ok();
+        let profile = db
+            .as_ref()
+            .map_or_else(CostProfile::default, CostProfile::of_db);
+        let outcome = match Self::resolve(db.as_ref(), username) {
+            Resolved::Entry(stored) => check_stored_costing(password, stored.as_bytes(), &profile),
+            Resolved::Locked(stored) => {
+                // What checking it would cost if it were unlocked, which is the
+                // account's own entry where that verifies.
+                let stored = strip_lock(stored.as_bytes());
+                if posix::crypt::stored_method(stored).is_some() {
+                    spend(password, stored);
+                } else {
+                    profile.burn(password);
+                }
                 Outcome::Locked
             }
             Resolved::Unknown => {
-                burn(password);
+                profile.burn(password);
                 Outcome::Rejected
             }
         };
@@ -621,17 +826,15 @@ impl Authenticator {
     /// open the accounts" must not be a reason to admit anyone, and the caller
     /// must not be able to tell the two apart, since a difference in the reply
     /// would report whether an account exists.
-    fn resolve(&self, username: &str) -> Resolved {
-        let Ok(db) = userdb::UserDb::load(&self.users_yaml) else {
+    fn resolve(db: Option<&userdb::UserDb>, username: &str) -> Resolved {
+        let Some(record) = db.and_then(|db| db.find(username)) else {
             return Resolved::Unknown;
         };
-        let Some(record) = db.find(username) else {
-            return Resolved::Unknown;
-        };
+        let stored = record.get(userdb::field::PASSWORD_HASH).unwrap_or_default();
         if record.is_locked() {
-            return Resolved::Locked;
+            return Resolved::Locked(stored);
         }
-        Resolved::Entry(record.get(userdb::field::PASSWORD_HASH).unwrap_or_default())
+        Resolved::Entry(stored)
     }
 }
 
@@ -1280,5 +1483,133 @@ mod tests {
             }),
             "neither half may shorten the other's delay"
         );
+    }
+
+    // ---- what a check costs ----
+
+    /// yescrypt at Ubuntu's cost, and scrypt: `posix::crypt`'s own known
+    /// answers, taken as they are because hashing either in a debug build
+    /// costs seconds.
+    const YESCRYPT: &str =
+        "$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7";
+    const SCRYPT: &str = "$7$66..../....SodiumChloride$SpJsFY2pIFcsdECgiLhE7VnInSJAT3kTfdlS6S6xFq9";
+
+    /// A stored entry for `pw` under `setting`, for the methods cheap enough
+    /// to compute here.
+    fn hashed(setting: &str) -> String {
+        let mut hash_buf = posix::crypt::buf();
+        posix::crypt::hash_into(b"pw", setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string()
+    }
+
+    #[test]
+    fn a_cost_class_is_the_method_and_its_parameters_without_the_salt() {
+        use super::cost_class;
+        let class = |entry: &str| cost_class(entry.as_bytes()).map(<[u8]>::to_vec);
+        assert_eq!(class(&hashed("$6$saltsalt$")), Some(b"$6$".to_vec()));
+        assert_eq!(
+            class(&hashed("$6$rounds=1000$saltsalt$")),
+            Some(b"$6$rounds=1000$".to_vec())
+        );
+        assert_eq!(class(&hashed("$5$saltsalt$")), Some(b"$5$".to_vec()));
+        assert_eq!(class(&hashed("$1$saltsalt$")), Some(b"$1$".to_vec()));
+        assert_eq!(
+            class(&hashed("$2b$04$abcdefghijklmnopqrstuu")),
+            Some(b"$2b$04$".to_vec())
+        );
+        assert_eq!(class(YESCRYPT), Some(b"$y$j9T$".to_vec()));
+        assert_eq!(class(SCRYPT), Some(b"$7$66..../....".to_vec()));
+        // Nothing that does not verify has a class: a locked mark, no
+        // password, and an entry in no format.
+        for not_an_entry in ["!", "*", "!!", "", "plaintext", "$6$"] {
+            assert_eq!(class(not_an_entry), None, "{not_an_entry:?}");
+        }
+    }
+
+    #[test]
+    fn a_profile_imitates_the_most_common_cost_class() {
+        use super::CostProfile;
+        let sha = hashed("$6$saltsalt$");
+        let bcrypt = hashed("$2b$04$abcdefghijklmnopqrstuu");
+        let bcrypt_too = hashed("$2b$04$uvwxyzabcdefghijklmnoe");
+        // Two bcrypt entries outnumber one SHA-512 entry, even though the SHA
+        // one comes first and one bcrypt entry is locked: a locked account's
+        // hash is still a cost its owner's check would have. The entries that
+        // verify nothing are passed over.
+        let entries = [
+            sha.clone(),
+            "*".to_string(),
+            bcrypt.clone(),
+            String::new(),
+            format!("!{bcrypt_too}"),
+            "garbage".to_string(),
+        ];
+        assert_eq!(
+            CostProfile::of_entries(&entries).like.as_deref(),
+            Some(bcrypt.as_bytes())
+        );
+        // A tie goes to the class seen first, so a file's profile is stable.
+        assert_eq!(
+            CostProfile::of_entries([&bcrypt, &sha]).like.as_deref(),
+            Some(bcrypt.as_bytes())
+        );
+        assert_eq!(
+            CostProfile::of_entries([&sha, &bcrypt]).like.as_deref(),
+            Some(sha.as_bytes())
+        );
+        // The entry imitated is the hash, without the marks that locked it:
+        // the marks would make it a setting nothing can hash under.
+        let locked_only = [format!("!!{sha}")];
+        assert_eq!(
+            CostProfile::of_entries(&locked_only).like.as_deref(),
+            Some(sha.as_bytes())
+        );
+        // Nothing that verifies: no profile, and a new password's cost stands
+        // in.
+        assert_eq!(
+            CostProfile::of_entries(["*", "", "!"]),
+            CostProfile::default()
+        );
+    }
+
+    /// The stand-in, a new password's cost, must be a setting the method
+    /// accepts, or every burn on a system with no profile would silently cost
+    /// nothing. This fails if `userdb::PASSWORD_METHOD` changes to a method
+    /// whose salts `DUMMY_SALT` is not.
+    #[test]
+    fn the_stand_in_is_a_setting_a_new_password_could_have() {
+        let mut setting_buf = posix::crypt::buf();
+        let setting = posix::crypt::setting_into(
+            userdb::PASSWORD_METHOD,
+            super::DUMMY_SALT,
+            &mut setting_buf,
+        )
+        .expect("the stand-in's salt must suit the method new passwords get");
+        let mut hash_buf = posix::crypt::buf();
+        assert!(posix::crypt::hash_into(b"pw", setting.as_bytes(), &mut hash_buf).is_some());
+        // And every burn still answers nothing, whatever it imitates.
+        super::burn(b"pw");
+        super::CostProfile::of_entries([hashed("$1$saltsalt$")]).burn(b"pw");
+    }
+
+    /// The database's own profile is the one `authenticate` burns with, for a
+    /// user who is not there; an unreadable database has none.
+    #[test]
+    fn a_store_s_profile_is_read_from_its_entries() {
+        use super::CostProfile;
+        let bcrypt = hashed("$2b$04$abcdefghijklmnopqrstuu");
+        let (mut auth, path) = authenticator_over(&bcrypt, "profile.yaml");
+        assert_eq!(
+            CostProfile::of_store(&path).like.as_deref(),
+            Some(bcrypt.as_bytes())
+        );
+        assert_eq!(auth.authenticate("nobody", b"pw"), Outcome::Rejected);
+        assert_eq!(auth.authenticate("alice", b"pw"), Outcome::Accepted);
+        assert_eq!(
+            CostProfile::of_store(&tmp("absent.yaml")),
+            CostProfile::default()
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

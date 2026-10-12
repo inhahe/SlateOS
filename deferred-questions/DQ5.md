@@ -10,7 +10,10 @@ nothing". So these tools need a design, not a port: some service that holds
 each session's terminal and delivers a message only if its owner allows it.
 `userspace/mesg`, which answered as `mesg`, `write` and `talk`, faked all of
 this through files and was deleted (known-issues
-`B-MESG-AND-WRITE-UNTIL-PORTED`).
+`B-MESG-AND-WRITE-UNTIL-PORTED`). Since 2026-10-08 coreutils has util-linux's
+`wall`, `write` and `mesg`, as Linux has them (`scripts/wall-diff.sh`): they open another user's terminal by its path,
+which is what SlateOS does not allow, and what to do instead is the part
+this question decides.
 
 **Why this is not in `open-questions.md`.** Nothing on SlateOS needs it yet:
 there is one interactive session at a time, `logind` (which tracks sessions)

@@ -230,46 +230,7 @@ pub fn strneqvcmp(s1: &[u8], s2: &[u8], ct: usize) -> i32 {
 /// past every digit.
 #[must_use]
 pub fn strtoul(s: &[u8], i: usize, base: u32) -> (u64, usize) {
-    let mut p = i;
-    while matches!(at(s, p), b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
-        p = p.saturating_add(1);
-    }
-    let negative = at(s, p) == b'-';
-    if matches!(at(s, p), b'+' | b'-') {
-        p = p.saturating_add(1);
-    }
-    if base == 16
-        && at(s, p) == b'0'
-        && matches!(at(s, p.saturating_add(1)), b'x' | b'X')
-        && at(s, p.saturating_add(2)).is_ascii_hexdigit()
-    {
-        p = p.saturating_add(2);
-    }
-    let start = p;
-    let mut value: u64 = 0;
-    let mut overflow = false;
-    while let Some(d) = char::from(at(s, p)).to_digit(base) {
-        match value
-            .checked_mul(u64::from(base))
-            .and_then(|v| v.checked_add(u64::from(d)))
-        {
-            Some(v) => value = v,
-            None => overflow = true,
-        }
-        p = p.saturating_add(1);
-    }
-    if p == start {
-        return (0, i);
-    }
-    if overflow {
-        return (u64::MAX, p);
-    }
-    (
-        if negative {
-            value.wrapping_neg()
-        } else {
-            value
-        },
-        p,
-    )
+    // `cstrtol`'s parse, from `i`: no digits leave the end at `i` itself.
+    let (v, used) = cstrtol::strtoul(s.get(i..).unwrap_or_default(), base);
+    (v, i.saturating_add(used))
 }

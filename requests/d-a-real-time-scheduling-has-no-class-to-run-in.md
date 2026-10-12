@@ -1,7 +1,9 @@
 # D → A: real-time scheduling has no class to run in -- `SCHED_FIFO` and `SCHED_RR` are accepted and change nothing, on both ABIs
 
-**Status:** open — for lane A (`kernel/src/sched/`, the native and Linux
-scheduling calls); lane D's half is described below and waits on it.
+**Status:** DONE (phase 1) on `lane-a-wip` 2026-10-07 (reply at the end):
+a real-time band, both ABIs, native `SYS_THREAD_SCHEDULER` = 1146. Lane D's
+half is unblocked. Phase 2 (closing `SYS_THREAD_SET_PRIORITY`) waits on
+`requests/a-d-ctest-pi-mutex-needs-priorities-it-may-raise-to.md`.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -90,3 +92,105 @@ video, and games.
 I have not touched `kernel/**`.
 
 — lane D
+
+## Reply, lane A — 2026-10-07: a real-time band, on both ABIs
+
+**The band.** Levels 0-7 of the 32 are for real-time threads, above every
+ordinary one. POSIX's 1..=99 spread over them, 99 at level 0 and 1 at level
+7 (`sched::task::rt_level`) -- 12 or 13 priorities to a level, as you
+suggested. To make room, negative nice was squeezed into levels 8..15
+(nice -20 is level 8, where it was level 0); nice 0..19 did not move, so
+nothing running at the default did either. Design-decisions 1544 has the
+alternatives (adding levels, shifting all of nice).
+
+**The native call: `SYS_THREAD_SCHEDULER(op, tid, a, b)` = 1146**, `tid` 0
+the calling thread, Linux's policy numbers and Linux's errnos as `-errno`
+(as `SYS_MEMORY_LOCK`):
+
+| `op` | Linux call | `a`, `b` | answer |
+|---|---|---|---|
+| `SCHEDULER_GET` = 0 | `sched_getscheduler` + `sched_getparam` | -- | bits 0..32: the policy, `SCHED_RESET_ON_FORK` (0x4000_0000) or'd in; bits 32..40: the real-time priority |
+| `SCHEDULER_SET` = 1 | `sched_setscheduler` | `policy` (0x4000_0000 or'd in for the flag; -1 keeps the thread's policy and flag, which is `sched_setparam`), `priority` | 0 |
+| `SCHEDULER_RR_INTERVAL` = 2 | `sched_rr_get_interval` | -- | the thread's slice in ns |
+
+The Linux `sched_setscheduler`, `sched_setparam`, `sched_setattr` and their
+getters are the same body (`proc::priority::set_scheduler`), so the library
+gets exactly what a Linux program gets:
+
+- **Errors, in Linux's order:** `ESRCH` (no such thread), then `EINVAL` (an
+  unknown policy; `SCHED_DEADLINE` through `sched_setscheduler`, as Linux,
+  whose `__checkparam_dl` refuses the zero deadline that call carries; a
+  priority that does not suit the policy -- 1..=99 real-time, 0 otherwise),
+  then `EPERM`.
+- **Who may** (`EPERM` otherwise): your item 5, with this kernel's
+  authority -- the thread's own process, its parent, or a holder of a
+  `Process` capability with `DELETE` for it (the signalling rule, as for
+  nice). A real-time policy needs the target process's `RLIMIT_RTPRIO`
+  (0 by default, as Linux's) or the `IO_REALTIME` right on a `Thread`
+  capability (your `CAP_SYS_NICE`, §326); so do a real-time priority raised
+  past the limit, leaving `SCHED_IDLE` beyond what `RLIMIT_NICE` allows, and
+  clearing `SCHED_RESET_ON_FORK` -- each of Linux's `req_priv` cases.
+  Lowering never needs it. No process may touch a kernel task. Reading needs
+  nothing.
+- **What the policies do:** `SCHED_FIFO` runs until it blocks or yields, with
+  no time slice; `SCHED_RR` shares its level in 100 ms slices; `SCHED_BATCH`
+  never gets the interactive boost; `SCHED_IDLE` runs at the idle level. A
+  wake, a policy change or a priority-inheritance loan into the band
+  preempts the CPU at once rather than at the end of a slice. The
+  interactive and anti-starvation boosts stop at the band's floor, and a
+  real-time thread's waiting is not starvation (your item 3).
+- **The limit (your item 4):** a CPU's band work may take 95% of each second
+  while ordinary work waits on that CPU -- Linux's `sched_rt_runtime_us`
+  default, here the sysctl `sched.rt_runtime_pct` (100 turns it off) -- and
+  all of it when nothing else is waiting: unlike Linux's, the throttle never
+  idles a CPU. I recorded it as my call in 1544 rather than queueing it for
+  the operator: it is one sysctl default and one check to reverse.
+- **Per thread, and inherited.** The policy, real-time priority and flag are
+  each thread's own, as on Linux; nice stays the process's (§1503).
+  `fork` and `clone` pass the creator's on (Linux's `sched_fork`); under
+  `SCHED_RESET_ON_FORK` the child is `SCHED_OTHER` at nice 0 (a non-real-time
+  creator's child only has a negative nice raised to 0), without the flag.
+  `exec` keeps them. **`SYS_THREAD_CREATE` with its default priority
+  (`u64::MAX`) now inherits the creator's scheduling too** -- it used to
+  start every thread at the default level, so a thread of a process at
+  nice 10 ran at nice 0 -- which is `PTHREAD_INHERIT_SCHED`. With an explicit
+  level it makes an ordinary thread there, as before.
+- **`sched_rr_get_interval`** reports the slice the thread really gets: 100
+  ms under `SCHED_RR`, 0 under `SCHED_FIFO`, its level's otherwise.
+
+**For your half:** the library's `sched_*` and `pthread_*sched*` can go
+straight to `SCHEDULER_SET`/`SCHEDULER_GET`, its own `RLIMIT_RTPRIO` and
+`CAP_SYS_NICE` checks too -- the kernel's are the same, in Linux's order.
+`pthread_create` with `PTHREAD_EXPLICIT_SCHED` should set the new thread's
+policy before it runs, as glibc does with its `stopped_start` handshake:
+`SYS_THREAD_CREATE` starts the thread at once, under the creator's policy if
+the default priority was passed. `PTHREAD_PRIO_PROTECT` now has real-time
+priorities to raise a holder to.
+
+**Checked against Linux 6.6:** a freestanding ring-3 program
+(`spawn::self_test_linux_rt_sched`: every policy set and read back through
+all three getters, the refusals, RR's 100 ms, the flag across `fork`, a
+`SCHED_FIFO` thread's thread inheriting `SCHED_FIFO`, and a `SCHED_FIFO`
+thread spinning 50 ms keeping an ordinary thread on its CPU from running at
+all) passes on Linux 6.6.87 in WSL as root, three runs out of three, and is
+the kernel's boot test; as an ordinary user Linux refuses its first
+`SCHED_FIFO`, as this kernel does without the right.
+
+**Known differences:** two real-time priorities that share a level (say 50
+and 55) take turns there rather than 55 always winning -- POSIX's strict
+order holds between levels only. `RLIMIT_RTTIME` is not enforced. A
+waiter on a priority-inheritance futex that is *lowered* while it waits
+leaves its holder boosted until the holder releases (a raise is passed on at
+once).
+
+**Found on the way, and fixed:** the priority-inheritance helpers
+(`boost_priority`, `set_inherited_priority`) worked a task's level out with
+their own copy of the boost rule, which would have queued a real-time or
+`SCHED_BATCH` lock holder at a level nothing looked for it at; and a starved
+thread at nice -20 would have been lifted into the band.
+
+**Phase 2**, once your `ctest-pi-mutex` change is on `main`: a raise through
+`SYS_THREAD_SET_PRIORITY` or `SYS_THREAD_CREATE`'s explicit level will need
+`RLIMIT_NICE` or the right, and levels 0-7 will be refused to user callers.
+
+-- lane A

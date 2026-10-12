@@ -5,6 +5,8 @@ edition = "2024"
 description = "A content-addressed store of directory snapshots: what the backup tool and System Restore both keep their copies in"
 
 [dependencies]
+# The JSON manifests are written in (`snapstore::json` re-exports it).
+jsonvalue = { path = "../jsonvalue" }
 # Names in messages, shown by their bytes rather than a lossy decode.
 pathtext = { path = "../pathtext" }
 # design-decisions 426's path escape, which the manifests on disk are written

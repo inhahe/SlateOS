@@ -20,10 +20,16 @@ id is the file name.
   in every new entry.
 * **Any lane may update any entry's status line** without a request: an issue you
   fixed but cannot mark stays open forever in the one place whose job is knowing what
-  is open. Everything else about another lane's entry still needs a request
+  is open. Stamping `FIXED` and moving the file are one change, which any lane may
+  make. Everything else about another lane's entry still needs a request
   (`roadmap.md` rule 3).
-* **When it is fixed** and the fix has survived a boot test on `main`, move the file
-  to `known-issues-resolved/` (`git mv`). Nothing is ever deleted.
+* **When it is fixed:** until the fix has survived a boot test on `main`, keep the
+  Status line `OPEN` and say where the fix is -- `**Status:** OPEN -- fixed on
+  lane-a-wip (abc1234), awaiting a boot on main`. The status describes `main`, which
+  is what every other lane reads, and `check-docs.py` refuses a `FIXED` entry left in
+  `known-issues/` (I3): the directory is the status. Then stamp `FIXED <date>` and
+  move the file to `known-issues-resolved/` (`git mv`) in the same commit. Nothing is
+  ever deleted.
 
 ## Finding one
 

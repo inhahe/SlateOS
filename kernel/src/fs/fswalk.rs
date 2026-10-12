@@ -173,6 +173,11 @@ pub struct WalkStats {
     pub total_size: u64,
     /// Directories skipped due to exclusion.
     pub excluded: u64,
+    /// Directories found but never read: past `max_depth`, or found while
+    /// `MAX_QUEUE_SIZE` were already waiting. Nonzero means the walk did not
+    /// see everything under its root, so a search that found nothing has not
+    /// shown there is nothing. Until 2026-10-02 both were dropped uncounted.
+    pub unwalked: u64,
 }
 
 impl WalkStats {
@@ -185,6 +190,7 @@ impl WalkStats {
             max_depth_reached: 0,
             total_size: 0,
             excluded: 0,
+            unwalked: 0,
         }
     }
 
@@ -264,6 +270,7 @@ pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions) -> KernelResu
     while let Some((dir_path, depth)) = pop_next(&mut pending, opts.order) {
         // Check depth limit.
         if depth >= opts.max_depth {
+            result.stats.unwalked = result.stats.unwalked.saturating_add(1);
             continue;
         }
 
@@ -310,6 +317,8 @@ pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions) -> KernelResu
                     // Add to pending for recursion.
                     if pending.len() < MAX_QUEUE_SIZE {
                         pending.push((full_path.clone(), child_depth));
+                    } else {
+                        result.stats.unwalked = result.stats.unwalked.saturating_add(1);
                     }
                 }
                 EntryType::File => {
@@ -390,7 +399,11 @@ where
     let mut stopped = false;
 
     while let Some((dir_path, depth)) = pop_next(&mut pending, opts.order) {
-        if stopped || depth >= opts.max_depth {
+        if stopped {
+            continue;
+        }
+        if depth >= opts.max_depth {
+            stats.unwalked = stats.unwalked.saturating_add(1);
             continue;
         }
 
@@ -459,8 +472,12 @@ where
                 }
             }
 
-            if should_queue && pending.len() < MAX_QUEUE_SIZE {
-                pending.push((full_path, child_depth));
+            if should_queue {
+                if pending.len() < MAX_QUEUE_SIZE {
+                    pending.push((full_path, child_depth));
+                } else {
+                    stats.unwalked = stats.unwalked.saturating_add(1);
+                }
             }
         }
     }
@@ -624,8 +641,58 @@ pub fn self_test() -> KernelResult<()> {
     test_pop_next();
     test_is_excluded();
     test_format_size();
+    test_unwalked_counted()?;
 
-    serial_println!("[fswalk] Self-test passed (6 tests).");
+    serial_println!("[fswalk] Self-test passed (7 tests).");
+    Ok(())
+}
+
+/// A walk counts the directories it leaves unread (`WalkStats::unwalked`),
+/// here those past its depth limit, through both [`walk`] and
+/// [`walk_visit`], on a scratch tree in `/tmp`. Until 2026-10-02 they were
+/// dropped uncounted, so a search under a limit that found nothing could not
+/// tell "nothing there" from "never looked".
+fn test_unwalked_counted() -> KernelResult<()> {
+    const ROOT: &str = "/tmp/_fswalk_unwalked";
+    // Best effort: a tree an interrupted earlier run left.
+    let _ = Vfs::remove_recursive(ROOT);
+    let made = (|| -> KernelResult<()> {
+        Vfs::mkdir(ROOT)?;
+        Vfs::mkdir("/tmp/_fswalk_unwalked/a")?;
+        Vfs::mkdir("/tmp/_fswalk_unwalked/a/deeper")?;
+        Vfs::mkdir("/tmp/_fswalk_unwalked/b")?;
+        Vfs::write_file("/tmp/_fswalk_unwalked/f", b"f")
+    })();
+    // Depth 1: the root is read; `a` and `b` are found and left unread.
+    let shallow = WalkOptions {
+        max_depth: 1,
+        ..Default::default()
+    };
+    let walked = made.and_then(|()| {
+        Ok((
+            walk(ROOT, &shallow)?,
+            walk_visit(ROOT, &shallow, |_| WalkAction::Continue)?,
+            walk(ROOT, &WalkOptions::default())?,
+        ))
+    });
+    // Best effort, as above: the scratch tree, whatever the walks answered.
+    let _ = Vfs::remove_recursive(ROOT);
+    let (collected, visited, whole) = walked?;
+    if collected.stats.unwalked != 2
+        || visited.unwalked != 2
+        || whole.stats.unwalked != 0
+        || whole.stats.dirs != 3
+    {
+        serial_println!(
+            "[fswalk]   FAIL: {} and {} directories unread at depth 1, {} of {} with no limit",
+            collected.stats.unwalked,
+            visited.unwalked,
+            whole.stats.unwalked,
+            whole.stats.dirs
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[fswalk]   directories left unread are counted: ok");
     Ok(())
 }
 

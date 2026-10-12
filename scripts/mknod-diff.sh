@@ -21,9 +21,10 @@
 #
 # ## Cases that differ on purpose
 #
-# `--help` omits the GNU ancillary block and `--version` names SlateOS. `-Z` and
-# `--context` are refused by name here (as by our `mkfifo`), where GNU on a
-# kernel without SELinux ignores `-Z` and warns about `--context`.
+# `--help` omits the GNU ancillary block and `--version` names SlateOS.
+# (`-Z` and `--context` used to be a third: they were refused by name here,
+# and are taken as GNU takes them on a kernel without SELinux since
+# design-decisions 1064, so they are ordinary cases now.)
 set -u
 
 DIFF_PROG='mknod'
@@ -168,8 +169,14 @@ xfail_case 'our --help omits the GNU ancillary block' q p --help
 run_case --help=1
 xfail_case 'our --help omits the GNU ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
-xfail_case 'we refuse -Z by name; GNU ignores it without SELinux' -Z q p
-xfail_case 'we refuse --context by name; GNU warns and goes on' --context=x q p
+run_case -Z q p
+run_case --context q p
+run_case --context=x q p
+run_case --context= q p
+run_case --cont q p
+run_case --context=x
+run_case --context=x -q
+run_case -Z -m 600 q p
 
 rm -rf "$DIFF_TMP/case-ours" "$DIFF_TMP/case-gnu"
 

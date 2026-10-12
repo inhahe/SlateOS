@@ -118,6 +118,8 @@ fn real_fire(arg: u64) {
         // SIGALRM post is IRQ-safe (signal registries mask interrupts).
         // A timer-generated signal carries si_code = SI_KERNEL (no sender),
         // matching Linux's ITIMER_REAL delivery.
+        // A stopped process takes it only once continued, as on Linux: a
+        // deadly SIGALRM ends it then (`handlers::act_on_stopped`).
         signal::set_pending_info(pid, SIGALRM, signal::SigInfo::kernel());
     }
 }

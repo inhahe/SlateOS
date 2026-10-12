@@ -107,6 +107,12 @@ MIRROR_MODES = ("batched", "per-file")
 # pinned to whatever this machine had on the day the test was written.
 UGLY = "fn main() {\nlet x=1;\n\n\n    println!(\"{x}\");\n}\n"
 
+# One `use` list two editions sort differently: edition 2024's style puts
+# `private::InternalMarker` after the capitals, 2018's before. It is the shape
+# of the typenum file lane E's request quotes
+# (requests/e-a-the-rustfmt-gate-assumes-every-crate-is-edition-2024.md).
+EDITIONED = "use crate::{private::InternalMarker, Cmp, Equal, Greater};\n"
+
 failures: list[str] = []
 
 # Appended to every label while a mirror mode is running. Every case is run
@@ -169,6 +175,24 @@ def pretty(text: str) -> str:
                        capture_output=True, check=False)
         with open(path, "r", encoding="utf-8", newline="") as fh:
             return fh.read()
+
+
+def pretty_as(text: str, edition: str) -> str:
+    """What rustfmt makes of `text` under `edition` -- computed, not assumed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "f.rs")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        subprocess.run(["rustfmt", "--edition", edition, path],
+                       capture_output=True, check=False)
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            return fh.read()
+
+
+def manifest(name: str, edition_line: str) -> str:
+    """A crate's Cargo.toml with the given edition line."""
+    return (f'[package]\nname = "{name}"\nversion = "0.1.0"\n'
+            f"{edition_line}\n")
 
 
 def write(work: str, rel: str, text: str) -> None:
@@ -401,6 +425,68 @@ def case_bypass(tmp: str, mirror: str) -> None:
     check("ALLOW_FMT_DRIFT=1 publishes it anyway", proc.returncode, 0)
 
 
+def case_vendored_crate_is_skipped(tmp: str, mirror: str) -> None:
+    """Upstream's bytes are not ours to format.
+
+    A crate whose directory holds `.cargo-checksum.json` is vendored -- worth
+    something only while it is byte-for-byte what was published -- so its files
+    are not checked, however they look. An unformatted file is the strongest
+    form of the case: the gate refuses it anywhere else.
+    """
+    work = build_fixture(os.path.join(tmp, "vendored"), mirror)
+    write(work, "v/Cargo.toml", manifest("v", 'edition = "2018"'))
+    write(work, "v/.cargo-checksum.json", '{"files":{},"package":"0"}\n')
+    write(work, "v/src/lib.rs", UGLY)
+    git(work, "add", "--", "v")
+    git(work, "commit", "--quiet", "-m", "vendor a crate")
+    check("a vendored crate's unformatted file pushes",
+          push_verdict(work), "allowed")
+
+
+def case_crate_edition_is_read(tmp: str, mirror: str) -> None:
+    """Each file is checked by its own crate's edition, not by a constant.
+
+    Both halves, or the first could pass by skipping the file: formatted as
+    its 2018 crate formats it, it pushes; formatted as 2024 would, it is
+    refused, because 2018's rustfmt would change it.
+    """
+    as2018 = pretty_as(EDITIONED, "2018")
+    as2024 = pretty_as(EDITIONED, "2024")
+    # Vacuous unless the two editions really disagree about this text.
+    check("the fixture's text formats differently in 2018 and 2024",
+          as2018 != as2024, True)
+
+    work = build_fixture(os.path.join(tmp, "ed2018"), mirror)
+    write(work, "o/Cargo.toml", manifest("o", 'edition = "2018"'))
+    write(work, "o/src/lib.rs", as2018)
+    git(work, "add", "--", "o")
+    git(work, "commit", "--quiet", "-m", "a 2018 crate, formatted as 2018 does")
+    check("a 2018 crate's file formatted for 2018 pushes",
+          push_verdict(work), "allowed")
+
+    work = build_fixture(os.path.join(tmp, "ed2018b"), mirror)
+    write(work, "o/Cargo.toml", manifest("o", 'edition = "2018"'))
+    write(work, "o/src/lib.rs", as2024)
+    git(work, "add", "--", "o")
+    git(work, "commit", "--quiet", "-m", "a 2018 crate, formatted as 2024 does")
+    check("...and the same file formatted for 2024 is refused",
+          push_verdict(work), "refused")
+
+
+def case_workspace_edition(tmp: str, mirror: str) -> None:
+    """`edition.workspace = true` is the root manifest's edition."""
+    work = build_fixture(os.path.join(tmp, "edws"), mirror)
+    write(work, "Cargo.toml",
+          '[workspace]\nmembers = ["m"]\n\n[workspace.package]\n'
+          'edition = "2018"\n')
+    write(work, "m/Cargo.toml", manifest("m", "edition.workspace = true"))
+    write(work, "m/src/lib.rs", pretty_as(EDITIONED, "2018"))
+    git(work, "add", "--", "Cargo.toml", "m")
+    git(work, "commit", "--quiet", "-m", "a member inheriting 2018")
+    check("a member inheriting the workspace's 2018 is checked as 2018",
+          push_verdict(work), "allowed")
+
+
 def case_gittree_failure_falls_back(tmp: str) -> None:
     """A broken helper must cost speed, never correctness, and never silence.
 
@@ -471,7 +557,9 @@ def main() -> int:
         for n, case in enumerate((case_committed_clean, case_committed_dirty,
                                   case_false_pass, case_false_fail,
                                   case_untouched_submodule, case_added_then_deleted,
-                                  case_bypass)):
+                                  case_bypass, case_vendored_crate_is_skipped,
+                                  case_crate_edition_is_read,
+                                  case_workspace_edition)):
             cases.append((heading if n == 0 else None,
                           labelled(f" [{mirror}]",
                                    lambda tmp, case=case, mirror=mirror: case(tmp, mirror))))

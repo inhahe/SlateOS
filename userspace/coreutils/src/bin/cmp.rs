@@ -775,9 +775,13 @@ mod imp {
     /// diffutils' standard output: glibc's buffer ([`StdioFile`]), every
     /// write a `printf` whose failure latches as `ferror` and is reported
     /// only at the end, by [`check_stdout`] -- the comparison goes on, as
-    /// upstream's does. The exception is a reader that went away: upstream
-    /// dies of `SIGPIPE` at that write, so the error is handed back to stop
-    /// the engine, and nothing more is said (design-decisions 377).
+    /// upstream's does. A reader that went away ends both programs at that
+    /// write by `SIGPIPE`, which `stdfd::restore` put back; inherited ignored,
+    /// the `EPIPE` latches here as it does in upstream's `printf`. The
+    /// exception is where the signal could not be put back
+    /// (`stdfd::reader_gone`): the error is handed back to stop the engine
+    /// where upstream would have died, and nothing more is said
+    /// (design-decisions 377).
     struct Out {
         file: StdioFile,
         reader_gone: bool,

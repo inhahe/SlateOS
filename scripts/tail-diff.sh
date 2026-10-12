@@ -81,6 +81,11 @@ DIFF_NEED=timeout
 # a case block sets it.
 ENVV=()
 
+# A redirection applied to `tail` itself on both sides -- `>&-`, `>/dev/full`,
+# `<&-`, `2>&-` -- for the cases about standard descriptors that cannot be
+# used. Empty for every other case. See `run_side` for where it goes.
+REDIR=
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -96,9 +101,20 @@ cd "$fixtures" >/dev/null || exit 1
 # `diff_run` keeps bash's own announcement of a child that died of a signal out
 # of the stderr the caller captures; `diff-wsl.sh` says why. Every `-f` case
 # here ends that way if the SIGTERM is ignored, so it is not hypothetical.
+#
+# A `REDIR` case runs without `diff_run`, whose `4>&2` needs descriptor 2 open:
+# the redirection goes on `timeout`, and `tail` inherits it through `timeout`
+# and `env`. `eval` only for the redirection, which a variable cannot hold
+# otherwise; the arguments stay in "$@". No such case is killed by a signal
+# bash would announce, so the announcement `diff_run` exists to suppress does
+# not arise.
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 3 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" tail "$@"
+  if [ -n "$REDIR" ]; then
+    eval "timeout -k 2 3 env \${ENVV[@]+\"\${ENVV[@]}\"} PATH=\"\$bindir/\$side\" tail \"\$@\" $REDIR"
+  else
+    diff_run timeout -k 2 3 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" tail "$@"
+  fi
 }
 
 # --- fixtures ----------------------------------------------------------------
@@ -162,7 +178,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }tail $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }tail $*${REDIR:+ $REDIR}"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -524,6 +540,110 @@ ENVV=(POSIXLY_CORRECT=)
 run_case posix.txt -n1
 ENVV=()
 run_case posix.txt -n1
+
+# --- which route reads a file, and how its failures end -------------------------
+# Files in /proc are regular, say they are empty, and refuse `lseek (SEEK_END)`,
+# so upstream reads them forwards; the seeking route said `error reading ...:
+# Invalid argument` until 2026-10-07. Only files whose contents cannot differ
+# between the two runs.
+run_case -n1 /proc/version
+run_case -n3 /proc/filesystems
+run_case -c 20 /proc/filesystems
+run_case -n +2 /proc/filesystems
+# A failed read while still looking for the start is reported and the next
+# operand is printed; one while copying -- `-n +1` and `-c +1` copy from the
+# first byte -- ends the run there, as does a seek a regular file refuses.
+run_case -n1 . five.txt
+run_case -n +1 . five.txt
+run_case -c +1 . five.txt
+run_case -c +9223372036854775807 five.txt
+run_case -c +9223372036854775809 five.txt
+run_case -c 9223372036854775808 five.txt
+# `-n0` reads nothing without `-f`; with it, the file is read to its end and
+# nothing printed -- not the unterminated last line. Both time out, and stdout
+# is compared.
+run_case -n0 -f unterminated.txt
+# A `-` that is a pipe is printed and then not followed, so these end at once;
+# beside a file, the file is still followed until the timeout.
+run_stdin 'a\nb\n' -f
+run_stdin 'a\nb\n' -f -n1 -
+run_stdin 'a\nb\n' -f -n1 - w1.txt
+
+# --- standard descriptors that cannot be used ---------------------------------
+# Measured against GNU 9.4 on 2026-10-07. A small output is held in stdio's
+# buffer and fails at the close at the end: `write error: REASON`. A large one
+# fails while copying -- `error writing 'standard output': REASON` -- and ends
+# the run there. A diagnostic flushes standard output first, as glibc's
+# `error()` does, so a failure that flush meets leaves the close at the end
+# nothing to write, and its `write error` no reason. Under `-f`, a closed
+# standard output fails the `fstat` that decides whether to watch it.
+for redir in '>&-' '>/dev/full'; do
+  REDIR=$redir
+  run_case -n1 five.txt
+  run_case -n 100000 big.txt
+  run_case -c +1 big.txt
+  run_case -n1 five.txt w1.txt
+  run_case -n1 five.txt nope.txt
+  run_case -n1 nope.txt
+  run_case -n0 five.txt
+  run_case --help
+  run_case -f -n1 five.txt
+  REDIR=
+done
+# A closed standard input is noticed by the `fstat` before the first read, and
+# again by the close at the end: `tail: -: Bad file descriptor`. One that is
+# never read is never noticed.
+REDIR='<&-'
+run_case
+run_case -n1 -
+run_case -c3
+run_case -n +2
+run_case -n1 - five.txt
+run_case -n1 five.txt
+run_case -f
+run_case -f -n1 - five.txt
+# A diagnostic that cannot be written is the run's failure.
+REDIR='2>&-'
+run_case -n1 nope.txt
+run_case -n1 five.txt
+REDIR=
+
+# --- a reader that goes away ---------------------------------------------------
+# `tail ... | head -c 1`, with SIGPIPE at its default disposition and then
+# ignored, as a program started from a shell that ran `trap '' PIPE` inherits
+# it. At the default, the write after `head` has gone kills `tail`: 141.
+# Ignored, the write fails and `tail` says so -- except under `-f` with nothing
+# more to write, where the follow loop notices the reader has gone by polling
+# standard output and raises the signal on itself: 141 again, or with the
+# signal ignored, status 1 and nothing said. The status is carried out of the
+# pipeline in a file, for the reason `yes-diff.sh` gives.
+piped() {
+  local ignored=$1; shift
+  local side rc o_rc g_rc rcf o_err g_err err
+  rcf=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  for side in ours gnu; do
+    if [ "$side" = ours ]; then err=$o_err; else err=$g_err; fi
+    ( if [ -n "$ignored" ]; then trap '' PIPE; fi
+      { timeout -k 2 10 env PATH="$bindir/$side" tail "$@" 2>"$err"; echo $? >"$rcf"; } \
+        | head -c 1 >/dev/null )
+    rc=$(cat "$rcf")
+    if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
+  done
+  local o_msg g_msg
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  rm -f "$rcf" "$o_err" "$g_err"
+  if [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ]; then AGREED=yes; else AGREED=no; fi
+  REPORT=$(printf '  ours (rc=%s): err{%s}\n  gnu  (rc=%s): err{%s}' \
+    "$o_rc" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$g_rc" "$(printf '%s' "$g_msg" | tr '\n' '|')")
+  report "${ignored:+trap '' PIPE; }tail $* | head -c 1"
+}
+for ignored in '' yes; do
+  piped "$ignored" -n 100000 big.txt
+  piped "$ignored" -c +1 big.txt
+  piped "$ignored" -f -n1 five.txt
+  piped "$ignored" -f -n 100000 big.txt
+done
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ' "$xpass"

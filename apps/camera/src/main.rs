@@ -32,6 +32,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::slider::{Look, Placement, Slider};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
@@ -115,6 +116,9 @@ pub enum Target {
     Delete,
     /// One end of one settings slider.
     Setting(Setting, Nudge),
+    /// The bar between a setting's two ends: the toolkit's slider, which a
+    /// press moves and a drag carries.
+    SettingBar(Setting),
     /// The viewfinder itself: clicking it takes the picture, which is what a
     /// camera's screen does.
     Viewfinder,
@@ -144,6 +148,31 @@ impl Setting {
             Setting::NoiseReduction,
             Setting::Zoom,
         ]
+    }
+
+    /// Where the panel draws it, counting from the top.
+    pub const fn index(self) -> usize {
+        match self {
+            Setting::Brightness => 0,
+            Setting::Contrast => 1,
+            Setting::Saturation => 2,
+            Setting::Exposure => 3,
+            Setting::WhiteBalance => 4,
+            Setting::NoiseReduction => 5,
+            Setting::Zoom => 6,
+        }
+    }
+
+    /// Its range and the grid a drag keeps it to: the least, the most and
+    /// the step -- the setters' own bounds, and the grain their values have.
+    pub const fn range(self) -> (f64, f64, f64) {
+        match self {
+            Setting::Brightness | Setting::Contrast | Setting::Saturation => (0.0, 100.0, 1.0),
+            Setting::Exposure => (-5.0, 5.0, 1.0),
+            Setting::WhiteBalance => (2500.0, 10000.0, 50.0),
+            Setting::NoiseReduction => (0.0, 3.0, 1.0),
+            Setting::Zoom => (1.0, 10.0, 0.1),
+        }
     }
 
     /// The name the panel prints.
@@ -268,6 +297,36 @@ impl Layout {
             heading,
             font,
             small,
+        }
+    }
+
+    /// The same window with the sidebar, the photo strip or both given up, as
+    /// the toolbar's two toggles ask: the picture takes their room.
+    ///
+    /// Until 2026-10-04 `sidebar_visible` and `photo_strip_visible` were what
+    /// `fullscreen_preview` had been until 2026-09-22 -- flags the toggles and
+    /// their keys inverted and nothing read, so the sidebar and the strip
+    /// stayed whatever the toolbar said of them.
+    #[must_use]
+    pub fn hiding(self, sidebar: bool, strip: bool) -> Self {
+        let mut viewfinder = self.viewfinder;
+        let mut side = self.sidebar;
+        if sidebar {
+            viewfinder.w = self.window.w;
+            side = Rect::new(self.window.w, self.viewfinder.y, 0.0, 0.0);
+        }
+        let strip_rect = if strip {
+            viewfinder.h =
+                (self.strip.bottom().max(self.viewfinder.bottom()) - viewfinder.y).max(0.0);
+            Rect::new(0.0, viewfinder.bottom(), 0.0, 0.0)
+        } else {
+            Rect::new(0.0, viewfinder.bottom(), viewfinder.w, self.strip.h)
+        };
+        Self {
+            viewfinder,
+            sidebar: side,
+            strip: strip_rect,
+            ..self
         }
     }
 
@@ -1389,6 +1448,13 @@ pub struct CameraApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Each setting's bar, in [`Setting::all`]'s order: the toolkit's slider,
+    /// holding the state of a drag of it and of the pointer over its thumb.
+    /// The values stay in `settings`; a bar is set from its setting before
+    /// each input and each drawing.
+    setting_bars: Vec<Slider>,
+    /// The setting whose bar a drag is moving, while one is.
+    dragging: Option<Setting>,
 }
 
 impl CameraApp {
@@ -1428,6 +1494,14 @@ impl CameraApp {
             show_histogram: false,
             next_recording_id: 1,
             flash_remaining_ms: 0,
+            setting_bars: Setting::all()
+                .iter()
+                .map(|s| {
+                    let (lo, hi, step) = s.range();
+                    Slider::new(lo, hi, lo).with_step(step)
+                })
+                .collect(),
+            dragging: None,
         }
     }
 
@@ -1701,6 +1775,182 @@ impl CameraApp {
     // Drawing
     // ------------------------------------------------------------------
 
+    /// The layout at a size, with the panes the toolbar's toggles have given
+    /// up given up, and everything but the picture in fullscreen. The drawing
+    /// and the pointer both come through here, so a control is where it is
+    /// drawn.
+    fn layout_at(&self, w: f32, h: f32) -> Layout {
+        let l = Layout::solve(w, h).hiding(!self.sidebar_visible, !self.photo_strip_visible);
+        if self.fullscreen_preview {
+            l.fullscreen()
+        } else {
+            l
+        }
+    }
+
+    /// The settings panel's rows as drawn: each setting and its row. None
+    /// while another panel is up or the sidebar is given up; fewer than all
+    /// when the sidebar is too short for them.
+    fn setting_rows(&self, l: &Layout) -> Vec<(Setting, Rect)> {
+        if self.sidebar_panel != SidebarPanel::Settings {
+            return Vec::new();
+        }
+        let Some(body) = sidebar_body(l) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        let mut y = body.y + l.pad * 0.5;
+        for setting in Setting::all() {
+            if y + l.row > body.bottom() {
+                break;
+            }
+            rows.push((
+                *setting,
+                Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, l.row),
+            ));
+            y += l.row;
+        }
+        rows
+    }
+
+    /// Setting `s`'s bar as it is drawn now, if the panel shows it and it has
+    /// room.
+    fn setting_bar(&self, s: Setting) -> Option<Placement> {
+        let l = self.layout_at(self.width, self.height);
+        self.setting_rows(&l)
+            .into_iter()
+            .find(|(row, _)| *row == s)
+            .and_then(|(_, rect)| setting_row(rect, &l).bar)
+    }
+
+    /// Setting `s` as a number on its bar's scale.
+    fn setting_number(&self, s: Setting) -> f64 {
+        match s {
+            Setting::Brightness => f64::from(self.settings.brightness),
+            Setting::Contrast => f64::from(self.settings.contrast),
+            Setting::Saturation => f64::from(self.settings.saturation),
+            Setting::Exposure => f64::from(self.settings.exposure),
+            Setting::WhiteBalance => f64::from(self.settings.white_balance),
+            Setting::NoiseReduction => f64::from(self.settings.noise_reduction),
+            Setting::Zoom => f64::from(self.settings.zoom),
+        }
+    }
+
+    /// Set `s` to `v` through the setter that owns its range -- the
+    /// temperature taking white balance off Auto, as the ends do -- and say
+    /// it on the status line. A whole-number setting is rounded to its
+    /// nearest; zoom keeps its tenths.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "held to the setting's range first, which every type here holds, and the whole-number ones rounded"
+    )]
+    pub fn set_setting(&mut self, s: Setting, v: f64) {
+        let (lo, hi, _) = s.range();
+        let v = if v.is_finite() {
+            v.clamp(lo, hi)
+        } else {
+            self.setting_number(s)
+        };
+        let whole = v.round();
+        match s {
+            Setting::Brightness => self.settings.set_brightness(whole as u32),
+            Setting::Contrast => self.settings.set_contrast(whole as u32),
+            Setting::Saturation => self.settings.set_saturation(whole as u32),
+            Setting::Exposure => self.settings.set_exposure(whole as i32),
+            Setting::WhiteBalance => {
+                self.settings.auto_white_balance = false;
+                self.settings.set_white_balance(whole as u32);
+            }
+            Setting::NoiseReduction => self.settings.noise_reduction = whole as u32,
+            Setting::Zoom => self.settings.set_zoom(v as f32),
+        }
+        let label = self.setting_value(s);
+        self.set_status(&format!("{}: {label}", s.label()));
+    }
+
+    /// Setting `s`'s bar as it stands: set to the setting, but mid-drag.
+    fn bar_now(&self, s: Setting) -> Slider {
+        let mut bar = self
+            .setting_bars
+            .get(s.index())
+            .cloned()
+            .unwrap_or_else(|| {
+                let (lo, hi, step) = s.range();
+                Slider::new(lo, hi, lo).with_step(step)
+            });
+        if !bar.is_dragging() {
+            bar.set_value(self.setting_number(s));
+        }
+        bar
+    }
+
+    /// A pointer event for setting `s`'s bar: the toolkit slider moves it, or
+    /// takes hold of it, or lights its thumb. Returns whether it took the
+    /// event.
+    fn bar_mouse(&mut self, s: Setting, mouse: &MouseEvent) -> bool {
+        let Some(placement) = self.setting_bar(s) else {
+            // The bar went under a drag: the window shrank and took the
+            // sidebar. The toolkit's rule for a drag that loses its pointer
+            // is to take it back, and the slider must be told -- a slider
+            // left holding its drag would follow the pointer, button up,
+            // once the room came back.
+            if self.dragging != Some(s) {
+                return false;
+            }
+            self.dragging = None;
+            let response = self.setting_bars.get_mut(s.index()).map(Slider::cancel);
+            if let Some(event) = response.and_then(guitk::slider::Response::event) {
+                self.set_setting(s, event.value());
+            }
+            return true;
+        };
+        let bar = self.bar_now(s);
+        let Some(stored) = self.setting_bars.get_mut(s.index()) else {
+            return false;
+        };
+        *stored = bar;
+        let response = stored.handle_mouse(&placement, mouse);
+        let dragging = stored.is_dragging();
+        if dragging {
+            self.dragging = Some(s);
+        } else if self.dragging == Some(s) {
+            self.dragging = None;
+        }
+        if let Some(event) = response.event() {
+            self.set_setting(s, event.value());
+        }
+        response.is_taken()
+    }
+
+    /// The pointer moving with no drag: each bar's thumb lights or goes out.
+    fn hover_bars(&mut self, mouse: &MouseEvent) -> bool {
+        let mut lit = false;
+        for s in Setting::all() {
+            lit |= self.bar_mouse(*s, mouse);
+        }
+        lit
+    }
+
+    /// A key while a bar is dragged: Escape takes the drag back, the rest
+    /// wait for the button. `None` with no drag on.
+    fn drag_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        let s = self.dragging?;
+        let stored = self.setting_bars.get_mut(s.index())?;
+        let response = stored.handle_key(key);
+        if !stored.is_dragging() {
+            self.dragging = None;
+        }
+        if let Some(event) = response.event() {
+            self.set_setting(s, event.value());
+        }
+        Some(if response.is_taken() {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        })
+    }
+
     /// Draw the whole window at `w` x `h`, recording a hit box for every
     /// control painted.
     ///
@@ -1711,12 +1961,7 @@ impl CameraApp {
     /// window the program was born in, painted into whatever window it is
     /// actually in.
     pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
-        let l = Layout::solve(w, h);
-        let l = if self.fullscreen_preview {
-            l.fullscreen()
-        } else {
-            l
-        };
+        let l = self.layout_at(w, h);
         let mut f = Frame::new(w, h);
 
         fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);
@@ -2619,10 +2864,9 @@ impl CameraApp {
             f.hit(Target::Panel(*panel), r);
         }
 
-        let body = Rect::new(s.x, s.y + tab_h, s.w, (s.h - tab_h).max(0.0));
-        if body.is_empty() {
+        let Some(body) = sidebar_body(l) else {
             return;
-        }
+        };
         f.clip(body);
         match self.sidebar_panel {
             SidebarPanel::Settings => self.draw_settings_panel(f, l, body),
@@ -2635,34 +2879,34 @@ impl CameraApp {
 
     /// The sliders.
     ///
-    /// Each row is a name, a value, and a pair of ends that step it. The ends
-    /// are square and sized from the row, so they stay clickable in a narrow
-    /// sidebar where a fixed 24 px button would have overlapped the name.
+    /// Each row is a name and a value along the top, and along the bottom a
+    /// pair of ends that step it with the setting's bar between them: the
+    /// toolkit's slider (2026-10-04, `c-e-the-toolkit-has-a-slider-now.md`),
+    /// which a press moves and a drag carries. The ends are square and sized
+    /// from the row, so they stay clickable in a narrow sidebar where a fixed
+    /// 24 px button would have overlapped the name.
     fn draw_settings_panel(&self, f: &mut Frame<Target>, l: &Layout, body: Rect) {
+        let rows = self.setting_rows(l);
         let mut y = body.y + l.pad * 0.5;
-        let bw = (l.row * 0.6).min(body.w / 4.0);
-        for setting in Setting::all() {
-            if y + l.row > body.bottom() {
-                break;
-            }
-            let row = Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, l.row);
-
-            // Name on the top half, value and the two ends on the bottom, so a
-            // narrow sidebar does not have to fit all four on one line.
-            let name_h = row.h * 0.5;
+        for &(setting, row) in &rows {
+            let parts = setting_row(row, l);
             bounded(
                 f,
-                Rect::new(row.x, row.y, row.w, name_h),
+                parts.name,
                 setting.label(),
                 self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
-
-            let lower = Rect::new(row.x, row.y + name_h, row.w, row.h - name_h);
-            let down = Rect::new(lower.x, lower.y, bw, lower.h);
-            let up = Rect::new(lower.right() - bw, lower.y, bw, lower.h);
-            for (r, label, nudge) in [(down, "-", Nudge::Down), (up, "+", Nudge::Up)] {
+            bounded(
+                f,
+                parts.value,
+                &self.setting_value(setting),
+                self.palette.text,
+                l.small,
+                FontWeightHint::Bold,
+            );
+            for (r, label, nudge) in [(parts.down, "-", Nudge::Down), (parts.up, "+", Nudge::Up)] {
                 fill(f, r, self.palette.surface0, CornerRadii::all(3.0));
                 centred(
                     f,
@@ -2672,37 +2916,25 @@ impl CameraApp {
                     l.small,
                     FontWeightHint::Bold,
                 );
-                f.hit(Target::Setting(*setting, nudge), r);
+                f.hit(Target::Setting(setting, nudge), r);
             }
-
-            let mid = Rect::new(
-                down.right() + 2.0,
-                lower.y,
-                (up.x - down.right() - 4.0).max(0.0),
-                lower.h,
-            );
-            if !mid.is_empty() {
-                // The bar behind the value is the value: it is what tells the
-                // user that 62 is nearly two thirds without their having to
-                // remember the range.
-                let frac = self.setting_fraction(*setting);
-                fill(f, mid, self.palette.surface0, CornerRadii::all(2.0));
-                fill(
-                    f,
-                    Rect::new(mid.x, mid.y, mid.w * frac, mid.h),
-                    self.palette.lavender,
-                    CornerRadii::all(2.0),
+            if let Some(placement) = parts.bar {
+                let bar = self.bar_now(setting);
+                let look = Look::accent(&self.palette, self.palette.surface0);
+                f.draw_with(|cmds| bar.draw(cmds, &self.palette, &placement, look, false, 0.0));
+                // The target between the ends, and no further: it is the
+                // slider's, cut to the room it has.
+                let room = Rect::new(
+                    parts.down.right(),
+                    parts.down.y,
+                    (parts.up.x - parts.down.right()).max(0.0),
+                    parts.down.h,
                 );
-                centred(
-                    f,
-                    mid,
-                    &self.setting_value(*setting),
-                    self.palette.crust,
-                    l.small,
-                    FontWeightHint::Bold,
-                );
+                if let Some(hit) = placement.hit().intersect(room) {
+                    f.hit(Target::SettingBar(setting), hit);
+                }
             }
-            y += l.row;
+            y = row.bottom();
         }
 
         // The toggles that are not sliders, if there is room left for them.
@@ -2988,27 +3220,6 @@ impl CameraApp {
         }
     }
 
-    /// How far along its own range a slider is, in `0.0..=1.0`.
-    ///
-    /// Every setting has a different range and two of them do not start at
-    /// zero, so the bar cannot be drawn from the raw value -- which is what the
-    /// previous version's settings rows did not draw at all.
-    fn setting_fraction(&self, s: Setting) -> f32 {
-        let (v, lo, hi) = match s {
-            Setting::Brightness => (self.settings.brightness as f32, 0.0, 100.0),
-            Setting::Contrast => (self.settings.contrast as f32, 0.0, 100.0),
-            Setting::Saturation => (self.settings.saturation as f32, 0.0, 100.0),
-            Setting::Exposure => (self.settings.exposure as f32, -5.0, 5.0),
-            Setting::WhiteBalance => (self.settings.white_balance as f32, 2500.0, 10000.0),
-            Setting::NoiseReduction => (self.settings.noise_reduction as f32, 0.0, 3.0),
-            Setting::Zoom => (self.settings.zoom, 1.0, 10.0),
-        };
-        if hi <= lo {
-            return 0.0;
-        }
-        ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
-    }
-
     /// Step a slider one notch.
     ///
     /// Each step goes through the setter that owns the range, so no caller can
@@ -3106,6 +3317,10 @@ impl CameraApp {
         // shortcut twice, which for the shutter is two photographs.
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        // A bar being dragged has the keyboard: Escape takes the drag back.
+        if let Some(result) = self.drag_key(key) {
+            return result;
         }
         if key.key == Key::F1 {
             self.show_help = !self.show_help;
@@ -3265,11 +3480,35 @@ impl CameraApp {
             }
             return EventResult::Ignored;
         }
-        if mouse.kind != MouseEventKind::Press(MouseButton::Left) {
-            return EventResult::Ignored;
+        // A bar's drag has the pointer wherever it goes, until the button
+        // comes up.
+        if let Some(setting) = self.dragging {
+            return if self.bar_mouse(setting, mouse) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {}
+            // The bars' thumbs light under the pointer.
+            MouseEventKind::Move => {
+                return if self.hover_bars(mouse) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            _ => return EventResult::Ignored,
         }
         let frame = self.frame(self.width, self.height);
         match frame.hit_test(mouse.x, mouse.y) {
+            // A bar is moved by where the press lands, which `activate` --
+            // the funnel for what has no position -- cannot be told.
+            Some(Target::SettingBar(setting)) => {
+                self.bar_mouse(setting, mouse);
+                EventResult::Consumed
+            }
             Some(target) => {
                 self.activate(target);
                 EventResult::Consumed
@@ -3335,6 +3574,9 @@ impl CameraApp {
                 }
             }
             Target::Setting(setting, nudge) => self.nudge(setting, nudge),
+            // Moved by the pointer's place on it (`handle_mouse`); reached any
+            // other way it has nothing to do.
+            Target::SettingBar(_) => {}
         }
     }
 }
@@ -3644,6 +3886,67 @@ fn luminance(r: u8, g: u8, b: u8) -> u16 {
 /// direction was intended rather than relying on the reader knowing that.
 fn channel(v: f32) -> u8 {
     v.clamp(0.0, 255.0) as u8
+}
+
+/// The widest a setting bar's thumb is drawn; narrower in a short row.
+const BAR_THUMB: f32 = 14.0;
+
+/// The sidebar below its tabs, where a panel is drawn; `None` with no room.
+fn sidebar_body(l: &Layout) -> Option<Rect> {
+    let s = l.sidebar;
+    if s.is_empty() {
+        return None;
+    }
+    let tab_h = (l.row * 0.85).min(s.h);
+    let body = Rect::new(s.x, s.y + tab_h, s.w, (s.h - tab_h).max(0.0));
+    (!body.is_empty()).then_some(body)
+}
+
+/// A settings row's parts: the name and the value along the top; the two
+/// ends along the bottom, with the setting's bar between them.
+struct SettingRow {
+    name: Rect,
+    value: Rect,
+    down: Rect,
+    up: Rect,
+    /// The bar: the toolkit's slider across the room between the ends,
+    /// short of them by as much as its thumb and the light round it reach;
+    /// `None` where there is no room for one.
+    bar: Option<Placement>,
+}
+
+/// Row `row`'s parts, at the layout's sizes.
+fn setting_row(row: Rect, l: &Layout) -> SettingRow {
+    let name_h = row.h * 0.5;
+    let name = Rect::new(row.x, row.y, row.w * 0.6, name_h);
+    let value = Rect::new(row.x + row.w * 0.6, row.y, row.w * 0.4, name_h);
+    let lower = Rect::new(row.x, row.y + name_h, row.w, row.h - name_h);
+    let bw = (l.row * 0.6).min(row.w / 4.0);
+    let down = Rect::new(lower.x, lower.y, bw, lower.h);
+    let up = Rect::new(lower.right() - bw, lower.y, bw, lower.h);
+    let mid = Rect::new(
+        down.right() + 2.0,
+        lower.y,
+        (up.x - down.right() - 4.0).max(0.0),
+        lower.h,
+    );
+    let reach = guitk::slider::HALO;
+    let thumb = BAR_THUMB.min(lower.h - 2.0 * reach).min(mid.w);
+    let inset = thumb / 2.0 + reach;
+    let track_w = mid.w - 2.0 * inset;
+    let bar = (thumb > 0.0 && track_w > 0.0).then(|| {
+        Placement::horizontal(
+            Rect::new(mid.x + inset, mid.y + mid.h / 2.0 - 2.0, track_w, 4.0),
+            thumb,
+        )
+    });
+    SettingRow {
+        name,
+        value,
+        down,
+        up,
+        bar,
+    }
 }
 
 /// One notch of a `u32` setting, in either direction, saturating at both ends.
@@ -5577,6 +5880,473 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One pointer event, at `(x, y)`, through the window's own entry point.
+    fn mouse(app: &mut CameraApp, x: f32, y: f32, kind: MouseEventKind) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// Setting `s`'s bar in a full-size window, which has room for every one.
+    fn bar_of(app: &CameraApp, s: Setting) -> Placement {
+        app.setting_bar(s)
+            .unwrap_or_else(|| panic!("no {} bar in a full-size window", s.label()))
+    }
+
+    /// The point `frac` along a bar's track, on its centre line.
+    fn along(bar: &Placement, frac: f32) -> (f32, f32) {
+        let t = bar.track;
+        (t.x + t.w * frac, t.y + t.h / 2.0)
+    }
+
+    /// Every setting but `moved` is where a fresh camera has it.
+    fn only_moved(app: &CameraApp, moved: Setting) {
+        let fresh = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for other in Setting::all().iter().copied() {
+            if other != moved {
+                assert_eq!(
+                    app.setting_value(other),
+                    fresh.setting_value(other),
+                    "moving {} moved {}",
+                    moved.label(),
+                    other.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_setting_follows_a_press_and_a_drag_along_its_bar() {
+        // The bar is the toolkit's slider: a press on the track puts the
+        // setting where the press is, a drag carries it -- out of the row,
+        // since the drag has the pointer wherever it goes -- and the release
+        // leaves it there. The value is read back through the setting, so a
+        // bar that drew right and set nothing fails here.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let bar = bar_of(&app, Setting::Brightness);
+        let (x, y) = along(&bar, 0.25);
+        assert_eq!(
+            mouse(&mut app, x, y, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.settings.brightness, 25, "the press set the wrong value");
+        assert_eq!(app.dragging, Some(Setting::Brightness));
+
+        let (x, _) = along(&bar, 0.75);
+        mouse(&mut app, x, y + 200.0, MouseEventKind::Move);
+        assert_eq!(app.settings.brightness, 75, "the drag did not carry it");
+        mouse(
+            &mut app,
+            x,
+            y + 200.0,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(app.settings.brightness, 75, "the release moved it");
+        assert_eq!(app.dragging, None, "the release did not let go");
+
+        // Let go means let go: a move afterwards carries nothing.
+        let (x, _) = along(&bar, 0.1);
+        mouse(&mut app, x, y, MouseEventKind::Move);
+        assert_eq!(app.settings.brightness, 75);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("Brightness: 75")),
+            "the status line says {:?}",
+            app.status_message
+        );
+        only_moved(&app, Setting::Brightness);
+    }
+
+    #[test]
+    fn a_press_on_a_bars_thumb_holds_the_setting_where_it_is() {
+        // Taking hold of the thumb a few pixels off its centre must not
+        // jump the setting to the pixel pressed.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let before = app.settings.saturation;
+        let bar = bar_of(&app, Setting::Saturation);
+        let (cx, cy) = bar
+            .thumb_rect(app.bar_now(Setting::Saturation).fraction())
+            .centre();
+        mouse(
+            &mut app,
+            cx + 4.0,
+            cy,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(app.settings.saturation, before);
+        assert_eq!(app.dragging, Some(Setting::Saturation));
+        mouse(
+            &mut app,
+            cx + 4.0,
+            cy,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(app.settings.saturation, before);
+    }
+
+    #[test]
+    fn escape_takes_a_bars_drag_back_and_other_keys_wait() {
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let before = app.settings.contrast;
+        let bar = bar_of(&app, Setting::Contrast);
+        let (x, y) = along(&bar, 0.9);
+        mouse(&mut app, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(app.settings.contrast, 90);
+
+        // Mid-drag the pointer has the setting, so the shutter's key does
+        // not fire under it.
+        assert_eq!(
+            probe::key(&mut app, &press(Key::Space)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.gallery.count(), 0, "a key mid-drag took a picture");
+
+        assert_eq!(
+            probe::key(&mut app, &press(Key::Escape)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            app.settings.contrast, before,
+            "Escape left the drag's value"
+        );
+        assert_eq!(app.dragging, None);
+        mouse(&mut app, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            app.settings.contrast, before,
+            "the release after Escape moved it"
+        );
+        only_moved(&app, Setting::Contrast);
+    }
+
+    #[test]
+    fn white_balance_moved_on_its_bar_is_no_longer_automatic() {
+        // The ends take it off Auto, and so must the bar: a temperature the
+        // user chose that Auto then overrode would be a bar that did nothing.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.settings.auto_white_balance);
+        let bar = bar_of(&app, Setting::WhiteBalance);
+        let (x, y) = along(&bar, 0.0);
+        mouse(&mut app, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(app.settings.white_balance, 2500);
+        assert!(!app.settings.auto_white_balance);
+    }
+
+    #[test]
+    fn zoom_keeps_its_tenths_on_its_bar() {
+        // Zoom's grid is a tenth; rounding it to a whole number like the
+        // other settings would make most of the bar unreachable.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let bar = bar_of(&app, Setting::Zoom);
+        // 1x + 0.3 of 9 = 3.7x.
+        let (x, y) = along(&bar, 0.3);
+        mouse(&mut app, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            (app.settings.zoom - 3.7).abs() < 0.001,
+            "zoom is {}",
+            app.settings.zoom
+        );
+    }
+
+    #[test]
+    fn a_bars_thumb_lights_under_the_pointer_and_goes_out_after() {
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let dark = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().to_vec();
+        let bar = bar_of(&app, Setting::Exposure);
+        let (cx, cy) = bar
+            .thumb_rect(app.bar_now(Setting::Exposure).fraction())
+            .centre();
+        assert_eq!(
+            mouse(&mut app, cx, cy, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        for s in Setting::all().iter().copied() {
+            assert_eq!(
+                app.setting_bars[s.index()].is_hovered(),
+                s == Setting::Exposure,
+                "the pointer on Exposure's thumb left {}'s lit wrong",
+                s.label()
+            );
+        }
+        assert_ne!(
+            app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands(),
+            dark.as_slice(),
+            "the lit thumb drew as the dark one"
+        );
+
+        // Off into the viewfinder: it goes out, and the picture is as it was.
+        let v = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT).viewfinder;
+        let (vx, vy) = v.centre();
+        mouse(&mut app, vx, vy, MouseEventKind::Move);
+        assert!(!app.setting_bars[Setting::Exposure.index()].is_hovered());
+        assert_eq!(
+            app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands(),
+            dark.as_slice()
+        );
+        assert_eq!(app.settings.exposure, 0, "hovering moved the setting");
+    }
+
+    #[test]
+    fn hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture() {
+        // The two toggles were once flags nothing read: the toolbar said the
+        // panes were gone and they were still drawn and still answered
+        // clicks. Each is checked in what is drawn -- the viewfinder's own
+        // hit box -- and in what still answers.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        probe::click(&mut app, Target::Shutter);
+        let shown = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!shown.sidebar.is_empty() && !shown.strip.is_empty());
+        assert!(probe::is_visible(&app, Target::Photo(0)));
+        assert!(probe::is_visible(&app, Target::SettingBar(Setting::Zoom)));
+
+        probe::click(&mut app, Target::Sidebar);
+        let l = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(l.sidebar.is_empty(), "the sidebar is still {:?}", l.sidebar);
+        assert!((l.viewfinder.w - WINDOW_WIDTH).abs() < 0.01);
+        assert!(
+            (l.strip.w - WINDOW_WIDTH).abs() < 0.01,
+            "the strip kept its old width"
+        );
+        assert_eq!(probe::rect_of(&app, Target::Viewfinder), Some(l.viewfinder));
+        assert!(!probe::is_visible(&app, Target::SettingBar(Setting::Zoom)));
+        assert!(!probe::is_visible(
+            &app,
+            Target::Setting(Setting::Zoom, Nudge::Up)
+        ));
+        assert!(app.setting_bar(Setting::Zoom).is_none());
+        assert!(probe::is_visible(&app, Target::Photo(0)));
+
+        probe::click(&mut app, Target::Strip);
+        let l = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(l.strip.is_empty(), "the strip is still {:?}", l.strip);
+        assert!((l.viewfinder.bottom() - shown.strip.bottom()).abs() < 0.01);
+        assert_eq!(probe::rect_of(&app, Target::Viewfinder), Some(l.viewfinder));
+        assert!(!probe::is_visible(&app, Target::Photo(0)));
+
+        // And back: both toggles again put the window as it was.
+        probe::click(&mut app, Target::Sidebar);
+        probe::click(&mut app, Target::Strip);
+        assert_eq!(app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT), shown);
+        assert!(probe::is_visible(&app, Target::Photo(0)));
+        assert!(probe::is_visible(&app, Target::SettingBar(Setting::Zoom)));
+    }
+
+    #[test]
+    fn hiding_only_the_strip_keeps_the_sidebar_full_height() {
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let shown = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT);
+        probe::click(&mut app, Target::Strip);
+        let l = app.layout_at(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(l.sidebar, shown.sidebar);
+        assert!((l.viewfinder.w - shown.viewfinder.w).abs() < 0.01);
+        assert!(l.viewfinder.h > shown.viewfinder.h);
+    }
+
+    #[test]
+    fn a_drag_whose_bar_goes_is_taken_back_and_lets_the_pointer_go() {
+        // The window shrinking under a drag takes the sidebar, and the bar
+        // with it. The drag is taken back -- the toolkit's rule for a drag
+        // that loses its pointer -- and nothing keeps hold of the pointer:
+        // the shutter answers, and the bar that comes back with the room
+        // does not follow a pointer whose button is up.
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let bar = bar_of(&app, Setting::Brightness);
+        let (x, y) = along(&bar, 0.8);
+        mouse(&mut app, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(app.settings.brightness, 80);
+
+        app.on_event(&Event::Resize {
+            width: 300,
+            height: 200,
+        });
+        assert!(
+            app.setting_bar(Setting::Brightness).is_none(),
+            "a 300x200 window still has its sidebar"
+        );
+        mouse(&mut app, 10.0, 100.0, MouseEventKind::Move);
+        assert_eq!(app.dragging, None, "the drag outlived its bar");
+        assert_eq!(
+            app.settings.brightness, 50,
+            "the drag the window took away was kept"
+        );
+        probe::click_sized(&mut app, Target::Shutter, MouseButton::Left, (300.0, 200.0));
+        assert_eq!(
+            app.gallery.count(),
+            1,
+            "the lost drag still had the pointer"
+        );
+
+        app.on_event(&Event::Resize {
+            width: 1100,
+            height: 720,
+        });
+        let (x, y) = along(&bar, 0.2);
+        mouse(&mut app, x, y, MouseEventKind::Move);
+        assert_eq!(
+            app.settings.brightness, 50,
+            "the bar came back following a pointer whose button is up"
+        );
+    }
+
+    /// Whether the frame paints a thumb-shaped fill exactly on `k`.
+    fn thumb_drawn_at(app: &CameraApp, k: Rect) -> bool {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .any(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => near(*x, k.x) && near(*y, k.y) && near(*width, k.w) && near(*height, k.h),
+                _ => false,
+            })
+    }
+
+    #[test]
+    fn a_bar_is_drawn_where_its_setting_is_whatever_moved_it() {
+        // The ends move a setting without the bar, so the bar must be drawn
+        // from the setting rather than from where it was last dragged. The
+        // value is read from the settings themselves, not through the
+        // program's own reading of them.
+        for s in Setting::all().iter().copied() {
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let bar = bar_of(&app, s);
+            probe::click(&mut app, Target::Setting(s, Nudge::Up));
+            let c = &app.settings;
+            let now = match s {
+                Setting::Brightness => f64::from(c.brightness),
+                Setting::Contrast => f64::from(c.contrast),
+                Setting::Saturation => f64::from(c.saturation),
+                Setting::Exposure => f64::from(c.exposure),
+                Setting::WhiteBalance => f64::from(c.white_balance),
+                Setting::NoiseReduction => f64::from(c.noise_reduction),
+                Setting::Zoom => f64::from(c.zoom),
+            };
+            let (lo, hi, _) = s.range();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a fraction in 0..=1, which f32 holds well enough to place a thumb"
+            )]
+            let frac = ((now - lo) / (hi - lo)) as f32;
+            assert!(
+                thumb_drawn_at(&app, bar.thumb_rect(frac)),
+                "{} is {now} but its thumb is not drawn there",
+                s.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_bars_answer_only_while_the_settings_panel_is_up() {
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let bar = bar_of(&app, Setting::Brightness);
+        let (x, y) = along(&bar, 0.5);
+        probe::click(&mut app, Target::Panel(SidebarPanel::Filters));
+        assert!(app.setting_bar(Setting::Brightness).is_none());
+        mouse(&mut app, x, y, MouseEventKind::Move);
+        assert!(
+            app.setting_bars.iter().all(|b| !b.is_hovered()),
+            "a bar on a panel that is not up lit under the pointer"
+        );
+    }
+
+    #[test]
+    fn a_bars_thumb_and_its_light_stay_between_its_ends_at_every_size() {
+        // At either end of its travel the thumb overhangs the track by half
+        // itself, and its light by more: the track is set in from the ends
+        // by that much, and the thumb is made short enough for its row.
+        let reach = guitk::slider::HALO;
+        let mut bars = 0;
+        for w in [500.0_f32, 640.0, 800.0, 1100.0, 1600.0, 2400.0] {
+            for h in [300.0_f32, 400.0, 600.0, 720.0, 1000.0, 1400.0] {
+                let app = CameraApp::with_sample_devices(w, h);
+                let l = app.layout_at(w, h);
+                for (s, row) in app.setting_rows(&l) {
+                    let parts = setting_row(row, &l);
+                    let Some(p) = parts.bar else {
+                        continue;
+                    };
+                    bars += 1;
+                    for frac in [0.0, 1.0] {
+                        let k = p.thumb_rect(frac);
+                        assert!(
+                            k.x - reach >= parts.down.right() - 0.01
+                                && k.right() + reach <= parts.up.x + 0.01,
+                            "{}'s thumb at {frac} in a {w}x{h} window reaches over an end",
+                            s.label()
+                        );
+                        assert!(
+                            k.y - reach >= parts.down.y - 0.01
+                                && k.bottom() + reach <= parts.down.bottom() + 0.01,
+                            "{}'s thumb in a {w}x{h} window is taller than its row",
+                            s.label()
+                        );
+                    }
+                }
+            }
+        }
+        assert!(bars > 100, "only {bars} bars were drawn across the sizes");
+    }
+
+    #[test]
+    fn set_setting_holds_every_setting_to_its_range() {
+        for s in Setting::all().iter().copied() {
+            let (lo, hi, _) = s.range();
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.set_setting(s, hi + 1000.0);
+            assert!(
+                (app.setting_number(s) - hi).abs() < 1e-6,
+                "{} set past its top is {}",
+                s.label(),
+                app.setting_number(s)
+            );
+            app.set_setting(s, lo - 1000.0);
+            assert!(
+                (app.setting_number(s) - lo).abs() < 1e-6,
+                "{} set past its bottom is {}",
+                s.label(),
+                app.setting_number(s)
+            );
+            app.set_setting(s, f64::midpoint(lo, hi));
+            let before = app.setting_number(s);
+            app.set_setting(s, f64::NAN);
+            assert!(
+                (app.setting_number(s) - before).abs() < 1e-6,
+                "{} set to NaN is {}",
+                s.label(),
+                app.setting_number(s)
+            );
+        }
+    }
+
+    #[test]
+    fn the_settings_rows_stay_inside_the_sidebar() {
+        // In a short window fewer rows fit; the ones that do not are left
+        // out rather than drawn over the status line below the sidebar.
+        let mut short = false;
+        for h in [120.0_f32, 160.0, 200.0, 260.0, 720.0] {
+            let app = CameraApp::with_sample_devices(WINDOW_WIDTH, h);
+            let l = app.layout_at(WINDOW_WIDTH, h);
+            let Some(body) = sidebar_body(&l) else {
+                continue;
+            };
+            let rows = app.setting_rows(&l);
+            short |= rows.len() < Setting::all().len();
+            for (s, row) in rows {
+                assert!(
+                    row.bottom() <= body.bottom() + 0.01,
+                    "{}'s row ends at {} past the sidebar's {} in a {h}-high window",
+                    s.label(),
+                    row.bottom(),
+                    body.bottom()
+                );
+            }
+        }
+        assert!(short, "no height tried was short enough to leave a row out");
     }
 
     /// Where the picture drew a given run of text, as a point inside it.

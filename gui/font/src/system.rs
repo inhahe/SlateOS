@@ -38,7 +38,7 @@ use crate::raster::{GlyphMask, Rendering};
 use crate::scaled::{
     ScaledFont, ScaledFontError, Target, blit_image, blit_mask, byte_levels, pixel_coord,
 };
-use crate::sfnt::{Face, SfntError};
+use crate::sfnt::{Face, Outline, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
 
@@ -544,6 +544,33 @@ impl SystemFont {
             face => self.fallbacks.get_mut(face.checked_sub(1)?)?,
         };
         font.colour_glyph(key.gid(), foreground | 0xFF00_0000)
+    }
+
+    /// The outline of `key`, a glyph this font shaped: in pixels at the
+    /// font's size, y up, the pen at the origin -- from whichever face the
+    /// key names, the font's own or a fallback, at that face's instance (a
+    /// variable face at the weight this font is), as the rasterizer draws it
+    /// but unhinted ([`ScaledFont::outline`] says why). Placed by the
+    /// [`ShapedGlyph`]'s advance and offset like its mask, it is the glyph as
+    /// a path: to fill with a gradient, stroke, clip to, or turn -- SVG text
+    /// drawn as shapes.
+    ///
+    /// `None` for the built-in bitmap face, which has no outlines; for a key
+    /// naming a face this font does not have; and for a glyph that draws
+    /// nothing (a space, a picture glyph) or cannot be read. A colour glyph
+    /// answers with its base outline, which is usually none.
+    #[must_use]
+    pub fn outline(&self, key: GlyphKey) -> Option<Outline> {
+        let Backend::Outline(primary) = &self.backend else {
+            return None;
+        };
+        // Which face the glyph is in, as `glyph_mask` reads it: 0 for this
+        // font's own, and the fallbacks from 1 (`GlyphKey::in_face`).
+        let font = match usize::from(key.face()) {
+            0 => primary,
+            face => self.fallbacks.get(face.checked_sub(1)?)?,
+        };
+        font.outline(key.gid())
     }
 
     /// Rasterize glyphs `rendering`'s way from now on -- anti-aliased or
@@ -1196,6 +1223,110 @@ mod tests {
         assert_eq!(font.glyph_mask(beta).cloned(), expected);
         // A key naming a face the font does not have is no glyph at all.
         assert!(font.glyph_mask(GlyphKey::in_face(9, 1)).is_none());
+    }
+
+    /// Every point of `outline` multiplied by `k`, worked out here rather
+    /// than by `Outline::transformed`, so that the tests below do not take
+    /// the code they check on trust.
+    fn times(outline: &Outline, k: f32) -> Vec<crate::sfnt::PathCmd> {
+        use crate::sfnt::{PathCmd, Point};
+        let s = |p: Point| Point::new(p.x * k, p.y * k);
+        outline
+            .commands
+            .iter()
+            .map(|c| match *c {
+                PathCmd::MoveTo(p) => PathCmd::MoveTo(s(p)),
+                PathCmd::LineTo(p) => PathCmd::LineTo(s(p)),
+                PathCmd::QuadTo(c, p) => PathCmd::QuadTo(s(c), s(p)),
+                PathCmd::CurveTo(a, b, p) => PathCmd::CurveTo(s(a), s(b), s(p)),
+                PathCmd::Close => PathCmd::Close,
+            })
+            .collect()
+    }
+
+    /// **A shaped glyph's outline is its face's, in pixels, y up**: the
+    /// fixture's square, (100,0) to (200,100) in a 1000-unit em, is (50,0)
+    /// to (100,50) at 500 px -- command for command the face's own, halved.
+    #[test]
+    fn a_glyphs_outline_is_its_faces_in_pixels() {
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        let font = SystemFont::from_shared(Arc::clone(&face), 500.0).unwrap();
+        let key = font.shape("A").glyphs()[0].key;
+        let outline = font.outline(key).expect("the square has an outline");
+        let b = outline.bbox().unwrap();
+        assert_eq!(
+            (b.x_min, b.y_min, b.x_max, b.y_max),
+            (50.0, 0.0, 100.0, 50.0)
+        );
+        assert_eq!(outline.commands, times(&face.outline(1).unwrap(), 0.5));
+        // The triangle's curve too: its off-curve point is scaled with it.
+        let key = font.shape("B").glyphs()[0].key;
+        assert_eq!(
+            font.outline(key).unwrap().commands,
+            times(&face.outline(2).unwrap(), 0.5)
+        );
+    }
+
+    /// **A variable face's outline is at the font's instance**: the variable
+    /// fixture's square is wider at weight 700 than at its default, in its
+    /// outline as in the glyph drawn.
+    #[test]
+    fn a_variable_faces_outline_is_at_the_fonts_weight() {
+        let face = Arc::new(Face::parse(build_variable_test_font()).unwrap());
+        let width = |font: &SystemFont| {
+            let b = font.outline(GlyphKey::outline(1)).unwrap().bbox().unwrap();
+            b.x_max - b.x_min
+        };
+        let regular = SystemFont::from_shared(Arc::clone(&face), 1000.0).unwrap();
+        let bold = SystemFont::from_shared(face, 1000.0)
+            .unwrap()
+            .with_axes(&[(*b"wght", 700.0)]);
+        let (bold, regular) = (width(&bold), width(&regular));
+        assert_eq!(regular, 100.0, "the default instance is the plain square");
+        assert!(bold > regular, "bold {bold}, regular {regular}");
+    }
+
+    /// **A fallback glyph's outline comes from its own face, at its own
+    /// instance**: a variable fallback made bold, whose square is wider than
+    /// the font's own face's.
+    #[test]
+    fn a_fallback_glyphs_outline_comes_from_its_own_face() {
+        let variable = Arc::new(Face::parse(build_variable_test_font()).unwrap());
+        let own = Arc::new(Face::parse(build_test_font()).unwrap());
+        let bold = [(*b"wght", 700.0)];
+        let font = SystemFont::from_shared(own, 1000.0)
+            .unwrap()
+            .with_fallbacks(&[Arc::clone(&variable)], &bold);
+        let alone = SystemFont::from_shared(variable, 1000.0)
+            .unwrap()
+            .with_axes(&bold);
+        let expected = alone.outline(GlyphKey::outline(1)).unwrap().commands;
+        assert_eq!(
+            font.outline(GlyphKey::in_face(1, 1)).unwrap().commands,
+            expected
+        );
+        assert_ne!(
+            font.outline(GlyphKey::outline(1)).unwrap().commands,
+            expected,
+            "the font's own square is the bold one too -- this proves nothing"
+        );
+    }
+
+    /// **No outline where there is none**: the built-in bitmap face, a key
+    /// naming a face the font does not have, and a glyph that draws nothing.
+    #[test]
+    fn no_outline_where_there_is_none() {
+        assert!(
+            SystemFont::builtin(16.0)
+                .outline(GlyphKey::bitmap('A'))
+                .is_none()
+        );
+        let font = with_fallbacks();
+        assert!(font.outline(GlyphKey::in_face(9, 1)).is_none());
+        // Glyph 0, the fixture's `.notdef`, is empty.
+        assert!(font.outline(GlyphKey::outline(0)).is_none());
+        assert!(font.outline(GlyphKey::outline(1)).is_some());
+        assert!(font.outline(GlyphKey::in_face(1, 1)).is_some());
     }
 
     #[test]

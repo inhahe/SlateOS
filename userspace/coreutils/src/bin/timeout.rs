@@ -529,8 +529,11 @@ mod imp {
         let _ = signal::set_default(SIGTTOU);
         // The runtime ignored SIGPIPE before `main`, and an ignored signal
         // stays ignored across `exec`. Upstream never touches it, so its
-        // command gets whatever `timeout` was given -- which is what this
-        // restores. Unchecked: SIGPIPE is a signal and may be reset.
+        // command gets whatever `timeout` was given. `stdfd::restore` has
+        // already put that back for this whole process (design-decisions
+        // §1060); this repeats it for the command alone, so that the command
+        // starts with the default even if the startup record was never made.
+        // Unchecked: SIGPIPE is a signal and may be reset.
         if !stdfd::sigpipe_ignored_at_startup() {
             let _ = signal::set_default(SIGPIPE);
         }

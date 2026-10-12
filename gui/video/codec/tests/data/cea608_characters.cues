@@ -1,0 +1,13 @@
+# cea608_characters.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 8341666666 9743066666 1
+text 0000 - "áéíóúç÷Ññ"
+break
+text 0000 - "®°½¿™¢£♪à èâêîôû"
+break
+text 0000 - "ÁÉÓÚÜü‘¡*’—©℠•“”"
+break
+text 0000 - "ÀÂÇÈÊËëÎÏïÔÙùÛ«»"
+break
+text 0000 - "ÃãÍÌìÒòÕõ{}\\^_¦~"
+break
+text 0000 - "ÄäÖöß¥¤|ÅåØø┌┐└┘"

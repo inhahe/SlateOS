@@ -97,7 +97,10 @@ pub const PASSWD_NAME: &str = "passwd";
 pub const SHADOW_NAME: &str = "shadow";
 
 /// The method new passwords are hashed with.
-const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
+///
+/// Public so that `authlib`, which must spend what checking a password costs
+/// on paths that check none, imitates this method rather than a copy of it.
+pub const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
 
 /// Canonical field names, and the aliases accepted when reading.
 pub mod field {
@@ -1045,6 +1048,60 @@ impl UserDb {
         out
     }
 
+    /// Take the exclusive hold on the database at `path` that a load, a change
+    /// and a save must happen under. See [`Lock`].
+    ///
+    /// While another program holds it this tries [`LOCK_TRIES`] times, a second
+    /// apart, as shadow-utils' `commonio_lock` does. Any other failure -- the
+    /// directory is not writable, the caller is not privileged -- is returned
+    /// at once, since waiting cannot change it. (Upstream retries those too,
+    /// so an unprivileged `chpasswd` takes fifteen seconds to say it cannot
+    /// lock `/etc/passwd`.)
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::WouldBlock`] if another program still holds the
+    /// database after the last try; otherwise the error from creating or
+    /// locking `<path>.lock`.
+    pub fn lock(path: impl AsRef<std::path::Path>) -> std::io::Result<Lock> {
+        Self::lock_trying(path.as_ref(), LOCK_TRIES, std::time::Duration::from_secs(1))
+    }
+
+    /// [`UserDb::lock`] with the number of tries and the pause between them
+    /// given, so that a test of a held lock does not take fifteen seconds.
+    fn lock_trying(
+        path: &std::path::Path,
+        tries: u32,
+        pause: std::time::Duration,
+    ) -> std::io::Result<Lock> {
+        let lock_path = lock_path_for(path);
+        let mut open = std::fs::OpenOptions::new();
+        open.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // Owner-only, as the database itself is: the file holds nothing,
+            // but nobody else has a reason to open it, and a world-writable
+            // lock is one anybody could hold to keep the administrator out.
+            open.mode(0o600);
+        }
+        let file = open.open(&lock_path)?;
+        let mut tried: u32 = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Lock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tried = tried.saturating_add(1);
+                    if tried >= tries {
+                        return Err(std::io::ErrorKind::WouldBlock.into());
+                    }
+                    std::thread::sleep(pause);
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
+        }
+    }
+
     /// Read the database from `path`.
     ///
     /// A file that does not exist is an empty database; every *other* failure
@@ -1551,19 +1608,71 @@ impl Staged {
     }
 }
 
-/// Draw a salt from `/dev/urandom`, or `None` if it cannot be read.
+/// How many times [`UserDb::lock`] tries a database another program holds,
+/// one second apart: shadow-utils' `LOCK_TRIES` and `LOCK_SLEEP`
+/// (`lib/commonio.c`).
+pub const LOCK_TRIES: u32 = 15;
+
+/// An exclusive hold on an account database, released when it is dropped.
+///
+/// A program that loads the database, changes it and saves it holds this from
+/// before the load until after the save. Without it two such programs running
+/// at once both load the same state, and the second save silently erases the
+/// first one's change: the lost update shadow-utils' `/etc/passwd.lock`
+/// exists to prevent, and one this database had no defence against until
+/// 2026-10-07.
+///
+/// The hold is an advisory `flock` on `<database>.lock` beside the database
+/// ([`std::fs::File::try_lock`]). Advisory is enough because every writer of
+/// the database takes it, and a lock the kernel holds dies with its holder,
+/// so a crash leaves nothing behind to clear by hand. shadow-utils' lock
+/// *files* do, and have to carry a pid to tell a stale one from a live one.
+/// The file itself stays, empty: removing it on release would let a third
+/// program lock a fresh file while a second still waits on the old one.
+#[derive(Debug)]
+pub struct Lock {
+    _file: std::fs::File,
+}
+
+/// `<path>.lock`: the database's whole file name with `.lock` after it, so
+/// `/etc/users.yaml` is held through `/etc/users.yaml.lock`.
+fn lock_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    std::path::PathBuf::from(name)
+}
+
+/// Draw a salt for the method new passwords get from `/dev/urandom`, or
+/// `None` if it cannot be read. See [`random_salt_of`].
+#[must_use]
+pub fn random_salt() -> Option<String> {
+    random_salt_of(PASSWORD_METHOD.salt_max())
+}
+
+/// Draw `len` salt characters from `/dev/urandom`, or `None` if it cannot be
+/// read.
+///
+/// Exactly `len` bytes are read. `/dev/urandom` has no end: on Linux, and on
+/// SlateOS (`kernel/src/fs/devfs.rs`), a read at any offset returns fresh
+/// bytes. So a read to end of file, which is what `std::fs::read` does, never
+/// returns: it grows its buffer until the allocation fails. That is what this
+/// did until 2026-10-07, and every `passwd` and `useradm` that set a password
+/// hung there.
 ///
 /// `& 0x3f` is an unbiased reduction and not the usual modulo mistake: 256 is
 /// exactly four times 64, so every alphabet character is the image of exactly
 /// four byte values.
 #[must_use]
-pub fn random_salt() -> Option<String> {
+pub fn random_salt_of(len: usize) -> Option<String> {
+    use std::io::Read;
     const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let len = PASSWORD_METHOD.salt_max();
-    let data = std::fs::read("/dev/urandom").ok()?;
+    let mut data = vec![0u8; len];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut data)
+        .ok()?;
     Some(
-        data.get(..len)?
-            .iter()
+        data.iter()
             .map(|b| char::from(*ALPHABET.get(usize::from(*b & 0x3f)).unwrap_or(&b'.')))
             .collect(),
     )
@@ -1872,6 +1981,70 @@ users:
             Err(PasswordError::Salt)
         );
         assert!(!record.contains(field::PASSWORD_HASH));
+    }
+
+    /// `/dev/urandom` never ends, so a salt read from it must stop at the
+    /// length it needs. This read to end of file until 2026-10-07 and never
+    /// returned: a `passwd` that set a password hung there. On a host with no
+    /// `/dev/urandom` (the Windows development host) it must say so rather
+    /// than invent a salt.
+    #[test]
+    fn a_random_salt_is_drawn_once_at_its_length_and_never_reads_to_the_end() {
+        let Some(salt) = random_salt() else {
+            assert!(
+                std::fs::File::open("/dev/urandom").is_err(),
+                "`/dev/urandom` opens, but no salt was drawn from it"
+            );
+            return;
+        };
+        assert_eq!(salt.len(), PASSWORD_METHOD.salt_max());
+        assert!(
+            salt.bytes()
+                .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
+            "{salt}"
+        );
+        assert_ne!(random_salt(), Some(salt), "two draws gave the same salt");
+        assert_eq!(random_salt_of(22).map(|s| s.len()), Some(22));
+        assert_eq!(random_salt_of(0).as_deref(), Some(""));
+        // And the whole password path that reaches it, which is what hung.
+        let mut record = Record::new();
+        assert_eq!(record.set_password("pw"), Ok(()));
+        assert_eq!(record.check_password("pw"), Auth::Accepted);
+    }
+
+    /// One holder at a time, and the hold ends with the [`Lock`]. A second
+    /// open of the lock file is a second holder even within one process --
+    /// `flock` belongs to the open, not the process -- which is what lets
+    /// this be tested here.
+    #[test]
+    fn a_held_database_cannot_be_held_again_until_it_is_released() {
+        let scratch = ScratchDir::new("userdb-lock");
+        let path = scratch.path("users.yaml");
+        let held = UserDb::lock(&path).expect("the first hold");
+        let second = UserDb::lock_trying(&path, 2, std::time::Duration::from_millis(10));
+        assert_eq!(
+            second.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert!(UserDb::lock_trying(&path, 1, std::time::Duration::ZERO).is_ok());
+        // The file stays: see `Lock`.
+        assert!(scratch.path("users.yaml.lock").exists());
+    }
+
+    /// A lock that cannot even be created is not one another program holds,
+    /// so it is refused at once rather than after fifteen seconds of waiting.
+    #[test]
+    fn a_lock_that_cannot_be_made_is_refused_without_waiting() {
+        let scratch = ScratchDir::new("userdb-lock-nodir");
+        let path = scratch.path("no-such-dir/users.yaml");
+        let started = std::time::Instant::now();
+        let refused = UserDb::lock_trying(&path, LOCK_TRIES, std::time::Duration::from_secs(1));
+        assert_eq!(
+            refused.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     /// A quotation mark in a display name used to end the value early and

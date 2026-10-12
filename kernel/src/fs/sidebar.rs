@@ -7,7 +7,8 @@
 //! - **This PC**: drives and mount points from VFS
 //! - **Network**: network locations (placeholder for now)
 //! - **Recent**: recently accessed directories from fs::recent
-//! - **Tags**: tagged files from fs::tags (if any)
+//! - **Tags**: empty -- a file's tags are its own attribute, found by
+//!   searching (fs::tags), and nothing in the kernel lists every tag in use
 //!
 //! ## Architecture
 //!
@@ -17,7 +18,7 @@
 //!     → bookmarks module for Quick Access
 //!     → VFS mount info for This PC / drives
 //!     → recent module for Recent Files
-//!     → tags module for Tags
+//!     → (Tags: an empty section, see `build_tags`)
 //!   → GUI renders the tree with expand/collapse
 //! ```
 //!
@@ -445,28 +446,14 @@ fn build_recent(expanded: &[(SectionKind, bool)]) -> SidebarSection {
     }
 }
 
+/// The Tags section: empty here. A file's tags are its own `user.xdg.tags`
+/// attribute, found by searching (`fs::tags::search`), and nothing in the
+/// kernel keeps a list of every tag in use -- that is a search index's to
+/// keep, in userspace (design-decisions §1560). The list this showed came
+/// from an in-memory index that a rename left stale and a reboot emptied, and
+/// each entry named a `/tags/<tag>` path that nothing served.
 fn build_tags(expanded: &[(SectionKind, bool)]) -> SidebarSection {
-    let mut items = Vec::new();
-
-    // Get unique tags from tags module.
-    let tag_list = crate::fs::tags::list_tags();
-    let mut prio = 0u32;
-    for (tag, _count) in &tag_list {
-        if prio >= MAX_ITEMS_PER_SECTION as u32 {
-            break;
-        }
-        items.push(SidebarItem {
-            label: tag.clone(),
-            // Tags navigate to a virtual search path.
-            path: PathBuf::from(alloc::format!("/tags/{}", tag)),
-            icon: String::from("tag"),
-            removable: false,
-            droppable: false,
-            usage_info: String::new(),
-            priority: prio,
-        });
-        prio = prio.saturating_add(1);
-    }
+    let items = Vec::new();
 
     SidebarSection {
         kind: SectionKind::Tags,

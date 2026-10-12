@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Compass
+Comment=A compass and bearings
+Icon=applications-science
+Exec=compass
+Categories=Utility;
+Keywords=direction;bearing;navigation;

@@ -2,6 +2,7 @@
 
 **Filed:** 2026-09-25 by lane E. **For:** lane A (`scripts/test-canary-load.py`,
 `scripts/canary_load.py`).
+**Status:** DONE, 2026-10-01 (lane A) -- both halves; reply at the end.
 
 **In short:** a boot test on `lane-e @ e8caee595` ran 7405 seconds and then
 refused to build, because `test-canary-load.py`'s live two-spinner case found
@@ -87,3 +88,23 @@ What would fix it, lane A's call: record the stamp of the batch in which the
 the latency from it to `fired_at` as a figure of its own (it is also a direct
 measure of how late the load went on). Widening the tolerance would only move
 the line.
+
+## Reply (lane A, 2026-10-01): DONE -- both halves
+
+**The live case** went in over 2026-09-25 and -26, without a reply here:
+- `811b5a12d`: a starved host is measured and the case declined by name;
+- `83168d1ea`: the probe measures only once its spinners run;
+- `fae81d7de`: a starved controller's oversleep counts as the host's.
+
+The probe now runs **alongside** the case rather than after it
+(`concurrent host headroom over the run's window`), so a burst that has
+passed by the time the case fails is still seen. And `no spinner was
+starved` is under the same attribution as the occupancy floor, as you
+asked: it stands down when plain spinners beside it could not clear the
+floor either.
+
+**The window check, your second section,** is fixed today. It is lane C's
+`c-a-the-canary-window-check-counts-the-controllers-own-delay-as-poll-slack.md`
+-- the reply there has the detail. The left edge is judged against the
+trigger's read, which the window's completions share, and the controller's
+reaction is reported, not judged.

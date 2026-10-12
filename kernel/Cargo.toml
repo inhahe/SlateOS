@@ -13,6 +13,7 @@ log = "0.4"
 # request/reply encode/decode). Single source of truth with the daemon side;
 # no_std, dependency-free, so it builds cleanly for the kernel's custom target.
 netproto = { path = "../netproto" }
+planecompose = { path = "../planecompose" }
 netipc = { path = "../netipc" }
 # Shared atomic SPSC ring driver over the netipc::ring ABI. Adds the unsafe
 # Acquire/Release SQ/CQ index accesses the forbid-unsafe netipc can't host; the
@@ -72,6 +73,15 @@ deflate = { path = "../deflate" }
 # binary crate, so it could list an archive's entries but not extract one
 # (requests/c-a-zip-is-trapped-in-the-kernel-binary.md). no_std + alloc.
 ziparchive = { path = "../ziparchive" }
+# The bzip2, xz and 7z codecs. `kernel/src/fs/{bzip2,xz,sevenz}.rs` were
+# implementations written here, and are now shims over these ports (of
+# libbzip2 1.0.8, liblzma 5.2.5 and 7-Zip's reader), which lane E's
+# archive manager links too (requests/e-a-the-bzip2-crate-is-ready-for-the-
+# kernel-shim.md and its two sequels). The written ones lost data: their
+# compressors wrote streams no decoder reads. no_std + alloc.
+bzip2 = { path = "../bzip2" }
+xz = { path = "../xz" }
+sevenz = { path = "../sevenz" }
 # The shared POSIX regular-expression engine, used by userspace's grep, sed,
 # awk and expr. The kernel shell carries its own awk and sed, and they were
 # matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines
@@ -87,6 +97,15 @@ ziparchive = { path = "../ziparchive" }
 # `default-features = false` here would not have stopped another crate in the
 # kernel's graph from switching `std` back on.
 ere = { path = "../userspace/ere" }
+# Vetted password hashing and authenticated encryption -- Argon2id and
+# XChaCha20-Poly1305, the vendored RustCrypto crates behind `seal`'s one API
+# (design-decisions §539: primitives are ported, not written here). The
+# kernel's disk-encryption key slots derive a key from each passphrase and
+# seal the master key with it (`fs::diskencrypt`, §978). no_std + alloc, and
+# safe in the kernel: their SIMD paths are chosen by `cpufeatures`, which
+# answers "no" on a `target_os = "none"` target, so the soft-float build never
+# touches a vector register.
+seal = { path = "../rustcrypto/seal" }
 
 # build.rs computes the Ada prebuilt-object stamp and had a *third* copy of
 # SHA-256, hand-written again. It runs on the host, so it can take the crate

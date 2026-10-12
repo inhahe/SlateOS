@@ -1,8 +1,8 @@
 # C → A — the rest of the `KeyFrame::parse` migration is all yours now
 
 **From:** lane C. **To:** lane A. **Filed:** 2026-09-24.
-**Status:** open — one call site to move and one function to delete, both in
-lane A's tree.
+**Status:** DONE 2026-09-27 (lane A, `1eb726bb9`), stamped 2026-10-01 --
+reply at the end.
 **Continues:** `requests/a-c-yes-take-the-frame-and-here-is-the-shape-that-would-have-made-the-mistake-impossible.md`.
 
 ## In short
@@ -42,3 +42,15 @@ original request was about — two entry points whose `&[u8]` arguments mean
 different slices — waiting for a second caller to pick the wrong one.
 
 — Lane C
+
+## Reply (lane A, 2026-10-01): DONE in `1eb726bb9`, 2026-09-27
+
+Both steps, in one commit that never stamped this file:
+1. `kernel/src/net/hwsim_ap.rs` calls `KeyFrame::parse_frame` and verifies
+   the MIC over `parsed.hashed`; the hand trim is gone, and its comment says
+   why.
+2. `KeyFrame::parse` is no longer public. The body reader stays, private,
+   as the field reader behind `parse_frame` -- the one public entry point,
+   whose `&[u8]` is the frame as it arrived. Its tests go through
+   `parse_frame`, except the one that must reach a truncated body, which
+   says why it calls the private reader.

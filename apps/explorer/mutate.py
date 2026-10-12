@@ -1004,6 +1004,38 @@ MAIN = [
         "        let command = false;\n",
         ["a_command_is_not_typed_into_a_name_box"],
     ),
+    # -- a bin on every drive (design-decisions §1238) --
+    (
+        "the bins are not held to their limits when opened",
+        "        let pruned = self\n            .recycle\n"
+        "            .prune_all(&recyclebin::Limits::user_default(), SystemTime::now());",
+        "        let pruned = Vec::new();",
+        ["opening_the_bin_holds_it_to_its_limits_and_says_so"],
+    ),
+    (
+        "what the limits took is not said",
+        "        self.status_message = pruned_message(&pruned).unwrap_or_default();",
+        "        self.status_message = pruned_message(&[]).unwrap_or_default();\n        let _ = pruned;",
+        ["opening_the_bin_holds_it_to_its_limits_and_says_so"],
+    ),
+    (
+        "a recycle's undo names the home bin",
+        "                            bin: went.bin.root().to_path_buf(),",
+        "                            bin: self.recycle.home().bin.root().to_path_buf(),",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
+    (
+        "Restore looks in the home bin",
+        "            match item.bin.restore(&entry.id) {",
+        "            match self.recycle.home().bin.restore(&entry.id) {",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
+    (
+        "Delete permanently looks in the home bin",
+        "            match id.bin().delete(&id.id) {",
+        "            match self.recycle.home().bin.delete(&id.id) {",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
 ]
 
 COLUMNS = [
@@ -1328,13 +1360,20 @@ FILEOPS = [
         "    if false {",
         [TOO_DEEP],
     ),
+    (
+        "a recycle is undone from a bin the record does not name",
+        "                        RecycleBin::new(bin.clone()).restore(id)?;",
+        '                        RecycleBin::new(PathBuf::from("nowhere")).restore(id)?;\n'
+        "                        let _ = bin;",
+        ["undoing_a_recycle_restores_from_the_bin_it_names"],
+    ),
 ]
 
 BINVIEW = [
     (
         "choosing a row keeps the old choice",
-        "        self.chosen.clear();\n        self.chosen.insert(entry.id.clone());",
-        "        self.chosen.insert(entry.id.clone());",
+        "        self.chosen.clear();\n        self.chosen.insert(key);",
+        "        self.chosen.insert(key);",
         [BIN_CHOOSE],
     ),
     (
@@ -1351,7 +1390,8 @@ BINVIEW = [
     ),
     (
         "the choice keeps entries that are gone",
-        "        self.chosen.retain(|id| present.contains(id.as_str()));\n",
+        "        self.chosen\n"
+        "            .retain(|key| present.contains(&(key.bin.as_path(), key.id.as_str())));\n",
         "        let _ = &present;\n",
         [BIN_RESTORE],
     ),
@@ -1375,9 +1415,41 @@ BINVIEW = [
     ),
     (
         "a damaged entry may be put back",
-        "            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => {",
+        "            BinButton::Restore if !self.chosen().iter().any(|e| e.entry.is_readable()) => {",
         "            BinButton::Restore if false => {",
         [BIN_BUTTONS],
+    ),
+    # -- a bin on every drive (design-decisions §1238) --
+    (
+        "an entry is known by its id alone",
+        "        self.entry.id == key.id && self.bin.root() == key.bin.as_path()",
+        "        self.entry.id == key.id",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
+    ),
+    (
+        "a key leaves out the bin",
+        "            bin: self.bin.root().to_path_buf(),\n            id: self.entry.id.clone(),",
+        "            bin: PathBuf::new(),\n            id: self.entry.id.clone(),",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
+    ),
+    (
+        "an unreadable bin hides the others",
+        '                Err(e) => unread.push(format!("{}: {e}", drive.label())),',
+        '                Err(e) => {\n                    entries.clear();\n'
+        '                    unread.push(format!("{}: {e}", drive.label()));\n                }',
+        ["a_bin_that_cannot_be_read_hides_none_of_the_others"],
+    ),
+    (
+        "an unreadable bin is not said beside the others' rows",
+        '                summary.push_str(&format!(" -- {error}"));',
+        "                let _ = error;",
+        ["a_bin_that_cannot_be_read_hides_none_of_the_others"],
+    ),
+    (
+        "the drives are not counted",
+        "        } else if drives.len() > 1 {",
+        "        } else if drives.len() > 99 {",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
     ),
     (
         "the folder column shows the whole path",
@@ -1399,6 +1471,175 @@ BINVIEW = [
     ),
 ]
 
+
+# The context menu follows the pointer and says why a greyed row is greyed
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): it never saw
+# the pointer move and was put away after every press, so its submenus
+# could not be reached with the pointer at all.
+MAIN += [
+    (
+        'a press that opens a submenu puts the menu away',
+        '        if !menu.is_visible() {\n            self.menu = None;\n        }',
+        '        self.menu = None;',
+        ['a_submenu_is_reached_with_the_pointer'],
+    ),
+    (
+        'the menu never sees the pointer move',
+        '            MouseEventKind::Move if self.menu.is_some() => self.hover_menu(m.x, m.y),',
+        '            MouseEventKind::Move if self.menu.is_some() => false,',
+        ['a_submenu_is_reached_with_the_pointer', 'a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the menu's greyed rows are not explained",
+        '        self.explain_menu(&mut menu);',
+        '        let _ = &menu;',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a folder's Open With is explained as a file's",
+        '                "A folder opens here, in the explorer: Open With is for files."',
+        '                "No program on this system says it opens this kind of file."',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'time does not pass for the menu',
+        '            Event::Tick { elapsed_ms } => self.tick_menu(*elapsed_ms) | self.tick_work(),',
+        '            Event::Tick { .. } => self.tick_work(),',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window does not wake for a menu's reason",
+        '            .map(|ms| std::time::Duration::from_millis(ms.max(1)));',
+        '            .filter(|_| false)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)));',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
+# What programs add to a file's right-click menu (2026-10-10, requests/c-e-
+# programs-add-to-a-files-right-click-menu.md): the service menus on for the
+# file, laid out as the desktop lays them out, each starting its program in
+# the file's folder; read again when a menu is installed.
+S_OFFERED = "a_service_menus_item_is_offered_and_starts_its_program_on_the_file"
+S_KINDS = "a_service_menu_is_offered_only_for_its_kinds_and_while_it_is_on"
+S_LATER = "a_service_menu_installed_later_is_offered_at_the_next_right_click"
+
+MAIN += [
+    (
+        "the service menus are never read again",
+        "        if self.service_seen.as_ref() == Some(&stamps) {\n",
+        "        if self.service_seen.is_some() {\n",
+        [S_LATER],
+    ),
+    (
+        "the service menus are not read",
+        "        self.service_menus = servicemenus::scan(&self.service_dirs, locale.as_ref());\n",
+        "        let _ = locale;\n",
+        [S_OFFERED],
+    ),
+    (
+        "the service items are not put in the file menu",
+        "            self.offer_service_menus(&mut items);\n",
+        "",
+        [S_OFFERED],
+    ),
+    (
+        "the service items come before Open",
+        "        let at = items.len().min(2);\n",
+        "        let at = items.len().min(0);\n",
+        [S_OFFERED],
+    ),
+    (
+        "a menu the user turned off is offered",
+        "        let rows = self.service_menus.rows(&self.service_choices, &targets);\n",
+        "        let rows = self\n            .service_menus\n            .rows(&servicemenus::Choices::default(), &targets);\n",
+        [S_KINDS],
+    ),
+    (
+        "a text kind is not offered what text is",
+        "        target.inherits.push(String::from(\"text/plain\"));\n",
+        "",
+        [S_KINDS],
+    ),
+    (
+        "a service item runs nothing",
+        "            || self.service_action(id)\n",
+        "",
+        [S_OFFERED],
+    ),
+    (
+        "a service item's program starts where its starter is",
+        "                    if let Err(e) = launch_in(&program, &args, run.dir.as_deref()) {\n",
+        "                    if let Err(e) = launch_in(&program, &args, None) {\n",
+        [S_OFFERED],
+    ),
+    (
+        "a service item started is not said",
+        "                    None => format!(\"Started {name}\"),\n",
+        "                    None => String::new(),\n",
+        [S_OFFERED],
+    ),
+]
+
+
+# Pictures from the icon theme (2026-10-10, requests/c-e-draw-pictures-from-
+# the-icon-theme.md): each entry's kind in the detail view is an icon -- its
+# type's own name, its kind's built-in stand-in -- handed to the loop after
+# the thumbnails, and drawn again in other colours or another theme.
+EX_ICONS = "each_entry_is_drawn_with_its_kinds_icon_from_the_theme"
+EX_NAMES = "no_file_types_icon_name_shortens_to_another_built_in_icon"
+EX_COLOURS = "other_colours_drop_the_icons_and_draw_them_again"
+
+MAIN += [
+    (
+        "the frame's icons are never sent",
+        "        self.icons.frame_drawn(&tree.commands);\n",
+        "",
+        [EX_ICONS],
+    ),
+    (
+        "the icons are not handed to the loop",
+        "        changes.extend(icon_uploads);\n",
+        "",
+        [EX_ICONS],
+    ),
+    (
+        "other colours keep the old icons",
+        "        if self.palette != *palette {\n            self.icons.forget();\n        }\n",
+        "",
+        [EX_COLOURS],
+    ),
+    (
+        "the same colours drop the icons",
+        "        if self.palette != *palette {\n",
+        "        if self.palette == *palette || self.palette != *palette {\n",
+        [EX_COLOURS],
+    ),
+    (
+        "another icon theme is not followed",
+        "        self.icons.set_theme(settings.icon_theme.clone());\n",
+        "",
+        [EX_COLOURS],
+    ),
+    (
+        "a type is never asked for by its own name",
+        "        std::borrow::Cow::Owned(mime.replace('/', \"-\"))\n",
+        "        let _ = mime;\n        std::borrow::Cow::Borrowed(self.file_type.icon_stand_in())\n",
+        [EX_ICONS],
+    ),
+    (
+        "a folder is drawn as a page",
+        "            return std::borrow::Cow::Borrowed(\"folder\");\n",
+        "            return std::borrow::Cow::Borrowed(\"text-x-generic\");\n",
+        [EX_ICONS],
+    ),
+    (
+        "a stand-in the built-in set does not draw",
+        "            Self::Video => \"media-playback-start\",\n",
+        "            Self::Video => \"video-x-generic\",\n",
+        [EX_NAMES],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "binview.rs": BINVIEW,
@@ -1406,6 +1647,21 @@ TABLES = {
     "columnprefs.rs": COLUMNPREFS,
     "fileops.rs": FILEOPS,
 }
+
+MAIN += [
+    (
+        "a double click reaches a file under a menu that stays up",
+        "            MouseEventKind::DoubleClick(_) if self.menu.is_some() => false,\n",
+        "",
+        ["a_double_click_on_a_menu_row_opens_nothing_under_it"],
+    ),
+    (
+        "the icons' drops wait behind the thumbnails' uploads",
+        "            .partition(|change| matches!(change, ImageChange::Drop(_)));\n",
+        "            .partition(|_| false);\n",
+        ["the_icons_drops_come_before_the_thumbnails_uploads"],
+    ),
+]
 
 if __name__ == "__main__":
     only = sys.argv[1:]

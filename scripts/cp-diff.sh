@@ -360,7 +360,7 @@ UMASK=
 # the environment builder; and inside `timeout`, so a wrapper that hangs is
 # bounded by the same 30 seconds as everything else.
 WRAP=()
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); UMASK=''; WRAP=(); }
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); UMASK=''; WRAP=(); CLOSING=''; }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -439,7 +439,14 @@ run_one() {
     [ -z "$UMASK" ] || umask "$UMASK"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
-    diff_run timeout -k 2 30 env "${ENVV[@]}" "${WRAP[@]}" cp "$@" >"$out" 2>"$err"
+    if [ -n "$CLOSING" ]; then
+      # Standard input or output closed for `cp` alone, after the captures;
+      # not `2>&-`, since `diff_run` duplicates standard error.
+      eval "diff_run timeout -k 2 30 env \"\${ENVV[@]}\" \"\${WRAP[@]}\" cp \"\$@\" \
+        >\"\$out\" 2>\"\$err\" $CLOSING"
+    else
+      diff_run timeout -k 2 30 env "${ENVV[@]}" "${WRAP[@]}" cp "$@" >"$out" 2>"$err"
+    fi
   ) <"$answers"
   echo $? >"$rcf"
   return 0
@@ -540,6 +547,7 @@ compare() {
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
   [ -z "$UMASK" ] || label="$label   [umask: $UMASK]"
+  [ -z "$CLOSING" ] || label="$label   [$CLOSING]"
   [ ${#WRAP[@]} -eq 0 ] || label="$label   [wrap: ${WRAP[*]}]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
@@ -2760,6 +2768,21 @@ run_case -RH la lb dir
 # destination, so a warning rather than a refusal.
 run_case -r tree tree dir
 run_case -r tree ./tree dir
+
+# =============================================================================
+# 21b. Standard input or output closed
+# =============================================================================
+# Upstream's `copy.c` opens through `fcntl--.h`, so no file it copies ever
+# lands on descriptor 0, 1 or 2; ours opens plainly. They agree because
+# `emit_verbose`'s line is written before each copy opens its files (GNU's
+# order too), so no file of ours holds descriptor 1 when standard output is
+# written -- and a closed standard output then fails the same way on both.
+CLOSING='>&-'; run_case file.txt copy.txt
+CLOSING='>&-'; run_case -v file.txt copy.txt
+CLOSING='>&-'; run_case -rv tree dir
+CLOSING='<&-'; run_case -v file.txt copy.txt
+CLOSING='<&- >&-'; run_case -rv tree dir
+CLOSING='<&- >&-'; run_case -v file.txt tree/a.txt dir
 
 # =============================================================================
 # 22. --help and --version

@@ -78,6 +78,18 @@ SReclaimable:     260000 kB
 Committed_AS:    5200000 kB
 MEMINFO
 
+# Two files procps reads as it reads no well-formed one, for MEMFILE below:
+# an empty one -- one read of nothing is `EIO`, and the run stops -- and one a
+# line-by-line reader gets wrong, since procps finds each key by searching for
+# the next `:`. Its `junk` line therefore swallows `MemFree:`, whose value is
+# lost; `Buffers:`'s value is on the line after its key; `Cached:` is
+# negative, so `strtoul` wraps it.
+meminfo_empty=$DIFF_TMP/meminfo-empty
+: > "$meminfo_empty"
+meminfo_odd=$DIFF_TMP/meminfo-odd
+printf 'MemTotal:       16000000 kB\njunk\nMemFree:         2100000 kB\nMemAvailable:    8300000 kB\nBuffers:\n 510000 kB\nCached: -1 kB\nSwapTotal:       4000000 kB\nSwapFree:        3100000 kB\n' > "$meminfo_odd"
+MEMFILE=
+
 # Can we pin it?  Probed once, and the answer decides whether the cases below
 # are evidence or are masked.
 ns=none
@@ -117,7 +129,7 @@ run_side() {
      TZ=UTC; export TZ
      shift 2
      exec free "$@"' \
-    _ "$meminfo" "$bindir/$side" "$@"
+    _ "${MEMFILE:-$meminfo}" "$bindir/$side" "$@"
 }
 
 compare() {
@@ -167,10 +179,12 @@ report() {
 run_case() {
   if [ "$ns" != yes ]; then
     masked=$((masked+1))
+    MEMFILE=
     return 0
   fi
   compare "$@"
-  report "free $*"
+  report "free $*${MEMFILE:+ [meminfo=${MEMFILE##*/}]}"
+  MEMFILE=
 }
 
 xfail_case() {
@@ -243,6 +257,13 @@ run_case -c abc
 run_case -s -1
 run_case --seconds=abc
 run_case extra-operand
+
+# --- /proc/meminfo as procps reads it ---------------------------------------------------
+MEMFILE=$meminfo_empty; run_case
+MEMFILE=$meminfo_empty; run_case -c 2 -s 0.1
+MEMFILE=$meminfo_odd; run_case
+MEMFILE=$meminfo_odd; run_case -w -l
+MEMFILE=$meminfo_odd; run_case -b --total
 
 # --- the two whose text is ours ----------------------------------------------------------
 # `--help` is NOT a declared divergence, and the harness is what told me. I

@@ -20,6 +20,9 @@ ere = { path = "../../userspace/ere" }
 journalrec = { path = "../../userspace/journalrec" }
 # An export is written atomically, like every other file an app writes.
 safeio = { path = "../safeio" }
+# JSON-lines logs are read with the applications' one JSON reader, each
+# value as the line wrote it (`object_members`).
+jsonvalue = { path = "../jsonvalue" }
 
 # Whether a key is a chord, a command or typing: AltGr arrives as Ctrl+Alt,
 # and a command carries its letter as text.

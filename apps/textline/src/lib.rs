@@ -27,6 +27,8 @@
 
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::FontWeightHint;
+use guitk::text::TextCursor;
+use guitk::textedit;
 use guitk::textinput::TextInput;
 
 /// Whether a key held with `modifiers` is a Ctrl chord -- Ctrl+S, Ctrl+A --
@@ -177,6 +179,50 @@ pub fn apply_key(
     }
 }
 
+/// [`apply_key`] on the program's clipboard (`guitk::clipboard`): Ctrl+V
+/// pastes it, and what Ctrl+C or Ctrl+X takes is put on it as well as
+/// handed back. It is the clipboard a field's right-click menu copies to and
+/// pastes from (`TextInput::edit_command`), so the keys and the menu agree;
+/// a window keeping a clipboard of its own for the keys has two that do not.
+pub fn apply_key_on_clipboard(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    font_size: f32,
+) -> LineEdit {
+    // Read for the key that pastes alone: the clipboard may hold megabytes,
+    // and every other key -- each letter typed -- would copy them for nothing.
+    let clipboard = if pastes(key) {
+        guitk::clipboard::text()
+    } else {
+        String::new()
+    };
+    let edit = apply_key(input, key, capacity, &clipboard, font_size);
+    if let Some(copied) = &edit.copied {
+        guitk::clipboard::set_text(copied);
+    }
+    edit
+}
+
+/// Whether `key` is [`apply_key`]'s paste: Ctrl+V as a chord
+/// ([`is_ctrl_chord`]).
+#[must_use]
+pub fn pastes(key: &KeyEvent) -> bool {
+    key.key == Key::V && is_ctrl_chord(key.modifiers)
+}
+
+/// A field holding `text`, which typing and pasting -- by key or from its
+/// right-click menu -- fill to at most `capacity` characters: how a program's
+/// one-line boxes start. The text it starts with is not cut, so a longer one
+/// a file holds is shown whole.
+#[must_use]
+pub fn field_holding(text: &str, capacity: usize) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(text);
+    input.set_capacity(Some(capacity));
+    input
+}
+
 /// Type `typed` into `input` over its selection, stopping at `capacity`
 /// characters -- counted in characters, not bytes, so a limit cannot cut a
 /// character in half. A control character -- a newline in a paste -- is left
@@ -197,6 +243,109 @@ pub fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
             break;
         }
         input.insert_char(ch);
+    }
+}
+
+/// What a masked field shows for `text`: `mask` for each of its
+/// characters, with the caret `cursor` and the selection's other end
+/// `anchor` -- byte offsets into `text` -- moved onto the same characters of
+/// the mask, to draw it with.
+///
+/// One mask for each *character*, as the caret steps through a masked field
+/// ([`apply_masked_key`]): a password field that drew one for each byte
+/// showed two for an `é`, where the caret and Backspace see one.
+#[must_use]
+pub fn masked(
+    text: &str,
+    cursor: usize,
+    anchor: Option<usize>,
+    mask: char,
+) -> (String, usize, Option<usize>) {
+    let shown: String = text.chars().map(|_| mask).collect();
+    let onto_mask = |byte: usize| {
+        let chars = text
+            .get(..byte)
+            .map_or_else(|| text.chars().count(), |head| head.chars().count());
+        chars.saturating_mul(mask.len_utf8())
+    };
+    (shown, onto_mask(cursor), anchor.map(onto_mask))
+}
+
+/// The byte of `text` that byte `at` of its mask stands for -- the mask
+/// being `mask` for each of its characters ([`masked`]): where a press
+/// measured against the mask as it was drawn puts the caret in the text.
+#[must_use]
+pub fn unmasked(text: &str, at: usize, mask: char) -> usize {
+    let nth = at.checked_div(mask.len_utf8()).unwrap_or(0);
+    text.char_indices()
+        .nth(nth)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
+/// Apply `key` to `input`, a field drawn masked ([`masked`]) -- a password
+/// -- as [`apply_key`] does, but for two things.
+///
+/// Left and Right step one character through the text as it is kept. The
+/// mask on the screen runs one way whatever the text does, and a step
+/// measured through the text's own runs of direction would carry the caret
+/// over two masks at once in a password with a Hebrew letter in it.
+///
+/// And nothing is copied or cut: a hidden password put on a clipboard is
+/// shown by the next paste anywhere. Ctrl+C and Ctrl+X are still the
+/// field's, doing nothing, so that neither reaches a window's own Ctrl+C. A
+/// paste is taken, as a password manager's paste is what keeps a password
+/// from being typed.
+pub fn apply_masked_key(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    clipboard: &str,
+) -> LineEdit {
+    let chord = is_ctrl_chord(key.modifiers);
+    match key.key {
+        Key::Left | Key::Right if !is_alt_or_windows_chord(key.modifiers) => {
+            step_by_character(input, key.key == Key::Right, key.modifiers.shift);
+            LineEdit {
+                handled: true,
+                copied: None,
+            }
+        }
+        Key::C | Key::X if chord => LineEdit {
+            handled: true,
+            copied: None,
+        },
+        // No key left measures the text, so the size it is drawn at does
+        // not matter to any of them.
+        _ => apply_key(input, key, capacity, clipboard, 0.0),
+    }
+}
+
+/// Move `input`'s caret one character `forward` or back through its text
+/// as it is kept -- extending the selection with `shift` -- or, without
+/// Shift, collapse a selection to the end it is moving towards.
+fn step_by_character(input: &mut TextInput, forward: bool, shift: bool) {
+    if !shift && input.has_selection() {
+        let (start, end) = input.selection_range();
+        input.set_cursor(TextCursor::from(if forward { end } else { start }));
+        input.set_selection_anchor(None);
+        return;
+    }
+    let at = input.cursor().byte();
+    let text = input.text();
+    let next = if forward {
+        text.get(at..)
+            .and_then(|tail| tail.chars().next())
+            .map(|c| at.saturating_add(c.len_utf8()))
+    } else {
+        text.get(..at)
+            .and_then(|head| head.chars().next_back())
+            .map(|c| at.saturating_sub(c.len_utf8()))
+    };
+    let mut anchor = input.selection_anchor();
+    textedit::begin_or_end_selection(shift, input.cursor(), &mut anchor);
+    input.set_selection_anchor(anchor);
+    if let Some(next) = next {
+        input.set_cursor(TextCursor::from(next));
     }
 }
 
@@ -243,6 +392,51 @@ mod tests {
         let mut input = TextInput::new();
         input.set_text(text);
         input
+    }
+
+    /// **`pastes` is the key `apply_key` pastes on, and no other**, whatever
+    /// is held with it: the program's clipboard is read for that key alone,
+    /// so a key that pasted without being it would paste nothing.
+    #[test]
+    fn pastes_is_the_key_apply_key_pastes_on() {
+        let mut combinations = Vec::new();
+        for bits in 0_u8..16 {
+            combinations.push(Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            });
+        }
+        for modifiers in combinations {
+            for (k, text) in [(Key::V, "v"), (Key::C, "c"), (Key::Unknown(0), "v")] {
+                let stroke = held(k, text, modifiers);
+                let mut input = field("");
+                apply_key(&mut input, &stroke, 100, "PASTED", 13.0);
+                assert_eq!(
+                    input.text() == "PASTED",
+                    pastes(&stroke),
+                    "{k:?} with {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    /// **A field holding a capacity is filled to it and no further**, and
+    /// keeps whole a longer text it starts with -- a draft's or a rule's,
+    /// read from a file.
+    #[test]
+    fn a_field_holding_a_capacity_fills_to_it() {
+        let mut input = field_holding("ab", 4);
+        input.insert_text("cdef");
+        assert_eq!(input.text(), "abcd");
+        let long = field_holding("a long start", 4);
+        assert_eq!(
+            long.text(),
+            "a long start",
+            "the text it starts with was cut"
+        );
+        assert_eq!(long.capacity(), Some(4));
     }
 
     /// **A key held with Alt or the Windows key is not the field's**: the
@@ -354,6 +548,40 @@ mod tests {
         // With nothing selected, a copy takes nothing.
         let none = apply_key(&mut input, &key(Key::C, "c", true, false), 10, "", 13.0);
         assert_eq!(none.copied, None);
+    }
+
+    /// **On the program's clipboard, the keys and a field's right-click menu
+    /// agree**: Ctrl+C puts the selection there, the menu's Paste pastes it
+    /// into another field, and what the menu copies Ctrl+V pastes.
+    #[test]
+    fn the_keys_and_the_menu_share_the_programs_clipboard() {
+        let mut from = field("hello");
+        let mut to = field("");
+        apply_key_on_clipboard(&mut from, &key(Key::A, "a", true, false), 10, 13.0);
+        let copied = apply_key_on_clipboard(&mut from, &key(Key::C, "c", true, false), 10, 13.0);
+        assert_eq!(
+            copied.copied.as_deref(),
+            Some("hello"),
+            "the copy is not handed back"
+        );
+        assert_eq!(guitk::clipboard::text(), "hello");
+        let _pasted = to.edit_command(guitk::editmenu::EditCommand::Paste.id());
+        assert_eq!(
+            to.text(),
+            "hello",
+            "the menu did not paste what the key copied"
+        );
+
+        let mut other = field("world");
+        other.select_all();
+        let _copied = other.edit_command(guitk::editmenu::EditCommand::Copy.id());
+        let mut last = field("");
+        apply_key_on_clipboard(&mut last, &key(Key::V, "v", true, false), 3, 13.0);
+        assert_eq!(
+            last.text(),
+            "wor",
+            "the key did not paste what the menu copied, to the capacity"
+        );
     }
 
     #[test]
@@ -532,5 +760,99 @@ mod tests {
         assert!(!types_into_field(&key(Key::Enter, "\r", false, false)));
         assert!(!types_into_field(&key(Key::A, "", false, false)));
         assert!(types_into_field(&typed("\u{e9}")));
+    }
+
+    // -- A masked field ------------------------------------------------------
+
+    /// **A masked field shows one mask for each character, its caret and
+    /// selection on the same characters**, and a press on the mask finds
+    /// the character it stands for.
+    #[test]
+    fn a_masked_field_masks_each_character_and_keeps_its_caret_on_it() {
+        // `é` is two bytes, `€` three, and each one character.
+        let text = "a\u{e9}\u{20ac}b";
+        let (shown, cursor, anchor) = masked(text, 3, Some(1), '\u{2022}');
+        assert_eq!(shown, "\u{2022}".repeat(4), "one mask for each character");
+        assert_eq!(cursor, 2 * 3, "the caret after the second character");
+        assert_eq!(anchor, Some(3), "the anchor after the first");
+        assert_eq!(
+            masked(text, text.len(), None, '*'),
+            ("****".to_owned(), 4, None)
+        );
+        assert_eq!(masked("", 0, None, '*'), (String::new(), 0, None));
+
+        assert_eq!(unmasked(text, 0, '\u{2022}'), 0);
+        assert_eq!(
+            unmasked(text, 3, '\u{2022}'),
+            1,
+            "the second mask is the `\u{e9}`"
+        );
+        assert_eq!(
+            unmasked(text, 6, '\u{2022}'),
+            3,
+            "the third is the `\u{20ac}`"
+        );
+        assert_eq!(
+            unmasked(text, 12, '\u{2022}'),
+            text.len(),
+            "past the end is the end"
+        );
+    }
+
+    /// **A masked field's arrows step one character through the text as it
+    /// is kept**, Shift extending the selection and an unshifted arrow
+    /// collapsing it; **and nothing is copied or cut from it**, though the
+    /// keys are its own. A paste is taken.
+    #[test]
+    fn a_masked_field_steps_by_character_and_gives_nothing_to_the_clipboard() {
+        let mut input = field("a\u{5d0}b");
+        input.set_cursor(TextCursor::from(0));
+        let right = key(Key::Right, "", false, false);
+        let left = key(Key::Left, "", false, false);
+        assert!(apply_masked_key(&mut input, &right, 64, "").handled);
+        assert_eq!(input.cursor().byte(), 1, "past the `a`");
+        apply_masked_key(&mut input, &right, 64, "");
+        assert_eq!(
+            input.cursor().byte(),
+            3,
+            "past the Hebrew letter, one character"
+        );
+        apply_masked_key(&mut input, &left, 64, "");
+        assert_eq!(input.cursor().byte(), 1, "back over it");
+        // Two characters, so collapsing the selection and stepping back
+        // from its end land in different places.
+        apply_masked_key(&mut input, &key(Key::Right, "", false, true), 64, "");
+        apply_masked_key(&mut input, &key(Key::Right, "", false, true), 64, "");
+        assert_eq!(input.selection_range(), (1, 4), "Shift+Right selects");
+        apply_masked_key(&mut input, &left, 64, "");
+        assert_eq!(
+            (input.cursor().byte(), input.has_selection()),
+            (1, false),
+            "an unshifted arrow collapses the selection to its start"
+        );
+
+        input.select_all();
+        for k in [Key::C, Key::X] {
+            let edit = apply_masked_key(&mut input, &key(k, "", true, false), 64, "");
+            assert_eq!(
+                edit,
+                LineEdit {
+                    handled: true,
+                    copied: None
+                },
+                "{k:?}"
+            );
+        }
+        assert_eq!(input.text(), "a\u{5d0}b", "Ctrl+X cut a hidden password");
+        let paste = key(Key::V, "", true, false);
+        assert!(apply_masked_key(&mut input, &paste, 64, "secret").handled);
+        assert_eq!(input.text(), "secret", "a paste is taken");
+        let alt_left = held(Key::Left, "", Modifiers::alt());
+        assert!(
+            !apply_masked_key(&mut input, &alt_left, 64, "").handled,
+            "Alt+Left"
+        );
+        assert!(apply_masked_key(&mut input, &typed("!"), 64, "").handled);
+        assert_eq!(input.text(), "secret!", "typing");
     }
 }

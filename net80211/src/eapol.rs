@@ -187,8 +187,9 @@ pub mod key_info {
 /// The MIC length is *not* carried in the frame. A receiver must already know
 /// the AKM — from the RSN element it accepted during association — before it
 /// can find the Key Data Length field, because that field sits immediately
-/// after a MIC of a length only the AKM tells you. This is why [`KeyFrame::parse`]
-/// takes the MIC length as an argument rather than discovering it.
+/// after a MIC of a length only the AKM tells you. This is why
+/// [`KeyFrame::parse_frame`] takes the MIC length as an argument rather than
+/// discovering it.
 ///
 /// Returns `None` for an unknown AKM as well as for an AEAD one; the caller
 /// cannot parse either, and conflating them costs nothing here because the
@@ -358,12 +359,16 @@ pub struct ParsedFrame<'a> {
 }
 
 impl<'a> KeyFrame<'a> {
-    /// Parse an EAPOL-Key *body* (that is, the output of [`body`]).
+    /// Parse an EAPOL-Key *body* (the frame less its 4-octet header): the
+    /// field reader behind [`parse_frame`](Self::parse_frame).
     ///
-    /// [`parse_frame`](Self::parse_frame) is the better entry point for a
-    /// frame received off the wire: it hands back the octets the MIC covers
-    /// so the caller does not reconstruct them. Reach for this one only when
-    /// the body is genuinely all you have.
+    /// Private since 2026-09-26, so the crate has one public entry point and
+    /// its `&[u8]` means one thing, the frame as it arrived. While this was
+    /// public beside the MIC helpers -- which index the *frame* -- the two
+    /// slices were indistinguishable at a call site, and a caller that passed
+    /// the body to `verify_mic` shifted every hashed range by the header's 4
+    /// octets. The kernel's hwsim AP shipped that bug once; `parse_frame`
+    /// replaced its two-step and this became a helper.
     ///
     /// `mic_len` comes from [`mic_len_for_akm`] for the AKM that was
     /// negotiated during association — it is not discoverable from the frame.
@@ -375,7 +380,7 @@ impl<'a> KeyFrame<'a> {
     /// let an attacker truncate the RSN element an AP advertised in message 3,
     /// which is precisely the downgrade the handshake exists to detect.
     #[must_use]
-    pub fn parse(body: &'a [u8], mic_len: usize) -> Option<Self> {
+    fn parse_body(body: &'a [u8], mic_len: usize) -> Option<Self> {
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(body.get(13..45)?);
         let mut iv = [0u8; IV_LEN];
@@ -406,13 +411,17 @@ impl<'a> KeyFrame<'a> {
     /// Parse a whole EAPOL frame, returning the body **and the octets the MIC
     /// covers**.
     ///
-    /// Prefer this to [`parse`](Self::parse). It takes the frame as it arrived
-    /// off the wire, so the caller never computes the MIC range by hand -- see
-    /// [`ParsedFrame`] for why that matters. `mic_len` is as for
-    /// [`parse`](Self::parse).
+    /// It takes the frame as it arrived off the wire, so the caller never
+    /// computes the MIC range by hand -- see [`ParsedFrame`] for why that
+    /// matters. `mic_len` comes from [`mic_len_for_akm`] for the AKM negotiated
+    /// during association -- it is not discoverable from the frame; pass `0`
+    /// for an AEAD AKM, whose frames have no MIC field.
     ///
-    /// Returns `None` for everything [`parse`](Self::parse) rejects, and also
-    /// when the header's Packet Type is not [`packet_type::KEY`].
+    /// Returns `None` for a body the field reader rejects -- short, or a Key
+    /// Data Length that overruns the frame, which must be rejected rather than
+    /// clamped: clamping would let an attacker truncate the RSN element an AP
+    /// advertised in message 3, the downgrade the handshake exists to detect --
+    /// and also when the header's Packet Type is not [`packet_type::KEY`].
     ///
     /// That type check earns its place by rejecting a genuine EAPOL-Start or
     /// EAPOL-Logoff -- both real things on the wire -- instead of parsing one as
@@ -442,7 +451,7 @@ impl<'a> KeyFrame<'a> {
         // another. `hashed.len() == end >= HEADER_LEN`, so this cannot fail.
         let body = hashed.get(HEADER_LEN..)?;
         Some(ParsedFrame {
-            key: Self::parse(body, mic_len)?,
+            key: Self::parse_body(body, mic_len)?,
             hashed,
         })
     }
@@ -752,8 +761,9 @@ mod tests {
     fn a_written_frame_parses_back_to_the_same_fields() {
         let rsn_ie = [48u8, 2, 1, 0];
         let (buf, n) = m2_frame(&rsn_ie);
-        let body = body(&buf[..n]).expect("body");
-        let kf = KeyFrame::parse(body, MIC_LEN_DEFAULT).expect("parses");
+        let kf = KeyFrame::parse_frame(&buf[..n], MIC_LEN_DEFAULT)
+            .expect("parses")
+            .key;
         assert_eq!(kf.descriptor_type, descriptor_type::RSN);
         assert_eq!(kf.descriptor_version(), key_info::VERSION_HMAC_SHA1_AES);
         assert_eq!(kf.key_len, 16);
@@ -849,7 +859,9 @@ mod tests {
         }
         let body = body(&padded).expect("body");
         assert_eq!(body.len(), n - HEADER_LEN);
-        let kf = KeyFrame::parse(body, MIC_LEN_DEFAULT).expect("parses");
+        let kf = KeyFrame::parse_frame(&padded, MIC_LEN_DEFAULT)
+            .expect("parses")
+            .key;
         assert_eq!(kf.key_data, &[] as &[u8]);
     }
 
@@ -860,21 +872,23 @@ mod tests {
         let (mut buf, n) = m2_frame(&[48, 2, 1, 0]);
         let len_at = HEADER_LEN + BODY_BEFORE_MIC + MIC_LEN_DEFAULT;
         buf[len_at..len_at + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
-        let body = body(&buf[..n]).expect("body");
-        assert_eq!(KeyFrame::parse(body, MIC_LEN_DEFAULT), None);
+        assert_eq!(KeyFrame::parse_frame(&buf[..n], MIC_LEN_DEFAULT), None);
     }
 
     #[test]
     fn a_body_short_by_one_octet_is_rejected_at_every_length() {
         let (buf, n) = m2_frame(&[48, 2, 1, 0]);
         let body = body(&buf[..n]).expect("body");
+        // On the private field reader, not `parse_frame`: a truncated *frame*
+        // fails the header's length check before the body is read, so only
+        // this reaches the reader's own bounds.
         for short in 0..body.len() {
             assert!(
-                KeyFrame::parse(&body[..short], MIC_LEN_DEFAULT).is_none(),
+                KeyFrame::parse_body(&body[..short], MIC_LEN_DEFAULT).is_none(),
                 "{short} octets must not parse as a full EAPOL-Key body"
             );
         }
-        assert!(KeyFrame::parse(body, MIC_LEN_DEFAULT).is_some());
+        assert!(KeyFrame::parse_body(body, MIC_LEN_DEFAULT).is_some());
     }
 
     #[test]
@@ -897,11 +911,11 @@ mod tests {
         assert_eq!(parsed.hashed, &buf[..n]);
         assert_eq!(parsed.key.key_data, &[48, 2, 1, 0]);
 
-        // And it agrees with the two-step it replaces, on the same buffer.
+        // And it agrees with the two-step it replaced, on the same buffer.
         let body = body(&padded).expect("body");
         assert_eq!(
             parsed.key,
-            KeyFrame::parse(body, MIC_LEN_DEFAULT).expect("parses")
+            KeyFrame::parse_body(body, MIC_LEN_DEFAULT).expect("parses")
         );
     }
 
@@ -1062,7 +1076,7 @@ mod tests {
         };
         let n = write(&mut out, version::V3, &fields, 0).expect("fits");
         assert_eq!(n, HEADER_LEN + 77 + 2 + 3);
-        let kf = KeyFrame::parse(body(&out[..n]).expect("body"), 0).expect("parses");
+        let kf = KeyFrame::parse_frame(&out[..n], 0).expect("parses").key;
         assert!(kf.mic.is_empty());
         assert_eq!(kf.key_data, &[9, 9, 9]);
     }

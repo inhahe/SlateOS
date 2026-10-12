@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Contacts
+Comment=Keep people's addresses, numbers and birthdays
+Icon=x-office-address-book
+Exec=contacts
+Categories=Office;ContactManagement;
+Keywords=address;book;people;

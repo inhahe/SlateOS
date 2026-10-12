@@ -541,6 +541,71 @@ MAIN += [
     ),
 ]
 
+
+# Why a component checkbox is switched off, said while the pointer rests
+# on it (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md).
+MAIN += [
+    (
+        'a switched-off checkbox gives no reason',
+        '                let why = component.source(&self.locations).err()?;',
+        '                let why = component.source(&self.locations).err().filter(|_| false)?;',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a checkbox's reason is not a sentence",
+        '                Some(((r.x, r.y, r.w, r.h), format!("{why}.")))',
+        '                Some(((r.x, r.y, r.w, r.h), why.to_string()))',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a checkbox's reason is given under the shortcut card",
+        '        if self.show_help {\n            return Vec::new();\n        }\n        self.component_rows()',
+        '        self.component_rows()',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the pointer is not followed for a checkbox's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => None,\n                _ => self.pointer,',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a pointer that left keeps a checkbox's reason",
+        '                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),',
+        '                MouseEventKind::Leave => self.pointer,\n                _ => Some((mouse.x, mouse.y)),',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the clock for a checkbox's reason does not move",
+        '            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);',
+        '            let _ = elapsed_ms;',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    # Not a row: the tick that shows a checkbox's reason asks for a frame of
+    # its own, which matters on the machine -- the window's own tick draws
+    # only when the wall clock's second has changed -- but no test can see
+    # it, because handle_tick reads the real clock and every test tick
+    # moves the window's time and asks for a frame anyway.
+    (
+        "a checkbox's reason going asks for no frame",
+        '        if self.explain_disabled() {\n            result = EventResult::Consumed;\n        }',
+        '        self.explain_disabled();',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a checkbox's reason is not drawn",
+        '        rt.commands.extend(self.why_disabled.render(&self.palette));',
+        '        let _ = self.why_disabled.render(&self.palette);',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window does not wake for a checkbox's reason",
+        '                .map_or(own, |ms| own.min(Duration::from_millis(ms))),',
+        '                .map_or(own, |_| own),',
+        ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 TABLES = {
     "points.rs": POINTS,
     "main.rs": MAIN,

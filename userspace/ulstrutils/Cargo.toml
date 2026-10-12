@@ -12,3 +12,6 @@ workspace = true
 # has no dependencies and takes bytes, so this crate stays a pure formatter
 # over it -- no I/O, and so safe under section 768 (one libc per process).
 quoting = { path = "../quoting" }
+# `fputs_careful` counts columns, for the wrapping `wall` and `write` ask of
+# it, by the one width table every program here measures with.
+charwidth = { path = "../charwidth" }

@@ -584,10 +584,10 @@ fn blockmix_xor_save(
 /// B's 128r bytes, as little-endian words, shuffled into the 2r blocks at
 /// word offset `dst`.
 fn load_b(mem: &mut [u64], dst: usize, b: &[u8], r: usize) {
-    for (i, bytes) in b[..128 * r].chunks_exact(64).enumerate() {
+    for (i, bytes) in b[..128 * r].as_chunks::<64>().0.iter().enumerate() {
         let mut w = [0u32; 16];
-        for (word, le) in w.iter_mut().zip(bytes.chunks_exact(4)) {
-            *word = u32::from_le_bytes([le[0], le[1], le[2], le[3]]);
+        for (word, le) in w.iter_mut().zip(bytes.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*le);
         }
         store(mem, dst + i * 8, &shuffle(&w));
     }
@@ -596,10 +596,10 @@ fn load_b(mem: &mut [u64], dst: usize, b: &[u8], r: usize) {
 /// The 2r blocks at word offset `src`, unshuffled, as little-endian words
 /// into B's 128r bytes.
 fn store_b(mem: &[u64], src: usize, b: &mut [u8], r: usize) {
-    for (i, bytes) in b[..128 * r].chunks_exact_mut(64).enumerate() {
+    for (i, bytes) in b[..128 * r].as_chunks_mut::<64>().0.iter_mut().enumerate() {
         let w = unshuffle(&load(mem, src + i * 8));
-        for (word, le) in w.iter().zip(bytes.chunks_exact_mut(4)) {
-            le.copy_from_slice(&word.to_le_bytes());
+        for (word, le) in w.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
+            *le = word.to_le_bytes();
         }
     }
 }

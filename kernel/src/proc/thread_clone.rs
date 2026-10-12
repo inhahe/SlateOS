@@ -18,8 +18,8 @@
 //! kernel-spawned task.  Its entry point is [`clone_thread_trampoline`],
 //! which:
 //!
-//!   1. Reclaims the heap-allocated register image (see
-//!      [`CloneThreadImage`]).
+//!   1. Reclaims the heap-allocated register image (a boxed
+//!      `[u64; REG_IMAGE_LEN]`; see [`REG_IMAGE_LEN`]).
 //!   2. If `CLONE_SETTLS` was requested, writes the new FS base into
 //!      `IA32_FS_BASE` (MSR 0xC000_0100) so the child sees its own TLS
 //!      block immediately on the first ring-3 instruction.
@@ -210,26 +210,45 @@ pub fn lookup_robust_list(task_id: TaskId) -> Option<(u64, u64)> {
 /// critical section the task installs (Linux checks this at abort
 /// time as a defence against attacker-supplied abort handlers).
 ///
-/// We currently use this only as an ABI-stored value:
-///   * `rseq(2)` register/unregister/duplicate-check is satisfied
-///     from this map.
-///   * The userspace `struct rseq` fields (`cpu_id_start`, `cpu_id`,
-///     `node_id`, `mm_cid`) are zeroed on register and never updated
-///     thereafter.  This is correct on a uniprocessor (cpu_id never
-///     changes from 0), and matches the semantics glibc's per-cpu
-///     fast paths require for *correctness* — they always succeed
-///     because the published cpu_id matches the cpu the section
-///     committed on.  On SMP we would need a preemption-time hook
-///     in the scheduler that writes the current CPU back into
-///     `*ptr` (and runs the abort handler when RIP falls inside a
-///     critical section that crossed CPUs).  See todo.txt for the
-///     deferred SMP rseq hook.
+/// `rseq(2)`'s register/unregister/duplicate checks are answered from
+/// this map, and `crate::rseq` reads it on a registered thread's way back
+/// to user mode -- to keep the area's `cpu_id` current and abort a critical
+/// section the thread was switched out, moved or signalled in
+/// (design-decisions 1546). Whether a thread has an entry is mirrored on its
+/// scheduler record (`sched::set_rseq_registered`), which is how a dispatch
+/// knows to mark its CPU without taking this lock.
 ///
+/// A forked child gets its forking thread's entry (Linux's `rseq_fork`); a
+/// new thread starts with none; an exec drops it ([`release_for_exec`]).
 /// Entries are removed in [`on_thread_exit_hook`] so the table does
 /// not grow without bound across the lifetime of the system.  No
 /// userspace write happens at exit (the thread is dying; Linux also
 /// does not zero the struct on exit).
 static RSEQ: Mutex<BTreeMap<TaskId, (u64, u32, u32)>> = Mutex::new(BTreeMap::new());
+
+/// Release what thread `task_id` registered in the image an exec is about to
+/// replace -- Linux's `exec_mm_release`, from `spawn::exec_process` just
+/// before the old address space is torn down, while it is still mapped:
+///
+/// - its PI futexes are handed to their waiters and its robust list walked,
+///   as at exit ([`on_thread_exit_hook`]'s order): the old image's mutexes die with
+///   it (Linux's `futex_exec_release`);
+/// - the robust-list head, the rseq area and the clear-child-tid word are
+///   forgotten.
+///
+/// Each names an address in the old image. Until 2026-10-08 all three outlived
+/// an exec, and the thread's exit then walked, or wrote into, whatever the new
+/// image had put at those addresses -- unless its C library happened to
+/// register over them first.
+pub fn release_for_exec(task_id: TaskId) {
+    let robust_head = ROBUST_LIST.lock().remove(&task_id).map(|(head, _len)| head);
+    crate::ipc::futex::exit_pi_owned_futexes(task_id);
+    if let Some(head) = robust_head {
+        crate::ipc::futex::exit_robust_list(head, task_id);
+    }
+    let _ = unregister_rseq(task_id);
+    CLEAR_CHILD_TID.lock().remove(&task_id);
+}
 
 /// Register `ptr` (`rseq` userspace pointer), `len` (struct length —
 /// Linux requires 32), and `sig` (abort-signature) for `task_id`.
@@ -238,6 +257,8 @@ static RSEQ: Mutex<BTreeMap<TaskId, (u64, u32, u32)>> = Mutex::new(BTreeMap::new
 /// user space, readable+writable for `len` bytes) and `len == 32`.
 pub fn register_rseq(task_id: TaskId, ptr: u64, len: u32, sig: u32) {
     RSEQ.lock().insert(task_id, (ptr, len, sig));
+    // A task that has gone has nothing to be dispatched with.
+    let _ = crate::sched::set_rseq_registered(task_id, true);
 }
 
 /// Look up the rseq registration for `task_id`.  Returns
@@ -249,7 +270,10 @@ pub fn lookup_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
 /// Remove the rseq registration for `task_id`, if any.  Returns
 /// the previous value for the caller's sanity-checks.
 pub fn unregister_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
-    RSEQ.lock().remove(&task_id)
+    let removed = RSEQ.lock().remove(&task_id);
+    // As above: a task that has gone has no flag to clear.
+    let _ = crate::sched::set_rseq_registered(task_id, false);
+    removed
 }
 
 /// Called from [`super::thread::on_thread_exit`] BEFORE the thread is
@@ -330,6 +354,9 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
     // in this address space's task list); we match that.
     RSEQ.lock().remove(&task_id);
 
+    // A traced thread's trace ends with it.
+    crate::proc::ptrace::on_thread_exit(task_id);
+
     let ctid_ptr = match CLEAR_CHILD_TID.lock().remove(&task_id) {
         Some(p) => p,
         None => return,
@@ -369,9 +396,9 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
 ///
 /// `image_raw` is `Box::into_raw(Box::new([u64; REG_IMAGE_LEN]))`,
 /// constructed by [`clone_thread`].  The trampoline reclaims and
-/// frees the box, installs the new FS base if requested, builds an
-/// IRETQ frame from the register image, and transitions to ring 3
-/// with `RAX = 0`.
+/// frees the box, installs the new FS base if requested, gives a traced
+/// thread its first stop, and enters ring 3 with `RAX = 0`
+/// (`crate::proc::user_entry`).
 ///
 /// # Safety
 ///
@@ -403,48 +430,66 @@ extern "C" fn clone_thread_trampoline(image_raw: u64) {
         unsafe { crate::cpu::wrmsr(IA32_FS_BASE, new_fs) };
     }
 
-    let ptr = regs.as_ptr();
+    // The thread's whole register set: its creator's at the call, with the
+    // call's 0 in RAX and RCX/R11 as a SYSRET from it leaves them -- never the
+    // kernel's own values, which this trampoline used to hand ring 3 in them
+    // (`crate::proc::user_entry`).
+    let [
+        rip,
+        _cs,
+        rflags,
+        rsp,
+        _ss,
+        rdi,
+        rsi,
+        rdx,
+        r10,
+        r8,
+        r9,
+        rbx,
+        rbp,
+        r12,
+        r13,
+        r14,
+        r15,
+        _fs,
+    ] = regs;
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip,
+        rsp,
+        rflags,
+        rax: 0,
+        rbx,
+        rcx: rip,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        r8,
+        r9,
+        r10,
+        r11: rflags,
+        r12,
+        r13,
+        r14,
+        r15,
+    };
 
-    // Build the IRETQ frame and transition to ring 3.
-    //
-    // SAFETY: The cloned thread shares the parent's address space
-    // (CR3 was carried over when the scheduler dispatched this
-    // thread, since `thread::spawn` plants it in the same process's
-    // PML4).  The IRETQ frame is pushed in canonical order (SS, RSP,
-    // RFLAGS, CS, RIP).  RCX is reserved for the image pointer and
-    // is NOT among the restored registers, so all memory reads
-    // complete before any register restore could clobber it.  RAX is
-    // explicitly zeroed so the cloned thread's userspace observes
-    // a `clone()` return value of 0 (Linux ABI: child returns 0,
-    // parent returns the child TID).
-    unsafe {
-        core::arch::asm!(
-            // Push the IRETQ frame (stack grows down -> reverse order).
-            "mov rax, [rcx + 32]", "push rax", // SS
-            "mov rax, [rcx + 24]", "push rax", // RSP (= child_stack)
-            "mov rax, [rcx + 16]", "push rax", // RFLAGS
-            "mov rax, [rcx + 8]",  "push rax", // CS
-            "mov rax, [rcx + 0]",  "push rax", // RIP
-            // Restore general-purpose registers from the image.
-            "mov rdi, [rcx + 40]",
-            "mov rsi, [rcx + 48]",
-            "mov rdx, [rcx + 56]",
-            "mov r10, [rcx + 64]",
-            "mov r8,  [rcx + 72]",
-            "mov r9,  [rcx + 80]",
-            "mov rbx, [rcx + 88]",
-            "mov rbp, [rcx + 96]",
-            "mov r12, [rcx + 104]",
-            "mov r13, [rcx + 112]",
-            "mov r14, [rcx + 120]",
-            "mov r15, [rcx + 128]",
-            // clone() return value in the cloned thread is 0.
-            "xor rax, rax",
-            "iretq",
-            in("rcx") ptr,
-            options(noreturn),
-        );
-    }
+    // A freeze that began while the thread was being made: its first entry to
+    // ring 3 passes no signal checkpoint, so it is looked for here, before
+    // its first instruction (`proc::freezer`).
+    crate::proc::freezer::park_if_frozen();
+
+    // A traced thread's first stop, before its first instruction
+    // (`ptrace::first_entry`): its tracer may change the registers.
+    crate::proc::ptrace::first_entry(&mut entry);
+
+    // SAFETY: the cloned thread shares its creator's address space, which the
+    // scheduler made the active one before dispatching it; RIP is the
+    // creator's own return address and RSP the caller-supplied stack (or a
+    // tracer's, which `ptrace`'s register checks keep to user addresses), and
+    // RFLAGS the creator's own, made safe when the image was built.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +529,14 @@ pub fn clone_thread(
     let regs = build_register_image(frame, args);
     let image_raw = Box::into_raw(Box::new(regs)) as u64;
 
-    // Inherit the calling thread's effective scheduling priority.
-    let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
-        .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
+    // The calling thread's scheduling, as Linux's `sched_fork` gives a new
+    // thread: policy, real-time priority and ordinary level, reset to the
+    // ordinary default under SCHED_RESET_ON_FORK (`sched::inheritance_from`).
+    // The thread is spawned at that level and given the rest while still
+    // suspended. Until 2026-10-07 it was spawned at the caller's *effective*
+    // level, an interactive boost or a lent level included.
+    let inheritance = crate::sched::inheritance_from(crate::sched::current_task_id());
+    let priority = inheritance.map_or(crate::sched::task::DEFAULT_PRIORITY, |i| i.level());
 
     // Compute the child's persistent FS (TLS) base *before* spawning so it can
     // be seeded onto the Task while it is still suspended.  IA32_FS_BASE is a
@@ -533,6 +583,10 @@ pub fn clone_thread(
             return Err(e);
         }
     };
+
+    if let Some(inheritance) = inheritance {
+        crate::sched::inherit_scheduling(task_id, inheritance);
+    }
 
     // NOTE: the child's FS/GS bases were seeded by `spawn_with_tls` *before*
     // the task was admitted — deliberately not done here, where the child may
@@ -590,11 +644,23 @@ pub fn clone_thread(
         register_clear_child_tid(task_id, args.child_tid_ptr);
     }
 
+    // A traced creator's thread is traced too, when its tracer asked
+    // (`PTRACE_O_TRACECLONE`, or CLONE_PTRACE): before it can run, so its
+    // first instruction is its first stop.
+    crate::proc::ptrace::attach_new(
+        crate::sched::current_task_id(),
+        parent_pid,
+        task_id,
+        crate::proc::ptrace::Creation::from_clone(args.flags, args.flags & 0xff),
+        frame.syscall_nr,
+    );
+
     // Phase 2: everything the exit path needs is registered — let the child run.
     // On failure `admit` has already unwound the thread registration and
     // destroyed the task, but the ctid entry we just installed is keyed on a
     // task id that will never exit, so drop it here rather than leaking it.
     if let Err(e) = thread::admit(parent_pid, task_id) {
+        crate::proc::ptrace::forget_new(task_id);
         forget_clear_child_tid(task_id);
         // SAFETY: `image_raw` came from `Box::into_raw` above and was not
         // consumed — the task never ran, so the trampoline never freed it.
@@ -661,6 +727,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // (1) build_register_image: verify slot mapping.
     let frame = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         syscall_nr: 0,
         arg0: 0x1111,
         arg1: 0x2222,
@@ -709,6 +778,9 @@ pub fn self_test() -> KernelResult<()> {
     }
     // RFLAGS substitution: zero -> 0x202.
     let frame_zero_rflags = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         user_rflags: 0,
         ..frame
     };

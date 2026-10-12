@@ -59,8 +59,8 @@ const H0: [u32; 5] = [
 /// kinds, the schedule expanded as it goes.
 fn compress(state: &mut [u32; 5], block: &[u8; 64]) {
     let mut w = [0u32; 16];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
     let [mut a, mut b, mut c, mut d, mut e] = *state;
     for i in 0..80 {
@@ -142,8 +142,8 @@ impl Sha1 {
         self.block[56..].copy_from_slice(&bits.to_be_bytes());
         compress(&mut self.state, &self.block);
         let mut out = [0u8; 20];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *chunk = word.to_be_bytes();
         }
         self.wipe();
         out

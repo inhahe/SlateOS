@@ -959,6 +959,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "fuzz.py",
         "q45_apply.py",
         "q45_survey.py",
+        "process-review.py",
         "questions-for-you.py",
         "reintro-evdev.py",
         "review-batch.py",

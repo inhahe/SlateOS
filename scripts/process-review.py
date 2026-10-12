@@ -344,8 +344,19 @@ say which. Plain prose, at most 400 words.
 """
 
 
+def newest_claude() -> str:
+    """The Claude Code to run: this session's, or else the newest installed
+    build (a scheduled task has no session, and the `claude` on PATH can lag
+    the builds the lanes run)."""
+    if os.environ.get("CLAUDE_CODE_EXECPATH"):
+        return os.environ["CLAUDE_CODE_EXECPATH"]
+    builds = sorted(Path.home().glob(".claude-cli/*/claude.exe"),
+                    key=lambda p: tuple(int(x) for x in re.findall(r"\d+", p.parent.name)))
+    return str(builds[-1]) if builds else "claude"
+
+
 def propose(text: str) -> str:
-    claude = os.environ.get("CLAUDE_CODE_EXECPATH") or "claude"
+    claude = newest_claude()
     r = subprocess.run([claude, "-p", "--model", "opus", "--effort", "medium", PROPOSE + text],
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        stdin=subprocess.DEVNULL, env=gitenv.clean_env(), timeout=1800)

@@ -1,4 +1,34 @@
 ## Resolved — lane C
+- **The start button should be the XOR logo: can you add it?** (C-Q28) --
+  answered 2026-10-09: done, `xor.png` put in the integration tree; it is
+  the repository's now and the start button is to draw it, round. §1604.
+
+- **Should copy and paste travel through the window system?** (C-Q29) --
+  answered 2026-10-09: yes, A; a program with no window reaches the clipboard
+  over the same connection (reading without focus behind a permission), and
+  the clipboard program keeps a history. §1605.
+
+- **May `CLAUDE.md` make claiming out-of-lane work a rule?** (C-Q31) --
+  answered 2026-10-09: yes, as written; lane A added the paragraph under the
+  operator's permission. §1606.
+
+- **Which of the two notification systems stays?** (C-Q32) -- answered
+  2026-10-09: the desktop shell; the separate program is retired. §1607.
+
+- **Where does the list of programs started at sign-in live?** (C-Q33) --
+  answered 2026-10-09: with the service manager, per user, if startup
+  programs depend on each other or on services -- they do, so C. §1608.
+
+- **Should the compositor or each program enlarge what programs draw on a
+  scaled display?** (C-Q34) -- answered 2026-10-09: the compositor (A), with
+  an image able to carry its own density and a surface able to ask for real
+  pixels. §1609.
+
+- **Should the backup tool's exclusion patterns learn character classes?**
+  (C-Q9) -- answered 2026-09-07 with no preference and two questions; both
+  answered with measurements and the call made by Claude, 2026-09-13. §841.
+  (Its line here was missing until 2026-10-12.)
+
 - **Under the optional Filled look, should the grey boxes be paler?** (C-Q15)
   -- answered 2026-09-27: the boxes stay as they are; instead the accent and the
   other interface colours are kept separately for each look, so a choice made

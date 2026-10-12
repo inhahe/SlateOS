@@ -77,7 +77,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
 | F-Q1 | F | §1370 (HEIC, and HEVC video, a separate install) | recorded |
-| C-Q31 | C | the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | relayed 2026-10-09 for lane C's decision entry |
+| C-Q31 | C | §1606; the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | recorded 2026-10-12 |
 | B-Q24 | B | -- | relayed 2026-10-09 (answered twice, "Claude's recommendation" and "A", which agree: A) |
 | A-Q22 | A | §1564 | recorded |
 | A-Q23 | A | §1565 | recorded |
@@ -86,11 +86,11 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | A-Q26 | A | §1568 (B, and the operator's "Allow" for this run only) | recorded |
 | B-Q22 | B | -- | relayed 2026-10-09 (a design of the operator's, with questions) |
 | B-Q25 | B | -- | relayed 2026-10-09 (A) |
-| C-Q28 | C | -- | relayed 2026-10-09 (`xor.png` is at the integration tree's root) |
-| C-Q29 | C | -- | relayed 2026-10-09 (A, with questions) |
-| C-Q32 | C | -- | relayed 2026-10-09 (A) |
-| C-Q33 | C | -- | relayed 2026-10-09 (C if startup programs depend on each other, else A) |
-| C-Q34 | C | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
+| C-Q28 | C | §1604 (`xor.png` is `gui/desktop/assets/xor.png`; the start button is to draw it) | recorded 2026-10-12 |
+| C-Q29 | C | §1605 (A; both questions answered there, as lane A answered them) | recorded 2026-10-12 |
+| C-Q32 | C | §1607 | recorded 2026-10-12 |
+| C-Q33 | C | §1608 (C: startup programs do depend on each other and on services) | recorded 2026-10-12 |
+| C-Q34 | C | §1609 (A, chosen in chat after lane A's answers; per-element density as the operator asked) | recorded 2026-10-12 |
 | D-Q3 | D | -- | relayed 2026-10-09; **concerns raised, no option chosen yet** |
 | D-Q4 | D | -- | relayed 2026-10-09 (B) |
 | D-Q5 | D | -- | relayed 2026-10-09 (B) |
@@ -180,7 +180,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | C-Q6 | C | §815 | recorded |
 | C-Q7 | C | §816 | recorded |
 | C-Q8 | C | §817 | recorded |
-| C-Q9 | C | §841 (you had no preference and asked two questions; both are answered there with measurements, and the call was Claude's) | recorded; its line in `open-questions-resolved/lane-c.md` is missing -- lane C's to add |
+| C-Q9 | C | §841 (you had no preference and asked two questions; both are answered there with measurements, and the call was Claude's) | recorded; its line in `open-questions-resolved/lane-c.md` added 2026-10-12 |
 | A-Q1 | A | `open-questions-resolved/lane-a.md` | recorded |
 | A-Q2 | A | `open-questions-resolved/lane-a.md` | recorded |
 | A-Q3 | A | §914 | recorded |

@@ -47,6 +47,8 @@
 # check or build that fails leaves the programs missing, and diff-wsl.sh then
 # finds no reference and says so rather than compare against something else.
 
+# shellcheck disable=SC2034  # the PROCPS_REF_* paths are for the harnesses that source this
+
 PROCPS_REF_VERSION=4.0.4
 PROCPS_REF_CACHE=$HOME/.cache/slateos-procps-ref
 # The release tarball as Debian mirrors it (`procps_4.0.4.orig.tar.xz` is the

@@ -2,6 +2,7 @@
 """A SlateOS guest that stays up, and a way into it from the host.
 
     python scripts/guest.py start [--port 4555] [--timeout 900]
+                                  [--qmp PORT] [--input] [--display none|gtk|sdl]
     python scripts/guest.py try ./build/my-tool [args...]      # put, then run
     python scripts/guest.py put LOCAL GUEST-PATH [--mode 755]
     python scripts/guest.py get GUEST-PATH LOCAL
@@ -20,6 +21,14 @@ named `org.slateos.agent.0`, which QEMU connects to a TCP socket on
 answers on that port: put a file, get a file, run a program with the
 capabilities named and hand back its output and exit code, or run a kernel
 shell command.
+
+To look at what a graphical program draws, `start --qmp PORT` adds a QMP
+monitor on that loopback port -- `screendump` there is the screen as QEMU
+scans it out -- `--input` a USB keyboard and mouse to send keys and clicks to
+(`input-send-event`), and `--display gtk` a window a person can watch and type
+at; the agent's `socket`, `input` and `service` grants are what a display
+server holds at boot (lane F's
+`requests/f-a-the-guest-cannot-run-a-graphical-program-or-show-its-screen.md`).
 
 It is for trying a change, not for publishing one. The guest's state carries
 over from one request to the next -- files put stay, a program that broke
@@ -243,7 +252,24 @@ def first_existing(paths: tuple[str, ...], what: str) -> str:
     raise Usage("%s not found (looked in: %s)" % (what, ", ".join(paths)))
 
 
-def qemu_command(port: int, esp: str, swap: str, rootfs: str | None, serial: str) -> list[str]:
+#: The `-display` a guest may have: none (the default, a guest nobody watches),
+#: or a window a person watches and types at.
+DISPLAYS = ("none", "gtk", "sdl")
+
+
+def qemu_command(port: int, esp: str, swap: str, rootfs: str | None, serial: str,
+                 qmp_port: int | None = None, usb_input: bool = False,
+                 display: str = "none") -> list[str]:
+    """QEMU's command line for a guest. `qmp_port`: a QMP monitor on that
+    loopback port, through which the host takes `screendump`s -- the screen as
+    QEMU scans it out, which nothing in the guest can fake -- and sends input
+    (`input-send-event`). `usb_input`: a USB keyboard and mouse on an xHCI
+    controller, the boot devices the kernel's HID driver takes (a tablet it
+    does not). `display`: one of DISPLAYS. Lane F's request, to run the
+    compositor in a guest and see what it draws
+    (`requests/f-a-the-guest-cannot-run-a-graphical-program-or-show-its-screen.md`)."""
+    if display not in DISPLAYS:
+        raise Usage("--display %s: one of %s" % (display, ", ".join(DISPLAYS)))
     qemu = first_existing(QEMU_CANDIDATES, "qemu-system-x86_64")
     ovmf = first_existing(OVMF_CANDIDATES, "OVMF firmware")
     cmd = [
@@ -272,10 +298,18 @@ def qemu_command(port: int, esp: str, swap: str, rootfs: str | None, serial: str
         # self-tests are virtio-gpu's.
         "-device", "virtio-gpu-pci",
         "-vga", "std",
-        "-display", "none",
+        "-display", display,
         "-serial", "file:%s" % serial,
         "-no-reboot",
     ]
+    if qmp_port is not None:
+        cmd += ["-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
+    if usb_input:
+        cmd += [
+            "-device", "qemu-xhci,id=xhci0",
+            "-device", "usb-kbd,bus=xhci0.0",
+            "-device", "usb-mouse,bus=xhci0.0",
+        ]
     return cmd
 
 
@@ -352,8 +386,9 @@ def port_free(port: int) -> bool:
         s.close()
 
 
-def start(port: int, timeout: float) -> None:
-    proc, serial = launch(port)
+def start(port: int, timeout: float, qmp_port: int | None = None, usb_input: bool = False,
+          display: str = "none") -> None:
+    proc, serial = launch(port, qmp_port=qmp_port, usb_input=usb_input, display=display)
     print("guest: QEMU started (PID %d), serial log %s; waiting for the agent..." % (proc.pid, serial))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -435,15 +470,20 @@ def kexec_marker_seen(serial: str) -> bool:
         return False
 
 
-def launch(port: int, extra_words: tuple[str, ...] = ()) -> tuple[subprocess.Popen, str]:
+def launch(port: int, extra_words: tuple[str, ...] = (), qmp_port: int | None = None,
+           usb_input: bool = False, display: str = "none") -> tuple[subprocess.Popen, str]:
     """Start QEMU on a copy of the last boot test's ESP, its command line
     given GUEST_CMDLINE_WORDS and `extra_words`; record its PID and port.
+    `qmp_port`, `usb_input` and `display` as qemu_command takes them.
     Returns the process and the path of its serial log."""
     if running_pid() is not None:
         raise Usage("a guest is already running (PID in %s); `stop` it first" % PIDFILE)
     if not port_free(port):
         raise Usage("127.0.0.1:%d cannot be listened on -- in use, or in a range Windows "
                     "reserves; pass --port" % port)
+    if qmp_port is not None and (qmp_port == port or not port_free(qmp_port)):
+        raise Usage("127.0.0.1:%d cannot be the QMP port -- in use, or the agent's; pass "
+                    "another --qmp" % qmp_port)
     esp_src = os.path.join(ROOT, "build", "esp")
     swap = os.path.join(ROOT, "build", "swap.img")
     for need in (esp_src, swap):
@@ -469,7 +509,8 @@ def launch(port: int, extra_words: tuple[str, ...] = ()) -> tuple[subprocess.Pop
     # A fresh log: a check reading it must not find the last guest's lines.
     if os.path.exists(serial):
         os.remove(serial)
-    cmd = qemu_command(port, esp, swap, rootfs if os.path.exists(rootfs) else None, serial)
+    cmd = qemu_command(port, esp, swap, rootfs if os.path.exists(rootfs) else None, serial,
+                       qmp_port=qmp_port, usb_input=usb_input, display=display)
     with open(os.path.join(GUEST_DIR, "qemu.log"), "wb") as log:
         flags = 0
         if os.name == "nt":
@@ -519,6 +560,12 @@ def main(argv: list[str]) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start")
     s.add_argument("--timeout", type=float, default=900.0)
+    s.add_argument("--qmp", type=int, metavar="PORT", default=None,
+                   help="a QMP monitor on 127.0.0.1:PORT, for screendump and input-send-event")
+    s.add_argument("--input", action="store_true",
+                   help="a USB keyboard and mouse (qemu-xhci, usb-kbd, usb-mouse)")
+    s.add_argument("--display", choices=DISPLAYS, default="none",
+                   help="none (the default), or a window to watch and type at")
     sub.add_parser("stop")
     sub.add_parser("ping")
     p = sub.add_parser("put")
@@ -543,7 +590,8 @@ def main(argv: list[str]) -> int:
 
     try:
         if args.cmd == "start":
-            start(port if args.port is not None else DEFAULT_PORT, args.timeout)
+            start(port if args.port is not None else DEFAULT_PORT, args.timeout,
+                  qmp_port=args.qmp, usb_input=args.input, display=args.display)
             return 0
         if args.cmd == "kexec":
             return kexec_check(port if args.port is not None else DEFAULT_PORT, args.timeout)

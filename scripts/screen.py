@@ -3,7 +3,7 @@
 
     python scripts/screen.py capture (--hmp PORT | --qmp PORT) OUT.ppm|OUT.png [--device ID]
     python scripts/screen.py type (--hmp PORT | --qmp PORT) TEXT     # `\\n` in TEXT is Enter
-    python scripts/screen.py text SCREEN.ppm                         # the console's text
+    python scripts/screen.py text SCREEN.ppm|SCREEN.png              # the console's text
     python scripts/screen.py probe (--hmp PORT | --qmp PORT) [--timeout 120] [--keep DIR]
     python scripts/screen.py --self-test
 
@@ -12,8 +12,8 @@ it, with QEMU's screen capture and simulated input" lane A's step on the path
 to a desktop a person can use. This is that test's host half. The desktop
 does not start yet, so what it checks today is the stand-in on the screen
 instead: the kernel's framebuffer console with init's shell on it. `probe`
-types `echo <token>` there and waits for the token to be drawn on a line of
-its own -- keyboard, kernel, init's shell, console, framebuffer and QEMU's
+types `echo <token>` there and waits for the token to be drawn at the start
+of a line -- keyboard, kernel, init's shell, console, framebuffer and QEMU's
 screen capture, end to end, which nothing else checks: BOOT_OK proves only
 the serial port. When the desktop starts, the probe's expectation changes;
 the capture, the typing and the reading stay.
@@ -47,6 +47,7 @@ import re
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -102,8 +103,63 @@ def parse_ppm(data: bytes) -> Screen:
     return Screen(width, height, body[: width * height * 3])
 
 
+def parse_png(data: bytes) -> Screen:
+    """An 8-bit RGB or RGBA PNG, not interlaced -- what this script and
+    QEMU's `screendump -f png` write -- as a screen (alpha dropped)."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("not a PNG")
+    at, idat, header = 8, b"", None
+    while at + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[at:at + 8])
+        body = data[at + 8:at + 8 + length]
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+        at += 12 + length
+    if header is None:
+        raise ValueError("a PNG with no header")
+    width, height, depth, colour, _, _, interlace = header
+    if depth != 8 or colour not in (2, 6) or interlace:
+        raise ValueError(f"a PNG this cannot read (depth {depth}, colour {colour})")
+    bpp = 3 if colour == 2 else 4
+    stride = width * bpp
+    raw = zlib.decompress(idat)
+    if len(raw) < height * (stride + 1):
+        raise ValueError("a PNG cut short")
+    out = bytearray()
+    prev = bytearray(stride)
+    for y in range(height):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+            elif kind != 0:
+                raise ValueError(f"a PNG row with filter {kind}")
+        prev = line
+        if bpp == 3:
+            out += line
+        else:
+            out += b"".join(bytes(line[i:i + 3]) for i in range(0, stride, 4))
+    return Screen(width, height, bytes(out))
+
+
 def read_screen(path: str | Path) -> Screen:
-    return parse_ppm(Path(path).read_bytes())
+    """A captured screen, PPM or PNG by its first bytes."""
+    data = Path(path).read_bytes()
+    return parse_png(data) if data.startswith(b"\x89PNG") else parse_ppm(data)
 
 
 def ppm_bytes(screen: Screen) -> bytes:
@@ -268,15 +324,19 @@ _ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _HMP_PROMPT = b"(qemu) "
 
 
-def hmp_output(raw: bytes) -> str:
-    """What an HMP command printed, from all the monitor sent back for it:
-    the command's own echo -- redrawn a key at a time, with cursor movement --
-    ends at the first line break; the prompt ends the rest."""
+def hmp_output(raw: bytes, command: str) -> str:
+    """What the HMP command `command` printed, from all the monitor sent back
+    for it: the command's own echo -- redrawn a key at a time, cursor
+    movement and all, the whole command last -- ends where the command does
+    last, and the prompt ends the rest. A monitor that does not echo sends
+    the output alone."""
     text = _ESCAPE.sub("", raw.decode("utf-8", "replace"))
-    _, _, rest = text.partition("\r\n")
-    if rest.endswith(_HMP_PROMPT.decode()):
-        rest = rest[: -len(_HMP_PROMPT)]
-    return rest.strip()
+    if text.endswith(_HMP_PROMPT.decode()):
+        text = text[: -len(_HMP_PROMPT)]
+    at = text.rfind(command)
+    if at >= 0:
+        text = text[at + len(command):]
+    return text.strip()
 
 
 def hmp_quote(path: str) -> str:
@@ -333,7 +393,7 @@ class Monitor:
     def hmp(self, command: str) -> str:
         """Run one HMP command; answer what it printed."""
         self.sock.sendall(command.encode("utf-8") + b"\n")
-        return hmp_output(self._until(_HMP_PROMPT))
+        return hmp_output(self._until(_HMP_PROMPT), command)
 
     def _qmp_message(self) -> dict:
         while True:
@@ -379,8 +439,10 @@ class Monitor:
             self._qmp("send-key", {"keys": [{"type": "qcode", "data": k} for k in keys],
                                    "hold-time": hold_ms})
         # QEMU lets go on a timer of its own; the next press waits for it, so
-        # two presses of one key are two, not one long one.
-        time.sleep(hold_ms / 1000 + 0.05)
+        # two presses of one key are two, not one long one. (A hold of 0 is
+        # the self-test's fake monitors, which hold nothing.)
+        if hold_ms:
+            time.sleep(hold_ms / 1000 + 0.05)
 
     def type_text(self, text: str, hold_ms: int = 100) -> None:
         for keys in keys_for(text):
@@ -401,38 +463,66 @@ class ProbeResult(NamedTuple):
     text: list[str]
 
 
+def answers(line: str, token: str) -> bool:
+    """Whether `line` is the shell's answer: the token at its start, not
+    followed by more of a word. What follows it, if anything, is older text
+    the answer was drawn over -- a console overwrites a row without erasing
+    the rest of it -- and the echoed command line starts with the prompt or
+    `echo`, never with the token."""
+    return line.startswith(token) and not line[len(token):len(token) + 1].isalnum()
+
+
 def probe(mon: Monitor, scratch: Path, timeout: float = 120.0, poll: float = 2.0,
           device: str | None = None, font: dict[bytes, str] | None = None,
-          token: str | None = None) -> ProbeResult:
+          token: str | None = None, hold_ms: int = 100, retype: float = 30.0,
+          quick: float = 10.0) -> ProbeResult:
     """Type `echo <token>` and Enter at the guest, and wait up to `timeout`
-    seconds for a line holding only the token to be drawn. `scratch` is the
-    file each capture is written to."""
+    seconds for a line that is the shell's answer ([`answers`]). `scratch` is
+    the file each capture is written to; `hold_ms` how long each key is held.
+
+    The screen is captured at once and then four times a second for the first
+    `quick` seconds -- the answer is drawn within moments, and output after it
+    could scroll it away before a slower look -- and every `poll` seconds
+    after that. With no answer, the command is typed again every `retype`
+    seconds: keys typed before the shell reads the console can be lost, and
+    another answer line is as good as the first."""
     font = font if font is not None else load_font()
     token = token or "screenprobe%06d" % random.randrange(10**6)
     command = f"echo {token}"
-    mon.type_text(command + "\n")
-    deadline = time.monotonic() + timeout
+    mon.type_text(command + "\n", hold_ms)
+    start = time.monotonic()
+    deadline = start + timeout
+    typed_at = start
+    tries = 1
     screen, text = None, []
     while True:
         screen = mon.capture(scratch, device)
         text = console_text(screen, font)
-        if any(line.strip() == token for line in text):
-            return ProbeResult(True, f"typed `{command}`; the answer `{token}` was drawn",
-                               screen, text)
-        if time.monotonic() >= deadline:
+        if any(answers(line, token) for line in text):
+            return ProbeResult(True, f"typed `{command}`; the answer `{token}` was drawn"
+                               + (f" (typed {tries} times)" if tries > 1 else ""), screen, text)
+        now = time.monotonic()
+        if now >= deadline:
             break
-        time.sleep(poll)
+        if now - typed_at >= retype:
+            mon.type_text(command + "\n", hold_ms)
+            typed_at = time.monotonic()
+            tries += 1
+            continue
+        time.sleep(min(0.25 if now - start < quick else poll, max(deadline - now, 0)))
     if colours(screen) == 1:
         why = "nothing is drawn on the screen: it is one colour"
     elif not any(sum(c.isalnum() for c in line) >= 3 for line in text):
         why = ("the screen holds no text in the console's font -- it is not the kernel "
                "console (a desktop, or a picture this probe does not know)")
-    elif any(command in line for line in text):
+    # Loosely: the keyboard driver may draw typed keys twice
+    # (known-issues A-CONSOLE-ECHO-IS-WHATEVER-THE-LAST-READER-LEFT).
+    elif any("echo" in line and token[:8] in line for line in text):
         why = (f"the keys reached the screen (`{command}` is drawn) but no line `{token}` "
                "followed: init's shell did not run it, or its answer was not drawn")
     else:
         why = "the screen shows the console, but no key typed reached it"
-    return ProbeResult(False, f"after {timeout:.0f}s, {why}", screen, text)
+    return ProbeResult(False, f"after {timeout:.0f}s and {tries} tries, {why}", screen, text)
 
 
 # ---------------------------------------------------------------------------
@@ -444,14 +534,20 @@ class _FakeGuest:
     """A console a fake monitor captures, with a shell that answers `echo`
     when `answers`; keys reach it when `keys_arrive`."""
 
-    def __init__(self, font, lines, keys_arrive=True, answers=True, blank=False):
+    def __init__(self, font, lines, keys_arrive=True, answers=True, blank=False,
+                 over_old_text=False, lose_first=0):
         self.font, self.lines = font, list(lines)
         self.keys_arrive, self.answers, self.blank = keys_arrive, answers, blank
+        self.over_old_text = over_old_text
+        self.lose_first = lose_first
         self.typing = ""
         self.lock = threading.Lock()
 
     def key(self, names: list[str]) -> None:
         if not self.keys_arrive:
+            return
+        if self.lose_first > 0:
+            self.lose_first -= 1
             return
         by_name = {v: k for k, v in _KEY_NAMES.items()}
         name = names[-1]
@@ -462,7 +558,8 @@ class _FakeGuest:
             if ch == "\n":
                 self.lines.append("user> " + self.typing)
                 if self.answers and self.typing.startswith("echo "):
-                    self.lines.append(self.typing[5:])
+                    rest = " persistent netstack daemon)" if self.over_old_text else ""
+                    self.lines.append(self.typing[5:] + rest)
                 self.typing = ""
             else:
                 self.typing += ch
@@ -574,6 +671,7 @@ def self_test() -> int:
     expect("PNG: signature, header, rows each led by filter 0",
            (png[:8], png[12:16], zlib.decompress(png[idat_at + 8 : idat_at + 8 + idat_len])),
            (b"\x89PNG\r\n\x1a\n", b"IHDR", b"\x00" + bytes(range(6)) + b"\x00" + bytes(range(6, 12))))
+    expect("PNG: what this writes reads back", parse_png(png_bytes(shot)), shot)
     expect("PNG: every chunk's CRC holds",
            all(struct.unpack(">I", png[at + 8 + n : at + 12 + n])[0]
                == zlib.crc32(png[at + 4 : at + 8 + n]) & 0xFFFFFFFF
@@ -588,11 +686,19 @@ def self_test() -> int:
         expect("a character no key types is refused", "typed", "refused")
     except ValueError:
         expect("a character no key types is refused", "refused", "refused")
+    for line, want in (("screenprobe42", True), ("screenprobe42 old text", True),
+                       ("screenprobe421", False), ("echo screenprobe42", False),
+                       ("user> echo screenprobe42", False)):
+        expect(f"the answer is told: {line!r}", answers(line, "screenprobe42"), want)
     expect("HMP: the echo and the prompt are not output",
-           hmp_output(b"s\x1b[K\x1b[Dsc\x1b[K\x1b[D\x1b[Dscreendump x\r\n(qemu) "), "")
+           hmp_output(b"s\x1b[K\x1b[Dsc\x1b[K\x1b[D\x1b[Dscreendump x\r\n(qemu) ",
+                      "screendump x"), "")
     expect("HMP: an error is output",
-           hmp_output(b"sen\x1b[K\x1b[Dsendkey zz\r\ninvalid parameter: zz\r\n(qemu) "),
-           "invalid parameter: zz")
+           hmp_output(b"sen\x1b[K\x1b[Dsendkey zz\r\ninvalid parameter: zz\r\n(qemu) ",
+                      "sendkey zz"), "invalid parameter: zz")
+    expect("HMP: with no echo, the first line is output",
+           hmp_output(b"Could not open 'x.ppm'\r\n(qemu) ", "screendump x.ppm"),
+           "Could not open 'x.ppm'")
     expect("HMP: a path with a space is one argument, and `\\` becomes `/`",
            hmp_quote("E:\\visual studio\\a.ppm"), '"E:/visual studio/a.ppm"')
 
@@ -604,6 +710,8 @@ def self_test() -> int:
         cases = (
             ("hmp", {}, True, "drawn"),
             ("qmp", {}, True, "drawn"),
+            ("hmp", {"over_old_text": True}, True, "drawn"),
+            ("qmp", {"lose_first": len("echo screenprobe7") + 1}, True, "typed 2 times"),
             ("hmp", {"answers": False}, False, "init's shell did not run it"),
             ("qmp", {"keys_arrive": False}, False, "no key typed reached it"),
             ("hmp", {"blank": True}, False, "nothing is drawn"),
@@ -612,7 +720,8 @@ def self_test() -> int:
             guest = _FakeGuest(font, ["Type 'help' for available commands."], **how)
             port, t = _serve(kind, guest)
             with Monitor(kind, port, timeout=10) as mon:
-                r = probe(mon, scratch, timeout=1.0, poll=0.2, font=font, token="screenprobe7")
+                r = probe(mon, scratch, timeout=0.6, poll=0.1, font=font, token="screenprobe7",
+                          hold_ms=0, retype=0.3, quick=0.1)
                 label = f"probe over {kind.upper()}, {how or 'a working guest'}"
                 expect(f"{label}: {'passes' if want_ok else 'fails'}", r.ok, want_ok)
                 expect(f"{label}: says `{said}`", said in r.message, True)
@@ -688,14 +797,24 @@ def main(argv: list[str]) -> int:
         return 0
 
     kind, port = ("hmp", args.hmp) if args.hmp is not None else ("qmp", args.qmp)
+    if args.verb == "probe" and args.keep:
+        # An earlier run's, gone first: what is kept is this run's or nothing.
+        for name in ("probe.png", "probe.txt"):
+            (Path(args.keep) / name).unlink(missing_ok=True)
     try:
         with Monitor(kind, port) as mon:
             if args.verb == "capture":
                 out = Path(args.out)
                 if out.suffix.lower() == ".png":
-                    shot = mon.capture(out.with_suffix(".ppm"), args.device)
+                    # QEMU writes PPM: to a file of its own beside the PNG,
+                    # so no existing file is overwritten or removed.
+                    fd, tmp = tempfile.mkstemp(suffix=".ppm", dir=out.resolve().parent)
+                    os.close(fd)
+                    try:
+                        shot = mon.capture(tmp, args.device)
+                    finally:
+                        Path(tmp).unlink(missing_ok=True)
                     write_screen(shot, out)
-                    out.with_suffix(".ppm").unlink()
                 else:
                     shot = mon.capture(out, args.device)
                 print(f"screen: {out}: {shot.width}x{shot.height}")

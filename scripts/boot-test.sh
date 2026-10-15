@@ -1631,6 +1631,11 @@ ESP_DIR="$PROJECT_ROOT/build/esp"
 # QEMU's virtual FAT.  See the --usb-image case in the arg parser.
 USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
+# The log as it stood at the marker, while the screen probe runs
+# (marker_log_back), and the whole log after it: the serial log ends at the
+# marker, as it did before the probe kept the guest up past it.
+SERIAL_AT_MARKER="$PROJECT_ROOT/build/serial-test-at-marker.txt"
+SERIAL_WHOLE="$PROJECT_ROOT/build/serial-test-whole.txt"
 # QEMU's own stderr, which until now was captured nowhere -- it went to the
 # harness console and died with it.
 #
@@ -1876,6 +1881,18 @@ screen_probe() {
     echo "=== Screen probe: typing at the guest and reading its screen ==="
     "$py" "$SCRIPT_DIR/screen.py" probe --hmp "$MONITOR_PORT" \
         --timeout "${SCREEN_PROBE_TIMEOUT:-180}" --keep "$PROJECT_ROOT/build/screen"
+}
+
+# Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
+# copied when the marker was seen): what every verdict reads is what it read
+# before the screen probe kept the guest up. The whole log, the probe's time
+# included, is kept beside it as $SERIAL_WHOLE.
+marker_log_back() {
+    kill_qemu "$QEMU_PID"
+    if [ -f "$SERIAL_AT_MARKER" ]; then
+        mv -f "$SERIAL_FILE" "$SERIAL_WHOLE" 2>/dev/null || true
+        mv -f "$SERIAL_AT_MARKER" "$SERIAL_FILE"
+    fi
 }
 
 # Replay whatever QEMU wrote to stderr, once, on the way out.
@@ -4229,7 +4246,9 @@ check_eol
 # kernel's own font, so a change to kernel/src/font.rs it cannot parse stops
 # here too.
 screen_probe_selftest() {
-    if [ "${SCREEN_PROBE:-1}" != "1" ]; then
+    # Not when the probe will not run: SCREEN_PROBE=0, or --no-monitor, which
+    # is for a host that may not even allow the self-test's loopback sockets.
+    if [ "${SCREEN_PROBE:-1}" != "1" ] || [ "${MONITOR_ENABLED:-1}" != "1" ]; then
         return 0
     fi
     local py=""
@@ -9882,7 +9901,7 @@ fi
 # Step 4: Boot QEMU
 contention_notice "the moment before QEMU"
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU, cpus: $SMP_CPUS) ==="
-rm -f "$SERIAL_FILE"
+rm -f "$SERIAL_FILE" "$SERIAL_AT_MARKER" "$SERIAL_WHOLE"
 # Removed together with the serial log, and for the identical reason: both are
 # evidence about *this* boot, and a leftover from the previous one is worse
 # than nothing because it looks like evidence.  record_boot_outcome only passes
@@ -10310,25 +10329,37 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # which contains the substring BOOT_OK — a false PASS on a hung boot.
     if [ -f "$SERIAL_FILE" ] && grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "$WAIT_MARKER detected after ${ELAPSED}s!"
-        screen_ok=1
-        screen_probe || screen_ok=0
-        kill_qemu "$QEMU_PID"
-        if ! check_selftest_failures "$SERIAL_FILE"; then
+        # The guest's time ends at the marker; the screen probe's is the
+        # harness's (kill_qemu stamps only the first end it sees).
+        QEMU_END_EPOCH=$(date +%s)
+        # The log is judged as it stood at the marker -- what the guest
+        # prints while the probe keeps it up neither fails nor passes the
+        # boot, and a boot already failed is not kept waiting for the probe.
+        # Afterwards the log holds that much; the whole is kept beside it.
+        cp "$SERIAL_FILE" "$SERIAL_AT_MARKER"
+        if ! check_selftest_failures "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if ! check_identity_rungs "$SERIAL_FILE"; then
+        if ! check_identity_rungs "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
             exit 1
         fi
-        if ! check_liveness_failures "$SERIAL_FILE"; then
+        if ! check_liveness_failures "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
             exit 1
         fi
-        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+        if ! check_bench_coverage "$SERIAL_AT_MARKER" "$BENCH"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
             exit 1
         fi
+        screen_ok=1
+        screen_probe || screen_ok=0
+        marker_log_back
         if [ "$screen_ok" != "1" ]; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the screen did not show what was typed at it) ==="
             exit 1

@@ -37,20 +37,30 @@ so when no package does.
 
 ## What lane B did (2026-10-15)
 
-- **`fonts:` in the manifest**, written by `pkg pack` from the package's
-  font files (`.ttf .otf .ttc .otc`) -- their typographic family (name ID
-  16) and legacy family (ID 1), read with `osfont` exactly as the font index
+- **`fonts:` in the manifest**, written by `pkg pack` from the font files
+  the package installs where the font index looks (`.ttf .otf .ttc .otc`
+  under `/usr/share/fonts/`) -- their typographic family (name ID 16) and
+  legacy family (ID 1), read with `osfont` exactly as the font index
   (`gui/toolkit/src/fontdb.rs`) reads them. A `fonts:` the packer wrote by
-  hand is only checked: a family no file holds is left out, with a warning.
-  `pkg info` shows the line as `Fonts:`.
-- **`pkg search --font <FAMILY>`** answers the available packages that carry
-  the family, matched as the index matches a name (trimmed, in any case;
-  the words after `--font` are the name, so `pkg search --font Fira Code`
-  works unquoted). Output is `pkg search`'s: one `NAME VERSION [installed]`
-  line per package, its description indented under it. None is a sentence
-  on standard error and status 1, so "no package" cannot be mistaken for
-  an answer.
+  hand is only checked: a family no file holds is left out, with a warning,
+  as is a family name with a comma or a control character in it. `pkg info`
+  shows the line as `Fonts:`.
+- **`pkg search --font <FAMILY>`** answers the packages that carry the
+  family, matched as the index matches a name (trimmed, in any case; the
+  words other than `--font` are the name, so `pkg search --font Fira Code`
+  works unquoted, and `--font=Fira Code` too). Each package is judged by the
+  version `pkg install` would take, the newest. Output is `pkg search`'s:
+  one `NAME VERSION STATUS` line per package, its description indented
+  under it. The status is empty when the package is not installed,
+  `[installed]` when the installed version holds the family, and
+  `[upgradable]` when it is installed but its version does not -- `pkg
+  install` leaves an installed package be, so that one needs `pkg upgrade
+  NAME`. No package is a sentence on standard error and status 1; no index
+  to look in (`pkg update` never ran) or one that could not be read is
+  status 2.
 
-For the Fonts page: run `pkg search --font <family>`; status 0 means the
-first word of each unindented line is a package to offer `pkg install`
-for.
+For the Fonts page: run `pkg search --font <family>`. Status 0: the first
+word of each unindented line is a package that has it -- offer `pkg
+install` when the line ends in no status, `pkg upgrade` when it ends in
+`[upgradable]`. Status 1: no package has it. Status 2: say the package
+index is missing and nothing more.

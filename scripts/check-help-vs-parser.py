@@ -58,21 +58,25 @@ HELPISH = re.compile(r"^\s*(-|Usage:|usage:|Options:|Commands:)")
 # first false positive of the kind -- a fixture's copy of the help, read as
 # a help the file itself failed to parse. Which files those are is
 # `rustlex.test_module_files`, the one answer every gate shares
-# (requests/e-abc-one-answer-to-which-files-are-test-modules.md); this file
-# carried a copy of its own until 2026-10-15.
+# (requests/e-abc-one-answer-to-which-files-are-test-modules.md).
 
 
-def test_module_files(files):
-    """The files among `files` a build compiles only for its tests, each as
-    `os.path.normpath` gives it."""
-    texts = {}
+def read_sources(files):
+    """Each of `files` that opens, its contents by its path, in order -- read
+    once, for both which files are tests and what the rest say."""
+    contents = {}
     for f in files:
         try:
-            texts[Path(os.path.normpath(f))] = io.open(
-                f, encoding="utf-8", errors="replace"
-            ).read()
+            contents[f] = io.open(f, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
+    return contents
+
+
+def test_module_files(contents):
+    """The files among `contents` -- each file's text by its path -- that a
+    build compiles only for its tests, each as `os.path.normpath` gives it."""
+    texts = {Path(os.path.normpath(f)): text for f, text in contents.items()}
     return {os.path.normpath(str(p)) for p in rustlex.test_module_files(texts)}
 
 
@@ -266,7 +270,7 @@ def selftest():
         for rel, body in parts.items():
             with io.open(os.path.join(src, rel), "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
-        got = test_module_files([os.path.join(src, r) for r in parts])
+        got = test_module_files(read_sources([os.path.join(src, r) for r in parts]))
         want_in = [os.path.join(src, "tests.rs"), os.path.join(src, "bin", "checks.rs")]
         want_out = [
             os.path.join(src, "util.rs"),
@@ -335,14 +339,11 @@ def sweep(files):
     """(how many of `files` hold help text, [(file, [(option, help line,
     where)])] for the options a file's help names that nothing in its
     program parses)."""
-    test_files = test_module_files(files)
+    contents = read_sources(files)
+    test_files = test_module_files(contents)
     texts, raws, order = {}, {}, []
-    for f in files:
+    for f, raw in contents.items():
         if os.path.normpath(f) in test_files:
-            continue
-        try:
-            raw = io.open(f, encoding="utf-8", errors="replace").read()
-        except OSError:
             continue
         # Comments out, string literals kept: a doc comment showing an example
         # command line (`b"--verbose,-d,--port=8080"` in services/init) is not

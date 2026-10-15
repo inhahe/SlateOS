@@ -131,15 +131,18 @@ TEST_DIRS = ("tests", "benches")
 # `test.rs` is not always test code (`coreutils/src/bin/test.rs` is the `test`
 # utility), and test code is not always called `tests`. The resolution is
 # `rustlex.test_module_files`, the one answer every gate shares
-# (requests/e-abc-one-answer-to-which-files-are-test-modules.md); this file
-# carried a copy of its own until 2026-10-15.
+# (requests/e-abc-one-answer-to-which-files-are-test-modules.md).
 
 
-def test_modules(sources: list[tuple[str, str | None]]) -> set[str]:
-    """The files among `sources` -- `(path, text)`, a text of `None` for one
-    that is not UTF-8 -- that a build compiles only for its tests: those a
-    `#[cfg(test)]` declaration loads, and every module below them."""
-    texts = {Path(rel): text for rel, text in sources if text is not None}
+def test_modules(sources: list[tuple[str, bytes | None]]) -> set[str]:
+    """The files among `sources` -- `(path, contents)` -- that a build
+    compiles only for its tests: those a `#[cfg(test)]` declaration loads,
+    and every module below them. A file that is not UTF-8 is still a module
+    and may still declare others, so it is read with its bad bytes replaced:
+    a declaration is ASCII."""
+    texts = {
+        Path(rel): (raw or b"").decode("utf-8", errors="replace") for rel, raw in sources
+    }
     return {path.as_posix() for path in test_module_files(texts)}
 
 # Files whose hits are not defects, with the reason. This table records *why*
@@ -1005,19 +1008,20 @@ def survey_tree(tree: gittree.Tree) -> Survey:
     scanned = 0
     # Read first, judged second: whether a file is a test module is said by
     # its parent, which the walk may reach after it (`test_modules`).
-    sources: list[tuple[str, str | None]] = []
+    sources: list[tuple[str, bytes | None]] = []
     for top in ROOTS:
         for rel in tree.files_under(top):
             if not rel.endswith(".rs") or rel in IGNORE:
                 continue
             if any(part in TEST_DIRS for part in rel.split("/")):
                 continue
-            sources.append((rel, _decode(tree.read_bytes(rel))))
+            sources.append((rel, tree.read_bytes(rel)))
     test_files = test_modules(sources)
-    for rel, text in sources:
+    for rel, raw in sources:
         if rel in test_files:
             continue
         scanned += 1
+        text = _decode(raw)
         if text is None:
             continue
         # Test code is not a diagnostic. This gate was the only one of the
@@ -2035,10 +2039,14 @@ def selftest() -> int:
     #     refused for `format!("'{}'", c)` by the gate as it stood. Driven
     #     through `survey`, the walk the push runs, on a tree of each kind.
     hit = 'fn f() {\n    eprintln!("cut: \'{p}\': no such file");\n}\n'
-    tree = {
+    tree: dict[str, str | bytes] = {
         # A crate root's test module, one under `#[path]`, and an ordinary one.
         "src/lib.rs": "#[cfg(test)]\nmod tests;\n#[cfg(test)]\n#[path = \"oracle_cases.rs\"]\n"
-                      "mod cases;\nmod real;\nmod other;\n",
+                      "mod cases;\nmod real;\nmod other;\n#[cfg(test)]\nmod latin1;\n",
+        # A test module that is not UTF-8 is test code all the same, and so
+        # is what it declares.
+        "src/latin1.rs": b"// caf\xe9\nmod inner;\n",
+        "src/latin1/inner.rs": hit,
         "src/tests.rs": hit + "mod helper;\n",
         "src/tests/helper.rs": hit,
         "src/oracle_cases.rs": hit,
@@ -2055,7 +2063,10 @@ def selftest() -> int:
         for rel, text in tree.items():
             path = Path(td) / "userspace" / "probe" / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8", newline="")
+            if isinstance(text, bytes):
+                path.write_bytes(text)
+            else:
+                path.write_text(text, encoding="utf-8", newline="")
         seen = survey(Path(td))
     want = {"userspace/probe/src/real.rs", "userspace/probe/src/bin/test.rs",
             "userspace/probe/src/other/tests.rs"}

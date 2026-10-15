@@ -152,20 +152,35 @@ pub fn foreground_group(fd: i32) -> Result<i32, i32> {
 }
 
 /// `tcflush`'s selector for "the input received and not yet read".
-const TCIFLUSH: i32 = 0;
+pub const TCIFLUSH: i32 = 0;
+/// `tcflush`'s selector for "the output written and not yet sent".
+pub const TCOFLUSH: i32 = 1;
+/// `tcflush`'s selector for both.
+pub const TCIOFLUSH: i32 = 2;
 
 /// `tcflush(fd, TCIFLUSH)`: throw away what has been typed at the terminal on
 /// `fd` and not yet read.
 ///
 /// # Errors
 ///
-/// `EBADF`, `ENOTTY`; [`ENOSYS`](crate::ENOSYS) on a host with no C library
-/// of ours.
+/// As [`flush`].
 pub fn flush_input(fd: i32) -> Result<(), i32> {
+    flush(fd, TCIFLUSH)
+}
+
+/// `tcflush(fd, queue)`: throw away what is waiting in the terminal on
+/// `fd`'s input ([`TCIFLUSH`]), its output ([`TCOFLUSH`]), or both
+/// ([`TCIOFLUSH`]).
+///
+/// # Errors
+///
+/// `EBADF`, `ENOTTY`, `EINVAL` for another `queue`; [`ENOSYS`](crate::ENOSYS)
+/// on a host with no C library of ours.
+pub fn flush(fd: i32, queue: i32) -> Result<(), i32> {
     #[cfg(unix)]
     {
         // SAFETY: `tcflush` takes two numbers and touches no memory of ours.
-        if unsafe { sys::tcflush(fd, TCIFLUSH) } == 0 {
+        if unsafe { sys::tcflush(fd, queue) } == 0 {
             Ok(())
         } else {
             Err(crate::last_errno())
@@ -173,7 +188,7 @@ pub fn flush_input(fd: i32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (fd, TCIFLUSH);
+        let _ = (fd, queue);
         Err(crate::ENOSYS)
     }
 }
@@ -227,9 +242,29 @@ pub fn set_input_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (t, speed);
-        Err(crate::ENOSYS)
+        // glibc 2.39's Linux `cfsetispeed`, for a host with no library to
+        // ask -- the IBSHIFT it sets for speed 0 is a shift count, 16, set
+        // as a flag, as glibc sets it.
+        if !is_speed(speed) {
+            return Err(crate::EINVAL);
+        }
+        t.c_ispeed = speed;
+        if speed == 0 {
+            t.c_iflag |= 16;
+        } else {
+            t.c_iflag &= !16;
+            t.c_cflag = (t.c_cflag & !CBAUD) | speed;
+        }
+        Ok(())
     }
+}
+
+/// Whether `speed` is a `B*` constant, as glibc's speed calls judge one:
+/// nothing outside `CBAUD`. (Their second test, `B57600` to `B4000000`,
+/// admits only values within it.)
+#[cfg(not(unix))]
+fn is_speed(speed: u32) -> bool {
+    speed & !CBAUD == 0
 }
 
 /// `cfsetospeed(t, speed)`: set the output speed to the `B*` constant `speed`.
@@ -249,8 +284,13 @@ pub fn set_output_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (t, speed);
-        Err(crate::ENOSYS)
+        // glibc 2.39's Linux `cfsetospeed`.
+        if !is_speed(speed) {
+            return Err(crate::EINVAL);
+        }
+        t.c_ospeed = speed;
+        t.c_cflag = (t.c_cflag & !CBAUD) | speed;
+        Ok(())
     }
 }
 
@@ -367,6 +407,8 @@ pub const FFDLY: u32 = 0o100_000;
 pub const CSIZE: u32 = 0o60;
 /// `CS8`.
 pub const CS8: u32 = 0o60;
+/// `CS7`: seven-bit characters.
+pub const CS7: u32 = 0o40;
 /// `CSTOPB`.
 pub const CSTOPB: u32 = 0o100;
 /// `CREAD`.
@@ -379,6 +421,10 @@ pub const PARODD: u32 = 0o1000;
 pub const HUPCL: u32 = 0o2000;
 /// `CLOCAL`.
 pub const CLOCAL: u32 = 0o4000;
+/// `CRTSCTS`: hardware (RTS/CTS) flow control.
+pub const CRTSCTS: u32 = 0o20_000_000_000;
+/// `B38400`: the speed a console reports, and a getty's default.
+pub const B38400: u32 = 0o17;
 
 // `c_lflag`.
 
@@ -618,6 +664,8 @@ mod tests {
         assert_eq!(TCSANOW, p::TCSANOW);
         assert_eq!(TCSADRAIN, p::TCSADRAIN);
         assert_eq!(TCSAFLUSH, p::TCSAFLUSH);
+        assert_eq!(TCIFLUSH, p::TCIFLUSH);
+        assert_eq!(TCIOFLUSH, p::TCIOFLUSH);
         // Every flag and slot the C library defines too.
         for (ours, theirs) in [
             (BRKINT, p::BRKINT),
@@ -631,6 +679,7 @@ mod tests {
             (ONLCR, p::ONLCR),
             (CSIZE, p::CSIZE),
             (CS8, p::CS8),
+            (B38400, p::B38400),
             (CREAD, p::CREAD),
             (PARENB, p::PARENB),
             (HUPCL, p::HUPCL),

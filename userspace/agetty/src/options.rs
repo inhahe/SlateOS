@@ -155,6 +155,9 @@ pub struct Options {
     pub tty_is_stdin: bool,
     /// `-H`: the host login is told of (upstream's `fakehost`).
     pub fakehost: Option<Vec<u8>>,
+    /// A virtual console's keyboard mode (`KDGKBMODE`), `K_RAW` on a serial
+    /// line.
+    pub kbmode: i32,
 }
 
 impl Default for Options {
@@ -180,6 +183,7 @@ impl Default for Options {
             clocal: Clocal::Auto,
             tty_is_stdin: false,
             fakehost: None,
+            kbmode: 0,
         }
     }
 }

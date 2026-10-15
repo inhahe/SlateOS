@@ -74,7 +74,10 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
             out.flush_at_exit();
             0
         }
-        Parsed::Run(_) => sys.errx(b"running on a line is not ported yet").0,
+        #[cfg(unix)]
+        Parsed::Run(op) => agetty::run::run(op, sys).0,
+        #[cfg(not(unix))]
+        Parsed::Run(_) => sys.errx(b"a terminal line is a Unix thing").0,
     }
 }
 

@@ -82,6 +82,7 @@ pub mod shm;
 pub mod signal;
 pub mod socket;
 pub mod termios;
+pub mod tty;
 pub mod utmp;
 pub mod uts;
 

@@ -10,13 +10,12 @@
 //! | stage | what | here |
 //! |---|---|---|
 //! | 1 | the command line, `--help`, `--version`, `--list-speeds`, `--reload`'s trigger, `--show-issue` and the issue file's escapes | [`options`], [`speeds`], [`issue`] |
-//! | 2 | the line opened and set up, the name read, `login` run | to come |
-//! | 3 | the `LOGIN_PROCESS` record in `utmp` and `wtmp` | to come |
-//! | 4 | the prompt printed again on a reload, and a virtual console's keyboard modes | to come |
+//! | 2 | the line opened and set up, the name read, `login` run | [`run`], [`termio`], [`logname`], [`prompt`], [`login`], [`logindefs`], [`ttys`] |
+//! | 3 | the `LOGIN_PROCESS` record in `utmp` and `wtmp` | [`utmp`] |
+//! | 4 | the prompt printed again on a reload | to come |
 //!
-//! Until stage 2 the `agetty` binary is built only with the `port` feature:
-//! a getty that cannot open a line is not shipped (design-decisions §1006),
-//! and `userspace/getty`, which it replaces, serves until then.
+//! Until it ships, the `agetty` binary is built only with the `port`
+//! feature, and `userspace/getty`, which it replaces, serves.
 //!
 //! # Deliberate differences
 //!
@@ -27,10 +26,23 @@
 //! 3. **`\S{}` in the issue file shows nothing.** Upstream's scan of
 //!    `os-release` for an empty name never advances, and the getty hangs
 //!    before its prompt.
+//! 4. **The end of the line's input ends the getty even with `--erase-chars`
+//!    or `--kill-chars`.** Upstream reads its 0 as a NUL, and a NUL is in
+//!    every string `strchr` searches, so it is taken for an erase or a kill
+//!    -- on a line that hung up, again and again at full speed.
 
 pub mod issue;
+pub mod login;
+pub mod logindefs;
+pub mod logname;
 pub mod options;
+pub mod prompt;
+#[cfg(unix)]
+pub mod run;
 pub mod speeds;
+pub mod termio;
+pub mod ttys;
+pub mod utmp;
 
 /// `_PATH_LOGIN`: the login program.
 pub const PATH_LOGIN: &[u8] = b"/bin/login";
@@ -53,6 +65,10 @@ pub trait Diag {
     /// `log_err (msg)`: syslog, `LOG_ERR`, and then -- "be kind to init" --
     /// ten seconds' sleep before the exit.
     fn log_err(&mut self, msg: &[u8]) -> Exit;
+    /// `exit_slowly (code)`: the ten seconds' sleep, and then the exit with
+    /// `code` -- a getty that ends at once is started again at once, and
+    /// init would spin on it.
+    fn exit_slowly(&mut self, code: u8) -> Exit;
 }
 
 /// The real thing.
@@ -119,10 +135,13 @@ impl Diag for System {
 
     fn log_err(&mut self, msg: &[u8]) -> Exit {
         self.dolog(libcsyslog::LOG_ERR, msg);
-        // `exit_slowly`: a getty that fails at once is restarted at once,
-        // and init would spin on it. A sleep cut short ends the wait early.
+        self.exit_slowly(1)
+    }
+
+    fn exit_slowly(&mut self, code: u8) -> Exit {
+        // `sleep (10)`: a signal that cuts it short ends the wait early.
         let _ = libcall::clock::nanosleep(10, 0);
-        Exit(1)
+        Exit(code)
     }
 }
 
@@ -161,8 +180,11 @@ pub(crate) mod tests {
         }
         fn log_err(&mut self, msg: &[u8]) -> Exit {
             self.syslog.push(msg.to_vec());
+            self.exit_slowly(1)
+        }
+        fn exit_slowly(&mut self, code: u8) -> Exit {
             self.slow_exit = true;
-            Exit(1)
+            Exit(code)
         }
     }
 

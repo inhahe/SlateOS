@@ -131,6 +131,25 @@ pub fn select_from_env(category: i32, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// `setlocale (category, name)`: select the locale `name` -- `"POSIX"`,
+/// `"C.UTF-8"` -- for `category`. Whether it exists: one that does not
+/// leaves the selection as it was.
+#[must_use]
+pub fn select(category: i32, name: &core::ffi::CStr) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `name` is a NUL-terminated string the call only reads; the
+        // result is only tested for null.
+        !unsafe { sys::setlocale(category, name.as_ptr().cast()) }.is_null()
+    }
+    #[cfg(not(unix))]
+    {
+        // The host has only "C", which "POSIX" also names.
+        let _ = category;
+        matches!(name.to_bytes(), b"C" | b"POSIX")
+    }
+}
+
 /// `setlocale (category, NULL)`: the name of the locale selected for
 /// `category`, copied into `buf` as far as it fits; its length.
 pub fn current(category: i32, buf: &mut [u8]) -> Option<usize> {

@@ -101,6 +101,37 @@ fn open_read_one(_path: &core::ffi::CStr) -> Result<i32, i32> {
     Err(ENOSYS)
 }
 
+/// `O_RDWR`.
+pub const O_RDWR: i32 = 0o2;
+/// `O_NOCTTY`: opening a terminal does not make it the controlling one.
+pub const O_NOCTTY: i32 = 0o400;
+
+/// Open a terminal line for reading and writing as a getty opens it --
+/// `open (path, O_RDWR | O_NOCTTY | O_NONBLOCK)`: not as the controlling
+/// terminal, without waiting for carrier, and *not* closed on `exec`, since
+/// it is to be the login's standard input. The lowest free descriptor, the
+/// caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports: `ENOENT`, `EACCES`, `EBUSY` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_line(path: &core::ffi::CStr) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_RDWR | O_NOCTTY | crate::termios::O_NONBLOCK;
+        // SAFETY: a NUL-terminated path the call only reads, and flags; no
+        // third argument, which only `O_CREAT` and `O_TMPFILE` read.
+        let fd = unsafe { sys::open(path.as_ptr(), flags) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ENOSYS)
+    }
+}
+
 /// Write `buf` to `fd` once: `write`. How many bytes went, which may be
 /// fewer than `buf` holds.
 ///
@@ -502,6 +533,24 @@ mod tests {
         assert_eq!(POLLIN, posix::poll::POLLIN);
         assert_eq!(POLLOUT, posix::poll::POLLOUT);
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+        assert_eq!(O_RDWR, posix::fcntl::O_RDWR);
+        assert_eq!(O_NOCTTY, posix::fcntl::O_NOCTTY);
+    }
+
+    /// A line opened as a getty opens it is read-write and survives `exec`;
+    /// a path that is not there is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_is_opened_read_write_and_kept_across_exec() {
+        let fd = open_line(c"/dev/null").unwrap();
+        let fl = crate::termios::status_flags(fd).unwrap();
+        assert_eq!(fl & 0o3, O_RDWR);
+        assert_ne!(fl & crate::termios::O_NONBLOCK, 0);
+        // SAFETY: `F_GETFD` takes no third argument.
+        let fdflags = unsafe { sys::fcntl(fd, F_GETFD) };
+        assert_eq!(fdflags & FD_CLOEXEC, 0);
+        let _ = close(fd);
+        assert_eq!(open_line(c"/nonexistent/line"), Err(crate::ENOENT));
     }
 
     #[cfg(unix)]

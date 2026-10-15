@@ -119,7 +119,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_running_system_has_a_name() {
-        let u = uname().unwrap_or_else(|e| panic!("uname: {e}"));
+        let u = uname();
+        assert_eq!(u.as_ref().err(), None);
+        let Ok(u) = u else { return };
         assert!(!u.sysname().is_empty());
         assert!(!u.machine().is_empty());
     }

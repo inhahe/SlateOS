@@ -29,6 +29,8 @@ scans it out -- `--input` a USB keyboard and mouse to send keys and clicks to
 at; the agent's `socket`, `input` and `service` grants are what a display
 server holds at boot (lane F's
 `requests/f-a-the-guest-cannot-run-a-graphical-program-or-show-its-screen.md`).
+`scripts/screen.py capture --qmp PORT shot.png` takes the picture, and
+`screen.py type --qmp PORT TEXT` types (a `\\n` in TEXT is Enter).
 
 It is for trying a change, not for publishing one. The guest's state carries
 over from one request to the next -- files put stay, a program that broke

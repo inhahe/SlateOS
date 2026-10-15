@@ -220,7 +220,14 @@
 #                                       # the watchdog does not.  Use this flag
 #                                       # only if the host TCP listen itself is a
 #                                       # problem (e.g. a sandbox that forbids
-#                                       # binding a port).
+#                                       # binding a port).  It also skips the
+#                                       # screen probe, which types through it.
+#   SCREEN_PROBE=0 ./scripts/boot-test.sh
+#                                       # skip the screen probe (screen_probe:
+#                                       # at the marker, type at the guest and
+#                                       # check its screen shows the answer).
+#                                       # SCREEN_PROBE_TIMEOUT=N gives it N
+#                                       # seconds instead of 180.
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -1831,6 +1838,44 @@ kill_qemu() {
     # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
     [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
+}
+
+# The screen probe: what a person sees and types at, end to end.
+#
+# The marker proves the serial port and nothing on the screen.  Until the
+# desktop starts (design-decisions 1392 -- a boot test that boots to it and
+# checks it is lane A's step), the screen is the kernel console with init's
+# shell on it.  At the marker, with the guest still up, `screen.py probe` types
+# `echo <token>` and Enter through the HMP monitor and waits for the token to
+# be drawn on a line of its own on QEMU's console 0 -- the keyboard, the
+# kernel's tty, init's shell, the console, the framebuffer and QEMU's display.
+# The last screen is kept as build/screen/probe.png, its text as probe.txt.
+#
+# Called only from the wait loop, with QEMU up, so the post-loop path -- the
+# wait over before the loop saw the marker -- checks no screen and says so.  It needs the monitor:
+# --no-monitor skips it, and so does SCREEN_PROBE=0, each saying so.  Returns
+# non-zero when the screen did not show the answer, or could not be read.
+screen_probe() {
+    if [ "${SCREEN_PROBE:-1}" != "1" ]; then
+        echo "=== Screen probe: skipped (SCREEN_PROBE=${SCREEN_PROBE}) ==="
+        return 0
+    fi
+    if [ "${#MONITOR_ARGS[@]}" -eq 0 ]; then
+        echo "=== Screen probe: skipped (--no-monitor: no monitor to type through) ==="
+        return 0
+    fi
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Screen probe: no python, so the screen cannot be checked ===" >&2
+        return 1
+    fi
+    echo "=== Screen probe: typing at the guest and reading its screen ==="
+    "$py" "$SCRIPT_DIR/screen.py" probe --hmp "$MONITOR_PORT" \
+        --timeout "${SCREEN_PROBE_TIMEOUT:-180}" --keep "$PROJECT_ROOT/build/screen"
 }
 
 # Replay whatever QEMU wrote to stderr, once, on the way out.
@@ -4175,6 +4220,40 @@ check_eol() {
 }
 
 check_eol
+
+# The screen probe's own self-test, before the build.  The probe runs only at
+# the marker (screen_probe), an hour or more into the run, and a probe broken
+# by a change to screen.py would fail that boot for a fault of its own.  This
+# drives it end to end in seconds -- fake HMP and QMP monitors on loopback, a
+# fake console that answers or does not -- and reads text drawn in the
+# kernel's own font, so a change to kernel/src/font.rs it cannot parse stops
+# here too.
+screen_probe_selftest() {
+    if [ "${SCREEN_PROBE:-1}" != "1" ]; then
+        return 0
+    fi
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== screen probe self-test: skipped (no python; the probe will say so too) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the screen probe (screen.py --self-test) ==="
+    if run_checker screen-probe-selftest "$py" "$PROJECT_ROOT/scripts/screen.py" --self-test; then
+        return 0
+    fi
+    echo "" >&2
+    echo "ERROR: refusing to build.  The screen probe's self-test failed, so the" >&2
+    echo "probe at the end of this boot would fail for its own fault, not the" >&2
+    echo "guest's.  Fix scripts/screen.py, or run with SCREEN_PROBE=0 to boot" >&2
+    echo "without it." >&2
+    exit 1
+}
+
+screen_probe_selftest
 
 # Lane B's manifest-producer gate.  Every entry in
 # `rootfs-bin-manifest.txt` must have something in the tree that produces
@@ -10231,6 +10310,8 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # which contains the substring BOOT_OK — a false PASS on a hung boot.
     if [ -f "$SERIAL_FILE" ] && grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "$WAIT_MARKER detected after ${ELAPSED}s!"
+        screen_ok=1
+        screen_probe || screen_ok=0
         kill_qemu "$QEMU_PID"
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
@@ -10246,6 +10327,10 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         fi
         if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            exit 1
+        fi
+        if [ "$screen_ok" != "1" ]; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the screen did not show what was typed at it) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"
@@ -10317,6 +10402,7 @@ kill_qemu "$QEMU_PID"
 if [ -f "$SERIAL_FILE" ]; then
     if grep -q "^$WAIT_MARKER" "$SERIAL_FILE"; then
         echo "$WAIT_MARKER found."
+        echo "=== Screen probe: not run -- the wait ended (QEMU exited, or the clock ran out) before it saw the marker ==="
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1

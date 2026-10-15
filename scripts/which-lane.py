@@ -521,6 +521,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "safewrite.py",
         "scan-orphan-modules.py",
         "scan-unwrap.py",
+        "screen.py",
         "selftest-boot-gate-identity.py",
         "selftestflag.py",
         "shellcheck-all.sh",

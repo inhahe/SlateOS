@@ -430,6 +430,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
+| `scripts/screen.py` | A guest's screen from the host: capture it, type at it, read its text back. |
 | `scripts/sed-diff.sh` | Differential test: our sed against GNU sed. |
 | `scripts/selftest-boot-gate-identity.py` | Self-test for boot-test.sh's `check_identity_rungs` gate. |
 | `scripts/selftestflag.py` | One spelling rule for `--self-test`, because the alternative reported success. |
@@ -580,4 +581,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_570 scripts._
+_571 scripts._

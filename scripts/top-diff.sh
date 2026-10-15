@@ -59,7 +59,7 @@ DIFF_REF=$PROCPS_REF_TOP
 . "$(dirname "$0")/diff-wsl.sh"
 
 runner=$root/scripts/curses-ptyrun.py
-pass=0; fail=0; xfail=0; xpass=0
+pass=0; fail=0; xfail=0; xpass=0; retried=0
 
 if ! unshare -mUrpf --propagation private sh -c 'mount --bind /dev/null /proc/uptime' 2>/dev/null; then
   echo "top-diff: cannot mount over /proc in a namespace here; skipping"
@@ -529,6 +529,16 @@ screen() {
   wanted "$label" || return 0
   screen_side ours "$@"
   screen_side gnu "$@"
+  # Both sides killed by the time limit, differing only in how many frames
+  # they drew while waiting: a loaded machine let a key arrive between a
+  # read and the `tcflush` after it, which both programs discard, and both
+  # then wait for a `q` that never comes. Once more, before judging.
+  if ! same && [ "$(cat "$DIFF_TMP/ours.rc")" = 137 ] && [ "$(cat "$DIFF_TMP/gnu.rc")" = 137 ]; then
+    retried=$((retried+1))
+    printf 'RETRY %s -- both sides hung\n' "$label"
+    screen_side ours "$@"
+    screen_side gnu "$@"
+  fi
   kept "$label"
   judge "$label" same
 }
@@ -825,5 +835,5 @@ screen "-n 1" 24x80 -- -n 1
 screen "-n 2 -d 0.2" 24x80 -- -n 2 -d 0.2
 
 reset_knobs
-echo "top-diff: $pass case(s) agree, $fail differ, $xfail differ on purpose, $xpass expected to differ and did not"
+echo "top-diff: $pass case(s) agree, $fail differ, $xfail differ on purpose, $xpass expected to differ and did not ($retried run again after both sides hung)"
 [ "$fail" = 0 ] && [ "$xpass" = 0 ]

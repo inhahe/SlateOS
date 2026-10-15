@@ -1515,6 +1515,18 @@ list moved to lane D on 2026-09-22):
     §1.3, no lane yet: the kernel applies them at process creation, Settings
     and the task manager set them).
 
+- `[-]` `[B]` **util-linux 2.39.3's `agetty`, ported** -- replacing
+  `userspace/getty`, written from the manual (its `mingetty` personality,
+  which Ubuntu does not ship, goes with it), and writing the `LOGIN_PROCESS`
+  record it never wrote (`known-issues/B-GETTY-WRITES-NO-LOGIN-PROCESS-RECORD.md`).
+  The console and serial logins of a server installation (§1073) run
+  through it. In stages, each held to Ubuntu's `/usr/sbin/agetty` by
+  `scripts/agetty-diff.sh` before the next: (1) the command line,
+  `--show-issue` and the issue file's escapes -- done 2026-10-15, 139 cases
+  agree; (2) the line opened and set up, the name read, `login` run; (3)
+  `utmp`/`wtmp`; (4) the prompt printed again on `--reload`, and a virtual
+  console's keyboard modes.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

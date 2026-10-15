@@ -26,6 +26,9 @@ pub const AF_INET6: i32 = 10;
 pub const SOCK_DGRAM: i32 = 2;
 /// `getaddrinfo`: also return the canonical name.
 pub const AI_CANONNAME: i32 = 0x0002;
+/// `getaddrinfo`: for `AF_INET6`, answer an IPv4 address as a mapped one
+/// when there is no IPv6 one.
+pub const AI_V4MAPPED: i32 = 0x0008;
 /// `getnameinfo`: the numeric form of the address, never a name.
 pub const NI_NUMERICHOST: i32 = 0x01;
 /// `getnameinfo`: fail rather than fall back to the numeric form.
@@ -36,6 +39,8 @@ pub const EAI_NONAME: i32 = -2;
 pub const IFF_UP: u32 = 1;
 /// The interface is the loopback.
 pub const IFF_LOOPBACK: u32 = 8;
+/// The interface's resources are allocated: it is running.
+pub const IFF_RUNNING: u32 = 0x40;
 /// The longest name `getnameinfo` writes, with its terminator.
 pub const NI_MAXHOST: usize = 1025;
 /// Room for the longest numeric IPv6 address and its terminator.
@@ -280,11 +285,21 @@ impl AddrInfo {
     ///
     /// The `EAI_*` code `getaddrinfo` returned, for [`gai_strerror`].
     pub fn lookup(host: &CStr, socktype: i32, flags: i32) -> Result<Self, i32> {
+        Self::lookup_family(host, 0, socktype, flags)
+    }
+
+    /// [`AddrInfo::lookup`] with the hints' `ai_family` too -- `AF_INET`,
+    /// `AF_INET6`, or 0 for either.
+    ///
+    /// # Errors
+    ///
+    /// As [`AddrInfo::lookup`].
+    pub fn lookup_family(host: &CStr, family: i32, socktype: i32, flags: i32) -> Result<Self, i32> {
         #[cfg(unix)]
         {
             let hints = Addrinfo {
                 ai_flags: flags,
-                ai_family: 0,
+                ai_family: family,
                 ai_socktype: socktype,
                 ai_protocol: 0,
                 ai_addrlen: 0,
@@ -311,8 +326,34 @@ impl AddrInfo {
         }
         #[cfg(not(unix))]
         {
-            let _ = (host, socktype, flags);
+            let _ = (host, family, socktype, flags);
             Err(EAI_NONAME)
+        }
+    }
+
+    /// The first entry's family and address, as `inet_ntop` takes it:
+    /// `sin_addr`'s 4 bytes for `AF_INET`, `sin6_addr`'s 16 for `AF_INET6`;
+    /// `None` for no entry, or one of another family.
+    #[must_use]
+    pub fn first_address(&self) -> Option<(i32, &[u8])> {
+        // SAFETY: `head` is the list `getaddrinfo` returned, owned by this
+        // value until it drops; a non-null `ai_addr` points at a socket
+        // address of the entry's family, `ai_addrlen` bytes long.
+        unsafe {
+            let first = self.head.as_ref()?;
+            if first.ai_addr.is_null() {
+                return None;
+            }
+            let (offset, len) = match first.ai_family {
+                f if f == AF_INET => (4usize, 4usize),
+                f if f == AF_INET6 => (8, 16),
+                _ => return None,
+            };
+            let base = first.ai_addr.cast::<u8>();
+            Some((
+                first.ai_family,
+                core::slice::from_raw_parts(base.add(offset), len),
+            ))
         }
     }
 
@@ -593,6 +634,37 @@ impl IfAddr<'_> {
         unsafe { self.entry.ifa_addr.as_ref() }.map(|sa| i32::from(sa.sa_family))
     }
 
+    /// `ifa_name`: the interface's name, `None` when the library gave none.
+    #[must_use]
+    pub fn name(&self) -> Option<&[u8]> {
+        if self.entry.ifa_name.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null `ifa_name` is a NUL-terminated string inside the
+        // list this entry borrows from, alive as long as the borrow.
+        Some(unsafe { CStr::from_ptr(self.entry.ifa_name) }.to_bytes())
+    }
+
+    /// The address itself, as `inet_ntop` takes it: `sin_addr`'s 4 bytes for
+    /// `AF_INET`, `sin6_addr`'s 16 for `AF_INET6`; `None` for an entry with
+    /// no address or one of another family.
+    #[must_use]
+    pub fn address(&self) -> Option<&[u8]> {
+        let (offset, len) = match self.family()? {
+            // `sin_addr` 4 bytes into `struct sockaddr_in` (family 2, port
+            // 2); `sin6_addr` 8 into `struct sockaddr_in6` (and flowinfo 4).
+            f if f == AF_INET => (4usize, 4usize),
+            f if f == AF_INET6 => (8, 16),
+            _ => return None,
+        };
+        // SAFETY: an `AF_INET` address is a `struct sockaddr_in` (16 bytes),
+        // an `AF_INET6` one a `struct sockaddr_in6` (28): `offset + len` is
+        // inside it either way, and the list outlives the borrow.
+        Some(unsafe {
+            core::slice::from_raw_parts(self.entry.ifa_addr.cast::<u8>().add(offset), len)
+        })
+    }
+
     /// Whether this is an IPv6 link-local unicast (`fe80::/10`) or link-local
     /// multicast (`ffx2::/16`) address: glibc's `IN6_IS_ADDR_LINKLOCAL` and
     /// `IN6_IS_ADDR_MC_LINKLOCAL`.
@@ -740,9 +812,11 @@ mod tests {
         assert_eq!(AF_INET6, posix::socket::AF_INET6);
         assert_eq!(SOCK_DGRAM, posix::socket::SOCK_DGRAM);
         assert_eq!(AI_CANONNAME, posix::socket::AI_CANONNAME);
+        assert_eq!(AI_V4MAPPED, posix::gai::AI_V4MAPPED);
         assert_eq!(EAI_NONAME, posix::socket::EAI_NONAME);
         assert_eq!(IFF_UP, posix::socket::IFF_UP);
         assert_eq!(IFF_LOOPBACK, posix::socket::IFF_LOOPBACK);
+        assert_eq!(IFF_RUNNING, posix::socket::IFF_RUNNING);
         assert_eq!(NI_NUMERICHOST, posix::gai::NI_NUMERICHOST);
         assert_eq!(NI_NAMEREQD, posix::gai::NI_NAMEREQD);
         assert_eq!(EAFNOSUPPORT, posix::errno::EAFNOSUPPORT);

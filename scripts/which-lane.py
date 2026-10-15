@@ -588,6 +588,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "write-usb-stick.ps1",
     ),
     "B": (
+        "agetty-diff.sh",
         "all-diff.sh",
         "arch-diff.sh",
         "argv-ignored-baseline.txt",

@@ -124,6 +124,7 @@
 # | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
 # | `DIFF_BINS`      | `$DIFF_PROG`, or empty if `DIFF_EXAMPLES` is set | the `--bin` names to build; more than one for a harness that compares a family |
 # | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
+# | `DIFF_FEATURES`  | (none) | cargo features to build with, comma-separated: for a binary built only on request, as `agetty` is while its port is in progress (`required-features`) |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec. Every `DIFF_*` knob above already crosses on its own, as do `OURS` and `VERBOSE`; this is for a name that matches neither pattern |
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
@@ -1314,6 +1315,7 @@ if [ -z "$OURS" ]; then
   for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done
   for diff_b in $DIFF_EXAMPLES; do diff_args="$diff_args --example $diff_b"; done
+  if [ -n "${DIFF_FEATURES:-}" ]; then diff_args="$diff_args --features $DIFF_FEATURES"; fi
   # shellcheck disable=SC2086
   ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1

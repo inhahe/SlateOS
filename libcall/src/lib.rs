@@ -83,6 +83,7 @@ pub mod signal;
 pub mod socket;
 pub mod termios;
 pub mod utmp;
+pub mod uts;
 
 // ---------------------------------------------------------------------------
 // Values

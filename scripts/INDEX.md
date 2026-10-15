@@ -10,6 +10,7 @@ promises about its own output, which a one-line summary cannot carry.
 | script | what it does |
 |---|---|
 | `scripts/abi-reach.py` | Which kernel capabilities can the Linux-ABI table reach that no native number can? |
+| `scripts/agetty-diff.sh` | Differential test: our `agetty` against util-linux 2.39.3's. |
 | `scripts/all-diff.sh` | Run every `*-diff.sh` harness and print one summary line each. |
 | `scripts/arch-diff.sh` | arch-diff.sh — compare our `arch` against GNU's, inside WSL. |
 | `scripts/argv-utf8.py` | Find utilities that read argv or the environment as `String`, and so panic. |
@@ -590,4 +591,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_580 scripts._
+_581 scripts._

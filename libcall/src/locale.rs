@@ -172,6 +172,31 @@ pub fn codeset(buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// `ABDAY_1`, `nl_langinfo`'s item for Sunday's abbreviation; the week's
+/// other days follow it.
+pub const ABDAY_1: i32 = 0x2_0000;
+/// `ABMON_1`, `nl_langinfo`'s item for January's abbreviation; the year's
+/// other months follow it.
+pub const ABMON_1: i32 = 0x2_000e;
+
+/// `nl_langinfo (item)`, copied into `buf` without its NUL: its length,
+/// which is more than `buf` holds when it did not fit. `None` off Unix,
+/// where there is no C library of ours to ask.
+pub fn langinfo(item: i32, buf: &mut [u8]) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `nl_langinfo` takes any item, answering "" for one it does
+        // not know; the result is copied out before anything else is called.
+        let p = unsafe { sys::nl_langinfo(item) };
+        copy_c_string(p, buf)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (item, buf);
+        None
+    }
+}
+
 /// `nl_langinfo (RADIXCHAR)`: the selected `LC_NUMERIC`'s decimal point,
 /// copied into `buf` -- `.` in `C`, `,` in many others. What `printf`'s
 /// `%f` writes between the whole and the fraction.
@@ -392,6 +417,8 @@ mod tests {
         assert_eq!(LC_COLLATE, posix::locale::LC_COLLATE);
         assert_eq!(LC_ALL, posix::locale::LC_ALL);
         assert_eq!(CODESET, posix::langinfo::CODESET);
+        assert_eq!(ABDAY_1, posix::langinfo::ABDAY_1);
+        assert_eq!(ABMON_1, posix::langinfo::ABMON_1);
         assert_eq!(RADIXCHAR, posix::langinfo::RADIXCHAR);
         assert_eq!(
             core::mem::size_of::<MbState>(),

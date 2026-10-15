@@ -566,7 +566,7 @@ impl Program {
         prefix: &str,
         table: &'t [(&'t str, T)],
         aliases: &[(&str, &str)],
-        how: Lookup,
+        how: Lookup<'_>,
     ) -> Result<Option<(&'t str, T)>, Error> {
         if let Some(hit) = table.iter().find(|(n, _)| *n == typed) {
             return Ok(Some(*hit));
@@ -574,7 +574,7 @@ impl Program {
         let matches: Vec<(usize, &(&'t str, T))> = table
             .iter()
             .enumerate()
-            .filter(|(_, (n, _))| n.starts_with(typed))
+            .filter(|(_, (n, _))| n.starts_with(typed) && !how.whole_only.contains(n))
             .collect();
         let Some(&(first_at, first)) = matches.first() else {
             return Ok(None);
@@ -806,6 +806,7 @@ impl Program {
             long_only: false,
             distinct_entries: false,
             short_only: false,
+            whole_only: &[],
             done: false,
             optopt: Optopt::None,
         }
@@ -830,11 +831,13 @@ pub enum Optopt<'a> {
 
 /// The rule [`Program::lookup_long`] resolves an abbreviation by.
 #[derive(Clone, Copy, Debug, Default)]
-struct Lookup {
+struct Lookup<'w> {
     /// `getopt_long_only`: every second prefix match is ambiguous.
     long_only: bool,
     /// Every table entry is its own option, even where two share a name.
     distinct: bool,
+    /// Options matched only when typed in full; see [`Parser::whole_only`].
+    whole_only: &'w [&'w str],
 }
 
 /// One thing found on the command line, in the order it was typed.
@@ -890,6 +893,8 @@ pub struct Parser<'a> {
     distinct_entries: bool,
     /// See [`Parser::short_only`].
     short_only: bool,
+    /// See [`Parser::whole_only`].
+    whole_only: &'a [&'a str],
     done: bool,
     /// See [`Parser::optopt`].
     optopt: Optopt<'a>,
@@ -1082,6 +1087,20 @@ impl<'a> Parser<'a> {
         self
     }
 
+    /// Match the long options `names` only when typed in full: no
+    /// abbreviation names one, and none makes an abbreviation of another
+    /// ambiguous.
+    ///
+    /// For options a port adds to its upstream's table. Every abbreviation
+    /// then means what it means upstream: SlateOS's `pkill --terminate`
+    /// leaves `pkill --term pts/1` the `--terminal` it is on Linux, where
+    /// matching it as glibc does would make it ambiguous between the two.
+    #[must_use]
+    pub fn whole_only(mut self, names: &'a [&'a str]) -> Self {
+        self.whole_only = names;
+        self
+    }
+
     /// Whether an operand here ends option parsing.
     fn stops_at_operand(&self) -> bool {
         match self.ordering {
@@ -1207,6 +1226,7 @@ impl<'a> Parser<'a> {
         let how = Lookup {
             long_only,
             distinct: self.distinct_entries,
+            whole_only: self.whole_only,
         };
         let found = self
             .program
@@ -2589,6 +2609,42 @@ mod tests {
                 Ok(Opt::Long("foo", None)),
                 Ok(Opt::Operand(&args[2])),
             ]
+        );
+    }
+
+    #[test]
+    fn a_whole_only_option_is_matched_in_full_and_spoils_no_abbreviation() {
+        let longs = [
+            ("terminal", Takes::Required),
+            ("table", Takes::Nothing),
+            ("terminate", Takes::Nothing),
+            ("timeout", Takes::Required),
+        ];
+        let added = ["terminate", "timeout"];
+        let args = argv(&["--term", "pts/1", "--terminate", "--timeo", "--t"]);
+        assert_eq!(
+            every(
+                GETOPT
+                    .parse(&args, "", &longs)
+                    .whole_only(&added)
+                    .keep_going(true)
+            ),
+            vec![
+                // What it is without the added options.
+                Ok(Opt::Long("terminal", Some("pts/1".into()))),
+                Ok(Opt::Long("terminate", None)),
+                Err("unrecognized option '--timeo'".into()),
+                // Still ambiguous, between the options that were there.
+                Err("option '--t' is ambiguous; possibilities: '--terminal' '--table'".into()),
+            ]
+        );
+        // Matched as glibc matches, the same abbreviation is ambiguous.
+        let args = argv(&["--term"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "", &longs)),
+            vec![Err(
+                "option '--term' is ambiguous; possibilities: '--terminal' '--terminate'".into()
+            )]
         );
     }
 

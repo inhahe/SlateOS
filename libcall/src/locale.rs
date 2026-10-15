@@ -78,14 +78,18 @@ mod sys {
         pub fn iscntrl(c: i32) -> i32;
         pub fn wctob(wc: u32) -> i32;
         pub fn btowc(c: i32) -> u32;
-        pub fn __ctype_get_mb_cur_max() -> usize;
         pub fn strcoll(s1: *const u8, s2: *const u8) -> i32;
         pub fn tolower(c: i32) -> i32;
     }
 }
 
-/// A C string the library returned, copied into `buf` without its NUL:
-/// the length, or `None` when it was NULL or does not fit.
+/// A C string the library returned, copied into `buf` without its NUL --
+/// as much of it as fits: its whole length, which is more than `buf` holds
+/// when it did not fit; `None` only when it was NULL.
+///
+/// So "no string" and "a string too long for the buffer" stay apart: a
+/// `setlocale` that selected a composite locale (`LC_CTYPE=...;LC_NUMERIC=...`,
+/// some 300 bytes) still says that it succeeded.
 #[cfg(unix)]
 fn copy_c_string(p: *const u8, buf: &mut [u8]) -> Option<usize> {
     if p.is_null() {
@@ -95,15 +99,23 @@ fn copy_c_string(p: *const u8, buf: &mut [u8]) -> Option<usize> {
     // valid until the next call that may overwrite it; it is copied out
     // before anything else is called.
     let s = unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes();
-    let dst = buf.get_mut(..s.len())?;
-    dst.copy_from_slice(s);
+    copy_cut(s, buf);
     Some(s.len())
+}
+
+/// As much of `s` as `buf` holds, into it.
+fn copy_cut(s: &[u8], buf: &mut [u8]) {
+    let n = s.len().min(buf.len());
+    if let (Some(dst), Some(src)) = (buf.get_mut(..n), s.get(..n)) {
+        dst.copy_from_slice(src);
+    }
 }
 
 /// `setlocale (category, "")`: the locale the environment names selected
 /// for `category` -- `LC_ALL`, the category's own variable, `LANG`, in that
-/// order -- and its name copied into `buf`. `None` when the named locale does
-/// not exist, which leaves the selection as it was.
+/// order -- and its name copied into `buf` as far as it fits: the name's
+/// length, which may be more than `buf` holds. `None` when the named locale
+/// does not exist, which leaves the selection as it was.
 pub fn select_from_env(category: i32, buf: &mut [u8]) -> Option<usize> {
     #[cfg(unix)]
     {
@@ -115,12 +127,12 @@ pub fn select_from_env(category: i32, buf: &mut [u8]) -> Option<usize> {
     #[cfg(not(unix))]
     {
         let _ = category;
-        name_c(buf)
+        Some(name_c(buf))
     }
 }
 
 /// `setlocale (category, NULL)`: the name of the locale selected for
-/// `category`, copied into `buf`.
+/// `category`, copied into `buf` as far as it fits; its length.
 pub fn current(category: i32, buf: &mut [u8]) -> Option<usize> {
     #[cfg(unix)]
     {
@@ -131,20 +143,20 @@ pub fn current(category: i32, buf: &mut [u8]) -> Option<usize> {
     #[cfg(not(unix))]
     {
         let _ = category;
-        name_c(buf)
+        Some(name_c(buf))
     }
 }
 
 /// `"C"`, the only locale the host build has.
 #[cfg(not(unix))]
-fn name_c(buf: &mut [u8]) -> Option<usize> {
-    let dst = buf.get_mut(..1)?;
-    dst.copy_from_slice(b"C");
-    Some(1)
+fn name_c(buf: &mut [u8]) -> usize {
+    copy_cut(b"C", buf);
+    1
 }
 
 /// `nl_langinfo (CODESET)`: the selected `LC_CTYPE`'s codeset, copied
-/// into `buf` -- `UTF-8`, or `ANSI_X3.4-1968` for glibc's `C`.
+/// into `buf` as far as it fits -- `UTF-8`, or `ANSI_X3.4-1968` for glibc's
+/// `C` -- and its length.
 pub fn codeset(buf: &mut [u8]) -> Option<usize> {
     #[cfg(unix)]
     {
@@ -155,8 +167,7 @@ pub fn codeset(buf: &mut [u8]) -> Option<usize> {
     #[cfg(not(unix))]
     {
         const ASCII: &[u8] = b"ANSI_X3.4-1968";
-        let dst = buf.get_mut(..ASCII.len())?;
-        dst.copy_from_slice(ASCII);
+        copy_cut(ASCII, buf);
         Some(ASCII.len())
     }
 }
@@ -174,8 +185,7 @@ pub fn radix(buf: &mut [u8]) -> Option<usize> {
     }
     #[cfg(not(unix))]
     {
-        let dst = buf.get_mut(..1)?;
-        dst.copy_from_slice(b".");
+        copy_cut(b".", buf);
         Some(1)
     }
 }
@@ -213,20 +223,6 @@ pub fn tolower(c: i32) -> i32 {
     #[cfg(not(unix))]
     {
         u8::try_from(c).map_or(c, |b| i32::from(b.to_ascii_lowercase()))
-    }
-}
-
-/// `MB_CUR_MAX`: the most bytes a character takes in the selected locale.
-#[must_use]
-pub fn mb_cur_max() -> usize {
-    #[cfg(unix)]
-    {
-        // SAFETY: no arguments; it reads the selected locale.
-        unsafe { sys::__ctype_get_mb_cur_max() }
-    }
-    #[cfg(not(unix))]
-    {
-        1
     }
 }
 
@@ -410,11 +406,13 @@ mod tests {
         let mut name = [0u8; 64];
         let n = current(LC_CTYPE, &mut name).expect("a name");
         assert_eq!(name.get(..n), Some(&b"C"[..]));
+        // A name too long for the buffer is still a name: its length comes
+        // back, and as much of it as fits.
+        assert_eq!(current(LC_CTYPE, &mut []), Some(1));
         let mut state = MbState::new();
         assert_eq!(mbrtowc(b"A", &mut state), Mb::Char(0x41, 1));
         assert_eq!(mbrtowc(b"\0", &mut state), Mb::Char(0, 0));
         assert_eq!(mbrtowc(b"\xe9", &mut MbState::new()), Mb::Invalid);
-        assert_eq!(mb_cur_max(), 1);
         let mut buf = [0u8; MB_LEN_MAX];
         assert_eq!(wcrtomb(0x41, &mut MbState::new(), &mut buf), Some(1));
         assert_eq!(buf[0], 0x41);

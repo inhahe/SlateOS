@@ -27,6 +27,18 @@ below:
 What is left is `exit`'s, after the screen is put back: `atexit` handlers and
 the standard streams' flush, as in upstream's handler.
 
+A second pass, 2026-10-14, after the review of lane B's publish batch found
+two paths the test could not see (it runs with `use_env` off and the window
+unchanged): the repaint asked for the screen's size through
+`std::env::var_os` -- an `OsString`, and Rust's environment lock, which a
+`set_var` the signal interrupted holds for writing (`watch` keeps `LINES`
+and `COLUMNS` current) -- and resized the screen, allocating, when the window
+had changed while the program was stopped. `getenv_num` now reads `getenv`
+in place (`libcall::env::with_var`), and inside the handler a changed size
+leaves the resize and the repaint to the program's next refresh -- which the
+interrupted wait makes at once -- with the program's modes back meanwhile
+(`signals::repaint_now`).
+
 **What.** `userspace/curses` does what ncurses' signal handlers do --
 `endwin` on `SIGINT`/`SIGTERM`, the suspend-and-repaint on `SIGTSTP`, and
 `end_and_exit` for a program's own handler (`watch`'s `die`) -- inside the

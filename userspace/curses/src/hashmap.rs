@@ -73,11 +73,11 @@ fn update_cost_from_blank(t: &Term, to: &[Cell], stdscr_bkgd: &Cell) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-/// A screen's line `n`'s text, `TEXTWIDTH` cells of it.
-fn text(win: &Window, n: i32, width: usize) -> Vec<Cell> {
+/// A screen's line `n`'s text, `TEXTWIDTH` cells of it -- borrowed, as
+/// upstream compares the lines' own cells.
+fn text(win: &Window, n: i32, width: usize) -> &[Cell] {
     win.line(n)
-        .map(|l| l.text.iter().take(width).copied().collect())
-        .unwrap_or_default()
+        .map_or(&[][..], |l| l.text.get(..width.min(l.text.len())).unwrap_or_default())
 }
 
 impl HashState {
@@ -134,7 +134,7 @@ impl HashState {
     /// `_nc_make_oldhash (i)`: line `i` of `curscr` hashed again.
     pub fn make_oldhash(&mut self, curscr: &Window, i: i32) {
         let width = usize::try_from(i32::from(curscr.maxx).wrapping_add(1)).unwrap_or(0);
-        let h = hash(&text(curscr, i, width));
+        let h = hash(text(curscr, i, width));
         if let Some(slot) = self
             .oldhash
             .as_mut()
@@ -170,7 +170,7 @@ impl HashState {
             }
             let mut i = bot;
             while i > bot.wrapping_sub(n) {
-                let h = hash(&text(curscr, i, width));
+                let h = hash(text(curscr, i, width));
                 if let Some(slot) = usize::try_from(i).ok().and_then(|i| old.get_mut(i)) {
                     *slot = h;
                 }
@@ -187,7 +187,7 @@ impl HashState {
             }
             let mut i = top;
             while i < top.wrapping_sub(n) {
-                let h = hash(&text(curscr, i, width));
+                let h = hash(text(curscr, i, width));
                 if let Some(slot) = usize::try_from(i).ok().and_then(|i| old.get_mut(i)) {
                     *slot = h;
                 }
@@ -222,17 +222,17 @@ impl HashState {
         // "On the left side of >= is the cost before moving; on the right
         // side -- cost after moving."
         let before = (if blank {
-            update_cost_from_blank(t, &new_t(to), stdscr_bkgd)
+            update_cost_from_blank(t, new_t(to), stdscr_bkgd)
         } else {
-            update_cost(&old_t(to), &new_t(to))
+            update_cost(old_t(to), new_t(to))
         })
-        .wrapping_add(update_cost(&old_t(new_from), &new_t(from)));
+        .wrapping_add(update_cost(old_t(new_from), new_t(from)));
         let after = (if new_from == from {
-            update_cost_from_blank(t, &new_t(from), stdscr_bkgd)
+            update_cost_from_blank(t, new_t(from), stdscr_bkgd)
         } else {
-            update_cost(&old_t(new_from), &new_t(from))
+            update_cost(old_t(new_from), new_t(from))
         })
-        .wrapping_add(update_cost(&old_t(from), &new_t(to)));
+        .wrapping_add(update_cost(old_t(from), new_t(to)));
         before >= after
     }
 
@@ -362,7 +362,7 @@ impl HashState {
             // "re-hash only changed lines"
             for i in 0..lines {
                 if newscr.line(i).is_some_and(|l| l.firstchar != NOCHANGE) {
-                    let h = hash(&text(newscr, i, width));
+                    let h = hash(text(newscr, i, width));
                     if let Some(slot) = self
                         .newhash
                         .as_mut()
@@ -374,8 +374,8 @@ impl HashState {
             }
         } else {
             // "re-hash all"
-            let newh: Vec<u64> = (0..lines).map(|i| hash(&text(newscr, i, width))).collect();
-            let oldh: Vec<u64> = (0..lines).map(|i| hash(&text(curscr, i, width))).collect();
+            let newh: Vec<u64> = (0..lines).map(|i| hash(text(newscr, i, width))).collect();
+            let oldh: Vec<u64> = (0..lines).map(|i| hash(text(curscr, i, width))).collect();
             self.newhash = Some(newh);
             self.oldhash = Some(oldh);
         }

@@ -82,15 +82,8 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 /// signal interrupted retried, and the rest dropped at any other failure --
 /// there is nowhere else to say that the terminal has gone.
 fn console_write(s: &str) {
-    let mut rest = s.as_bytes();
-    while !rest.is_empty() {
-        match libcall::fd::write(1, rest) {
-            Ok(0) => break,
-            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
-            Err(libcall::EINTR) => {}
-            Err(_) => break,
-        }
-    }
+    // The terminal that would have shown the failure is the one that failed.
+    let _ = libcall::fd::write_all(1, s.as_bytes(), false);
 }
 
 /// The next byte typed, or `None` when none is waiting.
@@ -456,11 +449,22 @@ fn full_render(session: &Session) {
 // ============================================================================
 
 /// The caller's login name, or `None` if this build cannot determine it.
+///
+/// Looked up as `getpwuid` looks it up, in `/etc/passwd`: the file every
+/// user may read, which userdb generates from its own (design-decisions
+/// §353). The database itself is the owner's alone, so reading it answered
+/// `None` for everyone but root -- and `screen` refused every other user.
 fn current_username() -> Option<String> {
     let uid = authlib::identity::caller_uid()?;
-    userdb::UserDb::load(userdb::DEFAULT_PATH)
-        .ok()
-        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+    name_of(&pwdb::Db::load(), uid)
+}
+
+/// The login name `db` gives `uid`, if it is one a directory can be named
+/// after.
+fn name_of(db: &pwdb::Db, uid: u32) -> Option<String> {
+    db.user_by_uid(uid)
+        .and_then(|u| String::from_utf8(u.name.clone()).ok())
+        .filter(|n| !n.is_empty() && !n.contains('/'))
 }
 
 /// Where this user's sessions live.
@@ -503,9 +507,9 @@ fn require_session_dir() -> String {
     }
 }
 
-fn save_session_info(session: &Session) {
-    let dir = require_session_dir();
-    let _ = fs::create_dir_all(&dir);
+/// The session's description, in `dir` -- the caller's session directory.
+fn save_session_info(session: &Session, dir: &str) {
+    let _ = fs::create_dir_all(dir);
 
     let info_path = format!("{}/{}.session", dir, session.name);
     let mut info = format!("name={}\n", session.name);
@@ -767,6 +771,9 @@ fn process_command(session: &mut Session, input: &str) {
 // ============================================================================
 
 fn run_session(session: &mut Session) {
+    // Who the user is, settled while the terminal is still as they left it:
+    // the refusal exits, and an exit skips `RawInput`'s restoring drop.
+    let dir = require_session_dir();
     // Raw input for as long as the session holds the terminal, and the
     // terminal's own settings back however the session ends. Without a
     // terminal there are no keys to read, as GNU screen says.
@@ -780,7 +787,7 @@ fn run_session(session: &mut Session) {
 
     let mut ctrl_a_pending = false;
 
-    save_session_info(session);
+    save_session_info(session, &dir);
 
     loop {
         if !session.running {
@@ -1217,6 +1224,21 @@ mod tests {
         assert_ne!(dir.as_deref(), Some("/tmp/screen-attacker-chosen"));
         // ...and never the old default, which was the worst of the three.
         assert_ne!(dir.as_deref(), Some("/tmp/screen-root"));
+    }
+
+    /// A user is named from the world-readable `/etc/passwd`, so a user
+    /// other than root has a name -- and a session directory -- at all.
+    #[test]
+    fn an_ordinary_user_has_a_name() {
+        let db = pwdb::Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n",
+            b"",
+        );
+        assert_eq!(name_of(&db, 1000).as_deref(), Some("alice"));
+        assert_eq!(name_of(&db, 4242), None, "a uid with no entry");
+        let odd = pwdb::Db::from_bytes(b"a/b:x:7:7::/:/bin/sh\n:x:8:8::/:/bin/sh\n", b"");
+        assert_eq!(name_of(&odd, 7), None, "a name with a slash names no directory");
+        assert_eq!(name_of(&odd, 8), None, "nor does an empty one");
     }
 
     /// Two users do not share a directory, which is the whole basis for the

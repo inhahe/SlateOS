@@ -66,6 +66,7 @@ use core::ffi::CStr;
 pub mod clock;
 pub mod conf;
 pub mod crypt;
+pub mod env;
 pub mod epoll;
 pub mod fd;
 pub mod glob;
@@ -479,6 +480,27 @@ pub fn hostname_into(buf: &mut [u8]) -> Result<usize, i32> {
 #[cfg(not(unix))]
 pub fn hostname_into(_buf: &mut [u8]) -> Result<usize, i32> {
     Err(ENOSYS)
+}
+
+/// The buffer [`xgethostname`] reads into: room for any `HOST_NAME_MAX`
+/// the C libraries this tree meets declare (64 on Linux, 255 on SlateOS)
+/// and its NUL, several times over.
+pub const XGETHOSTNAME_BUF: usize = 1025;
+
+/// util-linux's `xgethostname`: `gethostname` into `get_hostname_max () + 1`
+/// bytes -- 65 on Linux, 256 on SlateOS -- the last made 0. The name, as
+/// much of `buf` as it takes; `None` when `gethostname` fails, which with
+/// that buffer is when the name is longer than the system allows.
+///
+/// The size is the point: `gethostname` into more room than
+/// `HOST_NAME_MAX + 1` would read a name the system's own limit cuts short
+/// elsewhere, and into less fails where upstream's succeeds.
+pub fn xgethostname(buf: &mut [u8; XGETHOSTNAME_BUF]) -> Option<&[u8]> {
+    let sz = conf::hostname_max().saturating_add(1).min(XGETHOSTNAME_BUF);
+    let n = hostname_into(buf.get_mut(..sz)?).ok()?;
+    // `name[sz - 1] = '\0'`: a library that cuts the name short without
+    // saying so still gives a terminated one.
+    buf.get(..n.min(sz.saturating_sub(1)))
 }
 
 /// The name of the user logged in on this process's controlling terminal,

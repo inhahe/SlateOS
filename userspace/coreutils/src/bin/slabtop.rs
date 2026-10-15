@@ -181,28 +181,38 @@ fn sort_for(key: u8) -> Sort {
     }
 }
 
-/// `procps_slabinfo_sort`: the comparator for the item, under the order.
-fn compare(sort: Sort, a: &Node, b: &Node) -> std::cmp::Ordering {
-    let number = |x: u64, y: u64| {
-        if sort.ascend { x.cmp(&y) } else { y.cmp(&x) }
-    };
-    match sort.item {
-        Item::Name => {
-            // `order * strcoll (a, b)`. A name holds no NUL: the library's
-            // `%128s` stops at the first one.
-            let c = |n: &[u8]| CString::new(n.to_vec()).unwrap_or_default();
-            let ord = libcall::locale::strcoll(&c(&a.name), &c(&b.name));
-            if sort.ascend { ord } else { ord.reverse() }
-        }
-        Item::NumObjs => number(a.nr_objs.into(), b.nr_objs.into()),
-        Item::ActiveObjs => number(a.nr_active_objs.into(), b.nr_active_objs.into()),
-        Item::ObjSize => number(a.obj_size.into(), b.obj_size.into()),
-        Item::ObjPerSlab => number(a.objs_per_slab.into(), b.objs_per_slab.into()),
-        Item::PagesPerSlab => number(a.pages_per_slab.into(), b.pages_per_slab.into()),
-        Item::NumsSlabs => number(a.nr_slabs.into(), b.nr_slabs.into()),
-        Item::ActiveSlabs => number(a.nr_active_slabs.into(), b.nr_active_slabs.into()),
-        Item::SizeTotal => number(a.cache_size, b.cache_size),
-        Item::PercentUsed => number(a.percent_used.into(), b.percent_used.into()),
+/// The figure a numeric sort orders by; `None` for the name, which is
+/// ordered as text.
+fn number_of(item: Item, n: &Node) -> Option<u64> {
+    Some(match item {
+        Item::Name => return None,
+        Item::NumObjs => n.nr_objs.into(),
+        Item::ActiveObjs => n.nr_active_objs.into(),
+        Item::ObjSize => n.obj_size.into(),
+        Item::ObjPerSlab => n.objs_per_slab.into(),
+        Item::PagesPerSlab => n.pages_per_slab.into(),
+        Item::NumsSlabs => n.nr_slabs.into(),
+        Item::ActiveSlabs => n.nr_active_slabs.into(),
+        Item::SizeTotal => n.cache_size,
+        Item::PercentUsed => n.percent_used.into(),
+    })
+}
+
+/// `procps_slabinfo_sort`: the nodes in the item's order -- stable, as glibc
+/// 2.39's `qsort_r` sorts. Names compare by `order * strcoll (a, b)`, each
+/// made a C string once rather than at every comparison; a name holds no
+/// NUL (the library's `%128s` stops at the first one).
+fn sort_nodes(sort: Sort, nodes: &mut Vec<Node>) {
+    let directed = |ord: std::cmp::Ordering| if sort.ascend { ord } else { ord.reverse() };
+    if matches!(sort.item, Item::Name) {
+        let mut keyed: Vec<(CString, Node)> = nodes
+            .drain(..)
+            .map(|n| (CString::new(n.name.clone()).unwrap_or_default(), n))
+            .collect();
+        keyed.sort_by(|(a, _), (b, _)| directed(libcall::locale::strcoll(a, b)));
+        nodes.extend(keyed.into_iter().map(|(_, n)| n));
+    } else {
+        nodes.sort_by(|a, b| directed(number_of(sort.item, a).cmp(&number_of(sort.item, b))));
     }
 }
 
@@ -524,7 +534,7 @@ fn reap(info: &mut SlabInfo, sort: Sort, name: &[u8]) -> Option<Vec<Node>> {
     match info.reap() {
         Ok(nodes) => {
             let mut nodes = nodes.to_vec();
-            nodes.sort_by(|a, b| compare(sort, a, b));
+            sort_nodes(sort, &mut nodes);
             Some(nodes)
         }
         Err(failure) => {
@@ -744,25 +754,25 @@ mod tests {
 
     #[test]
     fn numbers_sort_largest_first_and_ties_keep_the_files_order() {
-        let mut nodes = [
+        let mut nodes = vec![
             node(b"a", 5, 0),
             node(b"b", 9, 0),
             node(b"c", 5, 0),
             node(b"d", 9, 0),
         ];
-        nodes.sort_by(|x, y| compare(DEFAULT, x, y));
+        sort_nodes(DEFAULT, &mut nodes);
         let names: Vec<&[u8]> = nodes.iter().map(|n| n.name.as_slice()).collect();
         assert_eq!(names, [&b"b"[..], b"d", b"a", b"c"]);
     }
 
     #[test]
     fn names_sort_as_strcoll_orders_them() {
-        let mut nodes = [
+        let mut nodes = vec![
             node(b"kmalloc-8", 1, 0),
             node(b"dentry", 1, 0),
             node(b"Acpi", 1, 0),
         ];
-        nodes.sort_by(|x, y| compare(sort_for(b'n'), x, y));
+        sort_nodes(sort_for(b'n'), &mut nodes);
         let names: Vec<&[u8]> = nodes.iter().map(|n| n.name.as_slice()).collect();
         // The C locale's order is the bytes'.
         assert_eq!(names, [&b"Acpi"[..], b"dentry", b"kmalloc-8"]);

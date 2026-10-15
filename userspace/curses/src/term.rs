@@ -1205,15 +1205,9 @@ impl Term {
 /// `write (fd, ...)` until all of `buf` is out: an interrupted or
 /// would-block write is tried again, a write of nothing or any other error
 /// abandons the rest, as `_nc_flush` does.
-fn write_all(fd: i32, mut buf: &[u8]) {
-    while !buf.is_empty() {
-        match libcall::fd::write(fd, buf) {
-            Ok(0) => break,
-            Ok(n) => buf = buf.get(n..).unwrap_or_default(),
-            Err(e) if e == libcall::EINTR || e == libcall::EAGAIN => {}
-            Err(_) => break,
-        }
-    }
+fn write_all(fd: i32, buf: &[u8]) {
+    // `_nc_flush` says nothing of a failure either: the terminal is gone.
+    let _ = libcall::fd::write_all(fd, buf, true);
 }
 
 /// `sscanf (s, "%d/%d/%d", &r, &g, &b)`: how many it read, into `vals`.

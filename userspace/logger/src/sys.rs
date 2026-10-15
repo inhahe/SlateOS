@@ -35,12 +35,8 @@ pub fn xgetlogin() -> Option<Vec<u8>> {
 /// name past 63 was refused that way.
 #[must_use]
 pub fn hostname() -> Option<Vec<u8>> {
-    let sz = libcall::conf::hostname_max().saturating_add(1);
-    let mut buf = vec![0u8; sz];
-    let n = libcall::hostname_into(&mut buf).ok()?;
-    // `name[sz - 1] = '\0'`: a library that cuts the name short without
-    // saying so still gives a terminated one.
-    Some(buf.get(..n.min(sz.saturating_sub(1)))?.to_vec())
+    let mut buf = [0u8; libcall::XGETHOSTNAME_BUF];
+    libcall::xgethostname(&mut buf).map(<[u8]>::to_vec)
 }
 
 /// `ntp_gettime`'s verdict on the clock: `Some(maxerror)` in microseconds

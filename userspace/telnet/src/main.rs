@@ -318,15 +318,8 @@ fn stdin_read(buf: &mut [u8]) -> usize {
 /// is retried, and the rest dropped at any other failure, there being no
 /// other place to report it.
 fn write_all(fd: i32, data: &[u8]) {
-    let mut rest = data;
-    while !rest.is_empty() {
-        match libcall::fd::write(fd, rest) {
-            Ok(0) => break,
-            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
-            Err(libcall::EINTR) => {}
-            Err(_) => break,
-        }
-    }
+    // The failure has nowhere to go but the descriptor that failed.
+    let _ = libcall::fd::write_all(fd, data, false);
 }
 
 /// Write all bytes of `data` to standard output.

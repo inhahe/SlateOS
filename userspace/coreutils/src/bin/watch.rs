@@ -271,23 +271,22 @@ impl Pipe {
         if self.eof {
             return EOF;
         }
-        let mut chunk = vec![0u8; STDIO_PIPE_BUFFER];
+        // One buffer for the life of the pipe, as stdio keeps one.
+        self.buf.resize(STDIO_PIPE_BUFFER, 0);
         loop {
-            match libcall::fd::read(self.fd, &mut chunk) {
-                Ok(0) => {
-                    self.eof = true;
-                    return EOF;
-                }
-                Ok(n) => {
-                    chunk.truncate(n);
-                    self.buf = chunk;
+            match libcall::fd::read(self.fd, &mut self.buf) {
+                Ok(n) if n > 0 => {
+                    self.buf.truncate(n);
                     self.pos = 1;
                     return self.buf.first().map_or(EOF, |&b| i32::from(b));
                 }
                 // The handlers restart what they interrupt.
                 Err(libcall::EINTR) => {}
-                // A read that fails is the end of the input to stdio.
-                Err(_) => {
+                // The end, or a read that fails, which is the end of the
+                // input to stdio.
+                _ => {
+                    self.buf.clear();
+                    self.pos = 0;
                     self.eof = true;
                     return EOF;
                 }
@@ -756,7 +755,9 @@ impl Watch {
             }
             Ok(libcall::process::Forked::Parent(pid)) => pid,
         };
-        // The child has its own copy of the write end.
+        // The child has its own copy of the write end. Upstream does not
+        // look at this close either: the descriptor is gone whatever it
+        // reports, and an EOF from the pipe needs only the child's copy shut.
         let _ = libcall::fd::close(write_end);
         let mut p = Pipe::new(read_end);
         let color = self.flags & WATCH_COLOR != 0;
@@ -923,13 +924,20 @@ impl Watch {
     /// The child of `run_command`: its standard output and error the pipe,
     /// then the command.
     fn child(&self, read_end: i32, write_end: i32, command: &[u8], command_argv: &[CString]) -> ! {
+        // Neither close is checked upstream, nor need be: the read end is
+        // only kept from the command, and descriptor 1 is replaced by the
+        // `dup2` after it, which is checked.
         let _ = libcall::fd::close(read_end);
         let _ = libcall::fd::close(1);
         if let Err(e) = libcall::fd::dup2(write_end, 1) {
             xerr(3, b"dup2 failed", Some(e));
         }
+        // The copy at 1 is what the command writes to; this one only has to
+        // be gone, whatever the close reports.
         let _ = libcall::fd::close(write_end);
-        // "stderr should default to stdout"
+        // "stderr should default to stdout" -- unchecked upstream: a command
+        // whose standard error stayed where it was still runs, and its
+        // complaints reach the terminal instead of the screen.
         let _ = libcall::fd::dup2(1, 2);
         if self.flags & WATCH_EXEC != 0 {
             let argv: Vec<&std::ffi::CStr> = command_argv.iter().map(CString::as_c_str).collect();

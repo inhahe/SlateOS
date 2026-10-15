@@ -83,6 +83,9 @@ const SUSPEND: u32 = 4;
 static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 /// `_nc_globals.have_sigwinch`.
 static HAVE_SIGWINCH: AtomicBool = AtomicBool::new(false);
+/// The `SIGTSTP` handler is posting its suspension: what [`suspend`] does
+/// now, it does inside the handler.
+static IN_HANDLER: AtomicBool = AtomicBool::new(false);
 /// `_nc_globals.cleanup_nested`: a cleanup is under way.
 static CLEANUP_NESTED: AtomicU32 = AtomicU32::new(0);
 /// `_nc_globals.init_signals`: `SIGINT`, `SIGTERM` and `SIGWINCH` have been
@@ -240,7 +243,9 @@ extern "C" fn handle_sigint(signal: i32) {
 /// `handle_SIGTSTP`.
 extern "C" fn handle_sigtstp(_sig: i32) {
     let _errno = sig::ErrnoGuard::save();
+    IN_HANDLER.store(true, Ordering::Release);
     post(SUSPEND);
+    IN_HANDLER.store(false, Ordering::Release);
 }
 
 /// `handle_SIGTSTP`'s work: the program's modes kept if it is in curses and
@@ -302,12 +307,28 @@ fn suspend(slot: &mut Option<Screen>) {
         // "If the user modified the tty state while suspended, he wants
         // those changes to stick."
         sp.def_shell_mode();
-        // "This relies on the fact that doupdate() will restore the
-        // program-mode tty state, and issue enter_ca_mode if need be."
-        sp.doupdate();
+        if repaint_now(IN_HANDLER.load(Ordering::Acquire), sp.size_unchanged()) {
+            // "This relies on the fact that doupdate() will restore the
+            // program-mode tty state, and issue enter_ca_mode if need be."
+            sp.doupdate();
+        } else {
+            // The window changed while the program was stopped, and resizing
+            // allocates, which this handler must not do. The program's modes
+            // come back so its keys work; the screen stays ended, and the
+            // program's next refresh -- which the interrupted wait makes
+            // straight away -- resizes it and repaints it.
+            sp.reset_prog_mode();
+        }
     }
     // "Reset the signals."
     let _ = sig::set_mask(&omask);
+}
+
+/// Whether the suspension's repaint happens now: always outside a handler;
+/// inside one, only when the screen keeps its size, since a resize
+/// allocates.
+fn repaint_now(in_handler: bool, size_unchanged: bool) -> bool {
+    !in_handler || size_unchanged
 }
 
 /// `CatchIfDefault (sig, handler)`: `handler` installed for `signal` if its
@@ -393,5 +414,15 @@ mod tests {
         handle_sigwinch(sig::SIGWINCH);
         assert!(take_sigwinch());
         assert!(!take_sigwinch());
+    }
+
+    /// Inside the handler a suspension repaints only a screen that kept its
+    /// size: a resize allocates, and is left to the program's next refresh.
+    #[test]
+    fn a_handler_leaves_a_resize_for_later() {
+        assert!(repaint_now(false, false), "outside a handler, always");
+        assert!(repaint_now(false, true));
+        assert!(repaint_now(true, true), "the same size, at once");
+        assert!(!repaint_now(true, false), "a new size, not in the handler");
     }
 }

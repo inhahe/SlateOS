@@ -94,6 +94,32 @@ fn write_one(_fd: i32, _buf: &[u8]) -> Result<usize, i32> {
     Err(ENOSYS)
 }
 
+/// Write all of `buf` to `fd`: `write` again after a short write and after
+/// one a signal interrupted -- and, with `retry_would_block`, after
+/// `EAGAIN` as well, as ncurses' `_nc_flush` does -- until all of it is out.
+/// A write of nothing, or any other failure, abandons the rest.
+///
+/// For a program that writes a terminal byte by byte through the C library
+/// and has nowhere to report a terminal that has gone: `telnet`, `screen`,
+/// a curses screen.
+///
+/// # Errors
+///
+/// The `errno` of the write that failed; 0 for a write of nothing.
+pub fn write_all(fd: i32, buf: &[u8], retry_would_block: bool) -> Result<(), i32> {
+    let mut rest = buf;
+    while !rest.is_empty() {
+        match write(fd, rest) {
+            Ok(0) => return Err(0),
+            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
+            Err(crate::EINTR) => {}
+            Err(crate::EAGAIN) if retry_would_block => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// A pipe: `pipe`, as the read end and the write end. Neither is
 /// close-on-exec, as `pipe` leaves them -- what a program handing one end to
 /// a child it forks wants.
@@ -298,6 +324,66 @@ pub fn wait_readable(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
     wait_readable_one(fd, timeout_ms)
 }
 
+/// The most descriptors [`wait_readable_among`] waits on at once.
+pub const WAIT_AMONG_MAX: usize = 8;
+
+/// [`wait_readable`] for several descriptors at once: one `poll` for
+/// `POLLIN` on each of `fds`, which ends as soon as any of them has
+/// something to read. Which ones have, as a mask -- bit `k` for `fds[k]` --
+/// and 0 when the time ran out.
+///
+/// For a program that waits on its terminal and on a pipe its signal
+/// handlers write to, so that a signal ends the wait however close to its
+/// start it came.
+///
+/// # Errors
+///
+/// As [`wait_readable`]: `EBADF` when one of `fds` is not open, `EINTR`
+/// when a signal came first, `ENOMEM`; `EINVAL` for more than
+/// [`WAIT_AMONG_MAX`] descriptors; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_readable_among(fds: &[i32], timeout_ms: i32) -> Result<u32, i32> {
+    wait_readable_among_impl(fds, timeout_ms)
+}
+
+#[cfg(unix)]
+fn wait_readable_among_impl(fds: &[i32], timeout_ms: i32) -> Result<u32, i32> {
+    if fds.len() > WAIT_AMONG_MAX {
+        return Err(crate::EINVAL);
+    }
+    let mut polls = [const {
+        sys::PollFd {
+            fd: -1,
+            events: POLLIN,
+            revents: 0,
+        }
+    }; WAIT_AMONG_MAX];
+    for (p, &fd) in polls.iter_mut().zip(fds) {
+        p.fd = fd;
+    }
+    let nfds = u64::try_from(fds.len()).unwrap_or(0);
+    // SAFETY: `polls` holds `WAIT_AMONG_MAX` live `struct pollfd`s in a
+    // row, of which the call reads and writes the first `nfds`.
+    let rc = unsafe { sys::poll(polls.as_mut_ptr(), nfds, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    let mut mask = 0u32;
+    for (k, p) in polls.iter().take(fds.len()).enumerate() {
+        if p.revents & POLLNVAL != 0 {
+            return Err(EBADF);
+        }
+        if p.revents != 0 {
+            mask |= 1 << k;
+        }
+    }
+    Ok(mask)
+}
+
+#[cfg(not(unix))]
+fn wait_readable_among_impl(_fds: &[i32], _timeout_ms: i32) -> Result<u32, i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(unix)]
 fn wait_readable_one(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
     let mut p = sys::PollFd {
@@ -422,9 +508,25 @@ mod tests {
         assert!(close(copy).is_err(), "closed twice");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_among_says_which_one_has_something() {
+        let (r1, w1) = pipe().unwrap();
+        let (r2, w2) = pipe().unwrap();
+        assert_eq!(wait_readable_among(&[r1, r2], 0), Ok(0));
+        assert_eq!(write(w2, b"x"), Ok(1));
+        assert_eq!(wait_readable_among(&[r1, r2], -1), Ok(0b10));
+        assert_eq!(wait_readable_among(&[r1, 1 << 20], 0), Err(EBADF));
+        assert_eq!(wait_readable_among(&[r1; 9], 0), Err(crate::EINVAL));
+        for fd in [r1, w1, r2, w2] {
+            close(fd).unwrap();
+        }
+    }
+
     #[cfg(not(unix))]
     #[test]
     fn off_unix_every_call_declines() {
+        assert_eq!(wait_readable_among(&[0], 0), Err(ENOSYS));
         assert_eq!(dup2(0, 1), Err(ENOSYS));
         assert_eq!(dup_above(0, 3), Err(ENOSYS));
         assert_eq!(set_close_on_exec(0, true), Err(ENOSYS));

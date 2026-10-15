@@ -77,8 +77,6 @@ pub struct Tty {
     pub ottyb: Termios,
     /// `Nttyb`: the program's.
     pub nttyb: Termios,
-    /// `_notty`: setting the modes failed with `ENOTTY`.
-    pub notty: bool,
 }
 
 impl Tty {
@@ -100,6 +98,10 @@ impl Tty {
 
     /// `_nc_set_tty_mode (buf)`: `tcsetattr (Filedes, TCSADRAIN, buf)`,
     /// again after an interruption.
+    ///
+    /// Upstream also remembers an `ENOTTY` (`_notty`) and fails every later
+    /// call on it -- which the same descriptor would fail with `ENOTTY`
+    /// anyway, so nothing here keeps it.
     fn set_mode(&mut self, buf: &Termios) -> bool {
         if self.fd < 0 {
             return false;
@@ -108,12 +110,7 @@ impl Tty {
             match tc::set_attr(self.fd, tc::TCSADRAIN, buf) {
                 Ok(()) => return true,
                 Err(libcall::EINTR) => {}
-                Err(e) => {
-                    if e == libcall::pty::ENOTTY {
-                        self.notty = true;
-                    }
-                    return false;
-                }
+                Err(_) => return false,
             }
         }
     }
@@ -232,16 +229,32 @@ pub struct Screen {
 
 /// `_nc_getenv_num (name)`: the variable as `strtol (s, &end, 0)` reads all
 /// of it, or -1 for none, a negative, trailing bytes or more than an `int`.
-fn getenv_num(name: &str) -> i32 {
-    let Some(v) = std::env::var_os(name) else {
-        return -1;
+///
+/// Read in place, as `getenv` reads it, allocating nothing and taking no
+/// lock: this runs in the `SIGTSTP` handler on the way back from a
+/// suspension (`doupdate` asks for the size again), where Rust's own
+/// environment lock might be held by the very `set_var` the signal
+/// interrupted (`watch` keeps `LINES` and `COLUMNS` up to date).
+fn getenv_num(name: &core::ffi::CStr) -> i32 {
+    let parse = |bytes: &[u8]| {
+        let (n, used) = cstrtol::strtol(bytes, 0);
+        if n < 0 || used == 0 || used != bytes.len() {
+            return -1;
+        }
+        i32::try_from(n).unwrap_or(-1)
     };
-    let bytes = os_bytes(&v);
-    let (n, used) = cstrtol::strtol(&bytes, 0);
-    if n < 0 || used == 0 || used != bytes.len() {
-        return -1;
+    #[cfg(unix)]
+    {
+        libcall::env::with_var(name, parse).unwrap_or(-1)
     }
-    i32::try_from(n).unwrap_or(-1)
+    #[cfg(not(unix))]
+    {
+        // No handler is installed off Unix: the host's own reader will do.
+        match std::env::var_os(name.to_str().unwrap_or_default()) {
+            Some(v) => parse(&os_bytes(&v)),
+            None => -1,
+        }
+    }
 }
 
 /// The bytes of an environment value.
@@ -267,6 +280,19 @@ pub(crate) fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
 /// (Upstream then asks the terminal where its cursor lands at 9999,9999 --
 /// but only when built with `USE_CHECK_SIZE`, which Debian's is not.)
 fn get_screensize(entry: &mut Entry, fd: i32, use_env: bool) -> (i32, i32, i32) {
+    let (linep, colp) = screensize_of(entry, fd, use_env);
+    if use_env {
+        entry.set_number(number::LINES, linep);
+        entry.set_number(number::COLUMNS, colp);
+    }
+    let init_tabs = entry.number(number::INIT_TABS);
+    let tabsize = if init_tabs >= 0 { init_tabs } else { 8 };
+    (linep, colp, tabsize)
+}
+
+/// [`get_screensize`]'s answer, with nothing written back: the lines and
+/// columns.
+fn screensize_of(entry: &Entry, fd: i32, use_env: bool) -> (i32, i32) {
     let mut linep = entry.number(number::LINES);
     let mut colp = entry.number(number::COLUMNS);
     if use_env {
@@ -285,11 +311,11 @@ fn get_screensize(entry: &mut Entry, fd: i32, use_env: bool) -> (i32, i32, i32) 
             }
         }
         // "Finally, look for environment variables."
-        let value = getenv_num("LINES");
+        let value = getenv_num(c"LINES");
         if value > 0 {
             linep = value;
         }
-        let value = getenv_num("COLUMNS");
+        let value = getenv_num(c"COLUMNS");
         if value > 0 {
             colp = value;
         }
@@ -306,12 +332,8 @@ fn get_screensize(entry: &mut Entry, fd: i32, use_env: bool) -> (i32, i32, i32) 
         if colp <= 0 {
             colp = 80;
         }
-        entry.set_number(number::LINES, linep);
-        entry.set_number(number::COLUMNS, colp);
     }
-    let init_tabs = entry.number(number::INIT_TABS);
-    let tabsize = if init_tabs >= 0 { init_tabs } else { 8 };
-    (linep, colp, tabsize)
+    (linep, colp)
 }
 
 /// `SGR0_TEST (mode)`: the terminal has the string, and it is not `sgr0`.
@@ -531,7 +553,7 @@ fn init_wacs(t: &mut Term, ctype: &dyn Ctype) {
 fn locale_breaks_acs(entry: &Entry) -> bool {
     if std::env::var_os("NCURSES_NO_UTF8_ACS").is_some() {
         // -1, true, for a value that is no number.
-        return getenv_num("NCURSES_NO_UTF8_ACS") != 0;
+        return getenv_num(c"NCURSES_NO_UTF8_ACS") != 0;
     }
     let u8_value = entry.tigetnum(b"U8");
     if u8_value >= 0 {
@@ -680,7 +702,6 @@ impl Screen {
             fd: tty_fd,
             ottyb: Termios::default(),
             nttyb: Termios::default(),
-            notty: false,
         };
         // `_nc_setupterm`: on a terminal, its modes kept now.
         if tty_fd >= 0 && libcall::fd::is_terminal(tty_fd) {
@@ -1051,6 +1072,14 @@ impl Screen {
             self.sig_winch = true;
         }
         self.sig_winch
+    }
+
+    /// Whether the size `doupdate` would ask for now is the size the screen
+    /// has -- asked without changing anything, and allocating nothing.
+    #[must_use]
+    pub fn size_unchanged(&self) -> bool {
+        let (lines, cols) = screensize_of(&self.t.entry, self.tty.fd, self.use_env);
+        lines == self.t.num(number::LINES) && cols == self.t.num(number::COLUMNS)
     }
 
     /// `_nc_update_screensize (sp)`: the screen's size asked for again, and

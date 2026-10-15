@@ -42,10 +42,15 @@
 //!
 //! 1. **`-V` names this build**, `killall (SlateOS coreutils) 0.1.0`, as
 //!    `pstree` does.
-//! 2. **A process whose group cannot be read is not signalled.** Upstream
-//!    goes on with the group -1 and signals `-(-1)`: the process itself
-//!    through its pidfd, but where the system has no pidfds -- SlateOS --
-//!    process 1. Here it is skipped, after upstream's message.
+//! 2. **A process whose group cannot be read, or is group 0 or 1, is not
+//!    signalled by group (`-g`).** Upstream goes on with a group it could
+//!    not read as -1 and signals `-(-1)`: the process itself through its
+//!    pidfd, but where the system has no pidfds -- SlateOS -- process 1.
+//!    And it signals group 1 as `kill (-1, sig)`, which is every process the
+//!    caller may signal, and group 0 as `kill (0, sig)`, which is killall's
+//!    own group: a process init started without a group of its own is in
+//!    group 1, so `killall -g` of it would end the system. Here each is
+//!    skipped -- after upstream's message for the unreadable one.
 //! 3. **`-I` or `-V` spelled long with one dash and nothing after it**
 //!    (`killall -ignore-case`) reads no word past the end: upstream takes
 //!    `argv[optind] + 1` from a null pointer and dies of `SIGSEGV`. Here the
@@ -878,8 +883,9 @@ impl Killall<'_> {
                     continue;
                 }
                 // Deliberate difference 2: a group that could not be read
-                // is no group to signal.
-                if id < 0 {
+                // is no group to signal, and neither is 0 or 1 -- `-0` is
+                // our own group and `-1` every process.
+                if id <= 1 {
                     continue;
                 }
                 id
@@ -1381,6 +1387,17 @@ mod tests {
         let (status, sent, _) = go_with(&[BASH, SLEEP], &["-g", "sleep", "bash"], &groups, b"");
         assert_eq!(sent, vec![(-100, 15)]);
         assert_eq!(status, 1, "the second name's process was in the same group");
+    }
+
+    #[test]
+    fn group_0_and_group_1_are_never_signalled() {
+        // `-(1)` would be every process, `-(0)` killall's own group.
+        for g in [0, 1] {
+            let groups = [(200, g)];
+            let (status, sent, _) = go_with(&[SLEEP], &["-g", "sleep"], &groups, b"");
+            assert!(sent.is_empty(), "group {g}");
+            assert_eq!(status, 1, "group {g}: nothing was signalled");
+        }
     }
 
     #[test]

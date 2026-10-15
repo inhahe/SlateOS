@@ -915,10 +915,20 @@ fn slabformat(run: &Run, out: &mut Stream) -> Result<(), Stop> {
             .map_err(|_| fatal("Unable to get slabinfo node data"))?
             .to_vec();
         // `procps_slabinfo_sort (…, SLAB_NAME, SLABINFO_SORT_ASCEND)`:
-        // `strcoll`'s order, kept stable as glibc 2.39's `qsort_r` keeps it.
-        // A name holds no NUL: the library's `%128s` stops at the first.
-        let c = |n: &[u8]| std::ffi::CString::new(n.to_vec()).unwrap_or_default();
-        nodes.sort_by(|x, y| libcall::locale::strcoll(&c(&x.name), &c(&y.name)));
+        // `strcoll`'s order, kept stable as glibc 2.39's `qsort_r` keeps it,
+        // each name made a C string once. A name holds no NUL: the
+        // library's `%128s` stops at the first.
+        let mut keyed: Vec<(std::ffi::CString, _)> = nodes
+            .drain(..)
+            .map(|n| {
+                (
+                    std::ffi::CString::new(n.name.clone()).unwrap_or_default(),
+                    n,
+                )
+            })
+            .collect();
+        keyed.sort_by(|(x, _), (y, _)| libcall::locale::strcoll(x, y));
+        nodes.extend(keyed.into_iter().map(|(_, n)| n));
         for (j, node) in nodes.iter().enumerate() {
             if header_due(run, j) {
                 slabheader(out);

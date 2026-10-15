@@ -215,15 +215,10 @@ impl GroupWorkspace {
     }
 }
 
-/// `xgethostname`: `gethostname` into `get_hostname_max () + 1` bytes -- 65
-/// on Linux, 256 on SlateOS -- the last made 0, or `None`.
+/// `xgethostname`: [`libcall::xgethostname`]'s name, or `None`.
 fn xgethostname() -> Option<Vec<u8>> {
-    let sz = libcall::conf::hostname_max().saturating_add(1);
-    let mut buf = vec![0u8; sz];
-    let n = libcall::hostname_into(&mut buf).ok()?;
-    // `name[sz - 1] = '\0'`: a library that cuts the name short without
-    // saying so still gives a terminated one.
-    Some(buf.get(..n.min(sz.saturating_sub(1)))?.to_vec())
+    let mut buf = [0u8; libcall::XGETHOSTNAME_BUF];
+    libcall::xgethostname(&mut buf).map(<[u8]>::to_vec)
 }
 
 /// util-linux's `xgetlogin`: the real uid's name, or `None`.

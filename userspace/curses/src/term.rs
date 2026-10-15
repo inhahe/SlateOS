@@ -505,20 +505,13 @@ impl Term {
     /// `TIPARM_n (cap, …)` of the string capability at `index`, copied:
     /// `None` when the terminal does not have it or it cannot be expanded.
     /// For setting up a screen, where a copy is kept; the writing paths use
-    /// [`Term::put_tiparm`] and [`Term::expand`], which copy nothing.
+    /// [`Term::put_tiparm`], or `tparm`'s buffer directly, which copy
+    /// nothing.
     pub fn tiparm(&mut self, index: usize, params: &[i64]) -> Option<Vec<u8>> {
         let s = self.entry.string(index)?;
         self.tparm
             .expand(&self.entry, s, params)
             .map(<[u8]>::to_vec)
-    }
-
-    /// `TIPARM_n (cap, …)` of the string capability at `index`, in the
-    /// buffer `tparm` keeps until the next expansion: `None` when the
-    /// terminal does not have it or it cannot be expanded.
-    pub fn expand(&mut self, index: usize, params: &[i64]) -> Option<&[u8]> {
-        let s = self.entry.string(index)?;
-        self.tparm.expand(&self.entry, s, params)
     }
 
     /// `_nc_baudrate (ospeed)` of the screen's terminal.

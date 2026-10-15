@@ -1419,6 +1419,92 @@ mod tests {
         hay.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// `normal_delay`: a delay that is not mandatory is padded unless
+    /// `NCURSES_NO_PADDING` says not to (xterm has no `xon` and no `pb`).
+    #[test]
+    fn a_delay_is_padded_unless_padding_is_turned_off() {
+        let mut s = xterm(Box::new(CLocale));
+        s.t.take_written();
+        s.t.padding = Padding {
+            terminal: true,
+            baud: 9600,
+            pad: b'*',
+            no_pad_char: false,
+        };
+        // 10 ms at 9600 bits a second, 9 bits a byte: 10 pad bytes.
+        s.t.tputs(b"a$<10>b", 1);
+        assert_eq!(s.t.take_written(), b"a**********b");
+        s.t.no_padding = true;
+        s.t.tputs(b"a$<10>b", 1);
+        assert_eq!(s.t.take_written(), b"ab");
+        // A mandatory one is padded all the same.
+        s.t.tputs(b"a$<10/>b", 1);
+        assert_eq!(s.t.take_written(), b"a**********b");
+    }
+
+    /// A terminal that pauses rather than pads gets what came before the
+    /// pause first: the buffer is written before the wait, not after.
+    #[test]
+    fn a_pause_comes_after_what_was_written_before_it() {
+        let mut s = xterm(Box::new(CLocale));
+        s.t.take_written();
+        s.t.padding = Padding {
+            terminal: true,
+            baud: 9600,
+            pad: 0,
+            no_pad_char: true,
+        };
+        s.t.tputs(b"a$<1/>b", 1);
+        let Sink::Memory(kept) = &s.t.output.sink else {
+            panic!("a memory screen");
+        };
+        assert_eq!(kept.as_slice(), b"a", "out before the pause");
+        assert_eq!(s.t.take_written(), b"ab");
+    }
+
+    #[test]
+    fn termattrs_are_the_modes_the_terminal_can_enter() {
+        let mut s = xterm(Box::new(CLocale));
+        let all = s.t.termattrs();
+        for a in [A_BOLD, A_REVERSE, A_UNDERLINE, A_ALTCHARSET] {
+            assert_ne!(all & a, 0, "{a:#x}");
+        }
+        s.t.entry.set_string(string::ENTER_BOLD_MODE, None);
+        assert_eq!(s.t.termattrs(), all & !A_BOLD);
+    }
+
+    /// `_nc_reset_colors` marks the colours it was given to be given again
+    /// when the screen comes back.
+    #[test]
+    fn resetting_the_colours_marks_their_definitions_to_be_sent_again() {
+        let mut s = xterm(Box::new(CLocale));
+        s.t.color_defs = 3;
+        s.t.reset_colors();
+        assert_eq!(s.t.color_defs, -3);
+        s.t.reset_colors();
+        assert_eq!(s.t.color_defs, -3, "only once");
+    }
+
+    #[test]
+    fn the_pair_table_grows_no_further_than_its_limit() {
+        let mut s = xterm(Box::new(CLocale));
+        assert!(s.t.start_color());
+        let limit = s.t.pair_limit;
+        s.t.reserve_pairs(limit - 1);
+        assert_eq!(s.t.color_pairs.len(), usize::try_from(limit).unwrap());
+    }
+
+    /// `start_color` on a terminal that names pairs but no colours makes
+    /// no colour tables, as upstream's `maxpairs > 0 && maxcolors > 0`.
+    #[test]
+    fn no_colours_means_no_colour_tables() {
+        let mut s = xterm(Box::new(CLocale));
+        s.t.entry.set_number(number::MAX_COLORS, 0);
+        assert!(s.t.start_color());
+        assert!(!s.t.coloron);
+        assert!(s.t.color_pairs.is_empty());
+    }
+
     /// `_nc_msec_cost`: a padding's milliseconds, tenths included, scaled
     /// by the lines affected where it ends in `*`, in tenths of a
     /// millisecond.

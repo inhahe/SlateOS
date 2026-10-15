@@ -1520,9 +1520,10 @@ list moved to lane D on 2026-09-22):
   - `[ ]` `[B]` `pkg` packages say which font families they carry, so
     Settings can offer a theme's recommended fonts
     (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
-  - `[ ]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
+  - `[x]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
     test-module finder from `rustlex` once lane A puts one there
-    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`).
+    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`). Done
+    2026-10-15: both call `rustlex.test_module_files`.
 
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**

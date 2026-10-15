@@ -73,7 +73,6 @@ unit of review is a file; a crate-level count would hide a new violation in
 from __future__ import annotations
 
 import os
-import posixpath
 import re
 import subprocess
 import sys
@@ -90,7 +89,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # one matters because this script's own self-test builds one.
 import gitenv  # noqa: E402
 import gittree  # noqa: E402
-from rustlex import live_code  # noqa: E402
+from rustlex import live_code, test_module_files  # noqa: E402
 from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -130,46 +129,18 @@ TEST_DIRS = ("tests", "benches")
 #
 # Found from the declarations, resolved as cargo resolves them, not by name: a
 # `test.rs` is not always test code (`coreutils/src/bin/test.rs` is the `test`
-# utility), and test code is not always called `tests`. A declaration this
-# misreads -- a crate root it does not know is one -- leaves its module read as
-# production, which is where the gate stood before.
-_TEST_MOD_DECL = re.compile(
-    r"^[ \t]*#\[cfg\(test\)\]\s*"
-    r"(?:(?:#\[[^\n]*\]|//[^\n]*)\s*)*"
-    r"(?:pub(?:\([^)\n]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
-    re.MULTILINE,
-)
-_PATH_ATTR = re.compile(r'#\[path\s*=\s*"(?P<path>[^"\n]+)"\s*\]')
+# utility), and test code is not always called `tests`. The resolution is
+# `rustlex.test_module_files`, the one answer every gate shares
+# (requests/e-abc-one-answer-to-which-files-are-test-modules.md); this file
+# carried a copy of its own until 2026-10-15.
 
 
-def _module_dir(rel: str) -> str:
-    """Where `mod x;` in the file `rel` looks for `x`: beside a crate root or a
-    `mod.rs`, and in the directory named for the file otherwise."""
-    parent, _, base = rel.rpartition("/")
-    if base in ("lib.rs", "main.rs", "mod.rs", "build.rs") or parent.endswith("/src/bin"):
-        return parent
-    return f"{parent}/{base[: -len('.rs')]}"
-
-
-def test_modules(sources: list[tuple[str, str | None]]) -> tuple[set[str], tuple[str, ...]]:
-    """The files of the modules `sources` declare under `#[cfg(test)]`, and
-    the directories holding those modules' own submodules, which are test code
-    too."""
-    files: set[str] = set()
-    dirs: list[str] = []
-    for rel, text in sources:
-        if text is None or "#[cfg(test)]" not in text:
-            continue
-        for decl in _TEST_MOD_DECL.finditer(text):
-            path = _PATH_ATTR.search(decl.group(0))
-            if path:
-                # Relative to the declaring file's own directory.
-                files.add(posixpath.normpath(f"{rel.rpartition('/')[0]}/{path['path']}"))
-                continue
-            base = f"{_module_dir(rel)}/{decl['name']}"
-            files.update((f"{base}.rs", f"{base}/mod.rs"))
-            dirs.append(f"{base}/")
-    return files, tuple(dirs)
+def test_modules(sources: list[tuple[str, str | None]]) -> set[str]:
+    """The files among `sources` -- `(path, text)`, a text of `None` for one
+    that is not UTF-8 -- that a build compiles only for its tests: those a
+    `#[cfg(test)]` declaration loads, and every module below them."""
+    texts = {Path(rel): text for rel, text in sources if text is not None}
+    return {path.as_posix() for path in test_module_files(texts)}
 
 # Files whose hits are not defects, with the reason. This table records *why*
 # a file is exempt; the baseline records only *that* a site exists, which is
@@ -1042,9 +1013,9 @@ def survey_tree(tree: gittree.Tree) -> Survey:
             if any(part in TEST_DIRS for part in rel.split("/")):
                 continue
             sources.append((rel, _decode(tree.read_bytes(rel))))
-    test_files, test_dirs = test_modules(sources)
+    test_files = test_modules(sources)
     for rel, text in sources:
-        if rel in test_files or rel.startswith(test_dirs):
+        if rel in test_files:
             continue
         scanned += 1
         if text is None:

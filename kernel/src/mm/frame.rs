@@ -1085,6 +1085,12 @@ impl BuddyAllocator {
 /// The singleton buddy allocator, initialized once during boot.
 static ALLOCATOR: Once<Mutex<BuddyAllocator>> = Once::new();
 
+/// Frames of usable memory the allocator was given at init: the machine's
+/// memory. `BuddyAllocator::total_frames` spans the managed address range,
+/// holes and all -- on a q35 guest with 3 GiB, 5 GiB of addresses -- so it
+/// answers how big the range is, never how much memory there is.
+static USABLE_FRAMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
@@ -1796,6 +1802,9 @@ pub const BUDDY_MAX_ORDER: usize = MAX_ORDER;
 pub struct FrameAllocStats {
     /// Total frames in the managed range (including non-usable holes).
     pub total_frames: usize,
+    /// Frames of usable memory: the machine's memory, which `total_frames`
+    /// overstates by its holes.
+    pub usable_frames: usize,
     /// Number of currently free frames.
     pub free_frames: usize,
     /// Free memory in bytes.
@@ -2072,6 +2081,7 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     };
 
     let usable = populate_free_lists(&mut allocator, memory_map, metadata_phys, metadata_end);
+    USABLE_FRAMES.store(usable, core::sync::atomic::Ordering::Relaxed);
 
     // Log results.
     serial_println!(
@@ -2805,6 +2815,7 @@ pub fn stats() -> Option<FrameAllocStats> {
 
         Some(FrameAllocStats {
             total_frames: guard.total_frames,
+            usable_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
             free_frames: guard.free_frames,
             free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
             order_counts,
@@ -2830,6 +2841,7 @@ pub fn try_stats() -> Option<FrameAllocStats> {
 
     Some(FrameAllocStats {
         total_frames: guard.total_frames,
+        usable_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
         free_frames: guard.free_frames,
         free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
         order_counts,

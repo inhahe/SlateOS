@@ -90,13 +90,14 @@ pub mod watermark;
 #[derive(Debug, Clone)]
 pub struct MemoryInfo {
     // --- Physical memory ---
-    /// Total managed physical memory (frames × 16 KiB).
+    /// The machine's memory: its usable frames × 16 KiB, not the managed
+    /// address range, whose holes are no memory.
     pub total_bytes: usize,
     /// Free physical memory (unallocated frames × 16 KiB).
     pub free_bytes: usize,
     /// Used physical memory (total − free).
     pub used_bytes: usize,
-    /// Total managed frames.
+    /// The machine's usable frames.
     pub total_frames: usize,
     /// Free frames.
     pub free_frames: usize,
@@ -343,9 +344,9 @@ fn assemble_memory_info(
     tracked_address_spaces: usize,
 ) -> MemoryInfo {
     // Physical frame allocator.
-    let (total_frames, free_frames, free_bytes) = frame_stats
-        .as_ref()
-        .map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
+    let (total_frames, free_frames, free_bytes) = frame_stats.as_ref().map_or((0, 0, 0), |s| {
+        (s.usable_frames, s.free_frames, s.free_bytes)
+    });
     let total_bytes = total_frames * frame::FRAME_SIZE;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 

@@ -1952,11 +1952,11 @@ fn blocks_of(len: u64) -> u64 {
     len.div_ceil(MEMFS_BLOCK_SIZE)
 }
 
-/// The machine's memory, in bytes: every frame the allocator manages.
-/// `None` before it is counted.
+/// The machine's memory, in bytes: its usable frames. `None` before it is
+/// counted.
 fn ram_bytes() -> Option<u64> {
     let stats = crate::mm::frame::stats()?;
-    let frames = u64::try_from(stats.total_frames).ok()?;
+    let frames = u64::try_from(stats.usable_frames).ok()?;
     let frame = u64::try_from(crate::mm::frame::FRAME_SIZE).ok()?;
     frames.checked_mul(frame)
 }

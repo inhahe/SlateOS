@@ -186,7 +186,7 @@ fn build_cpu_entries() -> Vec<InfoEntry> {
 fn build_memory_entries() -> Vec<InfoEntry> {
     let mut entries = Vec::new();
     if let Some(s) = crate::mm::frame::stats() {
-        let total = (s.total_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+        let total = (s.usable_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
         entries.push(make_entry("Total", &format_size(total)));
         entries.push(make_entry(
             "Page Size",

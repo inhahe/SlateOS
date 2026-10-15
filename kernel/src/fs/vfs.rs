@@ -922,16 +922,16 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
-    /// Claim the regular file at `path` for swap: answer the device sectors
-    /// it occupies, in file order -- every block of it allocated; a file with
-    /// a hole is `InvalidArgument` -- and refuse from now until
+    /// Claim the regular file `ino` for swap: answer the device sectors it
+    /// occupies, in file order -- every block of it allocated; a file with a
+    /// hole is `InvalidArgument` -- and refuse from now until
     /// [`Self::swapfile_release`] to write it, change its size or its blocks,
     /// or remove or rename it: the kernel writes those sectors directly,
     /// past the filesystem, as Linux's `S_SWAPFILE` file is written.
     /// `DeviceBusy` when it is claimed already. The default, for a filesystem
     /// that cannot give a file's sectors, is `NotSupported`.
-    fn swapfile_claim(&mut self, path: &Path) -> KernelResult<SwapFile> {
-        let _ = path;
+    fn swapfile_claim(&mut self, ino: u64) -> KernelResult<SwapFile> {
+        let _ = ino;
         Err(KernelError::NotSupported)
     }
 
@@ -1998,15 +1998,48 @@ pub fn linux_dev_t(dev: u32) -> u64 {
 /// is on its device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapFile {
-    /// Its inode.
-    pub ino: u64,
     /// The block device its filesystem is on, by its name in the registry.
     pub device: String,
-    /// Its size in bytes.
-    pub size: u64,
     /// Its sectors on the device, in file order: the first at the file's
     /// start, each run contiguous on the device.
     pub extents: Vec<crate::mm::swap::AreaExtent>,
+}
+
+/// A regular file in use as swap ([`Vfs::swapfile_claim_resolved`]): held as
+/// an open file is held -- its inode pinned, its mount refusing `umount`, a
+/// lazy unmount leaving the filesystem until the claim goes -- and claimed
+/// from its filesystem, which refuses to change it meanwhile.
+///
+/// Dropping it lets go: the caches' copies of the file are dropped first,
+/// since what swap wrote past them is newer and no write can have dirtied
+/// them while the claim stood; then the filesystem's claim; then the hold.
+pub struct SwapFileClaim {
+    hold: FileHold,
+    file: SwapFile,
+}
+
+impl SwapFileClaim {
+    /// The file's system-wide identity.
+    #[must_use]
+    pub fn id(&self) -> FileId {
+        self.hold.id()
+    }
+
+    /// Where the file is on its device.
+    #[must_use]
+    pub fn file(&self) -> &SwapFile {
+        &self.file
+    }
+}
+
+impl Drop for SwapFileClaim {
+    fn drop(&mut self) {
+        for e in &self.file.extents {
+            super::cache::invalidate_range(&self.file.device, e.dev_sector, e.sectors);
+        }
+        crate::mm::page_cache::invalidate_identity(self.hold.fs_id, self.hold.ino);
+        self.hold.fs.lock().swapfile_release(self.hold.ino);
+    }
 }
 
 /// A system-wide-unique identity for a filesystem object.
@@ -3249,21 +3282,13 @@ impl Vfs {
         // Cloning the `Arc` is the whole fix: it keeps the filesystem alive
         // across the unlocked window without keeping the mount table locked.
         let ns = super::mntns::current();
-        let (fs, mnt_id, last_of_its_fs, fs_id) = {
+        let (fs, mnt_id) = {
             let vfs = VFS.lock();
             let table = vfs.table(ns);
             let idx = Self::unmount_index(table, mount_path)?;
             let mp = table.get(idx).ok_or(KernelError::NotFound)?;
-            let fs_id = mp.fs_id;
-            let mounts_of_fs = vfs.every().filter(|m| m.fs_id == fs_id).count();
-            (Arc::clone(&mp.fs), mp.mnt_id, mounts_of_fs <= 1, fs_id)
+            (Arc::clone(&mp.fs), mp.mnt_id)
         };
-        // A swap file on it is in use, as an open file is (Linux's `umount`
-        // answers EBUSY for the file `swapon` holds open): `swapoff` first.
-        // Another mount of the same filesystem keeps it reachable.
-        if last_of_its_fs && crate::mm::swap::file_area_on(fs_id) {
-            return Err(KernelError::DeviceBusy);
-        }
 
         // Sync with no VFS lock held.
         if let Err(e) = fs.lock().sync() {
@@ -6903,61 +6928,43 @@ impl Vfs {
         Ok(Some(FileId { fs_id, ino }))
     }
 
-    /// Claim the regular file at **already-resolved** `path` for swap
+    /// Claim the regular file at **already-resolved** `path` for swap: hold
+    /// it as an open file is held, claim it from its filesystem
     /// ([`FileSystem::swapfile_claim`]), and leave what the kernel is about to
-    /// write past the filesystem as the only copy of those sectors: the
+    /// write past the filesystem as the only copy of those sectors -- the
     /// device's dirty sectors are written back first (what `mkswap` wrote,
     /// above all), then the sector cache's copies of the file's sectors and
-    /// the page cache's of its pages are dropped. Returns the filesystem's id
-    /// with the claim.
+    /// the page cache's of its pages are dropped.
     ///
-    /// The file must be writable by the caller, as Linux's `swapon` opens it
-    /// for writing.
+    /// The file must be one the caller could open for writing, as Linux's
+    /// `swapon` opens it: on a writable mount, writable by the caller, and
+    /// neither immutable nor append-only. (A container's read-only volumes
+    /// are the caller's to check, on the path before it was resolved.)
     ///
     /// # Errors
     ///
     /// The access checks', the lookup's, and the filesystem's
-    /// ([`FileSystem::swapfile_claim`]); a failed write-back, after which
-    /// the claim is let go.
-    pub fn swapfile_claim_resolved(path: impl AsRef<Path>) -> KernelResult<(u64, SwapFile)> {
+    /// ([`FileSystem::swapfile_claim`]); `NotSupported` for a file that
+    /// cannot be held (no stable inode, or not a regular file); a failed
+    /// write-back, after which the claim is let go.
+    pub fn swapfile_claim_resolved(path: impl AsRef<Path>) -> KernelResult<SwapFileClaim> {
         let path = path.as_ref();
         check_writable(path)?;
         check_path_access(path, PathAccess::Write)?;
-        let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
-        let file = fs.lock().swapfile_claim(&relative)?;
-        crate::mm::page_cache::invalidate_identity(fs_id, file.ino);
-        if let Err(e) = super::cache::flush(&file.device) {
-            fs.lock().swapfile_release(file.ino);
-            return Err(e);
+        let hold = Self::open_object(path)?.ok_or(KernelError::NotSupported)?;
+        let file = {
+            let mut fs = hold.fs.lock();
+            attr_policy::may_open(ino_attrs(&mut **fs, hold.ino), true, false, false)?;
+            fs.swapfile_claim(hold.ino)?
+        };
+        let claim = SwapFileClaim { hold, file };
+        crate::mm::page_cache::invalidate_identity(claim.hold.fs_id, claim.hold.ino);
+        // On failure the claim is dropped, which lets go of it.
+        super::cache::flush(&claim.file.device)?;
+        for e in &claim.file.extents {
+            super::cache::invalidate_range(&claim.file.device, e.dev_sector, e.sectors);
         }
-        for e in &file.extents {
-            super::cache::invalidate_range(&file.device, e.dev_sector, e.sectors);
-        }
-        Ok((fs_id, file))
-    }
-
-    /// Let go of the swap claim on file `ino` of the filesystem `fs_id`
-    /// ([`FileSystem::swapfile_release`]), and drop every cached copy of its
-    /// sectors and pages: what swap wrote there is newer than any of them. A
-    /// filesystem no longer mounted has nothing to let go of.
-    pub fn swapfile_release(
-        fs_id: u64,
-        ino: u64,
-        device: &str,
-        extents: &[crate::mm::swap::AreaExtent],
-    ) {
-        let fs = VFS
-            .lock()
-            .every()
-            .find(|m| m.fs_id == fs_id)
-            .map(|m| Arc::clone(&m.fs));
-        if let Some(fs) = fs {
-            fs.lock().swapfile_release(ino);
-        }
-        for e in extents {
-            super::cache::invalidate_range(device, e.dev_sector, e.sectors);
-        }
-        crate::mm::page_cache::invalidate_identity(fs_id, ino);
+        Ok(claim)
     }
 
     // -------------------------------------------------------------------

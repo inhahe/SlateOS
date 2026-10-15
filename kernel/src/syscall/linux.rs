@@ -31221,7 +31221,7 @@ fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EPERM);
     }
     // Gate 3: the name, then what it names (`mm::swapctl`).
-    let path = match swap_path(args.arg0) {
+    let path = match swap_path(args.arg0, true) {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -31234,11 +31234,16 @@ fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
 
 /// The file `swapon(2)` or `swapoff(2)` names: the caller's path, through its
 /// container root and its symbolic links, as a host path that exists.
-/// `EFAULT`, `ENOENT`, `ENAMETOOLONG` and the rest as the lookup answers.
-fn swap_path(path_ptr: u64) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+/// `EFAULT`, `ENOENT`, `ENAMETOOLONG` and the rest as the lookup answers; and
+/// for `swapon` (`writing`), `EROFS` where the caller's container keeps the
+/// path read-only, as Linux's `swapon` opens the file for writing.
+fn swap_path(path_ptr: u64, writing: bool) -> Result<crate::fs::path::PathBuf, SyscallResult> {
     let guest = resolve_at_path(AT_FDCWD, path_ptr)?;
     let host = crate::fs::Vfs::resolve_path(&guest).map_err(|e| linux_err(linux_errno_for(e)))?;
     crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    if writing {
+        crate::ipc::namespace::check_writable(&guest).map_err(|e| linux_err(linux_errno_for(e)))?;
+    }
     Ok(host)
 }
 
@@ -31291,7 +31296,7 @@ fn sys_swapoff(args: &SyscallArgs) -> SyscallResult {
     if !caller_may_mount() {
         return linux_err(errno::EPERM);
     }
-    let path = match swap_path(args.arg0) {
+    let path = match swap_path(args.arg0, false) {
         Ok(p) => p,
         Err(r) => return r,
     };

@@ -2009,10 +2009,7 @@ fn gen_bcache() -> Vec<u8> {
 /// `file` for a file; the pages it can hold and those it holds, in KiB; the
 /// priority. Space, tab, newline and backslash in a path are written as
 /// `\ooo`, as Linux's `seq_file_path` writes them; every other byte as it is.
-///
-/// Until 2026-10-09 the columns were SlateOS's own (`zram`/`disk:vdb`,
-/// `memory`/`disk`, fewer tabs), which `swapon --show` and `free` read as
-/// Linux's.
+/// Linux's columns exactly: `swapon --show` and `free` read this as Linux's.
 fn gen_swaps() -> Vec<u8> {
     let devices = crate::mm::swap::list_devices();
     let mut s = Vec::with_capacity(128usize.saturating_mul(devices.len().saturating_add(1)));

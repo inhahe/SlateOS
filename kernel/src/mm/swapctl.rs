@@ -11,10 +11,13 @@
 //! here, as for mounting): these take a path that is already the kernel's.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::Path;
+use crate::fs::{FileId, SwapFileClaim};
 use crate::mm::swap::{self, AreaExtent, AreaKind, AreaRequest, AreaTarget};
+use crate::sched::kmutex::KMutex;
 
 /// `swapon`'s `SWAP_FLAG_PREFER`: the low 15 bits are the priority.
 pub const SWAP_FLAG_PREFER: u32 = 0x8000;
@@ -25,25 +28,23 @@ pub const SWAP_FLAG_PRIO_MASK: u32 = 0x7FFF;
 /// discarded yet).
 pub const SWAP_FLAGS_VALID: u32 = 0x7_FFFF;
 
-/// What a resolved path is, for swap.
-enum Target {
-    /// A block device, by its name in the registry.
-    Device(String),
-    /// A regular file, on the filesystem with this id.
-    File(u64, crate::fs::SwapFile),
-}
+/// The swap files that are swap now: each one's claim, held from its
+/// `swapon` to its `swapoff`. Dropping a claim lets the file go
+/// ([`SwapFileClaim`]), so one is dropped only after its area is gone. A
+/// sleeping lock, held across a file's activation; taken before
+/// `swap::SWAP_ADMIN`, never under it.
+static CLAIMS: KMutex<Vec<SwapFileClaim>> = KMutex::new(Vec::new());
 
-/// The block device a resolved path names, if it is a `/dev` node of one.
-fn device_of(path: &Path) -> Option<String> {
+/// The block device a resolved path names, if it is a `/dev` node of one,
+/// and its size in sectors.
+fn device_of(path: &Path) -> Option<(String, u64)> {
     let rest = path.as_bytes().strip_prefix(b"/dev/")?;
     if rest.is_empty() || rest.contains(&b'/') {
         return None;
     }
     let name = core::str::from_utf8(rest).ok()?;
-    crate::blkdev::list_devices()
-        .into_iter()
-        .any(|d| d.name == name)
-        .then(|| String::from(name))
+    let info = crate::blkdev::info(name)?;
+    Some((String::from(name), info.sector_count))
 }
 
 /// Turn swap on at the resolved path `path` with `swapon`'s `flags`.
@@ -61,48 +62,45 @@ pub fn swap_on(path: &Path, flags: u32) -> KernelResult<swap::ActiveArea> {
     }
     let priority = (flags & SWAP_FLAG_PREFER != 0)
         .then(|| i32::try_from(flags & SWAP_FLAG_PRIO_MASK).unwrap_or(0));
-    let target = match device_of(path) {
-        Some(device) => Target::Device(device),
-        None => {
-            let (fs_id, file) = crate::fs::Vfs::swapfile_claim_resolved(path)?;
-            Target::File(fs_id, file)
-        }
+    let Some((device, sectors)) = device_of(path) else {
+        return swap_on_file(path, priority);
     };
-    let request = match &target {
-        Target::Device(device) => {
-            let sectors = crate::blkdev::with_device(device, |d| d.info().sector_count)
-                .ok_or(KernelError::NoSuchDevice)?;
-            AreaRequest {
-                path: path.as_bytes().to_vec(),
-                kind: AreaKind::Device,
-                device: device.clone(),
-                extents: alloc::vec![AreaExtent {
-                    area_sector: 0,
-                    dev_sector: 0,
-                    sectors,
-                }],
-                priority,
-            }
-        }
-        Target::File(fs_id, file) => AreaRequest {
-            path: path.as_bytes().to_vec(),
-            kind: AreaKind::File {
-                fs_id: *fs_id,
-                ino: file.ino,
-            },
-            device: file.device.clone(),
-            extents: file.extents.clone(),
-            priority,
-        },
+    swap::activate(AreaRequest {
+        path: path.as_bytes().to_vec(),
+        kind: AreaKind::Device,
+        device,
+        extents: alloc::vec![AreaExtent {
+            area_sector: 0,
+            dev_sector: 0,
+            sectors,
+        }],
+        priority,
+    })
+}
+
+/// [`swap_on`] for a regular file: claimed for as long as it is swap, and
+/// let go again when it does not become swap.
+fn swap_on_file(path: &Path, priority: Option<i32>) -> KernelResult<swap::ActiveArea> {
+    let claim = crate::fs::Vfs::swapfile_claim_resolved(path)?;
+    let FileId { fs_id, ino } = claim.id();
+    let request = AreaRequest {
+        path: path.as_bytes().to_vec(),
+        kind: AreaKind::File { fs_id, ino },
+        device: claim.file().device.clone(),
+        extents: claim.file().extents.clone(),
+        priority,
     };
-    let activated = swap::activate(request);
-    if activated.is_err()
-        && let Target::File(fs_id, file) = &target
-    {
-        // Not swap after all: the filesystem may change it again.
-        crate::fs::Vfs::swapfile_release(*fs_id, file.ino, &file.device, &file.extents);
-    }
-    activated
+    // Held across the activation, with room for the claim made first: once
+    // the area exists, nothing can fail before the claim is kept. (Not swap
+    // after all: the claim is dropped on the way out, and the filesystem may
+    // change the file again.)
+    let mut claims = CLAIMS.lock();
+    claims
+        .try_reserve(1)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    let area = swap::activate(request)?;
+    claims.push(claim);
+    Ok(area)
 }
 
 /// Turn swap off at the resolved path `path`: the device it names, or the
@@ -114,7 +112,7 @@ pub fn swap_on(path: &Path, flags: u32) -> KernelResult<swap::ActiveArea> {
 /// [`swap::deactivate`]'s.
 pub fn swap_off(path: &Path) -> KernelResult<()> {
     let target = match device_of(path) {
-        Some(device) => AreaTarget::Device(device),
+        Some((device, _)) => AreaTarget::Device(device),
         None => {
             let id = crate::fs::Vfs::file_identity_resolved(path)?
                 .ok_or(KernelError::InvalidArgument)?;
@@ -126,7 +124,15 @@ pub fn swap_off(path: &Path) -> KernelResult<()> {
     };
     let removed = swap::deactivate(&target)?;
     if let AreaKind::File { fs_id, ino } = removed.kind {
-        crate::fs::Vfs::swapfile_release(fs_id, ino, &removed.device, &removed.extents);
+        let claim = {
+            let mut claims = CLAIMS.lock();
+            claims
+                .iter()
+                .position(|c| c.id() == FileId { fs_id, ino })
+                .map(|i| claims.swap_remove(i))
+        };
+        // Dropped here, after the area went: the file is let go.
+        drop(claim);
     }
     Ok(())
 }
@@ -135,8 +141,8 @@ pub fn swap_off(path: &Path) -> KernelResult<()> {
 /// a 2 MiB file made with a swap header and a pattern 1 MiB in is turned on;
 /// its area reads the pattern back where the file's blocks are; while it is
 /// swap the file refuses a write, a truncation, removal and renaming, and a
-/// second `swapon`; `swapoff` turns it off, after which the file can be
-/// written and removed again.
+/// second `swapon`, and its filesystem an unmount; `swapoff` turns it off,
+/// after which the file can be written and removed again.
 ///
 /// # Errors
 ///
@@ -159,12 +165,7 @@ pub fn self_test_file() -> KernelResult<()> {
 
     // The file: a swap header for 128 pages of 16 KiB, and a pattern at 1 MiB.
     let mut data = alloc::vec![0u8; AREA];
-    if let Some(field) = data.get_mut(1024..1036) {
-        field.copy_from_slice(&[1, 0, 0, 0, 127, 0, 0, 0, 0, 0, 0, 0]);
-    }
-    if let Some(magic) = data.get_mut(SLOT - 10..SLOT) {
-        magic.copy_from_slice(b"SWAPSPACE2");
-    }
+    swap::make_header(&mut data, SLOT, 127, &[]);
     for (i, b) in data.iter_mut().skip(PATTERN_AT).take(SLOT).enumerate() {
         *b = u8::try_from(i % 251).unwrap_or(0);
     }
@@ -225,6 +226,10 @@ pub fn self_test_file() -> KernelResult<()> {
                 "a second swapon was taken",
                 swap_on(&path, 0).err() == Some(KernelError::DeviceBusy),
             ),
+            (
+                "the filesystem under it was unmounted",
+                crate::fs::Vfs::unmount("/mnt") == Err(KernelError::DeviceBusy),
+            ),
         ];
         if let Some((what, _)) = refusals.iter().find(|(_, ok)| !ok) {
             return Err(*what);
@@ -248,8 +253,8 @@ pub fn self_test_file() -> KernelResult<()> {
         (Ok(()), Ok(())) => {
             crate::serial_println!(
                 "[swapctl]   swap file on ext4: on, read where ext4 put it, refused a write, a \
-                 truncation, removal, renaming and a second swapon, off, writable and removable \
-                 again: OK"
+                 truncation, removal, renaming, a second swapon and an unmount, off, writable \
+                 and removable again: OK"
             );
             crate::serial_println!("[swapctl] Swap-file self-test PASSED");
             Ok(())

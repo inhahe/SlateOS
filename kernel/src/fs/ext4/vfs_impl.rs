@@ -523,8 +523,8 @@ impl FileSystem for Ext4Fs {
     /// taken: swap writes it directly, and the filesystem goes on reading it
     /// as zeros. A file mapped by block lists rather than extents (ext2/3)
     /// is `NotSupported`.
-    fn swapfile_claim(&mut self, path: &Path) -> KernelResult<SwapFile> {
-        let ino = self.driver.resolve_path(path)?;
+    fn swapfile_claim(&mut self, ino: u64) -> KernelResult<SwapFile> {
+        let ino = ext4_ino(ino)?;
         if self.swapfiles.contains(&ino) {
             return Err(KernelError::DeviceBusy);
         }
@@ -572,9 +572,7 @@ impl FileSystem for Ext4Fs {
         }
         self.swapfiles.insert(ino);
         Ok(SwapFile {
-            ino: u64::from(ino),
             device: String::from(self.driver.device_name()),
-            size,
             extents,
         })
     }

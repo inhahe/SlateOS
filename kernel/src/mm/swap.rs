@@ -64,10 +64,8 @@
 //! areas: a block device, or a file, that says it is swap. Saying so is
 //! Linux's `mkswap` header ([`parse_header`]): `SWAPSPACE2` at the end of the
 //! area's first page, version 1, and the area's length. A disk without it is
-//! never touched -- until 2026-10-09 the boot claimed the first 16 MiB of any
-//! virtio disk without an ext4 superblock at its start, a partitioned or FAT
-//! disk included (known-issues
-//! `A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK`).
+//! never touched, nor one whose first bytes also say it is something else
+//! ([`ambivalent`]).
 //!
 //! An area is a list of extents ([`AreaExtent`]): runs of its sectors that
 //! are contiguous on the device. A whole device or a partition is one; a
@@ -546,12 +544,6 @@ const HDR_VERSION: usize = 1024;
 const HDR_LAST_PAGE: usize = 1028;
 /// How many bad pages are listed.
 const HDR_NR_BADPAGES: usize = 1032;
-/// The area's UUID, 16 bytes.
-const HDR_UUID: usize = 1036;
-/// The area's label, 16 bytes.
-const HDR_LABEL: usize = 1052;
-/// Where the label ends.
-const HDR_LABEL_END: usize = 1068;
 /// The bad-page list, `u32`s up to the signature.
 const HDR_BADPAGES: usize = 1536;
 
@@ -570,10 +562,6 @@ pub struct SwapHeader {
     pub last_page: u32,
     /// Pages `mkswap -c` found unreadable, by number.
     pub bad_pages: Vec<u32>,
-    /// The area's UUID (`swaplabel -U`).
-    pub uuid: [u8; 16],
-    /// The area's label (`swaplabel -L`), NUL-padded.
-    pub label: [u8; 16],
 }
 
 impl SwapHeader {
@@ -657,21 +645,10 @@ pub fn parse_header(first: &[u8]) -> Result<SwapHeader, HeaderError> {
         }
         bad_pages.push(page);
     }
-    let mut uuid = [0u8; 16];
-    let mut label = [0u8; 16];
-    if let (Some(u), Some(l)) = (
-        first.get(HDR_UUID..HDR_LABEL),
-        first.get(HDR_LABEL..HDR_LABEL_END),
-    ) {
-        uuid.copy_from_slice(u);
-        label.copy_from_slice(l);
-    }
     Ok(SwapHeader {
         page_size,
         last_page,
         bad_pages,
-        uuid,
-        label,
     })
 }
 
@@ -976,6 +953,9 @@ struct SwapDevice {
     /// `swapoff` is emptying it ([`deactivate`]): no slot is given out from
     /// it, while what it holds is still read back.
     draining: bool,
+    /// Its priority is a default one ([`LEAST_PRIORITY`]), which `swapoff`
+    /// gives back.
+    default_priority: bool,
 }
 
 impl SwapDevice {
@@ -1045,34 +1025,59 @@ impl SwapState {
 
     /// The lowest global slot where `len` slots are free of every area,
     /// below [`MAX_SWAP_SLOTS`].
+    ///
+    /// Allocates nothing: it runs under `SWAP`, and an allocation that fails
+    /// its first try reclaims, which swaps out under `SWAP` again.
     fn find_gap(&self, len: u32) -> Option<u32> {
-        let mut taken: Vec<(u32, u32)> = self
-            .devices
-            .iter()
-            .map(|d| (d.base_slot, d.end_slot()))
-            .collect();
-        taken.sort_unstable();
         let mut candidate = 0u32;
-        for (base, end) in taken {
-            if candidate.checked_add(len)? <= base {
-                break;
+        loop {
+            let end = candidate.checked_add(len)?;
+            if end > MAX_SWAP_SLOTS {
+                return None;
             }
-            candidate = candidate.max(end);
+            // Past every area the window meets: no start before the furthest
+            // end among them has `len` free slots, since each such window
+            // would meet that area too.
+            match self
+                .devices
+                .iter()
+                .filter(|d| d.base_slot < end && candidate < d.end_slot())
+                .map(SwapDevice::end_slot)
+                .max()
+            {
+                Some(next) => candidate = next,
+                None => return Some(candidate),
+            }
         }
-        (candidate.checked_add(len)? <= MAX_SWAP_SLOTS).then_some(candidate)
     }
 
-    /// Make `part_refs` reach `end`, and `slot_end` with it.
+    /// Make `part_refs` reach `end`, and `slot_end` with it, in the room
+    /// [`reserve_for_area`] made: growing it here would allocate under `SWAP`.
     fn grow_to(&mut self, end: u32) -> KernelResult<()> {
         if end <= self.slot_end {
             return Ok(());
         }
-        let extra = end.saturating_sub(self.slot_end) as usize;
-        self.part_refs
-            .try_reserve(extra)
-            .map_err(|_| KernelError::OutOfMemory)?;
+        if self.part_refs.capacity() < end as usize {
+            return Err(KernelError::InternalError);
+        }
         self.part_refs.resize(end as usize, 0);
         self.slot_end = end;
+        Ok(())
+    }
+
+    /// Add `dev` among the areas, after every area of its priority or higher,
+    /// in the room [`reserve_for_area`] made. Not a sort: a stable sort may
+    /// allocate scratch space, and this runs under `SWAP`.
+    fn insert_area(&mut self, dev: SwapDevice) -> KernelResult<()> {
+        if self.devices.len() >= self.devices.capacity() {
+            return Err(KernelError::InternalError);
+        }
+        let at = self
+            .devices
+            .iter()
+            .position(|d| d.priority < dev.priority)
+            .unwrap_or(self.devices.len());
+        self.devices.insert(at, dev);
         Ok(())
     }
 
@@ -1489,17 +1494,17 @@ pub fn reclaimable_count() -> usize {
 ///
 /// Called during kernel boot, after the heap is available.
 pub fn init(num_slots: u32) {
-    let mut state = SWAP.lock();
-
-    let Some(base_slot) = state.find_gap(num_slots) else {
+    // Boot: nothing else adds or removes an area yet, which is what
+    // `reserve_for_area`'s caller must otherwise guarantee by `SWAP_ADMIN`.
+    let Some(base_slot) = SWAP.lock().find_gap(num_slots) else {
         serial_println!("[swap] zram: no room for {} slots", num_slots);
         return;
     };
-    if state.grow_to(base_slot.saturating_add(num_slots)).is_err() {
+    if reserve_for_area(base_slot.saturating_add(num_slots)).is_err() {
         serial_println!("[swap] zram: no memory for {} slots' counts", num_slots);
         return;
     }
-    state.devices.push(SwapDevice {
+    let device = SwapDevice {
         priority: 100,
         path: b"zram".to_vec(),
         kind: AreaKind::Memory,
@@ -1508,11 +1513,16 @@ pub fn init(num_slots: u32) {
         base_slot,
         reserved: 0,
         draining: false,
-    });
-    // Keep devices sorted by priority (descending).
-    state
-        .devices
-        .sort_by_key(|e| core::cmp::Reverse(e.priority));
+        default_priority: false,
+    };
+    let mut state = SWAP.lock();
+    if let Err(e) = state
+        .grow_to(base_slot.saturating_add(num_slots))
+        .and_then(|()| state.insert_area(device))
+    {
+        serial_println!("[swap] zram: not added: {:?}", e);
+        return;
+    }
     state.initialized = true;
 
     serial_println!(
@@ -1590,17 +1600,73 @@ fn area_taken(state: &SwapState, request: &AreaRequest) -> bool {
 }
 
 /// Whether a whole device's first bytes also hold another format's
-/// signature: an ext4 superblock, or a GPT header. A device that answers
-/// to two formats is not used for swap -- `mkfs` over an old swap area may
+/// signature: an ext4 or XFS superblock, a GPT header, or a DOS boot sector
+/// (an MBR, a FAT or NTFS volume). A device that answers to two formats is
+/// not used for swap -- `mkfs` or partitioning over an old swap area may
 /// leave the old signature in place, and taking the device would then
-/// destroy the filesystem. (util-linux's `swapon` refuses such a device as
+/// destroy what is there now. (util-linux's `swapon` refuses such a device as
 /// "ambivalent", through libblkid; the kernel itself does not check.)
 fn ambivalent(first: &[u8]) -> bool {
     // ext4's magic, 0xEF53, at byte 56 of the superblock at byte 1024.
     let ext4 = first.get(1080..1082) == Some(&[0x53, 0xEF][..]);
     // A GPT header in sector 1.
     let gpt = first.get(512..520) == Some(&b"EFI PART"[..]);
-    ext4 || gpt
+    // A DOS boot sector's 0x55AA at byte 510: an MBR partition table, or a
+    // FAT, exFAT or NTFS volume on the whole device. `mkswap` clears the
+    // first 1 KiB unless a partition table is there, which it keeps: either
+    // way the device is partitioned, or another volume took it since.
+    let boot_sector = first.get(510..512) == Some(&[0x55, 0xAA][..]);
+    // XFS's superblock magic at byte 0.
+    let xfs = first.get(0..4) == Some(&b"XFSB"[..]);
+    ext4 || gpt || boot_sector || xfs
+}
+
+/// Make room for one more area ending at global slot `end`: `part_refs`
+/// able to reach `end`, and `devices` able to take one more, so that adding
+/// it under `SWAP` ([`SwapState::grow_to`], [`SwapState::insert_area`])
+/// allocates nothing. Each larger buffer is made outside the lock and swapped
+/// in under it, the old one freed after.
+///
+/// The caller must be the only one adding or removing an area until it has
+/// added this one -- by holding `SWAP_ADMIN`, or at boot -- since that is
+/// what keeps the lengths read here true when the buffers are swapped in.
+///
+/// # Errors
+///
+/// `OutOfMemory`: a buffer could not be allocated.
+fn reserve_for_area(end: u32) -> KernelResult<()> {
+    let end = end as usize;
+    let (refs_short, devices_full) = {
+        let state = SWAP.lock();
+        (
+            state.part_refs.capacity() < end,
+            state.devices.len() >= state.devices.capacity(),
+        )
+    };
+    let mut refs: Vec<u8> = Vec::new();
+    if refs_short {
+        refs.try_reserve_exact(end)
+            .map_err(|_| KernelError::OutOfMemory)?;
+    }
+    let mut devices: Vec<SwapDevice> = Vec::new();
+    if devices_full {
+        devices
+            .try_reserve_exact(MAX_AREAS)
+            .map_err(|_| KernelError::OutOfMemory)?;
+    }
+    let mut state = SWAP.lock();
+    // Copies into room already made: neither line allocates.
+    if refs_short && refs.capacity() >= state.part_refs.len() {
+        refs.extend_from_slice(&state.part_refs);
+        core::mem::swap(&mut state.part_refs, &mut refs);
+    }
+    if devices_full && devices.capacity() >= state.devices.len() {
+        devices.append(&mut state.devices);
+        core::mem::swap(&mut state.devices, &mut devices);
+    }
+    drop(state);
+    // `refs` and `devices` hold the old buffers now, freed here.
+    Ok(())
 }
 
 /// Add a swap area: `swapon`. The area's first slot must hold a swap
@@ -1651,7 +1717,14 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
     let mut first = vec![0u8; HEADER_READ_BYTES];
     area_io(&request.device, &request.extents, 0, &mut first, false)?;
     let header = parse_header(&first).map_err(|_| KernelError::InvalidArgument)?;
+    // From here a refusal is of something that says it is swap: said on the
+    // serial line, since at boot nothing else would say why the area is not
+    // there (a device with no header is the ordinary case, and silent).
     if request.kind == AreaKind::Device && ambivalent(&first) {
+        serial_println!(
+            "[swap] {}: a swap header, beside another format's mark; not used",
+            request.device
+        );
         return Err(KernelError::InvalidArgument);
     }
 
@@ -1677,33 +1750,39 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
     }
     let reserved = u32::try_from(held.len()).unwrap_or(u32::MAX);
     if reserved >= slots {
+        serial_println!(
+            "[swap] {}: a swap header, but no slot past the header and the bad pages; not used",
+            request.device
+        );
         return Err(KernelError::InvalidArgument);
     }
 
-    // The big allocations, before the lock.
+    // Every allocation before the lock: under it, a failed first try would
+    // reclaim, and reclaim swaps out under `SWAP`, which this task would then
+    // hold twice. The area's place cannot change in between: only a
+    // `SWAP_ADMIN` holder adds or removes one.
     let backend = DiskBackend::try_new(&request.device, request.extents.clone(), slots)?;
     let mut allocator = SwapSlotAllocator::try_new(slots)?;
     for &slot in &held {
         allocator.reserve(slot);
     }
-
-    let mut state = SWAP.lock();
-    if state.devices.len() >= MAX_AREAS {
-        return Err(KernelError::ResourceExhausted);
-    }
-    if area_taken(&state, &request) {
-        return Err(KernelError::DeviceBusy);
-    }
-    let base_slot = state
-        .find_gap(slots)
-        .ok_or(KernelError::ResourceExhausted)?;
-    state.grow_to(base_slot.saturating_add(slots))?;
+    let base_slot = {
+        let state = SWAP.lock();
+        if state.devices.len() >= MAX_AREAS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        state
+            .find_gap(slots)
+            .ok_or(KernelError::ResourceExhausted)?
+    };
+    reserve_for_area(base_slot.saturating_add(slots))?;
+    let default_priority = request.priority.is_none();
     let priority = request.priority.unwrap_or_else(|| {
         LEAST_PRIORITY
             .fetch_sub(1, core::sync::atomic::Ordering::Relaxed)
             .saturating_sub(1)
     });
-    state.devices.push(SwapDevice {
+    let device = SwapDevice {
         priority,
         path: request.path,
         kind: request.kind,
@@ -1712,12 +1791,14 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
         base_slot,
         reserved,
         draining: false,
-    });
-    // Highest priority first; a stable sort keeps an earlier area of the
-    // same priority ahead of a later one.
-    state
-        .devices
-        .sort_by_key(|e| core::cmp::Reverse(e.priority));
+        default_priority,
+    };
+
+    let mut state = SWAP.lock();
+    state.grow_to(base_slot.saturating_add(slots))?;
+    // Highest priority first, an earlier area ahead of a later one of the
+    // same priority.
+    state.insert_area(device)?;
     state.initialized = true;
     Ok(ActiveArea {
         pages: slots.saturating_sub(reserved),
@@ -1728,8 +1809,6 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
 /// Which area [`deactivate`] takes away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AreaTarget {
-    /// By the path it was added with.
-    Path(Vec<u8>),
     /// A block device's area, by the device's name in the registry.
     Device(String),
     /// A file's area, by the file's identity: any name for the file will do,
@@ -1747,7 +1826,6 @@ impl AreaTarget {
     fn names(&self, dev: &SwapDevice) -> bool {
         match self {
             _ if dev.kind == AreaKind::Memory => false,
-            Self::Path(path) => dev.path == *path,
             Self::Device(name) => {
                 dev.kind == AreaKind::Device
                     && matches!(&dev.backend, SwapBackend::Disk(disk) if disk.device_name == *name)
@@ -1832,6 +1910,19 @@ pub(crate) fn deactivate_also(target: &AreaTarget, extra: &[u64]) -> KernelResul
     }
     let dev = state.devices.remove(index);
     state.shrink_to_areas();
+    // A default priority given back, as Linux's `swapoff` gives it: each
+    // area given one after this one moves up one, and so does the next
+    // default -- so on and off again lands an area where it was.
+    if dev.default_priority {
+        for d in state
+            .devices
+            .iter_mut()
+            .filter(|d| d.default_priority && d.priority < dev.priority)
+        {
+            d.priority = d.priority.saturating_add(1);
+        }
+        LEAST_PRIORITY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     state.initialized = !state.devices.is_empty();
     let SwapBackend::Disk(disk) = dev.backend else {
         return Err(KernelError::InternalError);
@@ -1872,16 +1963,6 @@ pub(crate) fn area_read(target: &AreaTarget, offset: u64, buf: &mut [u8]) -> Ker
     area_io(&device, &extents, first, buf, false)
 }
 
-/// Whether a swap area is a file on the filesystem `fs_id`: the VFS refuses
-/// to unmount it while one is.
-#[must_use]
-pub fn file_area_on(fs_id: u64) -> bool {
-    SWAP.lock()
-        .devices
-        .iter()
-        .any(|d| matches!(d.kind, AreaKind::File { fs_id: f, .. } if f == fs_id))
-}
-
 /// Pages the area at global slot `base` still holds; `None` when it is gone.
 fn area_pages(base: u32) -> Option<u32> {
     SWAP.lock()
@@ -1904,11 +1985,15 @@ fn drain(base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
         if pass > 0 {
             crate::sched::yield_now();
         }
+        let empty = || area_pages(base).is_none_or(|n| n == 0);
         let mut walked: Vec<u64> = Vec::new();
         for &pml4 in extra {
             // SAFETY: the caller's own address spaces, alive for the call.
             unsafe { bring_back(pml4, &in_area)? };
             walked.push(pml4);
+            if empty() {
+                return Ok(());
+            }
         }
         for pid in crate::proc::pcb::pids() {
             let Some(pin) = crate::proc::pcb::pin_address_space(pid) else {
@@ -1921,6 +2006,10 @@ fn drain(base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
             walked.push(pin.pml4());
             // SAFETY: pinned: its tables stay until the pin goes.
             unsafe { bring_back(pin.pml4(), &in_area)? };
+            // The last page back: the rest need not be walked.
+            if empty() {
+                return Ok(());
+            }
         }
     }
     if area_pages(base).is_none_or(|n| n == 0) {
@@ -1939,37 +2028,51 @@ fn drain(base: u32, end: u32, extra: &[u64]) -> KernelResult<()> {
 /// `pml4` must be a valid PML4 whose tables stay allocated for the call
 /// ([`page_table::for_each_user_frame`]).
 unsafe fn bring_back(pml4: u64, in_area: &dyn Fn(u64) -> bool) -> KernelResult<()> {
-    let mut frames = Vec::new();
-    // SAFETY: the caller's contract.
-    unsafe {
-        page_table::for_each_user_frame(pml4, |va, parts| {
-            if parts.iter().any(|p| in_area(p.raw())) {
-                frames.push(va);
+    // Frames found per walk: a list of fixed size, made once, since memory
+    // is short while an area empties. The walk resumes where it stopped.
+    const BATCH: usize = 256;
+    let mut frames: Vec<VirtAddr> = Vec::new();
+    frames
+        .try_reserve_exact(BATCH)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    let mut from = VirtAddr::new(0);
+    loop {
+        let mut resume = None;
+        // SAFETY: the caller's contract.
+        unsafe {
+            page_table::for_each_user_frame(pml4, from, |va, parts| {
+                if !parts.iter().any(|p| in_area(p.raw())) {
+                    return true;
+                }
+                if frames.len() >= BATCH {
+                    resume = Some(va);
+                    return false;
+                }
+                frames.push(va); // within the room made above
+                true
+            });
+        }
+        for va in frames.drain(..) {
+            // SAFETY: the caller's contract; `va` is a frame of this space.
+            match unsafe { swap_in_page(pml4, va) } {
+                Ok(Some(kept)) => register_reclaimable(pml4, va.as_u64(), kept),
+                // Brought back by its own fault first, or unmapped, since the
+                // walk read it.
+                Ok(None) | Err(KernelError::InvalidArgument | KernelError::InvalidAddress) => {}
+                Err(e) => return Err(e),
             }
-            true
-        });
-    }
-    for va in frames {
-        // SAFETY: the caller's contract; `va` is a frame of this space.
-        match unsafe { swap_in_page(pml4, va) } {
-            Ok(Some(kept)) => register_reclaimable(pml4, va.as_u64(), kept),
-            // Brought back by its own fault first, or unmapped, since the
-            // walk read it.
-            Ok(None) | Err(KernelError::InvalidArgument | KernelError::InvalidAddress) => {}
-            Err(e) => return Err(e),
+        }
+        match resume {
+            Some(va) => from = va,
+            None => return Ok(()),
         }
     }
-    Ok(())
 }
 
 /// Turn on, at boot, every whole block device whose first slot is a swap
 /// header -- and nothing else ([`activate`] refuses the rest). Partitions
 /// and files are userspace's to turn on, as Linux's `swapon -a` does from
 /// its table. Returns how many were added.
-///
-/// Until 2026-10-09 the boot took the first 16 MiB of the first virtio disk
-/// whose start held no ext4 superblock -- a partitioned or FAT disk among
-/// them -- and wrote swap over it under memory pressure.
 pub fn activate_signed_devices() -> usize {
     let mut added = 0usize;
     for info in crate::blkdev::list_devices() {
@@ -2926,6 +3029,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     base_slot: 0,
                     reserved: 0,
                     draining: false,
+                    default_priority: false,
                 },
                 SwapDevice {
                     priority: 0,
@@ -2936,6 +3040,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     base_slot: 4,
                     reserved: 0,
                     draining: false,
+                    default_priority: false,
                 },
             ],
             slot_end: 8,
@@ -3315,9 +3420,8 @@ fn test_round_trip_keeps_each_part() -> KernelResult<()> {
 /// Called after the boot's [`activate_signed_devices`] added a disk area.
 /// Writes pages straight to that area's own slots -- a page of zeros, a
 /// compressible one and an incompressible one -- reads each back, and gives
-/// the slots back. Until 2026-10-09 it went through the global allocator,
-/// which gives zram's slots first, so the disk was not necessarily what it
-/// tested.
+/// the slots back. Not through the global allocator, which gives zram's
+/// slots first: the disk would not necessarily be what it tested.
 pub fn self_test_disk() {
     serial_println!("[swap] Running disk backend self-test...");
 
@@ -3426,8 +3530,9 @@ pub fn self_test_areas() -> KernelResult<()> {
 }
 
 /// Write a `mkswap` header for an area whose last page is `last_page`, of
-/// `page_size` pages, listing `bad`, into `buf`.
-fn make_header(buf: &mut [u8], page_size: usize, last_page: u32, bad: &[u32]) {
+/// `page_size` pages, listing `bad`, into `buf`: for the self-tests here and
+/// in [`super::swapctl`], so the format has one encoder beside its parser.
+pub(crate) fn make_header(buf: &mut [u8], page_size: usize, last_page: u32, bad: &[u32]) {
     let mut put = |at: usize, value: u32| {
         if let Some(field) = buf.get_mut(at..at.saturating_add(4)) {
             field.copy_from_slice(&value.to_le_bytes());
@@ -3614,13 +3719,26 @@ impl ScratchDisk {
 }
 
 impl Drop for ScratchDisk {
+    /// Unregister the disk -- unless an area is still on it, which a failed
+    /// test can leave: a real process's page reclaim put there would then be
+    /// unreadable, so the disk stays, its memory spent, and the boot says so.
     fn drop(&mut self) {
+        let in_use = SWAP.lock().devices.iter().any(|d| {
+            matches!(&d.backend, SwapBackend::Disk(disk) if disk.device_name == self.0)
+        });
+        if in_use {
+            serial_println!(
+                "[swap]   WARNING: {} still holds a swap area; left registered",
+                self.0
+            );
+            return;
+        }
         crate::blkdev::unregister(self.0);
     }
 }
 
 /// A whole device: taken when its first slot is a swap header and nothing
-/// else; refused when it also holds an ext4 superblock ([`ambivalent`]).
+/// else; refused when it also holds another format's mark ([`ambivalent`]).
 fn test_whole_device() -> KernelResult<()> {
     const DEV: &str = "swaptest1";
     let disk = ScratchDisk::new(DEV, 256);
@@ -3653,9 +3771,43 @@ fn test_whole_device() -> KernelResult<()> {
     area_io(DEV, &whole, 0, &mut head, true)?;
     let taken = activate(request(b"/dev/swaptest1"));
     let removed = deactivate(&AreaTarget::Device(String::from(DEV)));
+    // A default priority is given back: on, off and on again lands where it
+    // was, as Linux's does.
+    let target = AreaTarget::Device(String::from(DEV));
+    let by_default = || AreaRequest {
+        priority: None,
+        ..request(b"/dev/swaptest1")
+    };
+    let once = activate(by_default()).map(|a| a.priority);
+    let off_once = deactivate(&target).is_ok();
+    let twice = activate(by_default()).map(|a| a.priority);
+    let off_twice = deactivate(&target).is_ok();
+    let priority_back = once.is_ok() && once == twice && off_once && off_twice;
     drop(disk);
 
+    // Each other format's mark beside the header makes the device another's.
+    let marked = |at: usize, mark: &[u8]| {
+        let mut first = head.clone();
+        first
+            .get_mut(at..at.saturating_add(mark.len()))
+            .map(|dst| dst.copy_from_slice(mark))
+            .is_some()
+            && ambivalent(&first)
+    };
+    let others_marks = marked(512, b"EFI PART")
+        && marked(510, &[0x55, 0xAA])
+        && marked(0, b"XFSB")
+        && !ambivalent(&head);
+
     let checks = [
+        (
+            "a GPT, a DOS boot sector (MBR, FAT, NTFS) or XFS beside the header is another's",
+            others_marks,
+        ),
+        (
+            "a default priority is given back at swapoff",
+            priority_back,
+        ),
         (
             "a device with no header is refused",
             unsigned == Err(KernelError::InvalidArgument),
@@ -3692,7 +3844,8 @@ fn test_whole_device() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[swap]   whole device: unsigned and ambivalent refused, signed taken and given back: OK"
+        "[swap]   whole device: unsigned and ambivalent refused, signed taken and given back, a \
+         default priority given back too: OK"
     );
     Ok(())
 }
@@ -3703,6 +3856,9 @@ fn test_whole_device() -> KernelResult<()> {
 /// its bytes where the extents put that slot; `swapoff` brings the page back
 /// mapped as it was and takes the area away; the slot numbers and counts
 /// are as before.
+// A self-test's fixed numbers: frame addresses plus the direct map's offset,
+// a slot's sector (slot * 32 for 16 KiB slots), and a pattern byte cut from
+// a counter -- none can overflow or lose bits that matter.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn test_area_round_trip() -> KernelResult<()> {
     const DEV: &str = "swaptest0";
@@ -3802,7 +3958,7 @@ fn test_area_round_trip() -> KernelResult<()> {
         }
 
         // swapoff: the page comes back and the area goes.
-        let removed = deactivate_also(&AreaTarget::Path(PATH.to_vec()), &[pml4])
+        let removed = deactivate_also(&AreaTarget::File { fs_id: 0, ino: 0 }, &[pml4])
             .map_err(|_| "swapoff failed")?;
         if removed.device != DEV || removed.extents != extents {
             return Err("swapoff gave back the wrong area");
@@ -3834,7 +3990,7 @@ fn test_area_round_trip() -> KernelResult<()> {
             return Err("the area is still listed");
         }
         if !matches!(
-            deactivate(&AreaTarget::Path(PATH.to_vec())),
+            deactivate(&AreaTarget::File { fs_id: 0, ino: 0 }),
             Err(KernelError::InvalidArgument)
         ) {
             return Err("a second swapoff was not refused");
@@ -3850,7 +4006,7 @@ fn test_area_round_trip() -> KernelResult<()> {
     // SAFETY: never loaded in any CR3; nothing else uses it.
     unsafe { page_table::destroy_user_address_space(pml4) };
     // Gone already on success, and then `InvalidArgument`: nothing to do.
-    let _ = deactivate(&AreaTarget::Path(PATH.to_vec()));
+    let _ = deactivate(&AreaTarget::File { fs_id: 0, ino: 0 });
     drop(disk);
 
     match result {

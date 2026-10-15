@@ -1406,12 +1406,6 @@ extern "C" fn kernel_main() -> ! {
             // zram (priority 100) takes evictions first; a disk area, -2 and
             // down, the overflow. Swap files and partitions are userspace's
             // to turn on (`swapon`).
-            //
-            // Until 2026-10-09 this took 16 MiB of the first virtio disk named
-            // vdb or vda without an ext4 superblock at its start -- a partitioned
-            // or FAT disk included -- and wrote swap over it under memory
-            // pressure (known-issues
-            // A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK).
             let swap_areas = mm::swap::activate_signed_devices();
             if swap_areas > 0 {
                 serial_println!("[boot] Disk swap: {} area(s) behind zram", swap_areas);

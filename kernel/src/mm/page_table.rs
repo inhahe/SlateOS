@@ -2028,10 +2028,12 @@ fn frame_group(pml4_phys: u64, virt: VirtAddr, hhdm: u64) -> Option<(u64, usize)
 }
 
 /// Every 16 KiB frame of the user half of the address space at `pml4_phys`
-/// that has a page table, with its four 4 KiB entries in whatever state each
-/// is in -- the walk [`clear_user_address_space`] makes, reading only.
-/// `visit` is called with the frame's address and its entries, in address
-/// order, and the walk stops early when it answers `false`.
+/// that has a page table, from the address `from` on, with its four 4 KiB
+/// entries in whatever state each is in -- the walk
+/// [`clear_user_address_space`] makes, reading only. `visit` is called with
+/// the frame's address and its entries, in address order, and the walk stops
+/// early when it answers `false`; a walk resumed from the frame it stopped at
+/// goes on where it left off.
 ///
 /// For a caller looking for something across a whole address space: swap's
 /// `swapoff` finds the frames whose entries name an area it is emptying.
@@ -2048,13 +2050,24 @@ fn frame_group(pml4_phys: u64, virt: VirtAddr, hhdm: u64) -> Option<(u64, usize)
 /// space goes, and a pin keeps that from happening.
 pub(crate) unsafe fn for_each_user_frame(
     pml4_phys: u64,
+    from: VirtAddr,
     mut visit: impl FnMut(VirtAddr, [PageTableEntry; HW_PAGES_PER_FRAME]) -> bool,
 ) {
     let Some(hhdm) = hhdm() else {
         return;
     };
+    let from = from.as_u64();
+    // Whether the span of `1 << shift` bytes at `start` ends at or before
+    // `from`: a table there holds nothing the walk still owes.
+    let before = |start: u64, shift: u32| {
+        start.saturating_add(1u64.checked_shl(shift).unwrap_or(u64::MAX)) <= from
+    };
     // The user half: PML4 entries 0-255.
     for pml4_idx in 0..ENTRIES_PER_TABLE / 2 {
+        let pml4_va = (pml4_idx as u64) << 39;
+        if before(pml4_va, 39) {
+            continue;
+        }
         // SAFETY: pml4_phys is valid (the caller's contract), index < 512.
         let pml4e = unsafe { read_entry(pml4_phys, pml4_idx, hhdm) };
         if !pml4e.is_present() {
@@ -2062,6 +2075,10 @@ pub(crate) unsafe fn for_each_user_frame(
         }
         let pdpt_phys = pml4e.phys_addr();
         for pdpt_idx in 0..ENTRIES_PER_TABLE {
+            let pdpt_va = pml4_va | ((pdpt_idx as u64) << 30);
+            if before(pdpt_va, 30) {
+                continue;
+            }
             // SAFETY: a table a present entry names, index < 512.
             let pdpte = unsafe { read_entry(pdpt_phys, pdpt_idx, hhdm) };
             if !pdpte.is_present() || pdpte.is_huge() {
@@ -2069,6 +2086,10 @@ pub(crate) unsafe fn for_each_user_frame(
             }
             let pd_phys = pdpte.phys_addr();
             for pd_idx in 0..ENTRIES_PER_TABLE {
+                let pd_va = pdpt_va | ((pd_idx as u64) << 21);
+                if before(pd_va, 21) {
+                    continue;
+                }
                 // SAFETY: as above.
                 let pde = unsafe { read_entry(pd_phys, pd_idx, hhdm) };
                 if !pde.is_present() || pde.is_huge() {
@@ -2076,6 +2097,9 @@ pub(crate) unsafe fn for_each_user_frame(
                 }
                 let pt_phys = pde.phys_addr();
                 for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
+                    if (pd_va | ((base_pt_idx as u64) << 12)) < from {
+                        continue;
+                    }
                     let mut parts = [PageTableEntry::EMPTY; HW_PAGES_PER_FRAME];
                     for (sub, part) in parts.iter_mut().enumerate() {
                         // SAFETY: as above; base_pt_idx is a multiple of 4
@@ -2088,10 +2112,7 @@ pub(crate) unsafe fn for_each_user_frame(
                         continue;
                     }
                     // The user half has bit 47 clear: no sign extension.
-                    let va = ((pml4_idx as u64) << 39)
-                        | ((pdpt_idx as u64) << 30)
-                        | ((pd_idx as u64) << 21)
-                        | ((base_pt_idx as u64) << 12);
+                    let va = pd_va | ((base_pt_idx as u64) << 12);
                     if !visit(VirtAddr::new(va), parts) {
                         return;
                     }

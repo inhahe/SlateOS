@@ -9061,10 +9061,13 @@ pub fn sys_swap_on(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_root_authority() {
         return SyscallResult::err(e);
     }
-    // Symbolic links followed, as Linux's `swapon` opens the file.
-    let path = match read_user_path(args.arg0, args.arg1 as usize)
-        .and_then(|p| crate::fs::Vfs::resolve_path(&p))
-    {
+    // Symbolic links followed, and a container's read-only volumes refused,
+    // as Linux's `swapon` opens the file for writing.
+    let path = match read_user_path(args.arg0, args.arg1 as usize).and_then(|p| {
+        let host = crate::fs::Vfs::resolve_path(&p)?;
+        crate::ipc::namespace::check_writable(&p)?;
+        Ok(host)
+    }) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };

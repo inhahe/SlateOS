@@ -2343,8 +2343,8 @@ fn cmd_info(db: &PackageDb, name: &str) {
                     println!("  {}", cap.name);
                 }
             }
-            if !manifest.fonts.is_empty() {
-                println!("Fonts:     {}", manifest.fonts.join(", "));
+            if let Some(line) = fonts_line(&manifest) {
+                println!("{line}");
             }
         }
         return;
@@ -2380,8 +2380,8 @@ fn cmd_info(db: &PackageDb, name: &str) {
                     println!("  {}", cap.name);
                 }
             }
-            if !manifest.fonts.is_empty() {
-                println!("Fonts:     {}", manifest.fonts.join(", "));
+            if let Some(line) = fonts_line(&manifest) {
+                println!("{line}");
             }
             if manifest.archive_size > 0 {
                 println!("Size:      {}", format_size(manifest.archive_size));
@@ -4293,10 +4293,21 @@ fn font_query(words: &[String]) -> Option<String> {
 /// One `pkg search` answer: `NAME VERSION STATUS`, and the description
 /// indented under it. Settings reads the first word of each unindented line.
 fn print_search_result(pkg: &PackageManifest, status: &str) {
-    println!("{} {} {status}", pkg.name, pkg.version);
+    print!("{}", search_result(pkg, status));
+}
+
+/// [`print_search_result`]'s lines.
+fn search_result(pkg: &PackageManifest, status: &str) -> String {
+    let mut text = format!("{} {} {status}\n", pkg.name, pkg.version);
     if !pkg.description.is_empty() {
-        println!("  {}", pkg.description);
+        text.push_str(&format!("  {}\n", pkg.description));
     }
+    text
+}
+
+/// `pkg info`'s `Fonts:` line, for a package that carries any.
+fn fonts_line(manifest: &PackageManifest) -> Option<String> {
+    (!manifest.fonts.is_empty()).then(|| format!("Fonts:     {}", manifest.fonts.join(", ")))
 }
 
 /// `pkg search --font <FAMILY>`: the packages that carry the family, as
@@ -5668,6 +5679,36 @@ mod tests {
         for name in ["a,b", "a\nb", "a\rb", "a\u{1b}[31m", "a\u{7f}", "a\u{85}b"] {
             assert!(!listable_family(name), "{name:?}");
         }
+    }
+
+    #[test]
+    fn a_font_file_that_names_no_family_is_warned_of() {
+        let mut m = manifest("name: fonts-x\n");
+        let warnings = pack_fonts(&mut m, [read_font("bold.ttf", named_font(&[(2, "Bold")]))]);
+        assert!(m.fonts.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("names no font family"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_search_answer_is_a_line_and_its_description_indented() {
+        let described = manifest("name: fonts-x\nversion: 1.0.0\ndescription: Fira fonts\n");
+        assert_eq!(
+            search_result(&described, "[installed]"),
+            "fonts-x 1.0.0 [installed]\n  Fira fonts\n"
+        );
+        let bare = manifest("name: tools\nversion: 2.0.0\n");
+        assert_eq!(search_result(&bare, ""), "tools 2.0.0 \n");
+    }
+
+    #[test]
+    fn info_names_the_fonts_only_of_a_package_that_has_some() {
+        let m = manifest("name: fonts-fira\nfonts: Fira Code, Fira Mono\n");
+        assert_eq!(
+            fonts_line(&m).as_deref(),
+            Some("Fonts:     Fira Code, Fira Mono")
+        );
+        assert_eq!(fonts_line(&manifest("name: tools\n")), None);
     }
 
     #[test]

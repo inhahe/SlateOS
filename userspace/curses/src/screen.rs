@@ -722,13 +722,9 @@ impl Screen {
         // runtime".
         if let Some(v) = std::env::var_os("NCURSES_ASSUMED_COLORS") {
             let max_colors = t.num(number::MAX_COLORS);
-            let (count, fg, bg) = scan_assumed(&os_bytes(&v));
-            if count >= 1 {
-                t.default_fg = assumed_color(fg, max_colors);
-                if count >= 3 {
-                    t.default_bg = assumed_color(bg, max_colors);
-                }
-            }
+            let (fg, bg) = assumed_defaults(&os_bytes(&v), max_colors);
+            t.default_fg = fg.unwrap_or(t.default_fg);
+            t.default_bg = bg.unwrap_or(t.default_bg);
         }
         // "If we've no magic cookie support, we suppress attributes that xmc
         // would affect, i.e., the attributes that affect the rendition of a
@@ -939,16 +935,16 @@ impl Screen {
     /// `_nc_initscr ()`: `cbreak`, and then echo, `ICRNL`, `INLCR`, `IGNCR`
     /// and `ONLCR` off -- the terminal's own echo and newline mapping, which
     /// curses does for itself.
-    fn initscr_modes(&mut self) -> bool {
+    /// Upstream's `newterm` does not look at whether this succeeded, and
+    /// so it says nothing.
+    fn initscr_modes(&mut self) {
         if !self.cbreak() {
-            return false;
+            return;
         }
         let buf = initscr_termios(self.tty.nttyb);
-        let ok = self.tty.set_mode(&buf);
-        if ok {
+        if self.tty.set_mode(&buf) {
             self.tty.nttyb = buf;
         }
-        ok
     }
 
     /// `flushinp ()`: what has been typed and not read, thrown away.
@@ -1259,6 +1255,17 @@ impl Screen {
     }
 }
 
+/// The default foreground and background `NCURSES_ASSUMED_COLORS`'s value
+/// `spec` sets on a terminal of `max_colors`: the foreground when a number
+/// was read, the background when a separator and a second followed.
+fn assumed_defaults(spec: &[u8], max_colors: i32) -> (Option<i32>, Option<i32>) {
+    let (count, fg, bg) = scan_assumed(spec);
+    (
+        (count >= 1).then(|| assumed_color(fg, max_colors)),
+        (count >= 3).then(|| assumed_color(bg, max_colors)),
+    )
+}
+
 /// A colour `NCURSES_ASSUMED_COLORS` names, if the terminal has it: one of
 /// its `max_colors`, else the terminal's own default.
 fn assumed_color(color: i32, max_colors: i32) -> i32 {
@@ -1433,6 +1440,15 @@ mod tests {
         assert_eq!(assumed_color(7, 8), 7);
         assert_eq!(assumed_color(8, 8), COLOR_DEFAULT);
         assert_eq!(assumed_color(-1, 8), COLOR_DEFAULT);
+    }
+
+    #[test]
+    fn assumed_colours_set_what_was_given() {
+        assert_eq!(assumed_defaults(b"", 8), (None, None));
+        assert_eq!(assumed_defaults(b"3", 8), (Some(3), None));
+        assert_eq!(assumed_defaults(b"3,", 8), (Some(3), None));
+        assert_eq!(assumed_defaults(b"3,4", 8), (Some(3), Some(4)));
+        assert_eq!(assumed_defaults(b"9;5;", 8), (Some(COLOR_DEFAULT), Some(5)));
     }
 
     #[test]

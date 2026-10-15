@@ -812,14 +812,16 @@ RC=
 screen "A z x c then W" 24x80 'keys:A' 'keys:z' 'keys:x' 'keys:c' 'keys:W' 'keys:q' --
 
 # Frames that move: the world a frame on, then a redraw.
+# A key that shows a message naps beside it, quiet but busy: `sleep:` keeps
+# the steps after it from being typed into the nap and read as one.
 screen "a frame later" 24x80 "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, 1" 24x80 'keys:1' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, t, m" 24x80 'keys:t' 'keys:m' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, H" 24x80 'keys:H' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, S" 24x80 'keys:S' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, I" 24x80 'keys:I' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, i" 24x80 'keys:i' "$later_step" 'keys:\n' 'keys:q' --
-screen "a frame later, 0" 24x80 'keys:0' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, 1" 24x80 'keys:1' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, t, m" 24x80 'keys:t' 'keys:m' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, H" 24x80 'keys:H' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, S" 24x80 'keys:S' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, I" 24x80 'keys:I' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, i" 24x80 'keys:i' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
+screen "a frame later, 0" 24x80 'keys:0' 'sleep:1.5' "$later_step" 'keys:\n' 'keys:q' --
 
 # Resizes and signals.
 screen "grown" 24x80 'resize:30x100' 'keys:q' --

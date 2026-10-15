@@ -30,6 +30,10 @@ the same.) A step is one or more actions, separated by `;`, done together:
   signal:NAME   the signal sent to PROG (INT, TERM, HUP, WINCH, ...)
   copy:SRC:DST  the file DST given SRC's contents, in place -- a file PROG
                 rereads changing under it
+  sleep:SECS    nothing for SECS seconds -- for a program that goes quiet
+                while it is still busy (a message it shows, then naps
+                beside), so that the next step is not typed into the nap
+                and read together with the one after it
 
 A session leader's process group has no parent outside it in the session, so
 it is orphaned, and the kernel discards the stop that `SIGTSTP` would cause:
@@ -91,6 +95,8 @@ def act(step, pid, master):
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         elif kind == "signal":
             os.kill(pid, getattr(signal, "SIG" + arg))
+        elif kind == "sleep":
+            time.sleep(float(arg))
         elif kind == "copy":
             src, _, dst = arg.partition(":")
             with open(src, "rb") as f:

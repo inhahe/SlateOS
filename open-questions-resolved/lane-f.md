@@ -35,3 +35,13 @@
 (C-Q18, answered for lane F's code, is §1334; lane C files its index line
 when it retires the entry.)
 
+- F-Q11 Video that does not fully say its colours: Chrome's way or the
+  players'? — resolved 2026-10-11 (1389): **C**, the players' guess for
+  what a video leaves out, and every part it gives used and converted.
+- F-Q12 A new window taking the keyboard without the user's action? —
+  resolved 2026-10-11 (1390): **B**, refused once the launchers pass tokens
+  on and a terminal can vouch for what it starts.
+- F-Q13 Telling a real password prompt from a fake? — resolved 2026-10-11
+  (1391): **C**, a secure key before typing and a lock on the taskbar.
+- F-Q15 A usable desktop as every lane's next goal? — resolved 2026-10-11
+  (1392): **A**.

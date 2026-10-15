@@ -14,21 +14,24 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 - **Written:** 2026-10-11 02:14, as `open-questions/answers.3.txt` in the
   integration tree.
-- **Processed:** 2026-10-11 by lane B: copied; lane B's answer recorded; lanes
-  C and F sent their answers by notice.
+- **Processed:** 2026-10-11 by lane B (copied; lane B's answer recorded; lanes
+  C and F sent theirs by notice) and 2026-10-12 by lane F (lane F's answers
+  written up; every lane told of F-Q15's), each without seeing the other's.
 - **Copy:** `operator-answers/2026-10-11-open-questions-answers.3.txt`
 - **Content:** sha256 `f3cee424078cd0ae670605616f54fb1fe4b2bd9515050b51b70a92209fb2c8ea`
+  (the checker's key: CRLF read as LF; the raw file's sha256 is
+  `d159de1dabe9621db387bade0cd74d9dd4b295d3b6a927b9831160596f427cfc`)
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| B-Q26 | B | §1074 (A: a program's remembered settings gain the processors it may use, a cap on its processor use and a profile while it runs; `roadmap-detailed.md` §1.3) | recorded |
-| C-Q35 | C | -- | relayed 2026-10-11 (Claude's recommendations) |
-| C-Q36 | C | -- | relayed 2026-10-11 (A) |
-| F-Q11 | F | -- | relayed 2026-10-11 (C, "if that would usually result in more correctness") |
-| F-Q12 | F | -- | relayed 2026-10-11 (B) |
-| F-Q13 | F | -- | relayed 2026-10-11 (C) |
-| F-Q14 | F | -- | relayed 2026-10-11 (the operator plans on 1, not settled: the new computer is not here yet) |
-| F-Q15 | F | -- | relayed 2026-10-11 (A) |
+| B-Q26: A | B | §1074 (a program's remembered settings gain the processors it may use, a cap on its processor use and a profile while it runs; `roadmap-detailed.md` §1.3) | recorded |
+| C-Q35: Claude's recommendations | C | -- | relayed 2026-10-11 |
+| C-Q36: A | C | -- | relayed 2026-10-11 |
+| F-Q11: C, "if that would usually result in more correctness" | F | §1389 (it does: a part a video gives is its encoder's word, a guess is a guess) | recorded |
+| F-Q12: B | F | §1390 | recorded |
+| F-Q13: C | F | §1391 (the compositor's half lane F's, the prompts' and the taskbar's lane C's) | recorded |
+| F-Q14: "I plan on 1, but it's not a sure thing" | F | -- | **waits on the operator: `open-questions/F-Q14.md`, until the new computer is here** |
+| F-Q15: A | F | §1392 (every lane told by notice) | recorded |
 
 ## chat, 2026-10-10: B-Q23 answered, B-Q24 confirmed, answered questions out of sight
 

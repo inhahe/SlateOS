@@ -262,7 +262,7 @@ def self_test() -> int:
             bad += 1
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "replay.txt"
-        p.write_text("missed - one\n", encoding="utf-8")
+        p.write_text("missed - one\n", encoding="utf-8", newline="")
         if done_names(p.read_text(encoding="utf-8")) != {"one"}:
             print("mutants-replay self-test: replay.txt not read back", file=sys.stderr)
             bad += 1

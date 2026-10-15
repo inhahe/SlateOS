@@ -757,10 +757,8 @@ fn gen_cpuid_file(name: &str) -> KernelResult<Vec<u8>> {
 /// System memory: `/sys/devices/system/memory/<name>`.
 ///
 /// Sourced from `mm::memory_info()`, the same call `/proc/meminfo` uses for
-/// `MemTotal`. Deliberately NOT from `frame::stats().total_frames`, which
-/// counts non-usable holes -- that would publish a second, different answer
-/// to 'how much memory is there' in a second tree, which is the duplication
-/// this whole tree was chosen to avoid.
+/// `MemTotal`: two trees answering 'how much memory is there' must give one
+/// answer, which is the duplication this whole tree was chosen to avoid.
 ///
 /// kB, matching `cache/size` and the rest of `/sys/devices`.
 fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
@@ -2469,12 +2467,10 @@ pub fn self_test() -> KernelResult<()> {
         // 3. THE ONE THAT MATTERS. memory/total_kb must equal /proc/meminfo's
         //    MemTotal. Both answer 'how much memory is there', and the whole
         //    reason this tree was chosen over a second /sys/hardware one was
-        //    to avoid two kernel answers to a single question. The obvious
-        //    source, frame::stats().total_frames, counts non-usable holes and
-        //    would pass every other check here while disagreeing with procfs.
-        //    If someone later 'simplifies' gen_memory_file to use it, this
-        //    goes red -- which is the only reason the guarantee survives the
-        //    next person to read that function.
+        //    to avoid two kernel answers to a single question. A source of its
+        //    own -- the managed range, `range_frames`, which counts holes --
+        //    would pass every other check here while disagreeing with procfs;
+        //    this is what goes red if gen_memory_file ever takes one.
         let ours = match fs.read_file(Path::new("/devices/system/memory/total_kb")) {
             Ok(v) => v,
             Err(e) => {

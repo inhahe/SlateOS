@@ -674,7 +674,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
     if let Some(st) = frame::stats() {
         assert_eq!(
-            tracked, st.total_frames,
+            tracked, st.range_frames,
             "ownership array must cover every frame the allocator manages"
         );
         serial_println!(

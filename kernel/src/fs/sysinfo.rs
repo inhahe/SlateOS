@@ -558,8 +558,7 @@ fn detect_cpu() -> CpuInfo {
 fn detect_memory() -> MemoryInfo {
     let (total, available) = match crate::mm::frame::stats() {
         Some(s) => {
-            let total =
-                (s.usable_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+            let total = (s.total_frames as u64).saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
             (total, s.free_bytes as u64)
         }
         None => (0, 0),

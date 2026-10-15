@@ -147,8 +147,8 @@ pub fn stats() -> ScrubStats {
 pub fn init() {
     // Get total physical memory from the frame allocator.
     if let Some(fstats) = frame::stats() {
-        // Scrub range: 0 to (total_frames * FRAME_SIZE).
-        let end = (fstats.total_frames as u64).saturating_mul(FRAME_SIZE as u64);
+        // Scrub range: 0 to the end of the managed range, holes and all.
+        let end = (fstats.range_frames as u64).saturating_mul(FRAME_SIZE as u64);
         SCRUB_END.store(end, Ordering::Release);
         CURSOR.store(0, Ordering::Release);
         serial_println!(

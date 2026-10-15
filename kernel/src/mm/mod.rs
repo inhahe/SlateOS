@@ -344,9 +344,9 @@ fn assemble_memory_info(
     tracked_address_spaces: usize,
 ) -> MemoryInfo {
     // Physical frame allocator.
-    let (total_frames, free_frames, free_bytes) = frame_stats.as_ref().map_or((0, 0, 0), |s| {
-        (s.usable_frames, s.free_frames, s.free_bytes)
-    });
+    let (total_frames, free_frames, free_bytes) = frame_stats
+        .as_ref()
+        .map_or((0, 0, 0), |s| (s.total_frames, s.free_frames, s.free_bytes));
     let total_bytes = total_frames * frame::FRAME_SIZE;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 

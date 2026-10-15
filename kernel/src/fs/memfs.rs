@@ -1956,7 +1956,7 @@ fn blocks_of(len: u64) -> u64 {
 /// counted.
 fn ram_bytes() -> Option<u64> {
     let stats = crate::mm::frame::stats()?;
-    let frames = u64::try_from(stats.usable_frames).ok()?;
+    let frames = u64::try_from(stats.total_frames).ok()?;
     let frame = u64::try_from(crate::mm::frame::FRAME_SIZE).ok()?;
     frames.checked_mul(frame)
 }

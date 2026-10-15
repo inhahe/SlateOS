@@ -1800,11 +1800,13 @@ pub const BUDDY_MAX_ORDER: usize = MAX_ORDER;
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Public stats API; fields used by diagnostics/sysctl.
 pub struct FrameAllocStats {
-    /// Total frames in the managed range (including non-usable holes).
+    /// Frames of usable memory: the machine's memory, what "how much memory
+    /// is there" means. Free frames never exceed it.
     pub total_frames: usize,
-    /// Frames of usable memory: the machine's memory, which `total_frames`
-    /// overstates by its holes.
-    pub usable_frames: usize,
+    /// Frames in the managed address range, non-usable holes included -- on a
+    /// q35 guest with 3 GiB, 5 GiB of addresses: for walking memory by
+    /// address, never for how much there is.
+    pub range_frames: usize,
     /// Number of currently free frames.
     pub free_frames: usize,
     /// Free memory in bytes.
@@ -2814,8 +2816,8 @@ pub fn stats() -> Option<FrameAllocStats> {
         }
 
         Some(FrameAllocStats {
-            total_frames: guard.total_frames,
-            usable_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
+            total_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
+            range_frames: guard.total_frames,
             free_frames: guard.free_frames,
             free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
             order_counts,
@@ -2840,8 +2842,8 @@ pub fn try_stats() -> Option<FrameAllocStats> {
     }
 
     Some(FrameAllocStats {
-        total_frames: guard.total_frames,
-        usable_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
+        total_frames: USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
+        range_frames: guard.total_frames,
         free_frames: guard.free_frames,
         free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
         order_counts,

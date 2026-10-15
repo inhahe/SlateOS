@@ -1514,7 +1514,7 @@ const MEMORY_TIER_PRIORITY: i32 = 100;
 /// 4 GiB -- what Fedora's zram-generator gives each machine it runs on. A
 /// slot costs its table entry (32 bytes) until a page is stored in it.
 fn memory_tier_slots() -> u32 {
-    let total = frame::stats().map_or(0, |s| s.usable_frames);
+    let total = frame::stats().map_or(0, |s| s.total_frames);
     let half = u64::try_from(total)
         .unwrap_or(u64::MAX)
         .saturating_mul(FRAME_SIZE as u64)

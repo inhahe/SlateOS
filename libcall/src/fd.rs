@@ -63,7 +63,42 @@ mod sys {
         pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
+        pub fn open(path: *const core::ffi::c_char, flags: i32, ...) -> i32;
     }
+
+    /// `O_RDONLY`.
+    pub const O_RDONLY: i32 = 0;
+    /// `O_CLOEXEC`, on Linux and in SlateOS's C library.
+    pub const O_CLOEXEC: i32 = 0o2_000_000;
+}
+
+/// Open `path` for reading, once: `open (path, O_RDONLY | O_CLOEXEC)`. The
+/// descriptor, the caller's to [`close`].
+///
+/// Once: an `open` that waits -- a FIFO with no writer yet -- and is
+/// interrupted by a signal's handler answers `EINTR` rather than waiting
+/// again, as the standard library's would, so that a program acting on its
+/// signals where it waits can act on that one.
+///
+/// # Errors
+///
+/// What `open` reports: `ENOENT`, `EACCES`, `EINTR` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_read(path: &core::ffi::CStr) -> Result<i32, i32> {
+    open_read_one(path)
+}
+
+#[cfg(unix)]
+fn open_read_one(path: &core::ffi::CStr) -> Result<i32, i32> {
+    // SAFETY: a NUL-terminated path the call only reads, and two flags; no
+    // third argument, which only `O_CREAT` and `O_TMPFILE` read.
+    let fd = unsafe { sys::open(path.as_ptr(), sys::O_RDONLY | sys::O_CLOEXEC) };
+    if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn open_read_one(_path: &core::ffi::CStr) -> Result<i32, i32> {
+    Err(ENOSYS)
 }
 
 /// Write `buf` to `fd` once: `write`. How many bytes went, which may be
@@ -467,6 +502,28 @@ mod tests {
         assert_eq!(POLLIN, posix::poll::POLLIN);
         assert_eq!(POLLOUT, posix::poll::POLLOUT);
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_opened_for_reading_reads_and_a_missing_one_says_so() {
+        assert_eq!(sys::O_CLOEXEC, posix::fcntl::O_CLOEXEC);
+        assert_eq!(sys::O_RDONLY, posix::fcntl::O_RDONLY);
+        let fd = open_read(c"/proc/self/stat").unwrap();
+        let mut buf = [0u8; 64];
+        let n = read(fd, &mut buf).unwrap();
+        assert!(n > 0, "something read");
+        // SAFETY: `F_GETFD` takes no third argument and touches no memory.
+        let flags = unsafe { sys::fcntl(fd, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, FD_CLOEXEC, "closed on exec");
+        close(fd).unwrap();
+        assert_eq!(open_read(c"/nonexistent/at/all"), Err(2), "ENOENT");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn nothing_opens_off_unix() {
+        assert_eq!(open_read(c"anything"), Err(crate::ENOSYS));
     }
 
     #[cfg(unix)]

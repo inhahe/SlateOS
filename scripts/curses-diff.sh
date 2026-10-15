@@ -39,7 +39,7 @@ DIFF_PKG='curses'
 DIFF_EXAMPLES=curses-probe
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
-DIFF_NEED='cc cmp od infocmp'
+DIFF_NEED='cc cmp od infocmp tic'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -76,6 +76,40 @@ for t in xterm-256color xterm xterm-color xterm-mono vt100 vt220 vt52 linux \
   fi
 done
 
+# And terminal types no database here holds, made for the capabilities they
+# have and the ones above do not: a magic-cookie glitch (`xmc`), colours that
+# will not combine with some attributes (`ncv`, reverse among them), colours
+# defined by hue, lightness and saturation (`hls`), and direct colour (`RGB`,
+# 2^24 colours). `tic` compiles them into a directory of the harness's own,
+# which both sides are pointed at with `TERMINFO`.
+synth=$DIFF_TMP/terminfo
+mkdir -p "$synth"
+cat > "$DIFF_TMP/synth.ti" <<'EOF'
+slate-xmc|a terminal whose attributes take a cell,
+	xmc#1, use=xterm-color,
+slate-ncv|colours that will not combine with standout underline or reverse,
+	ncv#7, use=xterm-color,
+slate-ncvbold|colours that will not combine with bold dim or blink,
+	ncv#56, use=xterm-color,
+slate-hls|colours defined by hue lightness and saturation,
+	hls, ccc,
+	initc=\E]4;%p1%d;hls%p2%d/%p3%d/%p4%d\E\\,
+	use=xterm-color,
+slate-direct|direct colour,
+	RGB, colors#0x1000000, pairs#0x10000,
+	op=\E[39;49m,
+	setab=\E[48;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
+	setaf=\E[38;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
+	use=xterm,
+EOF
+SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct'
+if ! tic -x -o "$synth" "$DIFF_TMP/synth.ti" 2> "$DIFF_TMP/synth.err"; then
+  echo "curses-diff: tic could not compile the made-up terminal types:" >&2
+  cat "$DIFF_TMP/synth.err" >&2
+  exit 1
+fi
+TERMS="$TERMS $SYNTH"
+
 pass=0
 fail=0
 failed=''
@@ -98,6 +132,7 @@ run() {
     shift
   done
   shift
+  case $term in slate-*) envs+=("TERMINFO=$synth") ;; esac
   if [ "$mode" = pty ]; then
     env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
       timeout 30 python3 "$root/scripts/curses-ptyrun.py" "${size%x*}" "${size#*x}" \
@@ -338,6 +373,45 @@ init_color 9 1000 333 333
 init_pair 5 8 9
 attrset 500
 mvaddstr 5 0 redefined
+refresh
+endwin
+EOF
+
+# Every attribute beside a colour pair -- what a terminal's `ncv` takes away
+# -- and the colours themselves at numbers only direct colour has.
+scenario colour-attributes 'C' <<'EOF'
+use_env 0
+initscr
+start_color
+use_default_colors
+init_pair 1 1 4
+init_pair 2 3 -1
+init_pair 3 255 32512
+attrset 10100
+mvaddstr 0 0 standout on a pair
+attrset 20100
+mvaddstr 1 0 underline on a pair
+attrset 40100
+mvaddstr 2 0 reverse on a pair
+attrset 240100
+mvaddstr 3 0 bold reverse on a pair
+attrset 200200
+mvaddstr 4 0 bold on default
+attrset 100200
+mvaddstr 5 0 dim on default
+attrset 80200
+mvaddstr 6 0 blink on default
+attrset 40000
+mvaddstr 7 0 reverse alone
+attrset 50300
+mvaddstr 8 0 standout reverse on the third pair
+attrset 0
+mvaddstr 9 0 plain
+refresh
+attrset 40100
+mvaddstr 2 0 reverse again
+attrset 100
+mvaddstr 10 0 pair only
 refresh
 endwin
 EOF

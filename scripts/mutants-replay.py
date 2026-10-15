@@ -35,7 +35,9 @@ catch. A skip stops it too, rather than passing for agreement.
 
 The file is appended to as the run goes, and a mutant already in it is not
 run again, so an interrupted run carries on where it stopped. Each harness's
-output is kept in `MUTANTS_DIR/replay-logs/`.
+output is kept in `MUTANTS_DIR/replay-logs/`. Once a harness has grown to
+reach what it missed, `--again replay.txt --record replay-2.txt` replays
+only the mutants the first record calls missed, into a second record.
 
 DIR must be a worktree of its own, made for this (`git worktree add --detach
 DIR <commit>`): its changes are thrown away after every mutant, and the run
@@ -196,12 +198,27 @@ def run_harness(bash: str, tree: Path, harness: str, log: Path, limit: int) -> s
     return verdict(r.returncode, output)
 
 
+def still_missed(text: str) -> set[str]:
+    """The mutants a `replay.txt` says every harness missed."""
+    names = set()
+    for line in text.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3 and parts[0] == "missed":
+            names.add(parts[2])
+    return names
+
+
 def replay(tree: Path, mutants_dir: Path, harnesses: list[str], workspace: str,
-           limit: int) -> int:
+           limit: int, record_name: str = "replay.txt", again: str = "") -> int:
     mo = mutants_dir / "mutants.out"
     outcomes = json.loads((mo / "outcomes.json").read_text(encoding="utf-8"))
     todo = missed_mutants(outcomes)
-    record = mutants_dir / "replay.txt"
+    if again:
+        # Only those an earlier replay's record says every harness missed:
+        # to measure harnesses grown since.
+        earlier = still_missed((mutants_dir / again).read_text(encoding="utf-8"))
+        todo = [m for m in todo if m[0] in earlier]
+    record = mutants_dir / record_name
     done = done_names(record.read_text(encoding="utf-8")) if record.exists() else set()
     logs = mutants_dir / "replay-logs"
     logs.mkdir(exist_ok=True)
@@ -294,6 +311,7 @@ def self_test() -> int:
          [("a.rs:1:1: replace x", "diff/a.diff"), ("a.rs:3:1: delete !", "diff/c.diff")]),
         (done_names("caught h.sh a.rs:1:1: replace x\nstale - b c d\nhung h.sh e\nnoise\n"),
          {"a.rs:1:1: replace x", "b c d", "e"}),
+        (still_missed("missed - a b\ncaught h.sh c\nmissed - d\n"), {"a b", "d"}),
         (verdict(0, "curses-diff: 990 case(s) agree"), "agreed"),
         (verdict(0, "curses-diff: no WSL on this host; skipping"), "skipped"),
         (verdict(0, "coreutils 9.4 did not build; SKIPPED"), "skipped"),
@@ -338,10 +356,18 @@ def main(argv: list[str]) -> int:
                          "the tree, when it is not the tree's root")
     ap.add_argument("--limit", type=int, default=LIMIT,
                     help="seconds each harness may run on one mutant (DIFF_TIMEOUT)")
+    ap.add_argument("--record", default="replay.txt",
+                    help="the record's name in MUTANTS_DIR")
+    ap.add_argument("--again", default="",
+                    help="replay only the mutants this earlier record (in MUTANTS_DIR) "
+                         "says every harness missed")
     ap.add_argument("mutants_dir", type=Path, help="one package's cargo-mutants output")
     ap.add_argument("harness", nargs="+", help="harness scripts, relative to --tree")
     a = ap.parse_args(argv[1:])
-    return replay(a.tree.resolve(), a.mutants_dir.resolve(), a.harness, a.workspace, a.limit)
+    if a.again and a.again == a.record:
+        ap.error("--again and --record must name different records")
+    return replay(a.tree.resolve(), a.mutants_dir.resolve(), a.harness, a.workspace, a.limit,
+                  a.record, a.again)
 
 
 if __name__ == "__main__":

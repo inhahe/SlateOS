@@ -147,35 +147,18 @@ const LONGS: &[(&str, Takes)] = &[
     ("queue", Takes::Required),
 ];
 
-/// What the program asks of the system: a fake in the tests, which must
+/// What the program asks of the system beyond what a request needs (the
+/// [`Asker`] it is given beside this): a fake in the tests, which must
 /// signal nothing.
-trait System: Asker {
+trait System {
     /// `sigqueue (pid, sig, value)`.
     fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32>;
     /// The C library's `SIGRTMIN`.
     fn rtmin(&self) -> i32;
 }
 
-/// The C library, and SlateOS's lifecycle calls.
+/// The C library.
 struct Libc;
-
-impl Asker for Libc {
-    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-        requests::System.kill(pid, sig)
-    }
-
-    fn answers(&self, pid: i32) -> bool {
-        requests::System.answers(pid)
-    }
-
-    fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
-        requests::System.ask(pid, close)
-    }
-
-    fn nap(&self, ms: u64) {
-        requests::System.nap(ms);
-    }
-}
 
 impl System for Libc {
     fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
@@ -279,9 +262,10 @@ fn strtosig(s: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The run: argv with its name first, on `sys`, writing standard output to
-/// `out`. Answers the status `main` exits with.
-fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
+/// The run: argv with its name first, on `sys`, sending signals and
+/// requests through `asker`, writing standard output to `out`. Answers the
+/// status `main` exits with.
+fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, asker: &dyn Asker, out: &mut dyn Write) -> u8 {
     let names = Names::of(argv.first().map_or(b"kill".as_slice(), Vec::as_slice));
     let rtmin = sys.rtmin();
     let usage = |to: To, out: &mut dyn Write| -> u8 {
@@ -329,7 +313,15 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
     while let Some(item) = parser.next() {
         let opt = match item {
             Ok(opt) => opt,
-            Err(_) => {
+            Err(e) => {
+                // SlateOS's own options have no letter for `%c` to print:
+                // the parser's sentence names the option instead.
+                if let Optopt::Long(name) = parser.optopt()
+                    && requests::NAMES.contains(&name)
+                {
+                    names.warnx(e.sentence.as_bytes());
+                    return usage(To::Err, out);
+                }
                 let optopt = match parser.optopt() {
                     Optopt::Short(c) => c,
                     Optopt::Long(name) => long_val(name),
@@ -461,21 +453,34 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
         let sent = if named_signal {
             match queue {
                 Some(value) => sys.sigqueue(target, signo, value),
-                None => sys.kill(target, signo),
+                None => asker.kill(target, signo),
             }
             .map_err(Refusal::Errno)
         } else {
-            requests::deliver(sys, target, asked.request(), asked.via).map(drop)
+            requests::deliver(asker, target, asked.request(), asked.via).map(drop)
         };
         match sent {
             Ok(()) => reached.push((pid, target)),
-            Err(why) => refused(pid, why),
+            Err(why) => {
+                refused(pid, why);
+                // Still there, it is still `--timeout`'s: a close it cannot
+                // answer is what the terminate after it is for.
+                if why != Refusal::Errno(requests::ESRCH) {
+                    reached.push((pid, target));
+                }
+            }
         }
     }
 
-    requests::escalate(sys, reached, &asked.escalations, asked.via, |&pid, why| {
-        refused(pid, why);
-    });
+    requests::escalate(
+        asker,
+        reached,
+        &asked.escalations,
+        asked.via,
+        |&pid, why| {
+            refused(pid, why);
+        },
+    );
     exitvalue
 }
 
@@ -518,38 +523,37 @@ fn main() -> ExitCode {
     // same way.
     let name = Names::of(argv.first().map_or(b"kill".as_slice(), Vec::as_slice)).full;
     let mut out = Stream::stdout();
-    let status = run(argv, &Libc, &mut out);
+    let status = run(argv, &Libc, &requests::System::GROUPS, &mut out);
     stdfd::close_stdout_procps(&name, out, ExitCode::from(status))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{Asker, System, run, strtosig};
+    use super::{System, run, strtosig};
     use std::cell::RefCell;
 
     /// One send: the call, the PID, the signal, and `sigqueue`'s value.
     type Sent = (&'static str, i32, i32, Option<i32>);
 
-    /// A system that records what it was asked to send and sends nothing.
-    /// `ESRCH` for PID 999999, as for a process that does not exist.
+    /// A system that records what it was asked to send and sends nothing:
+    /// `procstop`'s, on which PID 999999 is a process that does not exist,
+    /// and a record of `sigqueue`.
     #[derive(Default)]
     struct Fake {
-        sent: RefCell<Vec<Sent>>,
-        /// The processes that answer lifecycle requests.
-        answering: Vec<i32>,
-        /// The processes that end once `--timeout` has waited a little.
-        slow: Vec<i32>,
-        /// The processes that have ended.
-        gone: RefCell<Vec<i32>>,
+        asker: procstop::fake::Fake,
+        queued: RefCell<Vec<Sent>>,
     }
 
     /// A system on which `answering` answer requests and `slow` end after
     /// the first wait.
     fn sys(answering: &[i32], slow: &[i32]) -> Fake {
         Fake {
-            answering: answering.to_vec(),
-            slow: slow.to_vec(),
+            asker: procstop::fake::Fake {
+                answering: answering.to_vec(),
+                slow: slow.to_vec(),
+                ..procstop::fake::Fake::default()
+            },
             ..Fake::default()
         }
     }
@@ -646,52 +650,44 @@ mod tests {
         // A request that is not one, or no milliseconds.
         assert_eq!(go(&["--timeout", "40", "harder", "5"]).0, 1);
         assert_eq!(go(&["--timeout", "soon", "force", "5"]).0, 1);
+        assert_eq!(go(&["--timeout"]), (1, vec![], String::new()));
+        assert_eq!(go(&["--force=1", "5"]), (1, vec![], String::new()));
     }
 
-    impl Asker for Fake {
-        fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-            self.sent.borrow_mut().push(("kill", pid, sig, None));
-            if sig < 0 {
-                Err(22)
-            } else if pid == 999_999 || self.is_gone(pid) {
-                Err(3)
-            } else {
-                Ok(())
-            }
-        }
-        fn answers(&self, pid: i32) -> bool {
-            self.answering.contains(&pid)
-        }
-        fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
-            let what = if close { "close" } else { "terminate" };
-            self.sent.borrow_mut().push((what, pid, 0, None));
-            Ok(())
-        }
-        fn nap(&self, ms: u64) {
-            self.sent
-                .borrow_mut()
-                .push(("nap", 0, i32::try_from(ms).unwrap(), None));
-            // A process that takes its time ends after the first wait.
-            self.gone.borrow_mut().extend(self.slow.iter().copied());
-        }
+    #[test]
+    fn a_refused_request_is_still_followed_by_the_timeouts() {
+        // The man page's example, on a program that answers nothing: the
+        // close is refused, and the terminate after it is sent.
+        let (status, sent, _) = go_on(
+            sys(&[], &[]),
+            &["--close", "--timeout", "0", "terminate", "6"],
+        );
+        assert_eq!(status, 1, "the close was refused");
+        assert_eq!(
+            sent,
+            vec![
+                ("kill", 6, 0, None),
+                ("kill", 6, 0, None),
+                ("kill", 6, 15, None),
+            ]
+        );
+        // A process that is not there is not followed.
+        let (_, sent, _) = go_on(
+            sys(&[], &[]),
+            &["--close", "--timeout", "0", "force", "999999"],
+        );
+        assert!(!sent.contains(&("kill", 999_999, 9, None)), "{sent:?}");
     }
 
     impl System for Fake {
         fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
-            self.sent
+            self.queued
                 .borrow_mut()
                 .push(("sigqueue", pid, sig, Some(value)));
             Ok(())
         }
         fn rtmin(&self) -> i32 {
             34
-        }
-    }
-
-    impl Fake {
-        /// `kill (pid, 0)` for a process that has gone is `ESRCH`.
-        fn is_gone(&self, pid: i32) -> bool {
-            self.gone.borrow().contains(&pid)
         }
     }
 
@@ -705,8 +701,16 @@ mod tests {
         let mut argv = vec![b"kill".to_vec()];
         argv.extend(words.iter().map(|w| w.as_bytes().to_vec()));
         let mut out = Vec::new();
-        let status = run(argv, &sys, &mut out);
-        let sent = sys.sent.borrow().clone();
+        sys.asker.gone.borrow_mut().push(999_999);
+        let status = run(argv, &sys, &sys.asker, &mut out);
+        let mut sent: Vec<Sent> = sys
+            .asker
+            .did
+            .borrow()
+            .iter()
+            .map(|&(what, pid, sig)| (what, pid, sig, None))
+            .collect();
+        sent.extend(sys.queued.borrow().iter().copied());
         (status, sent, String::from_utf8(out).unwrap())
     }
 
@@ -744,9 +748,13 @@ mod tests {
 
     #[test]
     fn a_failure_is_per_process_and_the_status_is_one() {
-        let (status, sent, _) = go(&["5", "999999", "6"]);
+        let (status, sent, _) = go(&["-15", "5", "999999", "6"]);
         assert_eq!(status, 1);
         assert_eq!(sent.len(), 3, "the PIDs after the failure are signalled");
+        // A request too: asking 999999 finds it gone, and 6 is still sent.
+        let (status, sent, _) = go(&["5", "999999", "6"]);
+        assert_eq!(status, 1);
+        assert_eq!(sent, vec![("kill", 5, 15, None), ("kill", 6, 15, None)]);
     }
 
     #[test]

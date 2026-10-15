@@ -597,6 +597,8 @@ fn every_kernel_code_this_library_names_maps_to_its_variant() {
         ("OutOfMemory", BusError::ResourceExhausted),
         ("NotSupported", BusError::Unsupported),
         ("NoSuchSyscall", BusError::Unsupported),
+        ("NoSuchProcess", BusError::NoSuchProcess),
+        ("ProcessExited", BusError::NoSuchProcess),
     ];
     for (name, expected) in table {
         assert_eq!(BusError::from_code(kernel_code(name)), expected, "{name}");
@@ -862,4 +864,56 @@ fn duration_helpers_convert_and_saturate() {
     assert_eq!(secs_to_ns(60), 60_000_000_000);
     assert_eq!(secs_to_ns(u64::MAX), u64::MAX);
     assert_eq!(ms_to_ns(u64::MAX / 2), u64::MAX);
+}
+
+// ----------------------------------------------------------------------------
+// The lifecycle endpoint's receiving side
+// ----------------------------------------------------------------------------
+
+/// A lifecycle endpoint whose channel delivers `incoming`, then nothing.
+fn lifecycle_over(incoming: Vec<Incoming>) -> lifecycle::Lifecycle {
+    let script = Script {
+        incoming: incoming.into(),
+        ..Script::default()
+    };
+    lifecycle::Lifecycle::over(Box::new(Scripted(Arc::new(Mutex::new(script)))))
+}
+
+fn a_request() -> lifecycle::Request {
+    lifecycle::Request {
+        kind: lifecycle::Kind::Terminate,
+        id: 9,
+        asker_pid: 4,
+        asker_uid: 1000,
+    }
+}
+
+#[test]
+fn a_lifecycle_request_is_received_and_anything_else_is_malformed() {
+    let r = a_request();
+    let mut longer = r.encode().to_vec();
+    longer.extend_from_slice(&[0; 6]);
+    let mut l = lifecycle_over(vec![
+        Incoming::Bytes(r.encode().to_vec()),
+        // Not read as its first 24 bytes.
+        Incoming::Bytes(longer),
+        // Past the buffer: the kernel reports a length that did not fit.
+        Incoming::Bytes(vec![0; lifecycle::REQUEST_SIZE * 3]),
+        Incoming::Bytes(r.encode()[..20].to_vec()),
+    ]);
+    assert_eq!(l.handle(), 77);
+    assert_eq!(l.recv(), Ok(r));
+    assert_eq!(l.recv(), Err(BusError::Malformed));
+    assert_eq!(l.recv(), Err(BusError::Malformed));
+    assert_eq!(l.recv(), Err(BusError::Malformed));
+}
+
+#[test]
+fn try_recv_is_none_when_nothing_waits_and_the_channel_s_error_otherwise() {
+    let r = a_request();
+    let mut l = lifecycle_over(vec![Incoming::Bytes(r.encode().to_vec())]);
+    assert_eq!(l.try_recv(), Ok(Some(r)));
+    assert_eq!(l.try_recv(), Ok(None));
+    let mut l = lifecycle_over(vec![Incoming::Fails(BusError::Disconnected)]);
+    assert_eq!(l.try_recv(), Err(BusError::Disconnected));
 }

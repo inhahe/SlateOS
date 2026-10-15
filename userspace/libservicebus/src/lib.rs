@@ -1537,6 +1537,9 @@ impl Drop for Timer {
     }
 }
 
+// The lifecycle endpoint: how a program is asked to close or to stop.
+pub mod lifecycle;
+
 // ============================================================================
 // Payload fields -- the argument encoding services share
 // ============================================================================
@@ -1566,8 +1569,6 @@ impl Drop for Timer {
 /// project rule on OS-boundary data). Callers that want text validate it
 /// themselves, at the point where they know whether invalid UTF-8 is an error
 /// or just an unusual name.
-pub mod lifecycle;
-
 pub mod fields {
     /// The largest field count this decoder will believe.
     ///

@@ -177,8 +177,9 @@ const SIGNALS: [(i32, &str); 31] = [
 struct Exit(u8);
 
 /// What the program asks of the system beyond `/proc`: a fake in the tests,
-/// which must signal nothing. The requests' calls are [`Asker`]'s.
-trait System: Asker {
+/// which must signal nothing. The requests' calls are the [`Asker`]'s
+/// beside it.
+trait System {
     /// Send `sig` to `pid` -- as upstream's `my_send_signal`: through the
     /// pidfd of the process's `/proc` directory when `pid` is positive and
     /// the system has pidfds, else `kill(2)`.
@@ -194,28 +195,13 @@ trait System: Asker {
     fn clk_tck(&self) -> f64;
     /// `sleep (1)`, in `-w`'s wait.
     fn sleep_a_second(&self);
+    /// `fprintf (stderr, ...)` of what the run says about the processes it
+    /// signals: [`complain`], and a test's record.
+    fn complain(&self, text: &[u8]);
 }
 
 /// The system.
 struct Libc;
-
-impl Asker for Libc {
-    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-        requests::System.kill(pid, sig)
-    }
-
-    fn answers(&self, pid: i32) -> bool {
-        requests::System.answers(pid)
-    }
-
-    fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
-        requests::System.ask(pid, close)
-    }
-
-    fn nap(&self, ms: u64) {
-        requests::System.nap(ms);
-    }
-}
 
 impl System for Libc {
     fn send(&self, dir: Option<&std::fs::File>, pid: i32, sig: i32) -> Result<(), i32> {
@@ -252,6 +238,10 @@ impl System for Libc {
 
     fn sleep_a_second(&self) {
         std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    fn complain(&self, text: &[u8]) {
+        complain(text);
     }
 }
 
@@ -337,6 +327,8 @@ struct NameInfo {
 struct Killall<'s> {
     proc_root: PathBuf,
     sys: &'s dyn System,
+    /// SlateOS's requests, and the signals `--timeout` sends.
+    asker: &'s dyn Asker,
     opts: Opts,
     utf8: bool,
 }
@@ -504,7 +496,7 @@ impl Killall<'_> {
     /// run, as upstream's `exit (1)` does.
     fn uptime(&self) -> Result<f64, Exit> {
         let Ok(text) = std::fs::read(self.proc_root.join("uptime")) else {
-            complain(b"killall: error opening uptime file\n");
+            self.sys.complain(b"killall: error opening uptime file\n");
             return Err(Exit(1));
         };
         let word: Vec<u8> = text
@@ -610,7 +602,7 @@ impl Killall<'_> {
                 let mut text = b"killall: skipping partial match ".to_vec();
                 text.extend_from_slice(comm);
                 text.extend_from_slice(format!("({pid})\n").as_bytes());
-                complain(&text);
+                self.sys.complain(&text);
             }
             return Err(());
         }
@@ -631,7 +623,8 @@ impl Killall<'_> {
                 }
             }
         }
-        complain(b"killall: Cannot get UID from process status\n");
+        self.sys
+            .complain(b"killall: Cannot get UID from process status\n");
         Err(Exit(1))
     }
 
@@ -797,7 +790,7 @@ impl Killall<'_> {
                         let mut text = b"killall: Bad regular expression: ".to_vec();
                         text.extend_from_slice(name);
                         text.push(b'\n');
-                        complain(&text);
+                        self.sys.complain(&text);
                         return Err(Exit(1));
                     }
                 }
@@ -813,7 +806,7 @@ impl Killall<'_> {
                             text.extend_from_slice(b": ");
                             text.extend_from_slice(coreutils::errmsg::strerror(&e).as_bytes());
                             text.push(b'\n');
-                            complain(&text);
+                            self.sys.complain(&text);
                             return Err(Exit(1));
                         }
                     }
@@ -834,12 +827,18 @@ impl Killall<'_> {
         // What was sent to, for the `--timeout`s: the name and PID (or
         // group) to speak of it by, and where to send.
         let mut reached: Vec<((Vec<u8>, i32), i32)> = Vec::new();
-        let verb: &[u8] = if !o.named_signal && o.asked.request() == Request::Close {
-            b"Close"
-        } else if signal == SIGTERM {
-            b"Kill"
-        } else {
-            b"Signal"
+        // `-i`'s question begins with what will be sent: upstream's `Kill`
+        // for SIGTERM and `Signal` for any other, and `Close` for a close.
+        let sends = match (o.named_signal, o.asked.request()) {
+            (true, _) => Some(signal),
+            (false, Request::Close) => None,
+            (false, Request::Terminate) => Some(SIGTERM),
+            (false, Request::Force) => Some(requests::SIGKILL),
+        };
+        let verb: &[u8] = match sends {
+            None => b"Close",
+            Some(SIGTERM) => b"Kill",
+            Some(_) => b"Signal",
         };
         // `calloc (pids, sizeof (pid_t))`: zero for every process not (yet)
         // matched, which a matched one in group 0 then counts as seen.
@@ -918,7 +917,7 @@ impl Killall<'_> {
                 let id = match self.sys.getpgid(pid) {
                     Ok(pgid) => pgid,
                     Err(errno) => {
-                        complain(
+                        self.sys.complain(
                             format!("killall: getpgid({pid}): {}\n", strerror(errno)).as_bytes(),
                         );
                         -1
@@ -955,7 +954,7 @@ impl Killall<'_> {
                     .map_err(Refusal::Errno)
             } else {
                 let req = o.asked.request();
-                requests::deliver_with(self.sys, target, req, o.asked.via, signal_it)
+                requests::deliver_with(self.asker, target, req, o.asked.via, signal_it)
             };
             match sent {
                 Ok(route) => {
@@ -980,7 +979,7 @@ impl Killall<'_> {
                             }
                             .as_bytes(),
                         );
-                        complain(&text);
+                        self.sys.complain(&text);
                     }
                     if let Some(j) = found_name {
                         found |= bit(j);
@@ -992,7 +991,12 @@ impl Killall<'_> {
                     if why != Refusal::Errno(ESRCH) || o.interactive {
                         let mut text = shown.to_vec();
                         text.extend_from_slice(format!("({id}): {}\n", why.text()).as_bytes());
-                        complain(&text);
+                        self.sys.complain(&text);
+                    }
+                    // Still there, it is still `--timeout`'s: a close it
+                    // cannot answer is what the terminate after it is for.
+                    if why != Refusal::Errno(ESRCH) {
+                        reached.push(((shown.to_vec(), id), target));
                     }
                 }
             }
@@ -1003,19 +1007,23 @@ impl Killall<'_> {
                 if found & bit(i) == 0 {
                     let mut text = name.clone();
                     text.extend_from_slice(b": no process found\n");
-                    complain(&text);
+                    self.sys.complain(&text);
                 }
             }
         }
         // `--timeout`s, to what is still there.
         let steps = &o.asked.escalations;
-        requests::escalate(self.sys, reached, steps, o.asked.via, |(shown, id), why| {
-            if why != Refusal::Errno(ESRCH) {
+        requests::escalate(
+            self.asker,
+            reached,
+            steps,
+            o.asked.via,
+            |(shown, id), why| {
                 let mut text = shown.clone();
                 text.extend_from_slice(format!("({id}): {}\n", why.text()).as_bytes());
-                complain(&text);
-            }
-        });
+                self.sys.complain(&text);
+            },
+        );
         let error = if names.is_empty() {
             u8::from(pid_killed.is_empty())
         } else {
@@ -1048,7 +1056,7 @@ impl Killall<'_> {
                 let mut text = b"/proc: ".to_vec();
                 text.extend_from_slice(coreutils::errmsg::strerror(&e).as_bytes());
                 text.push(b'\n');
-                complain(&text);
+                self.sys.complain(&text);
                 return Err(Exit(1));
             }
         };
@@ -1281,6 +1289,7 @@ fn main() -> ExitCode {
     let mut k = Killall {
         proc_root: PathBuf::from("/proc"),
         sys: &sys,
+        asker: &requests::System::GROUPS,
         opts: Opts::default(),
         utf8: coreutils::locale::ctype_is_utf8(),
     };
@@ -1313,29 +1322,13 @@ mod tests {
 
     /// A system that records sends and signals nothing; every process is in
     /// the group its fixture names, and is gone once signalled -- to `-w`,
-    /// which asks `gone`; the null signal still finds it.
+    /// which asks `gone`; the null signal still finds it. The requests, and
+    /// `--timeout`'s signals, go to `procstop`'s fake asker beside it.
     struct Fake {
         sent: RefCell<Vec<Sent>>,
         groups: Vec<(i32, i32)>,
-        /// The processes that answer requests.
-        answering: Vec<i32>,
-        /// Each request made: the PID, and whether it was to close.
-        asked: RefCell<Vec<(i32, bool)>>,
-    }
-
-    impl Asker for Fake {
-        fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-            self.sent.borrow_mut().push((pid, sig));
-            Ok(())
-        }
-        fn answers(&self, pid: i32) -> bool {
-            self.answering.contains(&pid)
-        }
-        fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
-            self.asked.borrow_mut().push((pid, close));
-            Ok(())
-        }
-        fn nap(&self, _ms: u64) {}
+        /// What the run said, a complaint at a time.
+        said: RefCell<Vec<Vec<u8>>>,
     }
 
     impl System for Fake {
@@ -1360,6 +1353,9 @@ mod tests {
             100.0
         }
         fn sleep_a_second(&self) {}
+        fn complain(&self, text: &[u8]) {
+            self.said.borrow_mut().push(text.to_vec());
+        }
     }
 
     /// A process for the fixture: its PID, the name in `stat`, its start
@@ -1410,16 +1406,30 @@ mod tests {
         input: &[u8],
         answering: &[i32],
     ) -> (Ran, Vec<(i32, bool)>) {
+        let (ran, asked, _) = go_saying(procs, words, groups, input, answering);
+        (ran, asked)
+    }
+
+    /// [`go_asking`], and what the run said about the processes, a
+    /// complaint at a time.
+    fn go_saying(
+        procs: &[P],
+        words: &[&str],
+        groups: &[(i32, i32)],
+        input: &[u8],
+        answering: &[i32],
+    ) -> (Ran, Vec<(i32, bool)>, Vec<String>) {
         let root = world(procs);
         let sys = Fake {
             sent: RefCell::new(Vec::new()),
             groups: groups.to_vec(),
-            answering: answering.to_vec(),
-            asked: RefCell::new(Vec::new()),
+            said: RefCell::new(Vec::new()),
         };
+        let asker = procstop::fake::fake(answering, &[]);
         let mut k = Killall {
             proc_root: root.dir().to_path_buf(),
             sys: &sys,
+            asker: &asker,
             opts: Opts::default(),
             utf8: true,
         };
@@ -1429,9 +1439,24 @@ mod tests {
         let status = match run(b"killall", &words, &mut k, &mut out, &mut input) {
             Ok(s) | Err(Exit(s)) => s,
         };
-        let sent = sys.sent.borrow().clone();
-        let asked = sys.asked.borrow().clone();
-        ((status, sent, out), asked)
+        // What was sent through the pidfd path, then what `--timeout` sent
+        // after it; the requests asked, by PID and whether to close.
+        let mut sent = sys.sent.borrow().clone();
+        let mut asked = Vec::new();
+        for &(what, pid, sig) in asker.did.borrow().iter() {
+            match what {
+                "kill" => sent.push((pid, sig)),
+                "close" | "terminate" => asked.push((pid, what == "close")),
+                _ => {}
+            }
+        }
+        let said = sys
+            .said
+            .borrow()
+            .iter()
+            .map(|t| String::from_utf8(t.clone()).unwrap())
+            .collect();
+        ((status, sent, out), asked, said)
     }
 
     const SLEEP: P = P(200, "sleep", 50_000, b"sleep\x001000\0", 1000);
@@ -1583,10 +1608,36 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_is_said_and_a_process_gone_is_not() {
+        // Nothing answers: the close is refused, and said to be.
+        let (_, _, said) = go_saying(&[SLEEP], &["--close", "sleep"], &[], b"", &[]);
+        assert_eq!(
+            said,
+            [
+                "sleep(200): answers no close request; a terminate stops it without asking\n",
+                "sleep: no process found\n",
+            ]
+        );
+        // `-v` says what was sent, and what was asked.
+        let (_, _, said) = go_saying(&[SLEEP], &["-v", "sleep"], &[], b"", &[]);
+        assert_eq!(said, ["Killed sleep(200) with signal 15\n"]);
+        let (_, _, said) = go_saying(&[SLEEP], &["-v", "--close", "sleep"], &[], b"", &[200]);
+        assert_eq!(said, ["Asked sleep(200) to close\n"]);
+    }
+
+    #[test]
     fn a_timeout_escalates_to_what_is_still_there() {
         let (status, sent, _) = go(&[SLEEP], &["--timeout", "0", "force", "sleep"]);
         assert_eq!(status, 0);
         assert_eq!(sent, vec![(200, 15), (200, 0), (200, 9)]);
+        // A close nothing answers is refused, and the terminate after it is
+        // still sent.
+        let (status, sent, _) = go(
+            &[SLEEP],
+            &["--close", "--timeout", "0", "terminate", "sleep"],
+        );
+        assert_eq!(status, 1, "the close itself was refused");
+        assert_eq!(sent, vec![(200, 0), (200, 0), (200, 15)]);
     }
 
     #[test]
@@ -1614,6 +1665,11 @@ mod tests {
             go_asking(&[SLEEP], &["-i", "--close", "sleep"], &[], b"y\n", &[200]);
         assert_eq!(out, b"Close sleep(200) ? (y/N) ");
         assert_eq!(asked, vec![(200, true)]);
+        // A force is SIGKILL, which upstream calls `Signal`, as `-KILL`.
+        let (_, _, out) = go_with(&[SLEEP], &["-i", "--force", "sleep"], &[], b"n\n");
+        assert_eq!(out, b"Signal sleep(200) ? (y/N) ");
+        let (_, _, out) = go_with(&[SLEEP], &["-i", "--terminate", "sleep"], &[], b"n\n");
+        assert_eq!(out, b"Kill sleep(200) ? (y/N) ");
     }
 
     #[test]

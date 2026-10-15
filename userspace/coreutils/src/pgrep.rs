@@ -1344,7 +1344,12 @@ impl Pgrep {
     /// `execute_kill`: the signal named -- `kill`, or with `-q` `sigqueue` --
     /// or else the request (§1072), sent to process `pid` on `sys`. The way
     /// it went.
-    fn execute_kill<A: Asker + ?Sized>(&self, sys: &A, pid: i64) -> Result<Route, Refusal> {
+    fn execute_kill<A: Asker + ?Sized>(
+        &self,
+        sys: &A,
+        queue: Sigqueue<'_>,
+        pid: i64,
+    ) -> Result<Route, Refusal> {
         let target = scanf::low_i32(pid);
         // The second deliberate difference: never a group, nor everyone.
         if target <= 0 {
@@ -1356,7 +1361,7 @@ impl Pgrep {
         }
         let signal = self.opts.signal;
         if self.opts.use_sigqueue {
-            libcall::sigqueue(target, signal, self.opts.sigval)
+            queue(target, signal, self.opts.sigval)
         } else {
             sys.kill(target, signal)
         }
@@ -1377,16 +1382,22 @@ impl Pgrep {
 
     /// `pkill`'s half of `main`.
     fn pkill(&self, procs: &[El], out: &mut Stream) -> u8 {
-        self.pkill_on(&requests::System, procs, out)
+        self.pkill_on(&requests::System::SINGLE, &libcall::sigqueue, procs, out)
     }
 
     /// [`Pgrep::pkill`] on `sys`, writing to `out`; then each `--timeout`,
     /// to what is still there.
-    fn pkill_on<A: Asker + ?Sized>(&self, sys: &A, procs: &[El], out: &mut dyn Write) -> u8 {
+    fn pkill_on<A: Asker + ?Sized>(
+        &self,
+        sys: &A,
+        queue: Sigqueue<'_>,
+        procs: &[El],
+        out: &mut dyn Write,
+    ) -> u8 {
         let mut kill_count = 0usize;
         let mut reached = Vec::new();
         for e in procs {
-            match self.execute_kill(sys, e.num) {
+            match self.execute_kill(sys, queue, e.num) {
                 Ok(route) => {
                     reached.push((e.num, scanf::low_i32(e.num)));
                     if self.opts.echo {
@@ -1410,7 +1421,15 @@ impl Pgrep {
                     }
                     kill_count = kill_count.saturating_add(1);
                 }
-                Err(why) => self.refused(e.num, why),
+                Err(why) => {
+                    self.refused(e.num, why);
+                    // Still there, it is still `--timeout`'s; a PID below 1
+                    // was never sent anything and is not.
+                    let target = scanf::low_i32(e.num);
+                    if target > 0 && why != Refusal::Errno(libcall::ESRCH) {
+                        reached.push((e.num, target));
+                    }
+                }
             }
         }
         let asked = &self.opts.asked;
@@ -1477,6 +1496,10 @@ impl Pgrep {
         u8::from(wait_count == 0)
     }
 }
+
+/// `sigqueue (pid, sig, value)`, which `-q` sends with: the C library's,
+/// or a test's recorder.
+type Sigqueue<'a> = &'a dyn Fn(i32, i32, i32) -> Result<(), i32>;
 
 /// The parts of `select_procs`' state that the selection tests read.
 struct Selection {
@@ -1903,8 +1926,34 @@ mod tests {
             })
             .collect();
         let mut out = Vec::new();
-        let status = p.pkill_on(sys, &procs, &mut out);
+        let status = p.pkill_on(
+            sys,
+            &|_, _, _| panic!("nothing is queued"),
+            &procs,
+            &mut out,
+        );
         (status, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn pkill_queues_with_sigqueue_whoever_answers() {
+        let mut p = prog("pkill", Path::new("no-such-proc"));
+        p.parse_opts(&os(&["-q", "7", "-USR1", "x"])).unwrap();
+        let procs = [5, 0].map(|num| El {
+            num,
+            str: Vec::new(),
+        });
+        let sys = asker(&[5], &[]);
+        let queued = std::cell::RefCell::new(Vec::new());
+        let queue = |pid, sig, value| {
+            queued.borrow_mut().push((pid, sig, value));
+            Ok(())
+        };
+        let mut out = Vec::new();
+        assert_eq!(p.pkill_on(&sys, &queue, &procs, &mut out), 0);
+        // A signal named is sent as named, never asked; PID 0 is no process.
+        assert_eq!(queued.into_inner(), vec![(5, 10, 7)]);
+        assert!(sys.did.borrow().is_empty());
     }
 
     #[test]
@@ -1940,10 +1989,8 @@ mod tests {
         // 6 is refused; 7 has gone, which is no failure; 5 was asked.
         let (status, _) = pkill_on(&sys, &["--close", "x"], &[5, 6, 7]);
         assert_eq!(status, 0);
-        assert_eq!(
-            *sys.did.borrow(),
-            vec![("close", 5, 0), ("kill", 6, 0), ("kill", 7, 0)]
-        );
+        // Asking 7 says it is gone; 6 is looked for before it is refused.
+        assert_eq!(*sys.did.borrow(), vec![("close", 5, 0), ("kill", 6, 0)]);
         // Nothing reached: status 1.
         let sys = asker(&[], &[]);
         assert_eq!(pkill_on(&sys, &["--close", "x"], &[6]).0, 1);

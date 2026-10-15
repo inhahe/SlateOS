@@ -263,8 +263,8 @@ def replay(tree: Path, mutants_dir: Path, harnesses: list[str], workspace: str,
                     if v == "caught":
                         # A difference the machine's load caused would not
                         # come back: the mutant must be caught twice.
-                        again = run_harness(bash, tree, h, base.with_suffix(".again.log"), limit)
-                        v = "caught" if again == "caught" else "flaky"
+                        second = run_harness(bash, tree, h, base.with_suffix(".again.log"), limit)
+                        v = "caught" if second == "caught" else "flaky"
                     if v in ("skipped", "broken"):
                         git(tree, "reset", "--hard", "-q")
                         print(f"mutants-replay: {h} {v} rather than compared on {name}; "

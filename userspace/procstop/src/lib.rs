@@ -22,18 +22,13 @@
 //!
 //! Off SlateOS no program answers, so a terminate is always `SIGTERM`.
 
+use libcall::pty::{EIO, ENOMEM};
+use libcall::{EAGAIN, EINVAL, ENOSYS, EPERM};
 use libservicebus::{BusError, lifecycle};
 
-/// `SIGTERM`, which *terminate* is to a program that does not answer.
-pub const SIGTERM: i32 = 15;
-/// `SIGKILL`, which *force* is.
-pub const SIGKILL: i32 = 9;
-/// `ESRCH`: the process is not there.
-pub const ESRCH: i32 = 3;
-const EPERM: i32 = 1;
-const EAGAIN: i32 = 11;
-const EINVAL: i32 = 22;
-const ENOSYS: i32 = 38;
+// `SIGTERM`, which *terminate* is to a program that does not answer;
+// `SIGKILL`, which *force* is; `ESRCH`, a process that is not there.
+pub use libcall::{ESRCH, SIGKILL, SIGTERM};
 
 /// How long [`escalate`] waits between looks at whether a process is still
 /// there.
@@ -135,31 +130,44 @@ pub trait Asker {
     /// `kill (pid, sig)`, `pid` as `kill(2)` takes it: an `errno` for a
     /// failure.
     fn kill(&self, pid: i32, sig: i32) -> Result<(), i32>;
-    /// Whether process `pid` answers lifecycle requests.
-    fn answers(&self, pid: i32) -> bool;
     /// Ask process `pid` to close (`close`) or to terminate: an `errno` for
-    /// a failure.
+    /// a failure, `ENOSYS` when it does not answer requests -- it never
+    /// registered, it closed its endpoint, or this is not SlateOS.
     fn ask(&self, pid: i32, close: bool) -> Result<(), i32>;
     /// Wait `ms` milliseconds.
     fn nap(&self, ms: u64);
 }
 
-/// The real thing: the C library's `kill`, SlateOS's lifecycle calls.
-pub struct System;
+/// The real thing: SlateOS's lifecycle calls and the C library's `kill`.
+#[derive(Clone, Copy, Debug)]
+pub struct System {
+    /// Whether `kill` may reach a process group, or every process.
+    groups: bool,
+}
+
+impl System {
+    /// For a program that acts on processes it picked one at a time -- a
+    /// task manager's selected row. Its `kill` refuses 0 and a negative PID
+    /// with `EINVAL`, as `libcall::kill` does, so a PID read wrongly never
+    /// reaches the program's own process group, or every process.
+    pub const SINGLE: Self = Self { groups: false };
+    /// For a program whose operands are process groups and broadcasts by
+    /// design: the `kill` command (`kill -- -PGID`, `kill -9 -1`) and
+    /// `killall -g`.
+    pub const GROUPS: Self = Self { groups: true };
+}
 
 impl Asker for System {
     fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-        libcall::kill_any(pid, sig)
-    }
-
-    fn answers(&self, pid: i32) -> bool {
-        // A failure -- no such process, not ours to ask, or not SlateOS --
-        // is "no": the signal's route then says what it is.
-        u32::try_from(pid).is_ok_and(|p| lifecycle::answers(p) == Ok(true))
+        if self.groups {
+            libcall::kill_any(pid, sig)
+        } else {
+            libcall::kill(pid, sig)
+        }
     }
 
     fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
-        let p = u32::try_from(pid).map_err(|_| ESRCH)?;
+        let p = u32::try_from(pid).map_err(|_| EINVAL)?;
         let kind = if close {
             lifecycle::Kind::Close
         } else {
@@ -178,14 +186,18 @@ impl Asker for System {
     }
 }
 
-/// A lifecycle call's failure in the words a signal's would have been.
+/// A lifecycle call's failure in the words a signal's would have been;
+/// `ENOSYS` for a program that does not answer.
 fn errno_of(e: BusError) -> i32 {
     match e {
         BusError::NoSuchProcess => ESRCH,
         BusError::PermissionDenied => EPERM,
         BusError::QueueFull => EAGAIN,
         BusError::Unsupported => ENOSYS,
-        _ => EINVAL,
+        BusError::ResourceExhausted => ENOMEM,
+        BusError::InvalidArgument => EINVAL,
+        // The kernel failed in a way that is not the caller's mistake.
+        _ => EIO,
     }
 }
 
@@ -196,9 +208,10 @@ pub fn still_there<A: Asker + ?Sized>(sys: &A, target: i32) -> bool {
 }
 
 /// Send `req` to `target` -- a PID, or a process group as `kill(2)` takes
-/// one -- by the route `via` allows: a program that answers is asked; one
-/// that does not is sent `SIGTERM` for *terminate*, and refused for *close*,
-/// which no signal means; *force* is `SIGKILL`.
+/// one, which [`System::SINGLE`] refuses -- by the route `via` allows: a
+/// program that answers is asked; one that does not is sent `SIGTERM` for
+/// *terminate*, and refused for *close*, which no signal means; *force* is
+/// `SIGKILL`.
 ///
 /// # Errors
 ///
@@ -239,18 +252,24 @@ pub fn deliver_with<A: Asker + ?Sized>(
     // A process group is reached by signals alone.
     if target <= 0 {
         return match (via, close) {
-            (Via::Message, _) | (_, true) => Err(Refusal::Group),
-            _ => send(SIGTERM),
+            (Via::Signal, true) => Err(Refusal::NoCloseSignal),
+            (Via::Message, _) | (Via::Either, true) => Err(Refusal::Group),
+            (_, false) => send(SIGTERM),
         };
     }
-    if via != Via::Signal && sys.answers(target) {
-        return sys
-            .ask(target, close)
-            .map(|()| Route::Message)
-            .map_err(Refusal::Errno);
+    // Asked first, rather than first asked whether it answers: a program
+    // that closes its endpoint between the two is then sent the signal, not
+    // an error.
+    if via != Via::Signal {
+        match sys.ask(target, close) {
+            Ok(()) => return Ok(Route::Message),
+            Err(ENOSYS) => {}
+            Err(e) => return Err(Refusal::Errno(e)),
+        }
     }
     // Not asked: say so -- unless the process is not there at all, which is
-    // what to say then.
+    // what to say then. (Off SlateOS asking says `ENOSYS` of a process that
+    // does not exist too.)
     let absent = |refusal: Refusal| match signal(0) {
         Err(e) => Refusal::Errno(e),
         Ok(()) => refusal,
@@ -263,11 +282,14 @@ pub fn deliver_with<A: Asker + ?Sized>(
     }
 }
 
-/// `kill --timeout`'s escalation. `reached` holds the processes the first
-/// request was sent to, each `(key, target)` -- the key is what the caller
-/// names it by. For each `(ms, request)` in turn: wait up to `ms` for them to
-/// end, then send `request` to those still there. `refused` hears of each
-/// that could not be sent it, which is then left alone.
+/// `kill --timeout`'s escalation. `reached` holds the processes to follow --
+/// each `(key, target)`, the key what the caller names it by -- which is
+/// every one the first request was meant for that is there, whether or not
+/// that request could be sent: `--close --timeout 10000 terminate` must
+/// still terminate a program that answers no close request. For each `(ms,
+/// request)` in turn: wait up to `ms` for them to end, then send `request` to
+/// those still there. `refused` hears of each that could not be sent it; it
+/// is still followed, and only its being gone ends that.
 ///
 /// A process is found again by its PID. On SlateOS that is the process
 /// asked, since the kernel never hands a PID out twice; on Linux, where it
@@ -293,7 +315,11 @@ pub fn escalate<A: Asker + ?Sized, K>(
         for (key, target) in reached {
             match deliver(sys, target, next, via) {
                 Ok(_) => next_reached.push((key, target)),
-                Err(why) => refused(&key, why),
+                Err(Refusal::Errno(ESRCH)) => {}
+                Err(why) => {
+                    refused(&key, why);
+                    next_reached.push((key, target));
+                }
             }
         }
         reached = next_reached;
@@ -304,11 +330,11 @@ pub fn escalate<A: Asker + ?Sized, K>(
 /// records what it was asked to do and does nothing.
 #[cfg(any(test, feature = "fake"))]
 pub mod fake {
-    use super::{Asker, ESRCH};
+    use super::{Asker, EINVAL, ENOSYS, ESRCH};
     use std::cell::RefCell;
 
     /// What was done: `("kill", pid, sig)`, `("close" | "terminate", pid,
-    /// 0)`, `("nap", 0, ms)`.
+    /// 0)` for a request a process answered, `("nap", 0, ms)`.
     pub type Did = (&'static str, i32, i32);
 
     /// The system. Every process is there and signals do nothing, except as
@@ -317,29 +343,35 @@ pub mod fake {
     pub struct Fake {
         /// Everything done, in order.
         pub did: RefCell<Vec<Did>>,
-        /// The processes that answer requests.
+        /// The processes that answer requests; asking any other is `ENOSYS`.
         pub answering: Vec<i32>,
         /// The processes that end once a nap has passed.
         pub slow: Vec<i32>,
         /// The processes that are not there.
         pub gone: RefCell<Vec<i32>>,
-        /// What asking fails with, if it does.
+        /// What asking a process that answers fails with, if it does.
         pub ask_fails: Option<i32>,
     }
 
     impl Asker for Fake {
         fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
             self.did.borrow_mut().push(("kill", pid, sig));
-            if self.gone.borrow().contains(&pid) {
+            // As kill(2): a number that is no signal first, then the process.
+            if !(0..=64).contains(&sig) {
+                Err(EINVAL)
+            } else if self.gone.borrow().contains(&pid) {
                 Err(ESRCH)
             } else {
                 Ok(())
             }
         }
-        fn answers(&self, pid: i32) -> bool {
-            self.answering.contains(&pid)
-        }
         fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
+            if self.gone.borrow().contains(&pid) {
+                return Err(ESRCH);
+            }
+            if !self.answering.contains(&pid) {
+                return Err(ENOSYS);
+            }
             let what = if close { "close" } else { "terminate" };
             self.did.borrow_mut().push((what, pid, 0));
             self.ask_fails.map_or(Ok(()), Err)
@@ -423,6 +455,7 @@ mod tests {
             deliver(&sys, 6, Request::Close, Via::Either),
             Err(Refusal::CannotClose)
         );
+        // Asking says it is gone; nothing is signalled.
         assert_eq!(
             deliver(&sys, 7, Request::Close, Via::Either),
             Err(Refusal::Errno(ESRCH))
@@ -431,9 +464,33 @@ mod tests {
             deliver(&sys, 5, Request::Close, Via::Signal),
             Err(Refusal::NoCloseSignal)
         );
+        assert_eq!(*sys.did.borrow(), vec![("close", 5, 0), ("kill", 6, 0)]);
+    }
+
+    #[test]
+    fn a_process_that_does_not_answer_and_is_not_there_is_said_to_be_gone() {
+        // Off SlateOS asking says ENOSYS whether the process exists or not:
+        // the null signal tells the two apart.
+        struct NobodyAnswers(Fake);
+        impl Asker for NobodyAnswers {
+            fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
+                self.0.kill(pid, sig)
+            }
+            fn ask(&self, _pid: i32, _close: bool) -> Result<(), i32> {
+                Err(ENOSYS)
+            }
+            fn nap(&self, ms: u64) {
+                self.0.nap(ms);
+            }
+        }
+        let sys = NobodyAnswers(fake(&[], &[7]));
         assert_eq!(
-            *sys.did.borrow(),
-            vec![("close", 5, 0), ("kill", 6, 0), ("kill", 7, 0)]
+            deliver(&sys, 7, Request::Close, Via::Either),
+            Err(Refusal::Errno(ESRCH))
+        );
+        assert_eq!(
+            deliver(&sys, 7, Request::Terminate, Via::Message),
+            Err(Refusal::Errno(ESRCH))
         );
     }
 
@@ -454,7 +511,7 @@ mod tests {
         );
         assert_eq!(
             *sys.did.borrow(),
-            vec![("kill", 5, SIGTERM), ("kill", 6, 0), ("kill", 7, 0)]
+            vec![("kill", 5, SIGTERM), ("kill", 6, 0)]
         );
     }
 
@@ -475,11 +532,15 @@ mod tests {
         );
         for (req, via) in [
             (Request::Close, Via::Either),
-            (Request::Close, Via::Signal),
             (Request::Terminate, Via::Message),
         ] {
             assert_eq!(deliver(&sys, -5, req, via), Err(Refusal::Group));
         }
+        // Signals were what was asked for: it is the close they cannot say.
+        assert_eq!(
+            deliver(&sys, -5, Request::Close, Via::Signal),
+            Err(Refusal::NoCloseSignal)
+        );
         assert_eq!(
             *sys.did.borrow(),
             vec![
@@ -526,7 +587,10 @@ mod tests {
         assert_eq!(errno_of(BusError::PermissionDenied), EPERM);
         assert_eq!(errno_of(BusError::QueueFull), EAGAIN);
         assert_eq!(errno_of(BusError::Unsupported), ENOSYS);
-        assert_eq!(errno_of(BusError::Malformed), EINVAL);
+        assert_eq!(errno_of(BusError::ResourceExhausted), ENOMEM);
+        assert_eq!(errno_of(BusError::InvalidArgument), EINVAL);
+        assert_eq!(errno_of(BusError::Malformed), EIO);
+        assert_eq!(errno_of(BusError::Unknown(-1)), EIO);
     }
 
     #[test]
@@ -565,26 +629,64 @@ mod tests {
     }
 
     #[test]
-    fn escalation_reports_and_drops_a_refusal() {
+    fn a_refused_step_does_not_end_the_escalation() {
+        // `--close --timeout 0 terminate --timeout 0 force` to a program that
+        // answers nothing: the close is refused, and the terminate and the
+        // force are still sent.
         let sys = fake(&[], &[]);
         let mut refused = Vec::new();
         escalate(
             &sys,
             vec![(6, 6)],
-            &[(0, Request::Close), (0, Request::Force)],
+            &[
+                (0, Request::Close),
+                (0, Request::Terminate),
+                (0, Request::Force),
+            ],
             Via::Either,
             |k, why| refused.push((*k, why)),
         );
         assert_eq!(refused, vec![(6, Refusal::CannotClose)]);
-        // Refused, it is not forced after.
-        assert!(!sys.did.borrow().contains(&("kill", 6, SIGKILL)));
+        let did = sys.did.borrow();
+        assert!(did.contains(&("kill", 6, SIGTERM)), "{did:?}");
+        assert!(did.contains(&("kill", 6, SIGKILL)), "{did:?}");
+    }
+
+    #[test]
+    fn a_process_gone_before_its_step_is_neither_sent_nor_reported() {
+        let sys = fake(&[], &[6]);
+        let mut refused = Vec::new();
+        escalate(
+            &sys,
+            vec![(6, 6)],
+            &[(0, Request::Force)],
+            Via::Either,
+            |k, why| refused.push((*k, why)),
+        );
+        assert!(refused.is_empty());
+        assert_eq!(*sys.did.borrow(), vec![("kill", 6, 0)]);
+    }
+
+    #[test]
+    fn the_single_process_system_refuses_a_group_and_everyone() {
+        assert_eq!(System::SINGLE.kill(0, 0), Err(EINVAL));
+        assert_eq!(System::SINGLE.kill(-1, 0), Err(EINVAL));
+        assert_eq!(System::SINGLE.kill(-1234, 0), Err(EINVAL));
+        // The kill command's reaches its own group (the null signal sends
+        // nothing): wherever it can signal at all, it is not refused.
+        assert_ne!(System::GROUPS.kill(0, 0), Err(EINVAL));
+        // A group refused without a word to its members.
+        assert_eq!(
+            deliver(&System::SINGLE, -1, Request::Force, Via::Either),
+            Err(Refusal::Errno(EINVAL))
+        );
     }
 
     /// Off SlateOS nothing answers: a terminate is `SIGTERM`.
     #[cfg(not(target_vendor = "slateos"))]
     #[test]
     fn off_slateos_nothing_answers() {
-        assert!(!System.answers(1));
-        assert_eq!(System.ask(1, false), Err(ENOSYS));
+        assert_eq!(System::SINGLE.ask(1, false), Err(ENOSYS));
+        assert_eq!(System::SINGLE.ask(-1, false), Err(EINVAL));
     }
 }

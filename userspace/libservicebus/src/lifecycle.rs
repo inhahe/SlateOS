@@ -21,8 +21,7 @@
 //! [`BusError::Unsupported`]. So does every call here off SlateOS, where
 //! the syscalls are the host stub.
 
-use super::Endpoint as _;
-use super::{BusError, KernelChannel, Result, Wait, check, syscall0, syscall1, syscall2};
+use super::{BusError, Endpoint, KernelChannel, Result, Wait, check, syscall0, syscall1, syscall2};
 
 /// The kernel's numbers for the three calls (`kernel/src/syscall/number.rs`,
 /// compared by the tests).
@@ -135,7 +134,9 @@ impl Request {
 /// Dropping it closes the channel, after which the program is asked with
 /// signals again.
 pub struct Lifecycle {
-    channel: KernelChannel,
+    /// The kernel's channel; a scripted one in the tests, as for
+    /// [`super::Connection`].
+    channel: Box<dyn Endpoint>,
 }
 
 impl Lifecycle {
@@ -151,17 +152,23 @@ impl Lifecycle {
         // memory of ours.
         let ret = unsafe { syscall0(nr::SYS_LIFECYCLE_REGISTER) };
         Ok(Self {
-            channel: KernelChannel {
+            channel: Box::new(KernelChannel {
                 handle: check(ret)?,
-            },
+            }),
         })
+    }
+
+    /// An endpoint over `channel`, for the tests.
+    #[cfg(test)]
+    pub(crate) fn over(channel: Box<dyn Endpoint>) -> Self {
+        Self { channel }
     }
 
     /// The channel's handle, to wait on beside the program's other sources
     /// (`SYS_WAIT_MULTIPLE` for `POLLIN`, or an [`super::EventLoop`]).
     #[must_use]
     pub fn handle(&self) -> u64 {
-        self.channel.handle
+        self.channel.raw_handle()
     }
 
     /// The next request, waiting for one.

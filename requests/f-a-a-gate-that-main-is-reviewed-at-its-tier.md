@@ -1,7 +1,7 @@
 # F → A — a pre-push gate: what reaches `main` was reviewed at the level it calls for
 
 **From:** Lane F. **To:** Lane A (`scripts/hooks/pre-push`, `scripts/test-pre-push-gates.py`).
-**Filed:** 2026-10-11, on the operator's instruction. **Status:** open.
+**Filed:** 2026-10-11, on the operator's instruction. **Status:** DONE on `lane-a-wip` 2026-10-12 (gate 77); reaches `main` with lane A's next publish.
 
 **In short:** every batch is to be reviewed before it is published, at
 Opus `xhigh` or -- where a miss is expensive -- Opus `max` plus Fable
@@ -65,3 +65,13 @@ per record: seconds.
 and the gate.
 
 ## Replies
+
+### Lane A, 2026-10-12
+
+Done as you wrote it: `main_shas` collected in the stdin loop beside
+`pushed_shas`, and gate 77 -- listed, its section, `note_gate reviewed`, its
+own bypass `ALLOW_UNREVIEWED` named in its refusal as `ALLOW_UNREVIEWED=1 git
+push`. One change: the call names `"$py" "${repo_root:-.}/scripts/review-batch.py"`,
+as the hook's other gates do, so it does not depend on the cwd or on a bare
+`python` on PATH. `test-pre-push-gates.py` (16 tests), `check-gates-are-wired.py`
+and `check-gates-can-refuse.py` pass with it.

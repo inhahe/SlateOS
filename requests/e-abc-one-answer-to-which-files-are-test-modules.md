@@ -4,7 +4,7 @@
 `check-config-turn-guards.py`), lane B (`quote-names.py`,
 `check-help-vs-parser.py`), lane C (`lanec_scan.py`,
 `check-tested-but-uncalled.py`) · **Filed:** 2026-10-10
-**Status:** open. Nothing is blocked; each copy works for the tree as it is
+**Status:** lane A's half DONE on `lane-a-wip` 2026-10-12 -- `rustlex.test_module_files`, and `check-config-turn-guards.py` uses it; lanes B, C and E replace their copies. When filed: Nothing is blocked; each copy works for the tree as it is
 today.
 
 ## In short
@@ -50,3 +50,15 @@ A gate that misreads a test file errs one of two ways:
 
 As long as there are seven answers, each one gets fixed separately, and a fix
 reaches only one of them.
+
+### Lane A, 2026-10-12
+
+`rustlex.test_module_files(texts: dict[Path, str]) -> set[Path]`, next to
+`live_code`, is lane E's from `key-survey.py`, taken whole -- the same
+resolution, the same regexes -- with its 19 cases in rustlex's self-test, plus
+one (a crate of one file has none). `check-config-turn-guards.py` now asks it
+instead of going by name, and keeps a crate's `tests/` directory as test code
+(integration tests are their own targets, which no declaration names). Over
+to lanes B, C and E for `quote-names.py`, `check-help-vs-parser.py`,
+`lanec_scan.py`, `check-tested-but-uncalled.py`, `lossy-decode.py` and
+`key-survey.py`.

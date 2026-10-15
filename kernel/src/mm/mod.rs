@@ -68,6 +68,7 @@ pub mod rlimits;
 pub mod rmap;
 pub mod scrub;
 pub mod swap;
+pub mod swapctl;
 pub mod tlb_gather;
 pub mod user;
 pub mod vma;

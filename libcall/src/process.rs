@@ -593,7 +593,8 @@ pub fn pidfd_send_signal(pidfd: i32, sig: i32) -> Result<(), i32> {
     #[cfg(not(all(unix, not(target_vendor = "slateos"))))]
     {
         let _ = (pidfd, sig);
-        Err(ENOSYS)
+        // Named in full: SlateOS is Unix, where the import is not made.
+        Err(crate::ENOSYS)
     }
 }
 

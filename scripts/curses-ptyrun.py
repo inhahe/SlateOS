@@ -9,8 +9,9 @@ new session (`pty.fork`). Its standard input and output are the terminal; its
 standard error goes to the file ERR -- or with --tty-stderr stays on the
 terminal, as it is for a program run from one, which matters to a program
 that measures the terminal on its standard error (procps's `watch`). Everything
-the terminal is sent is written to the file OUT once PROG has exited, and its
-exit status is then appended to ERR as "exit N" (N negative for a signal).
+the terminal is sent is written to the file OUT as it arrives, and once PROG
+has exited its exit status is appended to ERR as "exit N" (N negative for a
+signal).
 
 PROG is found on `PATH` when it has no slash, so that its `argv[0]` can be
 the bare name.
@@ -130,7 +131,9 @@ def main(argv):
                 os.execvp(prog[0], prog)
             finally:
                 os._exit(127)
-        chunks = []
+        # Written as it comes, so that a run killed for hanging still shows
+        # how far it got.
+        out = open(out_path, "wb")
         last_event = None
         while True:
             timeout = None
@@ -148,12 +151,12 @@ def main(argv):
                 break
             if not data:
                 break
-            chunks.append(data)
+            out.write(data)
+            out.flush()
             last_event = time.monotonic()
+        out.close()
         _, status = os.waitpid(pid, 0)
         os.close(master)
-    with open(out_path, "wb") as out:
-        out.write(b"".join(chunks))
     with open(err_path, "ab") as err:
         err.write(b"exit %d\n" % os.waitstatus_to_exitcode(status))
     return 0

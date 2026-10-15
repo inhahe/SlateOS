@@ -618,6 +618,28 @@ check_identity_rungs() {
     fi
     return 0
 }
+
+# The check that failed a boot after it reached its marker, in the words of the
+# run's FAILED line; empty while none has. The history row records it as the
+# boot's cause when the serial log names nothing earlier (boot-history.py
+# --failed-check), so that a check that keeps failing boots can be counted.
+FAILED_CHECK=""
+
+# Run the checks a serial log that reached the marker must pass, in order, and
+# fail on the first that does not, setting FAILED_CHECK. $1: the log, as it
+# stood at the marker.
+marker_checks_pass() {
+    if ! check_selftest_failures "$1"; then
+        FAILED_CHECK="a self-test failed"
+    elif ! check_identity_rungs "$1"; then
+        FAILED_CHECK="a file-identity rung did not run"
+    elif ! check_liveness_failures "$1"; then
+        FAILED_CHECK="the liveness watchdog reported"
+    elif ! check_bench_coverage "$1" "$BENCH"; then
+        FAILED_CHECK="the benchmark suite left windows unjudged"
+    fi
+    [ -z "$FAILED_CHECK" ]
+}
 #
 # Under `selftest.keep_going=1` (SLATE_CMDLINE) a FATAL: line is a self-test
 # failure the kernel reported and carried on past -- it prints "[selftest]
@@ -3447,6 +3469,9 @@ record_boot_outcome() {
     fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
+    fi
+    if [ -n "$FAILED_CHECK" ]; then
+        args+=(--failed-check "$FAILED_CHECK")
     fi
     # Absent, not zero, when the run did not build: --no-build and --no-stage
     # skip Step 1 entirely, and recording 0 there would drag every median down
@@ -10365,31 +10390,17 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         # boot, and a boot already failed is not kept waiting for the probe.
         # Afterwards the log holds that much; the whole is kept beside it.
         cp "$SERIAL_FILE" "$SERIAL_AT_MARKER"
-        if ! check_selftest_failures "$SERIAL_AT_MARKER"; then
+        if ! marker_checks_pass "$SERIAL_AT_MARKER"; then
             marker_log_back
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
-            exit 1
-        fi
-        if ! check_identity_rungs "$SERIAL_AT_MARKER"; then
-            marker_log_back
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
-            exit 1
-        fi
-        if ! check_liveness_failures "$SERIAL_AT_MARKER"; then
-            marker_log_back
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
-            exit 1
-        fi
-        if ! check_bench_coverage "$SERIAL_AT_MARKER" "$BENCH"; then
-            marker_log_back
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but $FAILED_CHECK) ==="
             exit 1
         fi
         screen_ok=1
         screen_probe || screen_ok=0
         marker_log_back
         if [ "$screen_ok" != "1" ]; then
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but the screen did not show what was typed at it) ==="
+            FAILED_CHECK="the screen did not show what was typed at it"
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but $FAILED_CHECK) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"
@@ -10462,20 +10473,8 @@ if [ -f "$SERIAL_FILE" ]; then
     if grep -q "^$WAIT_MARKER" "$SERIAL_FILE"; then
         echo "$WAIT_MARKER found."
         echo "=== Screen probe: not run -- the wait ended (QEMU exited, or the clock ran out) before it saw the marker ==="
-        if ! check_selftest_failures "$SERIAL_FILE"; then
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
-            exit 1
-        fi
-        if ! check_identity_rungs "$SERIAL_FILE"; then
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
-            exit 1
-        fi
-        if ! check_liveness_failures "$SERIAL_FILE"; then
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
-            exit 1
-        fi
-        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
-            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+        if ! marker_checks_pass "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but $FAILED_CHECK) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"

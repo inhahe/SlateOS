@@ -968,6 +968,101 @@ def _verdict_from_evidence(serial: Serial | None, exit_code: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# Cause
+# --------------------------------------------------------------------------
+
+#: The panic handler's location line, `panicked at <file>:<line>:<col>:`.
+_PANIC_AT_RE = re.compile(r"panicked at (\S+?):(\d+):\d+:")
+#: A self-test's failure, by the words boot-test.sh's `check_selftest_failures`
+#: fails a boot on: any line saying "self-test failed", in either case -- the
+#: `FATAL:`/`WARNING:` lines of `selftest::report`, and older forms such as
+#: `[hpet] WARNING: Self-test failed`.
+_SELFTEST_FAILED_RE = re.compile(r"^.*self-test failed.*$",
+                                 re.MULTILINE | re.IGNORECASE)
+#: The test's name in `selftest::report`'s form, `FATAL: <name> self-test
+#: failed` (WARNING for one the boot carries on past).
+_SELFTEST_NAME_RE = re.compile(r"(?:FATAL|WARNING): (.+?) self-test failed",
+                               re.IGNORECASE)
+#: The kernel's own word that it is halting, for anything but a self-test.
+_FATAL_RE = re.compile(r"^FATAL: (.+)$", re.MULTILINE)
+#: A self-test's account of what failed, printed before its verdict line.
+_FAIL_LINE_RE = re.compile(r"^\[[^\]]*\]\s+FAIL: (.+)$", re.MULTILINE)
+#: A line's subsystem tag: `[sched]` in `[sched] Spawned task 7`.
+_TAG_RE = re.compile(r"^(\[[^\]]+\])")
+#: How much of a detail line a row keeps.
+CAUSE_DETAIL_WIDTH = 200
+
+
+def _source_location(path: str, line: str) -> str:
+    """`path:line`, with the separators of the host that built the kernel made
+    `/`, and the toolchain's own sources named from `library/`: the commit hash
+    rustc puts in their paths changes with every toolchain, and the same panic
+    must read the same before and after an update."""
+    p = path.replace("\\", "/")
+    m = re.match(r"/rustc/[0-9a-f]+/(.*)", p)
+    if m:
+        p = m.group(1)
+    return f"{p}:{line}"
+
+
+def failure_cause(serial: Serial, verdict: str,
+                  failed_check: str = "") -> tuple[str, str | None] | None:
+    """What a failed boot died of, as `(cause, detail)`, or None when the
+    evidence does not say.
+
+    `cause` is meant to be counted: the same words whenever the same thing
+    fails -- a panic's source location, a self-test's name, the harness check
+    that failed, the subsystem a hang stopped in -- and never anything that
+    varies from run to run (addresses, values, timings). `detail` is the line
+    that says more, which may vary: the self-test's own `FAIL:` line, the
+    panic's message, the exception, the last line before a hang.
+
+    The earliest of a panic, a failed self-test and a FATAL line is the cause,
+    since what followed it may be its consequence. Without any of them: the
+    first fatal exception; then `failed_check`, the check boot-test.sh failed
+    a boot on after it reached its marker (empty when there was none); then,
+    for a boot that never reached it, the subsystem that printed last.
+    """
+    text = serial.text
+    found: list[tuple[int, str, str | None]] = []
+    m = _PANIC_AT_RE.search(text)
+    if m:
+        message = text[m.end():].lstrip("\n").split("\n", 1)[0].strip()
+        found.append((m.start(), "panic at " + _source_location(m.group(1), m.group(2)),
+                      message or None))
+    m = _SELFTEST_FAILED_RE.search(text)
+    if m:
+        line = m.group(0)
+        named = _SELFTEST_NAME_RE.search(line)
+        tag = _TAG_RE.match(line)
+        name = (named.group(1).strip() if named
+                else tag.group(1) if tag
+                else line.strip())
+        fails = list(_FAIL_LINE_RE.finditer(text, 0, m.start()))
+        found.append((m.start(), "self-test " + name,
+                      fails[-1].group(1).strip() if fails else None))
+    for m in _FATAL_RE.finditer(text):
+        if not _SELFTEST_FAILED_RE.match(m.group(0)):
+            found.append((m.start(), "fatal: " + m.group(1).strip().rstrip("."), None))
+            break
+    if found:
+        _, cause, detail = min(found, key=lambda f: f[0])
+        return cause, detail[:CAUSE_DETAIL_WIDTH] if detail else None
+    if serial.exceptions:
+        exc = serial.exceptions[0]
+        name = re.split(r"\s+(?:at|in)\s+|0x", exc[len("EXCEPTION:"):], maxsplit=1)[0]
+        return "exception: " + name.strip(), exc[:CAUSE_DETAIL_WIDTH]
+    if failed_check:
+        return "check: " + failed_check, None
+    if verdict in ("TIMEOUT", "WEDGE"):
+        for line in reversed(serial.lines):
+            tag = _TAG_RE.match(line)
+            if tag:
+                return "stopped in " + tag.group(1), line[:CAUSE_DETAIL_WIDTH]
+    return None
+
+
+# --------------------------------------------------------------------------
 # Fingerprints
 # --------------------------------------------------------------------------
 
@@ -1545,6 +1640,16 @@ def build_record(serial: Serial | None, verdict: str, args,
             rec["tail"] = serial.tail()
             if serial.exceptions:
                 rec["exceptions"] = [e[:TAIL_WIDTH] for e in serial.exceptions[:5]]
+            # What it died of, in words that repeat when the failure does, so
+            # that a cause coming back can be counted (lane F's
+            # scripts/process-review.py does). Not for HOST_FAIL, whose cause
+            # is `host_fail` and lies outside the tree.
+            cause = (failure_cause(serial, verdict, getattr(args, "failed_check", "") or "")
+                     if verdict != "HOST_FAIL" else None)
+            if cause is not None:
+                rec["cause"] = cause[0]
+                if cause[1]:
+                    rec["cause_detail"] = cause[1]
     return rec
 
 
@@ -2047,6 +2152,14 @@ def report(records: list[dict], current: dict | None) -> None:
                 print(f"[boot-history] note: something outside the kernel also "
                       f"went wrong ({host_why}), but this verdict does not "
                       f"rest on it")
+        if current.get("cause"):
+            print(f"[boot-history] cause: {current['cause']}")
+            if current.get("cause_detail"):
+                print(f"[boot-history]   {current['cause_detail']}")
+            same = sum(1 for r in records
+                       if r is not current and r.get("cause") == current["cause"])
+            if same:
+                print(f"[boot-history]   the same cause is on {same} earlier row(s)")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
@@ -2189,6 +2302,11 @@ def main(argv=None) -> int:
                         help="boot-test.sh's exit status for this run")
     parser.add_argument("--marker", default="BOOT_OK",
                         help="the marker the harness waited for")
+    parser.add_argument("--failed-check", default="",
+                        help="the check boot-test.sh failed the boot on after "
+                             "it reached its marker, in the words of its "
+                             "FAILED line ('a self-test failed', ...); the "
+                             "row's `cause` when the log names nothing earlier")
     parser.add_argument("--gated-markers", default=None, metavar="PATH",
                         help="JSON from `check-self-tests-wired.py "
                              "--emit-markers`. Each key is the serial line a "

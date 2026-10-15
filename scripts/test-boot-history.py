@@ -699,6 +699,87 @@ def test_tail_is_bounded(bh):
           max(len(ln) for ln in rec["tail"]) <= bh.TAIL_WIDTH, True)
 
 
+# --------------------------------------------------------------------------
+# Cause (lane F's requests/f-a-the-boot-test-s-gates-take-four-times-as-long-
+# as-its-boots.md, part 2). The samples are the forms real failed boots
+# printed, from bench/boot-history.jsonl's tails.
+# --------------------------------------------------------------------------
+
+
+def _cause(bh, text, verdict, failed_check=""):
+    return bh.failure_cause(_serial(bh, _PROLOGUE + text), verdict, failed_check)
+
+
+def test_cause_of_a_panic_is_its_location(bh):
+    text = ("!!! KERNEL PANIC !!!\n"
+            "panicked at kernel\\src\\mm\\dma.rs:498:58:\n"
+            "DMA alloc Below16M: OutOfMemory\n")
+    check("cause: a panic, by source line, separators made /",
+          _cause(bh, text, "PANIC"),
+          ("panic at kernel/src/mm/dma.rs:498", "DMA alloc Below16M: OutOfMemory"))
+    text = ("panicked at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/"
+            "alloc/src/alloc.rs:553:9:\nmemory allocation of 768 bytes failed\n")
+    check("cause: a panic in the toolchain's sources, without its hash",
+          _cause(bh, text, "PANIC")[0], "panic at library/alloc/src/alloc.rs:553")
+
+
+def test_cause_of_a_failed_self_test_is_its_name(bh):
+    text = ("[syscall/linux]   mknod(S_IFREG): OK\n"
+            "[syscall/linux]   FAIL: mknod(S_IFIFO) was not EPERM\n"
+            "FATAL: Linux ABI translation self-test failed: internal kernel error (-1)\n")
+    check("cause: a FATAL self-test, with the FAIL line before it",
+          _cause(bh, text, "PANIC"),
+          ("self-test Linux ABI translation", "mknod(S_IFIFO) was not EPERM"))
+    text = "[hpet] WARNING: Self-test failed\nBOOT_OK\n"
+    check("cause: an older self-test form, named by its tag",
+          _cause(bh, text, "SELFTEST_FAIL", "a self-test failed"),
+          ("self-test [hpet]", None))
+
+
+def test_the_earliest_evidence_is_the_cause(bh):
+    text = ("[futex]   FAIL: PI owner-death handoff recovered=0 fail=1\n"
+            "WARNING: Futex self-test failed: internal kernel error (-1)\n"
+            "!!! KERNEL PANIC !!!\n"
+            "panicked at kernel\\src\\sched\\barrier.rs:251:9:\n"
+            "assertion failed\n")
+    check("cause: a self-test failure before a panic is the cause",
+          _cause(bh, text, "PANIC")[0], "self-test Futex")
+    text = ("FATAL: Double fault is unrecoverable. Halting.\n"
+            "FATAL: Futex self-test failed: x\n")
+    check("cause: a FATAL that is not a self-test, first",
+          _cause(bh, text, "PANIC"), ("fatal: Double fault is unrecoverable. Halting", None))
+
+
+def test_cause_without_a_named_failure(bh):
+    text = "EXCEPTION: Divide Error (#DE) at 0xffffffff80123456\n"
+    check("cause: an exception, without its address",
+          _cause(bh, text, "PANIC")[0], "exception: Divide Error (#DE)")
+    text = "[bench] harness_floor_suite: min=532 cycles\nBOOT_OK\n"
+    check("cause: the harness check that failed a boot after its marker",
+          _cause(bh, text, "SELFTEST_FAIL",
+                 "the benchmark suite left windows unjudged"),
+          ("check: the benchmark suite left windows unjudged", None))
+    text = "[vfs]   readdir: OK\n[unix_socket] Running self-test...\n"
+    check("cause: a hang, by the subsystem that printed last",
+          _cause(bh, text, "TIMEOUT"),
+          ("stopped in [unix_socket]", "[unix_socket] Running self-test..."))
+    check("cause: none for a clean log that failed for no reason it shows",
+          _cause(bh, "BOOT_OK\n", "SELFTEST_FAIL"), None)
+
+
+def test_cause_is_recorded_on_failures_only(bh):
+    args = _Args()
+    args.failed_check = "a file-identity rung did not run"
+    rec = bh.build_record(_serial(bh, S_PASS), "SELFTEST_FAIL", args)
+    check("record: a failure carries its cause",
+          rec.get("cause"), "check: a file-identity rung did not run")
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("record: a pass carries none", "cause" in rec, False)
+    rec = bh.build_record(_serial(bh, S_PTHREAD), "HOST_FAIL", _Args(),
+                          host_fail="cannot set up guest memory")
+    check("record: a host failure carries none", "cause" in rec, False)
+
+
 def test_caller_supplied_commit_wins_over_git(bh):
     """The row must name the tree that was *built*, not HEAD at record time.
 
@@ -812,6 +893,9 @@ class _Args:
     # And again (2026-10-09): `build_record` reads `args.cpus`, argparse's
     # default None. The note above is why it is here.
     cpus = None
+    # argparse's default: boot-test.sh passes --failed-check only when a check
+    # after the marker failed the boot.
+    failed_check = ""
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.

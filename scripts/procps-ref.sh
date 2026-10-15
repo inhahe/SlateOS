@@ -70,7 +70,10 @@ PROCPS_REF_SYSCTL=$PROCPS_REF_SRC/src/sysctl
 # `--disable-modern-top`, the original defaults, and `--enable-watch8bit`, so
 # it links ncursesw -- and, like the tree above, with no logind and no NUMA,
 # which SlateOS has neither of. `top` cannot be built `--without-ncurses`, so
-# it is a second tree, with its own configuration and stamp.
+# it is a second tree, with its own configuration and stamp -- built only for
+# a harness that asks for it before sourcing this, with `PROCPS_REF_TREES=top`
+# (the default is `main`, the tree above), so that every other procps harness
+# is not made to build a program it never runs.
 PROCPS_REF_TOP_SRC=$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION-top
 PROCPS_REF_TOP_CONFIGURE='--quiet --disable-nls --without-systemd --without-elogind --disable-kill --disable-numa --disable-modern-top --enable-watch8bit --disable-shared'
 PROCPS_REF_TOP=$PROCPS_REF_TOP_SRC/src/top/top
@@ -78,7 +81,10 @@ PROCPS_REF_TOP=$PROCPS_REF_TOP_SRC/src/top/top
 # procps_ref_tree DIR CONFIGURE TARGET...: the release unpacked into DIR,
 # configured with CONFIGURE, and the make targets TARGET (paths under DIR)
 # built -- unless DIR's stamp says that configuration is already built and
-# every target is there.
+# every target is there. A configuration that failed to build is not tried
+# again on every run of every harness: DIR.failed records it, and says so,
+# until it is deleted. Each tree unpacks in a directory of its own, so two
+# harnesses building different trees at once do not share one.
 procps_ref_tree() {
   procps_ref_dir=$1 procps_ref_conf=$2
   shift 2
@@ -89,6 +95,11 @@ procps_ref_tree() {
   # The stamp records the configuration, so a change to it rebuilds.
   if [ -n "$procps_ref_have" ] \
      && [ "$(cat "$procps_ref_dir/.slateos-built" 2>/dev/null)" = "$procps_ref_conf" ]; then
+    return 0
+  fi
+  if [ "$(cat "$procps_ref_dir.failed" 2>/dev/null)" = "$procps_ref_conf" ]; then
+    printf 'procps-ref.sh: %s failed to build before; delete %s to try again\n' \
+      "$*" "$procps_ref_dir.failed" >&2
     return 0
   fi
   mkdir -p "$PROCPS_REF_CACHE" || return 0
@@ -104,24 +115,33 @@ procps_ref_tree() {
     return 0
   fi
   printf 'procps-ref.sh: building procps-ng %s: %s (once)\n' "$PROCPS_REF_VERSION" "$*" >&2
-  rm -rf "$procps_ref_dir" "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION"
-  tar -C "$PROCPS_REF_CACHE" -xJf "$procps_ref_tar" || return 0
-  mv "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION" "$procps_ref_dir" || return 0
+  rm -rf "$procps_ref_dir" "$procps_ref_dir.unpack"
+  mkdir -p "$procps_ref_dir.unpack" || return 0
+  tar -C "$procps_ref_dir.unpack" -xJf "$procps_ref_tar" || return 0
+  mv "$procps_ref_dir.unpack/procps-ng-$PROCPS_REF_VERSION" "$procps_ref_dir" || return 0
+  rm -rf "$procps_ref_dir.unpack"
   # shellcheck disable=SC2086 # the configure flags are words on purpose
   if ! ( cd "$procps_ref_dir" && ./configure $procps_ref_conf >/dev/null \
          && make -s -j4 "$@" >/dev/null 2>&1 ); then
     printf 'procps-ref.sh: building procps-ng %s failed: %s\n' "$PROCPS_REF_VERSION" "$*" >&2
     for procps_ref_t in "$@"; do rm -f "$procps_ref_dir/$procps_ref_t"; done
+    printf '%s' "$procps_ref_conf" > "$procps_ref_dir.failed"
     return 0
   fi
+  rm -f "$procps_ref_dir.failed"
   printf '%s' "$procps_ref_conf" > "$procps_ref_dir/.slateos-built"
 }
 
 procps_ref_build() {
   [ "$(uname -s)" = Linux ] || return 0
-  procps_ref_tree "$PROCPS_REF_SRC" "$PROCPS_REF_CONFIGURE" src/w src/ps/pscommand \
-    src/pgrep src/pkill src/pidwait src/vmstat src/sysctl
-  procps_ref_tree "$PROCPS_REF_TOP_SRC" "$PROCPS_REF_TOP_CONFIGURE" src/top/top
+  for procps_ref_which in ${PROCPS_REF_TREES:-main}; do
+    case $procps_ref_which in
+      main) procps_ref_tree "$PROCPS_REF_SRC" "$PROCPS_REF_CONFIGURE" src/w \
+              src/ps/pscommand src/pgrep src/pkill src/pidwait src/vmstat src/sysctl ;;
+      top) procps_ref_tree "$PROCPS_REF_TOP_SRC" "$PROCPS_REF_TOP_CONFIGURE" src/top/top ;;
+      *) printf 'procps-ref.sh: no tree called %s\n' "$procps_ref_which" >&2 ;;
+    esac
+  done
 }
 
 procps_ref_build

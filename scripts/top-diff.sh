@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016  # the sh -c scripts expand in the inner shell
+# Differential test: our top against procps-ng 4.0.4's.
 #
-# Differential test: SlateOS's `top` (`userspace/coreutils/src/bin/top/`,
-# procps-ng 4.0.4's `src/top/top.c`) against procps-ng 4.0.4's own `top`,
-# built as Ubuntu builds it (`--disable-modern-top`) with no logind and no
-# NUMA, as SlateOS has neither (`procps-ref.sh`).
+# Ours is `userspace/coreutils/src/bin/top/`, a port of procps-ng 4.0.4's
+# `src/top/top.c`; the reference is that release's own `top`, built as
+# Ubuntu builds it (`--disable-modern-top`) with no logind and no NUMA, as
+# SlateOS has neither (`procps-ref.sh`).
 #
 # ## What is pinned
 #
@@ -44,14 +44,21 @@
 # The help screen on a terminal too narrow for the version string: cut
 # short there, upstream's `procps-ng 4.0.4` cannot be replaced by ours.
 #
+# `^Z` in batch mode on a terminal (deliberate difference 5): upstream sets
+# the modes it never read, all zeroes, so the frames after it go out with
+# bare newlines; ours leaves the terminal alone.
+#
 # Run `OURS=$HOME/.cache/slateos-procps-ref/procps-ng-4.0.4-top/src/top/top
 # ./scripts/top-diff.sh` to check that the harness still discriminates.
 # `DIFF_FAIL_FAST=1` stops the run at the first difference.
+#
+# shellcheck disable=SC2016  # the sh -c scripts expand in the inner shell
 set -u
 
 DIFF_PROG='top'
 DIFF_NEED='python3 unshare timeout cc'
 DIFF_TIMEOUT=${DIFF_TIMEOUT:-5400}
+PROCPS_REF_TREES=top
 # shellcheck source=procps-ref.sh
 . "$(dirname "$0")/procps-ref.sh"
 DIFF_REF=$PROCPS_REF_TOP
@@ -831,6 +838,8 @@ screen "^\\" 24x80 'keys:\x1c' --
 
 # Batch mode on a terminal.
 screen "-b -n 2 -d 0.2" 24x80 -- -b -n 2 -d 0.2
+xscreen "upstream zeroes the terminal's modes on ^Z in batch mode, so its later newlines go out bare" \
+  "-b, SIGTSTP, SIGCONT" 24x80 'signal:TSTP' 'signal:CONT' 'signal:TERM' -- -b -d 60
 screen "-n 1" 24x80 -- -n 1
 screen "-n 2 -d 0.2" 24x80 -- -n 2 -d 0.2
 

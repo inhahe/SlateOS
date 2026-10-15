@@ -545,7 +545,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/tload-diff.sh` | tload-diff.sh -- run our `tload` and procps-ng's side by side and report every |
 | `scripts/tload-frames.py` | Run tload and capture the frames it draws, for scripts/tload-diff.sh. |
-| `scripts/top-diff.sh` | shellcheck disable=SC2016  # the sh -c scripts expand in the inner shell |
+| `scripts/top-diff.sh` | Differential test: our top against procps-ng 4.0.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tput-diff.sh` | Differential test: ncurses 6.4's `tput`, `clear`, `tset` and `tabs`, ours against Ubuntu's. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |

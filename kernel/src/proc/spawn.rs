@@ -11657,8 +11657,9 @@ pub fn self_test_cscanf() -> KernelResult<()> {
 }
 
 /// Wait for fixture process `pid` to end -- become a zombie -- until the
-/// hrtimer clock passes `deadline_ns`, looking every `poll_ms` milliseconds.
-/// Answers whether it ended.
+/// hrtimer clock passes `deadline_ns`, looking every `poll_ms` milliseconds,
+/// or after every yield of the CPU when `poll_ms` is 0. Answers whether it
+/// ended.
 ///
 /// One that did not has each of its threads reported
 /// (`sched::report_task`), and then every CPU (`sched::report_cpus`), before
@@ -11673,7 +11674,11 @@ pub(crate) fn wait_for_fixture(pid: ProcessId, deadline_ns: u64, poll_ms: u64) -
         if crate::hrtimer::now_ns() >= deadline_ns {
             break;
         }
-        crate::sched::sleep_ms(poll_ms);
+        if poll_ms == 0 {
+            crate::sched::yield_now();
+        } else {
+            crate::sched::sleep_ms(poll_ms);
+        }
     }
     let why = "its process did not end by its deadline";
     for tid in pcb::get_threads(pid).unwrap_or_default() {
@@ -11906,15 +11911,7 @@ fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcom
     // clock it reads, however busy the machine is.
     let deadline =
         crate::hrtimer::now_ns().saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
-    let finished = loop {
-        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
-            break true;
-        }
-        if crate::hrtimer::now_ns() >= deadline {
-            break false;
-        }
-        crate::sched::yield_now();
-    };
+    let finished = wait_for_fixture(result.pid, deadline, 0);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
 
@@ -29967,11 +29964,7 @@ pub fn self_test_filestream_abi() -> KernelResult<()> {
 
     // About 8 MiB of file I/O on the memfs, and 2.5 MiB of `rep` scans.
     let deadline = crate::hrtimer::now_ns().saturating_add(30_000_000_000); // 30 s
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::yield_now();
-    }
+    wait_for_fixture(result.pid, deadline, 0);
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);

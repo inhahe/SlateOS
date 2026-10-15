@@ -554,6 +554,17 @@ static CURRENT_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per CPU: the task a switch there has committed to -- made `Running` under
+/// `SCHED` -- and not yet published in [`CURRENT_TASK_IDS`], which it is only
+/// after `SCHED` is dropped; 0 when none. For the hang diagnostics alone
+/// ([`report_running_orphans`], [`report_task`]): a task named here is
+/// mid-switch, not lost, though no CPU calls it current yet. Cleared by
+/// [`set_current_task`].
+static SWITCHING_TO: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Per-CPU idle task IDs, or `u64::MAX` for a CPU with none registered yet.
 ///
 /// The idle task's *priority* is discoverable without this array
@@ -1888,6 +1899,29 @@ fn set_current_task(cpu: usize, id: TaskId) {
     // SAFETY: cpu < MAX_CPUS (guaranteed by smp::current_cpu_index).
     #[allow(clippy::indexing_slicing)]
     CURRENT_TASK_IDS[cpu].store(id, Ordering::Release);
+    // Published: no longer only committed to (see SWITCHING_TO).
+    if let Some(slot) = SWITCHING_TO.get(cpu) {
+        slot.store(0, Ordering::Release);
+    }
+}
+
+/// A switch on `cpu` has committed to `id` under `SCHED` ([`SWITCHING_TO`]).
+#[inline]
+fn note_switching_to(cpu: usize, id: TaskId) {
+    if let Some(slot) = SWITCHING_TO.get(cpu) {
+        slot.store(id, Ordering::Release);
+    }
+}
+
+/// The CPU running task `id` ([`running_on`]), or one whose switch has
+/// committed to it and not yet published it ([`SWITCHING_TO`]): where the
+/// hang diagnostics look before calling a `Running` task lost.
+fn on_or_switching_to(id: TaskId) -> Option<usize> {
+    running_on(id, None).or_else(|| {
+        SWITCHING_TO
+            .iter()
+            .position(|slot| id != 0 && slot.load(Ordering::Acquire) == id)
+    })
 }
 
 /// Before this CPU, `cpu`, switches to task `next`: when `next` is not its
@@ -4607,25 +4641,20 @@ fn dump_all_tasks_serial() {
     dump_timer_sources(now);
 }
 
-/// Name every task that is `Running` on no CPU: committed to by a CPU that
-/// then ran something else, in no run queue, so nothing will run it again
-/// (known-issues `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`).
-/// Each with when and by which path it was last committed to and last left a
-/// CPU ([`task::Task::last_dispatch`]); `why` says who is asking. Answers how
-/// many there are.
+/// Name every task that is `Running` on no CPU, and in no CPU's switch
+/// ([`on_or_switching_to`]): committed to by a CPU that then ran something
+/// else, so that nothing will run it again unless a run queue holds it (known-issues
+/// `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`). Each with the
+/// CPUs whose queues hold it, and when and by which path it was last
+/// committed to and last left a CPU ([`task::Task::last_dispatch`]); `why`
+/// says who is asking. Answers how many there are.
+///
+/// The caller holds `SCHED`; each run queue's lock is taken inside it, the
+/// scheduler's own order.
 fn report_running_orphans(state: &SchedState, why: &str) -> usize {
-    let cpus = crate::smp::cpu_count();
     let mut orphans = 0usize;
     for (&id, task) in &state.tasks {
-        if task.state != TaskState::Running {
-            continue;
-        }
-        let on_cpu = (0..cpus).any(|cpu| {
-            CURRENT_TASK_IDS
-                .get(cpu)
-                .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
-        });
-        if on_cpu {
+        if task.state != TaskState::Running || on_or_switching_to(id).is_some() {
             continue;
         }
         orphans = orphans.saturating_add(1);
@@ -4634,12 +4663,13 @@ fn report_running_orphans(state: &SchedState, why: &str) -> usize {
             .get(..task.name_len.min(task.name.len()))
             .unwrap_or(&[]);
         serial_println!(
-            "[sched] *** ORPHAN ({}): task {} {:?} is Running on no CPU and in no run \
-             queue; last committed to at tick {} by {}, last left a CPU at tick {} by {} as \
-             {:?}; last_cpu {}",
+            "[sched] *** ORPHAN ({}): task {} {:?} is Running on no CPU, queued on {:#x}; \
+             last committed to at tick {} by {}, last left a CPU at tick {} by {} as {:?}; \
+             last_cpu {}",
             why,
             id,
             core::str::from_utf8(name).unwrap_or("<non-utf8>"),
+            PER_CPU_SCHED.queued_cpus(id),
             task.last_dispatch.0,
             task.last_dispatch.1,
             task.last_switch_out.0,
@@ -4659,20 +4689,14 @@ fn report_running_orphans(state: &SchedState, why: &str) -> usize {
 /// hrtimer queues when it is `Blocked`, since the question then is whether
 /// anything is still armed to wake it.
 ///
-/// For whoever gives up waiting on a task -- a self-test tearing down a
-/// fixture that did not finish (`proc::spawn::teardown_fixture`) -- so that a
-/// hang names its cause on the run that hit it rather than on a rerun that
-/// may not (known-issues
-/// `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`). Takes
-/// `SCHED`, then each run queue's lock: diagnostic use only.
+/// For whoever gives up waiting on a task -- `proc::spawn::wait_for_fixture`,
+/// when a self-test's or the guest agent's program misses its deadline -- so
+/// that a hang names its cause on the run that hit it rather than on a rerun
+/// that may not. Takes each run queue's lock in turn, then `SCHED`, never one
+/// inside the other: diagnostic use only.
 pub fn report_task(id: TaskId, why: &str) {
     let now = crate::apic::tick_count();
-    let cpus = crate::smp::cpu_count();
-    let on_cpu = (0..cpus).find(|&cpu| {
-        CURRENT_TASK_IDS
-            .get(cpu)
-            .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
-    });
+    let on_cpu = on_or_switching_to(id);
     let queued = PER_CPU_SCHED.queued_cpus(id);
     let blocked = {
         let state = SCHED.lock();
@@ -9418,24 +9442,34 @@ pub fn dead_tasks_resumed() -> u64 {
 /// `PREV_TASK_IDS` uses zero for "none", so it is not consulted for task 0
 /// either; task 0 runs only on the BSP.
 fn running_elsewhere(id: TaskId, cpu: usize) -> Option<usize> {
+    running_on(id, Some(cpu))
+}
+
+/// The CPU running task `id` -- current there, or mid-switch away from it
+/// -- other than `except`, if any. [`running_elsewhere`]'s answer, and the
+/// diagnostics' ([`report_task`], [`report_running_orphans`]), so that a
+/// hang report and the scheduler agree on where a task is.
+fn running_on(id: TaskId, except: Option<usize>) -> Option<usize> {
     let online = PER_CPU_SCHED.num_cpus().max(1);
-    (0..online).filter(|&other| other != cpu).find(|&other| {
-        let registered = IDLE_TASK_IDS
-            .get(other)
-            .is_some_and(|slot| slot.load(Ordering::Acquire) != u64::MAX);
-        let current = || {
-            CURRENT_TASK_IDS
+    (0..online)
+        .filter(|&other| Some(other) != except)
+        .find(|&other| {
+            let registered = IDLE_TASK_IDS
                 .get(other)
-                .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
-        };
-        let switching_away = || {
-            id != 0
-                && PREV_TASK_IDS
+                .is_some_and(|slot| slot.load(Ordering::Acquire) != u64::MAX);
+            let current = || {
+                CURRENT_TASK_IDS
                     .get(other)
                     .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
-        };
-        registered && (current() || switching_away())
-    })
+            };
+            let switching_away = || {
+                id != 0
+                    && PREV_TASK_IDS
+                        .get(other)
+                        .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
+            };
+            registered && (current() || switching_away())
+        })
 }
 
 /// What [`pick_runnable_locked`] may do with a task it has just taken off a
@@ -10058,6 +10092,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         task.record_dispatch(crate::apic::tick_count());
                         task.state = TaskState::Running;
                         task.last_dispatch = (crate::apic::tick_count(), "idle-fallback-switch");
+                        note_switching_to(cpu, ready_id);
                         task.last_cpu = cpu;
                         note_dispatch(cpu, task, true);
                     }
@@ -10331,6 +10366,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 next_task.record_dispatch(crate::apic::tick_count());
                 next_task.state = TaskState::Running;
                 next_task.last_dispatch = (crate::apic::tick_count(), "switch");
+                note_switching_to(cpu, next_id);
                 next_task.last_cpu = cpu;
                 note_dispatch(cpu, next_task, true);
             }
@@ -10905,6 +10941,7 @@ pub fn self_test() -> KernelResult<()> {
     test_load_average()?;
     test_liveness_watchdog()?;
     test_try_wake_contract()?;
+    test_hang_diagnostics()?;
     test_deferred_wake_signal_mask()?;
     test_prev_task_pins_outgoing_stack()?;
     test_task_is_on_cpu()?;
@@ -11255,6 +11292,101 @@ fn test_try_wake_contract() -> KernelResult<()> {
         "[sched]   try_wake contract (retry only on lock contention; a recorded wake \
          outlives a switch before its park): OK"
     );
+    Ok(())
+}
+
+/// A task that parks and never asks to run again: what
+/// [`test_hang_diagnostics`] reports on, and kills.
+extern "C" fn test_task_park_forever(_arg: u64) {
+    loop {
+        block_current();
+    }
+}
+
+/// Pin the hang reports to what they report.
+///
+/// [`PerCpuScheduler::queued_cpus`] names one CPU for a queued task and none
+/// once it has parked; [`report_running_orphans`] finds none in a healthy
+/// table, and finds a parked task made, under `SCHED`, to look `Running` on
+/// no CPU; [`report_task`] and [`report_cpus`] run through -- taking their
+/// locks without deadlock -- on a live task; [`crate::softirq::is_processing_on`]
+/// says no for a CPU not in softirq and for one that does not exist. These
+/// run only when something has already hung, so this is the run on which
+/// they are known to work.
+fn test_hang_diagnostics() -> KernelResult<()> {
+    let id = spawn(b"test-diag-park", 16, test_task_park_forever, 0, 0)?;
+    let fail = |what: &str| {
+        serial_println!("[sched]   FAIL: hang diagnostics: {}", what);
+        kill_task(id);
+        Err(KernelError::InternalError)
+    };
+
+    // Queued while Ready, on one CPU; a CPU may have taken it already.
+    {
+        let state = SCHED.lock();
+        let queued = PER_CPU_SCHED.queued_cpus(id);
+        let ok = match state.tasks.get(&id).map(|t| t.state) {
+            Some(TaskState::Ready) => queued.count_ones() == 1,
+            Some(_) => queued == 0,
+            None => false,
+        };
+        if !ok {
+            drop(state);
+            return fail("a new task's queue is not the one CPU it is Ready on");
+        }
+    }
+    for _ in 0..200 {
+        if task_state(id) == Some(TaskState::Blocked) {
+            break;
+        }
+        yield_now();
+    }
+    if task_state(id) != Some(TaskState::Blocked) {
+        return fail("the parking task never parked");
+    }
+    if PER_CPU_SCHED.queued_cpus(id) != 0 {
+        return fail("a parked task is still queued");
+    }
+
+    // No orphan in a healthy table; one when a parked task is made to look
+    // committed to long ago and left off every CPU.
+    let (healthy, planted) = {
+        let mut state = SCHED.lock();
+        let healthy = report_running_orphans(&state, "self-test: a healthy table");
+        let saved = state.tasks.get(&id).map(|t| (t.state, t.last_dispatch));
+        if let Some(t) = state.tasks.get_mut(&id) {
+            t.state = TaskState::Running;
+            t.last_dispatch = (0, "self-test plant");
+        }
+        let planted = report_running_orphans(&state, "self-test: a planted orphan");
+        if let (Some(t), Some((s, d))) = (state.tasks.get_mut(&id), saved) {
+            t.state = s;
+            t.last_dispatch = d;
+        }
+        (healthy, planted)
+    };
+    if healthy != 0 || planted != 1 {
+        serial_println!(
+            "[sched]   (orphans: {} in a healthy table, {} with one planted)",
+            healthy,
+            planted
+        );
+        return fail("report_running_orphans miscounts");
+    }
+
+    report_task(id, "self-test");
+    report_cpus("self-test");
+
+    let cpu = current_cpu_id();
+    if crate::softirq::is_processing_on(cpu) || crate::softirq::is_processing_on(usize::MAX) {
+        return fail("is_processing_on says yes outside softirq");
+    }
+
+    if !kill_task(id) {
+        serial_println!("[sched]   FAIL: hang diagnostics: the parked task could not be killed");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   Hang diagnostics (queued CPUs, orphans, task and CPU reports): OK");
     Ok(())
 }
 

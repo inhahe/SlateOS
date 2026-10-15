@@ -896,15 +896,13 @@ impl PerCpuScheduler {
     /// [`entries_for`](Self::entries_for).
     #[must_use]
     pub fn queued_cpus(&self, id: super::task::TaskId) -> u64 {
-        const _: () = assert!(MAX_CPUS <= 64, "the mask has a bit per CPU");
         let n = self.num_cpus.load(Ordering::Relaxed).max(1);
-        let mut mask = 0u64;
-        for (cpu, q) in self.queues.iter().take(n).enumerate() {
-            if Self::locked_irqs_off(q, |backend| backend.entries_for(id)) > 0 {
-                mask |= 1u64 << cpu;
-            }
-        }
-        mask
+        self.queues
+            .iter()
+            .take(n)
+            .enumerate()
+            .filter(|(_, q)| Self::locked_irqs_off(q, |backend| backend.entries_for(id)) > 0)
+            .fold(0u64, |mask, (cpu, _)| mask | super::cpu_bit(cpu))
     }
 
     /// Run `f` on one CPU's queue, holding its lock with interrupts disabled

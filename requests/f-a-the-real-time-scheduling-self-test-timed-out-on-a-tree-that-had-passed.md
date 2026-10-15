@@ -38,6 +38,7 @@ thread parked for a wake already spent. Fixed in `mark_ready` (the record
 now outlives a preemption, a yield and a stop), with a scheduler self-test
 step that fails on the old code. Details:
 `known-issues/A-A-PREEMPTION-BEFORE-A-PARK-ERASED-THE-WAKE-OWED-TO-IT.md`.
-Any self-test or guest-agent program that misses its deadline now prints the
-scheduler's account of each of its threads and every CPU, so the next one of
+A ring-3 self-test, C fixture or guest-agent program that misses its
+deadline now prints the scheduler's account of each of its threads and every
+CPU, so the next one of
 these names its cause on the run that hit it. **Status:** done.

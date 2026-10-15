@@ -36,7 +36,10 @@ The scheduler now records, per task, when and by which path a CPU last
 committed to it and last switched away from it (`Task::last_dispatch`,
 `Task::last_switch_out`); names any task `Running` on no CPU in the liveness
 dump and after a second of the idle fallback (`report_running_orphans`);
-and, for any self-test or guest-agent program that misses its deadline,
-prints each of its threads and every CPU's preemption state
-(`proc::spawn::wait_for_fixture`). The next occurrence names the path that
+and, for a program that misses its deadline -- the ring-3 self-tests that
+wait by the clock, lane D's C fixtures, the guest agent's runs -- prints
+each of its threads and every CPU's preemption state
+(`proc::spawn::wait_for_fixture`). The mlock rung is one of them; waits that
+count yields instead (the 2000-yield rungs, the 15 s capstones) print
+nothing yet. The next occurrence names the path that
 committed without switching. Repeat the mlock program under host load.

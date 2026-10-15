@@ -517,6 +517,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
 | `scripts/test-pre-push-python-choice.py` | Tests for the interpreter `scripts/hooks/pre-push` runs its gates with. |
+| `scripts/test-pre-push-review-gate.py` | Behavioural tests for pre-push gate 77 (what reaches main lies in a review). |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
 | `scripts/test-pre-push-suites-scope.py` | Tests for which scripts a push counts as changed, in `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
@@ -581,4 +582,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_571 scripts._
+_572 scripts._

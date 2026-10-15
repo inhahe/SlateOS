@@ -4274,6 +4274,34 @@ screen_probe_selftest() {
 
 screen_probe_selftest
 
+# review-batch.py's self-test, before the build. Its `--check` is pre-push
+# gate 77, which refuses a publish to main that no review covers; a checker
+# that has stopped checking would pass anything there. The self-test runs
+# here rather than at the push, because much of it exercises what `--check`
+# does not use -- mutation testing, cargo -- and a failure of that part must
+# not stop every lane's publish.
+review_batch_selftest() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== review-batch self-test: skipped (no python) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the review checker (review-batch.py --self-test) ==="
+    if run_checker review-batch-selftest "$py" "$PROJECT_ROOT/scripts/review-batch.py" --self-test; then
+        return 0
+    fi
+    echo "" >&2
+    echo "ERROR: refusing to build.  review-batch.py's self-test failed, so pre-push" >&2
+    echo "gate 77's verdict on what reaches main cannot be trusted." >&2
+    exit 1
+}
+
+review_batch_selftest
+
 # Lane B's manifest-producer gate.  Every entry in
 # `rootfs-bin-manifest.txt` must have something in the tree that produces
 # it, with aliases resolved to their producer.

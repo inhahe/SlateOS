@@ -868,7 +868,16 @@ fi
 # COST.  One `git log -p` over the pushed commits and a `rev-list` a record:
 # seconds.  Pushes to a lane branch skip it: only a publish is judged.  It
 # runs first, as soon as the gates' library is loaded, so a publish it
-# refuses spends none of the minutes the gates after it take.
+# refuses spends none of the minutes the gates after it take.  The checker's
+# own self-test runs before every boot test's build, not here: much of it
+# exercises what `--check` never uses (mutation testing, cargo), and a
+# failure there must not stop every publish.
+#
+# A checkout without `scripts/review-batch.py` is judged by the commits: if
+# those bound for main carry it, the checkout lost it and the push is
+# refused; if they do not (a hook test's scratch repository, a tree older
+# than the gate), there is nothing to judge by and the gate says so.
+# test-pre-push-review-gate.py drives it over real pushes.
 # ---------------------------------------------------------------------------
 skip_reviewed=0
 [ -n "${main_shas# }" ] || skip_reviewed=1
@@ -878,27 +887,37 @@ if [ "${ALLOW_UNREVIEWED:-0}" = "1" ]; then
     skip_reviewed=1
 fi
 [ -n "$py" ] || skip_reviewed=1
-# A tree without the checker -- older than it, or a hook test's scratch
-# repository -- has nothing to judge the push by.
-[ -f "${repo_root:-.}/scripts/review-batch.py" ] || skip_reviewed=1
-note_gate reviewed "$skip_reviewed"
-if [ "$skip_reviewed" != "1" ]; then
-    # Its self-test first: a check that has stopped checking passes anything.
-    if ! run_checker review-batch-selftest "$py" "${repo_root:-.}/scripts/review-batch.py" --self-test; then
-        echo "pre-push: REFUSING to push - review-batch.py's self-test failed, so its" >&2
-        echo "verdict on this push would mean nothing." >&2
+reviewer="${repo_root:-.}/scripts/review-batch.py"
+if [ "$skip_reviewed" != "1" ] && [ ! -f "$reviewer" ]; then
+    reviewer_carried=0
+    for _rs in $main_shas; do
+        git cat-file -e "$_rs:scripts/review-batch.py" 2>/dev/null && reviewer_carried=1
+    done
+    if [ "$reviewer_carried" = "1" ]; then
+        echo "pre-push: REFUSING to push - the commits bound for main carry" >&2
+        echo "scripts/review-batch.py, but this checkout has none to judge them by." >&2
+        echo "Put it back (git checkout -- scripts/review-batch.py) and push again." >&2
         exit 1
     fi
+    echo "pre-push: gate 77 skipped - no scripts/review-batch.py here or in the commits." >&2
+    skip_reviewed=1
+fi
+note_gate reviewed "$skip_reviewed"
+if [ "$skip_reviewed" != "1" ]; then
     # shellcheck disable=SC2086 # one word a sha, on purpose
-    if ! run_checker reviewed "$py" "${repo_root:-.}/scripts/review-batch.py" --check --remote "$remote_name" $main_shas; then
+    if ! run_checker reviewed "$py" "$reviewer" --check --remote "$remote_name" $main_shas; then
+        review_how=""
+        for _rs in $main_shas; do
+            review_how="$review_how
+    python scripts/review-batch.py $remote_name/main..$_rs"
+        done
         cat >&2 <<EOF
 pre-push: REFUSING to push - a commit bound for main lies in no recorded review.
 
 Review the batch -- what you are publishing that $remote_name/main lacks --
 in the background, then put the trailers it prints in the follow-up commit
 (an empty one when nothing needed fixing):
-
-    python scripts/review-batch.py $remote_name/main..HEAD
+$review_how
 
 To push anyway:
     ALLOW_UNREVIEWED=1 git push $remote_name ...
@@ -907,6 +926,8 @@ EOF
         exit 1
     fi
 fi
+
+# Gate 2, continued: its header is above, before the gates' library loads.
 
 
 if [ "${ALLOW_UNREACHABLE_ALIAS:-0}" = "1" ]; then

@@ -117,7 +117,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | F-Q9 | F | -- | relayed 2026-10-09: **B**, translate FFmpeg's fixed-point AAC decoder (lane F had recommended A) |
 | F-Q10 | F | -- | relayed 2026-10-09: A, Chrome's colour library; Little CMS when printing is built |
 | F-Q6 | F, C, D | -- | relayed 2026-10-09: turning remote desktop on offers, in the same steps, a dynamic-DNS name (lane D's `services/dyndns`) and a Let's Encrypt certificate -- whatever is not yet set up |
-| The MIT licence | operator | `LICENSE`, lane-a-wip `13032901f` | **done**: committed, reaching `main` with lane A's next publish |
+| The MIT licence | operator | `LICENSE`, lane-a-wip `13032901f` | **committed, held off `main`** (2026-10-15): at the repository root it makes lane C's `gather-notices.py` fail every boot test; lane A restores it, and its owner entry in `which-lane.py`, when lane C's fix is on `main` (`requests/a-c-gather-notices-reads-the-repository-root-as-a-crate.md`) |
 | The file reform (`todo2.txt`, `roadmap.md`, `known-issues.md`) | A | §1530 | answered in chat: done for the issues, decisions and questions, and finished roadmap blocks moved to `roadmap-done.md`, with a search database; **not** done for `todo.txt` (59,315 lines) -- lane A's, on its roadmap. `todo2.txt` is the operator's own and was never part of it |
 | Process Lasso's controls | A | -- | **question back: `open-questions/A-Q27.md`** |
 | Page Up, Page Down, Home, End, Ctrl+Home, Ctrl+End | C | §1416 (2026-09-27) | recorded and done the same day |

@@ -562,6 +562,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "test-pre-push-fmt-gate.py",
         "test-pre-push-identity-gate.py",
         "test-pre-push-python-choice.py",
+        "test-pre-push-review-gate.py",
         "test-pre-push-run-checker.py",
         "test-pre-push-suites-scope.py",
         "test-pre-push-touches.py",

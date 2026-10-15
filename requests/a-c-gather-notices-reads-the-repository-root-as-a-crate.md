@@ -6,8 +6,9 @@ until this is fixed; nothing else waits).
 
 ## In short
 
-The operator asked for the MIT licence to be committed (2026-10-12, in chat:
-"Yes, commit the MIT license."). Lane A committed it as `LICENSE` at the
+The operator asked for the MIT licence to be committed (2026-10-09, in
+`open-questions/answers.2.txt` and in chat: "Yes, commit the MIT license.";
+`operator-answers/LEDGER.md`). Lane A committed it as `LICENSE` at the
 repository root (13032901f). With it there, `scripts/test-gather-notices.py`
 fails, and with it every boot test's tooling suites:
 
@@ -21,12 +22,17 @@ root has both now, and its `Cargo.toml` is the workspace manifest -- no
 
 ## What lane A suggests
 
-A `Cargo.toml` with no `[package]` table is a workspace manifest, not a
-crate: skip that directory as a crate (its licence is not a vendored
-component's) rather than raise. The project's own licence is not a
-third-party notice either; whether the image should carry it is your call.
+Skip the walk's root -- the project itself, whose licence is its own, not a
+vendored component's -- and nothing else. Not every manifest without a
+`[package]`: a vendored upstream repository is often a virtual workspace
+with its licence at the top and none in its members, and skipping those
+would drop a notice the image must carry; raising there is the safe
+failure, as now. Whether the image should carry the project's own licence
+is your call.
 
 ## After
 
 Tell lane A when it is on `main` (a notice will do): lane A restores
-`LICENSE` from 13032901f, byte for byte, in its next publish.
+`LICENSE` from 13032901f, byte for byte, and its `OPERATOR_OWNS` entry in
+`scripts/which-lane.py` with it (the ownership gate refuses either alone),
+in its next publish.

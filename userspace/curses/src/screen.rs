@@ -1419,6 +1419,17 @@ mod tests {
         hay.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// `_nc_msec_cost`: a padding's milliseconds, tenths included, scaled
+    /// by the lines affected where it ends in `*`, in tenths of a
+    /// millisecond.
+    #[test]
+    fn padding_costs_its_tenths_and_scales_by_the_lines_it_affects() {
+        let s = xterm(Box::new(CLocale));
+        assert_eq!(s.t.msec_cost(Some(b"$<5.3>"), 1), 53);
+        assert_eq!(s.t.msec_cost(Some(b"$<2*>"), 3), 60);
+        assert_eq!(s.t.msec_cost(None, 1), crate::term::INFINITY);
+    }
+
     /// What a signal handler does to a screen the program has drawn --
     /// `endwin` for `SIGINT`, `SIGTERM` and a program's own handler, and for
     /// `SIGTSTP` that, then the modes kept and the screen repainted on the

@@ -778,5 +778,89 @@ mod tests {
         assert_eq!((w.cury, w.curx), (0, 1), "the cursor is kept inside");
         assert_eq!((w.lines[0].firstchar, w.lines[0].lastchar), (0, 1));
         assert!(!w.wresize(0, 2));
+        // One column is a size.
+        assert!(w.wresize(2, 1));
+        assert_eq!((w.maxy, w.maxx), (1, 0));
+        assert!(!w.wresize(2, 0));
+    }
+
+    #[test]
+    fn a_range_only_widens_what_is_marked() {
+        let mut line = win(1, 9).lines.remove(0);
+        line.firstchar = 2;
+        line.lastchar = 5;
+        line.changed_range(3, 7);
+        assert_eq!((line.firstchar, line.lastchar), (2, 7));
+        line.changed_range(1, 4);
+        assert_eq!((line.firstchar, line.lastchar), (1, 7));
+        line.firstchar = NOCHANGE;
+        line.lastchar = NOCHANGE;
+        line.changed_range(4, 6);
+        assert_eq!((line.firstchar, line.lastchar), (4, 6));
+    }
+
+    #[test]
+    fn shrinking_through_a_wide_character_drops_its_first_half() {
+        let mut w = win(1, 5);
+        for base in [1, 3] {
+            let mut first = Cell::with_char(0x4e2d, 0);
+            first.set_widec_ext(0);
+            let mut second = first;
+            second.set_widec_ext(1);
+            w.lines[0].text[base] = first;
+            w.lines[0].text[base + 1] = second;
+        }
+        // Four columns keep the first character whole and cut the second
+        // after its first half, which becomes the background.
+        assert!(w.wresize(1, 4));
+        let text = &w.lines[0].text;
+        assert!(text[1].is_widec_base() && text[2].is_widec_ext());
+        assert!(text[3].is_blank(), "{:?}", text[3]);
+    }
+
+    #[test]
+    fn a_window_may_begin_anywhere_on_the_screen() {
+        let w = Window::newwin(2, 3, 4, 5, (24, 80), 0).unwrap();
+        assert_eq!((w.begy, w.begx), (4, 5));
+        assert!(Window::newwin(2, 3, -1, 0, (24, 80), 0).is_none());
+        assert!(Window::newwin(2, 3, 0, -1, (24, 80), 0).is_none());
+        assert!(Window::newwin(-1, 3, 0, 0, (24, 80), 0).is_none());
+        assert!(Window::newwin(2, -1, 0, 0, (24, 80), 0).is_none());
+    }
+
+    #[test]
+    fn clearing_after_a_wrap_clears_the_new_line_but_not_past_the_corner() {
+        let mut w = win(2, 3);
+        w.wmove(0, 1);
+        w.flags |= WRAPPED;
+        assert!(w.wclrtoeol(), "the wrap is forgotten above the last line");
+        assert!(!w.is_wrapped());
+        assert_eq!(w.flags, ENDLINE | FULLWIN | SCROLLWIN | HASMOVED);
+        w.wmove(1, 2);
+        assert!(w.wclrtoeol(), "the last column is still the line's");
+        w.flags |= WRAPPED;
+        assert!(!w.wclrtoeol(), "wrapped at the lower right corner");
+    }
+
+    #[test]
+    fn erasing_forgets_the_wrap_and_nothing_else() {
+        let mut w = win(2, 3);
+        w.flags |= WRAPPED;
+        assert!(w.werase());
+        assert_eq!(w.flags, ENDLINE | FULLWIN | SCROLLWIN);
+    }
+
+    #[test]
+    fn touching_lines_from_the_top_marks_them() {
+        let mut w = win(3, 4);
+        assert!(w.wtouchln(0, 2, false));
+        assert_eq!(w.lines[0].firstchar, NOCHANGE);
+        assert_eq!(w.lines[1].lastchar, NOCHANGE);
+        assert_eq!((w.lines[2].firstchar, w.lines[2].lastchar), (0, 3));
+        assert!(w.wtouchln(1, 9, true), "a count past the end stops there");
+        assert_eq!((w.lines[1].firstchar, w.lines[1].lastchar), (0, 3));
+        assert!(!w.wtouchln(-1, 1, true));
+        assert!(!w.wtouchln(3, 1, true));
+        assert!(!w.wtouchln(0, -1, true));
     }
 }

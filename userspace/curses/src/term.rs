@@ -1307,6 +1307,11 @@ mod tests {
         assert_eq!(rgb2hls(1000, 1000, 1000), (0, 100, 0));
         assert_eq!(rgb2hls(1000, 0, 0), (120, 50, 100));
         assert_eq!(rgb2hls(0, 1000, 0), (240, 50, 100));
+        // A light below 50, whose saturation divides by max + min.
+        assert_eq!(rgb2hls(500, 0, 0), (120, 25, 100));
+        // Green below red and blue the largest: the minimum is green, and
+        // the hue comes from the third arm.
+        assert_eq!(rgb2hls(600, 200, 1000), (30, 60, 100));
     }
 
     #[test]

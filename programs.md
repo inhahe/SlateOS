@@ -289,7 +289,7 @@ two disagree.
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
 | `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
-| `top` | Interactive Process Monitor | yes |  |  |
+| `top` | Display the system's tasks, a screen at a time, below a summary of the system: procps-ng 4.0.4's `top`, ported. | yes | `coreutils` |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |
 | `tr` | Translate, squeeze, and/or delete bytes. | yes | `coreutils` |  |

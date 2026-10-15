@@ -114,7 +114,6 @@ userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
-userspace/top/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/unshare/src/main.rs:argv-as-string

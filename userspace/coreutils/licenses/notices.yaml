@@ -63,7 +63,7 @@ GNU Time:
     - GPL-3.0
 
 # The procps-ng programs, each a port of its src/*.c: free, uptime, vmstat,
-# ps, pgrep and pkill, w, sysctl (with local/procio.c), slabtop, watch,
+# ps, pgrep and pkill, w, sysctl (with local/procio.c), slabtop, top, watch,
 # tload, pmap, pwdx, skill and snice, and kill (src/kill.c,
 # LGPL-2.1-or-later); src/procps/ (library/*.c -- readproc, meminfo, stat,
 # vmstat, diskstats, slabinfo, namespace, sysinfo, devname, pwcache -- and

@@ -6079,6 +6079,26 @@ _Port ext4 first. Don't write a custom filesystem._
   `attr_set`; `scripts/watch-diff.sh`: 148 cases agree and 2 differ on
   purpose, on pseudo-terminals with standard error on the terminal and off
   it, the clock pinned by a preloaded shim);
+  `top` (2026-10-15, procps-ng 4.0.4's as Ubuntu builds it,
+  `--disable-modern-top`; `userspace/top`, written from the manual, is
+  retired: the summary and the task table from the library's `pids`, `stat`
+  and `meminfo` layers that `ps`, `free` and `vmstat` already read through;
+  the four windows and their field groups, sorting, the forest view, the
+  user and other filters, the inspect screens, the bottom windows, the
+  colour mapping, scrolling, the Fields screen, every prompt, and the
+  rcfile read in all its old forms and written back; the terminal through
+  `userspace/terminfo` with upstream's own `Pseudo_screen` row sparing;
+  `float` arithmetic, `snprintf` truncation and the locale's radix as C has
+  them; standard error reopened on `/dev/null` and so buffered, which is
+  why getopt's complaint still reaches the terminal and a fatal signal's
+  note never does; signals acted on where the program waits rather than in
+  their handlers (deliberate difference 1), and no NUMA (4);
+  `scripts/top-diff.sh`: 344 cases agree and 1 differs on purpose, `-b`
+  over a fixture `/proc` and the screen on pseudo-terminals -- keys,
+  prompts, rcfiles, resizes, signals, `^Z`, `/proc` changing between
+  frames -- each run in a PID namespace with the clock frozen;
+  `requests/b-ad-proc-counts-pages-of-4-kib-while-libc-says-a-page-is-16-kib.md`
+  for what only SlateOS can show: its memory columns four times too large);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6088,7 +6108,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] `[B]` System administration utilities — Rust userspace binaries: -- 150 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locale`, `mesg`, `dbus`, `perf`, `capsh`, `resolvectl`, `socat`, `parted`, `getfattr`, `auditctl`, `grub-install`, `upower`, `mkinitramfs`, `plymouth`, `udisksctl`, `numactl`, `btrfs`, `flatpak`, `firejail`, `apparmor`, `selinux`, `snapper`, `tuned`, `cpupower`, `thermald`, `fwupdmgr`, `podman`, `resolvectl`, `mcelog`, `rasdaemon`, `kexec`, `nvme`, `tpm2`, `avahi-daemon`, `cups`, `powertop`, `tlp`, `fscrypt`, `pipewire`, `xz`, `zstd`, `bzip2`, `lz4`, `age`, `openssl`, `certbot`, `gpg`, `borg`, `restic`, `rclone`, `git`, `sqlite3`, `cmake`, `meson`, `ninja`, `python3`, `node`, `docker`, `ffmpeg`, `valgrind`, `pkgconf`, `sensors`, `tmux`, `ruby`, `java`, `go`, `rustup`, `terraform`, `ansible`, `kubectl`, `gradle`, `maven`, `helm`, `prometheus`, `memcached`, `elasticsearch`, `consul`, `vault`, `etcd`, `minio`, `nginx`, `haproxy`, `traefik`, `caddy`, `envoy`, `openvpn`, `pgbouncer`, `neo4j`, `cassandra`, `iperf3`, `squid`, `postfix`, `dovecot`, `unbound`, `gitea`, `keycloak`, `mattermost`, `nextcloud`, `jellyfin`, `syncthing`, `borgmatic`, `pandoc`, `tesseract`, `exiftool`, `doxygen`, `ccache`, `distcc`, `sccache`, `mold`, `loki`, `tempo`, `jaeger`, `vegeta`, `k6`, `wrk`, `ab`, `cfssl`, `hashcat`, `john`, `lynis`, `trivy`, `cosign`, `buildah`, `cni-plugins`, `flux`, `argocd`, `pulumi`, `packer`, `mpv`, `sox`, `cmus`, `ncmpcpp`, `remmina`, `xrdp`, `borg`, `duplicity`, `timeshift`, `snapper2`, `lua`, `perl`, `php`, `julia`, `deno`, `bun`, `zig`, `micro`, `lazygit`, `lazydocker`, `bat`, `eza`.
   - [x] sysinfo: system information reader (/proc, /sys), CPU/mem/disk/net/OS summary, JSON output
   - [x] sanitize: filename sanitizer (4 modes: conservative/strict/windows/minimal, dry-run, recursive)
-  - [x] top: interactive process monitor (CPU/mem per-process, sort fields, batch mode, PID filter)
+  - [x] top: procps-ng 4.0.4's, a coreutils program since 2026-10-15 (see the coreutils item; `scripts/top-diff.sh`, 345 cases)
   - [x] mount/umount: filesystem mounting with fstab support, bind mounts, option parsing
   - [x] dmesg: kernel message buffer viewer (level filter, follow, JSON output, colored severity)
   - [x] lspci: PCI device lister (vendor/device database, tree view, BAR info, verbosity levels)

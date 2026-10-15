@@ -1386,6 +1386,20 @@ impl Pids {
         self.stacks.get(..self.n).unwrap_or_default()
     }
 
+    /// Stack `i` of every stack ever handed out, whether or not the last
+    /// reading used it -- what a caller holding a pointer past the end of
+    /// `stacks` (`top`'s windows keep such) reads: an earlier reading's
+    /// values.
+    #[must_use]
+    pub fn stack_any(&self, i: usize) -> Option<&Stack> {
+        self.stacks.get(i)
+    }
+
+    /// Stack `i`, to write its `PIDS_extra` slots.
+    pub fn stack_any_mut(&mut self, i: usize) -> Option<&mut Stack> {
+        self.stacks.get_mut(i)
+    }
+
     /// The last reading's stacks, to write the `PIDS_extra` slots of.
     pub fn stacks_mut(&mut self) -> &mut [Stack] {
         let n = self.n;

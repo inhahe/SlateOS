@@ -1,8 +1,8 @@
 # shellcheck shell=sh
 #
-# Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and
-# `sysctl` from the release, for harnesses whose reference must be the program
-# itself rather than the one a distribution installs.
+# Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat`,
+# `sysctl` and `top` from the release, for harnesses whose reference must be
+# the program itself rather than the one a distribution installs.
 #
 # ## Why a built reference
 #
@@ -66,13 +66,29 @@ PROCPS_REF_PIDWAIT=$PROCPS_REF_SRC/src/pidwait
 PROCPS_REF_VMSTAT=$PROCPS_REF_SRC/src/vmstat
 PROCPS_REF_SYSCTL=$PROCPS_REF_SRC/src/sysctl
 
-procps_ref_build() {
-  [ "$(uname -s)" = Linux ] || return 0
+# `top-diff.sh` compares against `top` configured as Ubuntu configures it --
+# `--disable-modern-top`, the original defaults, and `--enable-watch8bit`, so
+# it links ncursesw -- and, like the tree above, with no logind and no NUMA,
+# which SlateOS has neither of. `top` cannot be built `--without-ncurses`, so
+# it is a second tree, with its own configuration and stamp.
+PROCPS_REF_TOP_SRC=$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION-top
+PROCPS_REF_TOP_CONFIGURE='--quiet --disable-nls --without-systemd --without-elogind --disable-kill --disable-numa --disable-modern-top --enable-watch8bit --disable-shared'
+PROCPS_REF_TOP=$PROCPS_REF_TOP_SRC/src/top/top
+
+# procps_ref_tree DIR CONFIGURE TARGET...: the release unpacked into DIR,
+# configured with CONFIGURE, and the make targets TARGET (paths under DIR)
+# built -- unless DIR's stamp says that configuration is already built and
+# every target is there.
+procps_ref_tree() {
+  procps_ref_dir=$1 procps_ref_conf=$2
+  shift 2
+  procps_ref_have=yes
+  for procps_ref_t in "$@"; do
+    [ -x "$procps_ref_dir/$procps_ref_t" ] || procps_ref_have=
+  done
   # The stamp records the configuration, so a change to it rebuilds.
-  if [ -x "$PROCPS_REF_W" ] && [ -x "$PROCPS_REF_PS" ] && [ -x "$PROCPS_REF_PGREP" ] \
-     && [ -x "$PROCPS_REF_PKILL" ] && [ -x "$PROCPS_REF_PIDWAIT" ] \
-     && [ -x "$PROCPS_REF_VMSTAT" ] && [ -x "$PROCPS_REF_SYSCTL" ] \
-     && [ "$(cat "$PROCPS_REF_SRC/.slateos-built" 2>/dev/null)" = "$PROCPS_REF_CONFIGURE" ]; then
+  if [ -n "$procps_ref_have" ] \
+     && [ "$(cat "$procps_ref_dir/.slateos-built" 2>/dev/null)" = "$procps_ref_conf" ]; then
     return 0
   fi
   mkdir -p "$PROCPS_REF_CACHE" || return 0
@@ -87,20 +103,25 @@ procps_ref_build() {
     rm -f "$procps_ref_tar"
     return 0
   fi
-  printf 'procps-ref.sh: building procps-ng %s w, ps, pgrep, pkill, pidwait, vmstat and sysctl (once)\n' "$PROCPS_REF_VERSION" >&2
-  rm -rf "$PROCPS_REF_SRC" "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION"
+  printf 'procps-ref.sh: building procps-ng %s: %s (once)\n' "$PROCPS_REF_VERSION" "$*" >&2
+  rm -rf "$procps_ref_dir" "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION"
   tar -C "$PROCPS_REF_CACHE" -xJf "$procps_ref_tar" || return 0
-  mv "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION" "$PROCPS_REF_SRC" || return 0
+  mv "$PROCPS_REF_CACHE/procps-ng-$PROCPS_REF_VERSION" "$procps_ref_dir" || return 0
   # shellcheck disable=SC2086 # the configure flags are words on purpose
-  if ! ( cd "$PROCPS_REF_SRC" && ./configure $PROCPS_REF_CONFIGURE >/dev/null \
-         && make -s -j4 src/w src/ps/pscommand src/pgrep src/pkill src/pidwait src/vmstat \
-              src/sysctl >/dev/null 2>&1 ); then
-    printf 'procps-ref.sh: building procps-ng %s failed\n' "$PROCPS_REF_VERSION" >&2
-    rm -f "$PROCPS_REF_W" "$PROCPS_REF_PS" "$PROCPS_REF_PGREP" "$PROCPS_REF_PKILL" \
-      "$PROCPS_REF_PIDWAIT" "$PROCPS_REF_VMSTAT" "$PROCPS_REF_SYSCTL"
+  if ! ( cd "$procps_ref_dir" && ./configure $procps_ref_conf >/dev/null \
+         && make -s -j4 "$@" >/dev/null 2>&1 ); then
+    printf 'procps-ref.sh: building procps-ng %s failed: %s\n' "$PROCPS_REF_VERSION" "$*" >&2
+    for procps_ref_t in "$@"; do rm -f "$procps_ref_dir/$procps_ref_t"; done
     return 0
   fi
-  printf '%s' "$PROCPS_REF_CONFIGURE" > "$PROCPS_REF_SRC/.slateos-built"
+  printf '%s' "$procps_ref_conf" > "$procps_ref_dir/.slateos-built"
+}
+
+procps_ref_build() {
+  [ "$(uname -s)" = Linux ] || return 0
+  procps_ref_tree "$PROCPS_REF_SRC" "$PROCPS_REF_CONFIGURE" src/w src/ps/pscommand \
+    src/pgrep src/pkill src/pidwait src/vmstat src/sysctl
+  procps_ref_tree "$PROCPS_REF_TOP_SRC" "$PROCPS_REF_TOP_CONFIGURE" src/top/top
 }
 
 procps_ref_build

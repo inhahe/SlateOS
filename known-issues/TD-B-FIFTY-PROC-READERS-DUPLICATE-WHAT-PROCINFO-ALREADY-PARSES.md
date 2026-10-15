@@ -150,7 +150,9 @@ taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
 process whose name is not UTF-8 was dropped from the listing entirely -- and
 `pgrep` and `pkill` are the same binary, so such a process could not be
 signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
-day, which closes the set.
+day, which closes the set. (`userspace/top` is gone since 2026-10-15: `top` is
+procps-ng 4.0.4's now, reading `/proc` through `coreutils::procps`, the library
+layer `ps`, `free` and `vmstat` share.)
 
 ~~**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`,
 `lsof`, `strace`, `sysstat` and `who`~~ -- found by running the grep rather than

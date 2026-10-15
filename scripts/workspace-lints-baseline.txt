@@ -121,7 +121,6 @@ userspace/service
 userspace/ss
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
-userspace/top
 userspace/traceroute
 userspace/udevd
 userspace/unshare  # bare deny(clippy::all)

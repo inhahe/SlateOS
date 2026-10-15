@@ -623,6 +623,12 @@ impl Ext4Driver {
         Ok(driver)
     }
 
+    /// The block device the filesystem is on, by its name in the registry.
+    #[must_use]
+    pub fn device_name(&self) -> &str {
+        self.reader.device()
+    }
+
     /// Access the parsed superblock.
     #[must_use]
     pub fn superblock(&self) -> &ParsedSuperblock {

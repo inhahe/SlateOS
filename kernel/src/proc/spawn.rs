@@ -2693,6 +2693,11 @@ pub fn exec_process(
     // pcb::reset_linux_state_for_exec for the per-field rationale.
     pcb::reset_linux_state_for_exec(pid);
 
+    // The old image's lifecycle endpoint ends: the new one has not
+    // registered, and is not sent requests it cannot read
+    // (`proc::lifecycle`).
+    crate::proc::lifecycle::on_exec(pid);
+
     // Flush TLB for the user half.  Since we just freed all user
     // mappings, any stale TLB entries could cause use-after-free.
     // Reloading CR3 flushes all non-global TLB entries.
@@ -11744,6 +11749,13 @@ pub(crate) fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Righ
         // The right to replace the running kernel: the granted arm of
         // SYS_POWER_RELOAD (kexec).
         "reload_kernel" => Some((ResourceType::Process, 0, Rights::RELOAD_KERNEL)),
+        // What a display server holds at boot (the compositor's startup line,
+        // lane F's `requests/f-a-the-guest-cannot-run-a-graphical-program-or-
+        // show-its-screen.md`): a socket to listen on for its clients, the
+        // input devices to read, and the right to offer a service.
+        "socket" => Some((ResourceType::Socket, 0, Rights::READ | Rights::WRITE)),
+        "input" => Some((ResourceType::InputDevice, 0, Rights::READ)),
+        "service" => Some((ResourceType::Service, 0, Rights::WRITE)),
         _ => None,
     }
 }

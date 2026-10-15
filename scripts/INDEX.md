@@ -301,6 +301,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mkdir-diff.sh` | Differential test: our `mkdir` against GNU coreutils 9.4's. |
 | `scripts/mkfifo-diff.sh` | Differential test: our `mkfifo` against GNU coreutils 9.4's. |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
+| `scripts/mkswap.py` | Write a Linux swap-area header (mkswap's, version 1) onto an image, so SlateOS's kernel takes it as swap. |
 | `scripts/mktemp-diff.sh` | mktemp-diff.sh — compare our `mktemp` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/mono-spike/bcl.sh` | Build Mono's class libraries on the host, and stage what SlateOS's mono needs. |
 | `scripts/mono-spike/run.sh` | Cross-compile the Mono runtime (mono-sgen) and link it against SlateOS's libc.a. |
@@ -434,6 +435,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
+| `scripts/screen.py` | A guest's screen from the host: capture it, type at it, read its text back. |
 | `scripts/sed-diff.sh` | Differential test: our sed against GNU sed. |
 | `scripts/selftest-boot-gate-identity.py` | Self-test for boot-test.sh's `check_identity_rungs` gate. |
 | `scripts/selftestflag.py` | One spelling rule for `--self-test`, because the alternative reported success. |
@@ -521,6 +523,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
 | `scripts/test-pre-push-python-choice.py` | Tests for the interpreter `scripts/hooks/pre-push` runs its gates with. |
+| `scripts/test-pre-push-review-gate.py` | Behavioural tests for pre-push gate 77 (what reaches main lies in a review). |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
 | `scripts/test-pre-push-suites-scope.py` | Tests for which scripts a push counts as changed, in `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
@@ -587,4 +590,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_577 scripts._
+_580 scripts._

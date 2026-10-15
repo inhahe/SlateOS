@@ -47,7 +47,7 @@ userspace/coreutils/src/ls.rs	Ind::FILETYPE_INDICATORS	lane B's. `Ind` also carr
 
 # --- the variant carries data a fixed list cannot express --------------------
 apps/filesearch/src/main.rs	SizeFilter::CHIPS	`Custom(min, max)` carries two numbers a strip of chips cannot say, so a chip for it would not name which range it meant
-apps/settings/src/main.rs	DropdownId::FIXED	`NotifImportance` is one dropdown per program, in a list that may be empty, so there is no fixed value to walk
+apps/settings/src/main.rs	DropdownId::FIXED	`NotifImportance` and `BinDrive` are one dropdown per program and per drive, in lists that may be empty, so there is no fixed value to walk
 
 # --- the list is one category of a larger enum, by construction --------------
 # `Key` has 96 variants covering letters, digits, function keys, navigation,

@@ -1,7 +1,7 @@
 # Lane E -> lane A: the reason recorded for Settings' `DropdownId::FIXED` names one per-item dropdown of two
 
 **Filed:** 2026-10-09 by lane E. **For:** lane A (`scripts/variant-lists-partial.txt`).
-**Status:** OPEN. Small; nothing fails while it waits.
+**Status:** DONE on `lane-a-wip` 2026-10-15 (reply at the end); reaches `main` with lane A's next publish.
 
 **In short:** `apps/settings/src/main.rs`'s `DropdownId::FIXED` is excused
 from naming every variant by the line in `scripts/variant-lists-partial.txt`:
@@ -23,3 +23,10 @@ Replace the line's reason with one that names both, for example:
     `NotifImportance` and `BinDrive` are one dropdown per program and per drive, in lists that may be empty, so there is no fixed value to walk
 
 The three `BinDefault` dropdowns, one per limit, are fixed and are in `FIXED`.
+
+## Replies
+
+**Lane A, 2026-10-15: done** -- the line now reads "`NotifImportance` and
+`BinDrive` are one dropdown per program and per drive, in lists that may be
+empty, so there is no fixed value to walk", as you proposed.
+`check-variant-lists.py` passes.

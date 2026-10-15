@@ -634,7 +634,7 @@ impl Top {
                         curcol = 0;
                         curlin = self.insp.nl.wrapping_sub(max_ln);
                     }
-                    k if [b'L', b'&', b'/', b'n'].iter().any(|&c| i32::from(c) == k) => {
+                    k if b"L&/n".iter().any(|&c| i32::from(c) == k) => {
                         if self.insp.utf8 {
                             let rbeg = self.insp.row_at(curlin);
                             let rowtxt =

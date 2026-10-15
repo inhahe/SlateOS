@@ -179,8 +179,7 @@ impl Top {
             self.st.w_set = true;
         }
 
-        let rows_needed: usize;
-        if self.batch {
+        let rows_needed: usize = if self.batch {
             if self.st.w_cols != 0 {
                 self.screen_cols = self.st.w_cols;
             }
@@ -189,7 +188,7 @@ impl Top {
             } else {
                 i32::MAX
             };
-            rows_needed = 1;
+            1
         } else {
             let max_rows = i32::MAX
                 .checked_div(i32::try_from(ROWMAXSIZ).unwrap_or(1))
@@ -203,8 +202,8 @@ impl Top {
             if self.screen_rows < 0 || self.screen_rows > max_rows {
                 self.screen_rows = max_rows;
             }
-            rows_needed = usize::try_from(self.screen_rows).unwrap_or(0);
-        }
+            usize::try_from(self.screen_rows).unwrap_or(0)
+        };
         self.out.pseudo_rows = rows_needed;
         if self.out.pseudo.len() < rows_needed {
             self.out.pseudo.resize(rows_needed, Vec::new());

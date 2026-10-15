@@ -339,7 +339,7 @@ impl Top {
                 }
             } else {
                 for (i, c) in cpus.iter().take(cnt).enumerate() {
-                    let ctab = [b'u', b'E', b'P'];
+                    let ctab = *b"uEP";
                     let chr = if self.cw().rc.core_types != 0 {
                         usize::try_from(c.type_core)
                             .ok()

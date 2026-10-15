@@ -18,6 +18,11 @@ description = "SlateOS package manager — content-addressed store with atomic g
 quoting = { path = "../quoting" }
 httpclient = { path = "../../net/httpclient" }
 sha2 = { path = "../../sha2" }
+# The font parser the system's font index reads family names with
+# (`gui/toolkit/src/fontdb.rs`): `pkg pack` writes a package's `fonts:` from
+# its font files the same way, so a family Settings looks up by name is found
+# in the package that installs it.
+osfont = { path = "../../gui/font" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

@@ -13,6 +13,7 @@
 //!   pkg log [N|--all]           Show transaction history
 //!   pkg list [--installed]       List packages
 //!   pkg search <QUERY>           Search available packages
+//!   pkg search --font <FAMILY>   The packages that carry a font family
 //!   pkg info <PACKAGE>           Show package details
 //!   pkg rollback [GENERATION]    Rollback to a previous generation
 //!   pkg generations              List system generations
@@ -261,7 +262,13 @@ struct PackageManifest {
     authors: Vec<String>,
     homepage: String,
     depends: Vec<Dependency>,
-    provides: Vec<String>,         // paths this package provides
+    provides: Vec<String>, // paths this package provides
+    /// The font families its font files hold, as the files spell them --
+    /// what Settings asks for when a theme recommends a font it does not
+    /// have (`pkg search --font`). Written by `pkg pack` from the files
+    /// themselves, never trusted from the source manifest; see
+    /// [`font_families`].
+    fonts: Vec<String>,
     capabilities: Vec<Capability>, // capabilities this package needs
     files: Vec<PackageFile>,
     /// SHA-256 of the entire package archive.
@@ -287,6 +294,7 @@ impl PackageManifest {
     /// license: MIT
     /// depends: libc >= 0.1.0, libcrypto >= 1.0.0
     /// provides: /usr/bin/mycommand, /usr/lib/libmything.so
+    /// fonts: Inter, Inter Display
     /// capabilities: net.connect, fs.home
     /// file: bin/cmd -> /usr/bin/cmd 0755 <sha256> <size>
     /// archive_hash: <sha256>
@@ -301,6 +309,7 @@ impl PackageManifest {
         let mut homepage = String::new();
         let mut depends = Vec::new();
         let mut provides = Vec::new();
+        let mut fonts = Vec::new();
         let mut capabilities = Vec::new();
         let mut files = Vec::new();
         let mut archive_hash = String::new();
@@ -357,6 +366,14 @@ impl PackageManifest {
                 "provides" => {
                     provides = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
+                "fonts" => {
+                    fonts = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
                 "capabilities" => {
                     capabilities = value
                         .split(',')
@@ -398,6 +415,7 @@ impl PackageManifest {
             homepage,
             depends,
             provides,
+            fonts,
             capabilities,
             files,
             archive_hash,
@@ -433,6 +451,9 @@ impl PackageManifest {
         }
         if !self.provides.is_empty() {
             out.push_str(&format!("provides: {}\n", self.provides.join(", ")));
+        }
+        if !self.fonts.is_empty() {
+            out.push_str(&format!("fonts: {}\n", self.fonts.join(", ")));
         }
         if !self.capabilities.is_empty() {
             let caps: Vec<&str> = self.capabilities.iter().map(|c| c.name.as_str()).collect();
@@ -2314,6 +2335,9 @@ fn cmd_info(db: &PackageDb, name: &str) {
                     println!("  {}", cap.name);
                 }
             }
+            if !manifest.fonts.is_empty() {
+                println!("Fonts:     {}", manifest.fonts.join(", "));
+            }
         }
         return;
     }
@@ -2347,6 +2371,9 @@ fn cmd_info(db: &PackageDb, name: &str) {
                 for cap in &manifest.capabilities {
                     println!("  {}", cap.name);
                 }
+            }
+            if !manifest.fonts.is_empty() {
+                println!("Fonts:     {}", manifest.fonts.join(", "));
             }
             if manifest.archive_size > 0 {
                 println!("Size:      {}", format_size(manifest.archive_size));
@@ -4042,6 +4069,155 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     }
 }
 
+// ============================================================================
+// Font families
+// ============================================================================
+//
+// A theme can recommend the fonts it was designed with, and Settings offers to
+// install a recommended family that is missing (requests/e-b-a-package-could-
+// say-which-font-families-it-carries.md). Settings knows a family by name and
+// the package manager knows packages, so a package says which families it
+// carries: `fonts:` in its manifest. `pkg pack` writes that line from the
+// font files themselves, the way the system's font index reads them
+// (`gui/toolkit/src/fontdb.rs`), so it cannot drift from what the package
+// installs; a `fonts:` an author wrote is only checked against it.
+
+/// The extensions of the files the font index opens, compared without case.
+const FONT_EXTENSIONS: [&str; 4] = ["ttf", "ttc", "otf", "otc"];
+
+/// Whether `path` names a font file, by its extension.
+fn is_font_file(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| FONT_EXTENSIONS.iter().any(|f| e.eq_ignore_ascii_case(f)))
+}
+
+/// What a family is matched by: the font index's key, its name trimmed and
+/// lower-cased, so "inter" finds "Inter".
+fn family_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// The families font file `data` holds -- its typographic family (name ID
+/// 16) and its legacy one (ID 1), the two the font index answers to -- as
+/// the file spells them. A collection is read by its first face, as the
+/// index reads it.
+///
+/// # Errors
+///
+/// What the font parser could not read.
+fn families_in(data: &[u8]) -> Result<Vec<String>, String> {
+    let face = osfont::sfnt::Face::parse(data.to_vec()).map_err(|e| e.to_string())?;
+    Ok([
+        osfont::sfnt::name_id::TYPOGRAPHIC_FAMILY,
+        osfont::sfnt::name_id::FAMILY,
+    ]
+    .into_iter()
+    .filter_map(|id| face.name(id))
+    .map(|n| n.trim().to_string())
+    .filter(|n| !n.is_empty())
+    .collect())
+}
+
+/// The families a package's font files hold, each once whatever its case
+/// (the first spelling met), in the order of their keys.
+#[derive(Default)]
+struct FontFamilies(BTreeMap<String, String>);
+
+impl FontFamilies {
+    fn add(&mut self, name: String) {
+        self.0.entry(family_key(&name)).or_insert(name);
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(&family_key(name))
+    }
+
+    fn into_names(self) -> Vec<String> {
+        self.0.into_values().collect()
+    }
+}
+
+/// Write `manifest.fonts` from the font files among `files` -- `(source
+/// path, contents)` -- and say what does not agree: a font file nothing
+/// could be read from, and a family the source manifest named that no file
+/// holds. Answers those warnings, one line each.
+fn pack_fonts<'a>(
+    manifest: &mut PackageManifest,
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Vec<String> {
+    let mut found = FontFamilies::default();
+    let mut warnings = Vec::new();
+    for (src, data) in files {
+        if !is_font_file(src) {
+            continue;
+        }
+        match families_in(data) {
+            Ok(names) if names.is_empty() => {
+                warnings.push(format!("{}: names no font family", quoteaf_os(src)));
+            }
+            Ok(names) => names.into_iter().for_each(|n| found.add(n)),
+            Err(e) => warnings.push(format!("{}: no font family read ({e})", quoteaf_os(src))),
+        }
+    }
+    for named in &manifest.fonts {
+        if !found.contains(named) {
+            warnings.push(format!(
+                "fonts: {} is in none of the package's font files -- left out",
+                quoteaf_os(named)
+            ));
+        }
+    }
+    manifest.fonts = found.into_names();
+    warnings
+}
+
+/// Whether `manifest`'s package carries font family `family`, matched as
+/// the font index matches a name.
+fn carries_font(manifest: &PackageManifest, family: &str) -> bool {
+    let wanted = family_key(family);
+    manifest.fonts.iter().any(|f| family_key(f) == wanted)
+}
+
+/// `pkg search --font <FAMILY>`: the available packages that carry the
+/// family, one `NAME VERSION [installed]` line each with the description
+/// indented under it, as `pkg search` prints them. None is a sentence on
+/// standard error and status 1, so a caller can tell it from an answer.
+fn cmd_search_font(db: &PackageDb, family: &str) {
+    match db.load_repo_index() {
+        Ok(packages) => {
+            let carriers: Vec<&PackageManifest> = packages
+                .iter()
+                .filter(|p| carries_font(p, family))
+                .collect();
+            if carriers.is_empty() {
+                eprintln!(
+                    "pkg: no package carries the font family {}",
+                    quoteaf_os(family)
+                );
+                process::exit(1);
+            }
+            let current = db.current_generation();
+            for pkg in carriers {
+                let status = if current.packages.contains_key(&pkg.name) {
+                    "[installed]"
+                } else {
+                    ""
+                };
+                println!("{} {} {status}", pkg.name, pkg.version);
+                if !pkg.description.is_empty() {
+                    println!("  {}", pkg.description);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("pkg: search failed: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 /// Create a .pkg file from a manifest and source directory.
 ///
 /// Usage: pkg pack <manifest-path> [--output <file.pkg>]
@@ -4072,6 +4248,8 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
 
     // Compute hashes for all files and update the manifest entries
     let mut updated_files = Vec::new();
+    // The font files' contents, for the families they hold.
+    let mut font_files: Vec<(String, Vec<u8>)> = Vec::new();
     for file in &manifest.files {
         let src_path = base_dir.join(&file.src);
         let data = match fs::read(&src_path) {
@@ -4093,8 +4271,15 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
             hash,
             size,
         });
+        if is_font_file(&file.src) {
+            font_files.push((file.src.clone(), data));
+        }
     }
     manifest.files = updated_files;
+    let font_sources = font_files.iter().map(|(s, d)| (s.as_str(), d.as_slice()));
+    for warning in pack_fonts(&mut manifest, font_sources) {
+        eprintln!("pkg: warning: {warning}");
+    }
 
     // Build the archive
     let archive = match create_pkg_archive(&manifest, base_dir) {
@@ -4741,6 +4926,7 @@ Commands:
   log [N|--all]          Show transaction history (default: last 20)
   list [--installed]     List packages
   search <query>         Search available packages
+  search --font <family> The packages that carry a font family
   info <pkg>             Show package details
   rollback [gen]         Rollback to a previous generation
   generations            List system generations
@@ -4782,7 +4968,9 @@ Creating Packages:
 
   Reads a manifest file, locates all referenced source files relative to
   the manifest's directory, computes SHA-256 hashes, and produces a .pkg
-  archive that can be installed with 'pkg install'.
+  archive that can be installed with 'pkg install'. The 'fonts:' line is
+  written from the package's font files (.ttf .otf .ttc .otc): the
+  families they hold, which 'pkg search --font' finds.
 
 Package Snapshots:
   pkg snapshot export [file]   Export installed packages as portable manifest
@@ -4820,6 +5008,7 @@ Package Manifest Format:
   license: MIT
   depends: libc >= 0.1.0, libcrypto >= 1.0.0
   provides: /usr/bin/mycommand
+  fonts: Inter, Inter Display
   capabilities: net.connect, fs.home
   file: bin/cmd -> /usr/bin/cmd 755 <sha256> <size>
   archive_hash: <sha256>
@@ -4884,7 +5073,17 @@ fn main() {
                 eprintln!("pkg: search requires a query");
                 process::exit(1);
             }
-            cmd_search(&db, &rest_filtered.join(" "));
+            if rest_filtered[0] == "--font" {
+                // A family's name may hold spaces: "Fira Code".
+                let family = rest_filtered[1..].join(" ");
+                if family.trim().is_empty() {
+                    eprintln!("pkg: search --font requires a font family");
+                    process::exit(1);
+                }
+                cmd_search_font(&db, &family);
+            } else {
+                cmd_search(&db, &rest_filtered.join(" "));
+            }
         }
         "info" | "show" => {
             if rest_filtered.is_empty() {
@@ -5176,5 +5375,154 @@ mod tests {
         assert_eq!(store.list_blobs().expect("list"), vec![first]);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- font families ----
+
+    /// A font with only what the parser needs and the names given: one
+    /// empty glyph, and a `name` table of `(name ID, text)` records for
+    /// Windows, Unicode BMP, US English.
+    fn named_font(names: &[(u16, &str)]) -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        // Long `loca` offsets.
+        head[50..52].copy_from_slice(&1i16.to_be_bytes());
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&1u16.to_be_bytes());
+        let mut maxp = vec![0u8; 6];
+        maxp[4..6].copy_from_slice(&1u16.to_be_bytes());
+        let hmtx = vec![0u8; 4];
+        let loca = vec![0u8; 8];
+        let glyf = vec![0u8; 4];
+
+        let mut strings = Vec::new();
+        let mut records = Vec::new();
+        for &(id, text) in names {
+            let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for v in [
+                3u16,
+                1,
+                0x0409,
+                id,
+                utf16.len() as u16,
+                strings.len() as u16,
+            ] {
+                records.extend_from_slice(&v.to_be_bytes());
+            }
+            strings.extend_from_slice(&utf16);
+        }
+        let mut name = Vec::new();
+        let count = names.len() as u16;
+        for v in [0u16, count, 6 + 12 * count] {
+            name.extend_from_slice(&v.to_be_bytes());
+        }
+        name.extend_from_slice(&records);
+        name.extend_from_slice(&strings);
+
+        let tables: [(&[u8; 4], Vec<u8>); 7] = [
+            (b"glyf", glyf),
+            (b"head", head),
+            (b"hhea", hhea),
+            (b"hmtx", hmtx),
+            (b"loca", loca),
+            (b"maxp", maxp),
+            (b"name", name),
+        ];
+        let mut font = Vec::new();
+        font.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        for v in [tables.len() as u16, 64, 2, 48] {
+            font.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut offset = 12 + 16 * tables.len();
+        let mut body = Vec::new();
+        for (tag, data) in &tables {
+            font.extend_from_slice(*tag);
+            font.extend_from_slice(&0u32.to_be_bytes());
+            font.extend_from_slice(&(offset as u32).to_be_bytes());
+            font.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut padded = data.clone();
+            padded.resize(data.len().div_ceil(4) * 4, 0);
+            offset += padded.len();
+            body.extend_from_slice(&padded);
+        }
+        font.extend_from_slice(&body);
+        font
+    }
+
+    fn manifest(text: &str) -> PackageManifest {
+        PackageManifest::parse(text).expect("a manifest")
+    }
+
+    #[test]
+    fn a_font_file_s_families_are_its_typographic_and_legacy_ones() {
+        let font = named_font(&[(1, "Inter Display"), (2, "Regular"), (16, " Inter ")]);
+        assert_eq!(
+            families_in(&font),
+            Ok(vec!["Inter".to_string(), "Inter Display".to_string()])
+        );
+        assert_eq!(families_in(&named_font(&[(2, "Bold")])), Ok(vec![]));
+        assert!(families_in(b"not a font").is_err());
+    }
+
+    #[test]
+    fn font_files_are_known_by_the_index_s_extensions() {
+        for path in ["fonts/Inter.ttf", "a/B.OTF", "c.ttc", "d.Otc"] {
+            assert!(is_font_file(path), "{path}");
+        }
+        for path in ["inter.woff2", "ttf", "README", "x.ttf.txt"] {
+            assert!(!is_font_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn pack_writes_the_families_the_files_hold_and_says_what_disagrees() {
+        let inter = named_font(&[(1, "Inter"), (16, "Inter")]);
+        let display = named_font(&[(1, "inter display"), (16, "INTER")]);
+        let mut m = manifest("name: fonts-inter\nfonts: Inter, Comic Sans\n");
+        let warnings = pack_fonts(
+            &mut m,
+            [
+                ("Inter-Regular.ttf", inter.as_slice()),
+                ("InterDisplay.otf", display.as_slice()),
+                ("README.md", b"# not a font".as_slice()),
+                ("broken.ttf", b"\0\x01\0\0".as_slice()),
+            ],
+        );
+        // Each family once whatever its case, in the order of its key; the
+        // first spelling met is kept.
+        assert_eq!(m.fonts, vec!["Inter", "inter display"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("broken.ttf"), "{warnings:?}");
+        assert!(warnings[1].contains("Comic Sans"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_package_without_font_files_carries_no_fonts_whatever_it_said() {
+        let mut m = manifest("name: tools\nfonts: Inter\n");
+        let warnings = pack_fonts(&mut m, [("bin/tool", b"\x7fELF".as_slice())]);
+        assert!(m.fonts.is_empty());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn the_fonts_line_survives_a_round_trip() {
+        let m = manifest("name: fonts-fira\nversion: 6.2.0\nfonts: Fira Code , Fira Mono,\n");
+        assert_eq!(m.fonts, vec!["Fira Code", "Fira Mono"]);
+        let again = manifest(&m.serialize());
+        assert_eq!(again.fonts, m.fonts);
+        assert!(m.serialize().contains("\nfonts: Fira Code, Fira Mono\n"));
+        assert!(!manifest("name: tools\n").serialize().contains("fonts:"));
+    }
+
+    #[test]
+    fn a_family_is_found_whatever_its_case_or_spaces() {
+        let m = manifest("name: fonts-fira\nfonts: Fira Code, Fira Mono\n");
+        assert!(carries_font(&m, "Fira Code"));
+        assert!(carries_font(&m, "  fira code "));
+        assert!(carries_font(&m, "FIRA MONO"));
+        assert!(!carries_font(&m, "Fira"));
+        assert!(!carries_font(&m, "Fira Sans"));
+        assert!(!carries_font(&manifest("name: tools\n"), "Fira Code"));
     }
 }

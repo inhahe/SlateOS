@@ -1517,9 +1517,11 @@ list moved to lane D on 2026-09-22):
     once at boot needs a run-once kind of service in `init` and a line in the
     image's `startup.conf`, both lane D's: requested 2026-10-15
     (`requests/b-d-init-runs-swapon-a-once-at-boot.md`).
-  - `[ ]` `[B]` `pkg` packages say which font families they carry, so
+  - `[x]` `[B]` `pkg` packages say which font families they carry, so
     Settings can offer a theme's recommended fonts
     (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
+    Done 2026-10-15: `fonts:` in the manifest, written by `pkg pack` from the
+    font files as the font index reads them; `pkg search --font <FAMILY>`.
   - `[x]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
     test-module finder from `rustlex` once lane A puts one there
     (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`). Done

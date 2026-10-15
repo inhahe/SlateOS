@@ -36,8 +36,11 @@
 //!
 //! Grants are `-` for none, or words joined by `,` from the C fixtures'
 //! vocabulary (`proc::spawn::ctest_generic_grant`: `file`, `secureboot`,
-//! `reload_kernel`, and a display server's `socket`, `input` and `service`),
-//! so a program tried here holds what it would at boot.
+//! `reload_kernel`, `realtime`, and a display server's `socket`, `input` and
+//! `service`),
+//! so a program tried here holds what it would at boot. A run that answers
+//! `timeout` leaves the scheduler's account of each of its threads on the
+//! serial log (`proc::spawn::wait_for_fixture`), taken before it is killed.
 //!
 //! Any request may be answered `err <len>` and a message instead. A request
 //! line the agent cannot read ends the exchange: it answers `err`, forgets
@@ -386,15 +389,7 @@ fn run(seconds: u64, grants: &[u8], argv: &[Vec<u8>]) -> Vec<u8> {
     };
 
     let deadline = crate::hrtimer::now_ns().saturating_add(seconds.saturating_mul(1_000_000_000));
-    let finished = loop {
-        if crate::proc::pcb::state(result.pid) == Some(crate::proc::pcb::ProcessState::Zombie) {
-            break true;
-        }
-        if crate::hrtimer::now_ns() >= deadline {
-            break false;
-        }
-        crate::sched::sleep_ms(1);
-    };
+    let finished = spawn::wait_for_fixture(result.pid, deadline, 1);
     let code = crate::proc::pcb::exit_code(result.pid);
     spawn::teardown_fixture(result.pid, result.task_id);
 
@@ -582,6 +577,8 @@ pub fn self_test() -> KernelResult<()> {
     if !matches!(parse(&long), Parsed::Invalid(_)) {
         return fail("an endless request line was waited on");
     }
+    let realtime_ok =
+        grants_of(b"realtime") == Ok(alloc::vec![(ResourceType::Thread, 0, Rights::IO_REALTIME)]);
     let display_ok = grants_of(b"socket,input,service")
         == Ok(alloc::vec![
             (ResourceType::Socket, 0, Rights::READ | Rights::WRITE),
@@ -592,6 +589,7 @@ pub fn self_test() -> KernelResult<()> {
         || grants_of(b"file").map(|g| g.len()) != Ok(1)
         || grants_of(b"file,nonesuch").is_ok()
         || !display_ok
+        || !realtime_ok
     {
         return fail("grant words");
     }

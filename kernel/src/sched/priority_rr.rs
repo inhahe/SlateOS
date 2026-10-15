@@ -890,6 +890,23 @@ impl PerCpuScheduler {
             .sum()
     }
 
+    /// Which online CPUs' run queues name `id`, as a bit mask (bit `n` for
+    /// CPU `n`): at most one bit in a consistent scheduler, and it should be
+    /// a CPU the task's affinity allows. A diagnostic, locking like
+    /// [`entries_for`](Self::entries_for).
+    #[must_use]
+    pub fn queued_cpus(&self, id: super::task::TaskId) -> u64 {
+        const _: () = assert!(MAX_CPUS <= 64, "the mask has a bit per CPU");
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
+        let mut mask = 0u64;
+        for (cpu, q) in self.queues.iter().take(n).enumerate() {
+            if Self::locked_irqs_off(q, |backend| backend.entries_for(id)) > 0 {
+                mask |= 1u64 << cpu;
+            }
+        }
+        mask
+    }
+
     /// Run `f` on one CPU's queue, holding its lock with interrupts disabled
     /// -- the way to lock a queue from a path that does not hold `SCHED`.
     ///

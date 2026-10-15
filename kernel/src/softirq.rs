@@ -165,7 +165,14 @@ pub fn raise(bits: u32) {
 #[inline]
 #[must_use]
 pub fn is_processing() -> bool {
-    let cpu = crate::smp::current_cpu_index();
+    is_processing_on(crate::smp::current_cpu_index())
+}
+
+/// [`is_processing`] for CPU `cpu`, which may be another: a moment stale
+/// then. `false` for an index past the table.
+#[inline]
+#[must_use]
+pub fn is_processing_on(cpu: usize) -> bool {
     IN_SOFTIRQ
         .get(cpu)
         .is_some_and(|f| f.load(Ordering::Acquire))

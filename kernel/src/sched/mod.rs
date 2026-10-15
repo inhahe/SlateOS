@@ -4598,12 +4598,177 @@ fn dump_all_tasks_serial() {
             core::str::from_utf8(name).unwrap_or("<non-utf8>"),
         );
     }
+    report_running_orphans(&state, "the liveness dump");
 
     // A `Blocked` task in the table above is only half the story: the other
     // half is whether anything is still armed to wake it.  Dump both timer
     // sources so a hang report answers that in one pass instead of one boot
     // cycle per hypothesis.
     dump_timer_sources(now);
+}
+
+/// Name every task that is `Running` on no CPU: committed to by a CPU that
+/// then ran something else, in no run queue, so nothing will run it again
+/// (known-issues `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`).
+/// Each with when and by which path it was last committed to and last left a
+/// CPU ([`task::Task::last_dispatch`]); `why` says who is asking. Answers how
+/// many there are.
+fn report_running_orphans(state: &SchedState, why: &str) -> usize {
+    let cpus = crate::smp::cpu_count();
+    let mut orphans = 0usize;
+    for (&id, task) in &state.tasks {
+        if task.state != TaskState::Running {
+            continue;
+        }
+        let on_cpu = (0..cpus).any(|cpu| {
+            CURRENT_TASK_IDS
+                .get(cpu)
+                .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
+        });
+        if on_cpu {
+            continue;
+        }
+        orphans = orphans.saturating_add(1);
+        let name = task
+            .name
+            .get(..task.name_len.min(task.name.len()))
+            .unwrap_or(&[]);
+        serial_println!(
+            "[sched] *** ORPHAN ({}): task {} {:?} is Running on no CPU and in no run \
+             queue; last committed to at tick {} by {}, last left a CPU at tick {} by {} as \
+             {:?}; last_cpu {}",
+            why,
+            id,
+            core::str::from_utf8(name).unwrap_or("<non-utf8>"),
+            task.last_dispatch.0,
+            task.last_dispatch.1,
+            task.last_switch_out.0,
+            task.last_switch_out.1,
+            task.last_switch_out.2,
+            task.last_cpu,
+        );
+    }
+    orphans
+}
+
+/// Print, on one line headed by `why`, everything the scheduler knows of
+/// task `id` that bears on why it is not running: its state, policy and
+/// priorities, its affinity, the CPU running it (if any) and the CPUs whose
+/// run queues hold it, what it waits on and since when, and when and by which
+/// path it was last put on and taken off a CPU. Followed by the sleep and
+/// hrtimer queues when it is `Blocked`, since the question then is whether
+/// anything is still armed to wake it.
+///
+/// For whoever gives up waiting on a task -- a self-test tearing down a
+/// fixture that did not finish (`proc::spawn::teardown_fixture`) -- so that a
+/// hang names its cause on the run that hit it rather than on a rerun that
+/// may not (known-issues
+/// `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`). Takes
+/// `SCHED`, then each run queue's lock: diagnostic use only.
+pub fn report_task(id: TaskId, why: &str) {
+    let now = crate::apic::tick_count();
+    let cpus = crate::smp::cpu_count();
+    let on_cpu = (0..cpus).find(|&cpu| {
+        CURRENT_TASK_IDS
+            .get(cpu)
+            .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
+    });
+    let queued = PER_CPU_SCHED.queued_cpus(id);
+    let blocked = {
+        let state = SCHED.lock();
+        let Some(task) = state.tasks.get(&id) else {
+            serial_println!("[sched] task {} ({}): no such task", id, why);
+            return;
+        };
+        let name = task
+            .name
+            .get(..task.name_len.min(task.name.len()))
+            .unwrap_or(&[]);
+        serial_println!(
+            "[sched] task {} {:?} ({}): state={:?} policy={:?} rt_prio={} prio={} \
+             effective={} inherited={:?} affinity={:#x} on_cpu={:?} queued_on={:#x} \
+             last_cpu={} pending_wake={} block_site={} wait=({}) block_tick={} \
+             block_seq={} sleep_timer={} ready_since={} now={} dispatched={} by {} \
+             left_cpu={} by {} as {:?} schedules={}",
+            id,
+            core::str::from_utf8(name).unwrap_or("<non-utf8>"),
+            why,
+            task.state,
+            task.policy,
+            task.rt_priority,
+            task.priority,
+            task.effective_priority(),
+            task.inherited_priority,
+            task.cpu_affinity,
+            on_cpu,
+            queued,
+            task.last_cpu,
+            task.pending_wake,
+            BlockSite(task.block_site),
+            task.wait,
+            task.block_tick,
+            task.block_seq,
+            task.sleep_timer_id,
+            task.ready_since_tick,
+            now,
+            task.last_dispatch.0,
+            task.last_dispatch.1,
+            task.last_switch_out.0,
+            task.last_switch_out.1,
+            task.last_switch_out.2,
+            task.schedule_count,
+        );
+        task.state == TaskState::Blocked
+    };
+    if blocked {
+        dump_timer_sources(now);
+    }
+}
+
+/// Print, one line per online CPU headed by `why`, what decides whether that
+/// CPU will switch away from the task it runs: the task; its preempt count,
+/// with where and by whom the outermost disable was made; whether a
+/// preemption is pending (`NEED_RESCHED`) and new work signalled
+/// (`RESCHEDULE_PENDING`); whether it is in the idle fallback or running
+/// softirqs -- either of which, like a raised count, defers involuntary
+/// preemption ([`do_deferred_preempt`]); whether its timer is stopped, so
+/// that nothing will ask; how many real tasks its run queue holds (`None`:
+/// its lock was held); and how many times it has been preempted.
+///
+/// [`report_task`]'s companion: a task queued on a CPU that never switches is
+/// starved by that CPU, not by the task's own state. Lock-free but for a
+/// `try_lock` of each run queue.
+pub fn report_cpus(why: &str) {
+    for cpu in 0..crate::smp::cpu_count() {
+        let running = CURRENT_TASK_IDS
+            .get(cpu)
+            .map(|slot| slot.load(Ordering::Acquire));
+        let disabled = preempt_disable_site(cpu);
+        serial_println!(
+            "[sched] cpu{} ({}): running={:?} preempt_count={} disabled_at={} by={:?} \
+             need_resched={} reschedule_pending={} idle_fallback={} softirq={} \
+             timer_stopped={} queued={:?} preemptions={}",
+            cpu,
+            why,
+            running,
+            preempt_count(cpu),
+            BlockSite(disabled.map(|(site, _)| site)),
+            disabled.map(|(_, by)| by),
+            NEED_RESCHED
+                .get(cpu)
+                .is_some_and(|f| f.load(Ordering::Acquire)),
+            RESCHEDULE_PENDING
+                .get(cpu)
+                .is_some_and(|f| f.load(Ordering::Acquire)),
+            cpu_is_idle(cpu),
+            crate::softirq::is_processing_on(cpu),
+            crate::apic::timer_stopped_on(cpu),
+            PER_CPU_SCHED.try_real_queue_length(cpu),
+            PREEMPTIONS
+                .get(cpu)
+                .map_or(0, |n| n.load(Ordering::Relaxed)),
+        );
+    }
 }
 
 /// Dump the sleep queue and the hrtimer queues — every mechanism that can
@@ -6733,6 +6898,7 @@ pub fn park_if_suspended() -> bool {
                 let cpu = task.last_cpu;
                 PER_CPU_SCHED.dequeue(current, prio, cpu);
                 task.state = TaskState::Running;
+                task.last_dispatch = (crate::apic::tick_count(), "stop-raced-by-resume");
                 return false;
             }
             // Dead (killed while we were announcing the stop) or anything
@@ -8434,6 +8600,11 @@ static DEFERRED_WAKES_PENDING: AtomicBool = AtomicBool::new(false);
 /// the waitqueue `wait_timeout_ns (expired)` self-test (lost-wakeup family).
 const IDLE_FALLBACK_WEDGE_TICKS: u64 = 500;
 
+/// Idle-fallback iterations (≈ ticks) with nothing runnable before the loop
+/// looks for a task left `Running` on no CPU ([`report_running_orphans`]):
+/// once per idle stretch, a second in.
+const IDLE_ORPHAN_CHECK_TICKS: u64 = 100;
+
 /// One-shot guard so the idle-fallback wedge dump fires at most once per boot.
 static IDLE_FALLBACK_WEDGE_DUMPED: AtomicBool = AtomicBool::new(false);
 
@@ -9764,6 +9935,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     });
                     let Some(ready_id) = picked else {
                         idle_spins = idle_spins.saturating_add(1);
+                        // A second with nothing to run: if a task sits
+                        // `Running` on no CPU, this is where it shows.
+                        if idle_spins == IDLE_ORPHAN_CHECK_TICKS {
+                            report_running_orphans(&s, "the idle fallback, a second idle");
+                        }
                         if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
                             && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
                         {
@@ -9784,6 +9960,8 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         if let Some(task) = s.tasks.get_mut(&current_id) {
                             task.record_dispatch(crate::apic::tick_count());
                             task.state = TaskState::Running;
+                            task.last_dispatch =
+                                (crate::apic::tick_count(), "idle-fallback-resume-in-place");
                             task.last_cpu = cpu;
                             note_dispatch(cpu, task, false);
                         }
@@ -9879,8 +10057,16 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     if let Some(task) = s.tasks.get_mut(&ready_id) {
                         task.record_dispatch(crate::apic::tick_count());
                         task.state = TaskState::Running;
+                        task.last_dispatch = (crate::apic::tick_count(), "idle-fallback-switch");
                         task.last_cpu = cpu;
                         note_dispatch(cpu, task, true);
+                    }
+                    if let Some(task) = s.tasks.get_mut(&current_id) {
+                        task.last_switch_out = (
+                            crate::apic::tick_count(),
+                            "idle-fallback-switch",
+                            task.state,
+                        );
                     }
 
                     if let (
@@ -10052,6 +10238,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     PER_CPU_SCHED.dequeue(current_id, task.effective_priority(), cpu);
                     task.record_dispatch(crate::apic::tick_count());
                     task.state = TaskState::Running;
+                    task.last_dispatch = (crate::apic::tick_count(), "missed-pick-resume");
                     note_dispatch(cpu, task, false);
                 }
             }
@@ -10075,6 +10262,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             // save-then-restore.  Handle it uniformly regardless of `requeue`.
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 task.state = TaskState::Running;
+                task.last_dispatch = (crate::apic::tick_count(), "picked-self");
                 note_dispatch(cpu, task, false);
             }
             return;
@@ -10142,8 +10330,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             if let Some(next_task) = state.tasks.get_mut(&next_id) {
                 next_task.record_dispatch(crate::apic::tick_count());
                 next_task.state = TaskState::Running;
+                next_task.last_dispatch = (crate::apic::tick_count(), "switch");
                 next_task.last_cpu = cpu;
                 note_dispatch(cpu, next_task, true);
+            }
+            if let Some(old_task) = state.tasks.get_mut(&current_id) {
+                old_task.last_switch_out = (crate::apic::tick_count(), "switch", old_task.state);
             }
             old_ctx_ptr = old;
             new_ctx_ptr = new;

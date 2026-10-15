@@ -841,6 +841,16 @@ pub struct Task {
     /// frequently (excessive context switch overhead).
     pub schedule_count: u64,
 
+    /// When and by which path a CPU last committed to this task -- made it
+    /// `Running` -- for a task found `Running` on no CPU and in no run queue
+    /// (known-issues `A-A-TASK-LEFT-RUNNING-OFF-CPU-AND-OUT-OF-EVERY-RUN-QUEUE`):
+    /// the tick and the path's name in `sched::schedule_inner` and its kin.
+    pub last_dispatch: (u64, &'static str),
+
+    /// When and by which path this task last left a CPU, and the state it
+    /// left in: a task that left still `Running` was stranded there.
+    pub last_switch_out: (u64, &'static str, TaskState),
+
     /// Global tick count (`apic::tick_count`, USER_HZ = 100) captured when
     /// this task was created.  Monotonic, boot-relative.
     ///
@@ -1321,6 +1331,8 @@ impl Task {
             nvcsw: 0,
             nivcsw: 0,
             schedule_count: 0,
+            last_dispatch: (0, "never"),
+            last_switch_out: (0, "never", TaskState::Ready),
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
             start_tick: 0,
@@ -1427,6 +1439,8 @@ impl Task {
             nvcsw: 0,
             nivcsw: 0,
             schedule_count: 0,
+            last_dispatch: (0, "never"),
+            last_switch_out: (0, "never", TaskState::Ready),
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
             start_tick: 0,
@@ -1600,6 +1614,8 @@ impl Task {
             nvcsw: 0,
             nivcsw: 0,
             schedule_count: 0,
+            last_dispatch: (0, "never"),
+            last_switch_out: (0, "never", TaskState::Ready),
             // Capture the boot-relative creation time for /proc/<pid>/stat
             // starttime (field 22).  USER_HZ == tick rate, so no rescale.
             start_tick: crate::apic::tick_count(),

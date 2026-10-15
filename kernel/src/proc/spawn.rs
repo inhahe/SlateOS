@@ -11656,6 +11656,33 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     Ok(())
 }
 
+/// Wait for fixture process `pid` to end -- become a zombie -- until the
+/// hrtimer clock passes `deadline_ns`, looking every `poll_ms` milliseconds.
+/// Answers whether it ended.
+///
+/// One that did not has each of its threads reported
+/// (`sched::report_task`), and then every CPU (`sched::report_cpus`), before
+/// its caller tears it down
+/// ([`teardown_fixture`]) and the evidence with it: a hang then names its
+/// cause on the run that hit it, which may be the only run that does.
+pub(crate) fn wait_for_fixture(pid: ProcessId, deadline_ns: u64, poll_ms: u64) -> bool {
+    loop {
+        if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+            return true;
+        }
+        if crate::hrtimer::now_ns() >= deadline_ns {
+            break;
+        }
+        crate::sched::sleep_ms(poll_ms);
+    }
+    let why = "its process did not end by its deadline";
+    for tid in pcb::get_threads(pid).unwrap_or_default() {
+        crate::sched::report_task(tid, why);
+    }
+    crate::sched::report_cpus(why);
+    false
+}
+
 /// Take down a fixture process a rung spawned, whatever state it is in.
 ///
 /// A fixture that reached `Zombie` has no thread left, and is reaped as the
@@ -11756,6 +11783,9 @@ pub(crate) fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Righ
         "socket" => Some((ResourceType::Socket, 0, Rights::READ | Rights::WRITE)),
         "input" => Some((ResourceType::InputDevice, 0, Rights::READ)),
         "service" => Some((ResourceType::Service, 0, Rights::WRITE)),
+        // The right to raise a thread's priority, real-time policies included:
+        // this kernel's `CAP_SYS_NICE` (`self_test_linux_rt_sched` grants it).
+        "realtime" => Some((ResourceType::Thread, 0, Rights::IO_REALTIME)),
         _ => None,
     }
 }
@@ -23118,11 +23148,7 @@ pub fn self_test_linux_thread_signals() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23204,11 +23230,7 @@ pub fn self_test_linux_sigaltstack() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23309,11 +23331,7 @@ pub fn self_test_linux_sigpipe() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23411,11 +23429,7 @@ pub fn self_test_linux_mlock() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23517,11 +23531,7 @@ pub fn self_test_linux_null_buffer() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23613,11 +23623,7 @@ pub fn self_test_linux_rt_sched() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23711,11 +23717,7 @@ pub fn self_test_linux_rseq() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23820,11 +23822,7 @@ pub fn self_test_linux_ptrace() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -23959,11 +23957,7 @@ pub fn self_test_linux_exit_group() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24054,11 +24048,7 @@ pub fn self_test_linux_exec_threads() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24149,11 +24139,7 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24341,11 +24327,7 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24446,11 +24428,7 @@ pub fn self_test_linux_uts_namespaces() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24564,11 +24542,7 @@ pub fn self_test_linux_mount() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24671,11 +24645,7 @@ pub fn self_test_linux_mount_namespaces() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24789,11 +24759,7 @@ pub fn self_test_linux_bind_mounts() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -24939,11 +24905,7 @@ pub fn self_test_linux_stacked_mounts() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25073,11 +25035,7 @@ pub fn self_test_linux_fifo() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25182,11 +25140,7 @@ pub fn self_test_linux_sigchld_stop() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25277,11 +25231,7 @@ pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25371,11 +25321,7 @@ pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25462,11 +25408,7 @@ pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25575,11 +25517,7 @@ pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25696,11 +25634,7 @@ pub fn self_test_native_cpu_clock() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25797,11 +25731,7 @@ pub fn self_test_linux_signal_from_interrupt() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -25879,11 +25809,7 @@ pub fn self_test_linux_posix_timers() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -26071,11 +25997,7 @@ pub fn self_test_native_device_door() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -26154,11 +26076,7 @@ pub fn self_test_native_cap_broker() -> KernelResult<()> {
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);
@@ -26571,11 +26489,7 @@ fn run_native_namespaces(
         }
     };
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
-        crate::sched::sleep_ms(5);
-    }
+    wait_for_fixture(result.pid, deadline, 5);
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     teardown_fixture(result.pid, result.task_id);

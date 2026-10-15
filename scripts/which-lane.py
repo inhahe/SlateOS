@@ -148,7 +148,8 @@ LANES: dict[str, Lane] = {
     "A": Lane(
         "A",
         "Kernel, Core & Networking",
-        "boot, memory, scheduler, IPC, syscalls, capabilities, processes, the "
+        "boot, memory, scheduler, IPC, syscalls, capabilities, processes and "
+        "the ELF parser that loads them (elfparse/**), the "
         "in-kernel drivers and filesystems, the kernel graphics surface "
         "(DRM/KMS, fb), all of networking -- the in-kernel stack, the userspace "
         "net crates, WiFi, services/netstack -- the benchmarks and the boot test.",
@@ -224,6 +225,7 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("net80211/", "A"),
     ("aes/", "A"),
     ("hmac/", "A"),
+    ("elfparse/", "A"),
     ("services/netstack/", "A"),
     ("toolchain/x86_64-slateos.json", "A"),
     ("scripts/boot-test.sh", "A"),

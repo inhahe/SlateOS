@@ -13,6 +13,10 @@ log = "0.4"
 # request/reply encode/decode). Single source of truth with the daemon side;
 # no_std, dependency-free, so it builds cleanly for the kernel's custom target.
 netproto = { path = "../netproto" }
+# The parsing half of the ELF loader (`proc::elf` keeps the loading half): its
+# own crate so that it can be fuzzed on the host, since every byte it reads is
+# a program file's. no_std, no unsafe, no dependencies.
+elfparse = { path = "../elfparse" }
 planecompose = { path = "../planecompose" }
 netipc = { path = "../netipc" }
 # Shared atomic SPSC ring driver over the netipc::ring ABI. Adds the unsafe

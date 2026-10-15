@@ -1228,6 +1228,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "elfparse"
+version = "0.1.0"
+
+[[package]]
 name = "email"
 version = "0.1.0"
 dependencies = [
@@ -2023,6 +2027,7 @@ dependencies = [
  "bzip2",
  "crc32",
  "deflate",
+ "elfparse",
  "ere",
  "log",
  "net80211",

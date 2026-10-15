@@ -13,7 +13,7 @@ is the ownership boundary.
 | **kernel-core** | boot, GDT/IDT, interrupts, memory manager, page allocator, heap, scheduler | `kernel/src/boot/`, `kernel/src/mm/`, `kernel/src/sched/` |
 | **kernel-ipc** | syscall dispatch, channels, pipes, shared memory, futexes, io_uring, IOCP | `kernel/src/ipc/`, `kernel/src/syscall/` |
 | **kernel-security** | capabilities, process namespaces, CFI setup, IOMMU | `kernel/src/cap/`, `kernel/src/security/` |
-| **kernel-process** | process/thread lifecycle, ELF loader, exception handling | `kernel/src/proc/` |
+| **kernel-process** | process/thread lifecycle, ELF loader, exception handling | `kernel/src/proc/`, `elfparse/` (the ELF parser) |
 | **drivers** | driver framework, USB, storage, network, keyboard, display, virtio | `drivers/` |
 | **fs** | VFS, ext4 port, FAT32, recycle bin, change notifications | `fs/` |
 | **net** | TCP/IP stack, UDP, DNS, DHCP, sockets, firewall | `net/` |

@@ -1,0 +1,18 @@
+[package]
+name = "elfparse"
+version = "0.1.0"
+edition = "2024"
+description = "The parsing half of SlateOS's ELF64 loader: header and program-header validation, segments, the interpreter path, the ABI markers."
+
+[lib]
+path = "src/lib.rs"
+
+# Dependency-free, `no_std` and without `unsafe`: every byte it reads is a
+# stranger's (a program file), so it is fuzzed on the host (`fuzz/`), which the
+# kernel crate it was part of cannot be. The kernel keeps the loading half --
+# frames, page tables -- and maps this crate's errors to its own
+# (`kernel/src/proc/elf.rs`).
+[dependencies]
+
+[lints]
+workspace = true

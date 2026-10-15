@@ -1,0 +1,31 @@
+# elfparse's cargo-fuzz harness, run by `scripts/fuzz.py run elfparse/fuzz`.
+# Installed as ~/fuzz/elfparse-fuzz/tree/fuzz/Cargo.toml in WSL; the `path`s
+# below are relative to that place. Kept under this name so that nothing in the
+# real workspace mistakes this directory for a package. elfparse has no
+# `unsafe` code, so its target runs without the address sanitizer. Seeds:
+# `seeds.py`.
+[package]
+name = "elfparse-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+elfparse = { path = "../elfparse" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "elf"
+path = "fuzz_targets/elf.rs"
+test = false
+doc = false
+bench = false

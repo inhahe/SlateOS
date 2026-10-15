@@ -18,7 +18,9 @@
 //! 1. **Parse** — `ElfFile::parse(bytes)` validates the binary and
 //!    extracts headers.  No memory allocation, no page table changes.
 //!    Returns an `ElfFile` with accessors for program headers, entry
-//!    point, and loadable segments.
+//!    point, and loadable segments.  This half is the `elfparse` crate,
+//!    kept out of the kernel crate so that it can be tested and fuzzed on
+//!    the host; its errors become `KernelError`s through `From`.
 //!
 //! 2. **Load** — `load_into_address_space(elf, pml4)` allocates frames,
 //!    maps them at the correct virtual addresses, and copies segment
@@ -47,682 +49,69 @@ use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, USER_SPACE_END, VirtAddr};
 use crate::serial_println;
 
-// ---------------------------------------------------------------------------
-// ELF64 constants
-// ---------------------------------------------------------------------------
+pub use elfparse::LoadableSegment;
+// What the self-tests' ELF builders below write their files with, and the
+// loader-name test the ABI-detection self-test checks.
+use elfparse::{
+    EI_CLASS, EI_DATA, EI_OSABI, EI_VERSION, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELF64_SHDR_SIZE,
+    ELFCLASS64, ELFDATA2LSB, ELFOSABI_GNU, ELFOSABI_SLATEOS, ELFOSABI_SYSV, EM_X86_64, ET_DYN,
+    ET_EXEC, EV_CURRENT, NT_SLATEOS_ABI, PF_R, PF_W, PF_X, PT_GNU_PROPERTY, PT_INTERP, PT_LOAD,
+    PT_NOTE, SLATEOS_NOTE_NAME, is_linux_interp,
+};
 
-// ELF magic bytes (e_ident[0..4]).
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+// `elfparse` refuses a loadable segment that reaches past its bound, and the
+// loader below maps whatever it accepts: the two bounds must be one.
+const _: () = assert!(elfparse::USER_SPACE_END == USER_SPACE_END);
 
-// e_ident indices.
-const EI_CLASS: usize = 4;
-const EI_DATA: usize = 5;
-const EI_VERSION: usize = 6;
-const EI_OSABI: usize = 7;
-#[allow(dead_code)]
-const EI_ABIVERSION: usize = 8;
-
-// EI_CLASS values.
-const ELFCLASS64: u8 = 2;
-
-// EI_DATA values (byte order).
-const ELFDATA2LSB: u8 = 1; // Little-endian.
-
-// EI_OSABI values relevant to Linux-binary detection.
-//
-// Most Linux toolchains emit `ELFOSABI_SYSV` (0) regardless of target —
-// the OSABI byte is a weak signal.  But when it IS set to LINUX/GNU,
-// it's an unambiguous indicator.
-const ELFOSABI_SYSV: u8 = 0;
-const ELFOSABI_GNU: u8 = 3;
-// ELFOSABI_LINUX is an alias for ELFOSABI_GNU (same value, 3).  glibc
-// historically used the name "GNU"; many references say "LINUX".
-
-/// SlateOS's own `EI_OSABI` value: 255, the top of the range the gABI leaves
-/// to the architecture/OS (64–255). One of the two forms of the explicit
-/// native marker (design-decisions.md §33); `userspace/readelf` already names
-/// it `ELFOSABI_SLATEOS`.
-const ELFOSABI_SLATEOS: u8 = 255;
-
-/// Owner name of the SlateOS ABI note, NUL-terminated as ELF note names are.
-/// The other form of the native marker: a note in a `PT_NOTE` segment.
-const SLATEOS_NOTE_NAME: &[u8] = b"SlateOS\0";
-
-/// `n_type` of the note that declares "this binary speaks the SlateOS native
-/// system-call ABI". Its 4-byte descriptor is the ABI revision, currently 1;
-/// the kernel accepts any revision for now, and the field exists so a future
-/// incompatible ABI can be told apart without a new note type.
-const NT_SLATEOS_ABI: u32 = 1;
-
-// e_type values.
-const ET_EXEC: u16 = 2; // Executable file.
-const ET_DYN: u16 = 3; // Shared object / PIE.
-
-// e_machine values.
-const EM_X86_64: u16 = 62;
-
-// Program header p_type values.
-#[allow(dead_code)]
-const PT_NULL: u32 = 0;
-const PT_LOAD: u32 = 1;
-#[allow(dead_code)]
-const PT_DYNAMIC: u32 = 2;
-const PT_INTERP: u32 = 3;
-const PT_NOTE: u32 = 4;
-#[allow(dead_code)]
-const PT_PHDR: u32 = 6;
-#[allow(dead_code)]
-const PT_TLS: u32 = 7;
-#[allow(dead_code)]
-const PT_GNU_EH_FRAME: u32 = 0x6474_E550;
-#[allow(dead_code)]
-const PT_GNU_STACK: u32 = 0x6474_E551;
-#[allow(dead_code)]
-const PT_GNU_RELRO: u32 = 0x6474_E552;
-/// GNU property note — a strong Linux indicator emitted by binutils/gcc.
-/// Defined in the Linux Foundation gABI proposal.  Not used by FreeBSD/
-/// OpenBSD/NetBSD as of writing.
-const PT_GNU_PROPERTY: u32 = 0x6474_E553;
-
-// Segment permission flags (p_flags).
-const PF_X: u32 = 0x1; // Execute.
-const PF_W: u32 = 0x2; // Write.
-const PF_R: u32 = 0x4; // Read.
-
-// Minimum sizes.
-const ELF64_EHDR_SIZE: usize = 64;
-const ELF64_PHDR_SIZE: usize = 56;
-const ELF64_SHDR_SIZE: usize = 64;
-
-// Version.
-const EV_CURRENT: u8 = 1;
-
-// ---------------------------------------------------------------------------
-// ELF64 Header (e_ident is separate, remaining fields below)
-// ---------------------------------------------------------------------------
-
-/// Parsed ELF64 file header.
+/// A parsed ELF64 program file: an [`elfparse::ElfFile`], whose accessors it
+/// reaches through `Deref`, with the two checks that can refuse a file
+/// answering in [`KernelError`]s.
 ///
-/// All values are already in native byte order (little-endian on x86_64).
-#[derive(Debug, Clone, Copy)]
-pub struct Elf64Ehdr {
-    /// `e_ident[EI_OSABI]` — operating-system / ABI identifier.
-    ///
-    /// Most toolchains emit `ELFOSABI_SYSV` (0) regardless of target.
-    /// A non-zero value such as `ELFOSABI_GNU` (3) is an unambiguous
-    /// Linux-binary indicator.  See [`detect_linux_abi`].
-    pub e_ident_osabi: u8,
-    /// Object file type (`ET_EXEC`, `ET_DYN`, etc.).
-    pub e_type: u16,
-    /// Architecture (`EM_X86_64`).
-    pub e_machine: u16,
-    /// Object file version (must be `EV_CURRENT`).
-    pub e_version: u32,
-    /// Virtual address of program entry point.
-    pub e_entry: u64,
-    /// Byte offset of program header table in the file.
-    pub e_phoff: u64,
-    /// Byte offset of section header table in the file.
-    #[allow(dead_code)] // ELF spec field — not yet used by the loader.
-    pub e_shoff: u64,
-    /// Processor-specific flags (0 for x86_64).
-    #[allow(dead_code)] // ELF spec field — always 0 for x86_64.
-    pub e_flags: u32,
-    /// Size of this header (should be 64 for ELF64).
-    #[allow(dead_code)] // ELF spec field — validated implicitly.
-    pub e_ehsize: u16,
-    /// Size of each program header entry.
-    pub e_phentsize: u16,
-    /// Number of program header entries.
-    pub e_phnum: u16,
-    /// Size of each section header entry.
-    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
-    pub e_shentsize: u16,
-    /// Number of section header entries.
-    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
-    pub e_shnum: u16,
-    /// Section header string table index.
-    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
-    pub e_shstrndx: u16,
-}
-
-/// Parsed ELF64 program header (one per segment).
-#[derive(Debug, Clone, Copy)]
-pub struct Elf64Phdr {
-    /// Segment type (`PT_LOAD`, `PT_NOTE`, etc.).
-    pub p_type: u32,
-    /// Segment permission flags (`PF_R`, `PF_W`, `PF_X`).
-    pub p_flags: u32,
-    /// Offset of the segment data in the file.
-    pub p_offset: u64,
-    /// Virtual address where this segment should be loaded.
-    pub p_vaddr: u64,
-    /// Physical address (ignored on systems with virtual memory).
-    #[allow(dead_code)] // ELF spec field — unused on virtual memory systems.
-    pub p_paddr: u64,
-    /// Number of bytes of segment data in the file.
-    pub p_filesz: u64,
-    /// Number of bytes the segment occupies in memory (≥ `p_filesz`).
-    /// The difference (`p_memsz - p_filesz`) is BSS (zero-filled).
-    pub p_memsz: u64,
-    /// Alignment requirement (0 or 1 = no alignment, else power of 2).
-    #[allow(dead_code)] // ELF spec field — alignment enforced by frame size.
-    pub p_align: u64,
-}
-
-/// A loadable segment extracted from an ELF file.
-///
-/// Contains everything needed to map the segment into an address space.
-#[derive(Debug, Clone)]
-pub struct LoadableSegment {
-    /// Virtual address where the segment begins (from `p_vaddr`).
-    pub vaddr: u64,
-    /// Number of bytes to copy from the file.
-    pub file_size: u64,
-    /// Total size in memory (includes BSS).
-    pub mem_size: u64,
-    /// Offset into the ELF file where segment data starts.
-    pub file_offset: u64,
-    /// Read permission.
-    #[allow(dead_code)] // Public API — all mapped pages are readable via PRESENT.
-    pub readable: bool,
-    /// Write permission.
-    pub writable: bool,
-    /// Execute permission.
-    pub executable: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Parsed ELF file
-// ---------------------------------------------------------------------------
-
-/// A parsed ELF64 binary.
-///
-/// Holds a reference to the raw bytes and provides typed access to
-/// headers and segments.  Does not allocate — all data comes from
-/// the byte slice.
-pub struct ElfFile<'a> {
-    /// Raw ELF bytes.
-    data: &'a [u8],
-    /// Parsed file header.
-    pub header: Elf64Ehdr,
-}
+/// A newtype rather than a `From<ElfError> for KernelError`: a second `From`
+/// impl into `KernelError` leaves every closure that names its error type
+/// only through `?` with two to choose from, and the kernel has many.
+pub struct ElfFile<'a>(elfparse::ElfFile<'a>);
 
 impl<'a> ElfFile<'a> {
-    /// The program-header table as the file stores it: `e_phnum` entries of
-    /// `e_phentsize` bytes at `e_phoff`. `None` if it runs past the file.
-    /// What a copy of the table is made from when no loaded segment holds it
-    /// (`spawn::place_phdr_table`).
-    #[must_use]
-    pub fn phdr_table_bytes(&self) -> Option<&'a [u8]> {
-        let start = usize::try_from(self.header.e_phoff).ok()?;
-        let len =
-            usize::from(self.header.e_phentsize).checked_mul(usize::from(self.header.e_phnum))?;
-        self.data.get(start..start.checked_add(len)?)
-    }
-
-    /// Parse an ELF64 binary from a byte slice.
+    /// Parse `data` ([`elfparse::ElfFile::parse`]).
     ///
-    /// Validates:
-    /// - Magic bytes (0x7F "ELF")
-    /// - Class (64-bit)
-    /// - Data encoding (little-endian)
-    /// - Version (current)
-    /// - Machine (x86_64)
-    /// - Type (executable or shared object)
-    /// - Program header table fits within the file
+    /// # Errors
     ///
-    /// Returns `KernelError::InvalidExecutable` if any check fails.
+    /// [`KernelError::InvalidExecutable`] for a file the parser refuses.
     pub fn parse(data: &'a [u8]) -> KernelResult<Self> {
-        // Minimum size: need at least the ELF header.
-        if data.len() < ELF64_EHDR_SIZE {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check magic bytes.
-        if data[0..4] != ELF_MAGIC {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check class: must be ELF64.
-        if data[EI_CLASS] != ELFCLASS64 {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check data encoding: must be little-endian.
-        if data[EI_DATA] != ELFDATA2LSB {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check version.
-        if data[EI_VERSION] != EV_CURRENT {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Parse the header fields (all little-endian).
-        let header = Elf64Ehdr {
-            e_ident_osabi: data[EI_OSABI],
-            e_type: read_u16(data, 16),
-            e_machine: read_u16(data, 18),
-            e_version: read_u32(data, 20),
-            e_entry: read_u64(data, 24),
-            e_phoff: read_u64(data, 32),
-            e_shoff: read_u64(data, 40),
-            e_flags: read_u32(data, 48),
-            e_ehsize: read_u16(data, 52),
-            e_phentsize: read_u16(data, 54),
-            e_phnum: read_u16(data, 56),
-            e_shentsize: read_u16(data, 58),
-            e_shnum: read_u16(data, 60),
-            e_shstrndx: read_u16(data, 62),
-        };
-
-        // Check machine type.
-        if header.e_machine != EM_X86_64 {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check object type.
-        if header.e_type != ET_EXEC && header.e_type != ET_DYN {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check that the ELF version in the header is current.
-        if header.e_version != u32::from(EV_CURRENT) {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check program header entry size.
-        // Reject e_phentsize < ELF64_PHDR_SIZE when program headers exist.
-        // A zero e_phentsize with e_phnum > 0 would cause all headers to
-        // be read from the same offset, producing silently wrong results.
-        if header.e_phnum > 0 && (header.e_phentsize as usize) < ELF64_PHDR_SIZE {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        // Check that the program header table fits within the file.
-        if header.e_phnum > 0 {
-            let phdr_end = (header.e_phoff as usize)
-                .checked_add(
-                    (header.e_phnum as usize)
-                        .checked_mul(header.e_phentsize as usize)
-                        .ok_or(KernelError::InvalidExecutable)?,
-                )
-                .ok_or(KernelError::InvalidExecutable)?;
-
-            if phdr_end > data.len() {
-                return Err(KernelError::InvalidExecutable);
-            }
-        }
-
-        // Entry point validation: must be non-zero for executables.
-        if header.e_type == ET_EXEC && header.e_entry == 0 {
-            return Err(KernelError::InvalidExecutable);
-        }
-
-        Ok(Self { data, header })
+        elfparse::ElfFile::parse(data)
+            .map(Self)
+            .map_err(kernel_error)
     }
 
-    /// Returns the virtual address of the program entry point.
-    #[must_use]
-    pub fn entry_point(&self) -> u64 {
-        self.header.e_entry
-    }
-
-    /// Returns `true` if this is a position-independent executable (PIE).
-    #[must_use]
-    pub fn is_pie(&self) -> bool {
-        self.header.e_type == ET_DYN
-    }
-
-    /// Returns the number of program headers.
-    #[must_use]
-    pub fn program_header_count(&self) -> usize {
-        self.header.e_phnum as usize
-    }
-
-    /// Parse program header at the given index.
+    /// The `PT_LOAD` segments, every one checked first
+    /// ([`elfparse::ElfFile::loadable_segments`]).
     ///
-    /// Returns `None` if the index is out of bounds.
-    #[must_use]
-    pub fn program_header(&self, index: usize) -> Option<Elf64Phdr> {
-        if index >= self.header.e_phnum as usize {
-            return None;
-        }
-
-        let offset = (self.header.e_phoff as usize)
-            .checked_add(index.checked_mul(self.header.e_phentsize as usize)?)?;
-
-        // Bounds check: the program header table was validated in parse(),
-        // but be defensive.
-        if offset + ELF64_PHDR_SIZE > self.data.len() {
-            return None;
-        }
-
-        Some(Elf64Phdr {
-            p_type: read_u32(self.data, offset),
-            p_flags: read_u32(self.data, offset + 4),
-            p_offset: read_u64(self.data, offset + 8),
-            p_vaddr: read_u64(self.data, offset + 16),
-            p_paddr: read_u64(self.data, offset + 24),
-            p_filesz: read_u64(self.data, offset + 32),
-            p_memsz: read_u64(self.data, offset + 40),
-            p_align: read_u64(self.data, offset + 48),
-        })
-    }
-
-    /// Read the bytes of a program header's file image as a slice.
+    /// # Errors
     ///
-    /// Returns the raw `[p_offset .. p_offset + p_filesz]` slice, or
-    /// `None` if the range is out of bounds.  Useful for inspecting
-    /// `PT_INTERP` / `PT_NOTE` segment contents during ABI detection.
-    #[must_use]
-    pub fn raw_segment_bytes(&self, phdr: &Elf64Phdr) -> Option<&'a [u8]> {
-        let start = phdr.p_offset as usize;
-        let end = start.checked_add(phdr.p_filesz as usize)?;
-        self.data.get(start..end)
-    }
-
-    /// Detect whether this ELF binary speaks the Linux x86_64 syscall ABI.
-    ///
-    /// Returns `true` when the binary should run with
-    /// [`crate::proc::pcb::AbiMode::Linux`] so its raw `syscall`
-    /// instructions are routed through the Linux translation layer in
-    /// `kernel::syscall::linux`.
-    ///
-    /// ## Signals (in order of reliability)
-    ///
-    /// 1. **`e_ident[EI_OSABI]`** set to `ELFOSABI_GNU` (3, alias for
-    ///    `ELFOSABI_LINUX`).  Unambiguous when present.  glibc-linked
-    ///    binaries that use `STT_GNU_IFUNC` or other GNU extensions
-    ///    almost always set this; static-pie musl binaries may also set
-    ///    it.  Most Linux toolchains, however, leave it as `ELFOSABI_SYSV`
-    ///    (0), so absence is not a refutation.
-    ///
-    /// 2. **`PT_INTERP` pointing at a known Linux dynamic loader.**
-    ///    Dynamic Linux binaries always have a `PT_INTERP` segment with
-    ///    a NUL-terminated path string.  We match the substring
-    ///    `ld-linux-x86-64` (glibc) or `ld-musl-x86_64` (musl) — both
-    ///    are Linux-specific.  This catches the vast majority of
-    ///    dynamically-linked Linux binaries regardless of `EI_OSABI`.
-    ///
-    /// 3. **`PT_GNU_PROPERTY` segment present.**  This segment carries
-    ///    GNU-specific property notes (Intel CET endbr64 markers,
-    ///    `GNU_PROPERTY_X86_FEATURE_1_AND`, etc.) emitted by binutils
-    ///    and gcc since 2018.  As of this writing it is not used by
-    ///    FreeBSD/OpenBSD/NetBSD toolchains, so its presence on an
-    ///    x86_64 ELF is a strong Linux indicator.  This catches static
-    ///    GNU/Linux binaries built with recent toolchains.
-    ///
-    /// ## Deliberate non-signals
-    ///
-    /// - `PT_GNU_STACK` / `PT_GNU_RELRO` alone are NOT used as signals
-    ///   even though both originate in GNU/Linux; FreeBSD's clang now
-    ///   emits them too and they would generate false positives on
-    ///   FreeBSD binaries.
-    /// - `NT_GNU_ABI_TAG` notes inside `PT_NOTE` segments would be a
-    ///   reliable signal but require walking the note table; punt to
-    ///   a follow-up if false-negative rates turn out to matter.
-    /// - `e_machine` is already validated as `EM_X86_64` by
-    ///   [`ElfFile::parse`] — that check happens unconditionally.
-    ///
-    /// ## False-positive / false-negative profile
-    ///
-    /// False positives (returning `true` for a non-Linux binary) are
-    /// the dangerous direction: a Native binary mis-detected as Linux
-    /// would have its `syscall`s routed through the wrong dispatch
-    /// table, almost certainly resulting in `-ENOSYS` or wildly wrong
-    /// semantics.  The signals above are chosen so that false positives
-    /// require a binary that intentionally mimics Linux markers — not
-    /// something the host toolchain produces by accident.
-    ///
-    /// False negatives (returning `false` for a real Linux binary)
-    /// degrade to running the Linux binary under our native ABI, which
-    /// will produce wrong syscall results — but this is no worse than
-    /// having no Linux ABI support at all, and the binary can be
-    /// flagged manually via [`crate::proc::pcb::set_abi_mode`] or a
-    /// future explicit-runtime syscall.
-    ///
-    /// ## The SlateOS native marker outranks every signal above
-    ///
-    /// A binary carrying [`Self::has_slateos_marker`] is native, whatever else
-    /// it carries. That precedence is not a tie-break, it is a correction:
-    /// signal 1 is *not* unambiguous for our own toolchain. The slateos target
-    /// is an LLVM `x86_64-unknown-linux-musl` target, and an object is tagged
-    /// `ELFOSABI_GNU` as soon as it uses a GNU extension — so a native SlateOS
-    /// program can reach the kernel as OSABI 3. `coreutils`' binaries do, and
-    /// were being run with the *Linux* syscall table: their first native
-    /// syscall (`SYS_SET_FS_BASE`, 528) was refused as an unknown Linux
-    /// number. Found 2026-09-24, when `ctest-coreutils-runs` exec'd
-    /// `/mnt/bin/true` for the first time. The marker is how design-decisions
-    /// §33 (operator's decision) says native binaries identify themselves; its
-    /// producers are the toolchain's (`requests/a-bd-coreutils-cannot-start-
-    /// two-link-faults.md`).
-    #[must_use]
-    pub fn detect_linux_abi(&self) -> bool {
-        if self.has_slateos_marker() {
-            return false;
-        }
-
-        // Signal 1: EI_OSABI explicit Linux/GNU tag.
-        if self.header.e_ident_osabi == ELFOSABI_GNU {
-            return true;
-        }
-
-        // Signal 2 + 3: walk program headers once, checking for
-        // PT_INTERP with a Linux loader path and PT_GNU_PROPERTY.
-        for i in 0..self.program_header_count() {
-            let Some(phdr) = self.program_header(i) else {
-                continue;
-            };
-
-            match phdr.p_type {
-                PT_INTERP => {
-                    if let Some(bytes) = self.raw_segment_bytes(&phdr)
-                        && is_linux_interp(bytes)
-                    {
-                        return true;
-                    }
-                }
-                PT_GNU_PROPERTY => {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-
-        false
-    }
-
-    /// Whether this binary declares itself SlateOS-native — the explicit
-    /// marker of design-decisions.md §33.
-    ///
-    /// Either form is sufficient:
-    ///
-    /// * `e_ident[EI_OSABI] == ELFOSABI_SLATEOS` (255); or
-    /// * a note in a `PT_NOTE` segment whose owner is `"SlateOS"` and whose
-    ///   type is `NT_SLATEOS_ABI` (1), descriptor = ABI revision (4 bytes).
-    ///
-    /// Two forms because they suit different producers: a linker script can
-    /// keep a note that the C runtime emits, so every binary linked against
-    /// our libc carries it with no extra step; a byte in the header can be
-    /// stamped after the fact by whatever stages a binary, for toolchains that
-    /// cannot be taught to keep a note.
-    #[must_use]
-    pub fn has_slateos_marker(&self) -> bool {
-        if self.header.e_ident_osabi == ELFOSABI_SLATEOS {
-            return true;
-        }
-        (0..self.program_header_count()).any(|i| {
-            let Some(phdr) = self.program_header(i) else {
-                return false;
-            };
-            if phdr.p_type != PT_NOTE {
-                return false;
-            }
-            self.raw_segment_bytes(&phdr).is_some_and(|notes| {
-                notes_contain(notes, phdr.p_align, SLATEOS_NOTE_NAME, NT_SLATEOS_ABI)
-            })
-        })
-    }
-
-    /// Return the dynamic loader path from the `PT_INTERP` segment.
-    ///
-    /// A dynamically-linked ELF (`ET_DYN` executables and any binary that
-    /// is not fully static) carries a `PT_INTERP` program header whose
-    /// file image is a NUL-terminated path naming the program interpreter
-    /// — e.g. `/lib64/ld-linux-x86-64.so.2` (glibc) or
-    /// `/lib/ld-musl-x86_64.so.1` (musl).  The kernel must load *that*
-    /// interpreter (not the executable's own `e_entry`) and transfer
-    /// control to it; the interpreter then maps shared libraries and
-    /// jumps to the real entry point (passed via `AT_ENTRY`).
-    ///
-    /// Returns the path with its trailing NUL (and any bytes after the
-    /// first NUL) trimmed, or `None` when:
-    /// - the binary is statically linked (no `PT_INTERP` segment), or
-    /// - the segment's file image is out of bounds, or
-    /// - the path is empty (a malformed `PT_INTERP`).
-    ///
-    /// The result is raw bytes, never `str`: an interpreter path is an
-    /// OS path and may contain any byte except `/` (separator) and NUL
-    /// (terminator), so it must not be forced through UTF-8 validation.
-    #[must_use]
-    pub fn interp_path(&self) -> Option<&'a [u8]> {
-        for i in 0..self.program_header_count() {
-            let Some(phdr) = self.program_header(i) else {
-                continue;
-            };
-            if phdr.p_type != PT_INTERP {
-                continue;
-            }
-            let bytes = self.raw_segment_bytes(&phdr)?;
-            // The image is NUL-terminated in the file; trim at the first
-            // NUL (Linux's `load_elf_interp` likewise treats the segment
-            // as a C string).  An image with no NUL is tolerated by using
-            // its full length, but a leading NUL (empty path) is rejected.
-            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            let path = bytes.get(..end)?;
-            if path.is_empty() {
-                return None;
-            }
-            return Some(path);
-        }
-        None
-    }
-
-    /// Iterate over all `PT_LOAD` segments as [`LoadableSegment`]s.
-    ///
-    /// Validates each segment:
-    /// - `memsz >= filesz`
-    /// - Segment data fits within the file
-    /// - Virtual address is in the user-space range (for `ET_EXEC`)
-    ///
-    /// Returns an error if any `PT_LOAD` segment is invalid.
-    pub fn loadable_segments(&self) -> KernelResult<LoadableSegments<'_>> {
-        // Pre-validate all PT_LOAD segments so callers get a clean
-        // error up front rather than halfway through loading.
-        for i in 0..self.program_header_count() {
-            let Some(phdr) = self.program_header(i) else {
-                return Err(KernelError::InvalidExecutable);
-            };
-
-            if phdr.p_type != PT_LOAD {
-                continue;
-            }
-
-            // memsz must be >= filesz (BSS can add bytes, never remove).
-            if phdr.p_memsz < phdr.p_filesz {
-                return Err(KernelError::InvalidExecutable);
-            }
-
-            // Segment file data must fit within the ELF file.
-            let data_end = (phdr.p_offset as usize)
-                .checked_add(phdr.p_filesz as usize)
-                .ok_or(KernelError::InvalidExecutable)?;
-
-            if data_end > self.data.len() {
-                return Err(KernelError::InvalidExecutable);
-            }
-
-            // Validate that vaddr + memsz doesn't overflow and fits
-            // in user address space.  This applies to both ET_EXEC and
-            // ET_DYN — a PIE binary may have vaddr=0, but the segment
-            // still must not wrap around or exceed the user space limit.
-            let seg_end = phdr
-                .p_vaddr
-                .checked_add(phdr.p_memsz)
-                .ok_or(KernelError::InvalidExecutable)?;
-
-            if seg_end > USER_SPACE_END {
-                return Err(KernelError::InvalidExecutable);
-            }
-        }
-
-        Ok(LoadableSegments {
-            elf: self,
-            index: 0,
-        })
-    }
-
-    /// Get the raw bytes for a segment's file content.
-    ///
-    /// Returns the slice `[p_offset .. p_offset + p_filesz]`.
-    /// Returns `None` if the range is out of bounds.
-    #[allow(dead_code)] // Public API — useful for callers inspecting raw segment data.
-    #[must_use]
-    pub fn segment_data(&self, phdr: &Elf64Phdr) -> Option<&'a [u8]> {
-        let start = phdr.p_offset as usize;
-        let end = start.checked_add(phdr.p_filesz as usize)?;
-        self.data.get(start..end)
-    }
-
-    /// Get the total size of the raw ELF data.
-    #[allow(dead_code)] // Public API — useful for diagnostics and validation.
-    #[must_use]
-    pub fn file_size(&self) -> usize {
-        self.data.len()
+    /// [`KernelError::InvalidExecutable`] for a malformed loadable segment.
+    pub fn loadable_segments(&self) -> KernelResult<elfparse::LoadableSegments<'_, 'a>> {
+        self.0.loadable_segments().map_err(kernel_error)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Loadable segment iterator
-// ---------------------------------------------------------------------------
+impl<'a> core::ops::Deref for ElfFile<'a> {
+    type Target = elfparse::ElfFile<'a>;
 
-/// Iterator over `PT_LOAD` segments in an ELF file.
-pub struct LoadableSegments<'a> {
-    elf: &'a ElfFile<'a>,
-    index: usize,
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-impl Iterator for LoadableSegments<'_> {
-    type Item = LoadableSegment;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.elf.program_header_count() {
-            let idx = self.index;
-            self.index += 1;
-
-            let phdr = self.elf.program_header(idx)?;
-            if phdr.p_type != PT_LOAD {
-                continue;
-            }
-
-            // Skip zero-size segments (they're valid but useless).
-            if phdr.p_memsz == 0 {
-                continue;
-            }
-
-            return Some(LoadableSegment {
-                vaddr: phdr.p_vaddr,
-                file_size: phdr.p_filesz,
-                mem_size: phdr.p_memsz,
-                file_offset: phdr.p_offset,
-                readable: (phdr.p_flags & PF_R) != 0,
-                writable: (phdr.p_flags & PF_W) != 0,
-                executable: (phdr.p_flags & PF_X) != 0,
-            });
-        }
-        None
+/// The kernel's error for each of the parser's refusals: a file it does not
+/// accept is an invalid executable, a load bias that runs off the address
+/// space an invalid address, and an alignment that is not a power of two a
+/// bad alignment.
+fn kernel_error(e: elfparse::ElfError) -> KernelError {
+    match e {
+        elfparse::ElfError::Malformed => KernelError::InvalidExecutable,
+        elfparse::ElfError::AddressOverflow => KernelError::InvalidAddress,
+        elfparse::ElfError::BadAlignment => KernelError::BadAlignment,
     }
 }
 
@@ -967,45 +356,24 @@ pub unsafe fn load_segments_with_bias(
     Ok(())
 }
 
-/// Compute the highest 16 KiB-frame-aligned virtual address occupied by any
-/// `PT_LOAD` segment of `elf` when loaded at runtime bias `bias`.
+/// The highest 16 KiB-frame-aligned virtual address any `PT_LOAD` segment of
+/// `elf` reaches when loaded at runtime bias `bias`: where a Linux program's
+/// `brk` heap begins, as Linux places the break right after the executable's
+/// last loadable segment (`fs/binfmt_elf.c`, `set_brk`). [`ElfFile::image_end`]
+/// at this kernel's frame size.
 ///
-/// This is where the Linux `brk`/`sbrk` heap begins: Linux places the
-/// program break immediately after the executable's last loadable segment
-/// (its data/BSS), rounded up to a page boundary (`mm/mmap.c` /
-/// `fs/binfmt_elf.c` `set_brk`).  The returned address is frame-aligned and
-/// suitable as the initial `brk_start`.
-///
-/// Returns `Ok(0)` if the image has no loadable segments (a degenerate ELF;
-/// the caller treats a zero result as "no heap").
+/// `Ok(0)` for an image with no loadable segments, which the caller takes as
+/// "no heap".
 ///
 /// # Errors
 ///
+/// [`KernelError::InvalidExecutable`] for a malformed loadable segment;
 /// [`KernelError::InvalidAddress`] if applying `bias` or the frame round-up
 /// overflows `u64`.
 pub fn image_end(elf: &ElfFile<'_>, bias: u64) -> KernelResult<u64> {
-    let frame_size = FRAME_SIZE as u64;
-    // frame_size is a power of two, so frame_size - 1 is the alignment mask.
-    let mask = frame_size.wrapping_sub(1);
-    let mut highest: u64 = 0;
-    for seg in elf.loadable_segments()? {
-        let biased = seg
-            .vaddr
-            .checked_add(bias)
-            .ok_or(KernelError::InvalidAddress)?;
-        let seg_end = biased
-            .checked_add(seg.mem_size)
-            .ok_or(KernelError::InvalidAddress)?;
-        // Round the segment end up to the next frame boundary.
-        let aligned_end = seg_end
-            .checked_add(mask)
-            .ok_or(KernelError::InvalidAddress)?
-            & !mask;
-        if aligned_end > highest {
-            highest = aligned_end;
-        }
-    }
-    Ok(highest)
+    // The parser refuses an alignment that is not a power of two.
+    const _: () = assert!(FRAME_SIZE.is_power_of_two());
+    elf.image_end(bias, FRAME_SIZE as u64).map_err(kernel_error)
 }
 
 /// Copy the file-backed portion of a segment into a mapped frame.
@@ -1054,7 +422,7 @@ fn copy_segment_data_to_frame(
     let src_end = src_start.saturating_add(byte_count);
 
     // Bounds check on source data.
-    if src_end > elf.data.len() || frame_offset.saturating_add(byte_count) > FRAME_SIZE {
+    if src_end > elf.data().len() || frame_offset.saturating_add(byte_count) > FRAME_SIZE {
         return; // Silently skip — validation already caught bad segments.
     }
 
@@ -1062,155 +430,9 @@ fn copy_segment_data_to_frame(
     // owned frame.  Source is a valid slice of the ELF data.
     unsafe {
         let dst = (frame_hhdm_virt as *mut u8).add(frame_offset);
-        let src = elf.data.as_ptr().add(src_start);
+        let src = elf.data().as_ptr().add(src_start);
         core::ptr::copy_nonoverlapping(src, dst, byte_count);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: read little-endian integers from a byte slice
-// ---------------------------------------------------------------------------
-
-/// Read a little-endian `u16` from `data` at byte offset `off`.
-///
-/// # Panics
-///
-/// Panics if `off + 2 > data.len()` (caller must validate bounds).
-#[inline]
-fn read_u16(data: &[u8], off: usize) -> u16 {
-    let bytes: [u8; 2] = [data[off], data[off + 1]];
-    u16::from_le_bytes(bytes)
-}
-
-/// Whether the note segment image `notes` holds a note owned by `name` (the
-/// exact bytes, NUL included) with type `n_type`.
-///
-/// Each note is `Elf64_Nhdr { n_namesz, n_descsz, n_type }` (three `u32`s),
-/// then the name, then the descriptor, each padded to the note alignment.
-/// That alignment is 4 for ordinary notes and 8 for `.note.gnu.property`, and
-/// a segment's `p_align` says which — anything other than 8 is taken as 4,
-/// which is what every toolchain emits for a 4-aligned note segment.
-///
-/// Every size in a note is attacker-controlled (it is file content), so every
-/// offset is computed with checked arithmetic and every read goes through
-/// `get`: a malformed note ends the walk with `false`, it never panics and
-/// never reads outside the segment.
-fn notes_contain(notes: &[u8], p_align: u64, name: &[u8], n_type: u32) -> bool {
-    let align: usize = if p_align == 8 { 8 } else { 4 };
-    let pad = |x: usize| -> Option<usize> {
-        x.checked_add(align.wrapping_sub(1))
-            .map(|v| v & !align.wrapping_sub(1))
-    };
-    let word = |at: usize| -> Option<u32> {
-        let b: [u8; 4] = notes.get(at..at.checked_add(4)?)?.try_into().ok()?;
-        Some(u32::from_le_bytes(b))
-    };
-    let mut off = 0usize;
-    // One loop turn per note; `next > off` below guarantees progress, so
-    // this terminates within `notes.len() / 12` turns.
-    while off < notes.len() {
-        let Some(namesz) = word(off) else {
-            return false;
-        };
-        let Some(descsz) = word(off.saturating_add(4)) else {
-            return false;
-        };
-        let Some(ty) = word(off.saturating_add(8)) else {
-            return false;
-        };
-        let Some(name_start) = off.checked_add(12) else {
-            return false;
-        };
-        let Some(name_end) = name_start.checked_add(namesz as usize) else {
-            return false;
-        };
-        let Some(desc_start) = pad(name_end) else {
-            return false;
-        };
-        let Some(desc_end) = desc_start.checked_add(descsz as usize) else {
-            return false;
-        };
-        if desc_end > notes.len() {
-            return false;
-        }
-        if ty == n_type && notes.get(name_start..name_end) == Some(name) {
-            return true;
-        }
-        let Some(next) = pad(desc_end) else {
-            return false;
-        };
-        if next <= off {
-            return false;
-        }
-        off = next;
-    }
-    false
-}
-
-/// Return `true` if `bytes` (a NUL-terminated `PT_INTERP` path image)
-/// names a known Linux dynamic loader.
-///
-/// The check is substring-based on the path before the NUL terminator,
-/// matching both `/lib64/ld-linux-x86-64.so.2` (glibc, the
-/// near-universal Linux dynamic linker) and
-/// `/lib/ld-musl-x86_64.so.1` (musl).  Both substrings are
-/// Linux-specific — no other extant x86_64 OS ships a loader named
-/// `ld-linux-x86-64` or `ld-musl-x86_64`.
-#[inline]
-fn is_linux_interp(bytes: &[u8]) -> bool {
-    // Trim trailing NULs / NUL-terminate.  A well-formed PT_INTERP
-    // image is a C string with `p_filesz` bytes; the terminator may
-    // be at the end of the slice or somewhere in the middle.
-    let path = match bytes.iter().position(|&b| b == 0) {
-        Some(nul_pos) => bytes.get(..nul_pos).unwrap_or(&[]),
-        None => bytes,
-    };
-
-    contains_subslice(path, b"ld-linux-x86-64") || contains_subslice(path, b"ld-musl-x86_64")
-}
-
-/// Returns `true` if `haystack` contains `needle` as a contiguous
-/// subsequence.  Naive O(n*m) scan — adequate for the very short
-/// strings used here.
-#[inline]
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return needle.is_empty();
-    }
-    let last = haystack.len() - needle.len();
-    let mut i = 0;
-    while i <= last {
-        if let Some(window) = haystack.get(i..i + needle.len())
-            && window == needle
-        {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Read a little-endian `u32` from `data` at byte offset `off`.
-#[inline]
-fn read_u32(data: &[u8], off: usize) -> u32 {
-    let bytes: [u8; 4] = [data[off], data[off + 1], data[off + 2], data[off + 3]];
-    u32::from_le_bytes(bytes)
-}
-
-/// Read a little-endian `u64` from `data` at byte offset `off`.
-#[inline]
-fn read_u64(data: &[u8], off: usize) -> u64 {
-    let bytes: [u8; 8] = [
-        data[off],
-        data[off + 1],
-        data[off + 2],
-        data[off + 3],
-        data[off + 4],
-        data[off + 5],
-        data[off + 6],
-        data[off + 7],
-    ];
-    u64::from_le_bytes(bytes)
 }
 
 // ---------------------------------------------------------------------------

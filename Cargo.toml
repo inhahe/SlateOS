@@ -307,6 +307,12 @@ members = [
     "services/dyndns",
     "services/dyndns/providers",
     "services/dyndns/router",
+    # The parsing half of the kernel's ELF loader (lane A, lane F's
+    # requests/f-a-fuzz-netproto-and-the-elf-loader.md): a crate of its own so
+    # that it can be tested and fuzzed on the host, which the kernel crate
+    # cannot be. no_std; built for the kernel as its dependency, and out of
+    # `default-members` like `yamldoc`.
+    "elfparse",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

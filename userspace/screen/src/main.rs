@@ -1237,7 +1237,11 @@ mod tests {
         assert_eq!(name_of(&db, 1000).as_deref(), Some("alice"));
         assert_eq!(name_of(&db, 4242), None, "a uid with no entry");
         let odd = pwdb::Db::from_bytes(b"a/b:x:7:7::/:/bin/sh\n:x:8:8::/:/bin/sh\n", b"");
-        assert_eq!(name_of(&odd, 7), None, "a name with a slash names no directory");
+        assert_eq!(
+            name_of(&odd, 7),
+            None,
+            "a name with a slash names no directory"
+        );
         assert_eq!(name_of(&odd, 8), None, "nor does an empty one");
     }
 

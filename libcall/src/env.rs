@@ -63,10 +63,7 @@ mod tests {
         // SAFETY: this test's variable alone; nothing else reads or writes it.
         unsafe { std::env::set_var("LIBCALL_ENV_TEST", "42") };
         assert_eq!(with_var(c"LIBCALL_ENV_TEST", <[u8]>::len), Some(2));
-        assert_eq!(
-            with_var(c"LIBCALL_ENV_TEST", |v| v == b"42"),
-            Some(true)
-        );
+        assert_eq!(with_var(c"LIBCALL_ENV_TEST", |v| v == b"42"), Some(true));
         assert_eq!(with_var(c"LIBCALL_ENV_TEST_UNSET", <[u8]>::len), None);
     }
 

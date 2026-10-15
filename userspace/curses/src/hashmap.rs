@@ -76,8 +76,9 @@ fn update_cost_from_blank(t: &Term, to: &[Cell], stdscr_bkgd: &Cell) -> i32 {
 /// A screen's line `n`'s text, `TEXTWIDTH` cells of it -- borrowed, as
 /// upstream compares the lines' own cells.
 fn text(win: &Window, n: i32, width: usize) -> &[Cell] {
-    win.line(n)
-        .map_or(&[][..], |l| l.text.get(..width.min(l.text.len())).unwrap_or_default())
+    win.line(n).map_or(&[][..], |l| {
+        l.text.get(..width.min(l.text.len())).unwrap_or_default()
+    })
 }
 
 impl HashState {

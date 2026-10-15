@@ -8878,17 +8878,6 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) -> u64 {
     signal_mask
 }
 
-/// Dump scheduler + timer state when the `schedule_inner` idle fallback has
-/// spun for [`IDLE_FALLBACK_WEDGE_TICKS`] iterations with nothing runnable.
-///
-/// The caller holds the `SCHED` guard (`state`) so this reads the task table
-/// directly rather than re-locking.  It answers the questions a bare HLT
-/// register capture cannot: is the blocked task actually Blocked (vs. an
-/// orphaned Ready that was never enqueued)?  Did its `pending_wake` flag get
-/// stranded?  Is its wake-up hrtimer still pending, or did it already fire
-/// (and the wake was lost)?  Are there stuck deferred-wake slots?
-///
-/// Called only on the wedge path, so the serial cost is irrelevant.
 /// `Display` shim for [`task::Task::block_site`], so a never-blocked task
 /// prints as `none` instead of forcing every call site to unwrap the `Option`.
 struct BlockSite(Option<&'static core::panic::Location<'static>>);
@@ -8902,6 +8891,17 @@ impl core::fmt::Display for BlockSite {
     }
 }
 
+/// Dump scheduler + timer state when the `schedule_inner` idle fallback has
+/// spun for [`IDLE_FALLBACK_WEDGE_TICKS`] iterations with nothing runnable.
+///
+/// The caller holds the `SCHED` guard (`state`) so this reads the task table
+/// directly rather than re-locking.  It answers the questions a bare HLT
+/// register capture cannot: is the blocked task actually Blocked (vs. an
+/// orphaned Ready that was never enqueued)?  Did its `pending_wake` flag get
+/// stranded?  Is its wake-up hrtimer still pending, or did it already fire
+/// (and the wake was lost)?  Are there stuck deferred-wake slots?
+///
+/// Called only on the wedge path, so the serial cost is irrelevant.
 #[cold]
 fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) {
     let now_ns = crate::hrtimer::now_ns();

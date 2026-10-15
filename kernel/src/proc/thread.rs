@@ -2068,7 +2068,7 @@ fn test_leader_takes_the_process_id() -> KernelResult<()> {
                 && pcb::peek_next_pid() == sched::task::peek_next_id();
             if !ok {
                 serial_println!(
-                    "[thread]   FAIL: process {} got threads {} and {} (want {} then a fresh id                      naming no process; one counter)",
+                    "[thread]   FAIL: process {} got threads {} and {} (want {} then a fresh id naming no process; one counter)",
                     pid,
                     first,
                     second,

@@ -1070,7 +1070,7 @@ pub fn screen_text() -> Vec<alloc::string::String> {
 
 /// Fill the entire screen with the background color.
 pub fn clear() {
-    let mut con = CONSOLE.lock_irqsave();
+    let con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }

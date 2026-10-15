@@ -11632,7 +11632,7 @@ pub fn self_test_cscanf() -> KernelResult<()> {
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: ctest-scanf (ring 3) — expected Zombie, got {:?}. A fault is the              *expected* shape of a broken scanf trampoline: a destination pointer read from the              wrong slot is a wild address the engine then writes through, so this fixture              crashes where the printf ones would merely print nonsense",
+            "[spawn]   FAIL: ctest-scanf (ring 3) — expected Zombie, got {:?}. A fault is the *expected* shape of a broken scanf trampoline: a destination pointer read from the wrong slot is a wild address the engine then writes through, so this fixture crashes where the printf ones would merely print nonsense",
             state
         );
         return Err(KernelError::InternalError);
@@ -11640,7 +11640,7 @@ pub fn self_test_cscanf() -> KernelResult<()> {
 
     if exit_code != Some(EXPECTED) {
         serial_println!(
-            "[spawn]   FAIL: ctest-scanf (ring 3) — reached Zombie but exit code was {:?},              expected {}. Code bands: 10-13 = basics inside the register-passed range, 20-23 =              past the eighth conversion, which the old flat [u64; 8] could not represent (21 is              a wrong value, 22 is a canary clobbered by an off-by-one store, 23 is the mixed              %d/%ld/%s form where a miscount corrupts a differently-sized neighbour), 30-32 =              %*d suppression and a %n stored through the eleventh pointer, 40-41 = float              destinations, which are pointers and so must travel the INTEGER path rather than              consult fp_offset, 50-53 = fscanf, a separate trampoline reading a real file (50/51 mean the scratch file could not be opened at all, so the ABI checks above are still valid). See              services/ctest-scanf/main.c",
+            "[spawn]   FAIL: ctest-scanf (ring 3) — reached Zombie but exit code was {:?}, expected {}. Code bands: 10-13 = basics inside the register-passed range, 20-23 = past the eighth conversion, which the old flat [u64; 8] could not represent (21 is a wrong value, 22 is a canary clobbered by an off-by-one store, 23 is the mixed %d/%ld/%s form where a miscount corrupts a differently-sized neighbour), 30-32 = %*d suppression and a %n stored through the eleventh pointer, 40-41 = float destinations, which are pointers and so must travel the INTEGER path rather than consult fp_offset, 50-53 = fscanf, a separate trampoline reading a real file (50/51 mean the scratch file could not be opened at all, so the ABI checks above are still valid). See services/ctest-scanf/main.c",
             exit_code,
             EXPECTED
         );
@@ -25738,7 +25738,7 @@ pub fn self_test_linux_signal_from_interrupt() -> KernelResult<()> {
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: signal from interrupt (ring 3) — the program did not finish in 60 s              (state {:?})",
+            "[spawn]   FAIL: signal from interrupt (ring 3) — the program did not finish in 60 s (state {:?})",
             state
         );
         return Err(KernelError::InternalError);
@@ -25765,7 +25765,7 @@ pub fn self_test_linux_signal_from_interrupt() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[spawn]   Linux signal from interrupt (ring 3: a loop without system calls got its          SIGALRM handler, and every register, rcx/r11, the XMM registers, MXCSR and the red          zone came back; the handler started from the initial FPU state): OK"
+        "[spawn]   Linux signal from interrupt (ring 3: a loop without system calls got its SIGALRM handler, and every register, rcx/r11, the XMM registers, MXCSR and the red zone came back; the handler started from the initial FPU state): OK"
     );
     Ok(())
 }

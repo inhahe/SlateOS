@@ -454,8 +454,8 @@ pub mod zramstat;
 pub mod zstd;
 
 pub use vfs::{
-    DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, SwapFile, SwapFileClaim,
-    Vfs, XattrSetMode, XattrTarget,
+    DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, SwapFileClaim, Vfs,
+    XattrSetMode, XattrTarget,
 };
 
 /// A new instance of the filesystem `fstype` names, over the block device

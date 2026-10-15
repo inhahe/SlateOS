@@ -5,7 +5,9 @@
 //! whole device or (once there are partition nodes) a partition: Linux's
 //! `partition` -- or a regular file, whose filesystem gives the sectors it
 //! occupies and refuses to change it while it is swap
-//! ([`crate::fs::vfs::FileSystem::swapfile_claim`]): Linux's `file`.
+//! ([`crate::fs::vfs::FileSystem::swapfile_claim`]): Linux's `file`. One
+//! device is neither: `/dev/zram0` names the compressed tier
+//! ([`swap::MEMORY_TIER_DEVICE`]), which these turn off and on itself.
 //!
 //! Root's authority is the caller's to check (`CAP_SYS_ADMIN` on Linux; uid 0
 //! here, as for mounting): these take a path that is already the kernel's.
@@ -65,6 +67,9 @@ pub fn swap_on(path: &Path, flags: u32) -> KernelResult<swap::ActiveArea> {
     let Some((device, sectors)) = device_of(path) else {
         return swap_on_file(path, priority);
     };
+    if device == swap::MEMORY_TIER_DEVICE {
+        return swap::enable_memory_tier(priority);
+    }
     swap::activate(AreaRequest {
         path: path.as_bytes().to_vec(),
         kind: AreaKind::Device,
@@ -112,6 +117,7 @@ fn swap_on_file(path: &Path, priority: Option<i32>) -> KernelResult<swap::Active
 /// [`swap::deactivate`]'s.
 pub fn swap_off(path: &Path) -> KernelResult<()> {
     let target = match device_of(path) {
+        Some((device, _)) if device == swap::MEMORY_TIER_DEVICE => AreaTarget::Memory,
         Some((device, _)) => AreaTarget::Device(device),
         None => {
             let id = crate::fs::Vfs::file_identity_resolved(path)?
@@ -135,6 +141,88 @@ pub fn swap_off(path: &Path) -> KernelResult<()> {
         drop(claim);
     }
     Ok(())
+}
+
+/// The compressed tier off and on by its path, `/dev/zram0`, as `swapoff -a`
+/// and `swapon` see it: listed under that path; `/dev/zram0` reads as a swap
+/// header for the tier's size and refuses a write; `swapoff` takes the tier
+/// away, its pages back in memory, and a second is refused; `swapon` puts it
+/// back, at the priority asked, and a second is refused; `swapon` with no
+/// priority gives 100.
+///
+/// # Errors
+///
+/// `InternalError` naming what failed.
+pub fn self_test_memory_tier() -> KernelResult<()> {
+    crate::serial_println!("[swapctl] Running compressed-tier self-test...");
+    let path = Path::new("/dev/zram0");
+    let listed = |path: &[u8]| {
+        swap::list_devices()
+            .into_iter()
+            .find(|d| d.path == path)
+            .map(|d| d.priority)
+    };
+    let result = (|| -> Result<(), &'static str> {
+        let before = listed(path.as_bytes()).ok_or("the tier is not listed as /dev/zram0")?;
+        let info = crate::blkdev::info(swap::MEMORY_TIER_DEVICE).ok_or("no /dev/zram0")?;
+        let mut first = alloc::vec![0u8; 16_384];
+        for (i, sector) in first.chunks_mut(512).enumerate() {
+            let mut buf = [0u8; 512];
+            crate::blkdev::with_device(swap::MEMORY_TIER_DEVICE, |d| {
+                d.read_sector(u64::try_from(i).unwrap_or(0), &mut buf)
+            })
+            .ok_or("no /dev/zram0")?
+            .map_err(|_| "/dev/zram0 could not be read")?;
+            sector.copy_from_slice(&buf);
+        }
+        let header = swap::parse_header(&first).map_err(|_| "/dev/zram0 has no swap header")?;
+        let pages = info.sector_count.checked_div(32).unwrap_or(0);
+        if u64::from(header.last_page).saturating_add(1) != pages || !info.read_only {
+            return Err("/dev/zram0's header or size is not the tier's");
+        }
+        let refused_write = crate::blkdev::with_device(swap::MEMORY_TIER_DEVICE, |d| {
+            d.write_sector(0, &[0u8; 512])
+        }) == Some(Err(KernelError::ReadOnlyFilesystem));
+        if !refused_write {
+            return Err("/dev/zram0 took a write");
+        }
+        swap_off(path).map_err(|_| "swapoff /dev/zram0 failed")?;
+        if listed(path.as_bytes()).is_some() {
+            return Err("the tier is still listed after swapoff");
+        }
+        if swap_off(path).err() != Some(KernelError::InvalidArgument) {
+            return Err("a second swapoff was not refused");
+        }
+        let area = swap_on(path, SWAP_FLAG_PREFER | 77).map_err(|_| "swapon /dev/zram0 failed")?;
+        if area.priority != 77 || listed(path.as_bytes()) != Some(77) {
+            return Err("swapon /dev/zram0 did not give the priority asked");
+        }
+        if swap_on(path, 0).err() != Some(KernelError::DeviceBusy) {
+            return Err("a second swapon was not refused");
+        }
+        swap_off(path).map_err(|_| "the second swapoff failed")?;
+        let area = swap_on(path, 0).map_err(|_| "swapon /dev/zram0 with no priority failed")?;
+        if area.priority != 100 || before != 100 {
+            return Err("the tier's own priority is not 100");
+        }
+        Ok(())
+    })();
+    // Whatever happened, the tier on again, as the boot left it.
+    let _ = swap_on(path, 0); // DeviceBusy is the usual answer: it is on.
+    match result {
+        Ok(()) => {
+            crate::serial_println!(
+                "[swapctl]   /dev/zram0: listed, a swap header for its size, read-only, off and \
+                 on again by its path, at a priority asked or 100: OK"
+            );
+            crate::serial_println!("[swapctl] Compressed-tier self-test PASSED");
+            Ok(())
+        }
+        Err(what) => {
+            crate::serial_println!("[swapctl]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// A swap file end to end on the ext4 mounted at `/mnt`, when there is one:

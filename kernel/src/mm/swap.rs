@@ -419,6 +419,24 @@ struct MemBackend {
 }
 
 impl MemBackend {
+    /// [`Self::new`], refusing rather than failing when the slot table cannot
+    /// be allocated: for a tier added after boot (`swapon /dev/zram0`).
+    fn try_new(capacity: u32) -> KernelResult<Self> {
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(capacity as usize)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        slots.resize_with(capacity as usize, || None);
+        Ok(Self {
+            slots,
+            capacity,
+            uncompressed_bytes: 0,
+            compressed_bytes: 0,
+            compressed_count: 0,
+            uncompressed_count: 0,
+        })
+    }
+
     /// Create a new compressed in-memory backend with the given capacity.
     fn new(capacity: u32) -> Self {
         let mut slots = Vec::with_capacity(capacity as usize);
@@ -1481,56 +1499,189 @@ pub fn reclaimable_count() -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initialize the swap subsystem with a zram (compressed in-memory) backend.
-///
-/// `num_slots` determines the maximum number of pages that can be
-/// simultaneously stored in zram.  Each slot consumes no memory until
-/// a page is actually written to it (the in-memory backend allocates
-/// on demand).
-///
-/// zram is added at priority 100 (highest), so it will be preferred
-/// over disk swap when both are available.  Disk areas are added with
-/// [`activate`].
+/// The compressed tier's block device: it is shown, and turned off and on,
+/// as `/dev/zram0`, as Linux's zram is ([`MemoryTierDevice`]).
+pub const MEMORY_TIER_DEVICE: &str = "zram0";
+
+/// The path the compressed tier is listed under (`/proc/swaps`).
+const MEMORY_TIER_PATH: &[u8] = b"/dev/zram0";
+
+/// The compressed tier's priority when `swapon` names none: above every area
+/// added by default, so that evictions go to it first.
+const MEMORY_TIER_PRIORITY: i32 = 100;
+
+/// The compressed tier's size in slots: half the machine's memory, at most
+/// 4 GiB -- what Fedora's zram-generator gives each machine it runs on. A
+/// slot costs its table entry (32 bytes) until a page is stored in it.
+fn memory_tier_slots() -> u32 {
+    let total = frame::stats().map_or(0, |s| s.usable_frames);
+    let half = u64::try_from(total)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(FRAME_SIZE as u64)
+        .checked_div(2)
+        .unwrap_or(0);
+    let slots = half
+        .min(4 << 30)
+        .checked_div(FRAME_SIZE as u64)
+        .unwrap_or(0);
+    u32::try_from(slots)
+        .unwrap_or(MAX_AREA_SLOTS)
+        .clamp(1, MAX_AREA_SLOTS)
+}
+
+/// `/dev/zram0`: the compressed tier as a block device, so that what lists
+/// and tests block devices finds it, and util-linux's `swapon` reads a swap
+/// signature on it, as on Linux. Its first page reads as a `mkswap` header
+/// for the tier's size and the rest as zeros; it cannot be written, so
+/// nothing takes it for a disk to format or to swap to through the disk
+/// path. `swapon` and `swapoff` of it turn the tier itself on and off
+/// (`mm::swapctl`).
+struct MemoryTierDevice {
+    slots: u32,
+}
+
+impl crate::blkdev::BlockDevice for MemoryTierDevice {
+    fn info(&self) -> crate::blkdev::BlockDeviceInfo {
+        let bytes = u64::from(self.slots).saturating_mul(FRAME_SIZE as u64);
+        crate::blkdev::BlockDeviceInfo {
+            name: String::from(MEMORY_TIER_DEVICE),
+            sector_count: bytes.checked_div(SECTOR_BYTES as u64).unwrap_or(0),
+            sector_size: SECTOR_BYTES as u32,
+            read_only: true,
+        }
+    }
+
+    fn read_sector(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8; crate::blkdev::SECTOR_SIZE],
+    ) -> KernelResult<()> {
+        buf.fill(0);
+        let header_sectors = (FRAME_SIZE / SECTOR_BYTES) as u64;
+        if lba < header_sectors {
+            let mut page = vec![0u8; FRAME_SIZE];
+            make_header(&mut page, FRAME_SIZE, self.slots.saturating_sub(1), &[]);
+            let at = usize::try_from(lba)
+                .unwrap_or(0)
+                .saturating_mul(SECTOR_BYTES);
+            if let Some(src) = page.get(at..at.saturating_add(SECTOR_BYTES)) {
+                buf.copy_from_slice(src);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_sector(
+        &mut self,
+        _lba: u64,
+        _buf: &[u8; crate::blkdev::SECTOR_SIZE],
+    ) -> KernelResult<()> {
+        Err(KernelError::ReadOnlyFilesystem)
+    }
+}
+
+/// Start swap: the compressed tier, half the machine's memory at most 4 GiB
+/// ([`memory_tier_slots`]), at priority 100, and its device `/dev/zram0`.
+/// Disk areas are added with [`activate`].
 ///
 /// Called during kernel boot, after the heap is available.
-pub fn init(num_slots: u32) {
+pub fn init() {
+    let slots = memory_tier_slots();
+    crate::blkdev::register(
+        MEMORY_TIER_DEVICE,
+        alloc::boxed::Box::new(MemoryTierDevice { slots }),
+    );
     // Boot: nothing else adds or removes an area yet, which is what
     // `reserve_for_area`'s caller must otherwise guarantee by `SWAP_ADMIN`.
-    let Some(base_slot) = SWAP.lock().find_gap(num_slots) else {
-        serial_println!("[swap] zram: no room for {} slots", num_slots);
-        return;
-    };
-    if reserve_for_area(base_slot.saturating_add(num_slots)).is_err() {
-        serial_println!("[swap] zram: no memory for {} slots' counts", num_slots);
-        return;
+    match add_memory_tier(
+        slots,
+        MEMORY_TIER_PRIORITY,
+        MemBackend::new(slots),
+        SwapSlotAllocator::new(slots),
+    ) {
+        Ok(base_slot) => serial_println!(
+            "[swap] Compressed tier /dev/zram0: {} slots ({} MiB), priority {}, base slot {}",
+            slots,
+            u64::from(slots).saturating_mul(FRAME_SIZE as u64) >> 20,
+            MEMORY_TIER_PRIORITY,
+            base_slot
+        ),
+        Err(e) => serial_println!("[swap] Compressed tier not added: {:?}", e),
     }
+}
+
+/// Add the compressed tier of `slots` slots at `priority`, with its backend
+/// and allocator made by the caller; answers its first slot. The caller is
+/// the only one adding or removing an area (`SWAP_ADMIN`, or the boot).
+///
+/// # Errors
+///
+/// `DeviceBusy` when the tier is on already; `ResourceExhausted` for no room
+/// in the slot numbers; `OutOfMemory` for its bookkeeping.
+fn add_memory_tier(
+    slots: u32,
+    priority: i32,
+    backend: MemBackend,
+    allocator: SwapSlotAllocator,
+) -> KernelResult<u32> {
+    let base_slot = {
+        let state = SWAP.lock();
+        if state.devices.iter().any(|d| d.kind == AreaKind::Memory) {
+            return Err(KernelError::DeviceBusy);
+        }
+        state
+            .find_gap(slots)
+            .ok_or(KernelError::ResourceExhausted)?
+    };
+    reserve_for_area(base_slot.saturating_add(slots))?;
     let device = SwapDevice {
-        priority: 100,
-        path: b"zram".to_vec(),
+        priority,
+        path: MEMORY_TIER_PATH.to_vec(),
         kind: AreaKind::Memory,
-        backend: SwapBackend::Memory(MemBackend::new(num_slots)),
-        slots: SwapSlotAllocator::new(num_slots),
+        backend: SwapBackend::Memory(backend),
+        slots: allocator,
         base_slot,
         reserved: 0,
         draining: false,
         default_priority: false,
     };
     let mut state = SWAP.lock();
-    if let Err(e) = state
-        .grow_to(base_slot.saturating_add(num_slots))
-        .and_then(|()| state.insert_area(device))
-    {
-        serial_println!("[swap] zram: not added: {:?}", e);
-        return;
-    }
+    state.grow_to(base_slot.saturating_add(slots))?;
+    state.insert_area(device)?;
     state.initialized = true;
+    Ok(base_slot)
+}
 
-    serial_println!(
-        "[swap] Initialized zram backend: {} slots ({} KiB), priority=100, base_slot={}",
-        num_slots,
-        (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024,
-        base_slot
-    );
+/// Turn the compressed tier back on after [`deactivate`] took it away:
+/// `swapon /dev/zram0`, at `priority` or 100. Its size is what the boot gave
+/// it, which is what `/dev/zram0` says.
+///
+/// # Errors
+///
+/// `DeviceBusy` when it is on already; `OutOfMemory` for its tables;
+/// `ResourceExhausted` for no room in the slot numbers.
+pub fn enable_memory_tier(priority: Option<i32>) -> KernelResult<ActiveArea> {
+    let _admin = SWAP_ADMIN.lock();
+    let slots = crate::blkdev::info(MEMORY_TIER_DEVICE)
+        .and_then(|i| {
+            u32::try_from(
+                i.sector_count
+                    .checked_div((FRAME_SIZE / SECTOR_BYTES) as u64)?,
+            )
+            .ok()
+        })
+        .ok_or(KernelError::NoSuchDevice)?;
+    let priority = priority.unwrap_or(MEMORY_TIER_PRIORITY);
+    add_memory_tier(
+        slots,
+        priority,
+        MemBackend::try_new(slots)?,
+        SwapSlotAllocator::try_new(slots)?,
+    )?;
+    Ok(ActiveArea {
+        pages: slots,
+        priority,
+    })
 }
 
 /// `swapon` and `swapoff`, one at a time: Linux's `swapon_mutex`. A sleeping
@@ -1809,6 +1960,8 @@ pub fn activate(request: AreaRequest) -> KernelResult<ActiveArea> {
 /// Which area [`deactivate`] takes away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AreaTarget {
+    /// The compressed tier (`/dev/zram0`).
+    Memory,
     /// A block device's area, by the device's name in the registry.
     Device(String),
     /// A file's area, by the file's identity: any name for the file will do,
@@ -1822,9 +1975,10 @@ pub enum AreaTarget {
 }
 
 impl AreaTarget {
-    /// Whether `dev` is the area this names. The compressed tier never is.
+    /// Whether `dev` is the area this names.
     fn names(&self, dev: &SwapDevice) -> bool {
         match self {
+            Self::Memory => dev.kind == AreaKind::Memory,
             _ if dev.kind == AreaKind::Memory => false,
             Self::Device(name) => {
                 dev.kind == AreaKind::Device
@@ -1924,14 +2078,18 @@ pub(crate) fn deactivate_also(target: &AreaTarget, extra: &[u64]) -> KernelResul
         LEAST_PRIORITY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     state.initialized = !state.devices.is_empty();
-    let SwapBackend::Disk(disk) = dev.backend else {
-        return Err(KernelError::InternalError);
-    };
-    Ok(RemovedArea {
-        kind: dev.kind,
-        device: disk.device_name,
-        extents: disk.extents,
-    })
+    match dev.backend {
+        SwapBackend::Disk(disk) => Ok(RemovedArea {
+            kind: dev.kind,
+            device: disk.device_name,
+            extents: disk.extents,
+        }),
+        SwapBackend::Memory(_) => Ok(RemovedArea {
+            kind: dev.kind,
+            device: String::from(MEMORY_TIER_DEVICE),
+            extents: Vec::new(),
+        }),
+    }
 }
 
 /// Read `buf` -- whole sectors -- from byte `offset`, a sector multiple, of

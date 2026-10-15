@@ -892,11 +892,10 @@ extern "C" fn kernel_main() -> ! {
             // Idempotent: a no-op if the store was already populated.
             fs::kernparam::init_defaults();
 
-            // Step 9c: Initialize swap subsystem (zram initially).
-            // The in-memory compressed (zram) backend is always available.
-            // We'll try to upgrade to disk-backed swap after virtio-blk
-            // and blkdev init (Step 20e).
-            mm::swap::init(256);
+            // Step 9c: swap's compressed tier, /dev/zram0, sized from memory
+            // (`mm::swap::init`). Disk areas come at step 20e, once the
+            // block devices are up.
+            mm::swap::init();
             selftest::dispatch_debug("Swap", selftest::Severity::Integrity, || {
                 mm::swap::self_test()
             });
@@ -1492,6 +1491,12 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Swap file", selftest::Severity::Integrity, || {
                 mm::swapctl::self_test_file()
             });
+            // The compressed tier off and on by its path, /dev/zram0.
+            selftest::dispatch_debug(
+                "Compressed swap tier",
+                selftest::Severity::Integrity,
+                mm::swapctl::self_test_memory_tier,
+            );
 
             // Probe for ISO 9660 filesystems (CD-ROM images).
             // In QEMU, an ISO image can be attached as a virtio-blk device.

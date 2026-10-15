@@ -1,5 +1,6 @@
 ### [A] `A-PROC-SWAPS-LISTS-THE-COMPRESSED-TIER-AS-ZRAM-WHICH-SWAPOFF-CANNOT-NAME` — `swapoff -a` fails on the compressed tier's line in `/proc/swaps` -- 2026-10-14
-**Status:** OPEN (lane A). Next on lane A's swap list.
+**Status:** OPEN -- fixed on lane-a-wip (the tier is `/dev/zram0`, which
+`swapoff` and `swapon` take; design-decisions 1571), awaiting a boot on main.
 
 **In short:** `/proc/swaps` lists the compressed-memory swap tier as `zram`
 with type `partition`. A program that acts on that list -- util-linux's

@@ -2,7 +2,8 @@
 
 **Status:** OPEN -- fixed on lane-a-wip (8a2e52950: areas only by header,
 extents, `swapoff`; then `swapon`/`swapoff` by path and swap files on ext4),
-awaiting a boot on main. Left after that: zram sized from RAM (item 5); a GPT
+awaiting a boot on main; zram sized from RAM (item 5) too, as /dev/zram0
+(design-decisions 1571). Left after that: a GPT
 swap partition taken at boot (item 1's second half), which waits for the block
 layer to have partition devices at all; and turning configured swap on at boot
 (lane B's, `requests/a-b-turn-on-configured-swap-at-boot.md`). Found answering the operator's question on D-Q8

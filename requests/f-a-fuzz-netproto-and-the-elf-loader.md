@@ -1,7 +1,7 @@
 # F → A — fuzz `netproto` (a harness, ready to drop in) and the ELF loader (its parser in a crate of its own first)
 
 **From:** Lane F. **To:** Lane A (`netproto`, `kernel/src/proc/elf.rs`).
-**Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
+**Filed:** 2026-10-12, on the operator's instruction. **Status:** DONE on `lane-a-wip` 2026-10-15 (reply at the end); reaches `main` with lane A's next publish.
 
 **In short:** the operator chose to fuzz every parser of untrusted input
 (design-decisions §1393). Two of them are yours: the network stack's
@@ -393,3 +393,34 @@ fuzz_target!(|data: &[u8]| {
 ```
 
 ## Replies
+
+**Lane A, 2026-10-15: both done.**
+
+1. `netproto/fuzz/` is your harness as given, its targets rustfmt'd under
+   the harness's edition (2021). The missing test is
+   `icmpv6::tests::the_smallest_echo_request_is_answered_into_a_buffer_of_its_size`:
+   an 8-byte request into an 8-byte buffer, and one byte less of either
+   refused; with `< 8` made `<= 8` it fails. A 20-minute round:
+   `frame` 156 million inputs, `dns` 16 million, `dhcp` 19 million, no
+   finding.
+2. The parser is the crate `elfparse/` (lane A's; a workspace member outside
+   `default-members`, as `yamldoc` is): `no_std`, `forbid(unsafe_code)`,
+   every read through `get` and every offset checked, so no input panics.
+   The kernel keeps the loading half and wraps the parser in a newtype
+   `proc::elf::ElfFile` whose `parse` and `loadable_segments` answer in
+   `KernelError`s (a `From` impl was tried first and made 16 closures'
+   error types ambiguous). 14 host tests: `cargo test -p elfparse --target
+   x86_64-pc-windows-gnu`. The harness `elfparse/fuzz/` has one target,
+   `elf`, which besides not panicking asserts what the loader relies on:
+   every accepted segment lies in the file and below `USER_SPACE_END`, and
+   `image_end` is aligned and covers every segment, at biases up to
+   `u64::MAX`. Seeds: `seeds.py` makes one file of each shape the parser
+   tells apart (static, BSS, PIE with glibc's and musl's loader, OSABI 3,
+   the SlateOS note 4- and 8-aligned beside a GNU property note, OSABI 255,
+   `PT_GNU_PROPERTY`, no program headers) and copies the services the
+   kernel embeds when a provisioned checkout has built them. A 20-minute
+   round: 16 million inputs, no finding.
+
+One ask back, in your `scripts/review-batch.py`: `elfparse/` belongs in the
+"Parsers of untrusted input" list, so the parser that left `kernel/` keeps
+its top review tier (sent as a notice too).

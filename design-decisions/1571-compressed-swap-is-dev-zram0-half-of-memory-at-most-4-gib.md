@@ -22,9 +22,22 @@ otherwise. Closes known-issues
 **The size.** `min(memory / 2, 4 GiB)` is the default of Fedora's
 zram-generator, which every Fedora desktop has run since 2020; it is a cap on
 what may be stored, not memory taken: a slot costs its 32-byte table entry
-until a page is stored in it, and a stored page costs its compressed size.
-No commit accounting in this kernel counts swap capacity, so a larger tier
-lets no program commit more than memory holds.
+until a page is stored in it, and a stored page costs its compressed size
+rounded up to the heap's size class. No commit accounting in this kernel
+counts swap capacity, so a larger tier lets no program commit more than
+memory holds.
+
+**What a stored page costs (amended 2026-10-15, after review).** As first
+built, a stored page kept the 16 KiB buffer it was compressed into, and an
+incompressible page was kept as a full copy, so at this size reclaim could
+"free" gigabytes without freeing a frame. Now an all-zero page costs nothing;
+a page is kept only if it compresses to half a frame or less, in an
+allocation of exactly its size -- the heap serves anything larger as whole
+frames, so it would save nothing -- and one that does not is refused (as
+Linux's zswap refuses it), staying in memory or going to a disk area. That
+bounds the tier at its largest to a quarter of usable memory, in the range
+of zswap's 20% pool cap. Compression uses scratch the tier allocated when it
+was made, so storing a page allocates only the page's own bytes.
 
 | Option | Against it |
 |---|---|

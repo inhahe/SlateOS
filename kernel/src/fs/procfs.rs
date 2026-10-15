@@ -1748,10 +1748,7 @@ fn gen_vmstat() -> Vec<u8> {
         "zram_compressed_pages {}\n",
         comp.compressed_count
     ));
-    s.push_str(&format!(
-        "zram_uncompressed_pages {}\n",
-        comp.uncompressed_count
-    ));
+    s.push_str(&format!("zram_rejected_pages {}\n", comp.rejected_count));
     if comp.uncompressed_bytes > 0 {
         s.push_str(&format!("zram_ratio_pct {}\n", comp.ratio_percent()));
         s.push_str(&format!("zram_bytes_saved {}\n", comp.bytes_saved()));

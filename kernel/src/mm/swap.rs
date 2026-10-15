@@ -94,6 +94,7 @@ use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -246,19 +247,9 @@ struct SwapSlotAllocator {
 }
 
 impl SwapSlotAllocator {
-    /// Create a new slot allocator with the given capacity.
-    fn new(capacity: u32) -> Self {
-        let words = capacity.div_ceil(64) as usize;
-        Self {
-            bitmap: vec![0u64; words],
-            capacity,
-            used: 0,
-            hint: 0,
-        }
-    }
-
-    /// [`Self::new`], refusing rather than panicking when the bitmap cannot
-    /// be allocated: an area added by `swapon` can be terabytes.
+    /// An allocator of `capacity` slots, all free; refused rather than
+    /// panicking when the bitmap cannot be allocated: an area added by
+    /// `swapon` can be terabytes.
     fn try_new(capacity: u32) -> KernelResult<Self> {
         let words = capacity.div_ceil(64) as usize;
         let mut bitmap = Vec::new();
@@ -375,168 +366,165 @@ impl SwapSlotAllocator {
 // zram-style compressed in-memory swap backend
 // ---------------------------------------------------------------------------
 
-/// Slot storage type — compressed or uncompressed.
-///
-/// Pages are compressed on write.  If compression is beneficial
-/// (compressed size < FRAME_SIZE), the compressed form is stored.
-/// Otherwise, the uncompressed data is stored as-is.
+/// What one slot of the compressed tier holds.
 enum SlotData {
-    /// Compressed page data (smaller than FRAME_SIZE).
-    Compressed(Vec<u8>),
-    /// Uncompressed page data (compression was not beneficial).
-    Uncompressed(Vec<u8>),
+    /// An all-zero page, the commonest kind (fresh stack, BSS): nothing is
+    /// stored for it.
+    Zero,
+    /// A page's compressed form, in an allocation of exactly its size.
+    Compressed(Box<[u8]>),
 }
 
-/// zram-style compressed in-memory swap backend.
+/// The most the compressed tier keeps of one page: half a frame. The heap
+/// serves anything larger as whole frames (`heap::allocation_cost`), so a
+/// page that does not compress to this would cost a frame to free one: it is
+/// refused, and stays where it is or goes to a lower-priority area. That also
+/// bounds what the tier holds at its largest -- half of usable memory in
+/// slots -- to a quarter of usable memory.
+const MAX_STORED: usize = FRAME_SIZE / 2;
+
+/// The compressed in-memory swap tier, `/dev/zram0`: zram's design, pages
+/// compressed into the kernel heap.
 ///
-/// Compresses page data using an LZ4-like algorithm before storing
-/// in heap buffers.  This trades CPU time for memory savings:
-///
-/// - **Zero pages** (BSS, fresh stack): 16 KiB → 1 byte (99.99% savings)
-/// - **Sparse/repetitive data**: typically 50–90% compression
-/// - **Random/encrypted data**: stored uncompressed (no overhead beyond
-///   the failed compression attempt)
+/// - **Zero pages** (BSS, fresh stack) cost nothing.
+/// - **Compressible pages** cost their compressed size, rounded up to the
+///   heap's size class.
+/// - **A page that does not compress** to [`MAX_STORED`] is refused (as
+///   Linux's zswap refuses one), since keeping it would save nothing.
 ///
 /// ## Memory accounting
 ///
-/// `uncompressed_bytes` tracks the logical size of all stored pages
-/// (N × FRAME_SIZE).  `compressed_bytes` tracks the actual heap usage.
-/// The ratio `compressed_bytes / uncompressed_bytes` is the effective
-/// compression ratio.
+/// `uncompressed_bytes` is the logical size of the stored pages (N ×
+/// FRAME_SIZE); `compressed_bytes` is what they take from the heap, each
+/// page its allocation's real size, not its length.
 struct MemBackend {
     /// Slot storage.  `None` = slot never written.
     slots: Vec<Option<SlotData>>,
     /// Total capacity (number of slots).
     capacity: u32,
+    /// The compressor's scratch, allocated with the tier, so that storing a
+    /// page allocates only the page's own bytes: compression runs under the
+    /// `SWAP` lock, during reclaim, when an allocation may fail.
+    table: Vec<u32>,
+    output: Vec<u8>,
     /// Total uncompressed bytes stored (logical size).
     uncompressed_bytes: u64,
-    /// Total compressed bytes stored (actual heap usage).
+    /// What the stored pages take from the heap.
     compressed_bytes: u64,
-    /// Number of pages that compressed successfully.
+    /// Number of pages stored.
     compressed_count: u64,
-    /// Number of pages stored uncompressed (incompressible).
-    uncompressed_count: u64,
+    /// Number of pages refused: they would not compress to [`MAX_STORED`],
+    /// or the bytes to keep them could not be allocated.
+    rejected_count: u64,
 }
 
 impl MemBackend {
-    /// [`Self::new`], refusing rather than failing when the slot table cannot
-    /// be allocated: for a tier added after boot (`swapon /dev/zram0`).
+    /// A tier of `capacity` slots, with its compressor's scratch; refused
+    /// rather than panicking when any of it cannot be allocated.
     fn try_new(capacity: u32) -> KernelResult<Self> {
+        let oom = |_| KernelError::OutOfMemory;
         let mut slots = Vec::new();
-        slots
-            .try_reserve_exact(capacity as usize)
-            .map_err(|_| KernelError::OutOfMemory)?;
+        slots.try_reserve_exact(capacity as usize).map_err(oom)?;
         slots.resize_with(capacity as usize, || None);
+        let mut table = Vec::new();
+        table
+            .try_reserve_exact(super::compress::HASH_TABLE_ENTRIES)
+            .map_err(oom)?;
+        table.resize(super::compress::HASH_TABLE_ENTRIES, 0);
+        let mut output = Vec::new();
+        output.try_reserve_exact(MAX_STORED).map_err(oom)?;
+        output.resize(MAX_STORED, 0);
         Ok(Self {
             slots,
             capacity,
+            table,
+            output,
             uncompressed_bytes: 0,
             compressed_bytes: 0,
             compressed_count: 0,
-            uncompressed_count: 0,
+            rejected_count: 0,
         })
     }
 
-    /// Create a new compressed in-memory backend with the given capacity.
-    fn new(capacity: u32) -> Self {
-        let mut slots = Vec::with_capacity(capacity as usize);
-        for _ in 0..capacity {
-            slots.push(None);
-        }
-        Self {
-            slots,
-            capacity,
-            uncompressed_bytes: 0,
-            compressed_bytes: 0,
-            compressed_count: 0,
-            uncompressed_count: 0,
+    /// What a slot's data takes from the heap.
+    fn cost(data: &SlotData) -> u64 {
+        match data {
+            SlotData::Zero => 0,
+            SlotData::Compressed(c) => crate::mm::heap::allocation_cost(c.len()) as u64,
         }
     }
 
-    /// Write a page's data into a swap slot.
+    /// Store a page (`FRAME_SIZE` bytes) in `slot`, compressed.
     ///
-    /// Compresses the data first.  If compression is beneficial, stores
-    /// the compressed form; otherwise stores uncompressed.
+    /// `Ok(true)` when it is stored; `Ok(false)` when it is refused -- it
+    /// would not compress to [`MAX_STORED`], or the bytes to keep it could
+    /// not be allocated -- and nothing is stored, the slot left to the
+    /// caller to give back.
     ///
-    /// `data` must be exactly `FRAME_SIZE` bytes.
-    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<()> {
-        if slot >= self.capacity {
-            return Err(KernelError::InvalidArgument);
-        }
+    /// # Errors
+    ///
+    /// `InvalidArgument` for a slot past the tier or data not a frame long.
+    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<bool> {
         if data.len() != FRAME_SIZE {
             return Err(KernelError::InvalidArgument);
         }
-
         let slot_storage = self
             .slots
             .get_mut(slot as usize)
             .ok_or(KernelError::InvalidArgument)?;
-
-        // Try to compress the page.
-        let stored = match super::compress::compress(data) {
-            Some(compressed) => {
-                let compressed_len = compressed.len() as u64;
-                self.compressed_bytes = self.compressed_bytes.saturating_add(compressed_len);
-                self.compressed_count = self.compressed_count.saturating_add(1);
-                SlotData::Compressed(compressed)
-            }
-            None => {
-                // Incompressible — store uncompressed.
-                self.compressed_bytes = self.compressed_bytes.saturating_add(FRAME_SIZE as u64);
-                self.uncompressed_count = self.uncompressed_count.saturating_add(1);
-                SlotData::Uncompressed(data.to_vec())
-            }
+        let Some(len) = super::compress::compress_into(data, &mut self.output, &mut self.table)
+        else {
+            self.rejected_count = self.rejected_count.saturating_add(1);
+            return Ok(false);
         };
-
+        let compressed = self.output.get(..len).ok_or(KernelError::InternalError)?;
+        let stored = if super::compress::is_zero_encoding(compressed) {
+            SlotData::Zero
+        } else {
+            let mut bytes = Vec::new();
+            if bytes.try_reserve_exact(len).is_err() {
+                self.rejected_count = self.rejected_count.saturating_add(1);
+                return Ok(false);
+            }
+            bytes.extend_from_slice(compressed);
+            // Capacity is exactly `len`, so this does not reallocate.
+            SlotData::Compressed(bytes.into_boxed_slice())
+        };
+        self.compressed_bytes = self.compressed_bytes.saturating_add(Self::cost(&stored));
+        self.compressed_count = self.compressed_count.saturating_add(1);
         self.uncompressed_bytes = self.uncompressed_bytes.saturating_add(FRAME_SIZE as u64);
         *slot_storage = Some(stored);
-        Ok(())
+        Ok(true)
     }
 
-    /// Read a page's data from a swap slot.
-    ///
-    /// Decompresses if necessary.  `buf` must be exactly `FRAME_SIZE` bytes.
+    /// Read a page's data from a swap slot into `buf`, `FRAME_SIZE` bytes.
+    /// Allocates nothing.
     fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
-        if slot >= self.capacity {
-            return Err(KernelError::InvalidArgument);
-        }
         if buf.len() != FRAME_SIZE {
             return Err(KernelError::InvalidArgument);
         }
-
         let slot_data = self
             .slots
             .get(slot as usize)
             .and_then(|s| s.as_ref())
             .ok_or(KernelError::InvalidArgument)?;
-
         match slot_data {
+            SlotData::Zero => buf.fill(0),
             SlotData::Compressed(compressed) => {
-                let decompressed = super::compress::decompress(compressed, FRAME_SIZE)
+                super::compress::decompress_into(compressed, buf)
                     .map_err(|_| KernelError::InternalError)?;
-                buf.copy_from_slice(&decompressed);
-            }
-            SlotData::Uncompressed(data) => {
-                buf.copy_from_slice(data);
             }
         }
-
         Ok(())
     }
 
     /// Discard a slot's data (after swap-in).
     fn discard(&mut self, slot: u32) {
         if let Some(slot_storage) = self.slots.get_mut(slot as usize) {
-            // Update byte counts.
-            if let Some(data) = slot_storage {
-                let stored_size = match data {
-                    SlotData::Compressed(c) => c.len() as u64,
-                    SlotData::Uncompressed(_) => FRAME_SIZE as u64,
-                };
+            if let Some(data) = slot_storage.take() {
                 self.uncompressed_bytes = self.uncompressed_bytes.saturating_sub(FRAME_SIZE as u64);
-                self.compressed_bytes = self.compressed_bytes.saturating_sub(stored_size);
+                self.compressed_bytes = self.compressed_bytes.saturating_sub(Self::cost(&data));
             }
-            *slot_storage = None;
         }
     }
 }
@@ -840,7 +828,13 @@ impl DiskBackend {
                 // len < FRAME_SIZE = 16384, below META_COMPRESSED.
                 (padded, META_COMPRESSED | len as u16)
             }
-            _ => (data.to_vec(), FRAME_SIZE as u16),
+            _ => {
+                let mut raw = zeroed_buffer(0)?;
+                raw.try_reserve_exact(FRAME_SIZE)
+                    .map_err(|_| KernelError::OutOfMemory)?;
+                raw.extend_from_slice(data);
+                (raw, FRAME_SIZE as u16)
+            }
         };
         area_io(
             &self.device_name,
@@ -869,7 +863,7 @@ impl DiskBackend {
             .filter(|&m| m != 0)
             .ok_or(KernelError::InvalidArgument)?;
         let len = usize::from(meta & !META_COMPRESSED);
-        let mut disk = vec![0u8; len.div_ceil(SECTOR_BYTES).saturating_mul(SECTOR_BYTES)];
+        let mut disk = zeroed_buffer(len.div_ceil(SECTOR_BYTES).saturating_mul(SECTOR_BYTES))?;
         area_io(
             &self.device_name,
             &self.extents,
@@ -879,12 +873,8 @@ impl DiskBackend {
         )?;
         if meta & META_COMPRESSED != 0 {
             let compressed = disk.get(..len).ok_or(KernelError::InternalError)?;
-            let page = super::compress::decompress(compressed, FRAME_SIZE)
+            super::compress::decompress_into(compressed, buf)
                 .map_err(|_| KernelError::InternalError)?;
-            if page.len() != FRAME_SIZE {
-                return Err(KernelError::InternalError);
-            }
-            buf.copy_from_slice(&page);
         } else {
             buf.copy_from_slice(disk.get(..FRAME_SIZE).ok_or(KernelError::InternalError)?);
         }
@@ -897,6 +887,17 @@ impl DiskBackend {
             *entry = 0;
         }
     }
+}
+
+/// A buffer of `len` zero bytes, or `OutOfMemory`: the swap paths run
+/// because memory is short, so a buffer they cannot have is an answer, not a
+/// panic.
+fn zeroed_buffer(len: usize) -> KernelResult<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    v.resize(len, 0);
+    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -912,10 +913,12 @@ enum SwapBackend {
 }
 
 impl SwapBackend {
-    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<()> {
+    /// Store a page in `slot`: `Ok(false)` when the area refuses it, nothing
+    /// stored -- the compressed tier, for a page it cannot shrink.
+    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<bool> {
         match self {
             Self::Memory(m) => m.write(slot, data),
-            Self::Disk(d) => d.write(slot, data),
+            Self::Disk(d) => d.write(slot, data).map(|()| true),
         }
     }
 
@@ -944,8 +947,8 @@ impl SwapBackend {
 /// a swap slot, devices are tried in priority order (highest first).
 /// This enables a tiered swap setup:
 ///
-/// - **zram** (priority 100): fast in-memory compressed swap.
-///   Small capacity, but zero I/O latency.
+/// - **zram** (priority 100): fast in-memory compressed swap, `/dev/zram0`,
+///   half of usable memory in slots at most 4 GiB; zero I/O latency.
 /// - **disk** (priority 0): slower, larger capacity for overflow.
 ///   Used only when zram is full.
 struct SwapDevice {
@@ -953,7 +956,7 @@ struct SwapDevice {
     /// have capacity, the highest-priority device is used first.
     priority: i32,
     /// What `/proc/swaps` shows and `swapoff` names: the path `swapon` was
-    /// given, as bytes (`zram` for the compressed tier).
+    /// given, as bytes (`/dev/zram0` for the compressed tier).
     path: Vec<u8>,
     /// What the area is.
     kind: AreaKind,
@@ -1149,16 +1152,40 @@ impl SwapState {
         }
     }
 
-    /// Write data to a global swap slot.
-    fn write_slot(&mut self, global_slot: u32, data: &[u8]) -> KernelResult<()> {
-        let (dev_idx, local_slot) = self
-            .find_device(global_slot)
-            .ok_or(KernelError::InvalidArgument)?;
-        let dev = self
-            .devices
-            .get_mut(dev_idx)
-            .ok_or(KernelError::InternalError)?;
-        dev.backend.write(local_slot, data)
+    /// Store a page in a slot of the highest-priority area that keeps it, and
+    /// answer the global slot. An area `swapoff` is emptying gives nothing
+    /// out; an area that refuses the page -- the compressed tier, for a page
+    /// it cannot shrink -- passes it to the next.
+    ///
+    /// # Errors
+    ///
+    /// `WouldBlock` when an area refused the page and none after it took it:
+    /// not this page, not now, though another may be kept. `OutOfMemory`
+    /// when every area is full. A backend's own error otherwise, its slot
+    /// given back.
+    fn store_page(&mut self, data: &[u8]) -> KernelResult<u32> {
+        let mut refused = false;
+        for dev in self.devices.iter_mut().filter(|d| !d.draining) {
+            let Some(local_slot) = dev.slots.alloc() else {
+                continue;
+            };
+            match dev.backend.write(local_slot, data) {
+                Ok(true) => return Ok(dev.base_slot.saturating_add(local_slot)),
+                Ok(false) => {
+                    dev.slots.free(local_slot);
+                    refused = true;
+                }
+                Err(e) => {
+                    dev.slots.free(local_slot);
+                    return Err(e);
+                }
+            }
+        }
+        Err(if refused {
+            KernelError::WouldBlock
+        } else {
+            KernelError::OutOfMemory
+        })
     }
 
     /// Read data from a global swap slot.
@@ -1328,6 +1355,61 @@ pub fn unregister_reclaimable(pml4_phys: u64, vaddr: u64) {
     }
 }
 
+/// The tasks reclaiming now, by id ([`NO_RECLAIMER`] for a free place):
+/// Linux's `PF_MEMALLOC`.
+///
+/// An allocation a reclaiming task makes -- the victim list under `RECLAIM`,
+/// the page buffer and the compressed page under `SWAP` in `swap_out_page` --
+/// that finds memory short must not reclaim again: that would take those
+/// locks a second time on the same task, a self-deadlock the locks panic on.
+/// So [`try_reclaim`] reclaims nothing for a task already in it; the
+/// allocation fails instead, and every allocation on the reclaim path
+/// answers that as `OutOfMemory`.
+static RECLAIMING: [core::sync::atomic::AtomicU64; RECLAIMERS] =
+    [const { core::sync::atomic::AtomicU64::new(NO_RECLAIMER) }; RECLAIMERS];
+
+/// Places in [`RECLAIMING`]: more than tasks reclaim at once in practice
+/// (each CPU's current task and kswapd, and tasks parked mid-reclaim on disk
+/// I/O). A task that finds none free does not reclaim.
+const RECLAIMERS: usize = 64;
+
+/// A free place in [`RECLAIMING`]: no task has this id.
+const NO_RECLAIMER: u64 = u64::MAX;
+
+/// The current task's place in [`RECLAIMING`] while it reclaims, given back
+/// when dropped.
+struct Reclaiming(usize);
+
+impl Reclaiming {
+    /// Take a place for the current task; `None` when it holds one already
+    /// -- it is reclaiming, and must not again -- or none is free.
+    fn enter() -> Option<Self> {
+        use core::sync::atomic::Ordering;
+        let me = crate::sched::current_task_id();
+        if RECLAIMING
+            .iter()
+            .any(|slot| slot.load(Ordering::Acquire) == me)
+        {
+            return None;
+        }
+        RECLAIMING
+            .iter()
+            .position(|slot| {
+                slot.compare_exchange(NO_RECLAIMER, me, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            })
+            .map(Self)
+    }
+}
+
+impl Drop for Reclaiming {
+    fn drop(&mut self) {
+        if let Some(slot) = RECLAIMING.get(self.0) {
+            slot.store(NO_RECLAIMER, core::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 /// Try to reclaim `target` pages by swapping them out.
 ///
 /// Uses the **Clock algorithm** (second-chance LRU approximation):
@@ -1341,8 +1423,12 @@ pub fn unregister_reclaimable(pml4_phys: u64, vaddr: u64) {
 /// 4. Continue until `target` pages have been reclaimed or we've
 ///    scanned the entire list twice without finding a victim.
 ///
-/// Returns the number of pages actually reclaimed.
+/// Returns the number of pages actually reclaimed: 0, at once, for a task
+/// already reclaiming ([`Reclaiming`]).
 pub fn try_reclaim(target: usize) -> usize {
+    let Some(_reclaiming) = Reclaiming::enter() else {
+        return 0;
+    };
     let mut reclaimed = 0;
 
     // We need to collect victims while holding RECLAIM, then release
@@ -1355,13 +1441,19 @@ pub fn try_reclaim(target: usize) -> usize {
             return 0;
         }
 
+        // Reserved once, so that no push below allocates: an allocation here
+        // is made under RECLAIM, because memory is short.
+        let want = target.min(len);
         let mut victims = Vec::new();
+        if victims.try_reserve_exact(want).is_err() {
+            return 0;
+        }
         // Scan at most 2 * len entries (two full rotations gives every
         // page at least one second chance).
         let max_scan = len.saturating_mul(2);
         let mut scanned = 0;
 
-        while victims.len() < target && scanned < max_scan {
+        while victims.len() < want && scanned < max_scan {
             let idx = state.clock_hand % len;
             state.clock_hand = (state.clock_hand + 1) % len;
             scanned += 1;
@@ -1450,9 +1542,15 @@ pub fn try_reclaim(target: usize) -> usize {
                 }
             }
             // In use right now (its address space's page-table lock was held,
-            // or its entries changed after they were read): not a failure,
-            // just not this time. It stays on the list.
+            // or its entries changed after they were read), or refused by the
+            // area it would have gone to (the compressed tier, for a page that
+            // does not shrink): not a failure, just not this time. It stays
+            // on the list.
             Err(KernelError::WouldBlock) => {}
+            // Every area full (or none at all), or no memory to hold the page
+            // with while it is written: the next victim fares no better, so
+            // the pass ends. The frame stays on the list.
+            Err(KernelError::OutOfMemory) => break,
             Err(KernelError::NotSupported) => {
                 // A frame of a kind that is not swapped (shared memory, or a
                 // group split across frames by a partial copy-on-write break:
@@ -1538,14 +1636,36 @@ fn memory_tier_slots() -> u32 {
 /// (`mm::swapctl`).
 struct MemoryTierDevice {
     slots: u32,
+    /// The device's first page, its swap header: made once, with the device.
+    header: Box<[u8]>,
+}
+
+impl MemoryTierDevice {
+    /// The device of a tier of `slots` slots; `OutOfMemory` when its header
+    /// page cannot be had.
+    fn try_new(slots: u32) -> KernelResult<Self> {
+        let mut header = zeroed_buffer(FRAME_SIZE)?;
+        make_header(&mut header, FRAME_SIZE, slots.saturating_sub(1), &[]);
+        Ok(Self {
+            slots,
+            header: header.into_boxed_slice(),
+        })
+    }
+
+    /// Its size in sectors.
+    fn sectors(&self) -> u64 {
+        u64::from(self.slots)
+            .saturating_mul(FRAME_SIZE as u64)
+            .checked_div(SECTOR_BYTES as u64)
+            .unwrap_or(0)
+    }
 }
 
 impl crate::blkdev::BlockDevice for MemoryTierDevice {
     fn info(&self) -> crate::blkdev::BlockDeviceInfo {
-        let bytes = u64::from(self.slots).saturating_mul(FRAME_SIZE as u64);
         crate::blkdev::BlockDeviceInfo {
             name: String::from(MEMORY_TIER_DEVICE),
-            sector_count: bytes.checked_div(SECTOR_BYTES as u64).unwrap_or(0),
+            sector_count: self.sectors(),
             sector_size: SECTOR_BYTES as u32,
             read_only: true,
         }
@@ -1556,17 +1676,17 @@ impl crate::blkdev::BlockDevice for MemoryTierDevice {
         lba: u64,
         buf: &mut [u8; crate::blkdev::SECTOR_SIZE],
     ) -> KernelResult<()> {
+        // Past the end is an error, as on every other device: a reader that
+        // trusts the device to bound it must be stopped.
+        if lba >= self.sectors() {
+            return Err(KernelError::InvalidArgument);
+        }
         buf.fill(0);
-        let header_sectors = (FRAME_SIZE / SECTOR_BYTES) as u64;
-        if lba < header_sectors {
-            let mut page = vec![0u8; FRAME_SIZE];
-            make_header(&mut page, FRAME_SIZE, self.slots.saturating_sub(1), &[]);
-            let at = usize::try_from(lba)
-                .unwrap_or(0)
-                .saturating_mul(SECTOR_BYTES);
-            if let Some(src) = page.get(at..at.saturating_add(SECTOR_BYTES)) {
-                buf.copy_from_slice(src);
-            }
+        let at = usize::try_from(lba)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SECTOR_BYTES);
+        if let Some(src) = self.header.get(at..at.saturating_add(SECTOR_BYTES)) {
+            buf.copy_from_slice(src);
         }
         Ok(())
     }
@@ -1587,18 +1707,16 @@ impl crate::blkdev::BlockDevice for MemoryTierDevice {
 /// Called during kernel boot, after the heap is available.
 pub fn init() {
     let slots = memory_tier_slots();
-    crate::blkdev::register(
-        MEMORY_TIER_DEVICE,
-        alloc::boxed::Box::new(MemoryTierDevice { slots }),
-    );
+    match MemoryTierDevice::try_new(slots) {
+        Ok(device) => crate::blkdev::register(MEMORY_TIER_DEVICE, Box::new(device)),
+        Err(e) => {
+            serial_println!("[swap] /dev/zram0 not made: {:?}; no compressed tier", e);
+            return;
+        }
+    }
     // Boot: nothing else adds or removes an area yet, which is what
     // `reserve_for_area`'s caller must otherwise guarantee by `SWAP_ADMIN`.
-    match add_memory_tier(
-        slots,
-        MEMORY_TIER_PRIORITY,
-        MemBackend::new(slots),
-        SwapSlotAllocator::new(slots),
-    ) {
+    match add_memory_tier(slots, MEMORY_TIER_PRIORITY) {
         Ok(base_slot) => serial_println!(
             "[swap] Compressed tier /dev/zram0: {} slots ({} MiB), priority {}, base slot {}",
             slots,
@@ -1610,29 +1728,33 @@ pub fn init() {
     }
 }
 
-/// Add the compressed tier of `slots` slots at `priority`, with its backend
-/// and allocator made by the caller; answers its first slot. The caller is
-/// the only one adding or removing an area (`SWAP_ADMIN`, or the boot).
+/// Add the compressed tier of `slots` slots at `priority`; answers its first
+/// slot. The caller is the only one adding or removing an area
+/// (`SWAP_ADMIN`, or the boot), so what is checked first still holds when
+/// the tier goes in.
 ///
 /// # Errors
 ///
-/// `DeviceBusy` when the tier is on already; `ResourceExhausted` for no room
-/// in the slot numbers; `OutOfMemory` for its bookkeeping.
-fn add_memory_tier(
-    slots: u32,
-    priority: i32,
-    backend: MemBackend,
-    allocator: SwapSlotAllocator,
-) -> KernelResult<u32> {
+/// `DeviceBusy` when the tier is on already; `ResourceExhausted` for
+/// [`MAX_AREAS`] areas already, or no room in the slot numbers;
+/// `OutOfMemory` for its tables.
+fn add_memory_tier(slots: u32, priority: i32) -> KernelResult<u32> {
     let base_slot = {
         let state = SWAP.lock();
         if state.devices.iter().any(|d| d.kind == AreaKind::Memory) {
             return Err(KernelError::DeviceBusy);
         }
+        if state.devices.len() >= MAX_AREAS {
+            return Err(KernelError::ResourceExhausted);
+        }
         state
             .find_gap(slots)
             .ok_or(KernelError::ResourceExhausted)?
     };
+    // Made only once they are known to be wanted: the slot table alone is
+    // up to 8 MiB.
+    let backend = MemBackend::try_new(slots)?;
+    let allocator = SwapSlotAllocator::try_new(slots)?;
     reserve_for_area(base_slot.saturating_add(slots))?;
     let device = SwapDevice {
         priority,
@@ -1672,12 +1794,7 @@ pub fn enable_memory_tier(priority: Option<i32>) -> KernelResult<ActiveArea> {
         })
         .ok_or(KernelError::NoSuchDevice)?;
     let priority = priority.unwrap_or(MEMORY_TIER_PRIORITY);
-    add_memory_tier(
-        slots,
-        priority,
-        MemBackend::try_new(slots)?,
-        SwapSlotAllocator::try_new(slots)?,
-    )?;
+    add_memory_tier(slots, priority)?;
     Ok(ActiveArea {
         pages: slots,
         priority,
@@ -2002,8 +2119,7 @@ impl AreaTarget {
 ///
 /// # Errors
 ///
-/// - `InvalidArgument`: no such area (the compressed tier is not taken
-///   away).
+/// - `InvalidArgument`: no such area.
 /// - `DeviceBusy`: `swapoff` is already emptying it, or pages were still
 ///   left after [`DRAIN_PASSES`] walks.
 /// - `OutOfMemory`: memory, with the other areas' room, cannot hold what it
@@ -2344,8 +2460,8 @@ pub struct SwapDeviceInfo {
     /// applied beyond ASCII too so the text is valid UTF-8 and loses
     /// nothing.
     pub name: alloc::string::String,
-    /// The area's path as `swapon` was given it (`zram` for the compressed
-    /// tier).
+    /// The area's path as `swapon` was given it (`/dev/zram0` for the
+    /// compressed tier).
     pub path: Vec<u8>,
     /// Device type: "memory" for zram, "disk" for a block device or
     /// partition, "file" for a swap file.
@@ -2404,10 +2520,11 @@ pub struct CompressionStats {
     pub uncompressed_bytes: u64,
     /// Total compressed bytes stored (actual heap usage).
     pub compressed_bytes: u64,
-    /// Number of pages that compressed successfully.
+    /// Number of pages stored.
     pub compressed_count: u64,
-    /// Number of pages stored uncompressed (incompressible).
-    pub uncompressed_count: u64,
+    /// Number of pages refused: they would not compress enough to save
+    /// anything, or the bytes to keep them could not be allocated.
+    pub rejected_count: u64,
 }
 
 impl CompressionStats {
@@ -2465,7 +2582,7 @@ pub fn compression_stats() -> CompressionStats {
         uncompressed_bytes: 0,
         compressed_bytes: 0,
         compressed_count: 0,
-        uncompressed_count: 0,
+        rejected_count: 0,
     };
     for dev in &state.devices {
         if let SwapBackend::Memory(m) = &dev.backend {
@@ -2474,9 +2591,7 @@ pub fn compression_stats() -> CompressionStats {
                 .saturating_add(m.uncompressed_bytes);
             stats.compressed_bytes = stats.compressed_bytes.saturating_add(m.compressed_bytes);
             stats.compressed_count = stats.compressed_count.saturating_add(m.compressed_count);
-            stats.uncompressed_count = stats
-                .uncompressed_count
-                .saturating_add(m.uncompressed_count);
+            stats.rejected_count = stats.rejected_count.saturating_add(m.rejected_count);
         }
     }
     stats
@@ -2554,7 +2669,7 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
     let frame_virt = frame_base
         .checked_add(hhdm)
         .ok_or(KernelError::InternalError)?;
-    let mut page_data = vec![0u8; FRAME_SIZE];
+    let mut page_data = zeroed_buffer(FRAME_SIZE)?;
     // SAFETY: frame_virt is the HHDM address of a frame the page table maps;
     // FRAME_SIZE bytes from it are that one frame.
     unsafe {
@@ -2566,18 +2681,18 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
     // overflowing to lower-priority devices when the preferred one is full.
     let swap_entry = {
         let mut state = SWAP.lock();
+        // No area at all is every area full: `OutOfMemory`, which keeps the
+        // frame on the reclaim list for when one is added. `NotSupported`
+        // would take it off for good, as a frame no area can ever hold.
         if !state.initialized {
-            return Err(KernelError::NotSupported);
+            return Err(KernelError::OutOfMemory);
         }
-        let global_slot = state.alloc_slot().ok_or(KernelError::OutOfMemory)?;
+        let global_slot = state.store_page(&page_data)?;
         let Some(entry) = SwapEntry::new(global_slot) else {
+            state.discard_slot(global_slot);
             state.free_slot(global_slot);
             return Err(KernelError::InternalError);
         };
-        if let Err(e) = state.write_slot(global_slot, &page_data) {
-            state.free_slot(global_slot);
-            return Err(e);
-        }
         PAGES_SWAPPED_OUT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let Some(refs) = state.part_refs.get_mut(global_slot as usize) else {
             state.free_slot(global_slot);
@@ -2739,7 +2854,7 @@ pub(crate) unsafe fn prepare_swap_in(pml4_phys: u64, virt: VirtAddr) -> KernelRe
 
     // Read the data from the swap backend.
     // Multi-device: find_device() locates which backend owns this slot.
-    let mut page_data = vec![0u8; FRAME_SIZE];
+    let mut page_data = zeroed_buffer(FRAME_SIZE)?;
     {
         let state = SWAP.lock();
         if !state.initialized {
@@ -2959,12 +3074,27 @@ pub fn release_swap_parts(slot: u32, count: u8) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// A page of pseudo-random bytes, which does not compress: what the
+/// compressed tier must refuse.
+fn incompressible_page() -> Vec<u8> {
+    let mut page = vec![0u8; FRAME_SIZE];
+    let mut x: u32 = 0x9E37_79B9;
+    for byte in &mut page {
+        // xorshift32: no 4-byte sequence repeats within a page.
+        x ^= x.wrapping_shl(13);
+        x ^= x.wrapping_shr(17);
+        x ^= x.wrapping_shl(5);
+        *byte = x.to_be_bytes()[0];
+    }
+    page
+}
+
 /// Run self-test of the swap subsystem.
 ///
 /// Tests:
 /// 1. Swap entry encoding/decoding roundtrip.
 /// 2. Slot allocator: alloc, free, double-alloc, capacity exhaustion.
-/// 3. In-memory backend: write, read, data integrity.
+/// 3. In-memory backend: write, read, data integrity, zero pages, refusal.
 pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[swap] Running self-test...");
 
@@ -2995,7 +3125,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // --- Slot allocator ---
     {
-        let mut alloc = SwapSlotAllocator::new(128);
+        let mut alloc = SwapSlotAllocator::try_new(128)?;
         assert_eq!(alloc.free_count(), 128);
 
         // Allocate all 128 slots.
@@ -3028,7 +3158,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // --- Compressed zram backend ---
     {
-        let mut backend = MemBackend::new(4);
+        let mut backend = MemBackend::try_new(4)?;
 
         // Write test pattern to slot 0 (repeating — highly compressible).
         let mut data = vec![0u8; FRAME_SIZE];
@@ -3038,7 +3168,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 *byte = (i & 0xFF) as u8;
             }
         }
-        backend.write(0, &data).expect("write should succeed");
+        assert_eq!(
+            backend.write(0, &data),
+            Ok(true),
+            "a compressible page is kept"
+        );
         // Verify it compressed (compressed_count should be 1).
         assert_eq!(
             backend.compressed_count, 1,
@@ -3059,9 +3193,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Write all-zero page to slot 1 (special case: 1-byte encoding).
         let zeros = vec![0u8; FRAME_SIZE];
-        backend.write(1, &zeros).expect("write zeros");
+        let bytes_before_zero = backend.compressed_bytes;
+        assert_eq!(backend.write(1, &zeros), Ok(true), "a zero page is kept");
         assert_eq!(backend.compressed_count, 2);
-        // Zero page stores as 1 byte — compressed_bytes should barely increase.
+        assert_eq!(
+            backend.compressed_bytes, bytes_before_zero,
+            "a zero page costs the heap nothing"
+        );
         let bytes_after_zero = backend.compressed_bytes;
 
         // Read back zeros.
@@ -3070,7 +3208,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Write uniform non-zero to slot 2 (compresses well: run of 0xAA).
         let data2 = vec![0xAA; FRAME_SIZE];
-        backend.write(2, &data2).expect("write slot 2");
+        assert_eq!(backend.write(2, &data2), Ok(true), "write slot 2");
+
+        // A page that does not shrink to MAX_STORED is refused: nothing is
+        // kept, and it would have cost a frame to free one.
+        let noise = incompressible_page();
+        let before = (backend.compressed_bytes, backend.compressed_count);
+        assert_eq!(
+            backend.write(3, &noise),
+            Ok(false),
+            "an incompressible page is refused"
+        );
+        assert_eq!(backend.rejected_count, 1, "...and counted");
+        assert_eq!(
+            (backend.compressed_bytes, backend.compressed_count),
+            before,
+            "...and nothing is kept"
+        );
+        assert!(
+            backend.read(3, &mut buf).is_err(),
+            "...so its slot is empty"
+        );
 
         // Verify slot 0 is unchanged.
         backend.read(0, &mut buf).expect("re-read slot 0");
@@ -3182,8 +3340,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     priority: 100,
                     path: b"test-fast".to_vec(),
                     kind: AreaKind::Memory,
-                    backend: SwapBackend::Memory(MemBackend::new(4)),
-                    slots: SwapSlotAllocator::new(4),
+                    backend: SwapBackend::Memory(MemBackend::try_new(4)?),
+                    slots: SwapSlotAllocator::try_new(4)?,
                     base_slot: 0,
                     reserved: 0,
                     draining: false,
@@ -3193,8 +3351,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     priority: 0,
                     path: b"test-slow".to_vec(),
                     kind: AreaKind::Memory,
-                    backend: SwapBackend::Memory(MemBackend::new(4)),
-                    slots: SwapSlotAllocator::new(4),
+                    backend: SwapBackend::Memory(MemBackend::try_new(4)?),
+                    slots: SwapSlotAllocator::try_new(4)?,
                     base_slot: 4,
                     reserved: 0,
                     draining: false,
@@ -3229,16 +3387,30 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             refilled
         );
 
-        // Write and read through the multi-device API.
+        // Store and read through the multi-device API: A is full, so the
+        // page goes to B.
         let test_data = vec![0x42u8; FRAME_SIZE];
-        test_state
-            .write_slot(overflow, &test_data)
-            .expect("write to B");
+        let stored = test_state.store_page(&test_data).expect("store to B");
+        assert!(
+            (4..8).contains(&stored),
+            "stored slot {} should be B's",
+            stored
+        );
         let mut read_buf = vec![0u8; FRAME_SIZE];
         test_state
-            .read_slot(overflow, &mut read_buf)
+            .read_slot(stored, &mut read_buf)
             .expect("read from B");
         assert_eq!(read_buf, test_data, "multi-device read/write integrity");
+        // A page no area can shrink is refused by each in turn: not now, and
+        // no slot is taken by it.
+        let free = |st: &SwapState| st.devices.iter().map(|d| d.slots.free_count()).sum::<u32>();
+        let free_before = free(&test_state);
+        assert_eq!(
+            test_state.store_page(&incompressible_page()),
+            Err(KernelError::WouldBlock),
+            "a page every area refuses"
+        );
+        assert_eq!(free(&test_state), free_before, "...takes no slot");
 
         // Verify find_device routing.
         assert_eq!(
@@ -3625,10 +3797,14 @@ pub fn self_test_disk() {
         };
         taken.push(slot);
         let mut back = vec![0u8; FRAME_SIZE];
-        let round_trip = dev
-            .backend
-            .write(slot, page)
-            .and_then(|()| dev.backend.read(slot, &mut back));
+        let round_trip = dev.backend.write(slot, page).and_then(|stored| {
+            if stored {
+                dev.backend.read(slot, &mut back)
+            } else {
+                // Refused: a disk area keeps every page, so this fails.
+                Err(KernelError::WouldBlock)
+            }
+        });
         if round_trip.is_err() || back != *page {
             serial_println!(
                 "[swap]   FAIL: {} slot {}: {:?}, data {}",
@@ -3688,8 +3864,9 @@ pub fn self_test_areas() -> KernelResult<()> {
 }
 
 /// Write a `mkswap` header for an area whose last page is `last_page`, of
-/// `page_size` pages, listing `bad`, into `buf`: for the self-tests here and
-/// in [`super::swapctl`], so the format has one encoder beside its parser.
+/// `page_size` pages, listing `bad`, into `buf`: `/dev/zram0`'s first page
+/// ([`MemoryTierDevice`]), and the self-tests' here and in
+/// [`super::swapctl`], so the format has one encoder beside its parser.
 pub(crate) fn make_header(buf: &mut [u8], page_size: usize, last_page: u32, bad: &[u32]) {
     let mut put = |at: usize, value: u32| {
         if let Some(field) = buf.get_mut(at..at.saturating_add(4)) {

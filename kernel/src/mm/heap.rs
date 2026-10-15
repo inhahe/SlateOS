@@ -516,6 +516,24 @@ const NUM_CLASSES: usize = SIZE_CLASSES.len();
 /// go directly to the buddy allocator.
 const MAX_SLAB_SIZE: usize = 8192;
 
+/// How many bytes an allocation of `size` bytes, aligned to at most 8, takes
+/// from the heap: its size class when the slab path serves it, otherwise the
+/// buddy block of a power of two of frames that `large_order` asks for (an
+/// upper bound for the largest allocations, which vmalloc serves in whole
+/// frames). For a caller that accounts for what it holds: the compressed swap
+/// tier charges each stored page this, not its length.
+#[must_use]
+pub fn allocation_cost(size: usize) -> usize {
+    if size <= MAX_SLAB_SIZE {
+        size.max(8).next_power_of_two()
+    } else {
+        size.div_ceil(FRAME_SIZE)
+            .checked_next_power_of_two()
+            .and_then(|frames| frames.checked_mul(FRAME_SIZE))
+            .unwrap_or(usize::MAX)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal data structures
 // ---------------------------------------------------------------------------

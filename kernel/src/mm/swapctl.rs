@@ -207,8 +207,20 @@ pub fn self_test_memory_tier() -> KernelResult<()> {
         }
         Ok(())
     })();
-    // Whatever happened, the tier on again, as the boot left it.
-    let _ = swap_on(path, 0); // DeviceBusy is the usual answer: it is on.
+    // Whatever happened, the tier on again at its own priority, as the boot
+    // left it: a failure part-way may have left it off, or on at 77.
+    let restored = match listed(path.as_bytes()) {
+        Some(100) => Ok(()),
+        Some(_) => swap_off(path).and_then(|()| swap_on(path, 0).map(|_| ())),
+        None => swap_on(path, 0).map(|_| ()),
+    };
+    if let Err(e) = restored {
+        crate::serial_println!(
+            "[swapctl]   FAIL: the tier could not be put back as the boot left it: {:?}",
+            e
+        );
+        return Err(KernelError::InternalError);
+    }
     match result {
         Ok(()) => {
             crate::serial_println!(

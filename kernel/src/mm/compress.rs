@@ -30,8 +30,13 @@
 //!
 //! - **All-zero page**: encoded as a single magic byte `0xFF` (1 byte).
 //!   Very common for freshly mapped BSS and stack pages.
-//! - **Incompressible page**: if compressed size ≥ original, returns
-//!   `None` (caller stores uncompressed).
+//! - **Incompressible page**: if the compressed form would not be smaller
+//!   than the original -- or, for [`compress_into`], would not fit the
+//!   caller's buffer -- the answer is `None`, and the caller decides: the
+//!   compressed swap tier refuses the page, a disk area stores it raw.
+//! - **Allocation**: [`compress_into`] and [`decompress_into`] work in the
+//!   caller's buffers and allocate nothing; [`compress`] and [`decompress`]
+//!   allocate fallibly, a failure an answer rather than a panic.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -52,34 +57,38 @@ const HASH_TABLE_MASK: usize = HASH_TABLE_SIZE - 1;
 /// We allow up to 100% of input size (incompressible data).
 const MAX_OUTPUT_FACTOR: usize = 1;
 
-/// Compress a page.
-///
-/// Returns `Some(compressed_data)` if compression is beneficial (the
-/// output is smaller than the input), or `None` if the data is
-/// incompressible.
-///
-/// # Special cases
-///
-/// - All-zero input → returns `vec![0xFF]` (1 byte).
-/// - Incompressible → returns `None`.
-pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
-    if input.is_empty() {
-        return Some(Vec::new());
-    }
+/// The scratch [`compress_into`] finds matches with: one entry per hash
+/// bucket, overwritten by every call.
+pub const HASH_TABLE_ENTRIES: usize = HASH_TABLE_SIZE;
 
-    // Fast path: check for all-zero page.
-    if is_all_zero(input) {
-        return Some(vec![ZERO_PAGE_MARKER]);
+/// Compress `input` into `output`, finding matches with `table` (at least
+/// [`HASH_TABLE_ENTRIES`] entries, overwritten), and allocate nothing.
+///
+/// Answers the compressed length, or `None` when it would not fit in
+/// `output` or would not be smaller than `input` -- so the size of `output`
+/// is the most a caller is willing to keep, and a page that does not shrink
+/// that far is refused while it is being compressed rather than after. An
+/// all-zero input is the one byte [`ZERO_PAGE_MARKER`]; an empty one is
+/// empty.
+///
+/// For a caller that must not allocate: the compressed swap tier compresses
+/// under its lock, during reclaim, when an allocation may fail.
+pub fn compress_into(input: &[u8], output: &mut [u8], table: &mut [u32]) -> Option<usize> {
+    if input.is_empty() {
+        return Some(0);
     }
+    if is_all_zero(input) {
+        *output.first_mut()? = ZERO_PAGE_MARKER;
+        return Some(1);
+    }
+    let table = table.get_mut(..HASH_TABLE_SIZE)?;
+    table.fill(0);
 
     let input_len = input.len();
-    // Worst case: each byte is a literal → ~(1 + input_len) output.
-    // Pre-allocate a reasonable buffer.
-    let mut output = Vec::with_capacity(input_len);
-
-    // Hash table: maps 4-byte sequence hash → position in input.
-    let mut hash_table = vec![0u32; HASH_TABLE_SIZE];
-
+    let mut out = Out {
+        buf: output,
+        len: 0,
+    };
     let mut ip = 0usize; // Input position (current scan point).
     let mut anchor = 0usize; // Start of unmatched literal run.
 
@@ -90,10 +99,10 @@ pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
     while ip < input_limit {
         // Hash the 4 bytes at the current position.
         let h = hash4(input, ip);
-        let candidate = hash_table.get(h).copied().unwrap_or(0) as usize;
+        let candidate = table.get(h).copied().unwrap_or(0) as usize;
 
         // Update the hash table with the current position.
-        if let Some(slot) = hash_table.get_mut(h) {
+        if let Some(slot) = table.get_mut(h) {
             #[allow(clippy::cast_possible_truncation)]
             {
                 *slot = ip as u32;
@@ -117,19 +126,15 @@ pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
 
         // Encode: [literals from anchor..ip] [match at offset, match_len]
         let literal_len = ip.saturating_sub(anchor);
-
-        // Write the token and the literal/match sequence.
-        if !write_sequence(
-            &mut output,
+        write_sequence(
+            &mut out,
             input,
             anchor,
             literal_len,
             offset,
             match_len,
             false,
-        ) {
-            return None; // Output overflow.
-        }
+        )?;
 
         // Advance past the match.
         ip = ip.saturating_add(match_len);
@@ -137,39 +142,60 @@ pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
     }
 
     // Write the final literal run (no match).
-    let final_literal_len = input_len.saturating_sub(anchor);
-    if final_literal_len > 0 || anchor < input_len {
+    if anchor < input_len {
         let lit_len = input_len.saturating_sub(anchor);
-        if !write_sequence(&mut output, input, anchor, lit_len, 0, 0, true) {
-            return None;
-        }
+        write_sequence(&mut out, input, anchor, lit_len, 0, 0, true)?;
     }
 
-    // Only return compressed if it's actually smaller.
+    // Only answer if it is actually smaller.
     let max_size = input_len.saturating_mul(MAX_OUTPUT_FACTOR);
-    if output.len() >= max_size {
+    if out.len >= max_size {
         return None;
     }
+    Some(out.len)
+}
 
+/// Compress a page into a new buffer of exactly its compressed size.
+///
+/// `None` if the data is incompressible ([`compress_into`]), or if the
+/// buffers it needs cannot be allocated: a failed allocation is an answer
+/// here, never a panic.
+pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
+    let mut output = zeroed(input.len())?;
+    let mut table = Vec::new();
+    table.try_reserve_exact(HASH_TABLE_SIZE).ok()?;
+    table.resize(HASH_TABLE_SIZE, 0u32);
+    let len = compress_into(input, &mut output, &mut table)?;
+    output.truncate(len);
     Some(output)
 }
 
-/// Decompress data produced by [`compress`].
+/// Decompress data produced by [`compress_into`] into `output`, whose length
+/// is the size the data decompresses to. Allocates nothing.
 ///
-/// `output_len` is the expected decompressed size (the original page
-/// size).  Returns `Err` if the compressed data is malformed.
-pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressError> {
+/// # Errors
+///
+/// [`CompressError`] if the data is malformed, or does not decompress to
+/// exactly `output.len()` bytes.
+pub fn decompress_into(input: &[u8], output: &mut [u8]) -> Result<(), CompressError> {
+    let expected = output.len();
     if input.is_empty() {
-        return Ok(Vec::new());
+        return if expected == 0 {
+            Ok(())
+        } else {
+            Err(CompressError::SizeMismatch { expected, got: 0 })
+        };
     }
 
     // Check for all-zero page marker.
     if input.len() == 1 && input.first().copied() == Some(ZERO_PAGE_MARKER) {
-        return Ok(vec![0u8; output_len]);
+        output.fill(0);
+        return Ok(());
     }
 
-    let mut output = Vec::with_capacity(output_len);
+    let mut pos = 0usize; // Bytes of `output` written.
     let mut ip = 0usize; // Position in input.
+    let overflow = |got: usize| CompressError::SizeMismatch { expected, got };
 
     while ip < input.len() {
         let token = *input.get(ip).ok_or(CompressError::Truncated)?;
@@ -190,13 +216,14 @@ pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressEr
         }
 
         // Copy literals.
-        if ip.saturating_add(literal_len) > input.len() {
-            return Err(CompressError::Truncated);
-        }
         let literal_end = ip.saturating_add(literal_len);
-        for &b in input.get(ip..literal_end).ok_or(CompressError::Truncated)? {
-            output.push(b);
-        }
+        let literals = input.get(ip..literal_end).ok_or(CompressError::Truncated)?;
+        let out_end = pos.saturating_add(literal_len);
+        output
+            .get_mut(pos..out_end)
+            .ok_or_else(|| overflow(out_end))?
+            .copy_from_slice(literals);
+        pos = out_end;
         ip = literal_end;
 
         // If we've reached the end of input, this was the last sequence
@@ -212,9 +239,9 @@ pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressEr
             .get(ip.saturating_add(1))
             .ok_or(CompressError::Truncated)? as u16;
         ip = ip.saturating_add(2);
-        let offset = (hi << 8) | lo;
+        let offset = usize::from((hi << 8) | lo);
 
-        if offset == 0 {
+        if offset == 0 || offset > pos {
             return Err(CompressError::InvalidOffset);
         }
 
@@ -234,31 +261,55 @@ pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressEr
             }
         }
 
-        // Copy from the match position in the output buffer.
-        let match_start = output.len().wrapping_sub(offset as usize);
-        if match_start >= output.len() {
-            return Err(CompressError::InvalidOffset);
+        // Copy byte by byte from `offset` back, which handles a match that
+        // overlaps what it is writing.
+        let out_end = pos.saturating_add(match_len);
+        if out_end > expected {
+            return Err(overflow(out_end));
         }
-
-        // Copy byte-by-byte (handles overlapping matches).
-        for i in 0..match_len {
-            let src_idx = match_start.saturating_add(i % (offset as usize));
+        while pos < out_end {
             let b = output
-                .get(src_idx)
+                .get(pos.wrapping_sub(offset))
                 .copied()
                 .ok_or(CompressError::InvalidOffset)?;
-            output.push(b);
+            *output.get_mut(pos).ok_or_else(|| overflow(out_end))? = b;
+            pos += 1;
         }
     }
 
-    if output.len() != output_len {
-        return Err(CompressError::SizeMismatch {
-            expected: output_len,
-            got: output.len(),
-        });
+    if pos != expected {
+        return Err(CompressError::SizeMismatch { expected, got: pos });
     }
+    Ok(())
+}
 
+/// Decompress data produced by [`compress`] into a new buffer of
+/// `output_len` bytes.
+///
+/// # Errors
+///
+/// [`CompressError`] if the data is malformed or does not decompress to
+/// `output_len` bytes; [`CompressError::OutOfMemory`] if the buffer cannot
+/// be allocated.
+pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressError> {
+    let mut output = zeroed(output_len).ok_or(CompressError::OutOfMemory)?;
+    decompress_into(input, &mut output)?;
     Ok(output)
+}
+
+/// Whether `compressed`, from [`compress_into`], is an all-zero page's
+/// encoding: what a caller may store as "zeros" without keeping any bytes.
+#[must_use]
+pub fn is_zero_encoding(compressed: &[u8]) -> bool {
+    compressed == [ZERO_PAGE_MARKER]
+}
+
+/// A zeroed buffer of `len` bytes, or `None` if it cannot be allocated.
+fn zeroed(len: usize) -> Option<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0);
+    Some(v)
 }
 
 /// Compression error types.
@@ -270,6 +321,32 @@ pub enum CompressError {
     InvalidOffset,
     /// Decompressed size doesn't match the expected output length.
     SizeMismatch { expected: usize, got: usize },
+    /// The output buffer could not be allocated ([`decompress`]).
+    OutOfMemory,
+}
+
+/// A slice being filled from the front: what [`compress_into`] writes its
+/// output through, so that running out of room is an answer, not a panic.
+struct Out<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl Out<'_> {
+    /// Append `b`; `None` if the slice is full.
+    fn push(&mut self, b: u8) -> Option<()> {
+        *self.buf.get_mut(self.len)? = b;
+        self.len += 1;
+        Some(())
+    }
+
+    /// Append `bytes`; `None` if they do not fit.
+    fn extend(&mut self, bytes: &[u8]) -> Option<()> {
+        let end = self.len.checked_add(bytes.len())?;
+        self.buf.get_mut(self.len..end)?.copy_from_slice(bytes);
+        self.len = end;
+        Some(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,18 +413,18 @@ fn extend_match(data: &[u8], src: usize, dst: usize, limit: usize) -> usize {
     len
 }
 
-/// Write a literal+match sequence to the output buffer.
+/// Write a literal+match sequence to the output.
 ///
-/// Returns `false` if the output would exceed reasonable bounds.
+/// `None` if it does not fit, or the literal range lies outside `input`.
 fn write_sequence(
-    output: &mut Vec<u8>,
+    out: &mut Out<'_>,
     input: &[u8],
     literal_start: usize,
     literal_len: usize,
     offset: usize,
     match_len: usize,
     is_last: bool,
-) -> bool {
+) -> Option<()> {
     // Token byte.
     let lit_field = if literal_len >= 15 {
         15u8
@@ -367,58 +444,43 @@ fn write_sequence(
 
     #[allow(clippy::arithmetic_side_effects)]
     let token = (lit_field << 4) | mat_field;
-    output.push(token);
+    out.push(token)?;
 
     // Extra literal length bytes.
     if literal_len >= 15 {
-        let mut remaining = literal_len.saturating_sub(15);
-        loop {
-            if remaining >= 255 {
-                output.push(255);
-                remaining = remaining.saturating_sub(255);
-            } else {
-                #[allow(clippy::cast_possible_truncation)]
-                output.push(remaining as u8);
-                break;
-            }
-        }
+        write_extra_len(out, literal_len.saturating_sub(15))?;
     }
 
     // Literal bytes.
-    let lit_end = literal_start.saturating_add(literal_len);
-    if let Some(lits) = input.get(literal_start..lit_end) {
-        output.extend_from_slice(lits);
-    } else {
-        return false;
-    }
+    out.extend(input.get(literal_start..literal_start.saturating_add(literal_len))?)?;
 
     // Match (offset + optional extra length) — only if not last sequence.
     if !is_last {
         // 2-byte LE offset.
         #[allow(clippy::cast_possible_truncation)]
         {
-            output.push((offset & 0xFF) as u8);
-            output.push(((offset >> 8) & 0xFF) as u8);
+            out.push((offset & 0xFF) as u8)?;
+            out.push(((offset >> 8) & 0xFF) as u8)?;
         }
 
         // Extra match length bytes.
         let adj_match = match_len.saturating_sub(MIN_MATCH);
         if adj_match >= 15 {
-            let mut remaining = adj_match.saturating_sub(15);
-            loop {
-                if remaining >= 255 {
-                    output.push(255);
-                    remaining = remaining.saturating_sub(255);
-                } else {
-                    #[allow(clippy::cast_possible_truncation)]
-                    output.push(remaining as u8);
-                    break;
-                }
-            }
+            write_extra_len(out, adj_match.saturating_sub(15))?;
         }
     }
 
-    true
+    Some(())
+}
+
+/// A length's continuation bytes: 255 for each whole 255, then the rest.
+fn write_extra_len(out: &mut Out<'_>, mut remaining: usize) -> Option<()> {
+    while remaining >= 255 {
+        out.push(255)?;
+        remaining = remaining.saturating_sub(255);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    out.push(remaining as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +587,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let decompressed = decompress(&compressed, 0).expect("empty decompression");
         assert!(decompressed.is_empty());
         serial_println!("[compress]   Empty input: OK");
+    }
+
+    // --- Into a caller's buffers: the output's size is a limit, kept ---
+    {
+        let mut data = vec![0u8; 16384];
+        for (i, byte) in data.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *byte = (i & 0xFF) as u8;
+            }
+        }
+        let mut table = vec![0u32; HASH_TABLE_ENTRIES];
+        let mut out = vec![0u8; 8192];
+        let n = compress_into(&data, &mut out, &mut table).expect("fits in 8 KiB");
+        let mut back = vec![0u8; 16384];
+        decompress_into(out.get(..n).unwrap_or(&[]), &mut back).expect("roundtrip");
+        assert_eq!(back, data, "into-buffer roundtrip");
+        // One byte less room than it needs: refused, nothing written past it.
+        let mut tight = vec![0u8; n.saturating_add(1)];
+        let short = n.saturating_sub(1);
+        assert_eq!(
+            compress_into(&data, tight.get_mut(..short).unwrap_or(&mut []), &mut table),
+            None,
+            "an output too small is a refusal"
+        );
+        assert_eq!(
+            tight.get(short).copied(),
+            Some(0),
+            "nothing written past the limit"
+        );
+        // A table shorter than HASH_TABLE_ENTRIES: refused, not misused.
+        assert_eq!(compress_into(&data, &mut out, &mut [0u32; 16]), None);
+        // The wrong size to decompress into: an error, not a short page.
+        let mut small = vec![0u8; 100];
+        assert!(decompress_into(out.get(..n).unwrap_or(&[]), &mut small).is_err());
+        serial_println!("[compress]   Into a caller's buffers, its size a limit: OK");
+    }
+
+    // --- Incompressible: refused, whatever room there is ---
+    {
+        let mut data = vec![0u8; 16384];
+        let mut x: u32 = 0x1234_5678;
+        for byte in &mut data {
+            // xorshift32: no 4-byte sequence repeats within a page.
+            x ^= x.wrapping_shl(13);
+            x ^= x.wrapping_shr(17);
+            x ^= x.wrapping_shl(5);
+            *byte = x.to_be_bytes()[0];
+        }
+        assert!(compress(&data).is_none(), "random data does not shrink");
+        serial_println!("[compress]   Incompressible page refused: OK");
     }
 
     serial_println!("[compress] Self-test PASSED");

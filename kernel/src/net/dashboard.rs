@@ -793,7 +793,7 @@ fn api_swap() -> Vec<u8> {
             r#"{{"available":{},"total_bytes":{},"used_bytes":{},"#,
             r#""free_slots":{},"used_slots":{},"reclaimable_pages":{},"#,
             r#""compression":{{"compressed_bytes":{},"uncompressed_bytes":{},"#,
-            r#""compressed_pages":{},"uncompressed_pages":{},"#,
+            r#""compressed_pages":{},"rejected_pages":{},"#,
             r#""ratio_pct":{},"bytes_saved":{}}}"#,
         ),
         available,
@@ -805,7 +805,7 @@ fn api_swap() -> Vec<u8> {
         compression.compressed_bytes,
         compression.uncompressed_bytes,
         compression.compressed_count,
-        compression.uncompressed_count,
+        compression.rejected_count,
         ratio,
         saved,
     );
@@ -1263,9 +1263,9 @@ fn api_metrics() -> Vec<u8> {
     );
     prom_gauge(
         &mut t,
-        "os_swap_uncompressed_pages",
-        "Number of pages stored uncompressed (incompressible).",
-        swap.uncompressed_count,
+        "os_swap_rejected_pages",
+        "Pages the compressed tier refused: they would not shrink enough to save anything.",
+        swap.rejected_count,
     );
 
     // -- Scheduler ------------------------------------------------------------
@@ -1753,7 +1753,7 @@ async function update() {
       swh+=stat('Slots', swr.used_slots+' / '+(swr.used_slots+swr.free_slots));
       swh+=stat('Reclaimable', swr.reclaimable_pages+' pages');
       var c=swr.compression;
-      if(c.compressed_pages>0||c.uncompressed_pages>0){
+      if(c.compressed_pages>0||c.rejected_pages>0){
         swh+=stat('Compressed', fmt(c.compressed_bytes)+' ('+c.compressed_pages+' pages)');
         swh+=stat('Uncompressed', fmt(c.uncompressed_bytes)+' logical');
         swh+=stat('Ratio', c.ratio_pct+'%', c.ratio_pct<80?'ok':'');

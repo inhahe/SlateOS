@@ -145,8 +145,17 @@ pub mod string {
     pub const SET_A_BACKGROUND: usize = 360;
 }
 
+/// `NCURSES_PATHSEP`: what separates the elements of `$TERMINFO_DIRS` and
+/// of the search list. A Windows host's paths begin `C:`, so there it is
+/// `;`, as ncurses has it for Windows -- otherwise `$TERMINFO` naming a
+/// directory there falls apart at its drive letter.
+const PATHSEP: u8 = if cfg!(unix) { b':' } else { b';' };
 /// The compiled-in `TERMINFO_DIRS`.
+#[cfg(unix)]
 const CFG_LIST: &[u8] = b"/etc/terminfo:/lib/terminfo:/usr/share/terminfo";
+/// The compiled-in `TERMINFO_DIRS`, separated as the host separates them.
+#[cfg(not(unix))]
+const CFG_LIST: &[u8] = b"/etc/terminfo;/lib/terminfo;/usr/share/terminfo";
 /// The compiled-in `TERMINFO`: what an empty element stands for.
 const CFG_ONCE: &[u8] = b"/etc/terminfo";
 /// `PATH_MAX`, which bounds an entry's file name.
@@ -314,19 +323,20 @@ pub fn search_list_tic(env: &Env, tic_dir: Option<&[u8]>) -> Vec<Vec<u8>> {
     values.push(CFG_LIST.to_vec());
     values.push(CFG_ONCE.to_vec());
 
-    // `add_to_blob`: the non-empty values, colon-separated.
+    // `add_to_blob`: the non-empty values, separated by `PATHSEP`.
     let mut blob: Vec<u8> = Vec::new();
     for v in values.iter().filter(|v| !v.is_empty()) {
         if !blob.is_empty() {
-            blob.push(b':');
+            blob.push(PATHSEP);
         }
         blob.extend_from_slice(v);
     }
-    // Split at each colon -- except the one in a quick-dump's prefix.
+    // Split at each separator -- except the colon of a quick-dump's prefix.
     let mut list: Vec<Vec<u8>> = Vec::new();
     let mut current: Vec<u8> = Vec::new();
     for &c in &blob {
-        if c == b':' && !(current.len() == 3 && quick_prefix(&[current.as_slice(), b":"].concat()))
+        if c == PATHSEP
+            && !(current.len() == 3 && quick_prefix(&[current.as_slice(), b":"].concat()))
         {
             list.push(std::mem::take(&mut current));
         } else {

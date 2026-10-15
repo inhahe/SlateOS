@@ -224,6 +224,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/fuzz.py` | Fuzz a crate with its own harness: libFuzzer through `cargo fuzz`, in WSL. |
 | `scripts/gate-cache.py` | Replay a gate's passing verdict when nothing it read has changed. |
 | `scripts/gate-cost-report.py` | What each boot-test gate has cost, against what it has caught. |
 | `scripts/gatecache_site/sitecustomize.py` | Gate-cache bootstrap: trace this Python process when a cached gate runs it. |
@@ -368,6 +369,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
+| `scripts/process-review.py` | The week's numbers on how SlateOS is being built, and what to change first. |
 | `scripts/procps-close-diff.sh` | procps-close-diff.sh -- how each procps program here closes its standard |
 | `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and |
 | `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
@@ -578,4 +580,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_568 scripts._
+_570 scripts._

@@ -1,0 +1,8 @@
+B-Q26: A
+C-Q35: Claude's recommendations
+C-Q36: A
+F-Q11: C, if that would usually result in more correctness
+F-Q12: B
+F-Q13: C
+F-Q14: I plan on 1, but it's not a sure thing. I don't even have my new computer yet, and also I'm still thinking about some things about it.
+F-Q15: A

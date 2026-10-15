@@ -10,6 +10,26 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## open-questions/answers.3.txt
+
+- **Written:** 2026-10-11, as `open-questions/answers.3.txt` in the
+  integration tree.
+- **Processed:** 2026-10-12 by lane F: lane F's answers written up; lanes B
+  and C sent theirs by notice, and every lane told of F-Q15's.
+- **Copy:** `operator-answers/2026-10-11-open-questions-answers.3.txt`
+- **Content:** sha256 `d159de1dabe9621db387bade0cd74d9dd4b295d3b6a927b9831160596f427cfc`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| F-Q11: C, "if that would usually result in more correctness" | F | §1389 (it does: a part a video gives is its encoder's word, a guess is a guess) | recorded |
+| F-Q12: B | F | §1390 | recorded |
+| F-Q13: C | F | §1391 (the compositor's half lane F's, the prompts' and the taskbar's lane C's) | recorded |
+| F-Q14: "I plan on 1, but it's not a sure thing" | F | -- | **waits on the operator: `open-questions/F-Q14.md`, until the new computer is here** |
+| F-Q15: A | F | §1392 (every lane told by notice) | recorded |
+| B-Q26: A | B | -- | relayed 2026-10-12 |
+| C-Q35: Claude's recommendations | C | -- | relayed 2026-10-12 |
+| C-Q36: A | C | -- | relayed 2026-10-12 |
+
 ## chat, 2026-10-10: B-Q23 answered, B-Q24 confirmed, answered questions out of sight
 
 - **Given:** 2026-10-10, in chat to lane F's session, after lane F showed the

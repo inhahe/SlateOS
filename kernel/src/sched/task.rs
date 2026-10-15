@@ -448,6 +448,10 @@ pub struct Task {
     /// to see the task as Running, remove it from the queue, and call
     /// `wake()` which fails — leaving the task permanently stuck.
     ///
+    /// Only ever `true` on a task that is not `Blocked`, and kept until the
+    /// park it is owed to: a preemption or yield on the way to that park
+    /// leaves it set ([`Task::mark_ready`]).
+    ///
     /// Always accessed under the `SCHED` lock, so no atomics needed.
     pub pending_wake: bool,
     /// Created by [`spawn_suspended`](super::spawn_suspended) and not yet
@@ -1117,6 +1121,16 @@ impl Task {
     /// Call this instead of directly setting `state = TaskState::Ready`
     /// to ensure the `ready_since_tick` field is properly updated for
     /// starvation detection.
+    ///
+    /// A wake recorded while the task was not parked ([`Self::pending_wake`])
+    /// is kept through every transition but a wake from a park: it is owed
+    /// to a park the task has not made yet, and a preemption, a yield, a
+    /// throttle or a stop before that park must not erase it -- the park would
+    /// then wait for a wake that has already come and gone, with nothing left
+    /// to end it. One kept that turns out to be owed to nothing (a timer that
+    /// fired after its wait ended another way, a wake aimed at a park a stop
+    /// interrupted) costs the next park an early return, which every caller of
+    /// a park already survives by checking its condition again.
     #[inline]
     pub fn mark_ready(&mut self, current_tick: u64) {
         // A wake from a real park banks the time spent parked as sleep
@@ -1131,9 +1145,12 @@ impl Task {
                 .saturating_add(slept)
                 .min(MAX_SLEEP_CREDIT);
             self.interactive = self.interactive_verdict();
+            // This wake ends the park, so no recorded one is still owed. (None
+            // should be: a wake aimed at a parked task readies it instead of
+            // being recorded.)
+            self.pending_wake = false;
         }
         self.state = TaskState::Ready;
-        self.pending_wake = false; // Clear stale flag on actual transition.
         self.ready_since_tick = current_tick;
     }
 

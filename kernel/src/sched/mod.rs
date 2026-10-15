@@ -11202,7 +11202,8 @@ fn test_prev_task_pins_outgoing_stack() -> KernelResult<()> {
 /// `false` return manufactures a *duplicate* wake in the deferred queue that
 /// later fires against an unrelated park (see the `try_wake` docs and the
 /// stale-`pending_wake` lead under `BUG-DASH-CMDSUB-INTERMITTENT-HANG`).  The
-/// two non-obvious "accounted for" cases are checked here.
+/// two non-obvious "accounted for" cases are checked here, and that the wake
+/// recorded for a running task survives a switch made before it parks.
 fn test_try_wake_contract() -> KernelResult<()> {
     // 1. A task that does not exist.  Retrying can never succeed, so
     //    reporting "retry me" would pin a deferred slot forever (and with it
@@ -11219,6 +11220,18 @@ fn test_try_wake_contract() -> KernelResult<()> {
     let me = current_task_id();
     if !try_wake(me) {
         serial_println!("[sched]   FAIL: try_wake(running task) asked to be retried");
+        return Err(KernelError::InternalError);
+    }
+    // ...it must outlive a switch on the way to the park it is owed to: the
+    // yield goes through the requeue a preemption takes (`Task::mark_ready`),
+    // as a timer interrupt between arming a sleep's timer and parking does.
+    // Checked before parking, which would otherwise never return...
+    yield_now();
+    if !SCHED.lock().tasks.get(&me).is_some_and(|t| t.pending_wake) {
+        serial_println!(
+            "[sched]   FAIL: a wake recorded on a running task was erased by a switch \
+             before its park; the park would wait for a wake already spent"
+        );
         return Err(KernelError::InternalError);
     }
     // ...and the token must make the very next park return immediately
@@ -11238,7 +11251,10 @@ fn test_try_wake_contract() -> KernelResult<()> {
         }
     }
 
-    serial_println!("[sched]   try_wake contract (retry only on lock contention): OK");
+    serial_println!(
+        "[sched]   try_wake contract (retry only on lock contention; a recorded wake \
+         outlives a switch before its park): OK"
+    );
     Ok(())
 }
 

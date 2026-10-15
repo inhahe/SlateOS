@@ -18,12 +18,11 @@ goes on (the next test runs); the thread is lost.
   woken); cpu0 `local_has_real_work=false`, halted in
   `sched::schedule_inner` under the boot idle task's `block_current`; no
   deferred wake queued, none dropped.
-- Lane F's boot of `fd9c28d0d` (2026-10-12,
-  `requests/f-a-the-real-time-scheduling-self-test-timed-out-on-a-tree-that-had-passed.md`):
-  `[spawn] FAIL: real-time scheduling (ring 3) -- the program did not finish
-  in 60 s`, its main thread never running again after a `nanosleep` while a
-  spinner thread held the CPU. No task dump there, so whether it is this bug
-  is not yet known.
+- Lane F's boot of `fd9c28d0d` (2026-10-12), the real-time scheduling
+  self-test's timeout, was first listed here. Reproduced with the per-task
+  report, it is a different bug: its thread was left `Blocked`, the wake
+  owed to its park erased by a preemption before it
+  (`A-A-PREEMPTION-BEFORE-A-PARK-ERASED-THE-WAKE-OWED-TO-IT`, fixed).
 
 **What it is not.** Not a lost wake: the task was woken -- it is not
 `Blocked` -- and `try_wake`'s `pending_wake` contract was not involved
@@ -32,7 +31,12 @@ it (`schedule_inner`'s pick, the idle fallback's switch, or a resume in
 place), so one of those committed to 592 and the CPU then ran something else
 without putting 592 back in a queue.
 
-**Next.** Reproduce by repetition (the mlock and real-time programs, many
-times, on a guest under host load) with the scheduler recording, per CPU, the
-task each commit chose and each switch actually made, so the commit that
-went unswitched names itself.
+**Next.** The mlock program, 300 runs on an unloaded guest, did not fail.
+The scheduler now records, per task, when and by which path a CPU last
+committed to it and last switched away from it (`Task::last_dispatch`,
+`Task::last_switch_out`); names any task `Running` on no CPU in the liveness
+dump and after a second of the idle fallback (`report_running_orphans`);
+and, for any self-test or guest-agent program that misses its deadline,
+prints each of its threads and every CPU's preemption state
+(`proc::spawn::wait_for_fixture`). The next occurrence names the path that
+committed without switching. Repeat the mlock program under host load.

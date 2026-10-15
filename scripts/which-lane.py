@@ -717,6 +717,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "multicall-aliases-baseline.txt",
         "multicall-aliases.py",
         "multicall-shadowed-baseline.txt",
+        "mutants-replay.py",
         "mv-diff.sh",
         "nice-diff.sh",
         "nl-diff.sh",

@@ -309,6 +309,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mountpoint-diff.sh` | Differential test: our `mountpoint` against util-linux 2.39.3's. |
 | `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
 | `scripts/multicall-aliases.py` | Find command names that a program answers to but that nothing can invoke. |
+| `scripts/mutants-replay.py` | Replay the mutants `cargo test` could not kill through differential harnesses. |
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
 | `scripts/mv-diff.sh` | Differential test: our `mv` against GNU coreutils'. |
@@ -374,7 +375,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
 | `scripts/process-review.py` | The week's numbers on how SlateOS is being built, and what to change first. |
 | `scripts/procps-close-diff.sh` | procps-close-diff.sh -- how each procps program here closes its standard |
-| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat`, |
 | `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
@@ -585,4 +586,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_575 scripts._
+_576 scripts._

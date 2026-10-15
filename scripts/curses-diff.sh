@@ -29,6 +29,9 @@
 # ## Cases that differ on purpose
 #
 # None.
+#
+# `DIFF_FAIL_FAST=1` stops the run at the first difference, which is all
+# `mutants-replay.py` needs to know of a mutant.
 set -u
 
 DIFF_PROG='curses-probe'
@@ -120,6 +123,10 @@ check() {
   fi
   fail=$((fail + 1))
   failed="$failed $name/$term/$loc/$mode"
+  if [ -n "${DIFF_FAIL_FAST:-}" ]; then
+    echo "curses-diff: stopped at the first difference: $name/$term/$loc/$mode"
+    exit 1
+  fi
   if [ "${VERBOSE:-0}" = 1 ]; then
     echo "--- $name under $term, $loc, $mode"
     if ! cmp -s "$work/ref.err" "$work/ours.err"; then

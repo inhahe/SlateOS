@@ -1511,9 +1511,12 @@ list moved to lane D on 2026-09-22):
 
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
-    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`, on
-    lane-a-wip until lane A's next publish: the kernel turns on only a whole
-    disk with a swap header by itself).
+    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the
+    kernel half is on main: it turns on only a whole disk with a swap header
+    by itself). `swapon -a` itself is done (util-linux's, ported); running it
+    once at boot needs a run-once kind of service in `init` and a line in the
+    image's `startup.conf`, both lane D's: requested 2026-10-15
+    (`requests/b-d-init-runs-swapon-a-once-at-boot.md`).
   - `[ ]` `[B]` `pkg` packages say which font families they carry, so
     Settings can offer a theme's recommended fonts
     (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).

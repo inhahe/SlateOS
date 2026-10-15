@@ -953,7 +953,11 @@ impl Top {
         longs.push(LONG_ONE);
 
         let me = argv.first().cloned().unwrap_or_default();
-        let words: Vec<OsString> = argv.iter().skip(1).map(|w| quoting::os_from_bytes(w)).collect();
+        let words: Vec<OsString> = argv
+            .iter()
+            .skip(1)
+            .map(|w| quoting::os_from_bytes(w))
+            .collect();
         let program = Program::new("top", 1);
         let mut parser = program.parse(&words, "bcd:E:e:Hhin:Oo:p:SsU:u:Vw::1", &longs);
         let mut tmp_delay = f32::MAX;

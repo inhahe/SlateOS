@@ -191,9 +191,9 @@ impl Top {
                         let got = match c.stdout.take() {
                             Some(out) => self.read_all(raw_fd(&out)),
                             // Never: the output was asked for as a pipe.
-                            None => read_nothing(std::io::Error::from_raw_os_error(
-                                libcall::EINVAL,
-                            )),
+                            None => {
+                                read_nothing(std::io::Error::from_raw_os_error(libcall::EINVAL))
+                            }
                         };
                         // `pclose`: the command waited for, its status unread
                         // -- upstream looks at nothing but the output. A signal

@@ -1542,10 +1542,11 @@ mod tests {
             no_pad_char: true,
         };
         s.t.tputs(b"a$<1/>b", 1);
-        let Sink::Memory(kept) = &s.t.output.sink else {
-            panic!("a memory screen");
+        let kept = match &s.t.output.sink {
+            Sink::Memory(kept) => kept.as_slice(),
+            Sink::Fd(_) => b"not a memory screen",
         };
-        assert_eq!(kept.as_slice(), b"a", "out before the pause");
+        assert_eq!(kept, b"a", "out before the pause");
         assert_eq!(s.t.take_written(), b"ab");
     }
 

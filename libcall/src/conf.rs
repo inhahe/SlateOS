@@ -38,6 +38,18 @@ pub const SC_HOST_NAME_MAX: i32 = 180;
 /// a second that `/proc/PID/stat`'s times count in (100 on both).
 pub const SC_CLK_TCK: i32 = 2;
 
+/// `_SC_PAGESIZE`: 30 in glibc and SlateOS's library alike. The answers
+/// differ -- 4096 on x86-64 Linux, 16384 on SlateOS, whose pages are 16 KiB.
+pub const SC_PAGESIZE: i32 = 30;
+
+/// `getpagesize`: `sysconf (_SC_PAGESIZE)`, or 4096 where the library has
+/// nothing to say (a host that is not Unix).
+#[must_use]
+pub fn page_size() -> i64 {
+    let p = sysconf(SC_PAGESIZE);
+    if p > 0 { p } else { 4096 }
+}
+
 /// `MAXHOSTNAMELEN` in glibc's `<sys/param.h>`: util-linux's fallback.
 const MAXHOSTNAMELEN: usize = 64;
 
@@ -141,6 +153,14 @@ mod tests {
     fn the_names_are_the_librarys() {
         assert_eq!(SC_HOST_NAME_MAX, posix::unistd::_SC_HOST_NAME_MAX);
         assert_eq!(SC_CLK_TCK, posix::unistd::_SC_CLK_TCK);
+        assert_eq!(SC_PAGESIZE, posix::unistd::_SC_PAGESIZE);
+    }
+
+    /// A page is a power of two of at least a kibibyte, whatever the host.
+    #[test]
+    fn a_page_is_a_power_of_two_kibibytes_or_more() {
+        let p = page_size();
+        assert!(p >= 1024 && p.count_ones() == 1, "{p}");
     }
 
     /// The real library counts 100 ticks a second, as Linux and SlateOS do.

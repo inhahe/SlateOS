@@ -32,6 +32,7 @@
 //! | [`slabinfo`] | `library/slabinfo.c`: the caches of `/proc/slabinfo`, version 2 |
 //! | [`stat`] | `library/stat.c`'s summary ticks and system counters from `/proc/stat`, with one reading of history |
 //! | [`vmstat`] | `library/vmstat.c`: the page and swap counters of `/proc/vmstat`, read at most once a second |
+//! | [`pids`] | `library/pids.c`: the items, their values, the sort and the history, for `ps` and `top` |
 //! | [`signals`] | `local/signals.c`'s `signal_name_to_number`, procps' own spellings of a signal |
 //!
 //! # Why `fscanf`, and not `str::parse`
@@ -53,6 +54,7 @@ pub mod devname;
 pub mod diskstats;
 pub mod meminfo;
 pub mod namespace;
+pub mod pids;
 pub mod pwcache;
 pub mod readproc;
 pub mod scanf;

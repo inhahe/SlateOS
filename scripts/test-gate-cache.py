@@ -185,6 +185,38 @@ def cases(fx: Fixture) -> None:
     check("a directory it listed gained an entry: miss",
           (kind(note), "listing of" in note), ("MISS", True))
 
+    # --- imports: what each import looked for, not the directory's listing ---
+    fx.write("helper_mod.py", "VALUE = 'helped'\n")
+    importer = fx.checker("""
+        import json
+        import helper_mod
+        print(helper_mod.VALUE, json.dumps(1))
+    """)
+    fx.run(importer)
+    _, _, note = fx.run(importer)
+    check("a gate that imports from its own directory hits when nothing changed",
+          kind(note), "HIT")
+    fx.write("check-something-else.py", "print('another gate')\n")
+    _, _, note = fx.run(importer)
+    check("a script it does not import, added beside the ones it does: still a hit",
+          kind(note), "HIT")
+    fx.write("helper_mod.py", "VALUE = 'changed'\n")
+    _, _, note = fx.run(importer)
+    check("a module it imported changed: miss",
+          (kind(note), "helper_mod.py changed" in note), ("MISS", True))
+    fx.run(importer)
+    fx.write("json.py", "raise SystemExit('the standard json, shadowed')\n")
+    _, _, note = fx.run(importer)
+    check("a module that would shadow one it imported appeared: miss",
+          (kind(note), "an import of json finds" in note), ("MISS", True))
+    os.remove(fx.path("json.py"))
+    fx.run(importer)
+    os.makedirs(fx.path("helper_mod"))
+    _, _, note = fx.run(importer)
+    check("a package of the same name appeared beside a module it imported: miss",
+          (kind(note), "an import of helper_mod finds" in note), ("MISS", True))
+    os.rmdir(fx.path("helper_mod"))
+
     probe = fx.path("data", "maybe.txt")
     asker = fx.checker(f"""
         import os

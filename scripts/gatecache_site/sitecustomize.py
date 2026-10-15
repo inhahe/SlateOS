@@ -12,9 +12,16 @@ other `sitecustomize` further along the path is then run as well, since
 putting this one first hides it.
 """
 
-import importlib.util
-import os
 import sys
+
+# What Python's own startup loaded, taken before this file imports anything: a
+# module loaded after this point, by this file or the tracer, would be looked
+# up on the path by the program's own import in an untraced run, so the tracer
+# counts it as looked up (`gatecache_trace.install`).
+_STARTUP_MODULES = frozenset(sys.modules)
+
+import importlib.util  # noqa: E402
+import os  # noqa: E402
 
 
 def _load_tracer() -> None:
@@ -26,7 +33,7 @@ def _load_tracer() -> None:
     module = importlib.util.module_from_spec(spec)
     sys.modules["gatecache_trace"] = module
     spec.loader.exec_module(module)
-    module.install()
+    module.install(_STARTUP_MODULES)
 
 
 def _chain() -> None:

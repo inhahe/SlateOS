@@ -67,8 +67,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gatecache_trace as gt  # noqa: E402
 
-#: Bumped when the entry format changes; also part of every key.
-FORMAT = 1
+#: Bumped when the entry format changes; also part of every key. 2: imports'
+#: lookups (`inputs["lookups"]`) in place of the listings the import system
+#: takes.
+FORMAT = 2
 #: A file modified this close to the recording is always re-hashed.
 RACY_NS = 2_000_000_000
 #: The files whose behaviour an entry depends on besides its inputs.
@@ -157,6 +159,11 @@ def validate(entry: dict) -> str | None:
     for path, digest in inputs["lists"].items():
         if gt.listing_digest(path) != digest:
             return f"the listing of {path} changed"
+    for path, names in inputs["lookups"].items():
+        entries = gt.module_entries(path)
+        for name, digest in names.items():
+            if gt.module_digest(entries, name) != digest:
+                return f"what an import of {name} finds in {path} changed"
     # A file whose (size, mtime, id) is what it was when it was hashed is not
     # read again: git's index makes the same bet. The exception is git's too:
     # a file modified within RACY_NS of the recording could have changed again
@@ -186,7 +193,14 @@ def run_traced(argv: list[str], trace_dir: str) -> tuple[int, bytes]:
     env = dict(os.environ)
     env["GATE_CACHE_TRACE_DIR"] = trace_dir
     env["GATE_CACHE_SPAWN"] = "root"
-    env["GATE_CACHE_INTERNAL_ENV"] = json.dumps(["PYTHONPATH"])
+    # Bytecode is a cache of a source the tracer already records as read; but
+    # writing it is a write outside the run, which refused to store any gate
+    # whose imported module had changed since its .pyc -- and the refusal is
+    # remembered for the day, so the gate then ran untraced however often it
+    # booted. Traced runs compile in memory instead; untraced ones keep the
+    # bytecode cache warm.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["GATE_CACHE_INTERNAL_ENV"] = json.dumps(["PYTHONPATH", "PYTHONDONTWRITEBYTECODE"])
     env["GATE_CACHE_INTERNAL_ROOTS"] = "[]"
     site = os.path.join(HERE, "gatecache_site")
     env["PYTHONPATH"] = site + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -244,7 +258,7 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
     def inside(path: str) -> bool:
         return any(path == r or path.startswith(r.rstrip("\\/") + os.sep) for r in roots)
 
-    inputs: dict = {"reads": {}, "lists": {}, "stats": {}, "env": {},
+    inputs: dict = {"reads": {}, "lists": {}, "lookups": {}, "stats": {}, "env": {},
                     "git_fingerprints": [], "git_reads": []}
     for p in procs:
         for path, rec in p["reads"].items():
@@ -258,6 +272,14 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
                 continue
             if inputs["lists"].setdefault(path, digest) != digest:
                 why.append(f"the listing of {path} changed while the gate ran")
+        for path, names in p["lookups"].items():
+            if inside(path):
+                continue
+            slot = inputs["lookups"].setdefault(path, {})
+            for name, digest in names.items():
+                if slot.setdefault(name, digest) != digest:
+                    why.append(f"what an import of {name} finds in {path} "
+                               "changed while the gate ran")
         for path, kinds in p["stats"].items():
             if inside(path):
                 continue
@@ -390,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             inputs = entry["inputs"]
             note(f"HIT {label} -- replayed the passing run recorded {entry['recorded']}; "
                  f"all {len(inputs['reads'])} files, {len(inputs['lists'])} listings, "
+                 f"{sum(map(len, inputs['lookups'].values()))} imports, "
                  f"{len(inputs['stats'])} paths, {len(inputs['env'])} variables and "
                  f"{len(inputs['git_reads'])} git answers it read are unchanged.")
             log("HIT", label, started)
@@ -469,7 +492,9 @@ def main(argv: list[str] | None = None) -> int:
             "output": base64.b64encode(output).decode("ascii"), "inputs": inputs,
         })
         note(f"{head}; stored: {len(inputs['reads'])} files, "
-             f"{len(inputs['lists'])} listings, {len(inputs['stats'])} paths, "
+             f"{len(inputs['lists'])} listings, "
+             f"{sum(map(len, inputs['lookups'].values()))} imports, "
+             f"{len(inputs['stats'])} paths, "
              f"{len(inputs['env'])} variables, {len(inputs['git_reads'])} git answers.")
     except OSError as exc:
         note(f"{head}; could not store ({exc}).")

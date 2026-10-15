@@ -15,6 +15,12 @@ WHAT COUNTS AS AN INPUT
 * A directory listed: the sorted (name, is-dir, is-file, is-symlink) of its
   entries, taken when it is listed. (`DirEntry.is_*` answers come from the same
   listing, so the digest covers them; `DirEntry.stat()` is recorded on its own.)
+* A module the import system looked for in a directory: the same digest, of
+  only the entries that could answer that name there -- the name itself (a
+  package or namespace directory) and the name with any suffix (a module file).
+  The whole listing the import system takes to fill its finder's cache is not
+  an input: every gate imports from `scripts/`, so it made every gate depend on
+  every file there, and each script another lane added missed them all.
 * A path asked about: the exists / isfile / isdir / islink / access answer, or
   (type, size, mtime) when the process read a whole `stat`.
 * An environment variable read by name: its value, or its absence. A variable
@@ -44,6 +50,7 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import importlib.machinery
 import json
 import os
 import stat as stat_mod
@@ -158,6 +165,38 @@ def listing_digest(path: str) -> str | None:
         json.dumps(entries).encode("utf-8", "surrogateescape")).hexdigest()
 
 
+def module_entries(path: str) -> list | None:
+    """A directory's entries as `listing_digest` describes them, unsorted, for
+    `module_digest` to pick from; None if it cannot be listed."""
+    try:
+        with _REAL_SCANDIR(path) as it:
+            entries = []
+            for e in it:
+                try:
+                    entries.append((e.name, e.is_dir(), e.is_file(), e.is_symlink()))
+                except OSError:
+                    entries.append((e.name, None, None, None))
+    except OSError:
+        return None
+    return entries
+
+
+def module_digest(entries: list | None, name: str) -> str | None:
+    """Digest of the entries (from `module_entries`) that could answer an
+    import of module `name` from their directory: `name` itself, a package or
+    namespace directory, and `name.<suffix>`, a module file of any suffix.
+    Compared case-folded, a superset of what a case-sensitive finder matches,
+    so a filesystem that folds case cannot slip a match past it. None when
+    the directory could not be listed."""
+    if entries is None:
+        return None
+    key = name.casefold()
+    picked = sorted(e for e in entries
+                    if e[0].casefold() == key or e[0].casefold().startswith(key + "."))
+    return hashlib.sha256(
+        json.dumps(picked).encode("utf-8", "surrogateescape")).hexdigest()
+
+
 def stat_answer(path: str, kind: str):
     """The answer a stat-like query gives for `path` now. Both the recording
     and the lookup call this, so they cannot disagree about what a kind means."""
@@ -197,6 +236,13 @@ class _Tracer:
         self.tempdir = norm(tempfile.gettempdir()) or ""
         self.reads: dict[str, str | None] = {}
         self.lists: dict[str, str | None] = {}
+        # Directory -> module name -> digest of the entries that answer it
+        # (`module_digest`); the directory's entries kept, once read, in
+        # `_dir_entries` so that each name looked up costs no new listing.
+        self.lookups: dict[str, dict[str, str | None]] = {}
+        self._dir_entries: dict[str, list | None] = {}
+        # Top-level modules the tracer's own startup loaded (`install`).
+        self.preloaded: list[str] = []
         self.stats: dict[str, dict[str, object]] = {}
         self.env: dict[str, str | None] = {}
         self.env_bulk: list[str] = []
@@ -266,6 +312,25 @@ class _Tracer:
         with self.lock:
             self.lists.setdefault(path, digest)
 
+    def looked_up(self, path: str, name: str) -> None:
+        """The import system looked for module `name` in directory `path`."""
+        if self.is_internal(path):
+            return
+        with self.lock:
+            if name in self.lookups.get(path, {}):
+                return
+            known = path in self._dir_entries
+            entries = self._dir_entries.get(path)
+        if not known:
+            self.enter()
+            try:
+                entries = module_entries(path)
+            finally:
+                self.leave()
+        with self.lock:
+            entries = self._dir_entries.setdefault(path, entries)
+            self.lookups.setdefault(path, {}).setdefault(name, module_digest(entries, name))
+
     def asked(self, path: str, kind: str) -> None:
         if self.is_internal(path):
             return
@@ -283,6 +348,11 @@ class _Tracer:
     def dump(self) -> None:
         if self.ended:
             return
+        for entry in list(sys.path):
+            path = norm(entry or os.getcwd())
+            if path is not None:
+                for name in self.preloaded:
+                    self.looked_up(path, name)
         self.ended = True
         record = {
             "pid": os.getpid(),
@@ -290,6 +360,7 @@ class _Tracer:
             "argv": list(sys.argv),
             "reads": self.reads,
             "lists": self.lists,
+            "lookups": self.lookups,
             "stats": self.stats,
             "env": self.env,
             "env_bulk": self.env_bulk,
@@ -353,6 +424,10 @@ def _audit(event: str, args) -> None:
                 return
             t.read(path)
         elif event in ("os.listdir", "os.scandir"):
+            if _from_import_cache():
+                # What each import looked for is recorded by name instead
+                # (`_traced_find_spec`).
+                return
             path = norm(args[0] if args and args[0] is not None else ".")
             if path is not None:
                 t.listed(path)
@@ -494,6 +569,37 @@ class _Scan:
 
 def _traced_scandir(path="."):
     return _Scan(_REAL_SCANDIR(path))
+
+
+_REAL_FIND_SPEC = importlib.machinery.FileFinder.find_spec
+
+
+def _traced_find_spec(self, fullname, target=None):
+    """`FileFinder.find_spec`, recording which name was looked for where: what
+    an import's answer depends on, in place of the whole listing the finder
+    caches (`_from_import_cache`)."""
+    t = T
+    if t is not None and not t.busy():
+        path = norm(self.path or ".")
+        if path is not None:
+            t.looked_up(path, fullname.rpartition(".")[2])
+    return _REAL_FIND_SPEC(self, fullname, target)
+
+
+def _from_import_cache() -> bool:
+    """Whether the listing being audited is `FileFinder._fill_cache` filling
+    the import system's cache of a directory. Only the finder's own frame
+    counts, a few calls up from this hook: a gate that lists a directory
+    itself, however it gets there, is recorded in full."""
+    frame = sys._getframe(2)
+    for _ in range(3):
+        if frame is None:
+            return False
+        code = frame.f_code
+        if code.co_name == "_fill_cache" and "importlib" in code.co_filename:
+            return True
+        frame = frame.f_back
+    return False
 
 
 def _patch_environ() -> None:
@@ -739,12 +845,24 @@ def _classify(t: _Tracer, args, a, k, site_dir: str, tee: str):
     return args, k
 
 
-def install() -> None:
-    """Start tracing this process. Idempotent; a no-op without a trace dir."""
+def install(startup_modules: frozenset[str] = frozenset()) -> None:
+    """Start tracing this process. Idempotent; a no-op without a trace dir.
+
+    `startup_modules`: the modules Python's own startup had loaded before the
+    tracer's bootstrap imported anything (`sitecustomize`). Every other module
+    loaded by the time tracing starts -- the tracer's own imports -- is one the
+    program's `import` finds in `sys.modules` here, but would look up on the
+    path in an untraced run, where a file beside the program could shadow it.
+    So each is recorded at exit as looked up in every directory then on
+    `sys.path` (`_Tracer.dump`): a superset of where an untraced run looks.
+    """
     global T
     if T is not None or not _TRACE_DIR:
         return
     T = _Tracer(_TRACE_DIR, _SPAWN_ID)
+    T.preloaded = sorted({name.partition(".")[0] for name in sys.modules
+                          if name not in startup_modules
+                          and name not in ("gatecache_trace", "sitecustomize")})
     os.stat = _traced_stat
     os.lstat = _traced_lstat
     os.access = _traced_access
@@ -754,6 +872,7 @@ def install() -> None:
     os.path.isfile = _query(_REAL_ISFILE, "isfile")
     os.path.isdir = _query(_REAL_ISDIR, "isdir")
     os.path.islink = _query(_REAL_ISLINK, "islink")
+    importlib.machinery.FileFinder.find_spec = _traced_find_spec
     _patch_environ()
     _patch_popen()
     sys.addaudithook(_audit)

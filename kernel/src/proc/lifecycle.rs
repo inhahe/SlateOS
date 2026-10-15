@@ -57,10 +57,17 @@ pub const TERMINATE: u32 = 2;
 /// id, `u32` asker's process id, `u32` asker's real uid; little-endian.
 pub const MESSAGE_LEN: usize = 24;
 
-/// Every registered program's endpoint: the kernel's end of its channel, by
-/// process. A leaf lock: nothing is taken while it is held (the channel is
-/// sent on after it is let go).
-static ENDPOINTS: Mutex<BTreeMap<ProcessId, ChannelHandle>> = Mutex::new(BTreeMap::new());
+/// A registered program's channel: the end the kernel sends on, and the
+/// program's, which `fork` does not copy ([`is_program_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Endpoint {
+    kernel: ChannelHandle,
+    program: ChannelHandle,
+}
+
+/// Every registered program's endpoint, by process. A leaf lock: nothing is
+/// taken while it is held (the channel is sent on after it is let go).
+static ENDPOINTS: Mutex<BTreeMap<ProcessId, Endpoint>> = Mutex::new(BTreeMap::new());
 
 /// The next request's id: never 0, never reused.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -134,32 +141,46 @@ pub fn register(pid: ProcessId) -> KernelResult<ChannelHandle> {
     if pid == 0 {
         return Err(KernelError::InvalidArgument);
     }
-    // An endpoint whose program end is closed is gone already, and may be
-    // replaced. Asked with the registry let go: it is a leaf lock.
-    let existing = ENDPOINTS.lock().get(&pid).copied();
-    if existing.is_some_and(|end| !channel::peer_closed(end)) {
-        return Err(KernelError::AlreadyExists);
-    }
     let (kernel_end, program_end) = channel::create();
-    let replaced = {
-        let mut endpoints = ENDPOINTS.lock();
-        // Another registration got in between: it stands.
-        if endpoints.get(&pid).copied() != existing {
-            None
-        } else {
-            Some(endpoints.insert(pid, kernel_end))
+    let new = Endpoint {
+        kernel: kernel_end,
+        program: program_end,
+    };
+    loop {
+        // An endpoint whose program end is closed is gone already, and may
+        // be replaced. Asked with the registry let go: it is a leaf lock.
+        let existing = ENDPOINTS.lock().get(&pid).copied();
+        if existing.is_some_and(|e| !channel::peer_closed(e.kernel)) {
+            channel::close(kernel_end);
+            channel::close(program_end);
+            return Err(KernelError::AlreadyExists);
         }
-    };
-    let Some(replaced) = replaced else {
-        channel::close(kernel_end);
-        channel::close(program_end);
-        return Err(KernelError::AlreadyExists);
-    };
-    if let Some(old) = replaced {
-        channel::close(old);
+        let replaced = {
+            let mut endpoints = ENDPOINTS.lock();
+            // Changed since the look -- registered by another, or a stale one
+            // forgotten by a request or an exec: look again.
+            (endpoints.get(&pid).copied() == existing).then(|| endpoints.insert(pid, new))
+        };
+        if let Some(replaced) = replaced {
+            if let Some(old) = replaced {
+                channel::close(old.kernel);
+            }
+            break;
+        }
     }
     pcb::register_ipc_handle(pid, ResourceType::Channel, program_end.raw());
     Ok(program_end)
+}
+
+/// Whether the channel end `raw` is a registered program's own end of its
+/// endpoint: `fork` leaves it out of the child, so that one endpoint stays
+/// one program's (design-decisions 1569).
+#[must_use]
+pub fn is_program_end(raw: u64) -> bool {
+    ENDPOINTS
+        .lock()
+        .values()
+        .any(|e| e.program.raw() == raw)
 }
 
 /// Whether `target` answers lifecycle requests: it registered, and has not
@@ -167,7 +188,7 @@ pub fn register(pid: ProcessId) -> KernelResult<ChannelHandle> {
 #[must_use]
 pub fn answers(target: ProcessId) -> bool {
     let end = ENDPOINTS.lock().get(&target).copied();
-    end.is_some_and(|end| !channel::peer_closed(end))
+    end.is_some_and(|end| !channel::peer_closed(end.kernel))
 }
 
 /// Ask `target` to close or terminate, as `asker` (real uid `asker_uid`).
@@ -203,7 +224,7 @@ pub fn request(
         asker_uid,
     }
     .encode();
-    match channel::send(end, channel::Message::from_bytes(&message)?) {
+    match channel::send(end.kernel, channel::Message::from_bytes(&message)?) {
         Ok(()) => Ok(id),
         // The program closed its end: as if it had never registered, and
         // forgotten, so the next asker is answered without a send.
@@ -216,7 +237,7 @@ pub fn request(
 }
 
 /// Drop `pid`'s endpoint if it is still `end` (a newer registration stays).
-fn forget(pid: ProcessId, end: ChannelHandle) {
+fn forget(pid: ProcessId, end: Endpoint) {
     let gone = {
         let mut endpoints = ENDPOINTS.lock();
         if endpoints.get(&pid) == Some(&end) {
@@ -226,7 +247,7 @@ fn forget(pid: ProcessId, end: ChannelHandle) {
         }
     };
     if let Some(end) = gone {
-        channel::close(end);
+        channel::close(end.kernel);
     }
 }
 
@@ -235,7 +256,7 @@ fn forget(pid: ProcessId, end: ChannelHandle) {
 pub fn on_exec(pid: ProcessId) {
     let gone = ENDPOINTS.lock().remove(&pid);
     if let Some(end) = gone {
-        channel::close(end);
+        channel::close(end.kernel);
     }
 }
 
@@ -267,6 +288,8 @@ pub fn self_test() -> KernelResult<()> {
     let pid: ProcessId = u64::from(u32::MAX) - 7;
 
     let end = register(pid)?;
+    // fork leaves out the program's end, and only that.
+    let program_end_known = is_program_end(end.raw());
     let second = register(pid);
     let first_id = request(pid, CLOSE, 1, 1000)?;
     let second_id = request(pid, TERMINATE, 2, 0)?;
@@ -284,6 +307,7 @@ pub fn self_test() -> KernelResult<()> {
     let answers_again = answers(pid);
     on_exec(pid);
     let after_exec = request(pid, CLOSE, 1, 0);
+    let forgotten_end = !is_program_end(again.raw());
     channel::close(again);
     // And exit.
     let third = register(pid)?;
@@ -292,6 +316,10 @@ pub fn self_test() -> KernelResult<()> {
     channel::close(third);
 
     let checks = [
+        (
+            "the program's end is known as one, for fork to leave out, until it ends",
+            program_end_known && forgotten_end,
+        ),
         (
             "a second registration is refused while the first is open",
             second.as_ref().err() == Some(&KernelError::AlreadyExists),

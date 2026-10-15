@@ -621,6 +621,55 @@ find_py() {
 py=$(find_py) || skip=1
 [ -n "${py:-}" ] || skip=1
 
+# ---------------------------------------------------------------------------
+# Gate 77: what reaches main lies in a recorded review at its tier.
+#
+# WHAT IT CATCHES.  Every batch is reviewed before it is published: Opus at
+# `xhigh`, or Opus at `max` and then Fable at `xhigh` where a miss is
+# expensive (`claude-global.md`, "Code review").  `scripts/review-batch.py`
+# picks the tier from the batch and prints a record -- `Reviewed:`,
+# `Review-tier:`, `Review-runs:` trailers -- for the follow-up commit.  Its
+# `--check` refuses a commit bound for `main` that changes code, was committed
+# on or after 2026-10-12, and lies in no record's range at a tier at least its
+# own, with each review's report on this machine.  Documentation and data are
+# never reviewed, and the follow-up fixes after a reviewed tip are not
+# reviewed again.  Lane F's request (`f-a-a-gate-that-main-is-reviewed-at-its-tier`).
+#
+# COST.  One `git log -p` over the pushed commits and a `rev-list` a record:
+# seconds.  Pushes to a lane branch skip it: only a publish is judged.  It
+# runs first, as soon as an interpreter is found, so a publish it refuses
+# spends none of the minutes the gates after it take.
+# ---------------------------------------------------------------------------
+skip_reviewed=0
+[ -n "${main_shas# }" ] || skip_reviewed=1
+# Bypass: ALLOW_UNREVIEWED=1 git push origin <sha>:main
+if [ "${ALLOW_UNREVIEWED:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNREVIEWED=1 set - skipping gate 77 (the review record)." >&2
+    skip_reviewed=1
+fi
+[ -n "$py" ] || skip_reviewed=1
+note_gate reviewed "$skip_reviewed"
+if [ "$skip_reviewed" != "1" ]; then
+    # shellcheck disable=SC2086 # one word a sha, on purpose
+    if ! "$py" "${repo_root:-.}/scripts/review-batch.py" --check --remote "$remote_name" $main_shas; then
+        cat >&2 <<EOF
+pre-push: REFUSING to push - a commit bound for main lies in no recorded review.
+
+Review the batch -- what you are publishing that $remote_name/main lacks --
+in the background, then put the trailers it prints in the follow-up commit
+(an empty one when nothing needed fixing):
+
+    python scripts/review-batch.py $remote_name/main..HEAD
+
+To push anyway:
+    ALLOW_UNREVIEWED=1 git push $remote_name ...
+
+EOF
+        exit 1
+    fi
+fi
+
+
 # Does this push add commits touching any of the given paths?
 #
 # WHY THE REFS BEING PUSHED, NOT HEAD. This used to ask `git rev-list HEAD`,
@@ -7175,52 +7224,6 @@ To push anyway:
 
 EOF
     exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Gate 77: what reaches main lies in a recorded review at its tier.
-#
-# WHAT IT CATCHES.  Every batch is reviewed before it is published: Opus at
-# `xhigh`, or Opus at `max` and then Fable at `xhigh` where a miss is
-# expensive (`claude-global.md`, "Code review").  `scripts/review-batch.py`
-# picks the tier from the batch and prints a record -- `Reviewed:`,
-# `Review-tier:`, `Review-runs:` trailers -- for the follow-up commit.  Its
-# `--check` refuses a commit bound for `main` that changes code, was committed
-# on or after 2026-10-12, and lies in no record's range at a tier at least its
-# own, with each review's report on this machine.  Documentation and data are
-# never reviewed, and the follow-up fixes after a reviewed tip are not
-# reviewed again.  Lane F's request (`f-a-a-gate-that-main-is-reviewed-at-its-tier`).
-#
-# COST.  One `git log -p` over the pushed commits and a `rev-list` a record:
-# seconds.  Pushes to a lane branch skip it: only a publish is judged.
-# ---------------------------------------------------------------------------
-skip_reviewed=0
-[ -n "${main_shas# }" ] || skip_reviewed=1
-# Bypass: ALLOW_UNREVIEWED=1 git push origin <sha>:main
-if [ "${ALLOW_UNREVIEWED:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_UNREVIEWED=1 set - skipping gate 77 (the review record)." >&2
-    skip_reviewed=1
-fi
-[ -n "$py" ] || skip_reviewed=1
-note_gate reviewed "$skip_reviewed"
-if [ "$skip_reviewed" != "1" ]; then
-    # shellcheck disable=SC2086 # one word a sha, on purpose
-    if ! "$py" "${repo_root:-.}/scripts/review-batch.py" --check --remote "$remote_name" $main_shas; then
-        cat >&2 <<EOF
-pre-push: REFUSING to push - a commit bound for main lies in no recorded review.
-
-Review the batch -- what you are publishing that $remote_name/main lacks --
-in the background, then put the trailers it prints in the follow-up commit
-(an empty one when nothing needed fixing):
-
-    python scripts/review-batch.py $remote_name/main..HEAD
-
-To push anyway:
-    ALLOW_UNREVIEWED=1 git push $remote_name ...
-
-EOF
-        exit 1
-    fi
 fi
 
 n_ran=0

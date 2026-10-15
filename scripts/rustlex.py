@@ -189,7 +189,6 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
 #: rather than resolved.
 _ITEM_KEYWORDS = frozenset(
     {
-        "pub",
         "fn",
         "mod",
         "impl",
@@ -240,11 +239,28 @@ def _decorated_item_kind(masked: str, at: int) -> str:
             i = j
             continue
         break
-    word = ""
-    while i < len(masked) and (masked[i].isalnum() or masked[i] == "_"):
-        word += masked[i]
-        i += 1
+    word, i = _word_at(masked, i)
+    if word == "pub":
+        # A visibility, which an item and a field may both have: `pub fn`,
+        # `pub(crate) struct`, and the field `pub y_coded: bool,`. What
+        # follows it decides.
+        while i < len(masked) and masked[i].isspace():
+            i += 1
+        if i < len(masked) and masked[i] == "(":
+            close = masked.find(")", i)
+            i = len(masked) if close < 0 else close + 1
+        while i < len(masked) and masked[i].isspace():
+            i += 1
+        word, i = _word_at(masked, i)
     return "item" if word in _ITEM_KEYWORDS else "field"
+
+
+def _word_at(masked: str, i: int) -> tuple[str, int]:
+    """The identifier-like word starting at `i`, and where it ends."""
+    start = i
+    while i < len(masked) and (masked[i].isalnum() or masked[i] == "_"):
+        i += 1
+    return masked[start:i], i
 
 
 def _field_end(masked: str, at: int) -> int:
@@ -869,6 +885,27 @@ fn kept() { read_to_string(p); }
     live, _ = live_code(use_plain)
     expect("a cfg(test) use does not swallow the next item", "kept" in live, True)
     expect("...and the use itself goes, not just its attribute", "RefCell" in live, False)
+
+    # A field with a visibility is a field, not an item: it goes through its
+    # comma, and the struct's `}` and the items after it stay (the review of
+    # 2026-10-14: `gui/video/vp9/src/block.rs`'s `#[cfg(test)] pub y_coded:
+    # bool,` took the whole `impl ModeInfo` after it with it).
+    for label, field_src, gone, kept, braces_gone in (
+        ('a cfg(test) `pub` field before an impl',
+         'struct S {\n    a: u8,\n    #[cfg(test)]\n    pub y_coded: bool,\n}\nimpl S {\n    fn is_inter(&self) -> bool { live_body() }\n}\n',
+         'y_coded', 'is_inter', 0),
+        ('a cfg(test) `pub(crate)` field before a const',
+         'struct S {\n    #[cfg(test)]\n    pub(crate) x: u8,\n}\nconst C: u8 = 1;\n',
+         'x: u8', 'const C', 0),
+        ('a cfg(test) `pub(crate) fn` is still an item',
+         '#[cfg(test)]\npub(crate) fn helper() { test_body(); }\nfn live() {}\n',
+         'test_body', 'fn live', 1),
+    ):
+        live, _ = live_code(field_src)
+        expect(f"{label}: it goes", gone in live, False)
+        expect(f"{label}: what follows stays", kept in live, True)
+        expect(f"{label}: only its own braces go",
+               field_src.count("}") - live.count("}"), braces_gone)
 
     # Items without a body go whole, through their own `;` (lane E's
     # `requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`:

@@ -3,13 +3,9 @@
 
 The kernel uses a whole disk for swap only when the disk's first slot holds
 this header -- `SWAPSPACE2` at the end of the header page, version 1, the
-area's last page (`kernel/src/mm/swap.rs`, `parse_header`). Until 2026-10-09 it
-took the first 16 MiB of any virtio disk without an ext4 superblock at its
-start, which is how it would have written swap over a partitioned or a FAT
-disk (known-issues
-`A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK`). The
-boot test runs this over `build/swap.img` before every boot, so an image made
-before the change -- all zeros -- is still taken.
+area's last page (`kernel/src/mm/swap.rs`, `parse_header`) -- and nothing
+else in its first bytes. The boot test runs this over `build/swap.img` before
+every boot, so an image of all zeros is taken too.
 
     python scripts/mkswap.py [--page-size N] [--label TEXT] IMAGE
     python scripts/mkswap.py --self-test
@@ -27,6 +23,9 @@ import struct
 import sys
 import tempfile
 import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import selftestflag  # noqa: E402
 
 MAGIC = b"SWAPSPACE2"
 VERSION_AT = 1024  # version, last_page, nr_badpages: three little-endian u32s
@@ -117,14 +116,13 @@ def self_test() -> int:
 
 
 def main() -> int:
+    if selftestflag.wants_selftest(sys.argv[1:]):
+        return self_test()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("image", nargs="?")
     ap.add_argument("--page-size", type=int, default=16384, choices=PAGE_SIZES)
     ap.add_argument("--label", default="", help="up to 16 bytes")
-    ap.add_argument("--self-test", "--selftest", dest="selftest", action="store_true")
     args = ap.parse_args()
-    if args.selftest:
-        return self_test()
     if not args.image:
         ap.print_usage(sys.stderr)
         return 2

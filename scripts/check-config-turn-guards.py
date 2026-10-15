@@ -184,12 +184,9 @@ def test_files_of(texts: dict[Path, str], root: Path) -> set[Path]:
     """The files among `texts` that are test code as a whole: a crate's
     integration tests (its `tests/` directory), and the modules a build of its
     `src/` compiles only for its tests (`rustlex.test_module_files`, which
-    reads the `#[cfg(test)] mod x;` declarations as cargo resolves them).
-
-    Until 2026-10-11 this went by name -- a `tests.rs`, or anything under a
-    directory called `tests` -- which read a test module of any other name as
-    production and an ungated `tests.rs` as test code (lane E's
-    `requests/e-abc-one-answer-to-which-files-are-test-modules.md`)."""
+    reads the `#[cfg(test)] mod x;` declarations as cargo resolves them). Not
+    by name: a test module is not always called `tests`, and a `tests.rs`
+    nothing gates is production."""
     by_crate: dict[Path, dict[Path, str]] = {}
     out: set[Path] = set()
     for path, text in texts.items():

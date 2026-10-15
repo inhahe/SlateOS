@@ -724,17 +724,9 @@ impl Screen {
             let max_colors = t.num(number::MAX_COLORS);
             let (count, fg, bg) = scan_assumed(&os_bytes(&v));
             if count >= 1 {
-                t.default_fg = if fg >= 0 && fg < max_colors {
-                    fg
-                } else {
-                    COLOR_DEFAULT
-                };
+                t.default_fg = assumed_color(fg, max_colors);
                 if count >= 3 {
-                    t.default_bg = if bg >= 0 && bg < max_colors {
-                        bg
-                    } else {
-                        COLOR_DEFAULT
-                    };
+                    t.default_bg = assumed_color(bg, max_colors);
                 }
             }
         }
@@ -951,10 +943,7 @@ impl Screen {
         if !self.cbreak() {
             return false;
         }
-        let mut buf = self.tty.nttyb;
-        buf.c_lflag &= !(tc::ECHO | tc::ECHONL);
-        buf.c_iflag &= !(tc::ICRNL | tc::INLCR | tc::IGNCR);
-        buf.c_oflag &= !tc::ONLCR;
+        let buf = initscr_termios(self.tty.nttyb);
         let ok = self.tty.set_mode(&buf);
         if ok {
             self.tty.nttyb = buf;
@@ -1270,6 +1259,25 @@ impl Screen {
     }
 }
 
+/// A colour `NCURSES_ASSUMED_COLORS` names, if the terminal has it: one of
+/// its `max_colors`, else the terminal's own default.
+fn assumed_color(color: i32, max_colors: i32) -> i32 {
+    if color >= 0 && color < max_colors {
+        color
+    } else {
+        COLOR_DEFAULT
+    }
+}
+
+/// What `_nc_initscr` makes of the program's modes after `cbreak`: echo,
+/// `ICRNL`, `INLCR`, `IGNCR` and `ONLCR` off, and nothing else changed.
+fn initscr_termios(mut buf: Termios) -> Termios {
+    buf.c_lflag &= !(tc::ECHO | tc::ECHONL);
+    buf.c_iflag &= !(tc::ICRNL | tc::INLCR | tc::IGNCR);
+    buf.c_oflag &= !tc::ONLCR;
+    buf
+}
+
 /// One line of `wnoutrefresh`: the changed columns `changed` of `win`'s row
 /// copied into `newscr`'s, `rows` being the two, widened to whole wide
 /// characters, and the rest of any wide character the copy cuts into
@@ -1417,6 +1425,85 @@ mod tests {
 
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn an_assumed_colour_is_one_the_terminal_has() {
+        assert_eq!(assumed_color(0, 8), 0);
+        assert_eq!(assumed_color(7, 8), 7);
+        assert_eq!(assumed_color(8, 8), COLOR_DEFAULT);
+        assert_eq!(assumed_color(-1, 8), COLOR_DEFAULT);
+    }
+
+    #[test]
+    fn initscr_turns_off_the_mapping_curses_does_itself_and_nothing_else() {
+        let all = Termios {
+            c_iflag: !0,
+            c_oflag: !0,
+            c_cflag: !0,
+            c_lflag: !0,
+            ..Termios::default()
+        };
+        let t = initscr_termios(all);
+        assert_eq!(t.c_iflag, !(tc::ICRNL | tc::INLCR | tc::IGNCR));
+        assert_eq!(t.c_lflag, !(tc::ECHO | tc::ECHONL));
+        assert_eq!(t.c_oflag, !tc::ONLCR);
+        assert_eq!(t.c_cflag, !0);
+    }
+
+    /// With no terminal there are no modes to keep: `def_shell_mode` is
+    /// `ERR`, and what it keeps is cleared.
+    #[test]
+    fn the_shell_s_modes_are_not_kept_without_a_terminal() {
+        let mut s = xterm(Box::new(CLocale));
+        s.tty.ottyb.c_lflag = 1;
+        assert!(!s.def_shell_mode());
+        assert_eq!(s.tty.ottyb, Termios::default());
+    }
+
+    /// A magic-cookie terminal: the attributes a cookie would spoil are
+    /// suppressed, all but bold.
+    #[test]
+    fn a_magic_cookie_terminal_suppresses_the_cookie_attributes_but_bold() {
+        let s = xterm(Box::new(CLocale));
+        let mut entry = s.t.entry.clone();
+        entry.set_number(number::MAGIC_COOKIE_GLITCH, 1);
+        let opts = Options {
+            output: Sink::Memory(Vec::new()),
+            input: -1,
+            use_env: false,
+        };
+        let s = Screen::setup(entry, s.t.padding, &opts, Box::new(CLocale)).unwrap();
+        assert_ne!(s.t.xmc_triggers & A_BOLD, 0);
+        assert_eq!(s.t.xmc_suppress, s.t.xmc_triggers & !A_BOLD);
+        assert_ne!(s.t.xmc_suppress & A_REVERSE, 0);
+        assert_eq!(s.t.xmc_suppress & (A_BOLD | A_COLOR), 0);
+    }
+
+    /// Copying onto the first half of a wide character wipes its second
+    /// half, as upstream's `wnoutrefresh` does (`WidecExt` is 1 there, not
+    /// 0): no half of a character is left on the screen alone.
+    #[test]
+    fn a_copy_ending_on_a_wide_character_s_first_half_wipes_the_rest() {
+        let mut newscr = Window::newwin(1, 6, 0, 0, (1, 6), 0).unwrap();
+        let mut first = Cell::with_char(0x4e2d, 0);
+        first.set_widec_ext(0);
+        let mut second = first;
+        second.set_widec_ext(1);
+        newscr.lines[0].text[3] = first;
+        newscr.lines[0].text[4] = second;
+        newscr.lines[0].firstchar = NOCHANGE;
+        newscr.lines[0].lastchar = NOCHANGE;
+        let mut win = Window::newwin(1, 6, 0, 0, (1, 6), 0).unwrap();
+        for (i, c) in win.lines[0].text.iter_mut().enumerate() {
+            *c = Cell::new2(0x61 + i32::try_from(i).unwrap(), 0);
+        }
+        copy_changes(&win, &mut newscr, (0, 0), (0, 3), 5);
+        let text = &newscr.lines[0].text;
+        assert_eq!(text[3].ch(), 0x64);
+        assert!(text[4].is_blank(), "{:?}", text[4]);
+        let marks = (newscr.lines[0].firstchar, newscr.lines[0].lastchar);
+        assert_eq!(marks, (0, 4), "the wiped half is changed too");
     }
 
     /// `normal_delay`: a delay that is not mandatory is padded unless

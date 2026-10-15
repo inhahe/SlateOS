@@ -264,10 +264,12 @@ impl Top {
         if self.cw().chk(VIEW_CPUNOD) {
             let mut sel_ok = false;
             if self.numa_node_sel >= 0 {
-                let nodes = self.stat_reap.numa.clone();
-                if nodes
+                let sel = self.numa_node_sel;
+                if self
+                    .stat_reap
+                    .numa
                     .iter()
-                    .any(|n| n.id == self.numa_node_sel && n.numa_node != STAT_NODE_INVALID)
+                    .any(|n| n.id == sel && n.numa_node != STAT_NODE_INVALID)
                 {
                     sel_ok = true;
                 } else {
@@ -287,8 +289,12 @@ impl Top {
                     .and_then(|s| self.stat_reap.numa.get(s).copied())
                     .unwrap_or_default();
                 self.msg_row = self.msg_row.wrapping_add(self.sum_tics(&node, &tmp, true));
-                let cpus = self.stat_reap.cpus.clone();
-                for c in cpus.iter().take(usize::try_from(self.cpu_cnt).unwrap_or(0)) {
+                // Each CPU's figures fetched by index (`TicStack` is `Copy`):
+                // `sum_tics` needs the whole of `self`.
+                for i in 0..usize::try_from(self.cpu_cnt).unwrap_or(0) {
+                    let Some(c) = self.stat_reap.cpus.get(i).copied() else {
+                        break;
+                    };
                     if c.numa_node == sel {
                         if no_mas(self) {
                             break;
@@ -299,7 +305,7 @@ impl Top {
                             &[Arg::C(b'u'), Arg::I(i64::from(c.id))],
                         )
                         .0;
-                        self.msg_row = self.msg_row.wrapping_add(self.sum_tics(c, &tmp, true));
+                        self.msg_row = self.msg_row.wrapping_add(self.sum_tics(&c, &tmp, true));
                     }
                 }
             } else {
@@ -309,8 +315,10 @@ impl Top {
                     nls::WORD_ALLCPUS_TXT.as_bytes(),
                     true,
                 ));
-                let nodes = self.stat_reap.numa.clone();
-                for n in &nodes {
+                for i in 0..self.stat_reap.numa.len() {
+                    let Some(n) = self.stat_reap.numa.get(i).copied() else {
+                        break;
+                    };
                     if n.numa_node == STAT_NODE_INVALID {
                         continue;
                     }
@@ -323,22 +331,27 @@ impl Top {
                         &[Arg::I(i64::from(n.id))],
                     )
                     .0;
-                    self.msg_row = self.msg_row.wrapping_add(self.sum_tics(n, &tmp, true));
+                    self.msg_row = self.msg_row.wrapping_add(self.sum_tics(&n, &tmp, true));
                 }
             }
         } else if !self.cw().chk(VIEW_CPUSUM) {
-            let cpus = self.stat_reap.cpus.clone();
             let cnt = usize::try_from(self.cpu_cnt).unwrap_or(0);
             if self.cw().rc.combine_cpus != 0 {
-                for (i, c) in cpus.iter().take(cnt).enumerate() {
-                    let n = self.sum_unify(c, i.saturating_add(1) >= cnt);
+                for i in 0..cnt {
+                    let Some(c) = self.stat_reap.cpus.get(i).copied() else {
+                        break;
+                    };
+                    let n = self.sum_unify(&c, i.saturating_add(1) >= cnt);
                     self.msg_row = self.msg_row.wrapping_add(n);
                     if no_mas(self) {
                         break;
                     }
                 }
             } else {
-                for (i, c) in cpus.iter().take(cnt).enumerate() {
+                for i in 0..cnt {
+                    let Some(c) = self.stat_reap.cpus.get(i).copied() else {
+                        break;
+                    };
                     let ctab = *b"uEP";
                     let chr = if self.cw().rc.core_types != 0 {
                         usize::try_from(c.type_core)
@@ -355,7 +368,7 @@ impl Top {
                         &[Arg::C(chr), Arg::I(i64::from(c.id))],
                     )
                     .0;
-                    let n = self.sum_tics(c, &tmp, i.saturating_add(1) >= cnt);
+                    let n = self.sum_tics(&c, &tmp, i.saturating_add(1) >= cnt);
                     self.msg_row = self.msg_row.wrapping_add(n);
                     if no_mas(self) {
                         break;

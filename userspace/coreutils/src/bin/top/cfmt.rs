@@ -22,6 +22,12 @@ pub fn set_radix(radix: u8) {
     RADIX.store(radix, Ordering::Relaxed);
 }
 
+/// The decimal point `%f` reads and writes: the locale's, once
+/// [`set_radix`] has said what it is.
+pub fn radix() -> u8 {
+    RADIX.load(Ordering::Relaxed)
+}
+
 /// One argument.
 #[derive(Clone, Copy, Debug)]
 pub enum Arg<'a> {

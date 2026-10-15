@@ -358,7 +358,7 @@ fn whole(s: &[u8]) -> Option<f32> {
 
 /// `strtof` in a locale whose decimal point is `radix`: the value and how
 /// many bytes it took.
-fn strtof_in(s: &[u8], radix: u8) -> (f32, usize) {
+pub fn strtof_in(s: &[u8], radix: u8) -> (f32, usize) {
     if radix == b'.' {
         let r = cprintf::extfloat::strtof(s);
         return (r.value, r.consumed);

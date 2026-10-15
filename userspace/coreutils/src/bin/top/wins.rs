@@ -630,6 +630,8 @@ impl Top {
                 let ppt = &mut self.winstk[q].ppt;
                 let end = n.min(ppt.len());
                 if let Some(slice) = ppt.get_mut(..end) {
+                    // A sort the library refuses leaves the tasks in the order they were
+                    // read, as upstream's does.
                     let _ = pids.sort(
                         slice,
                         coreutils::procps::pids::Item::TicsBegan,

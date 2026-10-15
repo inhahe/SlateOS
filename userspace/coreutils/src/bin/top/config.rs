@@ -64,6 +64,8 @@ fn is_space(b: u8) -> bool {
 pub struct CFile {
     data: Vec<u8>,
     pos: usize,
+    /// The decimal point `%f` reads: the locale's, as `fscanf` has it.
+    radix: u8,
 }
 
 impl CFile {
@@ -77,17 +79,23 @@ impl CFile {
             // "fopen() shall fail if pathname is an empty string."
             return Err(std::io::Error::from_raw_os_error(2));
         }
-        let os = unsafe_free_os(path);
-        let data = std::fs::read(os)?;
-        Ok(Self { data, pos: 0 })
+        let data = std::fs::read(quoting::os_from_bytes(path))?;
+        Ok(Self::with_radix(&data, crate::cfmt::radix()))
     }
 
-    /// A stream over `data`, for a test.
+    /// A stream over `data`, read in the locale's numbers: `sscanf`'s.
     #[must_use]
     pub fn from_bytes(data: &[u8]) -> Self {
+        Self::with_radix(data, crate::cfmt::radix())
+    }
+
+    /// A stream over `data` whose `%f` reads `radix` as the decimal point.
+    #[must_use]
+    pub fn with_radix(data: &[u8], radix: u8) -> Self {
         Self {
             data: data.to_vec(),
             pos: 0,
+            radix,
         }
     }
 
@@ -224,14 +232,14 @@ impl CFile {
                 }
                 b'f' => {
                     let rest = self.data.get(self.pos..).unwrap_or_default();
-                    let r = cprintf::extfloat::strtof(rest);
-                    if r.consumed == 0 {
+                    let (value, consumed) = crate::fmt::strtof_in(rest, self.radix);
+                    if consumed == 0 {
                         return (assigned, got);
                     }
-                    self.pos = self.pos.saturating_add(r.consumed);
+                    self.pos = self.pos.saturating_add(consumed);
                     converted_any = true;
                     if !suppress {
-                        got.push(Got::Float(r.value));
+                        got.push(Got::Float(value));
                         assigned = assigned.saturating_add(1);
                     }
                 }
@@ -247,11 +255,6 @@ impl CFile {
 #[must_use]
 pub fn sscanf(s: &[u8], fmt: &[u8]) -> (i32, Vec<Got>) {
     CFile::from_bytes(c_str(s)).scanf(fmt)
-}
-
-/// A path of bytes as the OS takes it.
-fn unsafe_free_os(path: &[u8]) -> OsString {
-    crate::os_of(path)
 }
 
 /// `scat (buf, s)` into a C buffer of `LRGBUFSIZ` bytes: `s` appended after
@@ -839,6 +842,8 @@ impl Top {
             self.configs_path(path);
         }
 
+        // A file that does not open is `fopen`'s NULL, which the code below
+        // answers with the XDG name and then the defaults.
         let mut fp = CFile::open(&self.rc_name).ok();
         let mut system_default = false;
         if fp.is_none() {
@@ -848,6 +853,8 @@ impl Top {
                     None => system_default = true,
                     Some(home) => {
                         let cfg = [home.as_slice(), b"/.config"].concat();
+                        // Its failure -- most often, that it is there already -- shows when
+                        // the rcfile is opened.
                         let _ = mkdir_0700(&cfg);
                         p = Some(cfg);
                     }
@@ -859,12 +866,14 @@ impl Top {
                     system_default = true;
                 } else {
                     let dir = self.rc_name.clone();
+                    // As above: what matters is whether the file opens.
                     let _ = mkdir_0700(&dir);
                     let path =
                         [base.as_slice(), b"/procps/", self.myname.as_slice(), b"rc"].concat();
                     if self.configs_path(path) == 0 {
                         system_default = true;
                     } else {
+                        // Nothing there is the defaults, as upstream's NULL is.
                         fp = CFile::open(&self.rc_name).ok();
                     }
                 }
@@ -944,7 +953,7 @@ impl Top {
         longs.push(LONG_ONE);
 
         let me = argv.first().cloned().unwrap_or_default();
-        let words: Vec<OsString> = argv.iter().skip(1).map(|w| unsafe_free_os(w)).collect();
+        let words: Vec<OsString> = argv.iter().skip(1).map(|w| quoting::os_from_bytes(w)).collect();
         let program = Program::new("top", 1);
         let mut parser = program.parse(&words, "bcd:E:e:Hhin:Oo:p:SsU:u:Vw::1", &longs);
         let mut tmp_delay = f32::MAX;
@@ -1306,7 +1315,7 @@ impl Top {
             text.extend_from_slice(raw);
         }
 
-        let path = unsafe_free_os(&self.rc_name);
+        let path = quoting::os_from_bytes(&self.rc_name);
         let result = if self.rc_name.is_empty() {
             Err(std::io::Error::from_raw_os_error(2))
         } else {
@@ -1343,7 +1352,7 @@ fn tolower_key(k: i32) -> i32 {
 
 /// `mkdir (path, 0700)`, its result ignored as upstream ignores it.
 fn mkdir_0700(path: &[u8]) -> std::io::Result<()> {
-    let os = unsafe_free_os(path);
+    let os = quoting::os_from_bytes(path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

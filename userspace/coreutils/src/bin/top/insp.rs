@@ -3,8 +3,6 @@
 //! demonstrations), scrolled and searched like a pager, its unprintable
 //! bytes shown `^C`- and `<AB>`-style.
 
-use std::io::Read;
-
 use crate::cfmt::{Arg, snprintf};
 use crate::defs::{
     BIGBUFSIZ, BREAK_SCREEN, EU_CMD, EU_PID, FNDBUFSIZ, KBD_DOWN, KBD_END, KBD_ENTER, KBD_ESC,
@@ -26,21 +24,23 @@ pub enum Func {
 /// `INT_MAX`: "no match in this row".
 const NO_MATCH: i32 = i32::MAX;
 
-/// `readfile`: a reader's whole content in a buffer of `READMINSZ` more
-/// bytes than it holds, NUL after it -- and the error, if the read failed.
-fn readfile(r: Option<&mut dyn Read>) -> (Vec<u8>, usize, Option<std::io::Error>) {
-    let Some(r) = r else {
-        return (
-            vec![0; READMINSZ],
-            0,
-            Some(std::io::Error::from_raw_os_error(2)),
-        );
-    };
-    let mut data = Vec::new();
-    let err = r.read_to_end(&mut data).err();
-    let n = data.len();
-    data.resize(n.saturating_add(READMINSZ), 0);
-    (data, n, err)
+/// What `readfile` leaves for a stream that never opened: an empty buffer
+/// of `READMINSZ` bytes, and why.
+fn read_nothing(why: std::io::Error) -> (Vec<u8>, usize, Option<std::io::Error>) {
+    (vec![0; READMINSZ], 0, Some(why))
+}
+
+/// A child's output as a descriptor.
+#[cfg(unix)]
+fn raw_fd(out: &std::process::ChildStdout) -> i32 {
+    std::os::fd::AsRawFd::as_raw_fd(out)
+}
+
+/// A child's output as a descriptor: none, where there are no descriptors
+/// to read (and so nothing [`Top::read_all`] can read).
+#[cfg(not(unix))]
+fn raw_fd(_out: &std::process::ChildStdout) -> i32 {
+    -1
 }
 
 impl InspView {
@@ -148,42 +148,26 @@ impl Top {
             }
             Func::File => {
                 let path = snprintf(LRGBUFSIZ, fmts, &[Arg::I(i64::from(pid))]).0;
-                let mut file = std::fs::File::open(crate::os_of(&path));
-                let (buf, n, err) = match file.as_mut() {
-                    Ok(f) => readfile(Some(f)),
-                    Err(_) => readfile(None),
+                // `fopen (buf, "r")`, which may wait -- on a FIFO with no
+                // writer -- and a signal while it waits is acted on there.
+                let opened = match std::ffi::CString::new(path) {
+                    Err(_) => Err(libcall::ENOENT),
+                    Ok(c) => loop {
+                        match libcall::fd::open_read(&c) {
+                            Err(libcall::EINTR) => self.check_signals(),
+                            other => break other,
+                        }
+                    },
                 };
-                self.insp.buf = buf;
-                self.insp.bufrd = n;
-                let why = match (&file, err) {
-                    (Err(e), _) => Some(failed(e)),
-                    (Ok(_), Some(e)) => Some(failed(&e)),
-                    _ => None,
-                };
-                if let Some(msg) = why {
-                    self.insp_set_text(&msg);
-                }
-            }
-            Func::Pipe => {
-                let saved = libcall::signal::ignore(libcall::signal::SIGINT);
-                let cmd = snprintf(LRGBUFSIZ, fmts, &[Arg::I(i64::from(pid))]).0;
-                let child = shellcmd::shell_bytes(&cmd)
-                    .stdout(std::process::Stdio::piped())
-                    .spawn();
-                let (buf, n, err) = match child {
-                    Ok(mut c) => {
-                        let got = match c.stdout.as_mut() {
-                            Some(out) => readfile(Some(out)),
-                            None => readfile(None),
-                        };
-                        // `pclose`: the command waited for; its status unread.
-                        let _ = c.wait();
-                        (got.0, got.1, got.2)
+                let (buf, n, err) = match opened {
+                    Ok(fd) => {
+                        let got = self.read_all(fd);
+                        // `fclose` of a stream only read: nothing it could
+                        // report changes what was read.
+                        let _ = libcall::fd::close(fd);
+                        got
                     }
-                    Err(e) => {
-                        let (b, n, _) = readfile(None);
-                        (b, n, Some(e))
-                    }
+                    Err(e) => read_nothing(std::io::Error::from_raw_os_error(e)),
                 };
                 self.insp.buf = buf;
                 self.insp.bufrd = n;
@@ -191,8 +175,46 @@ impl Top {
                     let msg = failed(&e);
                     self.insp_set_text(&msg);
                 }
-                // `sa.sa_handler = sig_endpgm`, whatever it was before.
-                let _ = saved;
+            }
+            Func::Pipe => {
+                // `sigaction (SIGINT, SIG_IGN)`. What it was is not wanted
+                // back -- `sig_endpgm` goes there afterwards, as upstream
+                // puts it, whatever it had been -- and a failure leaves an
+                // interrupt ending the program, which is what it did anyway.
+                let _ = libcall::signal::ignore(libcall::signal::SIGINT);
+                let cmd = snprintf(LRGBUFSIZ, fmts, &[Arg::I(i64::from(pid))]).0;
+                let child = shellcmd::shell_bytes(&cmd)
+                    .stdout(std::process::Stdio::piped())
+                    .spawn();
+                let (buf, n, err) = match child {
+                    Ok(mut c) => {
+                        let got = match c.stdout.take() {
+                            Some(out) => self.read_all(raw_fd(&out)),
+                            // Never: the output was asked for as a pipe.
+                            None => read_nothing(std::io::Error::from_raw_os_error(
+                                libcall::EINVAL,
+                            )),
+                        };
+                        // `pclose`: the command waited for, its status unread
+                        // -- upstream looks at nothing but the output. A signal
+                        // while it is waited for is acted on there.
+                        let pid = i32::try_from(c.id()).unwrap_or(-1);
+                        while libcall::process::wait(pid) == Err(libcall::EINTR) {
+                            self.check_signals();
+                        }
+                        got
+                    }
+                    Err(e) => read_nothing(e),
+                };
+                self.insp.buf = buf;
+                self.insp.bufrd = n;
+                if let Some(e) = err {
+                    let msg = failed(&e);
+                    self.insp_set_text(&msg);
+                }
+                // `sa.sa_handler = sig_endpgm`. Should it fail, an interrupt
+                // is ignored until the program ends -- nothing else could be
+                // done about it here either.
                 let _ = libcall::signal::set_handler(
                     libcall::signal::SIGINT,
                     crate::sig_endpgm_handler(),
@@ -201,6 +223,31 @@ impl Top {
             }
         }
         self.insp.cnt_nl();
+    }
+
+    /// `readfile (fp, &buf, &bufsz, &bufrd)`: everything on `fd`, in a
+    /// buffer of `READMINSZ` more bytes than it holds, NUL after it -- and
+    /// the error, if the read failed.
+    ///
+    /// A command's output can keep the program waiting here for as long as
+    /// the command likes, and upstream's handlers act inside that `fread`: a
+    /// signal that interrupts the read is acted on before it goes on
+    /// (deliberate difference 1 keeps the handlers to flags, and this is one
+    /// of the places the program waits).
+    fn read_all(&mut self, fd: i32) -> (Vec<u8>, usize, Option<std::io::Error>) {
+        let mut data = Vec::new();
+        let mut chunk = vec![0u8; READMINSZ];
+        let err = loop {
+            match libcall::fd::read(fd, &mut chunk) {
+                Ok(0) => break None,
+                Ok(n) => data.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+                Err(libcall::EINTR) => self.check_signals(),
+                Err(e) => break Some(std::io::Error::from_raw_os_error(e)),
+            }
+        };
+        let n = data.len();
+        data.resize(n.saturating_add(READMINSZ), 0);
+        (data, n, err)
     }
 
     /// `Insp_bufrd = snprintf (Insp_buf, Insp_bufsz, "%s", msg)`.
@@ -592,6 +639,7 @@ impl Top {
                 self.show_special(true, &hd);
                 self.insp_show_pgs(curcol, curlin, max_ln);
                 self.out.flush();
+                // `tcflush`: keys a terminal cannot discard are only read a moment later.
                 let _ = libcall::termios::flush_input(0);
 
                 if crate::frames() != 0 {

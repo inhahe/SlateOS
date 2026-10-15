@@ -170,6 +170,8 @@ impl Outc for ToStream<'_> {
     }
 
     fn flush(&mut self) {
+        // A failure is the stream's to remember, as stdio's error flag; the
+        // close at exit reports it.
         let _ = self.0.flush_now();
     }
 }
@@ -225,6 +227,7 @@ impl Out {
     /// descriptor 2 then leads -- else written.
     pub fn err(&mut self, s: &[u8]) {
         if !self.err_buffered {
+            // A standard error that cannot be written has no one to tell.
             let _ = libcall::fd::write_all(2, s, false);
             return;
         }
@@ -253,6 +256,7 @@ impl Out {
     /// `fputs (s, stdout)`, `putchar`: no padding read into it.
     pub fn raw(&mut self, s: &[u8]) {
         if let Some(st) = self.stream.as_mut() {
+            // A failure is the stream's to remember; the close at exit reports it.
             let _ = std::io::Write::write_all(st, s);
         }
     }
@@ -260,6 +264,7 @@ impl Out {
     /// `fflush (stdout)`.
     pub fn flush(&mut self) {
         if let Some(st) = self.stream.as_mut() {
+            // A failure is the stream's to remember; the close at exit reports it.
             let _ = st.flush_now();
         }
     }
@@ -340,6 +345,8 @@ pub fn redirect_stderr() -> i32 {
 /// Standard error put back as [`redirect_stderr`] found it.
 pub fn restore_stderr(saved: i32) {
     if saved >= 0 {
+        // The program is ending: a standard error that cannot be put back,
+        // or a copy that will not close, has nothing left to spoil.
         let _ = libcall::fd::dup2(saved, 2);
         let _ = libcall::fd::close(saved);
     }
@@ -357,7 +364,7 @@ pub struct IoKey {
 
 impl Default for IoKey {
     fn default() -> Self {
-        let fixed: [(&[u8], i32); 21] = [
+        let fixed: [(&[u8], i32); 19] = [
             (b"\x08", KBD_BKSP),
             (b"\x7f", KBD_BKSP),
             (b"\x1bh", KBD_LEFT),
@@ -377,8 +384,6 @@ impl Default for IoKey {
             (b"\xc2\x8b", KBD_PGUP),
             (b"\xc2\x8c", KBD_END),
             (b"\x1b\x09", KBD_BTAB),
-            (b"", 0),
-            (b"", 0),
         ];
         let mut tab: Vec<(Option<Vec<u8>>, i32)> = [
             KBD_BKSP, KBD_INS, KBD_DEL, KBD_LEFT, KBD_DOWN, KBD_UP, KBD_RIGHT, KBD_HOME, KBD_PGDN,
@@ -387,7 +392,7 @@ impl Default for IoKey {
         .iter()
         .map(|&k| (None, k))
         .collect();
-        tab.extend(fixed.iter().take(19).map(|&(s, k)| (Some(s.to_vec()), k)));
+        tab.extend(fixed.iter().map(|&(s, k)| (Some(s.to_vec()), k)));
         Self {
             tab,
             buf: [0; MEDBUFSIZ],
@@ -782,6 +787,7 @@ impl Top {
         if rc == 0 {
             self.bye_bye(None);
         }
+        // `tcflush`: keys a terminal cannot discard are only read a moment later.
         let _ = libcall::termios::flush_input(0);
         rc
     }

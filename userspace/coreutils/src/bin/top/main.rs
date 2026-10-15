@@ -53,6 +53,11 @@
 //! 4. **No NUMA nodes.** Without `libnuma` there are none, as upstream's
 //!    reference build has none either: `2` and `3` say the extensions are
 //!    unavailable.
+//! 5. **`^Z` in batch mode leaves a terminal's settings alone.** Batch mode
+//!    never reads the terminal's modes, and upstream's `sig_paused` sets them
+//!    to the copies it never filled in -- zeroes, which leave the terminal
+//!    without echo or line editing, after the program too. Standard input
+//!    that is not a terminal still fails as upstream's does.
 
 mod cfmt;
 mod config;
@@ -167,23 +172,11 @@ pub fn sig_endpgm_handler() -> libcall::signal::Handler {
     on_endpgm
 }
 
-/// A path or argument of bytes as the OS takes it: exact on the target, and
-/// on the host (whose `OsStr` is not bytes) read as UTF-8.
-#[must_use]
-pub fn os_of(b: &[u8]) -> std::ffi::OsString {
-    #[cfg(unix)]
-    {
-        std::os::unix::ffi::OsStringExt::from_vec(b.to_vec())
-    }
-    #[cfg(not(unix))]
-    {
-        std::ffi::OsString::from(String::from_utf8_lossy(b).into_owned())
-    }
-}
-
 /// `sig_abexit`'s handler half: every other signal that can be caught.
 extern "C" fn on_abexit(sig: i32) {
     let _errno = libcall::signal::ErrnoGuard::save();
+    // The first such signal is the one reported; a later one finds the slot
+    // taken and the program already on its way out.
     let _ = PENDING_ABEXIT.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
     wake();
 }
@@ -731,6 +724,8 @@ impl Top {
 
         // `initialize_nls`: `setlocale (LC_ALL, "")`.
         let mut name = [0u8; 256];
+        // A locale the environment names and the system lacks leaves C, which
+        // is all a failure means upstream too.
         let _ = libcall::locale::select_from_env(libcall::locale::LC_ALL, &mut name);
         let mut point = [0u8; 16];
         let radix = libcall::locale::radix(&mut point)
@@ -907,6 +902,7 @@ impl Top {
         if self.batch {
             self.cwm().off(VIEW_SCROLL);
             // "allow running under nohup"
+            // Should it fail, a hangup ends the program: its default.
             let _ = libcall::signal::ignore(libcall::signal::SIGHUP);
         } else {
             self.cursor_state = self.caps.curs_hide.clone();
@@ -942,6 +938,7 @@ impl Top {
             let handler: sig::Handler = match i {
                 libcall::signal::SIGHUP => {
                     if self.batch {
+                        // As above: a failure leaves the default.
                         let _ = sig::ignore(i);
                         continue;
                     }
@@ -1057,6 +1054,8 @@ impl Top {
         // Held in the buffered `stderr`, and lost with it: `raise` and
         // `_exit` flush nothing.
         self.out.err(&note);
+        // The signal's own default ends the program, or else the `_exit` below
+        // does: none of these four failing changes the outcome.
         let _ = libcall::signal::set_default(sig);
         let mut one = libcall::signal::SigSet::empty();
         let _ = one.add(sig);
@@ -1069,7 +1068,13 @@ impl Top {
     /// resuming, the terminal as top keeps it and a full redraw.
     fn sig_paused(&mut self) {
         use libcall::termios::{TCSAFLUSH, set_attr};
-        if let Err(e) = set_attr(0, TCSAFLUSH, &self.tty_original) {
+        // Deliberate difference 5: in batch mode the modes were never taken
+        // (`whack_terminal` returns first), so both copies are all zeroes, and
+        // a terminal given them is left with no echo, no line editing and no
+        // output processing -- after the program has gone, too. A terminal is
+        // spared that; anything else fails here as upstream's does.
+        let spare = !self.ttychanged && libcall::fd::is_terminal(0);
+        if !spare && let Err(e) = set_attr(0, TCSAFLUSH, &self.tty_original) {
             let msg = Self::fmtmk(nls::FAIL_TTY_SET_FMT, &[Arg::S(&strerror_no(e))]);
             self.error_exit(&msg);
         }
@@ -1083,9 +1088,11 @@ impl Top {
         let c = self.caps.smam.clone();
         self.out.putp(&c);
         self.out.flush();
+        // A stop that cannot be raised leaves the program running, the terminal
+        // already given back to the user.
         let _ = libcall::signal::raise(libcall::signal::SIGSTOP);
         // "later, after SIGCONT..."
-        if let Err(e) = set_attr(0, TCSAFLUSH, &self.tty_raw) {
+        if !spare && let Err(e) = set_attr(0, TCSAFLUSH, &self.tty_raw) {
             let msg = Self::fmtmk(nls::FAIL_TTY_SET_FMT, &[Arg::S(&strerror_no(e))]);
             self.error_exit(&msg);
         }
@@ -1366,12 +1373,16 @@ impl Top {
             if self.loops == 0 {
                 self.bye_bye(None);
             }
-            let ms = delay_ms(self.rc.delay_time);
-            if self.batch {
-                self.wait_signals(ms);
-            } else if self.ioa(Some(ms)) {
-                let k = self.iokey(term::IOKEY_ONCE);
-                self.do_key(k);
+            match delay_ms(self.rc.delay_time) {
+                // `pselect` refused the delay: no wait, and no key read.
+                None => self.check_signals(),
+                Some(ms) if self.batch => self.wait_signals(ms),
+                Some(ms) => {
+                    if self.ioa(Some(ms)) {
+                        let k = self.iokey(term::IOKEY_ONCE);
+                        self.do_key(k);
+                    }
+                }
             }
         }
     }
@@ -1380,6 +1391,8 @@ impl Top {
     /// delay, cut short by a signal.
     fn wait_signals(&mut self, ms: i32) {
         if self.wake_read >= 0 {
+            // Woken, out of time or interrupted: the signals are looked at next
+            // whichever it was.
             let _ = libcall::fd::wait_readable(self.wake_read, ms);
         } else {
             nap(u64::try_from(ms).unwrap_or(0).saturating_mul(1000));
@@ -1425,6 +1438,7 @@ fn block_all_signals() {
 pub fn nap(us: u64) {
     let secs = us / 1_000_000;
     let nanos = u32::try_from((us % 1_000_000).wrapping_mul(1000)).unwrap_or(0);
+    // Woken early is a shorter nap, which upstream's `usleep` allows too.
     let _ = libcall::clock::nanosleep(secs, nanos);
 }
 
@@ -1436,11 +1450,16 @@ fn now_secs() -> i64 {
 }
 
 /// The delay as `pselect`'s timeout, in milliseconds: `tv_sec` the whole
-/// seconds of the `float`, `tv_nsec` the rest.
-// `(int)` of a non-negative `float` below `INT_MAX`: truncation, which `as`
-// performs; the rcfile and `d` keep the delay in that range.
+/// seconds of the `float`, `tv_nsec` the rest -- or `None` for a negative
+/// delay, a `timespec` `pselect` refuses at once (`EINVAL`) without waiting
+/// or reading a key. Only an rcfile can set one: `-d` and `d` refuse it.
+// `(int)` of a `float` below `INT_MAX`: truncation, which `as` performs; the
+// rcfile and `d` keep the delay in that range.
 #[allow(clippy::cast_possible_truncation)]
-fn delay_ms(delay: f32) -> i32 {
+fn delay_ms(delay: f32) -> Option<i32> {
+    if delay < 0.0 {
+        return None;
+    }
     let whole = delay as i64;
     let frac = (f64::from(delay) - whole as f64) * 1_000_000_000.0;
     let nanos = frac as i64;
@@ -1453,7 +1472,7 @@ fn delay_ms(delay: f32) -> i32 {
     } else {
         ms
     };
-    i32::try_from(ms).unwrap_or(i32::MAX)
+    Some(i32::try_from(ms).unwrap_or(i32::MAX))
 }
 
 /// `(float) d`: a `double` rounded to the nearest `float`, as C converts.
@@ -1544,6 +1563,10 @@ fn early_exit(myname: &[u8], text: &[u8]) -> ! {
 }
 
 fn main() {
+    // Standard descriptors as the program was given them -- a closed one
+    // closed, `SIGPIPE` as it was -- not as Rust's runtime left them.
+    coreutils::guard_std_fds!();
+    coreutils::stdfd::restore();
     let args: Vec<Vec<u8>> = std::env::args_os()
         .map(std::ffi::OsString::into_encoded_bytes)
         .collect();
@@ -1556,4 +1579,23 @@ fn main() {
     top.whack_terminal();
     top.wins_stage_2();
     top.run();
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_delay_is_whole_milliseconds_and_a_negative_one_none() {
+        assert_eq!(delay_ms(3.0), Some(3000));
+        assert_eq!(delay_ms(1.5), Some(1500));
+        // A part millisecond still waits.
+        assert_eq!(delay_ms(0.0005), Some(1));
+        assert_eq!(delay_ms(0.0), Some(0));
+        // `pselect` refuses a negative `timespec`.
+        assert_eq!(delay_ms(-2.0), None);
+        assert_eq!(delay_ms(-0.5), None);
+        assert_eq!(delay_ms(1e30), Some(i32::MAX));
+    }
 }

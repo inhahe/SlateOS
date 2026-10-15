@@ -346,6 +346,7 @@ fn apply_scheme() {
         }
     }
     let mut con = CONSOLE.lock_irqsave();
+    con.blank_buffer(bg);
     con.cursor_col = 0;
     con.cursor_row = 0;
 }
@@ -614,17 +615,21 @@ struct ConsoleInner {
     /// Text buffer mirroring the screen content (cols × rows cells).
     /// Used for scrollback capture and find-in-screen.
     screen_buf: Vec<ScrollCell>,
-    /// The boot steps drawn as running and not yet updated, oldest first:
-    /// where [`boot_step_update`] redraws each. Kept by row, so steps may nest
-    /// and the console may print between a step's start and its end.
+    /// The boot steps drawn as running and not yet updated, oldest first and
+    /// packed to the front: where [`boot_step_update`] redraws each. Kept by
+    /// row, moved with the rows and forgotten with them, so steps may nest and
+    /// the console may print between a step's start and its end.
     open_steps: [Option<OpenStep>; OPEN_STEPS],
+    /// Whether a line scrolled off the top goes into [`SCROLLBACK`]: the live
+    /// console's do; a self-test's scratch console's must not.
+    keeps_scrollback: bool,
 }
 
 /// A boot step on the screen as running: which step, and its text row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct OpenStep {
-    /// [`step_id`] of its description.
-    id: u64,
+    /// Its description, which names it: every step's is a literal of its own.
+    desc: &'static str,
     row: u32,
 }
 
@@ -633,34 +638,93 @@ struct OpenStep {
 /// as a line of its own.
 const OPEN_STEPS: usize = 4;
 
-/// A boot step's identity: FNV-1a of its description. Two steps with one
-/// description would share it, and none do.
-fn step_id(description: &str) -> u64 {
-    description.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+/// [`ConsoleInner::terminal_state`]: cursor (column, row), colours (fg, bg),
+/// attributes (bold, dim, underline, reverse, invisible, strikethrough),
+/// scroll region (top, bottom), and the saved cursor's column, row, colours
+/// and boldness.
+#[derive(Clone, Copy)]
+struct TerminalState {
+    cursor: (u32, u32),
+    colors: (u32, u32),
+    attrs: [bool; 6],
+    scroll: (u32, u32),
+    saved: (u32, u32, u32, u32, bool),
 }
 
 impl ConsoleInner {
-    /// The whole screen moved up one row: so did every open step's line, and
-    /// one on the top row has left the screen.
-    fn open_steps_scrolled(&mut self) {
+    /// Rows `top..=bottom` moved by `delta` (negative: up), as a scroll or an
+    /// inserted or deleted line moves them: an open step's line among them
+    /// moves too, and one carried out of that span is gone.
+    fn open_steps_moved(&mut self, top: u32, bottom: u32, delta: i64) {
         for slot in &mut self.open_steps {
-            *slot = slot.and_then(|s| s.row.checked_sub(1).map(|row| OpenStep { row, ..s }));
+            let Some(step) = *slot else { continue };
+            if !(top..=bottom).contains(&step.row) {
+                continue;
+            }
+            *slot = i64::from(step.row)
+                .checked_add(delta)
+                .and_then(|row| u32::try_from(row).ok())
+                .filter(|row| (top..=bottom).contains(row))
+                .map(|row| OpenStep { row, ..step });
+        }
+        self.pack_open_steps();
+    }
+
+    /// The text buffer's cell at (`col`, `row`), when there is one.
+    fn cell_mut(&mut self, col: u32, row: u32) -> Option<&mut ScrollCell> {
+        if col >= self.cols {
+            return None;
+        }
+        let at = (row as usize)
+            .checked_mul(self.cols as usize)?
+            .checked_add(col as usize)?;
+        self.screen_buf.get_mut(at)
+    }
+
+    /// Every cell of the text buffer blank on background `bg`: the screen
+    /// was cleared.
+    fn blank_buffer(&mut self, bg: u32) {
+        let fg = self.default_fg;
+        for cell in &mut self.screen_buf {
+            *cell = ScrollCell { ch: b' ', fg, bg };
         }
     }
 
-    /// The rows were moved some other way -- a region scrolled, lines
-    /// inserted or deleted, the screen erased or restored: no open step's
-    /// row can be trusted, and each is drawn on a line of its own when it ends.
-    fn forget_open_steps(&mut self) {
-        self.open_steps = [None; OPEN_STEPS];
+    /// Whether text row `row` still shows the running step `desc` as
+    /// [`draw_step_line`] drew it -- not erased, overwritten or moved since.
+    /// Told by the text buffer; before there is one, early in the boot,
+    /// nothing but a scroll moves rows, and that is followed, so yes.
+    fn shows_running_step(&self, row: u32, desc: &str) -> bool {
+        if self.screen_buf.is_empty() {
+            return true;
+        }
+        let cols = self.cols as usize;
+        let Some(cells) = (row as usize)
+            .checked_mul(cols)
+            .and_then(|at| self.screen_buf.get(at..at.checked_add(cols)?))
+        else {
+            return false;
+        };
+        let expected = b"  [*] ".iter().chain(desc.as_bytes());
+        cells.iter().zip(expected).all(|(cell, &b)| cell.ch == b)
+    }
+
+    /// The open steps packed to the front, in the order they began.
+    fn pack_open_steps(&mut self) {
+        let mut packed = [None; OPEN_STEPS];
+        for (slot, step) in packed
+            .iter_mut()
+            .zip(self.open_steps.iter().copied().flatten())
+        {
+            *slot = Some(step);
+        }
+        self.open_steps = packed;
     }
 
     /// Remember a step drawn as running on `row`, forgetting the oldest if
     /// all slots are taken.
-    fn open_step(&mut self, id: u64, row: u32) {
-        let step = Some(OpenStep { id, row });
+    fn open_step(&mut self, desc: &'static str, row: u32) {
+        let step = Some(OpenStep { desc, row });
         if let Some(free) = self.open_steps.iter_mut().find(|s| s.is_none()) {
             *free = step;
         } else {
@@ -671,14 +735,95 @@ impl ConsoleInner {
         }
     }
 
-    /// The row the most recent running step `id` is on, forgetting it.
-    fn close_step(&mut self, id: u64) -> Option<u32> {
+    /// The row the most recent running step `desc` is on, forgetting it.
+    fn close_step(&mut self, desc: &str) -> Option<u32> {
         let slot = self
             .open_steps
             .iter_mut()
             .rev()
-            .find(|s| s.is_some_and(|s| s.id == id))?;
-        slot.take().map(|s| s.row)
+            .find(|s| s.is_some_and(|s| s.desc == desc))?;
+        let row = slot.take().map(|s| s.row);
+        self.pack_open_steps();
+        row
+    }
+
+    /// The cursor, the colours and attributes and the scroll region: what a
+    /// self-test that drives the parser changes, so that it can put them back.
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState {
+            cursor: (self.cursor_col, self.cursor_row),
+            colors: (self.fg_color, self.bg_color),
+            attrs: [
+                self.bold,
+                self.dim,
+                self.underline,
+                self.reverse,
+                self.invisible,
+                self.strikethrough,
+            ],
+            scroll: (self.scroll_top, self.scroll_bottom),
+            saved: (
+                self.saved_cursor_col,
+                self.saved_cursor_row,
+                self.saved_fg_color,
+                self.saved_bg_color,
+                self.saved_bold,
+            ),
+        }
+    }
+
+    /// A console of `cols` by `rows` cells drawing into `fb` instead of the
+    /// screen, for a self-test: nothing it draws is seen, and nothing it
+    /// scrolls off reaches the live scrollback. `None` unless `fb` holds the
+    /// whole picture (`cols * 8` by `rows * 16` pixels). The caller keeps
+    /// `fb` alive, unmoved, for as long as the console is used: it draws
+    /// through the buffer's address.
+    fn scratch(cols: u32, rows: u32, fb: &mut [u32]) -> Option<Self> {
+        let width = cols.checked_mul(GLYPH_WIDTH)?;
+        let height = rows.checked_mul(GLYPH_HEIGHT)?;
+        let cells = usize::try_from(cols.checked_mul(rows)?).ok()?;
+        let pixels = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        if cols == 0 || rows == 0 || fb.len() < pixels {
+            return None;
+        }
+        let mut c = Self::new();
+        c.fb_addr = fb.as_mut_ptr() as u64;
+        c.fb_width = width;
+        c.fb_height = height;
+        c.fb_pitch = width.checked_mul(4)?;
+        c.cols = cols;
+        c.rows = rows;
+        c.scroll_bottom = rows.saturating_sub(1);
+        c.initialized = true;
+        c.keeps_scrollback = false;
+        // Made here rather than by `ensure_screen_buf`, which also sizes the
+        // live scrollback.
+        c.screen_buf = alloc::vec![ScrollCell::EMPTY; cells];
+        Some(c)
+    }
+
+    fn set_terminal_state(&mut self, s: TerminalState) {
+        (self.cursor_col, self.cursor_row) = s.cursor;
+        (self.fg_color, self.bg_color) = s.colors;
+        [
+            self.bold,
+            self.dim,
+            self.underline,
+            self.reverse,
+            self.invisible,
+            self.strikethrough,
+        ] = s.attrs;
+        (self.scroll_top, self.scroll_bottom) = s.scroll;
+        (
+            self.saved_cursor_col,
+            self.saved_cursor_row,
+            self.saved_fg_color,
+            self.saved_bg_color,
+            self.saved_bold,
+        ) = s.saved;
+        self.ansi_reset();
     }
 
     /// Create an uninitialized console.
@@ -722,6 +867,7 @@ impl ConsoleInner {
             ansi_has_digit: false,
             screen_buf: Vec::new(),
             open_steps: [None; OPEN_STEPS],
+            keeps_scrollback: true,
         }
     }
 
@@ -928,7 +1074,6 @@ pub fn clear() {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
 
     let fb = con.fb_addr;
     let width = con.fb_width;
@@ -947,6 +1092,7 @@ pub fn clear() {
 
     // Reset cursor to top-left.
     let mut con = CONSOLE.lock_irqsave();
+    con.blank_buffer(bg);
     con.cursor_col = 0;
     con.cursor_row = 0;
 }
@@ -960,10 +1106,13 @@ pub fn clear() {
 /// are handled via the existing CSI state machine.
 pub fn putchar(c: u8) {
     let mut con = CONSOLE.lock_irqsave();
-    if !con.initialized {
-        return;
+    if con.initialized {
+        putchar_on(&mut con, c);
     }
+}
 
+/// [`putchar`] on the console `con`.
+fn putchar_on(con: &mut ConsoleInner, c: u8) {
     // If we are accumulating a multi-byte UTF-8 sequence (and not inside
     // an escape sequence), check if `c` is a valid continuation byte.
     if con.utf8_len > 0 && con.ansi_state == AnsiState::Normal {
@@ -979,7 +1128,7 @@ pub fn putchar(c: u8) {
                 let cp = crate::unicode::decode_utf8(con.utf8_buf, con.utf8_len);
                 con.utf8_len = 0;
                 con.utf8_pos = 0;
-                render_codepoint(&mut con, cp);
+                render_codepoint(con, cp);
             }
             return;
         }
@@ -988,13 +1137,13 @@ pub fn putchar(c: u8) {
         // `c` normally.
         con.utf8_len = 0;
         con.utf8_pos = 0;
-        render_codepoint(&mut con, 0xFFFD);
+        render_codepoint(con, 0xFFFD);
     }
 
     match con.ansi_state {
-        AnsiState::Normal => putchar_normal(&mut con, c),
-        AnsiState::Escape => putchar_escape(&mut con, c),
-        AnsiState::Csi => putchar_csi(&mut con, c),
+        AnsiState::Normal => putchar_normal(con, c),
+        AnsiState::Escape => putchar_escape(con, c),
+        AnsiState::Csi => putchar_csi(con, c),
     }
 }
 
@@ -1149,7 +1298,6 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
         }
         b'c' => {
             // RIS (Reset to Initial State) — ESC c
-            con.forget_open_steps();
             con.fg_color = con.default_fg;
             con.bg_color = con.default_bg;
             con.bold = false;
@@ -1372,15 +1520,13 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
             // without moving the cursor.
             con.ansi_next_param();
             let n = con.ansi_param(0, 1) as u32;
-            let fb = con.fb_addr;
-            let pitch = con.fb_pitch;
             let bg = effective_bg(con);
             for i in 0..n {
                 let col = con.cursor_col + i;
                 if col >= con.cols {
                     break;
                 }
-                erase_cell(fb, pitch, col, con.cursor_row, bg);
+                blank_cell(con, col, con.cursor_row, bg);
             }
             con.ansi_reset();
         }
@@ -1664,9 +1810,6 @@ fn color_256(con: &ConsoleInner, n: usize) -> u32 {
 
 /// Handle ED (Erase in Display) command.
 fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
-    con.forget_open_steps();
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
     let cols = con.cols;
     let rows = con.rows;
     let bg = con.bg_color;
@@ -1676,12 +1819,12 @@ fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
             // Erase from cursor to end of display.
             // Clear rest of current line.
             for col in con.cursor_col..cols {
-                erase_cell(fb, pitch, col, con.cursor_row, bg);
+                blank_cell(con, col, con.cursor_row, bg);
             }
             // Clear all lines below.
             for row in (con.cursor_row + 1)..rows {
                 for col in 0..cols {
-                    erase_cell(fb, pitch, col, row, bg);
+                    blank_cell(con, col, row, bg);
                 }
             }
         }
@@ -1689,18 +1832,18 @@ fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
             // Erase from start to cursor.
             for row in 0..con.cursor_row {
                 for col in 0..cols {
-                    erase_cell(fb, pitch, col, row, bg);
+                    blank_cell(con, col, row, bg);
                 }
             }
             for col in 0..=con.cursor_col.min(cols.saturating_sub(1)) {
-                erase_cell(fb, pitch, col, con.cursor_row, bg);
+                blank_cell(con, col, con.cursor_row, bg);
             }
         }
         2 | 3 => {
             // Erase entire display.
             for row in 0..rows {
                 for col in 0..cols {
-                    erase_cell(fb, pitch, col, row, bg);
+                    blank_cell(con, col, row, bg);
                 }
             }
             // Also reset cursor for mode 2.
@@ -1715,8 +1858,6 @@ fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
 
 /// Handle EL (Erase in Line) command.
 fn handle_erase_line(con: &mut ConsoleInner, mode: u16) {
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
     let cols = con.cols;
     let row = con.cursor_row;
     let bg = con.bg_color;
@@ -1725,19 +1866,19 @@ fn handle_erase_line(con: &mut ConsoleInner, mode: u16) {
         0 => {
             // Erase from cursor to end of line.
             for col in con.cursor_col..cols {
-                erase_cell(fb, pitch, col, row, bg);
+                blank_cell(con, col, row, bg);
             }
         }
         1 => {
             // Erase from start of line to cursor.
             for col in 0..=con.cursor_col.min(cols.saturating_sub(1)) {
-                erase_cell(fb, pitch, col, row, bg);
+                blank_cell(con, col, row, bg);
             }
         }
         2 => {
             // Erase entire line.
             for col in 0..cols {
-                erase_cell(fb, pitch, col, row, bg);
+                blank_cell(con, col, row, bg);
             }
         }
         _ => {}
@@ -1759,11 +1900,9 @@ fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
+    con.open_steps_moved(con.scroll_top, con.scroll_bottom, -i64::from(n));
     let cols = con.cols;
     let bg = effective_bg(con);
 
@@ -1773,13 +1912,13 @@ fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
         if src_row > con.scroll_bottom {
             break;
         }
-        copy_row(fb, pitch, cols, src_row, dst_row);
+        move_row(con, src_row, dst_row);
     }
 
     // Clear the bottom n rows.
     for row in (con.scroll_bottom + 1 - n)..=con.scroll_bottom {
         for col in 0..cols {
-            erase_cell(fb, pitch, col, row, bg);
+            blank_cell(con, col, row, bg);
         }
     }
 }
@@ -1794,11 +1933,9 @@ fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
+    con.open_steps_moved(con.scroll_top, con.scroll_bottom, i64::from(n));
     let cols = con.cols;
     let bg = effective_bg(con);
 
@@ -1806,7 +1943,7 @@ fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
     let mut dst_row = con.scroll_bottom;
     while dst_row >= con.scroll_top + n {
         let src_row = dst_row - n;
-        copy_row(fb, pitch, cols, src_row, dst_row);
+        move_row(con, src_row, dst_row);
         if dst_row == 0 {
             break;
         }
@@ -1816,7 +1953,7 @@ fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
     // Clear the top n rows.
     for row in con.scroll_top..(con.scroll_top + n).min(con.scroll_bottom + 1) {
         for col in 0..cols {
-            erase_cell(fb, pitch, col, row, bg);
+            blank_cell(con, col, row, bg);
         }
     }
 }
@@ -1856,15 +1993,13 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
     let cur = con.cursor_row;
     if cur < con.scroll_top || cur > con.scroll_bottom {
         return;
     }
 
     let n = n.min(con.scroll_bottom - cur + 1);
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
+    con.open_steps_moved(cur, con.scroll_bottom, i64::from(n));
     let cols = con.cols;
     let bg = effective_bg(con);
 
@@ -1872,7 +2007,7 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
     let mut dst = con.scroll_bottom;
     while dst >= cur + n {
         let src = dst - n;
-        copy_row(fb, pitch, cols, src, dst);
+        move_row(con, src, dst);
         if dst == 0 {
             break;
         }
@@ -1882,7 +2017,7 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
     // Clear the inserted lines.
     for row in cur..(cur + n).min(con.scroll_bottom + 1) {
         for col in 0..cols {
-            erase_cell(fb, pitch, col, row, bg);
+            blank_cell(con, col, row, bg);
         }
     }
     con.cursor_col = 0;
@@ -1897,15 +2032,13 @@ fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
     let cur = con.cursor_row;
     if cur < con.scroll_top || cur > con.scroll_bottom {
         return;
     }
 
     let n = n.min(con.scroll_bottom - cur + 1);
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
+    con.open_steps_moved(cur, con.scroll_bottom, -i64::from(n));
     let cols = con.cols;
     let bg = effective_bg(con);
 
@@ -1915,13 +2048,13 @@ fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
         if src > con.scroll_bottom {
             break;
         }
-        copy_row(fb, pitch, cols, src, dst);
+        move_row(con, src, dst);
     }
 
     // Clear the bottom lines.
     for row in (con.scroll_bottom + 1 - n)..=con.scroll_bottom {
         for col in 0..cols {
-            erase_cell(fb, pitch, col, row, bg);
+            blank_cell(con, col, row, bg);
         }
     }
     con.cursor_col = 0;
@@ -1941,8 +2074,6 @@ fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
     let row = con.cursor_row;
     let bg = effective_bg(con);
     let n = n.min(con.cols - con.cursor_col);
@@ -1951,7 +2082,7 @@ fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
     let mut dst_col = con.cols.saturating_sub(1);
     while dst_col >= con.cursor_col + n {
         let src_col = dst_col - n;
-        copy_cell(fb, pitch, src_col, row, dst_col, row);
+        move_cell(con, src_col, row, dst_col, row);
         if dst_col == 0 {
             break;
         }
@@ -1960,7 +2091,7 @@ fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
 
     // Clear the inserted positions.
     for col in con.cursor_col..(con.cursor_col + n).min(con.cols) {
-        erase_cell(fb, pitch, col, row, bg);
+        blank_cell(con, col, row, bg);
     }
 }
 
@@ -1974,8 +2105,6 @@ fn handle_delete_chars(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
     let row = con.cursor_row;
     let bg = effective_bg(con);
     let n = n.min(con.cols - con.cursor_col);
@@ -1986,12 +2115,12 @@ fn handle_delete_chars(con: &mut ConsoleInner, n: u32) {
         if src_col >= con.cols {
             break;
         }
-        copy_cell(fb, pitch, src_col, row, dst_col, row);
+        move_cell(con, src_col, row, dst_col, row);
     }
 
     // Clear the rightmost positions.
     for col in (con.cols - n)..con.cols {
-        erase_cell(fb, pitch, col, row, bg);
+        blank_cell(con, col, row, bg);
     }
 }
 
@@ -2039,7 +2168,6 @@ fn handle_dec_private_mode(con: &mut ConsoleInner, mode: u16, set: bool) {
         }
         1049 => {
             // Alternate screen buffer.
-            con.forget_open_steps();
             if set {
                 // Enter alt screen: save cursor and clear display.
                 con.saved_cursor_col = con.cursor_col;
@@ -2050,12 +2178,10 @@ fn handle_dec_private_mode(con: &mut ConsoleInner, mode: u16, set: bool) {
                 con.cursor_col = 0;
                 con.cursor_row = 0;
                 // Clear the screen.
-                let fb = con.fb_addr;
-                let pitch = con.fb_pitch;
                 let bg = effective_bg(con);
                 for row in 0..con.rows {
                     for col in 0..con.cols {
-                        erase_cell(fb, pitch, col, row, bg);
+                        blank_cell(con, col, row, bg);
                     }
                 }
             } else {
@@ -2067,12 +2193,10 @@ fn handle_dec_private_mode(con: &mut ConsoleInner, mode: u16, set: bool) {
                 con.fg_color = con.saved_fg_color;
                 con.bg_color = con.saved_bg_color;
                 con.bold = con.saved_bold;
-                let fb = con.fb_addr;
-                let pitch = con.fb_pitch;
                 let bg = effective_bg(con);
                 for row in 0..con.rows {
                     for col in 0..con.cols {
-                        erase_cell(fb, pitch, col, row, bg);
+                        blank_cell(con, col, row, bg);
                     }
                 }
             }
@@ -2222,9 +2346,6 @@ pub enum BootStatus {
     Running,
     /// Step completed successfully (green checkmark).
     Ok,
-    /// Step failed but is non-fatal (red X, boot continues).
-    #[allow(dead_code)] // Used by boot_step_fail in main.rs.
-    Warn,
 }
 
 /// Accent color: green for success indicators (BGRA: 0x00_66CC66).
@@ -2232,9 +2353,6 @@ const COLOR_GREEN: u32 = 0x0066_CC66;
 
 /// Accent color: yellow for in-progress indicators (BGRA: 0x00_CCCC33).
 const COLOR_YELLOW: u32 = 0x00CC_CC33;
-
-/// Accent color: red-ish for warnings (BGRA: 0x00_CC6666).
-const COLOR_RED: u32 = 0x00CC_6666;
 
 /// Dim color for boot step descriptions.
 const COLOR_DIM: u32 = 0x0099_9999;
@@ -2247,44 +2365,53 @@ const COLOR_DIM: u32 = 0x0099_9999;
 ///
 /// Format:  `  [*] Description...`  (Running)
 ///          `  [+] Description...`  (Ok)
-///          `  [!] Description...`  (Warn)
 ///
 /// A running step is drawn on the cursor's line and the cursor moves past it;
-/// `Ok` and `Warn` given here overwrite the cursor's line and leave the cursor
-/// on it.
-pub fn boot_step(status: BootStatus, description: &str) {
+/// `Ok` given here overwrites the cursor's line and leaves the cursor on it.
+/// The description names the step for [`boot_step_update`].
+pub fn boot_step(status: BootStatus, description: &'static str) {
     let mut con = CONSOLE.lock_irqsave();
-    if !con.initialized {
-        return;
+    if con.initialized {
+        boot_step_on(&mut con, status, description);
     }
+}
+
+/// [`boot_step`] on the console `con`.
+fn boot_step_on(con: &mut ConsoleInner, status: BootStatus, description: &'static str) {
     let row = con.cursor_row;
-    draw_step_line(&mut con, row, status, description);
+    draw_step_line(con, row, status, description);
     if matches!(status, BootStatus::Running) {
-        con.open_step(step_id(description), row);
-        step_newline(&mut con);
+        con.open_step(description, row);
+        step_newline(con);
     }
 }
 
 /// End a boot step begun with `boot_step(Running, description)`: redraw its
 /// line, wherever it now is, with `status`.
 ///
-/// The line is found by the row it was drawn on, carried along as the screen
-/// scrolls, so steps may nest and the console may print between a step's
-/// start and its end; the cursor does not move. A step whose line is gone --
-/// scrolled off the top, or the screen rearranged since -- or that was never
+/// The line is found by the row it was drawn on, carried along as the rows
+/// move, so steps may nest and the console may print between a step's start
+/// and its end; the cursor does not move. A step whose line is gone --
+/// scrolled out, erased, or the screen replaced since -- or that was never
 /// started gets a line of its own at the cursor instead.
-pub fn boot_step_update(status: BootStatus, description: &str) {
+pub fn boot_step_update(status: BootStatus, description: &'static str) {
     let mut con = CONSOLE.lock_irqsave();
-    if !con.initialized {
-        return;
+    if con.initialized {
+        boot_step_update_on(&mut con, status, description);
     }
-    if let Some(row) = con.close_step(step_id(description)) {
-        draw_step_line(&mut con, row, status, description);
+}
+
+/// [`boot_step_update`] on the console `con`.
+fn boot_step_update_on(con: &mut ConsoleInner, status: BootStatus, description: &'static str) {
+    if let Some(row) = con.close_step(description)
+        && con.shows_running_step(row, description)
+    {
+        draw_step_line(con, row, status, description);
         return;
     }
     let row = con.cursor_row;
-    draw_step_line(&mut con, row, status, description);
-    step_newline(&mut con);
+    draw_step_line(con, row, status, description);
+    step_newline(con);
 }
 
 /// Move the cursor to the start of the next line, scrolling at the bottom.
@@ -2304,7 +2431,6 @@ fn draw_step_line(con: &mut ConsoleInner, row: u32, status: BootStatus, descript
     let (indicator, color) = match status {
         BootStatus::Running => (b'*', COLOR_YELLOW),
         BootStatus::Ok => (b'+', COLOR_GREEN),
-        BootStatus::Warn => (b'!', COLOR_RED),
     };
     let desc = description.as_bytes();
     let cols = con.cols;
@@ -2338,6 +2464,51 @@ fn draw_step_line(con: &mut ConsoleInner, row: u32, status: BootStatus, descript
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Erase the cell (`col`, `row`) to background `bg`, on the screen and in
+/// the text buffer. Every erase, scroll and insert or delete goes through
+/// this, [`move_row`] and [`move_cell`], so the buffer mirrors the screen.
+fn blank_cell(con: &mut ConsoleInner, col: u32, row: u32, bg: u32) {
+    erase_cell(con.fb_addr, con.fb_pitch, col, row, bg);
+    let fg = con.default_fg;
+    if let Some(cell) = con.cell_mut(col, row) {
+        *cell = ScrollCell { ch: b' ', fg, bg };
+    }
+}
+
+/// Copy text row `src` over row `dst`, on the screen and in the text buffer.
+fn move_row(con: &mut ConsoleInner, src: u32, dst: u32) {
+    copy_row(con.fb_addr, con.fb_pitch, con.cols, src, dst);
+    let cols = con.cols as usize;
+    let start = |row: u32| (row as usize).checked_mul(cols);
+    if let (Some(from), Some(to)) = (start(src), start(dst))
+        && from
+            .max(to)
+            .checked_add(cols)
+            .is_some_and(|end| end <= con.screen_buf.len())
+    {
+        con.screen_buf
+            .copy_within(from..from.saturating_add(cols), to);
+    }
+}
+
+/// Copy the cell (`src_col`, `src_row`) over (`dst_col`, `dst_row`), on the
+/// screen and in the text buffer.
+fn move_cell(con: &mut ConsoleInner, src_col: u32, src_row: u32, dst_col: u32, dst_row: u32) {
+    copy_cell(
+        con.fb_addr,
+        con.fb_pitch,
+        src_col,
+        src_row,
+        dst_col,
+        dst_row,
+    );
+    if let Some(cell) = con.cell_mut(src_col, src_row).copied()
+        && let Some(dst) = con.cell_mut(dst_col, dst_row)
+    {
+        *dst = cell;
+    }
+}
 
 /// Write a single 32-bit pixel to the framebuffer.
 ///
@@ -2474,14 +2645,8 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
     let rows = con.rows;
     let cols = con.cols as usize;
 
-    // A full-screen scroll carries the open boot steps' lines up a row; a
-    // region scroll (below) moves only part of the screen and forgets them.
-    if con.scroll_top == 0 && con.scroll_bottom == rows.saturating_sub(1) {
-        con.open_steps_scrolled();
-    }
-
     // Capture the top row into the scrollback buffer before scrolling.
-    if con.scroll_top == 0 && !con.screen_buf.is_empty() {
+    if con.scroll_top == 0 && !con.screen_buf.is_empty() && con.keeps_scrollback {
         let mut sline = ScrollLine::new(cols);
         for col_idx in 0..cols {
             if let Some(cell) = con.screen_buf.get(col_idx) {
@@ -2492,6 +2657,19 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
         }
         SCROLLBACK.lock_irqsave().push(sline);
     }
+
+    // If cursor is within a scroll region, use region-aware scrolling: it
+    // moves the region's rows, on the screen and in the text buffer alike,
+    // and only those.
+    if con.scroll_top != 0 || con.scroll_bottom != rows.saturating_sub(1) {
+        scroll_region_up(con, 1);
+        con.cursor_row = con.scroll_bottom;
+        con.cursor_col = 0;
+        return;
+    }
+
+    // The whole screen moves up a row: the open boot steps' lines with it.
+    con.open_steps_moved(0, rows.saturating_sub(1), -1);
 
     // Shift the screen text buffer up by one row.
     if !con.screen_buf.is_empty() {
@@ -2513,14 +2691,6 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
         {
             *cell = ScrollCell::EMPTY;
         }
-    }
-
-    // If cursor is within a scroll region, use region-aware scrolling.
-    if con.scroll_top != 0 || con.scroll_bottom != rows.saturating_sub(1) {
-        scroll_region_up(con, 1);
-        con.cursor_row = con.scroll_bottom;
-        con.cursor_col = 0;
-        return;
     }
 
     // Fast path: full-screen scroll via memmove.
@@ -2643,7 +2813,6 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     if !con.initialized {
         return;
     }
-    con.forget_open_steps();
     // Dimension mismatch guard — the framebuffer size cannot change at
     // runtime, but a stale snapshot from a different resolution must not
     // be blindly applied.
@@ -2752,47 +2921,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::selftest;
     crate::serial_println!("[console] Running self-test...");
 
-    // Boot steps: each update finds its own step's line. Bookkeeping only, on
-    // a console of the test's own, so it runs with or without a framebuffer.
-    {
-        let mut c = ConsoleInner::new();
-        let storage = step_id("Storage & filesystems");
-        let preempt = step_id("Preemptive scheduling");
-        selftest::check!(storage != preempt, "two step descriptions share an id");
-        // Nested, as main.rs runs them: Preemptive starts and ends inside
-        // Storage, whose update went to Preemptive's line until 2026-10-14.
-        c.open_step(storage, 10);
-        c.open_step(preempt, 11);
-        selftest::check!(c.close_step(preempt) == Some(11), "a nested step lost its line");
-        selftest::check!(
-            c.close_step(storage) == Some(10),
-            "the outer step's update went to another line"
-        );
-        selftest::check!(c.close_step(storage).is_none(), "a step ended twice");
-        // A full-screen scroll carries lines up; one on the top row leaves.
-        c.open_step(storage, 0);
-        c.open_step(preempt, 3);
-        c.open_steps_scrolled();
-        selftest::check!(
-            c.close_step(storage).is_none() && c.close_step(preempt) == Some(2),
-            "a scroll did not carry the open steps' lines"
-        );
-        // Any other rearrangement forgets them.
-        c.open_step(storage, 4);
-        c.forget_open_steps();
-        selftest::check!(c.close_step(storage).is_none(), "a rearranged screen kept a step");
-        // Past capacity, the oldest is forgotten and the rest are kept.
-        for (id, row) in [(1, 20), (2, 21), (3, 22), (4, 23), (5, 24)] {
-            c.open_step(id, row);
-        }
-        selftest::check!(
-            c.close_step(1).is_none() && c.close_step(2) == Some(21) && c.close_step(5) == Some(24),
-            "a full set of open steps did not forget the oldest"
-        );
-        crate::serial_println!(
-            "[console]   boot steps: a nested step, a scroll, a rearranged screen, a full set: OK"
-        );
+    // Boot steps, through boot_step and boot_step_update themselves, on a
+    // console of the test's own that draws into memory: nothing reaches the
+    // screen, and it runs with or without a framebuffer.
+    if let Err(what) = test_boot_steps() {
+        crate::serial_println!("[console]   FAIL: boot steps: {}", what);
+        return Err(crate::error::KernelError::InternalError);
     }
+    crate::serial_println!(
+        "[console]   boot steps: nested, with a scroll, a region scroll, an erase and text over a line between, \
+         past capacity: OK"
+    );
 
     // A machine with no framebuffer has no console to test, and that is a
     // legitimate configuration rather than a fault: a serial-only server, or a
@@ -2823,6 +2962,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         return Ok(());
     }
+
+    // The tests below drive the live console's parser -- cursor, colours,
+    // scroll region -- and draw nothing; this puts what they change back
+    // however they end, so the boot's output goes on where it was.
+    let _restore = RestoreTerminal(CONSOLE.lock_irqsave().terminal_state());
 
     // Test 1: Basic initialization state.
     {
@@ -3028,8 +3172,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::serial_println!("[console]   Full reset (RIS): OK");
     }
 
-    // Clean up: reset state for normal operation.
-    write_str_no_serial("\x1b[0m\x1b[r");
     crate::serial_println!("[console] Self-test PASSED");
     Ok(())
 }
@@ -3038,6 +3180,133 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 ///
 /// Used by self-test so escape sequences affect the framebuffer console
 /// state without polluting the serial log with control characters.
+/// Puts the live console's terminal state back when dropped
+/// ([`ConsoleInner::terminal_state`]): for [`self_test`].
+struct RestoreTerminal(TerminalState);
+
+impl Drop for RestoreTerminal {
+    fn drop(&mut self) {
+        CONSOLE.lock_irqsave().set_terminal_state(self.0);
+    }
+}
+
+/// Boot steps on a scratch console, 40 columns by 6 rows, drawing into
+/// memory: steps nested as the boot nests them, text and a scroll between a
+/// step's start and its end, a region scroll, an erase, and more open steps
+/// than are remembered. Each update must land on its own step's line, or on
+/// a line of its own when that line is gone.
+fn test_boot_steps() -> Result<(), &'static str> {
+    const COLS: u32 = 40;
+    const ROWS: u32 = 6;
+    const PIXELS: usize = (COLS * GLYPH_WIDTH * ROWS * GLYPH_HEIGHT) as usize;
+    let mut fb = alloc::vec![0u32; PIXELS];
+    let mut c = ConsoleInner::scratch(COLS, ROWS, &mut fb).ok_or("no scratch console")?;
+    let row_text = |c: &ConsoleInner, row: u32| -> alloc::string::String {
+        let at = (row as usize).saturating_mul(COLS as usize);
+        c.screen_buf
+            .get(at..at.saturating_add(COLS as usize))
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| char::from(cell.ch))
+                    .collect::<alloc::string::String>()
+            })
+            .unwrap_or_default()
+            .trim_end()
+            .into()
+    };
+    let write = |c: &mut ConsoleInner, text: &str| {
+        for b in text.bytes() {
+            putchar_on(c, b);
+        }
+    };
+    let ok = BootStatus::Ok;
+    let running = BootStatus::Running;
+
+    // Nested, as "Preemptive scheduling" runs inside "Storage & filesystems".
+    boot_step_on(&mut c, running, "outer");
+    boot_step_on(&mut c, running, "inner");
+    boot_step_update_on(&mut c, ok, "inner");
+    boot_step_update_on(&mut c, ok, "outer");
+    if row_text(&c, 0) != "  [+] outer" || row_text(&c, 1) != "  [+] inner" {
+        return Err("a nested step's update went to another step's line");
+    }
+    if c.cursor_row != 2 {
+        return Err("an update moved the cursor");
+    }
+
+    // Begun on the last row, with text and a scroll before it ends: its line
+    // moves up with the screen, and the update follows it.
+    c.cursor_row = ROWS.saturating_sub(1);
+    boot_step_on(&mut c, running, "scrolled"); // the screen scrolls: row 4
+    write(&mut c, "between\n"); // and again: row 3
+    boot_step_update_on(&mut c, ok, "scrolled");
+    if row_text(&c, 3) != "  [+] scrolled" || row_text(&c, 4) != "between" {
+        return Err("a scroll lost a step's line");
+    }
+
+    // A region scroll moves the step's line within the region.
+    write(&mut c, "\x1b[2;5r"); // rows 1-4 (0-based), cursor home
+    c.cursor_row = 3;
+    boot_step_on(&mut c, running, "region"); // row 3
+    write(&mut c, "\x1b[1S"); // the region up one: row 2
+    boot_step_update_on(&mut c, ok, "region");
+    if row_text(&c, 2) != "  [+] region" {
+        return Err("a region scroll lost a step's line");
+    }
+    // A newline at the region's foot scrolls the region alone: the rows
+    // outside it keep their text, in the buffer as on the screen.
+    let (top, foot) = (row_text(&c, 0), row_text(&c, ROWS.saturating_sub(1)));
+    c.cursor_row = 4;
+    write(&mut c, "\n");
+    if row_text(&c, 0) != top || row_text(&c, ROWS.saturating_sub(1)) != foot {
+        return Err("a region scroll moved the text buffer's rows outside the region");
+    }
+    write(&mut c, "\x1b[r");
+
+    // Text written over a step's line: the update does not write over it in
+    // turn, but takes a line of its own.
+    c.cursor_row = 1;
+    boot_step_on(&mut c, running, "overwritten"); // row 1, cursor to 2
+    c.cursor_row = 1;
+    c.cursor_col = 0;
+    write(&mut c, "a shell wrote this longer line\n"); // over row 1, cursor to 2
+    boot_step_update_on(&mut c, ok, "overwritten");
+    if row_text(&c, 1) != "a shell wrote this longer line" || row_text(&c, 2) != "  [+] overwritten"
+    {
+        return Err("a step's update wrote over what replaced its line");
+    }
+
+    // An erase takes the line: the update gets one of its own, at the cursor.
+    c.cursor_row = 1;
+    boot_step_on(&mut c, running, "erased"); // row 1, cursor to 2
+    write(&mut c, "\x1b[2J");
+    let cursor = c.cursor_row;
+    boot_step_update_on(&mut c, ok, "erased");
+    if row_text(&c, cursor) != "  [+] erased" {
+        return Err("an erased step's update was not drawn at the cursor");
+    }
+
+    // Five open at once: the oldest is forgotten, the others kept in order.
+    c.cursor_row = 0;
+    for desc in ["s1", "s2", "s3", "s4", "s5"] {
+        boot_step_on(&mut c, running, desc);
+    }
+    let kept: alloc::vec::Vec<&str> = c.open_steps.iter().flatten().map(|s| s.desc).collect();
+    if kept != ["s2", "s3", "s4", "s5"] {
+        return Err("a full set of open steps did not forget the oldest");
+    }
+    // One ends, one begins: still the oldest first.
+    boot_step_update_on(&mut c, ok, "s3");
+    boot_step_on(&mut c, running, "s6");
+    boot_step_on(&mut c, running, "s7");
+    let kept: alloc::vec::Vec<&str> = c.open_steps.iter().flatten().map(|s| s.desc).collect();
+    if kept != ["s4", "s5", "s6", "s7"] {
+        return Err("the open steps lost their order");
+    }
+    Ok(())
+}
+
 fn write_str_no_serial(s: &str) {
     for byte in s.bytes() {
         putchar(byte);

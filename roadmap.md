@@ -1501,6 +1501,12 @@ list moved to lane D on 2026-09-22):
       development and gaming the same set (everything but `sshd`, `ftpd`,
       `telnet`, `inetd`, `ntpd`, `finger`), server without the desktop
       applications and games -- each installable later from the others.
+      *Blocked, 2026-10-15:* there is nothing to group yet. No program of
+      the system is a package -- the image is staged from lane D's
+      `scripts/rootfs-bin-manifest.txt` (§1053), and `pkg` has no package
+      definitions for the system at all -- and the one consumer, the
+      installer, has no owner. Start when either exists: the groups are
+      then a list of package names per answer, and `pkg install @<group>`.
     - `[ ]` The installer's "what is this machine for" answer selects a group
       (no owner yet; the image keeps everything until then, §1053).
   - **A program's remembered settings grow by three** (§1074, B-Q26: A) --

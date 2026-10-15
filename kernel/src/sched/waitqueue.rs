@@ -128,6 +128,15 @@ impl WaitQueue {
 
         // Block the current task.  We will be woken by wake_one/wake_all.
         super::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Mutex));
+
+        // A wake takes its waiter's slot. A park that ended without one -- a
+        // wake recorded for an earlier wait ends the next park
+        // (`Task::mark_ready`) -- leaves ours, and a later `wake_one` spent
+        // on it would wake no one who waits: give it back.
+        let mut guard = self.waiters.lock();
+        if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+            *slot = NO_WAITER;
+        }
     }
 
     /// Block until a condition is true.

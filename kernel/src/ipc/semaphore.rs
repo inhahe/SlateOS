@@ -272,26 +272,24 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
         sem.waiters.push_back(sched::current_task_id());
     }
 
-    sched::block_current_on(crate::wchan::Wait::new(
-        crate::wchan::WaitChannel::Semaphore,
-        handle.raw(),
-    ));
+    let me = sched::current_task_id();
+    loop {
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Semaphore,
+            handle.raw(),
+        ));
 
-    // We were woken.  Two possibilities:
-    // 1. signal() removed us from the waiter queue and woke us — a
-    //    unit has been consumed on our behalf → return Ok.
-    // 2. close() drained all waiters and woke us — sem is gone.
-    //
-    // Distinguish by re-checking whether the semaphore still exists.
-    // If it's been removed from the table (close removes it),
-    // return ChannelClosed.  If it still exists, we were woken by
-    // signal (which removed us from the queue — we won't be in it).
-    {
+        // signal() grants a unit by taking a waiter off the queue, then wakes
+        // it: off the queue is the grant. close() removes the semaphore. A
+        // park can also end for neither -- a wake recorded for an earlier wait
+        // ends the next park (`sched::Task::mark_ready`) -- and then this task
+        // is still queued, holding no unit, and waits again.
         let table = SEM_TABLE.lock();
         match table.get(&handle.id()) {
-            None => Err(KernelError::ChannelClosed),
-            Some(sem) if sem.closed => Err(KernelError::ChannelClosed),
-            Some(_) => Ok(()), // Woken by signal.
+            None => return Err(KernelError::ChannelClosed),
+            Some(sem) if sem.closed => return Err(KernelError::ChannelClosed),
+            Some(sem) if sem.waiters.contains(&me) => {}
+            Some(_) => return Ok(()),
         }
     }
 }

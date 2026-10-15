@@ -293,6 +293,18 @@ fn note_contention(addr: u64, ns: u64) {
 /// at a time.
 ///
 /// Returns `true` iff a waiter for `task` was found and removed.
+/// Whether `task` is still queued on any futex: a wake takes a waiter off
+/// its queue before waking it, so a waiter still queued after its park has
+/// not been woken by one. Every bucket is looked in, since a requeue moves a
+/// waiter to another futex's.
+fn still_queued(task: u64) -> bool {
+    FUTEX_TABLE
+        .lock()
+        .buckets
+        .iter()
+        .any(|bucket| bucket.iter().any(|w| w.task_id == task))
+}
+
 fn remove_self_waiter(key: FutexKey, task: u64) -> bool {
     let mut table = FUTEX_TABLE.lock();
     let idx = key.bucket();
@@ -564,11 +576,20 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     let pid = current_user_pid();
     if pid == 0 {
         // Kernel task (boot self-test, etc.): no signal context — park
-        // uninterruptibly.  Woken only by futex_wake.
-        sched::block_current_on(crate::wchan::Wait::new(
-            crate::wchan::WaitChannel::Futex,
-            addr,
-        ));
+        // uninterruptibly until a futex_wake takes it off the queue. A park
+        // can end for neither -- a wake recorded for an earlier wait ends the
+        // next park (`sched::Task::mark_ready`) -- and a task still queued
+        // then parks again, rather than reporting a wake that never came and
+        // leaving its entry for a later wake to be spent on.
+        loop {
+            sched::block_current_on(crate::wchan::Wait::new(
+                crate::wchan::WaitChannel::Futex,
+                addr,
+            ));
+            if !still_queued(current_task) {
+                break;
+            }
+        }
         note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
         return Ok(true);
     }
@@ -2752,7 +2773,9 @@ pub fn futex_wait_requeue_pi(
     sched::set_blocked_on_pi(current_id, Some(pi_key.to_pi_wait()));
 
     // Arm a one-shot timeout if requested.  The same timer covers both the
-    // condvar-wait phase and the post-requeue PI-wait phase.
+    // condvar-wait phase and the post-requeue PI-wait phase. The deadline is
+    // taken first, so the timer fires at or after it.
+    let deadline = timeout_ns.map(|ns| crate::hrtimer::now_ns().saturating_add(ns));
     let timer_handle = match timeout_ns {
         Some(ns) => {
             fn rq_timeout_wake(tid: u64) {
@@ -2789,11 +2812,13 @@ pub fn futex_wait_requeue_pi(
             break Ok(());
         }
 
-        // Not the owner.  The only wakes that reach a requeue-PI waiter are
-        // an ownership transfer (handled above) or the timeout timer —
-        // cmp_requeue_pi requeues us *without* waking.  So with no timeout
-        // this wake is spurious: re-block.
-        if timeout_ns.is_none() {
+        // Not the owner.  The wakes meant for a requeue-PI waiter are an
+        // ownership transfer (handled above) and the timeout timer --
+        // cmp_requeue_pi requeues us *without* waking. Any other ending of the
+        // park (a wake recorded for an earlier wait, `sched::Task::mark_ready`)
+        // is spurious, and so is one before the deadline: re-block. Only the
+        // clock says the timeout has come.
+        if deadline.is_none_or(|d| crate::hrtimer::now_ns() < d) {
             drop(table);
             continue;
         }

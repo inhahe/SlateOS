@@ -1129,8 +1129,11 @@ impl Task {
     /// then wait for a wake that has already come and gone, with nothing left
     /// to end it. One kept that turns out to be owed to nothing (a timer that
     /// fired after its wait ended another way, a wake aimed at a park a stop
-    /// interrupted) costs the next park an early return, which every caller of
-    /// a park already survives by checking its condition again.
+    /// interrupted) costs the next park an early return, which a park's caller
+    /// must survive by checking its condition again and parking again: every
+    /// one in the kernel was audited for it on 2026-10-15, and the semaphore,
+    /// the kernel-task futex wait, requeue-PI's timeout and `WaitQueue::wait`
+    /// made to.
     #[inline]
     pub fn mark_ready(&mut self, current_tick: u64) {
         // A wake from a real park banks the time spent parked as sleep

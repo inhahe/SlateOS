@@ -993,6 +993,10 @@ fn phase_registration_swept() -> KernelResult<()> {
         super::pipe::close(wh);
         return Err(KernelError::InternalError);
     }
+    // A park first, to spend any wake recorded for this task before now (one
+    // outlives preemption until a park takes it, `sched::Task::mark_ready`):
+    // what is measured below is only what the write itself plants.
+    sched::sleep_ns_interruptible(1_000_000);
     // The wait is over; this write must wake nobody.
     if super::pipe::try_write(wh, b"x").is_err() {
         serial_println!("[multiwait]   FAIL: post-wait write failed");

@@ -976,9 +976,6 @@ OPERATOR_OWNS: tuple[str, ...] = (
     ".claude/",
     "backups/",
     "CLAUDE.md",
-    # The project's licence: the operator's (MIT, written 2026-09-16; committed
-    # at the operator's word, 2026-10-09).
-    "LICENSE",
     "claude.md.bak",
     "design.txt",
     "design desicions.txt",

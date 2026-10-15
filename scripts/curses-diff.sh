@@ -377,6 +377,120 @@ refresh
 endwin
 EOF
 
+# Control characters through addch and addstr: carriage return, backspace,
+# tab and newline, at the start of a line, in its middle, past the right
+# margin after a wrap and at the bottom right corner -- with attributes on,
+# so that the blanks a tab or a newline makes carry them.
+scenario control-characters 'C C.UTF-8' <<'EOF'
+use_env 0
+initscr
+mvaddstr 0 0 one\x0dtwo
+mvaddstr 1 0 tab\there\tand\tthere
+mvaddstr 2 0 \tleading tab
+mvaddstr 3 74 wrapping round the edge
+addstr \x0dback at the start
+mvaddstr 5 4 back\x08\x08space
+mvaddstr 6 0 \x08at the start
+mvaddstr 7 0 line\nnext line
+mvaddstr 9 75 abcde\nnext
+mvaddstr 11 0 \t\t\t\t\t\t\t\t\t\t\tend
+attrset 240000
+mvaddstr 12 2 bold\tand reversed\tblanks
+mvaddstr 13 70 tail\nnewline with attributes
+attrset 0
+mvaddch 15 79 41
+addch d
+addch 9
+addch 8
+addch 41
+mvaddstr 22 74 corner text\x0dthe end
+getyx
+refresh
+getyx
+endwin
+EOF
+
+# shifted FROM TO DELTA: rows FROM..TO showing the text of row r+DELTA --
+# the screen scrolled by DELTA lines within FROM..TO, as a program moving its
+# own text would leave it.
+shifted() {
+  local r
+  for ((r = $1; r <= $2; r++)); do
+    printf 'mvaddstr %d 0 line %02d the quick brown fox jumps over the lazy dog\n' "$r" "$((r + $3))"
+  done
+}
+
+# More scrolling for the hash map and the three ways to move lines: a
+# scrolling region (csr), inserting and deleting lines (il/dl), and
+# indexing (ind/ri, indn/rin) -- by several lines, both ways, over the whole
+# screen and over part of it with lines fixed above and below.
+scenario scrolling-more 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  shifted 0 23 0;   echo refresh
+  shifted 0 23 3;   echo refresh
+  shifted 0 23 1;   echo refresh
+  shifted 5 15 3;   echo refresh
+  shifted 10 22 -2; echo refresh
+  shifted 0 22 1;   echo refresh
+  shifted 1 23 -1;  echo refresh
+  shifted 0 23 7;   echo refresh
+  shifted 3 20 -5;  echo refresh
+  echo 'mvaddstr 12 0 a line of its own'
+  shifted 13 23 1;  echo refresh
+  echo 'endwin'
+)
+
+# Attributes switched one into another, each way a terminal may have to do
+# it: with `sgr`, or without it (xterm-color, xterm-mono) one mode on and
+# off at a time -- the line-drawing set among them, and italics, which only
+# some terminals can end on their own.
+scenario attribute-transitions 'C' <<'EOF'
+use_env 0
+initscr
+attrset 200000
+addstr B
+addch 400071
+addch 600071
+addstr b
+attrset 220000
+addstr BU
+attrset 20000
+addstr U
+attrset 10000
+addstr S
+attrset 30000
+addstr SU
+attrset 80000000
+addstr I
+attrset 80200000
+addstr IB
+attrset 200000
+addstr B
+attrset 0
+addch 400071
+addstr n
+attrset 400000
+addstr qqq
+attrset 440000
+addstr qq
+attrset 40000
+addstr R
+attrset 140000
+addstr RD
+attrset 0
+addstr plain
+refresh
+mvaddstr 1 0 second
+attrset 820000
+addstr hidden
+attrset 1000000
+addstr protected
+attrset 0
+refresh
+endwin
+EOF
+
 # Every attribute beside a colour pair -- what a terminal's `ncv` takes away
 # -- and the colours themselves at numbers only direct colour has.
 scenario colour-attributes 'C' <<'EOF'

@@ -336,7 +336,9 @@ pub fn search_list_tic(env: &Env, tic_dir: Option<&[u8]>) -> Vec<Vec<u8>> {
     let mut current: Vec<u8> = Vec::new();
     for &c in &blob {
         if c == PATHSEP
-            && !(current.len() == 3 && quick_prefix(&[current.as_slice(), b":"].concat()))
+            && !(c == b':'
+                && current.len() == 3
+                && quick_prefix(&[current.as_slice(), b":"].concat()))
         {
             list.push(std::mem::take(&mut current));
         } else {
@@ -884,14 +886,13 @@ mod tests {
     use super::*;
 
     /// A scratch directory, removed when dropped.
-    #[cfg(unix)]
     struct Scratch(PathBuf);
 
-    #[cfg(unix)]
     impl Scratch {
         fn new(tag: &str) -> Self {
             let p =
                 std::env::temp_dir().join(format!("terminfo-test-{tag}-{}", std::process::id()));
+            // A directory left by an earlier run, or none: created afresh.
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Self(p)
@@ -899,6 +900,10 @@ mod tests {
         fn bytes(&self) -> Vec<u8> {
             bytes_of(self.0.as_os_str())
         }
+    }
+
+    #[cfg(unix)]
+    impl Scratch {
         fn put(&self, name: &str, data: &[u8]) {
             let dir = self.0.join(&name[..1]);
             std::fs::create_dir_all(&dir).unwrap();
@@ -906,7 +911,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -1069,10 +1073,9 @@ mod tests {
         assert!(tgetent(b"zz-paper", &env).is_ok());
     }
 
-    // A Windows path's drive colon is a search-list separator.
-    #[cfg(unix)]
     #[test]
     fn the_search_list_is_built_as_upstream_builds_it() {
+        let sep = [PATHSEP];
         let a = Scratch::new("list-a");
         let b = Scratch::new("list-b");
         let env = Env {
@@ -1081,9 +1084,11 @@ mod tests {
             terminfo_dirs: Some(
                 [
                     b.bytes().as_slice(),
-                    b"::",
+                    &sep,
+                    &sep,
                     a.bytes().as_slice(),
-                    b":/nonexistent-terminfo",
+                    &sep,
+                    b"/nonexistent-terminfo",
                 ]
                 .concat(),
             ),

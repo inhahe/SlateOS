@@ -37,12 +37,19 @@
 # names this build; a failed write to standard output is reported; and an
 # empty number is reported with no reason, where upstream prints whatever
 # `errno` its start-up left. See `userspace/coreutils/src/bin/kill.rs`.
+#
+# Not compared at all: SlateOS's requests -- `--close`, `--terminate`,
+# `--force`, `--via`, `--timeout` (design-decisions §1072) -- which upstream
+# has no counterpart for, and their paragraph under our usage, which is taken
+# out of our output before every comparison. Off SlateOS no program answers a
+# request, so `kill PID` is `SIGTERM` here exactly as upstream sends it; the
+# requests themselves are held by `kill.rs`'s tests.
 set -u
 
 DIFF_PROG='kill'
 # `command -v kill` finds the shell's builtin, which is not what is compared.
 DIFF_REF='/usr/bin/kill /bin/kill'
-DIFF_NEED='unshare setsid timeout'
+DIFF_NEED='unshare setsid timeout perl'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -135,6 +142,10 @@ compare() {
   local p=$work/c$case_no
   run_side ours "$p" "$@"
   run_side gnu "$p" "$@"
+  # Our usage ends with a paragraph upstream has no counterpart for: SlateOS's
+  # requests (deliberate difference 6), taken out before comparing.
+  perl -0pi -e "s/\nSlateOS's requests, which a program may answer itself[^\n]*\n(?: [^\n]*\n)*//" \
+    "$p.ours.out" "$p.ours.err"
   LABEL="kill $*${REDIR:+ $REDIR}"
   REDIR=''
   local o_rc g_rc

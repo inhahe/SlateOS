@@ -1,42 +1,79 @@
-.TH KILL 1 "2026-05-18" "SlateOS" "User Commands"
+.TH KILL 1 "2026-10-15" "SlateOS" "User Commands"
 .SH NAME
-kill \- send a signal to a process
+kill \- stop a process, or send it a signal
 .SH SYNOPSIS
 .B kill
 [\fIOPTIONS\fR] \fIPID\fR...
+.br
+.B kill
+\fB\-l\fR [\fISIGNAL\fR]
+.br
+.B kill
+\fB\-L\fR
 .SH DESCRIPTION
-Send a signal to the specified process(es).  The default signal is
-SIGTERM (15), which requests graceful termination.
+procps-ng's \fBkill\fR, with SlateOS's three ways to stop a program.
 .PP
-On SlateOS, process lifecycle is primarily managed through IPC messages
-rather than Unix signals.  The \fBkill\fR command translates signal
-numbers into the appropriate IPC shutdown/terminate messages.
+With no signal named, each process is asked to \fIterminate\fR: to stop
+now and cleanly, asking nothing.  A SlateOS program that answers such
+requests is asked by message; any other process \(em every program ported
+from Linux \(em is sent SIGTERM, as on Linux.
+.PP
+A signal named with \fB\-\fR\fISIGNAL\fR, \fB\-s\fR or \fB\-q\fR is sent
+exactly as named, the Linux way, whoever the process is.
+.PP
+A negative \fIPID\fR is a process group, which is only ever signalled.
 .SH OPTIONS
 .TP
-\fB\-s\fR \fISIGNAL\fR
-Specify the signal to send by name.
+\fB\-\fR\fISIGNAL\fR, \fB\-s\fR, \fB\-\-signal\fR \fISIGNAL\fR
+Send \fISIGNAL\fR, by name (\fBHUP\fR, \fBSIGKILL\fR, \fBRTMIN+3\fR) or
+number.
 .TP
-\fB\-l\fR
-List all available signal names.
+\fB\-q\fR, \fB\-\-queue\fR \fIVALUE\fR
+Send the signal with \fBsigqueue\fR(3), carrying \fIVALUE\fR.
 .TP
-\fB\-9\fR
-Send SIGKILL (force kill, cannot be caught).
+\fB\-l\fR, \fB\-\-list\fR[=\fISIGNAL\fR]
+List the signal names, or translate one between name and number.
 .TP
-\fB\-15\fR
-Send SIGTERM (graceful termination, default).
+\fB\-L\fR, \fB\-\-table\fR
+List the signal names and numbers in a table.
 .TP
-\fB\-\fR\fINUM\fR
-Send signal number NUM.
+\fB\-\-close\fR
+Ask each process to close, as its own close command does: it may ask
+about unsaved work, and may decline.  A process that does not answer
+requests is not touched, and \fBkill\fR says so.
+.TP
+\fB\-\-terminate\fR
+Ask each process to stop now, asking nothing (the default).
+.TP
+\fB\-\-force\fR
+End each process at once (SIGKILL).
+.TP
+\fB\-\-via=message\fR, \fB\-\-via=signal\fR
+Send the request only by message (a process that does not answer is
+refused) or only by signal.
+.TP
+\fB\-\-timeout\fR \fIMS\fR \fIREQUEST\fR
+If a process is still there \fIMS\fR milliseconds later, send it
+\fIREQUEST\fR: \fBclose\fR, \fBterminate\fR or \fBforce\fR.  May be
+given more than once.
+.PP
+The request options are recognised only when spelled in full.
+\fBpkill\fR(1) and \fBkillall\fR(1) take the same ones.
+.SH EXIT STATUS
+0 when every process was reached, 1 otherwise.
 .SH EXAMPLES
 .nf
-kill 1234              Send SIGTERM to process 1234
-kill -9 1234           Force kill process 1234
-kill -s HUP 5678      Send SIGHUP to reload config
-kill -l                List all signals
+kill 1234                       Ask 1234 to terminate (SIGTERM if it
+                                does not answer requests)
+kill --close 1234               Ask 1234 to close, as its window would
+kill --close --timeout 10000 terminate --timeout 5000 force 1234
+                                Close; terminate after 10 s; force after 5 s more
+kill -9 1234                    Send SIGKILL
+kill -s HUP 5678                Send SIGHUP
+kill -l                         List the signal names
 .fi
 .SH SEE ALSO
-.BR ps (1),
+.BR pkill (1),
 .BR killall (1),
+.BR ps (1),
 .BR signal (7)
-.SH AUTHOR
-SlateOS Contributors.

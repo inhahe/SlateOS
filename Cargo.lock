@@ -695,6 +695,7 @@ dependencies = [
  "modechange",
  "optionalfile",
  "procinfo",
+ "procstop",
  "pwdb",
  "quoting",
  "randrange",
@@ -3290,6 +3291,14 @@ dependencies = [
 [[package]]
 name = "procinfo"
 version = "0.1.0"
+
+[[package]]
+name = "procstop"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "libservicebus",
+]
 
 [[package]]
 name = "programs"

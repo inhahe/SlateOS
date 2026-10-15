@@ -13,10 +13,33 @@
 //! written here from the manual, and `userspace/kill`, which asked a service
 //! that was never written to stop the process and, when that failed -- every
 //! time -- ended it on the spot. So a plain `kill PID` was sometimes
-//! `kill -9 PID`. Both are gone; `kill PID` is `SIGTERM` everywhere.
-//! SlateOS's own ways of asking a program to stop -- *close*, which may ask
-//! the user to save, and *terminate* as a message rather than a signal --
-//! join this program when the lifecycle protocol exists (§1072).
+//! `kill -9 PID`. Both are gone; `kill PID` stops a program without forcing
+//! it, everywhere.
+//!
+//! # SlateOS's three requests (§1072)
+//!
+//! Besides the signals, a process can be *asked* -- through the lifecycle
+//! endpoint a SlateOS program registers (`libservicebus::lifecycle`) -- to
+//! **close** (what its own close command does: it may ask the user to save,
+//! and may decline) or to **terminate** (stop now, cleanly, asking nothing);
+//! **force** ends it without asking anyone (`SIGKILL`). The user picks the
+//! request, the program picks the route:
+//!
+//! | you type | asked | route |
+//! |---|---|---|
+//! | `kill PID`, `--terminate` | terminate | the message if the program answers it, else `SIGTERM` |
+//! | `--close` | close | the message if it answers; refused otherwise (no signal means close) |
+//! | `--force` | force | `SIGKILL` |
+//! | `-SIG`, `-s SIG`, `-q V` | exactly that signal | always the signal, as a script that names one means |
+//! | `--via=message`, `--via=signal` | as asked | only that route: a program that does not answer is refused, or no message is tried |
+//! | `--timeout MS REQUEST` | `REQUEST`, after `MS` milliseconds | to each process still there |
+//!
+//! Off SlateOS no program answers, so `kill PID` there is upstream's
+//! `SIGTERM` exactly; a process group (a negative PID) is always signalled.
+//! The options are SlateOS's -- deliberate difference 6 -- and so is the
+//! paragraph listing them under the usage, which `scripts/kill-diff.sh`
+//! takes out before comparing. `pkill` and `killall` take the same ones:
+//! [`coreutils::procps::requests`] is all three's.
 //!
 //! # How upstream reads its command line
 //!
@@ -77,6 +100,10 @@
 //!    call left behind -- `No such file or directory` on Ubuntu, from its
 //!    start-up -- which is `free`'s and `vmstat`'s divergence too
 //!    ([`coreutils::procps::strutils`]).
+//! 6. **`--close`, `--terminate`, `--force`, `--via` and `--timeout`**, the
+//!    requests above, and their paragraph under the usage. They are matched
+//!    only when spelled in full, so every abbreviation means what it does
+//!    upstream: `--t` is still `--table`.
 //!
 //! On SlateOS `sigqueue` is not delivered yet, so `-q` reports `Function not
 //! implemented` for each process, as `pkill -q` does.
@@ -91,6 +118,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use coreutils::getopt::{Opt, Optopt, Program, Takes};
+use coreutils::procps::requests::{self, Asker, Explain as _, Options, Refusal};
 use coreutils::procps::signals::{
     NUMBER_OF_SIGNALS, pretty_print_signals, signal_name_to_number, signal_number_to_name,
     skill_sig_option, unix_print_signals,
@@ -108,7 +136,8 @@ const KILL: Program = Program::new("kill", 1);
 /// Upstream's option string.
 const SHORTS: &str = "l::Ls:hVq:";
 
-/// Upstream's `longopts`, in its order.
+/// Upstream's `longopts`, in its order; SlateOS's requests follow them
+/// (deliberate difference 6).
 const LONGS: &[(&str, Takes)] = &[
     ("list", Takes::Optional),
     ("table", Takes::Nothing),
@@ -118,28 +147,37 @@ const LONGS: &[(&str, Takes)] = &[
     ("queue", Takes::Required),
 ];
 
-/// `SIGTERM`, the signal with none named.
-const SIGTERM: i32 = 15;
-
 /// What the program asks of the system: a fake in the tests, which must
 /// signal nothing.
-trait System {
-    /// `kill (pid, sig)`, `pid` as `kill(2)` takes it.
-    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32>;
+trait System: Asker {
     /// `sigqueue (pid, sig, value)`.
     fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32>;
     /// The C library's `SIGRTMIN`.
     fn rtmin(&self) -> i32;
 }
 
-/// The C library.
+/// The C library, and SlateOS's lifecycle calls.
 struct Libc;
 
-impl System for Libc {
+impl Asker for Libc {
     fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
-        libcall::kill_any(pid, sig)
+        requests::System.kill(pid, sig)
     }
 
+    fn answers(&self, pid: i32) -> bool {
+        requests::System.answers(pid)
+    }
+
+    fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
+        requests::System.ask(pid, close)
+    }
+
+    fn nap(&self, ms: u64) {
+        requests::System.nap(ms);
+    }
+}
+
+impl System for Libc {
     fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
         libcall::sigqueue_any(pid, sig, value)
     }
@@ -196,6 +234,8 @@ fn usage_text(short: &[u8]) -> Vec<u8> {
           -V, --version  output version information and exit\n\
           \nFor more details see kill(1).\n",
     );
+    // SlateOS's requests (deliberate difference 6).
+    t.extend_from_slice(requests::USAGE);
     t
 }
 
@@ -265,9 +305,14 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
     }
 
     let mut signo = skill_sig_option(&mut argv, rtmin);
+    // A signal named on the command line -- here, or with `-s` or `-q`
+    // below -- is sent as it is, the Linux way; without one, *terminate* is
+    // asked (§1072), which is `SIGTERM` to any program that does not answer.
+    let mut named_signal = signo >= 0;
     if signo < 0 {
-        signo = SIGTERM;
+        signo = requests::SIGTERM;
     }
+    let mut asked = Options::default();
     let words: Vec<OsString> = argv
         .iter()
         .skip(1)
@@ -276,7 +321,11 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
 
     let mut queue: Option<i32> = None;
     let mut operands: Vec<Vec<u8>> = Vec::new();
-    let mut parser = KILL.parse(&words, SHORTS, LONGS).keep_going(true);
+    let longs: Vec<(&str, Takes)> = LONGS.iter().chain(requests::LONGS).copied().collect();
+    let mut parser = KILL
+        .parse(&words, SHORTS, &longs)
+        .keep_going(true)
+        .whole_only(requests::NAMES);
     while let Some(item) = parser.next() {
         let opt = match item {
             Ok(opt) => opt,
@@ -338,6 +387,15 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
             Opt::Short(b's', value) | Opt::Long("signal", value) => {
                 let name = value.as_ref().map(|v| os_bytes(v).into_owned());
                 signo = signal_name_to_number(name.as_deref().unwrap_or_default(), rtmin);
+                named_signal = true;
+            }
+            Opt::Long(name, value) if requests::NAMES.contains(&name) => {
+                let value = value.as_ref().map(|v| os_bytes(v).into_owned());
+                let next = || parser.take_word().map(|w| os_bytes(&w).into_owned());
+                if let Err(complaint) = asked.take(name, value.as_deref(), next) {
+                    names.warnx(complaint.as_bytes());
+                    return usage(To::Err, out);
+                }
             }
             Opt::Short(b'h', _) | Opt::Long("help", _) => return usage(To::Out, out),
             Opt::Short(b'V', _) | Opt::Long("version", _) => {
@@ -349,6 +407,7 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
             Opt::Short(b'q', value) | Opt::Long("queue", value) => {
                 let text = value.as_ref().map(|v| os_bytes(v).into_owned());
                 let text = text.unwrap_or_default();
+                named_signal = true;
                 match strutils::strtol(&text) {
                     // `sigval.sival_int = strtol_or_err (...)`: a `long` cut
                     // to `int`.
@@ -372,8 +431,24 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
     if operands.is_empty() {
         return usage(To::Err, out);
     }
+    if named_signal && asked.conflict_with_a_signal() {
+        names.warnx(Options::CONFLICT.as_bytes());
+        return usage(To::Err, out);
+    }
 
     let mut exitvalue = 0;
+    // `error (0, errno, "(%ld)", pid)`: the `long`, not the cut `pid_t` the
+    // call was made with.
+    let mut refused = |pid: i64, why: Refusal| {
+        let mut line = names.full.clone();
+        line.extend_from_slice(format!(": ({pid}): ").as_bytes());
+        line.extend_from_slice(why.text().as_bytes());
+        line.push(b'\n');
+        stdfd::diag_bytes(&line);
+        exitvalue = 1;
+    };
+    // The processes the first request reached, for a `--timeout` to look at.
+    let mut reached: Vec<(i64, i32)> = Vec::new();
     for word in &operands {
         let pid = match strutils::strtol(word) {
             Ok(pid) => pid,
@@ -382,23 +457,25 @@ fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
                 return 1;
             }
         };
-        let sent = match queue {
-            Some(value) => sys.sigqueue(scanf::low_i32(pid), signo, value),
-            None => sys.kill(scanf::low_i32(pid), signo),
+        let target = scanf::low_i32(pid);
+        let sent = if named_signal {
+            match queue {
+                Some(value) => sys.sigqueue(target, signo, value),
+                None => sys.kill(target, signo),
+            }
+            .map_err(Refusal::Errno)
+        } else {
+            requests::deliver(sys, target, asked.request(), asked.via).map(drop)
         };
-        if let Err(errno) = sent {
-            // `error (0, errno, "(%ld)", pid)`: the `long`, not the cut
-            // `pid_t` the call was made with.
-            let mut line = names.full.clone();
-            line.extend_from_slice(format!(": ({pid}): ").as_bytes());
-            line.extend_from_slice(
-                coreutils::errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes(),
-            );
-            line.push(b'\n');
-            stdfd::diag_bytes(&line);
-            exitvalue = 1;
+        match sent {
+            Ok(()) => reached.push((pid, target)),
+            Err(why) => refused(pid, why),
         }
     }
+
+    requests::escalate(sys, reached, &asked.escalations, asked.via, |&pid, why| {
+        refused(pid, why);
+    });
     exitvalue
 }
 
@@ -448,7 +525,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::{System, run, strtosig};
+    use super::{Asker, System, run, strtosig};
     use std::cell::RefCell;
 
     /// One send: the call, the PID, the signal, and `sigqueue`'s value.
@@ -459,19 +536,147 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         sent: RefCell<Vec<Sent>>,
+        /// The processes that answer lifecycle requests.
+        answering: Vec<i32>,
+        /// The processes that end once `--timeout` has waited a little.
+        slow: Vec<i32>,
+        /// The processes that have ended.
+        gone: RefCell<Vec<i32>>,
     }
 
-    impl System for Fake {
+    /// A system on which `answering` answer requests and `slow` end after
+    /// the first wait.
+    fn sys(answering: &[i32], slow: &[i32]) -> Fake {
+        Fake {
+            answering: answering.to_vec(),
+            slow: slow.to_vec(),
+            ..Fake::default()
+        }
+    }
+
+    #[test]
+    fn a_program_that_answers_is_asked_and_one_that_does_not_is_signalled() {
+        // `kill PID`: terminate, as a message to 5, as SIGTERM to 6.
+        let (status, sent, _) = go_on(sys(&[5], &[]), &["5", "6"]);
+        assert_eq!(status, 0);
+        assert_eq!(sent, vec![("terminate", 5, 0, None), ("kill", 6, 15, None)]);
+        // `--terminate` is the same thing said out loud.
+        let (_, sent, _) = go_on(sys(&[5], &[]), &["--terminate", "5", "6"]);
+        assert_eq!(sent, vec![("terminate", 5, 0, None), ("kill", 6, 15, None)]);
+    }
+
+    #[test]
+    fn close_is_asked_and_refused_where_nothing_answers() {
+        let (status, sent, _) = go_on(sys(&[5], &[]), &["--close", "5", "6"]);
+        // 6 does not answer: refused (after the null signal found it there),
+        // and the status says so.
+        assert_eq!(status, 1);
+        assert_eq!(sent, vec![("close", 5, 0, None), ("kill", 6, 0, None)]);
+        // A process that is not there is said to be not there.
+        let (status, _, _) = go_on(sys(&[], &[]), &["--close", "999999"]);
+        assert_eq!(status, 1);
+        // No signal means close.
+        let (status, sent, _) = go_on(sys(&[5], &[]), &["--close", "--via=signal", "5"]);
+        assert_eq!((status, sent), (1, vec![]));
+    }
+
+    #[test]
+    fn force_is_sigkill_whoever_answers() {
+        let (status, sent, _) = go_on(sys(&[5], &[]), &["--force", "5"]);
+        assert_eq!((status, sent), (0, vec![("kill", 5, 9, None)]));
+    }
+
+    #[test]
+    fn a_route_can_be_insisted_on() {
+        // Only the message: 6 does not answer, and is refused.
+        let (status, sent, _) = go_on(sys(&[5], &[]), &["--via=message", "5", "6"]);
+        assert_eq!(status, 1);
+        assert_eq!(sent, vec![("terminate", 5, 0, None), ("kill", 6, 0, None)]);
+        // Only the signal: 5 answers, and is signalled all the same.
+        let (_, sent, _) = go_on(sys(&[5], &[]), &["--via=signal", "5"]);
+        assert_eq!(sent, vec![("kill", 5, 15, None)]);
+        assert_eq!(go(&["--via=carrier-pigeon", "5"]).0, 1);
+    }
+
+    #[test]
+    fn a_process_group_is_signalled_and_never_asked() {
+        // (`-5` would be the signal 5: any word that is one is taken first.)
+        let (status, sent, _) = go_on(sys(&[1234], &[]), &["--", "-1234"]);
+        assert_eq!((status, sent), (0, vec![("kill", -1234, 15, None)]));
+        let (status, sent, _) = go_on(sys(&[1234], &[]), &["--close", "--", "-1234"]);
+        assert_eq!((status, sent), (1, vec![]));
+    }
+
+    #[test]
+    fn a_named_signal_is_sent_as_named_and_a_request_beside_it_is_refused() {
+        let (_, sent, _) = go_on(sys(&[5], &[]), &["-INT", "5"]);
+        assert_eq!(sent, vec![("kill", 5, 2, None)]);
+        let (_, sent, _) = go_on(sys(&[5], &[]), &["-s", "TERM", "5"]);
+        assert_eq!(sent, vec![("kill", 5, 15, None)]);
+        assert_eq!(go(&["-9", "--close", "5"]).0, 1);
+        assert_eq!(go(&["-s", "INT", "--via=message", "5"]).0, 1);
+    }
+
+    #[test]
+    fn a_timeout_escalates_to_what_is_still_there() {
+        // 5 answers and is slow; 6 ignores the request.
+        let (status, sent, _) = go_on(
+            sys(&[5, 6], &[5]),
+            &["--close", "--timeout", "40", "force", "5", "6"],
+        );
+        assert_eq!(status, 0);
+        assert_eq!(
+            sent,
+            vec![
+                ("close", 5, 0, None),
+                ("close", 6, 0, None),
+                // Both still there: wait a step.
+                ("kill", 5, 0, None),
+                ("nap", 0, 20, None),
+                // 5 has gone; 6 has not -- wait the rest.
+                ("kill", 5, 0, None),
+                ("kill", 6, 0, None),
+                ("nap", 0, 20, None),
+                // Out of time: 6 alone is forced.
+                ("kill", 5, 0, None),
+                ("kill", 6, 0, None),
+                ("kill", 6, 9, None),
+            ]
+        );
+        // A request that is not one, or no milliseconds.
+        assert_eq!(go(&["--timeout", "40", "harder", "5"]).0, 1);
+        assert_eq!(go(&["--timeout", "soon", "force", "5"]).0, 1);
+    }
+
+    impl Asker for Fake {
         fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
             self.sent.borrow_mut().push(("kill", pid, sig, None));
             if sig < 0 {
                 Err(22)
-            } else if pid == 999_999 {
+            } else if pid == 999_999 || self.is_gone(pid) {
                 Err(3)
             } else {
                 Ok(())
             }
         }
+        fn answers(&self, pid: i32) -> bool {
+            self.answering.contains(&pid)
+        }
+        fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
+            let what = if close { "close" } else { "terminate" };
+            self.sent.borrow_mut().push((what, pid, 0, None));
+            Ok(())
+        }
+        fn nap(&self, ms: u64) {
+            self.sent
+                .borrow_mut()
+                .push(("nap", 0, i32::try_from(ms).unwrap(), None));
+            // A process that takes its time ends after the first wait.
+            self.gone.borrow_mut().extend(self.slow.iter().copied());
+        }
+    }
+
+    impl System for Fake {
         fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
             self.sent
                 .borrow_mut()
@@ -483,9 +688,20 @@ mod tests {
         }
     }
 
+    impl Fake {
+        /// `kill (pid, 0)` for a process that has gone is `ESRCH`.
+        fn is_gone(&self, pid: i32) -> bool {
+            self.gone.borrow().contains(&pid)
+        }
+    }
+
     /// The status, what was sent, and standard output.
     fn go(words: &[&str]) -> (u8, Vec<Sent>, String) {
-        let sys = Fake::default();
+        go_on(Fake::default(), words)
+    }
+
+    /// [`go`] on a system set up beforehand.
+    fn go_on(sys: Fake, words: &[&str]) -> (u8, Vec<Sent>, String) {
         let mut argv = vec![b"kill".to_vec()];
         argv.extend(words.iter().map(|w| w.as_bytes().to_vec()));
         let mut out = Vec::new();
@@ -608,8 +824,26 @@ mod tests {
             out.starts_with("\nUsage:\n kill [options] <pid> [...]\n"),
             "{out}"
         );
-        assert!(out.ends_with("\nFor more details see kill(1).\n"), "{out}");
+        // Upstream's usage, then SlateOS's paragraph -- whose first line is
+        // what scripts/kill-diff.sh finds it by.
+        let upstream =
+            out.strip_suffix(std::str::from_utf8(coreutils::procps::requests::USAGE).unwrap());
+        assert!(
+            upstream.is_some_and(|u| u.ends_with("\nFor more details see kill(1).\n")),
+            "{out}"
+        );
+        assert!(out.contains("\nSlateOS's requests, which a program may answer itself"));
         assert_eq!(go(&["-V"]).2, "kill from SlateOS coreutils 0.1.0\n");
+    }
+
+    #[test]
+    fn the_requests_are_matched_whole_and_upstream_s_abbreviations_kept() {
+        // `--t` is still `--table`, as upstream reads it.
+        let (status, sent, out) = go(&["--t"]);
+        assert_eq!((status, sent), (0, vec![]));
+        assert!(out.contains("TERM"), "{out}");
+        // `--clo` is no option at all.
+        assert_eq!(go(&["--clo", "5"]), (1, vec![], String::new()));
     }
 
     #[test]

@@ -30,11 +30,18 @@
 #
 # The module's deliberate differences: `-V` names this build; a failed write
 # to standard output is reported. See `userspace/coreutils/src/bin/killall.rs`.
+#
+# Not compared at all: SlateOS's requests -- `--close`, `--terminate`,
+# `--force`, `--via`, `--timeout` (design-decisions §1072) -- which upstream
+# has no counterpart for, and their paragraph in our usage, which is taken out
+# of our output before every comparison. Off SlateOS no program answers a
+# request, so a plain `killall NAME` is upstream's `SIGTERM` and is compared
+# as such.
 set -u
 
 DIFF_PROG='killall'
 DIFF_REF='/usr/bin/killall /bin/killall'
-DIFF_NEED='unshare setsid timeout'
+DIFF_NEED='unshare setsid timeout perl'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -142,6 +149,10 @@ $(head -5 "$p.gnu.nserr")"
   for f in "$p.ours.out" "$p.gnu.out" "$p.ours.err" "$p.gnu.err"; do
     sed -i "s|$fx|@BIN|g" "$f"
   done
+  # Our usage holds a paragraph upstream has no counterpart for: SlateOS's
+  # requests (deliberate difference 6), taken out before comparing.
+  perl -0pi -e "s/\nSlateOS's requests, which a program may answer itself[^\n]*\n(?: [^\n]*\n)*//" \
+    "$p.ours.out" "$p.ours.err"
   if cmp -s "$p.ours.out" "$p.gnu.out" && cmp -s "$p.ours.err" "$p.gnu.err" \
      && cmp -s "$p.ours.fate" "$p.gnu.fate"; then
     AGREED=yes

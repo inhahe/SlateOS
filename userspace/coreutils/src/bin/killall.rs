@@ -61,6 +61,18 @@
 //! 5. **A regular expression the engine gives up on** -- a backreference
 //!    search past its step budget -- ends the run, `killall: regex error`,
 //!    status 1, where glibc has no budget and answers eventually.
+//! 6. **`kill`'s requests** (design-decisions §1072,
+//!    [`coreutils::procps::requests`]): `--close`, `--terminate`, `--force`,
+//!    `--via` and `--timeout`, matched only when spelled in full, so every
+//!    abbreviation means what it does upstream; and their paragraph under the
+//!    usage, which `scripts/killall-diff.sh` takes out before comparing. With
+//!    no signal named, each process is asked to *terminate* -- through its
+//!    lifecycle endpoint if it answers one, else with `SIGTERM`, upstream's
+//!    default exactly -- and `-v` says `Asked NAME(PID) to terminate` of one
+//!    that was asked; `-i` asks `Close NAME(PID) ?` for `--close`. A signal
+//!    named (`-SIGNAL`, `-s`) is sent as named, and a request or a route
+//!    beside one is the usage. A process group (`-g`) is only ever
+//!    signalled.
 //!
 //! On SlateOS a process is signalled with `kill(2)`: its kernel has no
 //! pidfds, which is the case upstream falls back to `kill` for
@@ -76,6 +88,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use coreutils::getopt::{Opt, Program, Takes};
+use coreutils::procps::requests::{self, Asker, Explain as _, Refusal, Request, Route};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
 use ere::{Regex, Syntax};
@@ -88,7 +101,8 @@ const KILLALL: Program = Program::new("killall", 1);
 /// Upstream's option string.
 const SHORTS: &str = "egy:o:ilqrs:u:vwZ:VIn:";
 
-/// Upstream's `options[]`, in its order.
+/// Upstream's `options[]`, in its order; SlateOS's requests follow them
+/// (deliberate difference 6).
 const LONGS: &[(&str, Takes)] = &[
     ("exact", Takes::Nothing),
     ("ignore-case", Takes::Nothing),
@@ -163,8 +177,8 @@ const SIGNALS: [(i32, &str); 31] = [
 struct Exit(u8);
 
 /// What the program asks of the system beyond `/proc`: a fake in the tests,
-/// which must signal nothing.
-trait System {
+/// which must signal nothing. The requests' calls are [`Asker`]'s.
+trait System: Asker {
     /// Send `sig` to `pid` -- as upstream's `my_send_signal`: through the
     /// pidfd of the process's `/proc` directory when `pid` is positive and
     /// the system has pidfds, else `kill(2)`.
@@ -184,6 +198,24 @@ trait System {
 
 /// The system.
 struct Libc;
+
+impl Asker for Libc {
+    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
+        requests::System.kill(pid, sig)
+    }
+
+    fn answers(&self, pid: i32) -> bool {
+        requests::System.answers(pid)
+    }
+
+    fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
+        requests::System.ask(pid, close)
+    }
+
+    fn nap(&self, ms: u64) {
+        requests::System.nap(ms);
+    }
+}
 
 impl System for Libc {
     fn send(&self, dir: Option<&std::fs::File>, pid: i32, sig: i32) -> Result<(), i32> {
@@ -285,6 +317,11 @@ struct Opts {
     younger_than: i64,
     older_than: i64,
     ns_pid: i32,
+    /// Whether a signal was named, to be sent as named rather than a
+    /// request (deliberate difference 6).
+    named_signal: bool,
+    /// SlateOS's requests.
+    asked: requests::Options,
 }
 
 /// One NAME, as `build_nameinfo` keeps it: its length, and for a path the
@@ -338,8 +375,11 @@ fn usage(msg: Option<&str>) -> Exit {
           -n,--ns PID         match processes that belong to the same namespaces\n                      \
           as PID\n  \
           -Z,--context REGEXP kill only process(es) having context\n                      \
-          (must precede other arguments)\n\n",
+          (must precede other arguments)\n",
     );
+    // Deliberate difference 6, before upstream's closing blank line.
+    text.extend_from_slice(requests::USAGE);
+    text.push(b'\n');
     complain(&text);
     Exit(1)
 }
@@ -685,21 +725,19 @@ fn bit(i: usize) -> u64 {
 /// `ask (name, pid, signal)`: the question on standard output, an answer
 /// from standard input -- `y` or `n` in front, as `rpmatch` reads it in the
 /// C locale; anything else asks again; an empty line or the end of input is
-/// no.
+/// no. `verb` begins it: upstream's `Kill` for `SIGTERM`, `Signal` for any
+/// other, and SlateOS's `Close` for a close request.
 fn ask(
     out: &mut dyn Write,
     input: &mut dyn BufRead,
+    verb: &[u8],
     name: &[u8],
     pid: i32,
-    signal: i32,
     process_group: bool,
 ) -> bool {
     loop {
-        let mut q = if signal == SIGTERM {
-            b"Kill ".to_vec()
-        } else {
-            b"Signal ".to_vec()
-        };
+        let mut q = verb.to_vec();
+        q.push(b' ');
         q.extend_from_slice(name);
         q.extend_from_slice(
             format!(
@@ -793,6 +831,16 @@ impl Killall<'_> {
         let pid_table = self.create_pid_table()?;
         let mut found: u64 = 0;
         let mut pid_killed: Vec<i32> = Vec::new();
+        // What was sent to, for the `--timeout`s: the name and PID (or
+        // group) to speak of it by, and where to send.
+        let mut reached: Vec<((Vec<u8>, i32), i32)> = Vec::new();
+        let verb: &[u8] = if !o.named_signal && o.asked.request() == Request::Close {
+            b"Close"
+        } else if signal == SIGTERM {
+            b"Kill"
+        } else {
+            b"Signal"
+        };
         // `calloc (pids, sizeof (pid_t))`: zero for every process not (yet)
         // matched, which a matched one in group 0 then counts as seen.
         let mut pgids: Vec<i32> = vec![0; pid_table.len()];
@@ -892,7 +940,7 @@ impl Killall<'_> {
             } else {
                 pid
             };
-            if o.interactive && !ask(out, input, &comm, id, signal, o.process_group) {
+            if o.interactive && !ask(out, input, verb, &comm, id, o.process_group) {
                 continue;
             }
             let target = if o.process_group {
@@ -900,16 +948,36 @@ impl Killall<'_> {
             } else {
                 id
             };
-            match self.sys.send(dir.file(), target, signal) {
-                Ok(()) => {
+            let signal_it = |sig: i32| self.sys.send(dir.file(), target, sig);
+            let sent = if o.named_signal {
+                signal_it(signal)
+                    .map(|()| Route::Signal(signal))
+                    .map_err(Refusal::Errno)
+            } else {
+                let req = o.asked.request();
+                requests::deliver_with(self.sys, target, req, o.asked.via, signal_it)
+            };
+            match sent {
+                Ok(route) => {
                     if o.verbose {
-                        let mut text = b"Killed ".to_vec();
+                        let group = if o.process_group { "pgid " } else { "" };
+                        let mut text = match route {
+                            Route::Signal(_) => b"Killed ".to_vec(),
+                            Route::Message => b"Asked ".to_vec(),
+                        };
                         text.extend_from_slice(shown);
                         text.extend_from_slice(
-                            format!(
-                                "({}{id}) with signal {signal}\n",
-                                if o.process_group { "pgid " } else { "" }
-                            )
+                            match route {
+                                Route::Signal(sig) => format!("({group}{id}) with signal {sig}\n"),
+                                Route::Message => {
+                                    let what = if o.asked.request() == Request::Close {
+                                        "close"
+                                    } else {
+                                        "terminate"
+                                    };
+                                    format!("({group}{id}) to {what}\n")
+                                }
+                            }
                             .as_bytes(),
                         );
                         complain(&text);
@@ -918,11 +986,12 @@ impl Killall<'_> {
                         found |= bit(j);
                     }
                     pid_killed.push(id);
+                    reached.push(((shown.to_vec(), id), target));
                 }
-                Err(errno) => {
-                    if errno != ESRCH || o.interactive {
+                Err(why) => {
+                    if why != Refusal::Errno(ESRCH) || o.interactive {
                         let mut text = shown.to_vec();
-                        text.extend_from_slice(format!("({id}): {}\n", strerror(errno)).as_bytes());
+                        text.extend_from_slice(format!("({id}): {}\n", why.text()).as_bytes());
                         complain(&text);
                     }
                 }
@@ -938,6 +1007,15 @@ impl Killall<'_> {
                 }
             }
         }
+        // `--timeout`s, to what is still there.
+        let steps = &o.asked.escalations;
+        requests::escalate(self.sys, reached, steps, o.asked.via, |(shown, id), why| {
+            if why != Refusal::Errno(ESRCH) {
+                let mut text = shown.clone();
+                text.extend_from_slice(format!("({id}): {}\n", why.text()).as_bytes());
+                complain(&text);
+            }
+        });
         let error = if names.is_empty() {
             u8::from(pid_killed.is_empty())
         } else {
@@ -1028,15 +1106,18 @@ fn run(
                 .map(|w| os_bytes(w).into_owned())
         }
     };
-    let mut sig_num = SIGTERM;
+    // `None` until a signal is named: SIGTERM, or SlateOS's request.
+    let mut sig_num: Option<i32> = None;
     let mut uid: Option<u32> = None;
     let mut context: Option<Regex> = None;
     let mut skip_error: Option<usize> = None;
     let mut operands: Vec<Vec<u8>> = Vec::new();
+    let longs: Vec<(&str, Takes)> = LONGS.iter().chain(requests::LONGS).copied().collect();
     let mut parser = KILLALL
-        .parse(words, SHORTS, LONGS)
+        .parse(words, SHORTS, &longs)
         .long_only(true)
-        .keep_going(true);
+        .keep_going(true)
+        .whole_only(requests::NAMES);
     while let Some(item) = parser.next() {
         // glibc's `optind`, which counts `argv[0]`.
         let optind = parser.optind().saturating_add(1);
@@ -1056,10 +1137,10 @@ fn run(
                 }
                 match prev.get(1) {
                     Some(c) if c.is_ascii_uppercase() => {
-                        sig_num = get_signal(prev.get(1..).unwrap_or_default())?;
+                        sig_num = Some(get_signal(prev.get(1..).unwrap_or_default())?);
                     }
                     Some(c) if c.is_ascii_digit() => {
-                        sig_num = atoi(prev.get(1..).unwrap_or_default());
+                        sig_num = Some(atoi(prev.get(1..).unwrap_or_default()));
                     }
                     _ => return Err(usage(None)),
                 }
@@ -1073,6 +1154,13 @@ fn run(
         };
         match opt {
             Opt::Operand(word) => operands.push(os_bytes(word).into_owned()),
+            Opt::Long(name, v) if requests::NAMES.contains(&name) => {
+                let v = v.map(|v| os_bytes(&v).into_owned());
+                let next = || parser.take_word().map(|w| os_bytes(&w).into_owned());
+                if let Err(complaint) = k.opts.asked.take(name, v.as_deref(), next) {
+                    return Err(usage(Some(complaint)));
+                }
+            }
             Opt::Short(b'e', _) | Opt::Long("exact", _) => k.opts.exact = true,
             Opt::Short(b'g', _) | Opt::Long("process-group", _) => k.opts.process_group = true,
             Opt::Short(b'y', v) | Opt::Long("younger-than", v) => {
@@ -1099,7 +1187,9 @@ fn run(
             }
             Opt::Short(b'q', _) | Opt::Long("quiet", _) => k.opts.quiet = true,
             Opt::Short(b'r', _) | Opt::Long("regexp", _) => k.opts.reg = true,
-            Opt::Short(b's', v) | Opt::Long("signal", v) => sig_num = get_signal(&value(&v))?,
+            Opt::Short(b's', v) | Opt::Long("signal", v) => {
+                sig_num = Some(get_signal(&value(&v))?);
+            }
             Opt::Short(b'u', v) | Opt::Long("user", v) => {
                 let name = value(&v);
                 match pwdb::Db::load().user_by_name(&name) {
@@ -1121,7 +1211,7 @@ fn run(
                 } else {
                     // "option check is optind-1 but sig name is optind".
                     let next = c_argv(optind).unwrap_or_default();
-                    sig_num = get_signal(next.get(1..).unwrap_or_default())?;
+                    sig_num = Some(get_signal(next.get(1..).unwrap_or_default())?);
                     skip_error = Some(optind);
                 }
             }
@@ -1131,7 +1221,7 @@ fn run(
                     return Ok(0);
                 }
                 let next = c_argv(optind).unwrap_or_default();
-                sig_num = get_signal(next.get(1..).unwrap_or_default())?;
+                sig_num = Some(get_signal(next.get(1..).unwrap_or_default())?);
                 skip_error = Some(optind);
             }
             Opt::Short(b'n', v) | Opt::Long("ns", v) => {
@@ -1164,6 +1254,10 @@ fn run(
     if operands.is_empty() && uid.is_none() && context.is_none() {
         return Err(usage(None));
     }
+    k.opts.named_signal = sig_num.is_some();
+    if k.opts.named_signal && k.opts.asked.conflict_with_a_signal() {
+        return Err(usage(Some(requests::Options::CONFLICT)));
+    }
     if operands.len() > MAX_NAMES {
         complain(format!("killall: Maximum number of names is {MAX_NAMES}\n").as_bytes());
         return Err(Exit(1));
@@ -1172,7 +1266,8 @@ fn run(
         complain(b"killall: /proc lacks process entries (not mounted ?)\n");
         return Err(Exit(1));
     }
-    k.kill_all(sig_num, &operands, uid, context.as_ref(), out, input)
+    let signal = sig_num.unwrap_or(SIGTERM);
+    k.kill_all(signal, &operands, uid, context.as_ref(), out, input)
 }
 
 fn main() -> ExitCode {
@@ -1217,10 +1312,30 @@ mod tests {
     type Ran = (u8, Vec<Sent>, Vec<u8>);
 
     /// A system that records sends and signals nothing; every process is in
-    /// the group its fixture names, and is gone once signalled.
+    /// the group its fixture names, and is gone once signalled -- to `-w`,
+    /// which asks `gone`; the null signal still finds it.
     struct Fake {
         sent: RefCell<Vec<Sent>>,
         groups: Vec<(i32, i32)>,
+        /// The processes that answer requests.
+        answering: Vec<i32>,
+        /// Each request made: the PID, and whether it was to close.
+        asked: RefCell<Vec<(i32, bool)>>,
+    }
+
+    impl Asker for Fake {
+        fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
+            self.sent.borrow_mut().push((pid, sig));
+            Ok(())
+        }
+        fn answers(&self, pid: i32) -> bool {
+            self.answering.contains(&pid)
+        }
+        fn ask(&self, pid: i32, close: bool) -> Result<(), i32> {
+            self.asked.borrow_mut().push((pid, close));
+            Ok(())
+        }
+        fn nap(&self, _ms: u64) {}
     }
 
     impl System for Fake {
@@ -1283,10 +1398,24 @@ mod tests {
 
     /// Run `words` over `procs`, with process groups and an input.
     fn go_with(procs: &[P], words: &[&str], groups: &[(i32, i32)], input: &[u8]) -> Ran {
+        go_asking(procs, words, groups, input, &[]).0
+    }
+
+    /// [`go_with`] on a system where `answering` answer requests: the run,
+    /// and the requests made.
+    fn go_asking(
+        procs: &[P],
+        words: &[&str],
+        groups: &[(i32, i32)],
+        input: &[u8],
+        answering: &[i32],
+    ) -> (Ran, Vec<(i32, bool)>) {
         let root = world(procs);
         let sys = Fake {
             sent: RefCell::new(Vec::new()),
             groups: groups.to_vec(),
+            answering: answering.to_vec(),
+            asked: RefCell::new(Vec::new()),
         };
         let mut k = Killall {
             proc_root: root.dir().to_path_buf(),
@@ -1301,7 +1430,8 @@ mod tests {
             Ok(s) | Err(Exit(s)) => s,
         };
         let sent = sys.sent.borrow().clone();
-        (status, sent, out)
+        let asked = sys.asked.borrow().clone();
+        ((status, sent, out), asked)
     }
 
     const SLEEP: P = P(200, "sleep", 50_000, b"sleep\x001000\0", 1000);
@@ -1420,6 +1550,70 @@ mod tests {
         );
         assert_eq!(go(&[], &[]).0, 1);
         assert_eq!(go(&[], &["-e"]).0, 1, "an option and no name");
+    }
+
+    #[test]
+    fn a_program_that_answers_is_asked_and_the_rest_signalled() {
+        let ((status, sent, _), asked) =
+            go_asking(&[BASH, SLEEP], &["sleep", "bash"], &[], b"", &[200]);
+        assert_eq!(status, 0);
+        assert_eq!(asked, vec![(200, false)]);
+        assert_eq!(sent, vec![(100, 15)]);
+        // A signal named is sent as named, whoever answers.
+        let ((_, sent, _), asked) = go_asking(&[SLEEP], &["-HUP", "sleep"], &[], b"", &[200]);
+        assert_eq!((sent, asked), (vec![(200, 1)], vec![]));
+        // Close, and force.
+        let ((_, _, _), asked) = go_asking(&[SLEEP], &["--close", "sleep"], &[], b"", &[200]);
+        assert_eq!(asked, vec![(200, true)]);
+        let ((_, sent, _), asked) = go_asking(&[SLEEP], &["-force", "sleep"], &[], b"", &[200]);
+        assert_eq!((sent, asked), (vec![(200, 9)], vec![]));
+    }
+
+    #[test]
+    fn close_is_refused_where_nothing_answers_and_a_group_is_only_signalled() {
+        // Refused after the null signal found it: nothing found, status 1.
+        let (status, sent, _) = go(&[SLEEP], &["--close", "sleep"]);
+        assert_eq!((status, sent), (1, vec![(200, 0)]));
+        let groups = [(200, 100)];
+        let (status, sent, _) = go_with(&[SLEEP], &["-g", "sleep"], &groups, b"");
+        assert_eq!((status, sent), (0, vec![(-100, 15)]));
+        let ((status, sent, _), asked) =
+            go_asking(&[SLEEP], &["-g", "--close", "sleep"], &groups, b"", &[200]);
+        assert_eq!((status, sent, asked), (1, vec![], vec![]));
+    }
+
+    #[test]
+    fn a_timeout_escalates_to_what_is_still_there() {
+        let (status, sent, _) = go(&[SLEEP], &["--timeout", "0", "force", "sleep"]);
+        assert_eq!(status, 0);
+        assert_eq!(sent, vec![(200, 15), (200, 0), (200, 9)]);
+    }
+
+    #[test]
+    fn the_requests_are_whole_words_and_no_signal_s_company() {
+        // `--t` names no option, as upstream, and `--clo` is not `--close`:
+        // the requests are matched whole.
+        assert_eq!(go(&[SLEEP], &["--t", "sleep"]).0, 1);
+        assert_eq!(go(&[SLEEP], &["--clo", "sleep"]), (1, vec![], vec![]));
+        for words in [
+            &["-9", "--close", "sleep"][..],
+            &["-s", "HUP", "--via=message", "sleep"],
+            &["--via=pigeon", "sleep"],
+            &["--timeout", "10", "harder", "sleep"],
+        ] {
+            assert_eq!(go(&[SLEEP], words), (1, vec![], vec![]), "{words:?}");
+        }
+        // A signal and a timeout go together.
+        let (_, sent, _) = go(&[SLEEP], &["-HUP", "--timeout", "0", "force", "sleep"]);
+        assert_eq!(sent, vec![(200, 1), (200, 0), (200, 9)]);
+    }
+
+    #[test]
+    fn interactive_asks_to_close_for_a_close() {
+        let ((_, _, out), asked) =
+            go_asking(&[SLEEP], &["-i", "--close", "sleep"], &[], b"y\n", &[200]);
+        assert_eq!(out, b"Close sleep(200) ? (y/N) ");
+        assert_eq!(asked, vec![(200, true)]);
     }
 
     #[test]

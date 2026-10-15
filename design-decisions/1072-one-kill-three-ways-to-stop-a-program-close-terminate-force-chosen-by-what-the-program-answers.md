@@ -86,8 +86,8 @@ take the same options.
 | part | lane | state |
 |---|---|---|
 | the kernel half: a lifecycle endpoint each process registers at start (Fuchsia's `PA_LIFECYCLE` shape), found by PID under the same permission rule as a signal | A | offered by lane A 2026-10-09; accepted, request with a draft interface to follow from lane A |
-| the userspace half: a small library a program registers and answers with (`on_close` may decline, `on_terminate` may not), and `kill`, `pkill`, `killall` sending it | B | on lane B's roadmap |
-| services: `init` and the service manager stop a service with *terminate*, then *force* after its stop timeout | B | on lane B's roadmap |
+| the userspace half: a small library a program registers and answers with (`on_close` may decline, `on_terminate` may not), and `kill`, `pkill`, `killall` sending it | B | built 2026-10-15: `libservicebus::lifecycle` (a program registers, and receives each request on a channel it can wait on beside its others), `userspace/procstop` (the routing, for anything that stops programs), `coreutils::procps::requests` (the three commands' options, matched only when spelled in full so no upstream abbreviation changes meaning) |
+| services: `init` and the service manager stop a service with *terminate*, then *force* after its stop timeout | B | the stop is `services/init`'s, lane D's tree: requested 2026-10-15 (`requests/b-d-init-stops-a-service-with-terminate-then-force.md`) |
 | every program built on the GUI toolkit answers *close* as its close button does and *terminate* as session end does | C | requested |
 | the task manager (`apps/sysmonitor`) offers close, terminate (as "End without asking") and force; it sends `SIGKILL` today | E | requested |
 | a Linux program's windows: *close* as the compositor's close request (Wayland's `xdg_toplevel.close`) | F | requested when the toolkit half exists |

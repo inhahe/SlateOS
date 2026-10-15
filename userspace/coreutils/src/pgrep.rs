@@ -31,8 +31,13 @@
 //!
 //! ## On SlateOS
 //!
-//! * `pkill` sends through the kernel's signal path, `kill(2)`, as the
-//!   coreutils `kill` does. `-q` sends with `sigqueue`, which SlateOS's C
+//! * `pkill` takes `kill`'s requests (design-decisions §1072,
+//!   [`crate::procps::requests`]): with no signal named, each process is
+//!   asked to *terminate* -- through its lifecycle endpoint if it answers
+//!   one, else with `SIGTERM`, which is upstream's `pkill` exactly -- and
+//!   `--close`, `--force`, `--via` and `--timeout` are `kill`'s. A signal
+//!   named with `-SIGNAL`, `--signal` or `-q` is sent as named, through the
+//!   kernel's signal path. `-q` sends with `sigqueue`, which SlateOS's C
 //!   library does not deliver yet; each such send reports `Function not
 //!   implemented`.
 //! * `pidwait` waits on `pidfd_open`, which the kernel implements for Linux
@@ -65,6 +70,14 @@
 //!    `pidwait -e` print for a process selected without a pattern, before
 //!    any name was copied, is the empty string, which is what upstream's
 //!    freshly mapped buffer holds.
+//! 6. **`--close`, `--terminate`, `--force`, `--via` and `--timeout`**, the
+//!    requests above, under every name as every long option is, and their
+//!    paragraph under `pkill`'s usage, which `scripts/pgrep-diff.sh` takes
+//!    out before comparing. They are matched only when spelled in full, so
+//!    every abbreviation means what it does upstream: `--term` is still
+//!    `--terminal`. A request or a route beside a named signal is refused, as
+//!    `kill` refuses it: `pkill: a signal and a request ... cannot both be
+//!    given`, and the usage.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -78,6 +91,7 @@ use crate::procps::cvt::{cvt_i32, cvt_u64, dbl};
 use crate::procps::devname::{ABBREV_DEV, Devname};
 use crate::procps::pwcache::Pwcache;
 use crate::procps::readproc::{Fill, Proc, Reader};
+use crate::procps::requests::{self, Asker, Explain as _, Refusal, Route};
 use crate::procps::{hertz, namespace, scanf, signals, sysinfo};
 use crate::stdfd::{self, Stream};
 
@@ -136,7 +150,8 @@ impl Mode {
 }
 
 /// `longopts[]`, in upstream's order -- which `getopt_long` lists an
-/// ambiguous abbreviation's candidates in.
+/// ambiguous abbreviation's candidates in. SlateOS's requests follow them
+/// (deliberate difference 6).
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("signal", Takes::Required),
     ("ignore-ancestors", Takes::Nothing),
@@ -197,6 +212,12 @@ pub struct Opts {
     pub threads: bool,
     pub ns_pid: i32,
     pub use_sigqueue: bool,
+    /// Whether a signal was named -- `-SIGNAL`, `--signal`, `-q` -- to be
+    /// sent as named, rather than a request (§1072).
+    pub named_signal: bool,
+    /// SlateOS's requests: what is asked, by which route, and the
+    /// `--timeout`s.
+    pub asked: requests::Options,
     pub require_handler: bool,
     /// `-q`'s `sival_int`.
     pub sigval: i32,
@@ -239,6 +260,8 @@ impl Default for Opts {
             threads: false,
             ns_pid: 0,
             use_sigqueue: false,
+            named_signal: false,
+            asked: requests::Options::default(),
             require_handler: false,
             sigval: 0,
             delim: b"\n".to_vec(),
@@ -513,6 +536,10 @@ impl Pgrep {
         t.extend_from_slice(b" [options] <pattern>\n\nOptions:\n");
         t.extend_from_slice(usage_body(self.mode).as_bytes());
         t.extend_from_slice(USAGE_COMMON.as_bytes());
+        if self.mode == Mode::Pkill {
+            // Deliberate difference 6.
+            t.extend_from_slice(requests::USAGE);
+        }
         t
     }
 
@@ -677,6 +704,7 @@ impl Pgrep {
         if let Some((i, sig)) = found {
             args.remove(i);
             self.opts.signal = sig;
+            self.opts.named_signal = true;
         }
     }
 
@@ -696,7 +724,15 @@ impl Pgrep {
         let mut criteria_count = 0u32;
         let mut operands: Vec<Vec<u8>> = Vec::new();
         let shorts = self.mode.short_options();
-        for item in PROGRAM.parse(&args, shorts, LONG_OPTIONS) {
+        let longs: Vec<(&str, Takes)> = LONG_OPTIONS
+            .iter()
+            .chain(requests::LONGS)
+            .copied()
+            .collect();
+        let mut parser = PROGRAM
+            .parse(&args, shorts, &longs)
+            .whole_only(requests::NAMES);
+        while let Some(item) = parser.next() {
             let item = match item {
                 Ok(item) => item,
                 Err(e) => {
@@ -712,6 +748,19 @@ impl Pgrep {
             let (opt, arg) = match item {
                 Opt::Operand(x) => {
                     operands.push(crate::quote::os_bytes(x).into_owned());
+                    continue;
+                }
+                Opt::Long(name, v) if requests::NAMES.contains(&name) => {
+                    let v = v.map(|v| crate::quote::os_bytes(&v).into_owned());
+                    let next = || {
+                        parser
+                            .take_word()
+                            .map(|w| crate::quote::os_bytes(&w).into_owned())
+                    };
+                    if let Err(complaint) = self.opts.asked.take(name, v.as_deref(), next) {
+                        self.warnx(complaint.as_bytes());
+                        return Err(Stop::Usage { to_stderr: true });
+                    }
                     continue;
                 }
                 Opt::Short(c, v) => (Key::Short(c), v),
@@ -822,6 +871,7 @@ impl Pgrep {
                 Key::Short(b'q') => {
                     self.opts.sigval = scanf::atoi(&arg);
                     self.opts.use_sigqueue = true;
+                    self.opts.named_signal = true;
                 }
                 Key::Cgroup => {
                     self.opts.cgroup = Some(Self::need(Self::split_list(self, &arg, |_, s| {
@@ -837,6 +887,10 @@ impl Pgrep {
                 // '?', from `-?`: in the option string, so no complaint first.
                 Key::Short(_) => return Err(Stop::Usage { to_stderr: true }),
             }
+        }
+        if self.opts.named_signal && self.opts.asked.conflict_with_a_signal() {
+            self.warnx(requests::Options::CONFLICT.as_bytes());
+            return Err(Stop::Usage { to_stderr: true });
         }
         self.finish_opts(criteria_count, operands)
     }
@@ -894,10 +948,12 @@ impl Pgrep {
         let sig = signals::signal_name_to_number(arg, self.rtmin);
         if sig != -1 {
             self.opts.signal = sig;
+            self.opts.named_signal = true;
             return Ok(());
         }
         if arg.first().is_some_and(u8::is_ascii_digit) {
             self.opts.signal = scanf::atoi(arg);
+            self.opts.named_signal = true;
             return Ok(());
         }
         // `fprintf (stderr, "Unknown signal \"%s\".", optarg)`: no program
@@ -1285,27 +1341,66 @@ impl Pgrep {
         }
     }
 
-    /// `kill` or, with `-q`, `sigqueue`.
-    fn execute_kill(&self, pid: i64) -> Result<(), i32> {
-        let pid = scanf::low_i32(pid);
+    /// `execute_kill`: the signal named -- `kill`, or with `-q` `sigqueue` --
+    /// or else the request (§1072), sent to process `pid` on `sys`. The way
+    /// it went.
+    fn execute_kill<A: Asker + ?Sized>(&self, sys: &A, pid: i64) -> Result<Route, Refusal> {
+        let target = scanf::low_i32(pid);
+        // The second deliberate difference: never a group, nor everyone.
+        if target <= 0 {
+            return Err(Refusal::Errno(libcall::EINVAL));
+        }
+        if !self.opts.named_signal {
+            let asked = &self.opts.asked;
+            return requests::deliver(sys, target, asked.request(), asked.via);
+        }
+        let signal = self.opts.signal;
         if self.opts.use_sigqueue {
-            libcall::sigqueue(pid, self.opts.signal, self.opts.sigval)
+            libcall::sigqueue(target, signal, self.opts.sigval)
         } else {
-            libcall::kill(pid, self.opts.signal)
+            sys.kill(target, signal)
+        }
+        .map(|()| Route::Signal(signal))
+        .map_err(Refusal::Errno)
+    }
+
+    /// `killing pid N failed: reason`, for a send that failed other than by
+    /// the process having gone, which is OK.
+    fn refused(&self, pid: i64, why: Refusal) {
+        let msg = format!("killing pid {pid} failed");
+        match why {
+            Refusal::Errno(libcall::ESRCH) => {}
+            Refusal::Errno(errno) => self.warn(msg.as_bytes(), errno),
+            other => self.warnx(format!("{msg}: {}", other.text()).as_bytes()),
         }
     }
 
     /// `pkill`'s half of `main`.
     fn pkill(&self, procs: &[El], out: &mut Stream) -> u8 {
+        self.pkill_on(&requests::System, procs, out)
+    }
+
+    /// [`Pgrep::pkill`] on `sys`, writing to `out`; then each `--timeout`,
+    /// to what is still there.
+    fn pkill_on<A: Asker + ?Sized>(&self, sys: &A, procs: &[El], out: &mut dyn Write) -> u8 {
         let mut kill_count = 0usize;
+        let mut reached = Vec::new();
         for e in procs {
-            match self.execute_kill(e.num) {
-                Ok(()) => {
+            match self.execute_kill(sys, e.num) {
+                Ok(route) => {
+                    reached.push((e.num, scanf::low_i32(e.num)));
                     if self.opts.echo {
+                        // Upstream's words for a signal; a program asked is
+                        // not killed, and is not said to be.
+                        let what = match (route, self.opts.asked.request()) {
+                            (Route::Signal(_), _) => "killed",
+                            (Route::Message, requests::Request::Close) => "asked to close",
+                            (Route::Message, _) => "asked to terminate",
+                        };
                         let mut line = e.str.clone();
                         line.extend_from_slice(
                             format!(
-                                " killed (pid {})\n",
+                                " {what} (pid {})\n",
                                 u64::from_ne_bytes(e.num.to_ne_bytes())
                             )
                             .as_bytes(),
@@ -1315,13 +1410,13 @@ impl Pgrep {
                     }
                     kill_count = kill_count.saturating_add(1);
                 }
-                // Gone now, which is OK.
-                Err(libcall::ESRCH) => {}
-                Err(errno) => {
-                    self.warn(format!("killing pid {} failed", e.num).as_bytes(), errno);
-                }
+                Err(why) => self.refused(e.num, why),
             }
         }
+        let asked = &self.opts.asked;
+        requests::escalate(sys, reached, &asked.escalations, asked.via, |&pid, why| {
+            self.refused(pid, why);
+        });
         if self.opts.count {
             // As above.
             let _ = out.write_all(format!("{}\n", procs.len()).as_bytes());
@@ -1526,6 +1621,7 @@ pub fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+    use procstop::fake::{Fake as FakeAsker, fake as asker};
     use std::fs;
     use std::path::Path;
 
@@ -1748,6 +1844,9 @@ mod tests {
     #[test]
     fn the_help_is_the_modes() {
         let text = String::from_utf8(prog("pkill", Path::new(".")).usage_text()).unwrap();
+        // Upstream's, and then SlateOS's requests (deliberate difference 6).
+        let requests = std::str::from_utf8(requests::USAGE).unwrap();
+        let text = text.strip_suffix(requests).unwrap();
         assert!(text.starts_with("\nUsage:\n pkill [options] <pattern>\n\nOptions:\n -<sig>"));
         assert!(text.contains("\n     --signal <sig>        signal to send"));
         assert!(text.contains(
@@ -1789,6 +1888,139 @@ mod tests {
             parsed("pkill", &["--signal", "NOPE", "x"]),
             Err(Stop::Usage { to_stderr: true })
         );
+    }
+
+    /// `pkill` as parsed from `args`, sent to the processes `pids` on `sys`:
+    /// the status and what was written.
+    fn pkill_on(sys: &FakeAsker, args: &[&str], pids: &[i64]) -> (u8, String) {
+        let mut p = prog("pkill", Path::new("no-such-proc"));
+        p.parse_opts(&os(args)).unwrap();
+        let procs: Vec<El> = pids
+            .iter()
+            .map(|&num| El {
+                num,
+                str: format!("p{num}").into_bytes(),
+            })
+            .collect();
+        let mut out = Vec::new();
+        let status = p.pkill_on(sys, &procs, &mut out);
+        (status, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn pkill_asks_what_answers_and_signals_the_rest() {
+        // No signal named: terminate, as a message to 5, SIGTERM to 6.
+        let sys = asker(&[5], &[]);
+        assert_eq!(
+            pkill_on(&sys, &["-e", "x"], &[5, 6]),
+            (
+                0,
+                "p5 asked to terminate (pid 5)\np6 killed (pid 6)\n".to_string()
+            )
+        );
+        assert_eq!(
+            *sys.did.borrow(),
+            vec![("terminate", 5, 0), ("kill", 6, 15)]
+        );
+        let sys = asker(&[5], &[]);
+        let (_, out) = pkill_on(&sys, &["-e", "--close", "x"], &[5]);
+        assert_eq!(out, "p5 asked to close (pid 5)\n");
+        // A signal named is sent as named, to everyone.
+        let sys = asker(&[5], &[]);
+        pkill_on(&sys, &["-INT", "x"], &[5, 6]);
+        assert_eq!(*sys.did.borrow(), vec![("kill", 5, 2), ("kill", 6, 2)]);
+        let sys = asker(&[5], &[]);
+        pkill_on(&sys, &["--signal", "TERM", "x"], &[5]);
+        assert_eq!(*sys.did.borrow(), vec![("kill", 5, 15)]);
+    }
+
+    #[test]
+    fn pkill_close_is_refused_where_nothing_answers() {
+        let sys = asker(&[5], &[7]);
+        // 6 is refused; 7 has gone, which is no failure; 5 was asked.
+        let (status, _) = pkill_on(&sys, &["--close", "x"], &[5, 6, 7]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            *sys.did.borrow(),
+            vec![("close", 5, 0), ("kill", 6, 0), ("kill", 7, 0)]
+        );
+        // Nothing reached: status 1.
+        let sys = asker(&[], &[]);
+        assert_eq!(pkill_on(&sys, &["--close", "x"], &[6]).0, 1);
+    }
+
+    #[test]
+    fn pkill_never_sends_to_a_group() {
+        // The second deliberate difference holds for a request too.
+        let sys = asker(&[], &[]);
+        assert_eq!(pkill_on(&sys, &["--force", "x"], &[0, -1]).0, 1);
+        assert_eq!(*sys.did.borrow(), vec![]);
+    }
+
+    #[test]
+    fn pkill_escalates_to_what_is_still_there() {
+        let sys = FakeAsker {
+            answering: vec![5],
+            slow: vec![5],
+            ..FakeAsker::default()
+        };
+        let (status, out) = pkill_on(&sys, &["-c", "--timeout", "20", "force", "x"], &[5, 6]);
+        assert_eq!((status, out.as_str()), (0, "2\n"));
+        assert_eq!(
+            *sys.did.borrow(),
+            vec![
+                ("terminate", 5, 0),
+                ("kill", 6, 15),
+                ("kill", 5, 0),
+                ("nap", 0, 20),
+                ("kill", 5, 0),
+                ("kill", 6, 0),
+                ("kill", 6, 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn pkill_takes_kill_s_requests_whole() {
+        let o = parsed("pkill", &["--close", "--via=message", "x"]).unwrap();
+        assert_eq!(o.asked.requested, Some(requests::Request::Close));
+        assert_eq!(o.asked.via, requests::Via::Message);
+        assert!(!o.named_signal);
+        // An abbreviation is upstream's option: `--term` is `--terminal`,
+        // `--f` is `--full`.
+        let o = parsed("pkill", &["--term", "pts/1", "--f", "x"]).unwrap();
+        assert_eq!(o.term, Some(vec![b"pts/1".to_vec()]));
+        assert!(o.full);
+        assert_eq!(o.asked, requests::Options::default());
+        // A signal and a request cannot both be given; a signal and a
+        // timeout can.
+        for args in [
+            &["-9", "--close", "x"][..],
+            &["--signal", "INT", "--via=signal", "x"],
+            &["-q", "1", "--force", "x"],
+        ] {
+            assert_eq!(parsed("pkill", args), Err(Stop::Usage { to_stderr: true }));
+        }
+        let o = parsed("pkill", &["-INT", "--timeout", "500", "force", "x"]).unwrap();
+        assert!(o.named_signal);
+        assert_eq!(o.asked.escalations, vec![(500, requests::Request::Force)]);
+        // A bad route or timeout is the usage.
+        for args in [
+            &["--via=pigeon", "x"][..],
+            &["--timeout", "500", "harder", "x"],
+            &["--timeout", "soon", "force", "x"],
+        ] {
+            assert_eq!(parsed("pkill", args), Err(Stop::Usage { to_stderr: true }));
+        }
+    }
+
+    #[test]
+    fn only_pkill_lists_the_requests() {
+        let root = Path::new("no-such-proc");
+        let tail = requests::USAGE;
+        assert!(prog("pkill", root).usage_text().ends_with(tail));
+        assert!(!prog("pgrep", root).usage_text().ends_with(tail));
+        assert!(!prog("pidwait", root).usage_text().ends_with(tail));
     }
 
     #[test]

@@ -1472,13 +1472,22 @@ list moved to lane D on 2026-09-22):
       `NotSupported` for a program with no endpoint, `SYS_LIFECYCLE_QUERY`
       1174; §1569, `requests/a-b-the-lifecycle-endpoint.md`), reaching main
       with lane A's next publish.
-    - `[ ]` `[B]` The userspace half: a library a program answers *close* (may
+    - `[x]` `[B]` The userspace half: a library a program answers *close* (may
       decline) and *terminate* (may not) with; `kill`, `pkill` and `killall`
       sending them -- `--close`, `--via=message|signal`, `--force`,
       `--timeout MS REQUEST` -- and falling back to the signal for a program
-      that does not answer.
+      that does not answer. Done 2026-10-15: `libservicebus::lifecycle`
+      (register, receive, ask, query); `coreutils::procps::requests`, the
+      three programs' one implementation of the options and the routes. The
+      options are matched only when spelled in full (`getoptlong`'s
+      `whole_only`), so every upstream abbreviation keeps its meaning -- `pkill
+      --term` is still `--terminal` -- and the harnesses take the usage
+      paragraph out before comparing.
     - `[ ]` `[B]` Services stopped with *terminate*, then *force* after their
-      stop timeout (`init`, the service manager).
+      stop timeout (`init`, the service manager). The stop is
+      `services/init`'s, which is lane D's tree: requested 2026-10-15
+      (`requests/b-d-init-stops-a-service-with-terminate-then-force.md`);
+      the `service` command only asks `init`.
     - `[ ]` `[C]` The GUI toolkit answers *close* as a window's close button
       does and *terminate* as session end does, for every program built on it
       (requested).

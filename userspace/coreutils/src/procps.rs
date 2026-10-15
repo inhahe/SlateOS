@@ -34,6 +34,7 @@
 //! | [`vmstat`] | `library/vmstat.c`: the page and swap counters of `/proc/vmstat`, read at most once a second |
 //! | [`pids`] | `library/pids.c`: the items, their values, the sort and the history, for `ps` and `top` |
 //! | [`signals`] | `local/signals.c`'s `signal_name_to_number`, procps' own spellings of a signal |
+//! | [`requests`] | SlateOS's: close, terminate and force, asked of a program that answers and signalled to one that does not, for `kill`, `pkill` and `killall` (§1072) |
 //!
 //! # Why `fscanf`, and not `str::parse`
 //!
@@ -57,6 +58,7 @@ pub mod namespace;
 pub mod pids;
 pub mod pwcache;
 pub mod readproc;
+pub mod requests;
 pub mod scanf;
 pub mod signals;
 pub mod slabinfo;

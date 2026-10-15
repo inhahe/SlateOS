@@ -1,0 +1,45 @@
+# netproto's cargo-fuzz harness, run by `scripts/fuzz.py run netproto/fuzz`.
+# Installed as ~/fuzz/netproto-fuzz/tree/fuzz/Cargo.toml in WSL; the `path`s
+# below are relative to that place. Kept under this name so that nothing in the
+# real workspace mistakes this directory for a package. netproto has no
+# `unsafe` code, so its targets run without the address sanitizer. Seeds:
+# `seeds.py`.
+[package]
+name = "netproto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+netproto = { path = "../netproto" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dhcp"
+path = "fuzz_targets/dhcp.rs"
+test = false
+doc = false
+bench = false

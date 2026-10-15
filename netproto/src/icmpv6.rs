@@ -452,6 +452,22 @@ mod tests {
     }
 
     #[test]
+    fn the_smallest_echo_request_is_answered_into_a_buffer_of_its_size() {
+        let me = link_local_from_mac(&MAC_A);
+        let peer = link_local_from_mac(&MAC_B);
+        // A request with no data is its 8-byte header alone, and a reply into
+        // exactly 8 bytes must succeed; one byte less in either must not.
+        let req = [TYPE_ECHO_REQUEST, 0, 0, 0, 0x12, 0x34, 0, 1];
+        let mut out = [0u8; 8];
+        assert_eq!(write_echo_reply(&mut out, &me, &peer, &req), Some(8));
+        assert_eq!(out[0], TYPE_ECHO_REPLY);
+        assert_eq!(&out[4..], &req[4..]);
+        assert!(verify_checksum(&me, &peer, &out));
+        assert!(write_echo_reply(&mut [0u8; 7], &me, &peer, &req).is_none());
+        assert!(write_echo_reply(&mut out, &me, &peer, &req[..7]).is_none());
+    }
+
+    #[test]
     fn solicited_node_copies_low_24_bits() {
         let target = [
             0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF,

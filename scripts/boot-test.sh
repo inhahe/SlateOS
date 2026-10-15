@@ -4301,19 +4301,19 @@ check_unused_exports() {
         exit 1
     fi
 
-    echo "=== Checking for exports whose documented caller does not exist ==="
+    echo "=== Listing exports no other crate names (a report; it refuses only on its own failure) ==="
     if run_checker check-unused-exports "$py" \
             "$PROJECT_ROOT/scripts/check-unused-exports.py"; then
         return 0
     fi
 
+    # Its list of exports is a report and never refuses (it would only with
+    # --strict); the run fails for two reasons, both the checker's own.
     echo "" >&2
-    echo "ERROR: refusing to build.  Each export above is named as having a" >&2
-    echo "caller by its own documentation, and that caller does not exist." >&2
-    echo "" >&2
-    echo "An export with no caller yet is ordinary and is NOT what this" >&2
-    echo "reports.  A doc comment that names one is a promise nothing keeps," >&2
-    echo "and the next reader will believe it." >&2
+    echo "ERROR: refusing to build.  check-unused-exports.py could not give a" >&2
+    echo "verdict: its self-test failed, or it found fewer library crates than" >&2
+    echo "its floor -- a scan that saw almost nothing, whose empty list would" >&2
+    echo "read like a clean tree.  Its output above says which." >&2
     exit 1
 }
 

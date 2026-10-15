@@ -283,6 +283,34 @@ def _field_end(masked: str, at: int) -> int:
     return len(masked)
 
 
+def _item_opening(masked: str, at: int) -> tuple[str, int]:
+    """How the item beginning at `at` is shaped: `("block", i)` when its first
+    `{` outside `(..)` and `[..]` comes first -- `i` is that brace -- or
+    `("semi", i)` when its first `;` there does -- an item without a body, `i`
+    just past the semicolon -- or `("none", len)` when neither comes.
+
+    Only `(..)` and `[..]` are counted: a `;` inside `[T; N]` belongs to a type,
+    whether in a signature (`fn f(a: [u8; 2]) {`, `-> [T; 11] {`) or a
+    `const`'s value. `<..>` is not counted: `->` and `=>` hold a `>` that
+    closes nothing, a `<` in an expression opens nothing, and no `;` sits in
+    angle brackets except inside a `[..]` that is counted anyway.
+    """
+    depth = 0
+    i = at
+    while i < len(masked):
+        c = masked[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and c == "{":
+            return "block", i
+        elif depth == 0 and c == ";":
+            return "semi", i + 1
+        i += 1
+    return "none", len(masked)
+
+
 def live_code(src: str) -> tuple[str, str]:
     """`src` with test code removed and nothing else.
 
@@ -385,15 +413,17 @@ def live_code(src: str) -> tuple[str, str]:
                     mout[k] = " "
             i = end
             continue
-        brace = masked.find("{", i)
-        semi = masked.find(";", i)
-        if brace < 0 or (0 <= semi < brace):
-            # The attribute decorates a non-block item -- `#[cfg(test)] use
-            # std::cell::RefCell;`. There is no block to match, and searching
-            # on for a `{` would find one belonging to the NEXT item and blank
-            # everything between. Drop the attribute and carry on.
-            end = i + len("#[cfg(test)]")
-            for k in range(i, end):
+        shape, brace = _item_opening(masked, i + len("#[cfg(test)]"))
+        if shape != "block":
+            # The attribute decorates an item without a block -- `#[cfg(test)]
+            # use std::cell::RefCell;`, `mod x;`, a `const`, a unit struct --
+            # which ends at its own `;` and goes with the attribute (lane E's
+            # `requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`:
+            # only the attribute went, and `#[cfg(test)] pub mod draw_check;`
+            # stayed a live module). Searching on for a `{` would find the NEXT
+            # item's and blank everything between.
+            end = brace if shape == "semi" else i + len("#[cfg(test)]")
+            for k in range(i, min(end, len(out))):
                 if out[k] != "\n":
                     out[k] = " "
                     mout[k] = " "
@@ -687,6 +717,30 @@ fn kept() { read_to_string(p); }
 """
     live, _ = live_code(use_plain)
     expect("a cfg(test) use does not swallow the next item", "kept" in live, True)
+    expect("...and the use itself goes, not just its attribute", "RefCell" in live, False)
+
+    # Items without a body go whole, through their own `;` (lane E's
+    # `requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`:
+    # about 230 of them stayed live tree-wide, `pub mod draw_check;` among
+    # them, whose exports then read as unused).
+    for label, test_item, gone, kept in (
+        ("a cfg(test) `pub mod x;`", "pub mod draw_check;", "draw_check", "after_mod"),
+        ("a cfg(test) unit struct", "pub struct StubProvider;", "StubProvider", "after_struct"),
+        ("a cfg(test) const with `[T; N]`", "const TABLE: [u8; 2] = [1; 2];", "TABLE",
+         "after_const"),
+        # A `;` inside brackets in a signature is the type's, not the item's:
+        # these are functions with bodies, and the bodies go.
+        ("a cfg(test) fn with `[u8; 2]` in its arguments",
+         "fn f(a: [u8; 2]) { arg_body(); }", "arg_body", "after_arg_fn"),
+        ("a cfg(test) fn returning `[T; N]` (the arrow's `>` opens nothing)",
+         "fn roles(&self) -> [(&'static str, u8); 11] { ret_body() }", "ret_body",
+         "after_ret_fn"),
+    ):
+        src = f"#[cfg(test)]\n{test_item}\nfn {kept}() {{ read_to_string(p); }}\n"
+        live, _ = live_code(src)
+        expect(f"{label} goes whole", gone in live, False)
+        expect(f"...and the item after it stays", kept in live, True)
+        expect(f"...and the length is kept", len(live), len(src))
 
     # ...but a *braced* use has braces that are its own, and only its own.
     use_braced = """#[cfg(test)]

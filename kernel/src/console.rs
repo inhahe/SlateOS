@@ -614,9 +614,73 @@ struct ConsoleInner {
     /// Text buffer mirroring the screen content (cols × rows cells).
     /// Used for scrollback capture and find-in-screen.
     screen_buf: Vec<ScrollCell>,
+    /// The boot steps drawn as running and not yet updated, oldest first:
+    /// where [`boot_step_update`] redraws each. Kept by row, so steps may nest
+    /// and the console may print between a step's start and its end.
+    open_steps: [Option<OpenStep>; OPEN_STEPS],
+}
+
+/// A boot step on the screen as running: which step, and its text row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct OpenStep {
+    /// [`step_id`] of its description.
+    id: u64,
+    row: u32,
+}
+
+/// How many running boot steps the console remembers at once. The boot nests
+/// two deep; past this many, the oldest is forgotten and its update is drawn
+/// as a line of its own.
+const OPEN_STEPS: usize = 4;
+
+/// A boot step's identity: FNV-1a of its description. Two steps with one
+/// description would share it, and none do.
+fn step_id(description: &str) -> u64 {
+    description.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 impl ConsoleInner {
+    /// The whole screen moved up one row: so did every open step's line, and
+    /// one on the top row has left the screen.
+    fn open_steps_scrolled(&mut self) {
+        for slot in &mut self.open_steps {
+            *slot = slot.and_then(|s| s.row.checked_sub(1).map(|row| OpenStep { row, ..s }));
+        }
+    }
+
+    /// The rows were moved some other way -- a region scrolled, lines
+    /// inserted or deleted, the screen erased or restored: no open step's
+    /// row can be trusted, and each is drawn on a line of its own when it ends.
+    fn forget_open_steps(&mut self) {
+        self.open_steps = [None; OPEN_STEPS];
+    }
+
+    /// Remember a step drawn as running on `row`, forgetting the oldest if
+    /// all slots are taken.
+    fn open_step(&mut self, id: u64, row: u32) {
+        let step = Some(OpenStep { id, row });
+        if let Some(free) = self.open_steps.iter_mut().find(|s| s.is_none()) {
+            *free = step;
+        } else {
+            self.open_steps.rotate_left(1);
+            if let Some(last) = self.open_steps.last_mut() {
+                *last = step;
+            }
+        }
+    }
+
+    /// The row the most recent running step `id` is on, forgetting it.
+    fn close_step(&mut self, id: u64) -> Option<u32> {
+        let slot = self
+            .open_steps
+            .iter_mut()
+            .rev()
+            .find(|s| s.is_some_and(|s| s.id == id))?;
+        slot.take().map(|s| s.row)
+    }
+
     /// Create an uninitialized console.
     const fn new() -> Self {
         Self {
@@ -657,6 +721,7 @@ impl ConsoleInner {
             ansi_cur_param: 0,
             ansi_has_digit: false,
             screen_buf: Vec::new(),
+            open_steps: [None; OPEN_STEPS],
         }
     }
 
@@ -859,10 +924,11 @@ pub fn screen_text() -> Vec<alloc::string::String> {
 
 /// Fill the entire screen with the background color.
 pub fn clear() {
-    let con = CONSOLE.lock_irqsave();
+    let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
 
     let fb = con.fb_addr;
     let width = con.fb_width;
@@ -1083,6 +1149,7 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
         }
         b'c' => {
             // RIS (Reset to Initial State) — ESC c
+            con.forget_open_steps();
             con.fg_color = con.default_fg;
             con.bg_color = con.default_bg;
             con.bold = false;
@@ -1597,6 +1664,7 @@ fn color_256(con: &ConsoleInner, n: usize) -> u32 {
 
 /// Handle ED (Erase in Display) command.
 fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
+    con.forget_open_steps();
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let cols = con.cols;
@@ -1691,6 +1759,7 @@ fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
     let fb = con.fb_addr;
@@ -1725,6 +1794,7 @@ fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
     let region_height = con.scroll_bottom - con.scroll_top + 1;
     let n = n.min(region_height);
     let fb = con.fb_addr;
@@ -1786,6 +1856,7 @@ fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
     let cur = con.cursor_row;
     if cur < con.scroll_top || cur > con.scroll_bottom {
         return;
@@ -1826,6 +1897,7 @@ fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
     let cur = con.cursor_row;
     if cur < con.scroll_top || cur > con.scroll_bottom {
         return;
@@ -1967,6 +2039,7 @@ fn handle_dec_private_mode(con: &mut ConsoleInner, mode: u16, set: bool) {
         }
         1049 => {
             // Alternate screen buffer.
+            con.forget_open_steps();
             if set {
                 // Enter alt screen: save cursor and clear display.
                 con.saved_cursor_col = con.cursor_col;
@@ -2173,84 +2246,92 @@ const COLOR_DIM: u32 = 0x0099_9999;
 /// `boot_step_update` with `BootStatus::Ok` when it completes.
 ///
 /// Format:  `  [*] Description...`  (Running)
-///          `  [✓] Description...`  (Ok)
+///          `  [+] Description...`  (Ok)
 ///          `  [!] Description...`  (Warn)
+///
+/// A running step is drawn on the cursor's line and the cursor moves past it;
+/// `Ok` and `Warn` given here overwrite the cursor's line and leave the cursor
+/// on it.
 pub fn boot_step(status: BootStatus, description: &str) {
     let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
-
-    let fb = con.fb_addr;
-    let pitch = con.fb_pitch;
     let row = con.cursor_row;
-
-    // Clear the current line (overwrite any previous content for updates).
-    let cols = con.cols;
-    for c in 0..cols {
-        draw_glyph(fb, pitch, c, row, b' ');
-    }
-
-    // Draw status indicator with color.
-    let (indicator, color) = match status {
-        BootStatus::Running => (b'*', COLOR_YELLOW),
-        BootStatus::Ok => (b'+', COLOR_GREEN),
-        BootStatus::Warn => (b'!', COLOR_RED),
-    };
-
-    // "  [" prefix
-    draw_glyph(fb, pitch, 0, row, b' ');
-    draw_glyph(fb, pitch, 1, row, b' ');
-    draw_glyph(fb, pitch, 2, row, b'[');
-
-    // Colored indicator character
-    draw_glyph_colored(fb, pitch, 3, row, indicator, color);
-
-    // "] " suffix
-    draw_glyph(fb, pitch, 4, row, b']');
-    draw_glyph(fb, pitch, 5, row, b' ');
-
-    // Description in dim text
-    let max_desc = (cols as usize).saturating_sub(6);
-    for (i, &byte) in description.as_bytes().iter().take(max_desc).enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let col = 6u32.wrapping_add(i as u32);
-        draw_glyph_colored(fb, pitch, col, row, byte, COLOR_DIM);
-    }
-
-    // Only advance to next line on Running (Ok/Warn overwrites current line).
+    draw_step_line(&mut con, row, status, description);
     if matches!(status, BootStatus::Running) {
-        con.cursor_col = 0;
-        con.cursor_row = row.wrapping_add(1);
-        if con.cursor_row >= con.rows {
-            scroll_up_locked(&mut con);
-        }
+        con.open_step(step_id(description), row);
+        step_newline(&mut con);
     }
 }
 
-/// Update the most recent boot step's status (overwrites the previous line).
+/// End a boot step begun with `boot_step(Running, description)`: redraw its
+/// line, wherever it now is, with `status`.
 ///
-/// Moves the cursor back to the previous line, redraws with the new status,
-/// and advances again.  Use after `boot_step(Running, ...)` to show success.
+/// The line is found by the row it was drawn on, carried along as the screen
+/// scrolls, so steps may nest and the console may print between a step's
+/// start and its end; the cursor does not move. A step whose line is gone --
+/// scrolled off the top, or the screen rearranged since -- or that was never
+/// started gets a line of its own at the cursor instead.
 pub fn boot_step_update(status: BootStatus, description: &str) {
     let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
         return;
     }
-    // Move cursor back to the previous line.
-    if con.cursor_row > 0 {
-        con.cursor_row = con.cursor_row.wrapping_sub(1);
+    if let Some(row) = con.close_step(step_id(description)) {
+        draw_step_line(&mut con, row, status, description);
+        return;
     }
-    drop(con);
+    let row = con.cursor_row;
+    draw_step_line(&mut con, row, status, description);
+    step_newline(&mut con);
+}
 
-    boot_step(status, description);
-
-    // Advance cursor past the updated line.
-    let mut con = CONSOLE.lock_irqsave();
+/// Move the cursor to the start of the next line, scrolling at the bottom.
+fn step_newline(con: &mut ConsoleInner) {
     con.cursor_col = 0;
     con.cursor_row = con.cursor_row.wrapping_add(1);
     if con.cursor_row >= con.rows {
-        scroll_up_locked(&mut con);
+        scroll_up_locked(con);
+    }
+}
+
+/// Draw `  [s] description` over the whole of text row `row`, on the screen
+/// and in the screen's text buffer, so scrollback and `screen_text` hold the
+/// boot steps too.
+fn draw_step_line(con: &mut ConsoleInner, row: u32, status: BootStatus, description: &str) {
+    con.ensure_screen_buf();
+    let (indicator, color) = match status {
+        BootStatus::Running => (b'*', COLOR_YELLOW),
+        BootStatus::Ok => (b'+', COLOR_GREEN),
+        BootStatus::Warn => (b'!', COLOR_RED),
+    };
+    let desc = description.as_bytes();
+    let cols = con.cols;
+    let row_start = (row as usize).wrapping_mul(cols as usize);
+    for col in 0..cols {
+        let (ch, fg) = match col {
+            2 => (b'[', DEFAULT_FG),
+            3 => (indicator, color),
+            4 => (b']', DEFAULT_FG),
+            // The description, in dim text, cut at the screen's edge.
+            6.. => (
+                usize::try_from(col.wrapping_sub(6))
+                    .ok()
+                    .and_then(|i| desc.get(i).copied())
+                    .unwrap_or(b' '),
+                COLOR_DIM,
+            ),
+            _ => (b' ', DEFAULT_FG),
+        };
+        draw_glyph_colored(con.fb_addr, con.fb_pitch, col, row, ch, fg);
+        if let Some(cell) = con.screen_buf.get_mut(row_start.wrapping_add(col as usize)) {
+            *cell = ScrollCell {
+                ch,
+                fg,
+                bg: DEFAULT_BG,
+            };
+        }
     }
 }
 
@@ -2392,6 +2473,12 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
     let pitch = con.fb_pitch;
     let rows = con.rows;
     let cols = con.cols as usize;
+
+    // A full-screen scroll carries the open boot steps' lines up a row; a
+    // region scroll (below) moves only part of the screen and forgets them.
+    if con.scroll_top == 0 && con.scroll_bottom == rows.saturating_sub(1) {
+        con.open_steps_scrolled();
+    }
 
     // Capture the top row into the scrollback buffer before scrolling.
     if con.scroll_top == 0 && !con.screen_buf.is_empty() {
@@ -2556,6 +2643,7 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     if !con.initialized {
         return;
     }
+    con.forget_open_steps();
     // Dimension mismatch guard — the framebuffer size cannot change at
     // runtime, but a stale snapshot from a different resolution must not
     // be blindly applied.
@@ -2663,6 +2751,48 @@ pub fn dimensions() -> (u32, u32) {
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::selftest;
     crate::serial_println!("[console] Running self-test...");
+
+    // Boot steps: each update finds its own step's line. Bookkeeping only, on
+    // a console of the test's own, so it runs with or without a framebuffer.
+    {
+        let mut c = ConsoleInner::new();
+        let storage = step_id("Storage & filesystems");
+        let preempt = step_id("Preemptive scheduling");
+        selftest::check!(storage != preempt, "two step descriptions share an id");
+        // Nested, as main.rs runs them: Preemptive starts and ends inside
+        // Storage, whose update went to Preemptive's line until 2026-10-14.
+        c.open_step(storage, 10);
+        c.open_step(preempt, 11);
+        selftest::check!(c.close_step(preempt) == Some(11), "a nested step lost its line");
+        selftest::check!(
+            c.close_step(storage) == Some(10),
+            "the outer step's update went to another line"
+        );
+        selftest::check!(c.close_step(storage).is_none(), "a step ended twice");
+        // A full-screen scroll carries lines up; one on the top row leaves.
+        c.open_step(storage, 0);
+        c.open_step(preempt, 3);
+        c.open_steps_scrolled();
+        selftest::check!(
+            c.close_step(storage).is_none() && c.close_step(preempt) == Some(2),
+            "a scroll did not carry the open steps' lines"
+        );
+        // Any other rearrangement forgets them.
+        c.open_step(storage, 4);
+        c.forget_open_steps();
+        selftest::check!(c.close_step(storage).is_none(), "a rearranged screen kept a step");
+        // Past capacity, the oldest is forgotten and the rest are kept.
+        for (id, row) in [(1, 20), (2, 21), (3, 22), (4, 23), (5, 24)] {
+            c.open_step(id, row);
+        }
+        selftest::check!(
+            c.close_step(1).is_none() && c.close_step(2) == Some(21) && c.close_step(5) == Some(24),
+            "a full set of open steps did not forget the oldest"
+        );
+        crate::serial_println!(
+            "[console]   boot steps: a nested step, a scroll, a rearranged screen, a full set: OK"
+        );
+    }
 
     // A machine with no framebuffer has no console to test, and that is a
     // legitimate configuration rather than a fault: a serial-only server, or a

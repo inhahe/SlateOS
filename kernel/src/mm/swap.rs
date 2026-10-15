@@ -3723,9 +3723,10 @@ impl Drop for ScratchDisk {
     /// test can leave: a real process's page reclaim put there would then be
     /// unreadable, so the disk stays, its memory spent, and the boot says so.
     fn drop(&mut self) {
-        let in_use = SWAP.lock().devices.iter().any(|d| {
-            matches!(&d.backend, SwapBackend::Disk(disk) if disk.device_name == self.0)
-        });
+        let in_use =
+            SWAP.lock().devices.iter().any(
+                |d| matches!(&d.backend, SwapBackend::Disk(disk) if disk.device_name == self.0),
+            );
         if in_use {
             serial_println!(
                 "[swap]   WARNING: {} still holds a swap area; left registered",
@@ -3804,10 +3805,7 @@ fn test_whole_device() -> KernelResult<()> {
             "a GPT, a DOS boot sector (MBR, FAT, NTFS) or XFS beside the header is another's",
             others_marks,
         ),
-        (
-            "a default priority is given back at swapoff",
-            priority_back,
-        ),
+        ("a default priority is given back at swapoff", priority_back),
         (
             "a device with no header is refused",
             unsigned == Err(KernelError::InvalidArgument),

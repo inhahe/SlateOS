@@ -177,10 +177,7 @@ pub fn register(pid: ProcessId) -> KernelResult<ChannelHandle> {
 /// one program's (design-decisions 1569).
 #[must_use]
 pub fn is_program_end(raw: u64) -> bool {
-    ENDPOINTS
-        .lock()
-        .values()
-        .any(|e| e.program.raw() == raw)
+    ENDPOINTS.lock().values().any(|e| e.program.raw() == raw)
 }
 
 /// Whether `target` answers lifecycle requests: it registered, and has not

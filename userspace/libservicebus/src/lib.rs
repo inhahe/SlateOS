@@ -377,6 +377,9 @@ pub enum BusError {
     InvalidArgument,
     /// The caller lacks the capability (`PermissionDenied`, `InvalidCapability`).
     PermissionDenied,
+    /// No process has that ID, or it has ended (`NoSuchProcess`,
+    /// `ProcessExited`).
+    NoSuchProcess,
     /// A kernel limit or out of memory (`ResourceExhausted`, `OutOfMemory`).
     ResourceExhausted,
     /// The kernel has no such call (`NoSuchSyscall`, `NotSupported`) -- or this
@@ -402,6 +405,7 @@ impl BusError {
             kerror::INVALID_HANDLE => Self::InvalidHandle,
             kerror::INVALID_ARGUMENT | kerror::INVALID_ADDRESS => Self::InvalidArgument,
             kerror::PERMISSION_DENIED | kerror::INVALID_CAPABILITY => Self::PermissionDenied,
+            kerror::NO_SUCH_PROCESS | kerror::PROCESS_EXITED => Self::NoSuchProcess,
             kerror::RESOURCE_EXHAUSTED | kerror::OUT_OF_MEMORY => Self::ResourceExhausted,
             kerror::NOT_SUPPORTED | kerror::NO_SUCH_SYSCALL | HOST_ENOSYS => Self::Unsupported,
             other => Self::Unknown(other),
@@ -422,6 +426,7 @@ impl fmt::Display for BusError {
             Self::InvalidHandle => f.write_str("invalid handle"),
             Self::InvalidArgument => f.write_str("invalid argument"),
             Self::PermissionDenied => f.write_str("permission denied"),
+            Self::NoSuchProcess => f.write_str("no such process"),
             Self::ResourceExhausted => f.write_str("resource limit reached"),
             Self::Unsupported => f.write_str("not supported here"),
             Self::Malformed => f.write_str("malformed message"),
@@ -1561,6 +1566,8 @@ impl Drop for Timer {
 /// project rule on OS-boundary data). Callers that want text validate it
 /// themselves, at the point where they know whether invalid UTF-8 is an error
 /// or just an unusual name.
+pub mod lifecycle;
+
 pub mod fields {
     /// The largest field count this decoder will believe.
     ///

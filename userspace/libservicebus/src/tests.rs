@@ -675,13 +675,43 @@ fn syscall_numbers_are_the_kernel_s() {
     for (name, value) in ours {
         assert_eq!(kernel_syscall(name), value, "{name}");
     }
+    use crate::lifecycle::nr as lc;
+    for (name, value) in [
+        ("SYS_LIFECYCLE_REGISTER", lc::SYS_LIFECYCLE_REGISTER),
+        ("SYS_LIFECYCLE_REQUEST", lc::SYS_LIFECYCLE_REQUEST),
+        ("SYS_LIFECYCLE_QUERY", lc::SYS_LIFECYCLE_QUERY),
+        (
+            "LIFECYCLE_CLOSE",
+            u64::from(crate::lifecycle::Kind::Close.code()),
+        ),
+        (
+            "LIFECYCLE_TERMINATE",
+            u64::from(crate::lifecycle::Kind::Terminate.code()),
+        ),
+    ] {
+        assert_eq!(kernel_syscall(name), value, "{name}");
+    }
+    let len = NUMBER_RS
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("pub const LIFECYCLE_MESSAGE_LEN: usize = ")
+        })
+        .and_then(|v| v.trim_end_matches(';').parse::<usize>().ok());
+    assert_eq!(len, Some(crate::lifecycle::REQUEST_SIZE));
 }
 
 #[test]
 fn the_message_size_limit_is_the_kernel_s() {
     let expr = CHANNEL_RS
         .lines()
-        .find_map(|l| l.trim().strip_prefix("const MAX_MESSAGE_SIZE: usize = "))
+        .find_map(|l| {
+            let l = l.trim();
+            // Public since lane A's channels-as-descriptors read it too.
+            l.strip_prefix("pub ")
+                .unwrap_or(l)
+                .strip_prefix("const MAX_MESSAGE_SIZE: usize = ")
+        })
         .expect("MAX_MESSAGE_SIZE in kernel/src/ipc/channel.rs");
     let expr = expr.split(';').next().unwrap();
     let kernel: usize = expr

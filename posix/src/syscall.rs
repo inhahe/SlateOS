@@ -1189,6 +1189,19 @@ pub const MEMORY_UNLOCK_RANGE: u64 = 1;
 pub const MEMORY_LOCK_ALL: u64 = 2;
 /// [`SYS_MEMORY_LOCK`] operation: unlock every mapping, `munlockall()`.
 pub const MEMORY_UNLOCK_ALL: u64 = 3;
+
+/// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
+/// off; does not return on success. Needs the `POWER_OFF` right on a
+/// class-wide `Process` capability (`PermissionDenied`); `NotSupported`, the
+/// machine still running, when no way of switching off answered. Lane A's.
+pub const SYS_POWER_OFF: u64 = 1167;
+/// `SYS_POWER_REBOOT(flags)` -- flush every filesystem and restart through
+/// the firmware; does not return. Needs the `REBOOT` right.
+pub const SYS_POWER_REBOOT: u64 = 1168;
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec); `(0, 0)` for the running
+/// kernel's own image and command line. Needs the `RELOAD_KERNEL` right.
+pub const SYS_POWER_RELOAD: u64 = 1139;
 // Later pipe additions live in the free extension range (657+): the original
 // 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
 // buffered bytes without consuming, wait_readable blocks for data/EOF.

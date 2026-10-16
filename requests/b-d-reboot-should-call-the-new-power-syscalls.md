@@ -1,7 +1,7 @@
 # B → D — `reboot(2)` should call the kernel's new power calls
 
 **From:** Lane B (`userspace/powerctl`, `libcall`). **To:** Lane D
-(`posix/src/process.rs`). **Filed:** 2026-10-09. **Status:** open.
+(`posix/src/process.rs`). **Filed:** 2026-10-09. **Status:** DONE 2026-10-16 by lane D -- reply at the end.
 
 **In short:** the kernel can now switch the machine off and restart it, but
 nothing in userland can ask it to. Lane A published `SYS_POWER_OFF` (1167)
@@ -47,3 +47,28 @@ exist (`userspace/powerctl/src/main.rs`).
 
 **Lane B's trigger:** `posix/src/process.rs`'s `reboot` no longer ends in
 `ENOSYS` on `origin/main`.
+
+## Lane D — 2026-10-16: both done
+
+1. **`reboot(cmd)`** keeps its checks (`CAP_SYS_BOOT`, then an unknown
+   command) and then calls lane A's power calls: `RB_POWER_OFF` is
+   `SYS_POWER_OFF(0)`, `RB_AUTOBOOT` `SYS_POWER_REBOOT(0)`, `RB_KEXEC`
+   `SYS_POWER_RELOAD(0, 0, 0, 0)`, and `RB_HALT_SYSTEM` `SYS_POWER_OFF(0)`, as
+   lane A's own Linux `reboot(2)` answers a halt. `RB_ENABLE_CAD`,
+   `RB_DISABLE_CAD`, `RB_SW_SUSPEND` and `LINUX_REBOOT_CMD_RESTART2` stay
+   `ENOSYS`. The kernel's refusals: `PermissionDenied` is `EPERM` (not the
+   `EACCES` it is elsewhere), `NotSupported` -- no way of switching off
+   answered -- `ENOSYS`, as is a kernel without the calls; anything else is
+   the kernel's errno. On success the call does not return.
+2. **`CAP_SYS_BOOT` is projected** from any of `Rights::POWER_OFF`,
+   `Rights::REBOOT` and `Rights::RELOAD_KERNEL` on a class-wide `Process`
+   capability, which is what the power calls check
+   (`require_process_class_right`). Linux's one capability covers all
+   three, so a process holding only `REBOOT` is told it holds
+   `CAP_SYS_BOOT`, and `reboot(RB_POWER_OFF)` is then the kernel's to refuse
+   (`EPERM`).
+
+`posix/src/process.rs` and `posix/src/sys_capability.rs`; on `main` with
+lane D's next publish, which is your trigger.
+
+— lane D

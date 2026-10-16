@@ -2454,34 +2454,83 @@ pub fn reboot_cmd_known(cmd: u32) -> bool {
     )
 }
 
-/// Reboot the system.
+/// The kernel call a known `reboot` command is, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerCall {
+    /// `SYS_POWER_OFF`: switch the machine off.
+    Off,
+    /// `SYS_POWER_REBOOT`: restart through the firmware.
+    Reboot,
+    /// `SYS_POWER_RELOAD` with the running kernel's own image and command
+    /// line: restart without the firmware.
+    Reload,
+    /// No kernel call answers it: Ctrl-Alt-Del's setting, suspend to disk,
+    /// and a restart with a command string.
+    None,
+}
+
+/// What `cmd` -- one [`reboot_cmd_known`] accepts -- asks of the kernel.
+/// `HALT` switches off, as lane A's own Linux `reboot(2)` answers it: there is
+/// no call that stops the processors and leaves the power on, and switching off
+/// is what a halt is for on a machine that can.
+fn power_call(cmd: u32) -> PowerCall {
+    match cmd {
+        LINUX_REBOOT_CMD_POWER_OFF | LINUX_REBOOT_CMD_HALT => PowerCall::Off,
+        LINUX_REBOOT_CMD_RESTART => PowerCall::Reboot,
+        LINUX_REBOOT_CMD_KEXEC => PowerCall::Reload,
+        _ => PowerCall::None,
+    }
+}
+
+/// A power call's answer `ret`, as `reboot` gives it: 0, or -1 with errno --
+/// `EPERM` for the kernel's `PermissionDenied` (the right this command needs
+/// is not held, which Linux's `CAP_SYS_BOOT` check answers so), `ENOSYS` for
+/// `NotSupported` (no way of switching off answered, the machine still
+/// running) and for a kernel without the call, else the kernel's errno.
+fn power_answer(ret: i64) -> i32 {
+    if ret >= 0 {
+        return 0;
+    }
+    let e = match ret {
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::NOT_SUPPORTED | errno::native::NO_SUCH_SYSCALL => errno::ENOSYS,
+        r if cfg!(not(target_os = "none")) && r == crate::syscall::HOST_ENOSYS => errno::ENOSYS,
+        r => {
+            // Sets errno from the kernel's code, as every other call does.
+            let _ = errno::translate(r);
+            return -1;
+        }
+    };
+    errno::set_errno(e);
+    -1
+}
+
+/// Reboot the system, switch it off, or restart it into its own kernel.
 ///
-/// Stub: answers as Linux's `sys_reboot` would, in Linux's order, then
-/// `ENOSYS`, because this microkernel exports no reboot path yet.  The real
-/// implementation will hand off to the platform power-management driver.
-///
-/// # glibc / Linux model
-///
-/// glibc's `reboot(int howto)` supplies both magic values itself and calls
-/// the kernel straight away -- it checks nothing first -- and the kernel
-/// (`kernel/reboot.c`) checks, in this order:
+/// Linux's checks first, in Linux's order (`kernel/reboot.c`):
 ///
 /// 1. the caller lacks `CAP_SYS_BOOT`               → `EPERM`
 /// 2. `magic1`/`magic2` wrong                       → `EINVAL`
 /// 3. `cmd` not one it knows (the switch's default) → `EINVAL`
 /// 4. otherwise: the command runs.
 ///
-/// (2) cannot happen through the wrapper, so what a program can see is (1),
-/// then (3), then -- here -- `ENOSYS` for (4).  Until 2026-09-27 this checked
-/// `cmd` first, so an unknown command without the capability was `EINVAL`
-/// where Linux says `EPERM`; a comment argued glibc filters commands before
-/// the call, which it does not.
+/// (2) cannot happen through glibc's `reboot(int howto)`, which supplies
+/// both magic values itself and checks nothing first, so a program sees (1),
+/// then (3), then the command. `CAP_SYS_BOOT` is held when the process holds
+/// one of the kernel's power rights (`sys_capability`'s projection).
+///
+/// The commands are lane A's power calls ([`power_call`]): `RESTART`
+/// restarts through the firmware, `POWER_OFF` and `HALT` switch off, `KEXEC`
+/// restarts into the running kernel's own image. Each flushes every
+/// filesystem first and does not return when it works. `CAD_ON`, `CAD_OFF`,
+/// `SW_SUSPEND` and `RESTART2` have no kernel call: `ENOSYS`, as before. The
+/// kernel's refusals are [`power_answer`]'s.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn reboot(cmd: i32) -> i32 {
     // Reinterpret the signed C `int` as u32 so the magic constants
     // (some of which have the high bit set, e.g. CMD_HALT 0xCDEF0123)
     // compare equal regardless of sign-extension on the caller side.
-    let cmd_u = cmd as u32;
+    let cmd_u = cmd.cast_unsigned();
     if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_BOOT) {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -2490,8 +2539,16 @@ pub extern "C" fn reboot(cmd: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let ret = match power_call(cmd_u) {
+        PowerCall::Off => crate::syscall::syscall1(crate::syscall::SYS_POWER_OFF, 0),
+        PowerCall::Reboot => crate::syscall::syscall1(crate::syscall::SYS_POWER_REBOOT, 0),
+        PowerCall::Reload => crate::syscall::syscall4(crate::syscall::SYS_POWER_RELOAD, 0, 0, 0, 0),
+        PowerCall::None => {
+            errno::set_errno(errno::ENOSYS);
+            return -1;
+        }
+    };
+    power_answer(ret)
 }
 
 // ---------------------------------------------------------------------------
@@ -5275,7 +5332,9 @@ mod tests {
     #[test]
     fn test_reboot_returns_enosys_when_capable() {
         // The default process holds CAP_SYS_BOOT, so every well-formed call
-        // reaches the end and surfaces ENOSYS (no reboot subsystem yet).
+        // reaches the kernel -- which the host has not got: ENOSYS, as for a
+        // kernel without the power calls, and for the commands no call
+        // answers.
         let _g = CapGuard::snapshot();
         for cmd in REBOOT_CMDS {
             crate::errno::set_errno(0);
@@ -5344,6 +5403,47 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(reboot(0xDEAD_BEEFu32 as i32), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// Each command's kernel call: off for `POWER_OFF` and `HALT`, the
+    /// firmware's restart for `RESTART`, the running kernel again for
+    /// `KEXEC`, and nothing for the rest.
+    #[test]
+    fn reboot_commands_are_the_kernels_power_calls() {
+        assert_eq!(power_call(LINUX_REBOOT_CMD_POWER_OFF), PowerCall::Off);
+        assert_eq!(power_call(LINUX_REBOOT_CMD_HALT), PowerCall::Off);
+        assert_eq!(power_call(LINUX_REBOOT_CMD_RESTART), PowerCall::Reboot);
+        assert_eq!(power_call(LINUX_REBOOT_CMD_KEXEC), PowerCall::Reload);
+        for cmd in [
+            LINUX_REBOOT_CMD_CAD_ON,
+            LINUX_REBOOT_CMD_CAD_OFF,
+            LINUX_REBOOT_CMD_SW_SUSPEND,
+            LINUX_REBOOT_CMD_RESTART2,
+        ] {
+            assert_eq!(power_call(cmd), PowerCall::None, "cmd {cmd:#010x}");
+        }
+    }
+
+    /// The kernel's refusals, as `reboot` answers them: a right not held is
+    /// EPERM (Linux's CAP_SYS_BOOT answer, not the EACCES the kernel's
+    /// `PermissionDenied` is elsewhere); no way to switch off, and a kernel
+    /// without the call, ENOSYS; anything else the kernel's errno.
+    #[test]
+    fn a_power_calls_answer_is_reboots() {
+        use crate::errno::{self, native};
+        assert_eq!(power_answer(0), 0);
+        for (ret, want) in [
+            (native::PERMISSION_DENIED, errno::EPERM),
+            (native::NOT_SUPPORTED, errno::ENOSYS),
+            (native::NO_SUCH_SYSCALL, errno::ENOSYS),
+            (crate::syscall::HOST_ENOSYS, errno::ENOSYS),
+            (native::INVALID_ARGUMENT, errno::EINVAL),
+            (native::OUT_OF_MEMORY, errno::ENOMEM),
+        ] {
+            errno::set_errno(0);
+            assert_eq!(power_answer(ret), -1, "{ret}");
+            assert_eq!(errno::get_errno(), want, "{ret}");
+        }
     }
 
     // -- reboot constants --

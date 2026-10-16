@@ -485,8 +485,8 @@ fn reported_caps_effective() -> (u32, u32) {
 /// [`current_caps_effective`].
 pub mod kernel_view {
     use super::{
-        CAP_KILL, CAP_LAST_CAP, CAP_NET_RAW, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE,
-        CAP_SYS_PTRACE, CAP_SYS_RAWIO, store,
+        CAP_KILL, CAP_LAST_CAP, CAP_NET_RAW, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_BOOT,
+        CAP_SYS_NICE, CAP_SYS_PTRACE, CAP_SYS_RAWIO, store,
     };
 
     /// Kernel `ResourceType` discriminants.
@@ -513,13 +513,13 @@ pub mod kernel_view {
 
     /// Kernel `Rights` bits.
     ///
-    /// Mirrors `kernel/src/cap/rights.rs`. `Rights` is a **`u64`** — thirteen
-    /// bits are defined there today, which is exactly why nothing here may
-    /// narrow it to `u32`: the width is the ABI, not the current occupancy.
+    /// Mirrors `kernel/src/cap/rights.rs`. `Rights` is a **`u64`**, which is
+    /// exactly why nothing here may narrow it to `u32`: the width is the ABI,
+    /// not the current occupancy.
     ///
     /// **This mirror is partial by design, and the gap is not a TODO.** Only
-    /// the bits some rule in [`project`] actually tests appear here — nine of
-    /// the thirteen. A bit that is projected onto no Linux capability has
+    /// the bits some rule in [`project`] actually tests appear here. A bit
+    /// that is projected onto no Linux capability has
     /// nothing to say to this file, and copying it over anyway would invite
     /// the reader to assume the absent ones are unimplemented rather than
     /// simply irrelevant. Add a bit here when, and only when, a predicate
@@ -549,6 +549,13 @@ pub mod kernel_view {
         /// grant site in `kernel/` and this projection in `posix/` and no
         /// single diff showing both halves. See design-decisions.md §207.
         pub const SET_CREDENTIALS: u64 = 1 << 18;
+        /// May restart SlateOS into a kernel image the caller chooses
+        /// (`SYS_POWER_RELOAD`, Linux's kexec).
+        pub const RELOAD_KERNEL: u64 = 1 << 24;
+        /// May switch the machine off (`SYS_POWER_OFF`).
+        pub const POWER_OFF: u64 = 1 << 25;
+        /// May restart the machine through the firmware (`SYS_POWER_REBOOT`).
+        pub const REBOOT: u64 = 1 << 26;
     }
 
     /// One capability, as `SYS_CAP_QUERY` writes it.
@@ -766,6 +773,20 @@ pub mod kernel_view {
         if holds_with(entries, res::PROCESS, rights::SET_CREDENTIALS) {
             m.set(CAP_SETUID);
             m.set(CAP_SETGID);
+        }
+        // The machine's power -- reboot(2) and kexec -- is CAP_SYS_BOOT's, and
+        // the kernel's power calls each ask for a right of their own on a
+        // class-wide Process capability (`require_process_class_right`). Linux
+        // has one capability for all three, so holding any of them is
+        // CAP_SYS_BOOT: a program allowed to restart the machine is one Linux
+        // would let reboot. The command whose own right is missing is still
+        // the kernel's to refuse (`reboot` answers it EPERM).
+        if holds_class_with(
+            entries,
+            res::PROCESS,
+            rights::POWER_OFF | rights::REBOOT | rights::RELOAD_KERNEL,
+        ) {
+            m.set(CAP_SYS_BOOT);
         }
 
         if project_sys_admin(entries) {
@@ -1244,7 +1265,6 @@ mod projection_tests {
             CAP_IPC_LOCK,
             CAP_SYS_MODULE,
             CAP_SYS_CHROOT,
-            CAP_SYS_BOOT,
             CAP_SYS_RESOURCE,
             CAP_SYS_TIME,
             CAP_MKNOD,
@@ -1258,6 +1278,31 @@ mod projection_tests {
                 "cap {unmapped} has no rule but projected as held"
             );
         }
+    }
+
+    /// Any of the kernel's three power rights, on a class-wide Process
+    /// capability as its power calls require, is `CAP_SYS_BOOT`; none, or one
+    /// on a single process, is not.
+    #[test]
+    fn the_power_rights_are_cap_sys_boot() {
+        for r in [rights::POWER_OFF, rights::REBOOT, rights::RELOAD_KERNEL] {
+            assert!(
+                is_set(project(&[cap(res::PROCESS, r)]), CAP_SYS_BOOT),
+                "{r:#x}"
+            );
+            assert!(
+                !is_set(project(&[cap_on(res::PROCESS, 7, r)]), CAP_SYS_BOOT),
+                "{r:#x} on one process"
+            );
+        }
+        assert!(!is_set(
+            project(&[cap(res::PROCESS, rights::SIGNAL | rights::DEBUG)]),
+            CAP_SYS_BOOT
+        ));
+        assert!(!is_set(
+            project(&[cap(res::THREAD, rights::REBOOT)]),
+            CAP_SYS_BOOT
+        ));
     }
 
     #[test]

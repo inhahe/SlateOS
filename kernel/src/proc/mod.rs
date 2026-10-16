@@ -40,6 +40,7 @@ pub mod exception;
 pub mod fork;
 pub mod freezer;
 pub mod itimer;
+pub mod lifecycle;
 pub mod linux_fd;
 pub mod linux_sigframe;
 pub mod linux_stack;
@@ -87,6 +88,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[proc] Running fork self-test...");
     fork::self_test()?;
     freezer::self_test()?;
+    lifecycle::self_test()?;
     serial_println!("[proc] Running Linux fd-table self-test...");
     linux_fd::self_test()?;
     serial_println!("[proc] Running Linux SysV-stack self-test...");

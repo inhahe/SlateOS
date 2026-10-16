@@ -37,13 +37,20 @@
 # 1, which only a malformed `/proc` produces and upstream passes to `kill` as
 # "my process group" (0) or "everyone" (-1); and getopt's message escapes an
 # option byte that is not text. See the module's docs.
+#
+# Not compared at all: SlateOS's requests -- `--close`, `--terminate`,
+# `--force`, `--via`, `--timeout` (design-decisions §1072) -- which upstream
+# has no counterpart for, and their paragraph under `pkill`'s usage, which is
+# taken out of our output before every comparison. Off SlateOS no program
+# answers a request, so a plain `pkill` is upstream's `SIGTERM` and is
+# compared as such.
 set -u
 
 DIFF_PROG='pgrep'
 DIFF_BINS='pgrep pkill'
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
-DIFF_NEED="python3 unshare timeout setsid mkfifo"
+DIFF_NEED="python3 perl unshare timeout setsid mkfifo"
 # shellcheck source=procps-ref.sh
 . "$(dirname "$0")/procps-ref.sh"
 # shellcheck source=diff-wsl.sh
@@ -377,6 +384,10 @@ compare() {
   [ "$WORLD" = live ] && [ -z "$LIVE" ] && LIVE='sleep 30'
   run_side ours "$p" "$@"
   run_side gnu "$p" "$@"
+  # `pkill`'s usage ends with a paragraph upstream has no counterpart for:
+  # SlateOS's requests (deliberate difference 6), taken out before comparing.
+  perl -0pi -e "s/\nSlateOS's requests, which a program may answer itself[^\n]*\n(?: [^\n]*\n)*//" \
+    "$p.ours.out" "$p.ours.err"
   LABEL="$*"
   [ "$WORLD" != main ] && LABEL="$LABEL [world=$WORLD]"
   [ "$LOCALE" != C.UTF-8 ] && LABEL="$LABEL [LC_ALL=$LOCALE]"

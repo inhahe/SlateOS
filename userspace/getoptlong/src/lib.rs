@@ -566,7 +566,7 @@ impl Program {
         prefix: &str,
         table: &'t [(&'t str, T)],
         aliases: &[(&str, &str)],
-        how: Lookup,
+        how: Lookup<'_>,
     ) -> Result<Option<(&'t str, T)>, Error> {
         if let Some(hit) = table.iter().find(|(n, _)| *n == typed) {
             return Ok(Some(*hit));
@@ -574,7 +574,7 @@ impl Program {
         let matches: Vec<(usize, &(&'t str, T))> = table
             .iter()
             .enumerate()
-            .filter(|(_, (n, _))| n.starts_with(typed))
+            .filter(|(_, (n, _))| n.starts_with(typed) && !how.whole_only.contains(n))
             .collect();
         let Some(&(first_at, first)) = matches.first() else {
             return Ok(None);
@@ -806,18 +806,38 @@ impl Program {
             long_only: false,
             distinct_entries: false,
             short_only: false,
+            whole_only: &[],
             done: false,
+            optopt: Optopt::None,
         }
     }
 }
 
+/// glibc's `optopt`: the option an error was about. See [`Parser::optopt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Optopt<'a> {
+    /// No error yet, or one that names no option -- an unrecognised or
+    /// ambiguous long option. glibc's 0.
+    None,
+    /// A short option: the letter that was not an option, or that wanted a
+    /// value and had none.
+    Short(u8),
+    /// A long option, as the table names it, that wanted a value and had
+    /// none or was given one it does not take. glibc stores the option's
+    /// `val` -- its short letter, by the usual convention -- which the
+    /// caller maps from the name.
+    Long(&'a str),
+}
+
 /// The rule [`Program::lookup_long`] resolves an abbreviation by.
 #[derive(Clone, Copy, Debug, Default)]
-struct Lookup {
+struct Lookup<'w> {
     /// `getopt_long_only`: every second prefix match is ambiguous.
     long_only: bool,
     /// Every table entry is its own option, even where two share a name.
     distinct: bool,
+    /// Options matched only when typed in full; see [`Parser::whole_only`].
+    whole_only: &'w [&'w str],
 }
 
 /// One thing found on the command line, in the order it was typed.
@@ -873,7 +893,11 @@ pub struct Parser<'a> {
     distinct_entries: bool,
     /// See [`Parser::short_only`].
     short_only: bool,
+    /// See [`Parser::whole_only`].
+    whole_only: &'a [&'a str],
     done: bool,
+    /// See [`Parser::optopt`].
+    optopt: Optopt<'a>,
 }
 
 impl<'a> Parser<'a> {
@@ -925,6 +949,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// glibc's `optopt`: the option the last error was about, as glibc sets
+    /// it -- the letter for a short option that is not one or wants a value;
+    /// the option for a long one that wants a value or refuses one (glibc
+    /// stores its `val`); nothing for an unrecognised or ambiguous long option.
+    /// Like glibc's, it is set by an error and left alone otherwise.
+    ///
+    /// For a program that sets `opterr = 0` and decides for itself what a
+    /// `'?'` means -- procps' `kill`, which reads `-5` as the process group
+    /// `-5` only when `optopt` is a digit.
+    #[must_use]
+    pub fn optopt(&self) -> Optopt<'a> {
+        self.optopt
+    }
+
     /// Take the next word of argv as a value the *program* decided an
     /// option has: glibc's `optarg = argv[optind++]`, done by hand.
     ///
@@ -939,6 +977,18 @@ impl<'a> Parser<'a> {
             return None;
         }
         self.next_word()
+    }
+
+    /// Give up on the rest of the word being read: what is left of a bundle
+    /// like `-1234` after the `1` is not read, and the walk goes on with the
+    /// next word. glibc's `nextchar = NULL; optind++`, done by hand.
+    ///
+    /// For the program that decides, after `getopt` has refused a word's first
+    /// letter, that the whole word was something else -- `kill`, for which
+    /// `-1234` is a process group. With [`Parser::keep_going`], so that the
+    /// walk goes on at all.
+    pub fn abandon_word(&mut self) {
+        self.cluster.clear();
     }
 
     /// Whether glibc's `getopt_long` would have **stopped** by now: every word
@@ -1037,6 +1087,20 @@ impl<'a> Parser<'a> {
         self
     }
 
+    /// Match the long options `names` only when typed in full: no
+    /// abbreviation names one, and none makes an abbreviation of another
+    /// ambiguous.
+    ///
+    /// For options a port adds to its upstream's table. Every abbreviation
+    /// then means what it means upstream: SlateOS's `pkill --terminate`
+    /// leaves `pkill --term pts/1` the `--terminal` it is on Linux, where
+    /// matching it as glibc does would make it ambiguous between the two.
+    #[must_use]
+    pub fn whole_only(mut self, names: &'a [&'a str]) -> Self {
+        self.whole_only = names;
+        self
+    }
+
     /// Whether an operand here ends option parsing.
     fn stops_at_operand(&self) -> bool {
         match self.ordering {
@@ -1071,23 +1135,29 @@ impl<'a> Parser<'a> {
             // the next word, and is resolved as `process_long_option` does,
             // never `getopt_long_only`'s way, with `-W ` in its messages.
             let body = if tail.is_empty() {
-                let next = self
-                    .next_word()
-                    .ok_or_else(|| self.program.short_missing_argument(flag))?;
+                let Some(next) = self.next_word() else {
+                    self.optopt = Optopt::Short(flag);
+                    return Err(self.program.short_missing_argument(flag));
+                };
                 os_bytes(&next).into_owned()
             } else {
                 tail.to_vec()
             };
             let mut shown = b"-W ".to_vec();
             shown.extend_from_slice(&body);
-            return self
-                .long_item(&body, &shown, "-W ", false)?
-                .ok_or_else(|| self.program.unrecognized_option(&shown));
+            return match self.long_item(&body, &shown, "-W ", false)? {
+                Some(opt) => Ok(opt),
+                None => {
+                    self.optopt = Optopt::None;
+                    Err(self.program.unrecognized_option(&shown))
+                }
+            };
         }
         let Some(takes) = short_takes(self.shorts, flag) else {
             // The rest of the bundle is still to be read, should the walk go
             // on (`keep_going`): glibc moves to the next letter.
             self.cluster = tail.to_vec();
+            self.optopt = Optopt::Short(flag);
             return Err(self.program.invalid_option(flag));
         };
         if takes == Takes::Nothing {
@@ -1103,10 +1173,13 @@ impl<'a> Parser<'a> {
             // between `Optional` and `Required`.
             (Takes::Optional, true) => None,
             (_, false) => Some(os_from_bytes(&tail)),
-            (_, true) => Some(
-                self.next_word()
-                    .ok_or_else(|| self.program.short_missing_argument(flag))?,
-            ),
+            (_, true) => {
+                let Some(next) = self.next_word() else {
+                    self.optopt = Optopt::Short(flag);
+                    return Err(self.program.short_missing_argument(flag));
+                };
+                Some(next)
+            }
         };
         Ok(Opt::Short(flag, value))
     }
@@ -1114,8 +1187,13 @@ impl<'a> Parser<'a> {
     /// Handle one `--name[=value]` word.
     fn take_long(&mut self, body: &[u8], whole: &[u8]) -> Result<Opt<'a>, Error> {
         let long_only = self.long_only;
-        self.long_item(body, whole, "--", long_only)?
-            .ok_or_else(|| self.program.unrecognized_option(whole))
+        match self.long_item(body, whole, "--", long_only)? {
+            Some(opt) => Ok(opt),
+            None => {
+                self.optopt = Optopt::None;
+                Err(self.program.unrecognized_option(whole))
+            }
+        }
     }
 
     /// One long option: `body` is what follows its `prefix` -- `name` or
@@ -1148,15 +1226,17 @@ impl<'a> Parser<'a> {
         let how = Lookup {
             long_only,
             distinct: self.distinct_entries,
+            whole_only: self.whole_only,
         };
-        let Some((name, takes)) =
-            self.program
-                .lookup_long(typed, whole, prefix, self.longs, self.aliases, how)?
-        else {
+        let found = self
+            .program
+            .lookup_long(typed, whole, prefix, self.longs, self.aliases, how);
+        let Some((name, takes)) = found.inspect_err(|_| self.optopt = Optopt::None)? else {
             return Ok(None);
         };
 
         if inline.is_some() && takes == Takes::Nothing {
+            self.optopt = Optopt::Long(name);
             return Err(self.program.long_unwanted_argument_as(prefix, name));
         }
         let value = match takes {
@@ -1167,9 +1247,13 @@ impl<'a> Parser<'a> {
                 // `--time=` is an *empty* value, not a missing one, and must
                 // reach the caller so `argmatch` can list the valid words.
                 Some(text) => os_from_bytes(text),
-                None => self
-                    .next_word()
-                    .ok_or_else(|| self.program.long_missing_argument_as(prefix, name))?,
+                None => {
+                    let Some(next) = self.next_word() else {
+                        self.optopt = Optopt::Long(name);
+                        return Err(self.program.long_missing_argument_as(prefix, name));
+                    };
+                    next
+                }
             }),
         };
         Ok(Some(Opt::Long(name, value)))
@@ -1236,6 +1320,7 @@ impl<'a> Parser<'a> {
                         Ok(Some(opt)) => return Some(Ok(opt)),
                         Err(e) => return Some(Err(e)),
                         Ok(None) if !listed(body.first()) => {
+                            self.optopt = Optopt::None;
                             return Some(Err(self.program.unrecognized_option(&bytes)));
                         }
                         // Not a long option, but its first letter is a short
@@ -2308,6 +2393,73 @@ mod tests {
         assert_eq!(p.next().unwrap().unwrap(), short(b'f'));
     }
 
+    /// glibc's `optopt`, as procps' `kill` reads it under `opterr = 0`:
+    /// the letter of a bad or valueless short option, the option a long
+    /// word's value was missing or unwanted for, nothing for a long word that
+    /// names no option or several, and unchanged by an item that is fine.
+    #[test]
+    fn optopt_names_the_option_an_error_was_about() {
+        const KILL: Program = Program::new("kill", 1);
+        const SHORTS: &str = "l::Ls:hVq:";
+        const LONGS: &[(&str, Takes)] = &[
+            ("list", Takes::Optional),
+            ("table", Takes::Nothing),
+            ("signal", Takes::Required),
+            ("help", Takes::Nothing),
+            ("version", Takes::Nothing),
+            ("queue", Takes::Required),
+            ("quit", Takes::Nothing),
+        ];
+        let first = |words: &[&str], expect: &dyn Fn(Optopt<'_>) -> bool| {
+            let args = argv(words);
+            let mut p = KILL.parse(&args, SHORTS, LONGS);
+            assert_eq!(p.optopt(), Optopt::None, "nothing before the walk");
+            let mut errors = 0;
+            for item in p.by_ref() {
+                errors += usize::from(item.is_err());
+            }
+            assert_eq!(errors, 1, "{words:?}");
+            assert!(expect(p.optopt()), "{words:?}: {:?}", p.optopt());
+        };
+        first(&["-1234"], &|o| o == Optopt::Short(b'1'));
+        first(&["-Lx"], &|o| o == Optopt::Short(b'x'));
+        first(&["-s"], &|o| o == Optopt::Short(b's'));
+        first(&["9", "-q"], &|o| o == Optopt::Short(b'q'));
+        first(&["--signal"], &|o| o == Optopt::Long("signal"));
+        first(&["--table=x"], &|o| o == Optopt::Long("table"));
+        first(&["--nosuch"], &|o| o == Optopt::None);
+        first(&["--qu"], &|o| o == Optopt::None);
+
+        // A good item after a bad one leaves it: glibc sets it on errors only.
+        let args = argv(&["-x", "-L"]);
+        let mut p = KILL.parse(&args, SHORTS, LONGS).keep_going(true);
+        assert!(p.next().is_some_and(|i| i.is_err()));
+        assert_eq!(p.next(), Some(Ok(Opt::Short(b'L', None))));
+        assert_eq!(p.optopt(), Optopt::Short(b'x'));
+    }
+
+    /// `abandon_word`: the rest of a refused bundle is skipped, and the walk
+    /// goes on at the next word -- where without it each letter left would
+    /// be refused in turn.
+    #[test]
+    fn an_abandoned_word_is_not_read_any_further() {
+        const KILL: Program = Program::new("kill", 1);
+        const LONGS: &[(&str, Takes)] = &[("table", Takes::Nothing)];
+        let args = argv(&["-1234", "-L", "5"]);
+        let mut p = KILL.parse(&args, "Ls:", LONGS).keep_going(true);
+        assert!(p.next().is_some_and(|i| i.is_err()));
+        assert_eq!(p.current_word(), Some(&args[0]));
+        p.abandon_word();
+        assert_eq!(p.next(), Some(Ok(Opt::Short(b'L', None))));
+        assert_eq!(p.next(), Some(Ok(Opt::Operand(&args[2]))));
+        assert_eq!(p.next(), None);
+
+        // Without it, the 2, the 3 and the 4 are refused as well.
+        let mut q = KILL.parse(&args, "Ls:", LONGS).keep_going(true);
+        let errors = q.by_ref().filter(Result::is_err).count();
+        assert_eq!(errors, 4);
+    }
+
     #[test]
     fn optind_after_a_double_dash_is_past_it() {
         // `--` is consumed by the parser and never yielded, so a scan that
@@ -2457,6 +2609,42 @@ mod tests {
                 Ok(Opt::Long("foo", None)),
                 Ok(Opt::Operand(&args[2])),
             ]
+        );
+    }
+
+    #[test]
+    fn a_whole_only_option_is_matched_in_full_and_spoils_no_abbreviation() {
+        let longs = [
+            ("terminal", Takes::Required),
+            ("table", Takes::Nothing),
+            ("terminate", Takes::Nothing),
+            ("timeout", Takes::Required),
+        ];
+        let added = ["terminate", "timeout"];
+        let args = argv(&["--term", "pts/1", "--terminate", "--timeo", "--t"]);
+        assert_eq!(
+            every(
+                GETOPT
+                    .parse(&args, "", &longs)
+                    .whole_only(&added)
+                    .keep_going(true)
+            ),
+            vec![
+                // What it is without the added options.
+                Ok(Opt::Long("terminal", Some("pts/1".into()))),
+                Ok(Opt::Long("terminate", None)),
+                Err("unrecognized option '--timeo'".into()),
+                // Still ambiguous, between the options that were there.
+                Err("option '--t' is ambiguous; possibilities: '--terminal' '--table'".into()),
+            ]
+        );
+        // Matched as glibc matches, the same abbreviation is ambiguous.
+        let args = argv(&["--term"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "", &longs)),
+            vec![Err(
+                "option '--term' is ambiguous; possibilities: '--terminal' '--terminate'".into()
+            )]
         );
     }
 

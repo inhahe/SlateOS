@@ -5616,6 +5616,8 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     crate::fs::mntns::process_gone(pid);
     // A paused container's process that ends is no longer paused.
     crate::proc::freezer::on_process_exit(pid);
+    // A program's lifecycle endpoint goes with it.
+    crate::proc::lifecycle::on_process_exit(pid);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);

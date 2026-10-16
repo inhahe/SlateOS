@@ -131,16 +131,25 @@
 //!   refusing is to treat it as a literal name — which would *write to a file
 //!   the user did not ask for*, and silently. All three answer
 //!   `Shell access not implemented by this ed`.
+//! - **Output that cannot be written is reported.** GNU ed checks no write to
+//!   standard output and has no `close_stdout`, so `ed f < script > /dev/full`
+//!   and the same with the output closed exit as if all was well, having
+//!   printed nowhere. Here the run ends as a GNU coreutils program's does --
+//!   `ed: write error: No space left on device`, status 1 -- which is the
+//!   operator's answer to B-Q25 (design-decisions §1071). The descriptors are
+//!   the ones `ed` was given (`guard_std_fds!`), so a closed output fails as a
+//!   full one does. A full or closed *standard error* changes nothing, as in
+//!   GNU ed: the decision is about output, not diagnostics.
 //!
 //! # How this is checked
 //!
-//! `scripts/ed-diff.sh` runs 507 cases against GNU ed 1.20.1 inside WSL and
+//! `scripts/ed-diff.sh` runs 538 cases against GNU ed 1.20.1 inside WSL and
 //! compares four things, not the usual three: stdout, stderr, the exit status
 //! **and the bytes left on disk**. The fourth is not belt-and-braces — the
 //! data-loss bug above agreed with GNU on the first three and disagreed only on
 //! the file. Every case appears in the two stdin kinds where the two kinds
 //! differ. `OURS=/usr/bin/ed scripts/ed-diff.sh` checks the harness can still
-//! tell the two apart: it turns all 8 deliberate differences into `XPASS`, and
+//! tell the two apart: it turns all 17 deliberate differences into `XPASS`, and
 //! nothing else moves.
 //!
 //! It is the harness, not the unit tests, that has found every substantive
@@ -164,6 +173,15 @@ use ere::{Regex, StartOfLine, bre};
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
+
+// The standard descriptors as `ed` was given them, so that a closed output is
+// a write that fails -- reported, design-decisions §1071 -- and a closed input
+// is what GNU's sees, a script file (`fstat` failing counts as regular there)
+// that has ended, rather than the runtime's `/dev/null` standing in. Files
+// then open on the lowest free descriptor, as GNU's do; nothing is written to
+// a standard stream while one is open, so a file that lands on 1 or 2
+// receives nothing it was not meant to.
+coreutils::guard_std_fds!();
 
 /// `ed`'s usage status is 1 — measured: `ed -Z; echo $?` prints 1.
 const ED: Program = Program::new("ed", 1);
@@ -244,20 +262,48 @@ enum Request {
     Run(Options, Option<OsString>),
 }
 
+/// One status leaves the program, and standard output's close decides the
+/// last of it -- standard *error*'s does not: GNU ed checks neither stream,
+/// and design-decisions §1071 has a lost output reported, not a lost
+/// diagnostic. So a full or closed standard error changes nothing here, as
+/// there.
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    run_main()
+}
+
+/// gnulib's `close_stdout` without its last step, `close_stream (stderr)`: a
+/// write to standard output that failed is reported, `ed: write error: ...`,
+/// status 1 (§1071), and a diagnostic that could not be written is not.
+fn close_stdout_only(out: Stream, earned: ExitCode) -> ExitCode {
+    match out.finish() {
+        Ok(()) => earned,
+        Err(e) if stdfd::reader_gone(&e) => earned,
+        Err(e) => {
+            stdfd::write_error("ed", &e);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_main() -> ExitCode {
+    // Before anything touches a standard stream: see `guard_std_fds!` above.
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
+        // Through the stream rather than `print!`, which panics when the write
+        // fails -- and the panic aborts -- where the stream keeps the failure
+        // for the close to report (design-decisions §1071).
         Ok(Request::Help) => {
-            print!("{}", help_text());
-            ExitCode::SUCCESS
+            let mut out = Stream::stdout();
+            // A `Stream` write never fails; a failure is kept for the close.
+            let _ = out.write_all(help_text().as_bytes());
+            close_stdout_only(out, ExitCode::SUCCESS)
         }
         Ok(Request::Version) => {
-            println!("ed (SlateOS coreutils) 0.1.0");
-            ExitCode::SUCCESS
+            let mut out = Stream::stdout();
+            // As for the help.
+            let _ = out.write_all(b"ed (SlateOS coreutils) 0.1.0\n");
+            close_stdout_only(out, ExitCode::SUCCESS)
         }
         Ok(Request::Run(opts, file)) => {
             let loose = opts.loose;
@@ -269,7 +315,7 @@ fn run_main() -> ExitCode {
             };
             let Editor { out, .. } = editor;
             let earned = if loose { 0 } else { status };
-            stdfd::close_stdout("ed", out, ExitCode::from(earned))
+            close_stdout_only(out, ExitCode::from(earned))
         }
         Err(e) => {
             ED.report(&e);
@@ -1526,7 +1572,12 @@ struct Editor {
 
 impl Editor {
     fn new(opts: Options) -> Self {
-        let file_driven = filekind::borrowed_stdin().is_some_and(|f| filekind::is_regular(&f));
+        // GNU's `is_regular_file (0)` is `fstat` failing *or* `S_ISREG`: so
+        // standard input closed counts as a script file. Measured: `ed
+        // nosuch.txt <&-` reports the file and exits 2, as from a script,
+        // where over a pipe it would carry on.
+        let file_driven =
+            filekind::borrowed_stdin().is_none_or(|f| filekind::regular(&f).unwrap_or(true));
         Self::with_input(opts, Box::new(std::io::stdin().lock()), file_driven)
     }
 
@@ -1923,6 +1974,10 @@ impl Editor {
     /// While a global command list is running that list *is* the input — see
     /// [`Editor::global_input`] — so this returns `None` at the end of the list
     /// and does not reach standard input.
+    ///
+    /// Standard input closed (`ed f <&-`) reads as its end, here as in GNU ed,
+    /// which says nothing and ends the session as at end of input (measured);
+    /// `std`'s standard input answers `EBADF` with end of file.
     fn read_line(&mut self) -> Option<Vec<u8>> {
         if let Some(pending) = self.global_input.as_mut() {
             return pending.pop();

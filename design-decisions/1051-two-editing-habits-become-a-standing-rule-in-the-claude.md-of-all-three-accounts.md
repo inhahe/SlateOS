@@ -1,4 +1,4 @@
-## 1051. Two editing habits become a standing rule, in the CLAUDE.md of all three accounts -- pending the operator's word in this session
+## 1051. Two editing habits become a standing rule, in the CLAUDE.md of all three accounts
 
 **Date:** 2026-09-27
 **Lane:** B
@@ -12,11 +12,13 @@ habits catch it: assert how many places matched before replacing, and never
 write the explanation of a trap and the code it describes in the same pass.
 The operator wants both in the user-level `CLAUDE.md` of each account.
 
-**Not yet applied, and why.** Lane B edits a `CLAUDE.md` only on the
-operator's own instruction in the session that makes the edit; this answer
-reached it through another session's relay, which is not that. The operator
-has been asked to confirm in lane B's session. The text to add, so it can be
-pasted as it stands once confirmed:
+**Applied 2026-10-09**, by lane A at the operator's direction in lane A's
+session: the rule is its own section, "Edits by search-and-replace", above
+the curated one in all three files below (lane A's notice of 2026-10-09;
+`operator-answers/LEDGER.md` records it). Lane B had held off because it
+edits a `CLAUDE.md` only on the operator's instruction in the session that
+makes the edit, and this answer had reached it through another session's
+relay. The text, as approved:
 
 > **Edits by search-and-replace.** Before replacing, check that the anchor
 > matched exactly as many places as you meant -- usually one -- and stop if

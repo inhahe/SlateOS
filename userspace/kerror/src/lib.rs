@@ -50,6 +50,10 @@ pub const OUT_OF_MEMORY: i64 = -100;
 /// `InvalidAddress`: a pointer argument the kernel could not read or write
 /// through.
 pub const INVALID_ADDRESS: i64 = -101;
+/// `NoSuchProcess`: no process has that ID.
+pub const NO_SUCH_PROCESS: i64 = -200;
+/// `ProcessExited`: the process has ended and not yet been reaped.
+pub const PROCESS_EXITED: i64 = -202;
 /// `ChannelClosed`: the other end of the channel has closed.
 pub const CHANNEL_CLOSED: i64 = -300;
 /// `ChannelFull`: the channel's queue has no room.

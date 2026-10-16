@@ -552,7 +552,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
-- [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD) — *2026-10-09 (lane A): was marked done, is not built. The kernel swaps to compressed RAM and to 16 MiB of a spare virtio disk it claims at boot; `swapon` refuses. Taken by lane A: `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`.*
+- [-] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD) — *2026-10-09 (lane A): was marked done, was not built (the kernel swapped to compressed RAM and to 16 MiB of a spare virtio disk it claimed at boot; `swapon` refused). Built on lane-a-wip the same day: `swapon`/`swapoff` for swap files on ext4 and for block devices, both ABIs; turning the configured file on at boot is lane B's (`requests/a-b-turn-on-configured-swap-at-boot.md`). `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`.*
 - [x] zswap/zram compressed swap (recommended for desktop)
 - [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
 - [x] Swap priority (multiple swap devices) — tiered: zram (priority 100) + disk (priority 0), highest-priority device fills first
@@ -614,6 +614,10 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
   - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
   - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
   - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
+  - [ ] **Three more remembered settings, beside the priority** _(the operator's answer to B-Q26, 2026-10-11: design-decisions §1074)_ -- kept, shown, ordered by the same precedence and set in the same two places:
+    - [ ] **The processors a program may use** (CPU affinity), including "the fast cores" / "the power-saving cores" on a chip with both kinds; applied at process creation through the per-process processor mask (`SYS_SCHED_SET_AFFINITY`).
+    - [ ] **A cap on a program's processor use** -- a percentage, or a number of cores -- applied as a launch-time limit the kernel enforces.
+    - [ ] **A workload profile while the program runs** -- switched to when it starts, back when the last such program ends; raising priority for everything else needs the grant a priority raise needs.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
@@ -1135,7 +1139,7 @@ _Note the boundary: this covers programs that **crash**. A program that **hangs*
 - [x] Hardware exceptions → language-level exceptions (SEH-style) _(exception.rs: ExceptionCode enum, ExceptionContext struct, per-process handler registry; idt.rs: dispatch to userspace handler via modified IRETQ frame, context pushed on user stack, SysV ABI, SYS_EXCEPTION_RETURN to resume)_
   - [x] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
   - [x] Normal page faults handled by kernel, NOT exposed to application
-- [ ] Structured shutdown via IPC message (not Unix signals)
+- [-] Structured shutdown via IPC message (not Unix signals) — *2026-10-09: the kernel half is built (lane A, §1569): a program registers for close and terminate requests (`SYS_LIFECYCLE_REGISTER`/`REQUEST`/`QUERY`, 1172-1174) and each arrives as one message. The rest is the operator's §1072 design, built by lanes B (`kill`, services), C (the toolkit answering for every GUI program) and E (the task manager).*
 - [ ] Process credential / capability management
 - [ ] Unwind info in release builds for backtraces (< 2% perf impact)
 - [ ] Separate debug symbol files loaded on demand for symbolization
@@ -3852,6 +3856,27 @@ the flags here say only where each item stood on 2026-10-10._
   - **The choice** waits on `dotnet/runtime` running here (lane E,
     `roadmap.md`). `apps/backup` (§4.4) is SlateOS's own backup program,
     which a reimplementation would build on.
+  - [ ] **Back up a file as soon as its writer says it is done** (the
+    operator, 2026-10-16). SlateOS lets a program mark a file as being written
+    and then finalize it (§ filesystem, the "file is complete" finalizer /
+    write-in-progress signal). The port's continuous backup copies a file, or
+    makes its new version, on that finalize, rather than guessing from
+    whether the file has gone quiet. Until a finalize, it leaves alone a file
+    marked as being written. A finalize the kernel fires because the writer
+    died is backed up but kept apart, as possibly half-written.
+    - **The guessing stays, for every writer that never uses the signal:**
+      Linux programs, Windows programs under Wine, and any other program that
+      does not call the new functions. On Windows, LithicBackup copies a
+      file once it has stayed unchanged for a time that grows with its size,
+      and, for files matching chosen name patterns such as append-only logs,
+      after a longest wait even if it never settles
+      (`src/LithicBackup.Core/Models/ContinuousRules.cs`: debounce size tiers
+      and max-wait mask tiers). Those rules apply to files without the mark.
+    - **Open:** a file kept marked for hours, such as a database that stays
+      open all day, never finalizes, so it is never copied. A longest wait
+      would copy it torn. The way to a good copy is the VSS equivalent
+      (§4.10, writer coordination), which asks its writer to reach a
+      consistent state first.
 
 **Asked for on 2026-08-21:**
 

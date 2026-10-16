@@ -9014,6 +9014,90 @@ pub(crate) fn check_signal_target(
     Ok(sig)
 }
 
+/// `SYS_LIFECYCLE_REGISTER` (1172) -- the caller answers lifecycle requests:
+/// returns the channel end they arrive on (`crate::proc::lifecycle`).
+pub fn sys_lifecycle_register(_args: &SyscallArgs) -> SyscallResult {
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::proc::lifecycle::register(pid) {
+        Ok(end) => broker_value(end.raw()),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_LIFECYCLE_REQUEST` (1173) -- ask process `arg0` to close (`arg1` 1)
+/// or to terminate (2), by the rule a signal to it passes
+/// ([`check_signal_target`]). Returns the request's id.
+pub fn sys_lifecycle_request(args: &SyscallArgs) -> SyscallResult {
+    let caller = caller_pid().unwrap_or(0);
+    if let Err(e) = check_signal_target(caller, args.arg0, 0) {
+        return SyscallResult::err(e);
+    }
+    let Ok(kind) = u32::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let uid = crate::proc::pcb::process_uid(caller).unwrap_or(0);
+    match crate::proc::lifecycle::request(args.arg0, kind, caller, uid) {
+        Ok(id) => broker_value(id),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_LIFECYCLE_QUERY` (1174) -- 1 when process `arg0` answers lifecycle
+/// requests, 0 when not; by the rule a signal to it passes.
+pub fn sys_lifecycle_query(args: &SyscallArgs) -> SyscallResult {
+    let caller = caller_pid().unwrap_or(0);
+    if let Err(e) = check_signal_target(caller, args.arg0, 0) {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(i64::from(crate::proc::lifecycle::answers(args.arg0)))
+}
+
+/// `SYS_SWAP_ON` (1175) -- turn swap on at the absolute path
+/// `arg0`/`arg1` with `swapon`'s flags `arg2` (`mm::swapctl::swap_on`).
+pub fn sys_swap_on(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_root_authority() {
+        return SyscallResult::err(e);
+    }
+    // Symbolic links followed, and a container's read-only volumes refused,
+    // as Linux's `swapon` opens the file for writing.
+    let path = match read_user_path(args.arg0, args.arg1 as usize).and_then(|p| {
+        let host = crate::fs::Vfs::resolve_path(&p)?;
+        crate::ipc::namespace::check_writable(&p)?;
+        Ok(host)
+    }) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(flags) = u32::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::mm::swapctl::swap_on(&path, flags) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SWAP_OFF` (1176) -- turn swap off at the absolute path `arg0`/`arg1`
+/// (`mm::swapctl::swap_off`).
+pub fn sys_swap_off(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_root_authority() {
+        return SyscallResult::err(e);
+    }
+    let path = match read_user_path(args.arg0, args.arg1 as usize)
+        .and_then(|p| crate::fs::Vfs::resolve_path(&p))
+    {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::mm::swapctl::swap_off(&path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// The record of a signal process `caller` sends: the sender class, the
 /// caller's pid and real uid, and the value.
 fn sender_info(

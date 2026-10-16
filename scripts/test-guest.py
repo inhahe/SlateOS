@@ -169,6 +169,31 @@ def main() -> int:
           staged.replace("selftest.keep_going=1\n",
                          "selftest.keep_going=1 " + words + " kexec.selftest=1\n"))
 
+    # QEMU's command line: the display, the QMP monitor and the USB input
+    # devices `start` may add (lane F's request: the compositor in a guest).
+    # The firmware and QEMU are looked for on disk; this file stands in.
+    guest.QEMU_CANDIDATES = (os.path.abspath(__file__),)
+    guest.OVMF_CANDIDATES = (os.path.abspath(__file__),)
+    plain = guest.qemu_command(4555, "esp", "swap", None, "serial")
+    check("by default the guest shows nothing",
+          plain[plain.index("-display") + 1], "none")
+    check("by default no monitor and no USB input",
+          ("-qmp" in plain, "usb-kbd,bus=xhci0.0" in plain), (False, False))
+    full = guest.qemu_command(4555, "esp", "swap", None, "serial",
+                              qmp_port=4560, usb_input=True, display="gtk")
+    check("a window when asked", full[full.index("-display") + 1], "gtk")
+    check("the QMP monitor on the loopback port asked for",
+          full[full.index("-qmp") + 1], "tcp:127.0.0.1:4560,server=on,wait=off")
+    check("a keyboard and a mouse on an xHCI controller",
+          [full[i + 1] for i, a in enumerate(full) if a == "-device"][-3:],
+          ["qemu-xhci,id=xhci0", "usb-kbd,bus=xhci0.0", "usb-mouse,bus=xhci0.0"])
+    try:
+        guest.qemu_command(4555, "esp", "swap", None, "serial", display="vnc")
+        refused = False
+    except guest.Usage:
+        refused = True
+    check("a display that is not offered is refused", refused, True)
+
     # The serial log's verdict on a self-reload.
     banner, marker = guest.BOOT_BANNER, guest.KEXEC_MARKER
     refused = guest.KEXEC_REFUSED + b": InvalidArgument ===\n"

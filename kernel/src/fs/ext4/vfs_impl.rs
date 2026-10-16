@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::attr_policy;
 use crate::fs::path::{Path, PathBuf};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, SwapFile};
+use crate::mm::swap::AreaExtent;
 
 use super::driver::Ext4Driver;
 use super::ondisk::{EXT4_ROOT_INO, file_type, inode_flags};
@@ -40,6 +41,13 @@ pub struct Ext4Fs {
     /// as Linux keeps it -- so a crash before the last close leaves it
     /// reclaimable at the next mount instead of leaked.
     orphans: BTreeSet<u32>,
+    /// Files claimed for swap ([`FileSystem::swapfile_claim`]): the kernel
+    /// writes their blocks directly, so none of them may be written, resized,
+    /// reallocated, removed or renamed here until released -- Linux's
+    /// `S_SWAPFILE`. Writes and size changes answer `DeviceBusy` (Linux:
+    /// `ETXTBSY`, a code SlateOS's errors do not have); removal and renaming
+    /// `NotPermitted` (Linux: `EPERM`).
+    swapfiles: BTreeSet<u32>,
 }
 
 impl Ext4Fs {
@@ -49,6 +57,7 @@ impl Ext4Fs {
             driver,
             pins: BTreeMap::new(),
             orphans: BTreeSet::new(),
+            swapfiles: BTreeSet::new(),
         }
     }
 
@@ -340,6 +349,10 @@ impl FileSystem for Ext4Fs {
         // when the target is unreachable (e.g. a symlink whose stored target
         // is an absolute VFS path on another mount).  Resolve no-follow.
         let ino = self.driver.resolve_path_no_follow(path)?;
+        // Swap is using its blocks: `swapoff` first (Linux's `may_delete`).
+        if self.swapfiles.contains(&ino) {
+            return Err(KernelError::NotPermitted);
+        }
         let inode = self.driver.read_inode(ino)?;
 
         // Can't remove directories with remove() — use rmdir().
@@ -502,6 +515,74 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
+    /// The file's blocks, from its extent tree, as device sectors in file
+    /// order -- runs adjacent on the disk merged -- and the file claimed
+    /// ([`Ext4Fs::swapfiles`]). Every block up to its size must be allocated:
+    /// a hole is `InvalidArgument`, as Linux's `swapon` refuses "a swapfile
+    /// with holes". An unwritten extent (from `fallocate`) is allocated and
+    /// taken: swap writes it directly, and the filesystem goes on reading it
+    /// as zeros. A file mapped by block lists rather than extents (ext2/3)
+    /// is `NotSupported`.
+    fn swapfile_claim(&mut self, ino: u64) -> KernelResult<SwapFile> {
+        let ino = ext4_ino(ino)?;
+        if self.swapfiles.contains(&ino) {
+            return Err(KernelError::DeviceBusy);
+        }
+        let inode = self.driver.read_inode(ino)?;
+        if inode.i_mode & file_type::S_IFMT != file_type::S_IFREG {
+            return Err(KernelError::InvalidArgument);
+        }
+        let size = inode_file_size(&inode);
+        let block = u64::from(self.driver.superblock().block_size);
+        let per_block = block
+            .checked_div(crate::blkdev::SECTOR_SIZE as u64)
+            .unwrap_or(0);
+        if per_block == 0 || size == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let blocks = size.div_ceil(block);
+        let (map, _tree) = self.driver.read_extent_map(ino, &inode)?;
+        let mut extents: Vec<AreaExtent> = Vec::new();
+        let mut next = 0u64; // the next block of the file to account for
+        for e in &map {
+            if e.logical >= blocks {
+                break;
+            }
+            if e.logical != next {
+                return Err(KernelError::InvalidArgument); // a hole
+            }
+            let len = e.len.min(blocks.saturating_sub(e.logical));
+            let sector = |b: u64| b.checked_mul(per_block).ok_or(KernelError::FileTooLarge);
+            let (area_sector, dev_sector, sectors) =
+                (sector(e.logical)?, sector(e.phys)?, sector(len)?);
+            match extents.last_mut() {
+                Some(last) if last.dev_sector.checked_add(last.sectors) == Some(dev_sector) => {
+                    last.sectors = last.sectors.saturating_add(sectors);
+                }
+                _ => extents.push(AreaExtent {
+                    area_sector,
+                    dev_sector,
+                    sectors,
+                }),
+            }
+            next = e.logical.saturating_add(len);
+        }
+        if next < blocks {
+            return Err(KernelError::InvalidArgument); // a hole at the end
+        }
+        self.swapfiles.insert(ino);
+        Ok(SwapFile {
+            device: String::from(self.driver.device_name()),
+            extents,
+        })
+    }
+
+    fn swapfile_release(&mut self, ino: u64) {
+        if let Ok(ino) = ext4_ino(ino) {
+            self.swapfiles.remove(&ino);
+        }
+    }
+
     fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         // `rename(2)` never dereferences a trailing symlink on either operand:
         // it renames the *symlink itself* (and replaces an existing symlink
@@ -511,6 +592,11 @@ impl FileSystem for Ext4Fs {
         // directories are still resolved with follow (correct: the path *to* a
         // parent follows intermediate symlinks).
         let src_ino = self.driver.resolve_path_no_follow(from)?;
+        // A swap file keeps its name while it is swap (Linux's `may_delete`
+        // on the source).
+        if self.swapfiles.contains(&src_ino) {
+            return Err(KernelError::NotPermitted);
+        }
         let src_inode = self.driver.read_inode(src_ino)?;
         let src_mode = src_inode.i_mode & file_type::S_IFMT;
 
@@ -556,6 +642,10 @@ impl FileSystem for Ext4Fs {
             // silently destroyed the file.
             if dest_ino == src_ino {
                 return Ok(());
+            }
+            // Nor is a swap file renamed over (`may_delete` on the victim).
+            if self.swapfiles.contains(&dest_ino) {
+                return Err(KernelError::NotPermitted);
             }
             let dest_inode = self.driver.read_inode(dest_ino)?;
             let dest_mode = dest_inode.i_mode & file_type::S_IFMT;
@@ -1210,6 +1300,16 @@ impl FileSystem for Ext4Fs {
 }
 
 impl Ext4Fs {
+    /// `DeviceBusy` while `ino` is a swap file ([`Self::swapfiles`]): its
+    /// data, size and blocks are swap's until it is released.
+    fn not_swap(&self, ino: u32) -> KernelResult<()> {
+        if self.swapfiles.contains(&ino) {
+            Err(KernelError::DeviceBusy)
+        } else {
+            Ok(())
+        }
+    }
+
     /// A node that holds nothing -- `ifmt` `S_IFSOCK` or `S_IFIFO`, listed
     /// as `dtype` -- at `path`, with permission bits `mode`: an inode with no
     /// extent tree and `i_block` zero, as Linux's `ext4_mknod` makes one.
@@ -1253,6 +1353,7 @@ impl Ext4Fs {
     /// does to a file that exists, and what an in-place write falls back to
     /// when the extent tree cannot be extended.
     fn replace_contents(&mut self, ino: u32, data: &[u8]) -> KernelResult<()> {
+        self.not_swap(ino)?;
         let inode = self.driver.read_inode(ino)?;
 
         // Only regular files can be written.
@@ -1335,6 +1436,7 @@ impl Ext4Fs {
     /// that a failed kernel allocation, which halts the machine (lane D's
     /// report, requests/d-a-truncating-an-ext4-file-...).
     fn write_ino_u32(&mut self, ino: u32, offset: u64, data: &[u8]) -> KernelResult<()> {
+        self.not_swap(ino)?;
         let inode = self.driver.read_inode(ino)?;
 
         let mode = inode.i_mode & file_type::S_IFMT;
@@ -1408,6 +1510,7 @@ impl Ext4Fs {
     /// -- growing records the length and leaves a hole, shrinking frees the
     /// blocks past the new end. Neither reads the file.
     fn truncate_ino_u32(&mut self, ino: u32, size: u64) -> KernelResult<()> {
+        self.not_swap(ino)?;
         let inode = self.driver.read_inode(ino)?;
 
         let mode = inode.i_mode & file_type::S_IFMT;
@@ -1448,6 +1551,7 @@ impl Ext4Fs {
     /// alike (`Ext4Driver::preallocate_extents` -- unwritten blocks for
     /// every hole, all or nothing).
     fn fallocate_ino_u32(&mut self, ino: u32, size: u64) -> KernelResult<()> {
+        self.not_swap(ino)?;
         let inode = self.driver.read_inode(ino)?;
 
         let mode = inode.i_mode & file_type::S_IFMT;

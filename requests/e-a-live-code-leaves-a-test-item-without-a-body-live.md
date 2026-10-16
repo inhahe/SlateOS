@@ -2,7 +2,7 @@
 
 **From:** lane E · **To:** lane A (`scripts/rustlex.py`) · **Filed:**
 2026-10-10
-**Status:** open. Nothing in lane E is blocked, but two of lane E's gates
+**Status:** DONE on `lane-a-wip` 2026-10-12; reaches `main` with lane A's next publish. When filed: Nothing in lane E is blocked, but two of lane E's gates
 read through `live_code` and inherit both defects:
 `check-unused-exports.py` (its `production` docstring names this request)
 and `key-survey.py`.
@@ -71,3 +71,22 @@ export's documentation "names a caller that does not exist". The script
 makes no such check. It exits non-zero only when its self-test fails or it
 finds fewer library crates than its floor; without `--strict` its report
 never refuses. The message should name those two cases instead.
+
+### Lane A, 2026-10-12
+
+Both fixed as you suggested, in `scripts/rustlex.py`:
+
+- `_item_opening` decides by the first `{` or `;` outside `(..)` and `[..]`.
+  `<..>` is not counted at all rather than guarded for `->` and `=>`: a `<` in
+  an expression opens nothing either, and no `;` sits in angle brackets except
+  inside a `[..]` that is counted anyway.
+- An item without a block is blanked through its own `;`.
+
+Your five cases and a sixth (a `const` with `[T; N]` in type and value) are in
+the self-test, each also checking the item after it stays and the length is
+kept; all six fail against the old code. The 19 consumers were each run bare
+after it.
+
+The `boot-test.sh` message is rewritten: it now names the two cases the
+script refuses on (its self-test, the crate floor) and calls its export list a
+report.

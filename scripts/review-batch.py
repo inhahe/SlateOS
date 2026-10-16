@@ -109,6 +109,7 @@ MAX_PATHS = (
     "deflate/", "bzip2/", "xz/", "sevenz/", "ziparchive/", "elfparse/",
     "userspace/gzip/", "userspace/zip/", "userspace/cpio/", "userspace/file/",
     "userspace/libmagic/", "apps/archivemanager/", "apps/tararchive/",
+    "userspace/readelf/", "userspace/objdump/", "apps/exif/",
     # What destroys or rewrites data on disk.
     "userspace/fsck/", "userspace/mkfs/", "userspace/fdisk/", "userspace/wipefs/",
     "userspace/blkdiscard/", "userspace/mount/", "userspace/ulmount/", "userspace/losetup/",
@@ -169,7 +170,14 @@ RUNS = {"xhigh": (("opus", "xhigh"),), "max": (("opus", "max"), ("fable", "xhigh
 OPTIONAL_RUNS = {("fable", "xhigh")}
 
 #: A fenced ```json block, the form `/code-review` ends a finished review with.
-JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)^[ \t]*```", re.M | re.S)
+JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)^[ \t]*```", re.M | re.S | re.I)
+
+#: What a reviewer says when the review it may skip -- Fable's -- cannot run
+#: because its share of the allowance is spent: its limit, or the usage credits
+#: a `claude -p` session cannot accept (`claude-global.md`, "Code review"). Only
+#: this lets a record go without it. Any other failure is a failure: the batch
+#: is reviewed again.
+LIMIT_SPENT = re.compile(r"fable limit reached|usage credits", re.I)
 
 #: Commits committed before this day were reviewed and recorded in prose,
 #: which `--check` cannot read; they are not checked.
@@ -244,18 +252,32 @@ class Change:
         self.context: list[str] = []
 
 
-def judge(files: dict[str, Change]) -> tuple[str, list[str]]:
+def fuzzed_crates(cwd: str | Path | None = None) -> tuple[str, ...]:
+    """The directories that keep a fuzz harness (`<crate>/fuzz/`, with the
+    `harness.toml` `scripts/fuzz.py` reads or cargo-fuzz's `Cargo.toml`), as
+    `MAX_PATHS`-style prefixes. Every parser of untrusted input is to have one
+    (`CLAUDE.md`), so having one marks a crate for `max` without a hand-kept
+    entry."""
+    out = set()
+    for path in git("ls-files", cwd=cwd, check=False).splitlines():
+        crate, sep, rest = path.partition("/fuzz/")
+        if sep and rest in ("harness.toml", "Cargo.toml"):
+            out.add(crate + "/")
+    return tuple(sorted(out))
+
+
+def judge(files: dict[str, Change], fuzzed: tuple[str, ...] = ()) -> tuple[str, list[str]]:
     """The tier a change calls for, and why: `none` when no code changes;
-    `max` when code under `MAX_PATHS` changes, an added line of code matches
-    `MAX_CONTENT`, or a Rust function containing `unsafe` is changed; else
-    `xhigh`."""
+    `max` when code under `MAX_PATHS` or a crate in `fuzzed` (`fuzzed_crates`)
+    changes, an added line of code matches `MAX_CONTENT`, or a Rust function
+    containing `unsafe` is changed; else `xhigh`."""
     tier, why = "none", []
     for path, ch in files.items():
         if not is_code(path):
             continue
         if tier == "none":
             tier = "xhigh"
-        prefix = next((p for p in MAX_PATHS if path.startswith(p)), None)
+        prefix = next((p for p in (*MAX_PATHS, *fuzzed) if path.startswith(p)), None)
         if prefix:
             tier = "max"
             why.append(f"{path}: under {prefix}")
@@ -285,8 +307,8 @@ class Commit:
         self.sha, self.parents, self.date, self.message = sha, parents, date, message
         self.files: dict[str, Change] = {}
 
-    def tier(self) -> tuple[str, list[str]]:
-        return judge(self.files)
+    def tier(self, fuzzed: tuple[str, ...] = ()) -> tuple[str, list[str]]:
+        return judge(self.files, fuzzed)
 
     def subject(self) -> str:
         lines = self.message.strip().splitlines()
@@ -394,17 +416,31 @@ def record_problems(r: Record, reports: Path, cwd: str | Path | None) -> list[st
         if not resolve(end, cwd=cwd, check=False):
             return [f"{r.sha[:10]}: its record names {end!r}, which is no commit here"]
     out = []
+    batch = f"{resolve(r.base, cwd=cwd)}..{resolve(r.tip, cwd=cwd)}"
     for run in RUNS[r.tier]:
         report = r.runs.get(run)
         if report == "unavailable" and run in OPTIONAL_RUNS:
             continue
         if not report or report == "unavailable":
             out.append(f"{r.sha[:10]}: its record has no {run[0]} review at {run[1]}")
-        elif not (reports / report).is_file():
+            continue
+        # A bare file name in the reviews directory, nothing that leaves it.
+        if Path(report).name != report or report.startswith("."):
+            out.append(f"{r.sha[:10]}: its record names a report outside the reviews "
+                       f"directory: {report}")
+            continue
+        if not (reports / report).is_file():
             out.append(f"{r.sha[:10]}: its record names a report this machine does not "
                        f"have: {report}")
-        elif findings_of((reports / report).read_text(encoding="utf-8",
-                                                      errors="replace")) is None:
+            continue
+        said = (reports / report).read_text(encoding="utf-8", errors="replace")
+        # The report says which batch it reviewed and who reviewed it: a record
+        # whose runs were copied from another batch's must not pass.
+        head = said.split("\n", 2)
+        if head[:2] != [f"review of {batch}", f"reviewer: {run[0]} at {run[1]}"]:
+            out.append(f"{r.sha[:10]}: its record names a report of another review: "
+                       f"{report} ({' / '.join(head[:2])})")
+        elif findings_of(said) is None:
             out.append(f"{r.sha[:10]}: its record names a report that holds no finished "
                        f"review: {report}")
     return out
@@ -418,8 +454,9 @@ def batch_tier(rng: str, remote: str = "origin",
                cwd: str | Path | None = None) -> tuple[str, list[str], list[Commit]]:
     cs = commits(rng, *published(remote, cwd), cwd=cwd)
     tier, why = "none", []
+    fuzzed = fuzzed_crates(cwd)
     for c in cs:
-        t, w = c.tier()
+        t, w = c.tier(fuzzed)
         tier = higher(tier, t)
         why += [f"{c.sha[:10]} {x}" for x in w]
     return tier, why, cs
@@ -466,47 +503,89 @@ def review_commands(base: str, tip: str, tier: str) -> list[tuple[str, str, list
 
 def findings_of(said: str) -> list | None:
     """The findings a reviewer's output ends with -- the last ```json block
-    that holds a list, `[]` when it found nothing -- or None when it holds no
-    such block, which means it did not finish a review.
+    that holds a list, or a last line that is a bare `[]` -- or None when
+    there is none, which means it did not finish a review.
 
     The test is positive on purpose. A reviewer that could not review still
     exits 0, with a message in place of a review: "Credit balance is too
     low", "You've hit your session limit", a reply cut off at the output
-    limit. The next failure will have a message nobody has seen yet."""
+    limit. The next failure will have a message nobody has seen yet.
+
+    A review that finished must not be thrown away for a slip in its JSON (a
+    backslash in a quoted regex, a raw tab): such a block is read leniently,
+    and one that still does not parse counts as a single finding that says
+    so, for the triage to read in the report."""
     found = None
     for m in JSON_BLOCK.finditer(said):
-        try:
-            value = json.loads(m.group(1))
-        except ValueError:
-            continue
+        body = m.group(1).strip()
+        value = _lenient_json(body)
         if isinstance(value, list):
             found = value
+        elif value is None and body.startswith("[") and body.endswith("]"):
+            found = [{"file": "", "summary": "the findings array does not parse as "
+                      "JSON; read them in the report"}]
+    if found is None:
+        last = [ln.strip() for ln in said.split("[run-timeout] child exited", 1)[0]
+                .splitlines() if ln.strip() and not ln.startswith("[run-timeout]")]
+        if last and last[-1] == "[]":
+            found = []
     return found
 
 
-def why_not_reviewed(said: str) -> str:
-    """The reviewer's last words before it exited, which is where its own
-    error is: what to tell the user. What follows `run-timeout.py`'s exit line
-    is the reviewer's stderr -- start-up warnings, not the reason."""
-    said = said.split("[run-timeout] child exited", 1)[0]
-    lines = [ln.strip() for ln in said.splitlines()
+def _lenient_json(body: str):
+    """`body` as JSON, forgiving raw control characters and backslashes that
+    start no JSON escape; None if it still does not parse."""
+    # Pairwise, left to right, so that a correct `\\` is kept whole and only a
+    # backslash before a character no JSON escape starts with is doubled.
+    repaired = re.sub(r"\\(.)", lambda m: m.group(0) if m.group(1) in '\\"/bfnrtu'
+                      else "\\\\" + m.group(1), body, flags=re.S)
+    for text in (body, repaired):
+        try:
+            return json.loads(text, strict=False)
+        except ValueError:
+            continue
+    return None
+
+
+def why_not_reviewed(code: int, out: str, err: str) -> str:
+    """What to tell the user about a reviewer that did not review: from its
+    exit status where `run-timeout.py` set it, else its last words on stdout
+    before it exited, else its last on stderr (which otherwise carries only
+    start-up warnings)."""
+    if code == 124:
+        return f"stopped after {REVIEW_TIMEOUT} s"
+    if code == 130:
+        return "interrupted"
+    words = [ln.strip() for ln in out.split("[run-timeout] child exited", 1)[0].splitlines()
              if ln.strip() and not ln.startswith("[run-timeout]")]
-    return lines[-1][:200] if lines else "it printed nothing"
+    words = words or [ln.strip() for ln in err.splitlines() if ln.strip()]
+    reason = words[-1][:200] if words else "it printed nothing"
+    return f"it could not be started: {reason}" if code == 125 else reason
 
 
-def run_review(argv: list[str], cwd: Path, report: Path, header: str) -> tuple[int, str]:
+#: A reviewer's longest single response, in tokens, thinking included.
+#: Claude Code stops one at 64000 unless told otherwise; Fable 5.1 and Opus
+#: 5.5 can give 128000. A review at `xhigh` can think past the lower limit in
+#: one response and then lose all of it, four times over as Claude Code
+#: retries -- a Fable review on 2026-10-16 spent 54 minutes so.
+REVIEW_MAX_OUTPUT_TOKENS = 128000
+
+
+def run_review(argv: list[str], cwd: Path, report: Path,
+               header: str) -> tuple[int, str, str]:
     """Run one reviewer in `cwd` under `run-timeout.py` (which stops its whole
     process tree on timeout), keep all it says in `report`, and answer its
-    exit status and output."""
+    exit status, stdout and stderr."""
     runner = Path(__file__).resolve().parent / "run-timeout.py"
+    env = gitenv.clean_env()
+    env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(REVIEW_MAX_OUTPUT_TOKENS)
     r = subprocess.run([sys.executable, str(runner), str(REVIEW_TIMEOUT), *argv], cwd=cwd,
-                       env=gitenv.clean_env(), capture_output=True, text=True,
+                       env=env, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
-    said = r.stdout + r.stderr
     report.parent.mkdir(parents=True, exist_ok=True)
     with open(report, "w", encoding="utf-8", newline="\n") as f:
-        f.write(header + f"exit status: {r.returncode}\n\n" + said + "\n")
-    return r.returncode, said
+        f.write(header + f"exit status: {r.returncode}\n\n" + r.stdout + r.stderr + "\n")
+    return r.returncode, r.stdout, r.stderr
 
 
 def remove_scratch(top: Path, scratch: Path) -> None:
@@ -734,31 +813,33 @@ def effort_timeline(transcript: Path) -> list[tuple[float, str]]:
 
 def batch_written_at(cs: list[Commit], timeline: list[tuple[float, str]], fallback: str) -> str:
     """The effort level the batch's commits were made at: for each commit,
-    the level of the session's last request before it. One level when they
-    agree; `mixed (...)` when they do not; `fallback` when the transcript
-    does not reach back to them (another session made them)."""
+    the level of the session's last request before it. One level when every
+    commit has one and they agree; `mixed` when they differ, or when the
+    transcript covers only some of them (the rest were made by another
+    session, at a level it cannot say); `fallback` when it covers none.
+    `mixed` carries no counts, so that `--stats` groups all such batches."""
     import bisect
-    if not timeline:
-        return fallback
     times = [t for t, _ in timeline]
-    seen: dict[str, int] = {}
+    seen: set[str] = set()
+    uncovered = 0
     for c in cs:
         if len(c.parents) > 1:
             continue
         try:
             when = dt.datetime.fromisoformat(c.date).timestamp()
         except ValueError:
+            uncovered += 1
             continue
         i = bisect.bisect_right(times, when) - 1
         # A request more than six hours before the commit is not the one
         # that made it: the session was elsewhere, or the commit is older.
         if i >= 0 and when - times[i] < 6 * 3600:
-            seen[timeline[i][1]] = seen.get(timeline[i][1], 0) + 1
+            seen.add(timeline[i][1])
+        else:
+            uncovered += 1
     if not seen:
         return fallback
-    if len(seen) == 1:
-        return next(iter(seen))
-    return "mixed (" + ", ".join(f"{k} {n}" for k, n in sorted(seen.items())) + ")"
+    return next(iter(seen)) if len(seen) == 1 and not uncovered else "mixed"
 
 
 def session_transcript() -> Path | None:
@@ -779,13 +860,6 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
         raise SystemExit("review-batch: give the batch as <base>..<tip>")
     base, tip = resolve(base_rev), resolve(tip_rev)
     tier, why, cs = batch_tier(f"{base}..{tip}", remote)
-    if written_at is None:
-        # The level the commits were made at, from this session's own
-        # transcript; the session's level now only if that cannot say.
-        transcript = session_transcript()
-        written_at = batch_written_at(
-            cs, effort_timeline(transcript) if transcript else [],
-            os.environ.get("CLAUDE_EFFORT", "unknown"))
     print(f"review-batch: {len(cs)} commits, {base[:10]}..{tip[:10]}: tier {tier}")
     for w in why[:20]:
         print(f"  {w}")
@@ -811,22 +885,30 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
             header = (f"review of {base}..{tip}\nreviewer: {model} at {level}\n"
                       f"started: {dt.datetime.now().isoformat(timespec='seconds')}\n")
             print(f"review-batch: {model} at {level} -- started", flush=True)
-            code, said = run_review(argv, scratch, report, header)
-            findings = findings_of(said) if code == 0 else None
-            if findings is None and (model, level) in OPTIONAL_RUNS:
+            code, out, err = run_review(argv, scratch, report, header)
+            findings = findings_of(out) if code == 0 else None
+            if findings is None and (model, level) in OPTIONAL_RUNS and LIMIT_SPENT.search(out):
                 runs.append(f"{model}-{level} unavailable")
-                print(f"review-batch: {model} at {level} did not review (exit {code}: "
-                      f"{why_not_reviewed(said)}); the record says so -- see {report}. If "
-                      "it was not its limit, run the batch again later.", flush=True)
+                print(f"review-batch: {model} at {level}: its allowance is spent "
+                      f"({why_not_reviewed(code, out, err)}); the record says so, and the "
+                      f"other review stands alone -- see {report}", flush=True)
             elif findings is None:
                 print(f"review-batch: {model} at {level} FAILED (exit {code}: "
-                      f"{why_not_reviewed(said)}); no record -- see {report}", flush=True)
+                      f"{why_not_reviewed(code, out, err)}); no record -- see {report}. "
+                      "Run the batch again.", flush=True)
                 return 1
             else:
                 runs.append(f"{model}-{level} {name}")
                 print(f"review-batch: {model} at {level} -- done, {len(findings)} "
                       f"finding(s); report {report}", flush=True)
-                print(said[-6000:], flush=True)
+                print(json.dumps(findings, indent=1, ensure_ascii=False), flush=True)
+        if written_at is None:
+            # The level the commits were made at, from this session's own
+            # transcript; the session's level now only if that cannot say.
+            transcript = session_transcript()
+            written_at = batch_written_at(
+                cs, effort_timeline(transcript) if transcript else [],
+                os.environ.get("CLAUDE_EFFORT", "unknown"))
         # The record first: the reviews are done and paid for, and nothing
         # the mutation round does may lose it.
         print("\nTrailers for the follow-up commit (fill in the findings after triage):\n")
@@ -866,6 +948,7 @@ def check(shas: list[str], remote: str, cwd: str | Path | None = None,
     covered: list[tuple[Record, set[str]]] = []
     exempt: set[str] = set()
     problems: list[str] = []
+    fuzzed = fuzzed_crates(cwd)
     for c in cs:
         r = record_of(c)
         if not r:
@@ -883,7 +966,7 @@ def check(shas: list[str], remote: str, cwd: str | Path | None = None,
     for c in cs:
         if c.date[:10] < start or c.sha in exempt:
             continue
-        need, why = c.tier()
+        need, why = c.tier(fuzzed)
         if need == "none":
             continue
         if not any(c.sha in inside and TIERS.index(r.tier) >= TIERS.index(need)
@@ -981,17 +1064,37 @@ def self_test() -> int:
     expect("the last array wins", findings_of(
         f"{tick}json\n{finding}\n{tick}\nthen\n{tick}json\n[]\n{tick}\n"), [])
     expect("an object is not the findings", findings_of(f"{tick}json\n{{}}\n{tick}\n"), None)
-    expect("broken JSON is not the findings", findings_of(f"{tick}json\n[1,\n{tick}\n"), None)
+    expect("an unfinished array is not the findings",
+           findings_of(f"{tick}json\n[1,\n{tick}\n"), None)
+    # A review that finished is not thrown away for a slip in its JSON.
+    expect("the fence in capitals", findings_of(f"{tick}JSON\n[]\n{tick}\n"), [])
+    slip = '[{"summary": "matches \\s*(\\d+) and \\\\d", "file": "a\tb.rs"}]'
+    expect("a backslash that starts no escape, a raw tab",
+           (findings_of(f"{tick}json\n{slip}\n{tick}\n") or [{}])[0].get("summary"),
+           "matches \\s*(\\d+) and \\d")
+    expect("an array that will not parse is one finding saying so",
+           len(findings_of(f'{tick}json\n[{{"a": 1}} {{"b": 2}}]\n{tick}\n') or []), 1)
+    expect("a bare [] as the last word", findings_of("Nothing found.\n[]\n"), [])
     for failed in ("Credit balance is too low",
                    "You've hit your session limit · resets 1:10pm (America/New_York)",
                    "API Error: Claude's response exceeded the 64000 output token maximum.",
                    "Fable limit reached", ""):
         expect(f"not a review: {failed[:30]!r}", findings_of(failed), None)
+    expect("only Fable's own limit lets a record go without it",
+           [bool(LIMIT_SPENT.search(s)) for s in (
+               "Fable limit reached", "Continue on usage credits?",
+               "You've hit your session limit", "API Error: Claude's response exceeded")],
+           [True, True, False, False])
     expect("why it did not review", why_not_reviewed(
-        "[run-timeout] launching\nYou've hit your session limit\n"
-        "[run-timeout] child exited: PASS\nIgnoring 11 permissions.allow entries\n"
-        "claude.ai connectors are disabled\n"),
+        0, "[run-timeout] launching\nYou've hit your session limit\n"
+        "[run-timeout] child exited: PASS\n",
+        "Ignoring 11 permissions.allow entries\nclaude.ai connectors are disabled\n"),
         "You've hit your session limit")
+    expect("an error only on stderr", why_not_reviewed(
+        1, "[run-timeout] child exited: FAIL\n", "Error: invalid model\n"),
+        "Error: invalid model")
+    expect("out of time", why_not_reviewed(124, "[run-timeout] TIMEOUT\n", "warning\n"),
+           f"stopped after {REVIEW_TIMEOUT} s")
     expect("inside existing unsafe",
            tier("apps/x.rs", ["    p.add(i + 1)"], ["unsafe fn f(p: *const u8) {"]), "max")
     expect("unsafe nearby, nothing added", tier("apps/x.rs", [], ["unsafe fn f() {"]), "xhigh")
@@ -1025,8 +1128,12 @@ def self_test() -> int:
             run("commit", "-q", "-m", msg, date=date)
             return run("rev-parse", "HEAD")
 
-        def report(name: str, said: str = "Review done.\n\n```json\n[]\n```\n") -> str:
-            (reports / name).write_text(said, encoding="utf-8", newline="\n")
+        def report(name: str, batch: str, reviewer: str,
+                   said: str = "Review done.\n\n```json\n[]\n```\n") -> str:
+            """A report of `reviewer` (`opus at max`) reviewing `batch`."""
+            (reports / name).write_text(f"review of {batch}\nreviewer: {reviewer}\n"
+                                        f"started: now\nexit status: 0\n\n{said}",
+                                        encoding="utf-8", newline="\n")
             return name
 
         def record(base: str, tip: str, tier: str, runs: str, extra: str = "") -> str:
@@ -1054,15 +1161,17 @@ def self_test() -> int:
         expect("old and docs pass", any(old[:10] in p or docs[:10] in p for p in problems),
                False)
 
-        rec_x = commit("apps/b.rs", "// fix", record(root, tip, "xhigh",
-                                                     f"opus-xhigh {report('r1.md')}"))
+        batch = f"{root}..{tip}"
+        rec_x = commit("apps/b.rs", "// fix", record(
+            root, tip, "xhigh", f"opus-xhigh {report('r1.md', batch, 'opus at xhigh')}"))
         status, problems = check([rec_x], "origin", cwd=repo, reports=reports)
         expect("xhigh record: max commits still refused", refused(problems),
                sorted(s[:10] for s in (kern, tip)))
 
         commit("apps/c.rs", "fn fix1() {}", "first fix, no record")
         rec_m = commit("apps/b.rs", "// fix 2", record(
-            root, tip, "max", f"opus-max {report('r2.md')}, fable-xhigh unavailable",
+            root, tip, "max",
+            f"opus-max {report('r2.md', batch, 'opus at max')}, fable-xhigh unavailable",
             "\nCo-Authored-By: someone <x@y>"))
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
         expect("max record covers all, fixes split over two commits", (status, problems),
@@ -1071,11 +1180,25 @@ def self_test() -> int:
         (reports / "r2.md").unlink()
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
         expect("a missing report is named", any("r2.md" in p for p in problems), True)
-        report("r2.md", "exit status: 0\n\nCredit balance is too low\n")
+        report("r2.md", batch, "opus at max", "Credit balance is too low\n")
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
         expect("a report of a review that never ran is refused",
                any("r2.md" in p and "no finished review" in p for p in problems), True)
-        report("r2.md")
+        report("r2.md", f"{root}..{kern}", "opus at max")
+        status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
+        expect("a report of another batch is refused",
+               any("r2.md" in p and "another review" in p for p in problems), True)
+        report("r2.md", batch, "opus at xhigh")
+        status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
+        expect("a report by another reviewer is refused",
+               any("r2.md" in p and "another review" in p for p in problems), True)
+        report("r2.md", batch, "opus at max")
+        escape = Record("e" * 40, {"Reviewed": batch, "Review-tier": "max",
+                                   "Review-runs": "opus-max ../reports/r2.md, "
+                                                  "fable-xhigh unavailable"})
+        expect("a report outside the reviews directory is refused",
+               any("outside the reviews directory" in p
+                   for p in record_problems(escape, reports, repo)), True)
 
         later = commit("apps/d.rs", "fn d() {}", "new work")
         status, problems = check([later], "origin", cwd=repo, reports=reports)
@@ -1115,6 +1238,13 @@ def self_test() -> int:
         lines = code_lines(root, tip, cwd=repo)
         # Three records: two of root..tip, and one of an empty range.
         expect("stats", rows, [("F", "max", 3, 2 * lines, 6, 3)])
+
+        # A crate that keeps a fuzz harness is a parser of untrusted input.
+        commit("parse/fuzz/harness.toml", "[package]", "harness")
+        commit("parse/src/fuzz/mod.rs", "// a module, not a harness", "module")
+        expect("crates with a harness", fuzzed_crates(repo), ("parse/",))
+        expect("a fuzzed crate is reviewed at max", judge(
+            {"parse/src/lib.rs": change(["fn f() {}"], [])}, fuzzed_crates(repo))[0], "max")
 
     # Which workspace each changed file is mutation-tested from: the tree's
     # own for its members, its own for a crate with a [workspace] of its own.
@@ -1192,7 +1322,9 @@ def self_test() -> int:
         expect("all at max", batch_written_at(made("2026-10-11T12:30:00+00:00"), tl, "fb"), "max")
         expect("mixed", batch_written_at(made("2026-10-11T10:05:00+00:00",
                                               "2026-10-12T09:10:00+00:00"), tl, "fb"),
-               "mixed (max 1, xhigh 1)")
+               "mixed")
+        expect("some made by another session", batch_written_at(
+            made("2026-10-01T00:00:00+00:00", "2026-10-12T09:10:00+00:00"), tl, "fb"), "mixed")
         expect("before the transcript", batch_written_at(made("2026-10-01T00:00:00+00:00"),
                                                          tl, "fb"), "fb")
         expect("long after the last request", batch_written_at(

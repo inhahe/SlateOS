@@ -3779,7 +3779,9 @@ fn note_freed_spans_words() -> KernelResult<()> {
 /// through them), and check that every one recorded as zeroed is all zero:
 /// what [`alloc_frame_zeroed`] trusts the record for. A free block carries
 /// the lists' links in its first bytes; were they left there, a frame
-/// recorded as zeroed would come back with them.
+/// recorded as zeroed would come back with them. End to end, so it checks
+/// only the frames that happen to come back; [`remove_free_clears_its_node`]
+/// checks the lists themselves.
 fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
     let mut frames = [0u64; BUDDY_CYCLE_FRAMES];
     let mut taken = 0usize;
@@ -3802,7 +3804,6 @@ fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
         }
     }
     let mut bad: Option<(u64, usize, u8)> = None;
-    let mut recorded = 0usize;
     let mut back = 0usize;
     for slot in &mut frames {
         let Ok(frame) = alloc_order(0) else {
@@ -3813,7 +3814,6 @@ fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
         if !freed_zeroed(frame.addr()) {
             continue;
         }
-        recorded = recorded.saturating_add(1);
         let ptr = frame.to_virt(hhdm) as *const u8;
         // SAFETY: allocated, HHDM valid, exclusively ours.
         let first = unsafe {
@@ -3842,10 +3842,57 @@ fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if recorded == 0 {
+    // A pass that took back no frame freed here checked nothing on this
+    // boot -- the frames freed above can merge into larger blocks, which the
+    // order-0 list serves last -- and is no failure:
+    // `remove_free_clears_its_node` is the check that always holds the lists
+    // to their promise.
+    Ok(())
+}
+
+/// A block taken off a free list keeps nothing of the list's node in its
+/// first bytes: a frame of our own pushed onto the order-0 list and removed
+/// again, under the allocator's lock with interrupts off, comes back with its
+/// first [`FreeNode`] bytes zero and the rest as it was. What
+/// [`alloc_frame_zeroed`] trusts a frame recorded as zeroed to keep,
+/// whichever lists it passed through.
+fn remove_free_clears_its_node(hhdm: u64) -> KernelResult<()> {
+    let frame = alloc_order(0)?;
+    let ptr = frame.to_virt(hhdm) as *mut u8;
+    // SAFETY: just allocated, exclusively ours, HHDM valid.
+    unsafe {
+        core::ptr::write_bytes(ptr, 0xC3, FRAME_SIZE);
+    }
+    let Some(allocator) = ALLOCATOR.get() else {
+        return Err(KernelError::NotSupported);
+    };
+    crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        guard.push_free(frame.addr(), 0);
+        guard.remove_free(frame.addr(), 0);
+    });
+    let node = core::mem::size_of::<FreeNode>();
+    // SAFETY: allocated, exclusively ours again (removed from the list under
+    // the lock), HHDM valid; `node` is below FRAME_SIZE.
+    let (cleared, kept) = unsafe {
+        let bytes = core::slice::from_raw_parts(ptr.cast_const(), FRAME_SIZE);
+        (
+            bytes.get(..node).is_some_and(|b| b.iter().all(|&x| x == 0)),
+            bytes
+                .get(node..)
+                .is_some_and(|b| b.iter().all(|&x| x == 0xC3)),
+        )
+    };
+    // SAFETY: allocated above by alloc_order(0), sole owner, freed once.
+    unsafe {
+        free_order(frame, 0)?;
+    }
+    if !cleared || !kept {
         serial_println!(
-            "[mm]   FAIL: none of {back} frames taken back from the buddy lists was one \
-             freed zeroed there: the check checked nothing"
+            "[mm]   FAIL: a block taken off a free list kept its list node ({}), or lost \
+             bytes past it ({})",
+            !cleared,
+            !kept
         );
         return Err(KernelError::InternalError);
     }
@@ -3916,6 +3963,7 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
         return Err(KernelError::InternalError);
     }
     through_buddy?;
+    remove_free_clears_its_node(hhdm)?;
     note_freed_spans_words()?;
 
     // A free that does not zero records that it did not: with the mode off,

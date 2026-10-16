@@ -106,7 +106,7 @@ MAX_PATHS = (
     "aes/", "hmac/", "sha1/", "sha2/", "blake2/", "sm3/", "md5/", "rustcrypto/",
     # Parsers of untrusted input.
     "gui/video/", "gui/imagecodec/", "gui/font/", "apps/videoplayer/", "apps/pdfviewer/",
-    "deflate/", "bzip2/", "xz/", "sevenz/", "ziparchive/",
+    "deflate/", "bzip2/", "xz/", "sevenz/", "ziparchive/", "elfparse/",
     "userspace/gzip/", "userspace/zip/", "userspace/cpio/", "userspace/file/",
     "userspace/libmagic/", "apps/archivemanager/", "apps/tararchive/",
     # What destroys or rewrites data on disk.
@@ -970,6 +970,7 @@ def self_test() -> int:
     expect("rm -rf in a hook", tier("scripts/hooks/pre-push", ['rm -rf "$wt"']), "max")
     expect("Remove-Item", tier("scripts/x.ps1", ["Remove-Item -Recurse $p"]), "max")
     expect("a word inside another", tier("apps/x.rs", ["let unsafety = 1;"]), "xhigh")
+    expect("a parser that left the kernel", tier("elfparse/src/lib.rs", ["fn f() {}"]), "max")
 
     # A review counts only if it ends with its findings array. Every failure
     # seen so far exits 0 with a message instead.

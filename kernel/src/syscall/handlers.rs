@@ -17213,9 +17213,6 @@ fn issue_daemon_socket(kind: NativeKind, socket: DaemonSocket) -> SyscallResult 
     SyscallResult::ok(handle as i64)
 }
 
-/// The socket layer's domain for a native IPv4 socket.
-const DAEMON_AF_INET: u16 = 2;
-
 /// An `i32` count from the socket layer as a call's result.
 fn daemon_count(r: KernelResult<i32>) -> SyscallResult {
     match r {
@@ -17280,7 +17277,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     const CONNECT_NONBLOCK: u32 = 1;
 
     if daemon_sockets() {
-        let socket = match crate::net::socket::create(DAEMON_AF_INET) {
+        let socket = match crate::net::socket::create(crate::net::socket::AF_INET) {
             Ok(s) => s,
             Err(e) => return SyscallResult::err(e),
         };
@@ -17614,7 +17611,7 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
         /// The backlog a native listener asks for: the kernel stack's call
         /// takes none, and the daemon's own limit applies.
         const BACKLOG: i32 = 128;
-        let socket = match crate::net::socket::create(DAEMON_AF_INET) {
+        let socket = match crate::net::socket::create(crate::net::socket::AF_INET) {
             Ok(s) => s,
             Err(e) => return SyscallResult::err(e),
         };
@@ -17657,25 +17654,13 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
     let pin = match resolved {
         Resolved::Kernel(pin) => pin,
         Resolved::Daemon(listener) => {
-            // The socket layer's accept is one non-blocking look at the
-            // backlog; a blocking accept looks again until a connection
-            // comes, as the Linux `accept(2)` over the daemon does, and a
-            // signal ends the wait (`Interrupted`).
-            loop {
-                match crate::net::socket::accept(listener) {
-                    Ok((socket, _peer)) => {
-                        return issue_daemon_socket(NativeKind::TcpConnection, socket);
-                    }
-                    Err(KernelError::WouldBlock) if (flags & ACCEPT_NONBLOCK) == 0 => {
-                        let pid = crate::ipc::waiters::current_user_pid();
-                        if crate::ipc::waiters::deliverable_signal_pending(pid) {
-                            return SyscallResult::err(KernelError::Interrupted);
-                        }
-                        sched::yield_now();
-                    }
-                    Err(e) => return SyscallResult::err(e),
-                }
-            }
+            // A blocking accept waits for a connection, a signal ending the
+            // wait (`Interrupted`), as the Linux `accept(2)` over the daemon.
+            let nonblock = (flags & ACCEPT_NONBLOCK) != 0;
+            return match crate::net::socket::accept_wait(listener, nonblock) {
+                Ok((socket, _peer)) => issue_daemon_socket(NativeKind::TcpConnection, socket),
+                Err(e) => SyscallResult::err(e),
+            };
         }
     };
     let listener_handle = pin.slot();
@@ -17726,8 +17711,7 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
         // families (`SYS_UDP_MCAST_JOIN6` beside `_JOIN`), which only an IPv6
         // socket of the daemon's does (`netipc::sockopt::Socket::v6`). Its
         // sends go to either family whatever the domain.
-        const AF_INET6: u16 = 10;
-        let socket = match crate::net::socket::create_dgram(AF_INET6) {
+        let socket = match crate::net::socket::create_dgram(crate::net::socket::AF_INET6) {
             Ok(s) => s,
             Err(e) => return SyscallResult::err(e),
         };
@@ -17805,38 +17789,17 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// What the daemon is asked for native multicast `option` set to `value`,
-/// read as the kernel stack's `udp::set_option` reads it: a hop count 0 to
-/// 255 or all ones for the default, a loop flag.
+/// meaning what it means to the kernel stack's sockets
+/// (`udp::mcast_value`).
 fn daemon_mcast_scalar(
     option: crate::net::udp::McastOption,
     value: u64,
 ) -> KernelResult<netipc::sockopt::Set> {
-    use crate::net::udp::McastOption;
-    use netipc::ring::{
-        UDP_OPT_MCAST_HOPS, UDP_OPT_MCAST_LOOP4, UDP_OPT_MCAST_LOOP6, UDP_OPT_MCAST_TTL,
-    };
-    /// Linux's default multicast TTL and hop limit.
-    const DEFAULT_HOPS: u32 = 1;
-    let hops = |v: u64| match v {
-        u64::MAX => Ok(DEFAULT_HOPS),
-        v => u8::try_from(v)
-            .map(u32::from)
-            .map_err(|_| KernelError::InvalidArgument),
-    };
-    let (option, value) = match option {
-        McastOption::Ttl => (UDP_OPT_MCAST_TTL, hops(value)?),
-        McastOption::Loop => (UDP_OPT_MCAST_LOOP4, u32::from(value != 0)),
-        McastOption::Hops6 => (UDP_OPT_MCAST_HOPS, hops(value)?),
-        McastOption::Loop6 => (
-            UDP_OPT_MCAST_LOOP6,
-            match value {
-                0 => 0,
-                1 => 1,
-                _ => return Err(KernelError::InvalidArgument),
-            },
-        ),
-    };
-    Ok(netipc::sockopt::Set::Scalar { option, value })
+    let value = u32::from(crate::net::udp::mcast_value(option, value)?);
+    Ok(netipc::sockopt::Set::Scalar {
+        option: daemon_mcast_code(option),
+        value,
+    })
 }
 
 /// The daemon's option code for native multicast `option`.
@@ -17892,41 +17855,37 @@ fn daemon_mcast_set(socket: DaemonSocket, set: netipc::sockopt::Set) -> SyscallR
     }
 }
 
-/// One datagram from daemon socket `socket` for `SYS_UDP_RECV` and
-/// `SYS_UDP_RECV6`, without waiting, its payload copied to the user buffer
-/// `buf` of `cap` bytes (already validated). Answers what the call returns --
-/// the bytes copied, or with `trunc` (`MSG_TRUNC`) the datagram's whole size
-/// -- and the source as `(family, address, port)`.
+/// One datagram of `family` (`netipc::ring::UDP_AF_INET` for `SYS_UDP_RECV`,
+/// `UDP_AF_INET6` for `SYS_UDP_RECV6`) from daemon socket `socket`, without
+/// waiting, its payload copied to the user buffer `buf` of `cap` bytes
+/// (already validated). Answers what the call returns -- the bytes copied, or
+/// with `trunc` (`MSG_TRUNC`) the datagram's whole size -- and its source
+/// address and port. With `peek` (`MSG_PEEK`) the datagram stays to be
+/// received again.
 ///
-/// `NotSupported` for `peek`: the daemon has no look that leaves the datagram
-/// queued.
+/// The two calls take only their own family's datagrams, as on the kernel
+/// stack, where a socket had a queue for each; the daemon's socket has one,
+/// and `net::socket` keeps a datagram of the other family for the other call
+/// (`socket::dgram_recv_family`). The kernel buffer is what a datagram can
+/// be, not what the caller says it can take.
 fn daemon_udp_recv(
     socket: DaemonSocket,
+    family: u16,
     buf: u64,
     cap: usize,
     peek: bool,
     trunc: bool,
-) -> KernelResult<(usize, u16, [u8; 16], u16)> {
-    if peek {
-        return Err(KernelError::NotSupported);
-    }
-    // The whole datagram, when its size is asked for: the daemon cuts what
-    // it hands over to the buffer it is given.
-    let room = if trunc {
-        cap.max(crate::net::udp::MAX_PAYLOAD)
-    } else {
-        cap
-    };
-    let mut data = crate::mm::user::alloc_zeroed_vec(room)?;
-    let (len, family, from, port) = crate::net::socket::dgram_recv_from(socket, &mut data, true)?;
-    let whole = usize::try_from(len).unwrap_or(0).min(data.len());
-    let copied = whole.min(cap);
+) -> KernelResult<(usize, [u8; 16], u16)> {
+    let mut data = crate::mm::user::alloc_zeroed_vec(cap.min(netipc::ring::UDP_DGRAM_MAX))?;
+    let (whole, _family, from, port) =
+        crate::net::socket::dgram_recv_family(socket, &mut data, true, Some(family), peek)?;
+    let copied = whole.min(data.len());
     if copied > 0 {
         // SAFETY: `data` is a live kernel `Vec` of at least `copied` bytes;
         // `copy_to_user` re-validates the destination.
         unsafe { crate::mm::user::copy_to_user(data.as_ptr(), buf, copied) }?;
     }
-    Ok((if trunc { whole } else { copied }, family, from, port))
+    Ok((if trunc { whole } else { copied }, from, port))
 }
 
 /// Read the 16-byte IPv6 address at user pointer `ptr`.
@@ -18024,8 +17983,9 @@ pub fn sys_udp_recv6(args: &SyscallArgs) -> SyscallResult {
         Resolved::Daemon(socket) => {
             let peek = args.arg4 & MSG_PEEK != 0;
             let trunc = args.arg4 & MSG_TRUNC != 0;
-            let (returned, _family, from, port) =
-                match daemon_udp_recv(socket, args.arg1, cap, peek, trunc) {
+            let family = netipc::ring::UDP_AF_INET6;
+            let (returned, from, port) =
+                match daemon_udp_recv(socket, family, args.arg1, cap, peek, trunc) {
                     Ok(got) => got,
                     Err(e) => return SyscallResult::err(e),
                 };
@@ -18238,19 +18198,18 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     let pin = match resolved {
         Resolved::Kernel(pin) => pin,
         Resolved::Daemon(socket) => {
-            let (returned, family, from, port) =
-                match daemon_udp_recv(socket, args.arg1, buf_cap, peek, trunc) {
+            let family = netipc::ring::UDP_AF_INET;
+            let (returned, from, port) =
+                match daemon_udp_recv(socket, family, args.arg1, buf_cap, peek, trunc) {
                     Ok(got) => got,
                     Err(e) => return SyscallResult::err(e),
                 };
             if args.arg3 != 0 {
-                // An IPv4 call's source: an IPv6 datagram's, which it cannot
-                // say, reads as the unspecified address.
+                // An IPv4 datagram's source: its address is `from`'s first four
+                // bytes.
                 let mut src = [0u8; 6];
-                if family == netipc::ring::UDP_AF_INET {
-                    if let (Some(dst), Some(v4)) = (src.get_mut(..4), from.get(..4)) {
-                        dst.copy_from_slice(v4);
-                    }
+                if let (Some(dst), Some(v4)) = (src.get_mut(..4), from.get(..4)) {
+                    dst.copy_from_slice(v4);
                 }
                 if let Some(dst) = src.get_mut(4..6) {
                     dst.copy_from_slice(&port.to_le_bytes());
@@ -21037,18 +20996,35 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `SYS_TCP_POLL_STATUS` for a daemon socket: its readiness as the kernel
-/// stack's bits (POLLIN 1, POLLOUT 4, POLLERR 8). The daemon reports no
-/// hang-up of its own: the end of the stream reads as readable, which is what
-/// lets the read that returns 0 happen.
+/// stack's bits (POLLIN 1, POLLOUT 4, POLLERR 8, POLLHUP 16). The daemon
+/// reports the end of the stream as readable, so readable with nothing
+/// buffered is the peer's close: POLLHUP too, as the kernel stack answers it,
+/// beside the POLLIN that lets the read that returns 0 happen. A poll that
+/// fails -- the daemon has dropped the connection, or restarted -- is
+/// POLLERR and POLLHUP: an error code here would be read as readiness bits
+/// (libc takes the result as them, unsigned).
 fn daemon_poll_status(socket: DaemonSocket) -> SyscallResult {
-    match crate::net::socket::poll_ready(socket) {
-        Ok((readable, writable, error)) => SyscallResult::ok(
-            i64::from(u8::from(readable))
-                | i64::from(u8::from(writable)) << 2
-                | i64::from(u8::from(error)) << 3,
-        ),
-        Err(e) => SyscallResult::err(e),
+    const POLLIN: i64 = 1;
+    const POLLOUT: i64 = 4;
+    const POLLERR: i64 = 8;
+    const POLLHUP: i64 = 16;
+    let Ok((readable, writable, error)) = crate::net::socket::poll_ready(socket) else {
+        return SyscallResult::ok(POLLERR | POLLHUP);
+    };
+    let mut bits = 0;
+    if readable {
+        bits |= POLLIN;
+        if crate::net::socket::readable_bytes(socket) == Ok(0) {
+            bits |= POLLHUP;
+        }
     }
+    if writable {
+        bits |= POLLOUT;
+    }
+    if error {
+        bits |= POLLERR;
+    }
+    SyscallResult::ok(bits)
 }
 
 /// `SYS_TCP_LAST_ERROR` for a daemon socket: its pending error, read or taken
@@ -21056,9 +21032,7 @@ fn daemon_poll_status(socket: DaemonSocket) -> SyscallResult {
 /// Any other failure is reported as a reset, the code for a connection that
 /// has failed.
 fn daemon_last_error(socket: DaemonSocket, take: bool) -> SyscallResult {
-    /// Linux's errnos, as the socket layer latches them.
-    const ETIMEDOUT: i32 = 110;
-    const ECONNREFUSED: i32 = 111;
+    use crate::net::socket::{ECONNREFUSED, ETIMEDOUT};
     let errno = if take {
         crate::net::socket::take_so_error(socket)
     } else {
@@ -21387,6 +21361,8 @@ pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
     // Possession, and the slot pinned for the call (`net::native_socket`).
     let pin = match native_socket(args.arg0, NativeKind::TcpConnection) {
         Ok(Resolved::Kernel(pin)) => pin,
+        // The daemon sends every segment at once, never coalescing: Nagle is
+        // off whatever is asked, and turning it on would change no result.
         Ok(Resolved::Daemon(_)) => return SyscallResult::ok(0),
         Err(e) => return SyscallResult::err(e),
     };
@@ -21412,7 +21388,17 @@ pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
     // Possession, and the slot pinned for the call (`net::native_socket`).
     let pin = match native_socket(args.arg0, NativeKind::TcpConnection) {
         Ok(Resolved::Kernel(pin)) => pin,
-        Ok(Resolved::Daemon(_)) => return SyscallResult::ok(0),
+        // The daemon sends no keepalive probes: off is what it does, and on is
+        // refused rather than promised, since a dead peer would never be
+        // found (known-issues A-THE-NETWORK-DAEMON-S-SOCKETS-LACK-WHAT-THE-KERNEL-
+        // STACK-S-HAD).
+        Ok(Resolved::Daemon(_)) => {
+            return if args.arg1 == 0 {
+                SyscallResult::ok(0)
+            } else {
+                SyscallResult::err(KernelError::NotSupported)
+            };
+        }
         Err(e) => return SyscallResult::err(e),
     };
     let handle = pin.slot();
@@ -21439,6 +21425,9 @@ pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
     // Possession, and the slot pinned for the call (`net::native_socket`).
     let pin = match native_socket(args.arg0, NativeKind::TcpConnection) {
         Ok(Resolved::Kernel(pin)) => pin,
+        // Timings for probes the daemon never sends, which turning keepalive
+        // on refuses (`sys_tcp_set_keepalive`): kept nowhere, promising
+        // nothing. Linux too takes them with keepalive off.
         Ok(Resolved::Daemon(_)) => return SyscallResult::ok(0),
         Err(e) => return SyscallResult::err(e),
     };

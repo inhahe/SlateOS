@@ -6152,9 +6152,12 @@ fn check_native_tcp_parity(ip: [u8; 4]) -> KernelResult<()> {
         [handle, request.as_ptr() as u64, request.len() as u64, 0],
     );
     let mut answer = [0u8; 16];
-    let mut got = 0i64;
+    // Asked again only while it would block: an answer, an end of stream (0)
+    // or an error is the verdict, at once.
+    let would_block = KernelError::WouldBlock as i64;
+    let mut got = would_block;
     let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
-    while got <= 0 && crate::hrtimer::now_ns() < deadline {
+    while got == would_block && crate::hrtimer::now_ns() < deadline {
         got = call(
             SYS_TCP_RECV,
             [
@@ -6164,7 +6167,7 @@ fn check_native_tcp_parity(ip: [u8; 4]) -> KernelResult<()> {
                 MSG_DONTWAIT,
             ],
         );
-        if got <= 0 {
+        if got == would_block {
             crate::sched::sleep_ms(10);
         }
     }

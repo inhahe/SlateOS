@@ -60,8 +60,9 @@ use crate::error::{KernelError, KernelResult};
 use crate::net::netstack_client::NetstackConn;
 use crate::sched::kmutex::KMutex;
 use crate::sync::Mutex;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique per-socket id (also the value stored in `FdEntry::raw_handle`).
@@ -75,8 +76,11 @@ fn alloc_socket_id() -> SocketId {
     NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// `AF_INET6` — the address family whose accept path reads the 18-byte peer form.
-const AF_INET6: u16 = 10;
+/// `AF_INET`: a socket's domain for IPv4 ([`create`], [`create_dgram`]).
+pub const AF_INET: u16 = 2;
+/// `AF_INET6`: its domain for IPv6, also the family whose accept path reads
+/// the 18-byte peer form.
+pub const AF_INET6: u16 = 10;
 
 /// Opaque handle to a stream socket. Stored as `FdEntry::raw_handle` (a `u64`)
 /// by the Linux fd-table dispatch layer.
@@ -286,7 +290,26 @@ struct SocketInner {
     /// so that the daemon -- which answers "timed out" from then on -- cannot
     /// make a later poll latch it again.
     timeout_reported: bool,
+    /// Datagram sockets only: datagrams taken from the daemon and not given
+    /// out yet, oldest first ([`dgram_recv_family`]) -- one of the other
+    /// family than its receiver takes, or one a receiver peeked at. At most
+    /// [`HELD_MAX`].
+    held: VecDeque<HeldDatagram>,
 }
+
+/// A datagram the daemon handed over that a receiver has yet to take
+/// ([`SocketInner::held`]).
+#[derive(Clone)]
+struct HeldDatagram {
+    family: u16,
+    from: [u8; 16],
+    port: u16,
+    data: Vec<u8>,
+}
+
+/// The most datagrams a socket holds for a receiver yet to take them; the
+/// oldest is dropped for a new one, as UDP drops what nobody reads.
+const HELD_MAX: usize = 16;
 
 impl SocketInner {
     /// Borrow the underlying [`NetstackConn`] of an **owned** session. Datagram
@@ -387,6 +410,7 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
         peer_port: 0,
         so_error: 0,
         timeout_reported: false,
+        held: VecDeque::new(),
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
@@ -593,6 +617,8 @@ pub fn connect6(
 /// - `WouldBlock` — `nonblock` was set and the window was full (→ `EAGAIN`).
 /// - `Interrupted` — a blocking wait was ended by a signal before any byte went.
 /// - `TimedOut` — the connection timed out (→ `ETIMEDOUT`).
+/// - `NotConnected` too when the daemon dropped the connection (its raw
+///   failure) before any byte went.
 /// - protocol faults propagated from [`NetstackConn::send`].
 pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
@@ -628,8 +654,12 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
                     return Ok(i32::try_from(sent).unwrap_or(i32::MAX));
                 }
             }
-            // Nothing accepted, or the daemon's raw failure: what went, else that.
-            Ok(n) => return Ok(if sent > 0 { count } else { n }),
+            // Nothing accepted: what went. The daemon's raw failure -- its
+            // generic -1, the connection gone -- is what went, else an error:
+            // passed on as a count it read as a negative byte count, or (to a
+            // native caller) as the code of an unrelated error.
+            Ok(n) if n < 0 && sent == 0 => return Err(KernelError::NotConnected),
+            Ok(_) => return Ok(count),
             Err(e) => return if sent > 0 { Ok(count) } else { Err(e) },
         }
     }
@@ -667,7 +697,8 @@ fn timeout_reported(inner: &KMutex<SocketInner>) {
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
-/// - `NotConnected` — the socket is not connected.
+/// - `NotConnected` — the socket is not connected, or the daemon dropped the
+///   connection (its raw failure).
 /// - `WouldBlock` — `nonblock` was set and no data was ready.
 /// - protocol faults propagated from [`NetstackConn::recv`].
 pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) -> KernelResult<i32> {
@@ -682,7 +713,12 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) ->
     if got == Err(KernelError::TimedOut) {
         timeout_reported(&inner);
     }
-    got
+    // The daemon's raw failure (its generic -1: the connection gone) is no
+    // count: as one it read as end of stream, or worse.
+    match got {
+        Ok(n) if n < 0 => Err(KernelError::NotConnected),
+        other => other,
+    }
 }
 
 /// The client socket [`late_sender`] writes to, as a raw handle; 0 when none.
@@ -1239,7 +1275,11 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
     // `sendto`); report writable-only, nothing to read, no error.
     if guard.kind == SockKind::Dgram {
         if guard.bound {
-            return guard.owned_conn_mut()?.poll_ready();
+            // A datagram the socket holds ([`SocketInner::held`]) is one to
+            // read as much as one the daemon has.
+            let held = !guard.held.is_empty();
+            let (readable, writable, error) = guard.owned_conn_mut()?.poll_ready()?;
+            return Ok((readable || held, writable, error));
         }
         return Ok((false, true, false));
     }
@@ -1317,9 +1357,9 @@ pub fn readable_bytes(handle: SocketHandle) -> KernelResult<u32> {
 }
 
 /// Linux `ECONNREFUSED`: a connect was refused (or its handshake failed).
-const ECONNREFUSED: i32 = 111;
+pub const ECONNREFUSED: i32 = 111;
 /// Linux `ETIMEDOUT`: an established connection's resends went unanswered.
-const ETIMEDOUT: i32 = 110;
+pub const ETIMEDOUT: i32 = 110;
 
 /// Read and clear the pending socket error (`getsockopt(SOL_SOCKET, SO_ERROR)`).
 ///
@@ -1412,19 +1452,22 @@ pub fn peer6(handle: SocketHandle) -> KernelResult<(Option<[u8; 16]>, u16)> {
 /// The socket's **local** endpoint for `getsockname`, queried live from the daemon
 /// (which owns the interface IP and the ephemeral source port it assigned).
 ///
-/// Only meaningful once the socket is connected — an unconnected socket has no
+/// Meaningful once a connect has begun -- the daemon picks the ephemeral port
+/// when it sends the SYN, so a non-blocking connect still in progress has
+/// one, as on Linux -- and not before: an unconnected socket has no
 /// daemon-assigned local port yet. Returns a [`LocalEndpoint`] whose variant
 /// conveys the address family.
 ///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
-/// - `NotConnected` — the socket is not connected (no local port assigned).
+/// - `NotConnected` — no connect has begun (no local port assigned), or it
+///   failed.
 /// - protocol faults propagated from [`NetstackConn::local_addr`].
 pub fn local(handle: SocketHandle) -> KernelResult<crate::net::netstack_client::LocalEndpoint> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
-    if guard.state != SockState::Connected {
+    if !matches!(guard.state, SockState::Connected | SockState::Connecting) {
         return Err(KernelError::NotConnected);
     }
     guard.with_stream_conn(|c, cid| c.local_addr_on(cid))
@@ -1656,13 +1699,61 @@ pub fn dgram_recv_from(
     buf: &mut [u8],
     nonblock: bool,
 ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
+    let cap = buf.len();
+    let (whole, family, from, port) = dgram_recv_family(handle, buf, nonblock, None, false)?;
+    Ok((
+        i32::try_from(whole.min(cap)).unwrap_or(i32::MAX),
+        family,
+        from,
+        port,
+    ))
+}
+
+/// [`dgram_recv_from`] for a receiver that takes only datagrams of `family`
+/// (`Some`, [`netipc::ring::UDP_AF_INET`] or `UDP_AF_INET6`) -- the native
+/// calls, which keep IPv4 and IPv6 apart as the kernel stack's sockets kept
+/// them in two queues, where the daemon's socket has one -- and that may
+/// `peek`: the datagram is handed out and kept for the next receive. A
+/// datagram of the other family is kept for a receiver of that family.
+/// Kept datagrams are given out first, oldest first ([`SocketInner::held`]).
+///
+/// Answers the datagram's whole length -- it may be more than `buf` takes,
+/// which is what `MSG_TRUNC` asks -- and its family, source and port. The
+/// datagram arrives whole: up to [`netipc::ring::UDP_DGRAM_MAX`] bytes.
+///
+/// # Errors
+///
+/// As [`dgram_recv_from`]; `OutOfMemory` for the buffer a datagram lands in.
+pub fn dgram_recv_family(
+    handle: SocketHandle,
+    buf: &mut [u8],
+    nonblock: bool,
+    family: Option<u16>,
+    peek: bool,
+) -> KernelResult<(usize, u16, [u8; 16], u16)> {
     let inner = inner_of(handle)?;
+    let mut landing = crate::mm::user::alloc_zeroed_vec(netipc::ring::UDP_DGRAM_MAX)?;
+    let wants = |f: u16| family.is_none_or(|want| want == f);
+    let hand_out = |d: &HeldDatagram, buf: &mut [u8]| {
+        let n = d.data.len().min(buf.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), d.data.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        (d.data.len(), d.family, d.from, d.port)
+    };
     wait_until(handle, nonblock, || {
         let mut guard = inner.lock();
         if guard.kind != SockKind::Dgram {
             return Err(KernelError::InvalidArgument);
         }
         ensure_bound(&mut guard)?;
+        if let Some(i) = guard.held.iter().position(|d| wants(d.family)) {
+            let given = guard.held.get(i).map(|d| hand_out(d, buf));
+            if !peek {
+                guard.held.remove(i);
+            }
+            return given.ok_or(KernelError::InternalError);
+        }
         let peer = guard.dgram_peer;
         // An *unconnected* datagram socket delivers from any source. A
         // *connected* one (a `connect(2)` set a default peer) only delivers
@@ -1671,16 +1762,28 @@ pub fn dgram_recv_from(
         // once: there may be a matching one behind it. An empty queue is the
         // daemon's would-block, which `wait_until` waits out.
         loop {
-            let got = guard.owned_conn_mut()?.udp_recv_any(buf, true)?;
-            let accepted = match peer {
-                None => true,
-                Some(p) => {
-                    let (_, family, ip16, port) = got;
-                    dgram_peer_matches(&p, family, &ip16, port)
-                }
+            let (len, got_family, from, port) =
+                guard.owned_conn_mut()?.udp_recv_any(&mut landing, true)?;
+            if peer.is_some_and(|p| !dgram_peer_matches(&p, got_family, &from, port)) {
+                continue;
+            }
+            let len = usize::try_from(len).unwrap_or(0).min(landing.len());
+            let datagram = HeldDatagram {
+                family: got_family,
+                from,
+                port,
+                data: landing.get(..len).unwrap_or(&[]).to_vec(),
             };
-            if accepted {
-                return Ok(got);
+            let take = wants(got_family);
+            let given = take.then(|| hand_out(&datagram, buf));
+            if !take || peek {
+                if guard.held.len() >= HELD_MAX {
+                    guard.held.pop_front();
+                }
+                guard.held.push_back(datagram);
+            }
+            if let Some(given) = given {
+                return Ok(given);
             }
         }
     })
@@ -2303,6 +2406,7 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
         peer_port,
         so_error: 0,
         timeout_reported: false,
+        held: VecDeque::new(),
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
@@ -2311,6 +2415,23 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
     };
     SOCKET_TABLE.lock().insert(id, slot);
     Ok((SocketHandle(id), peer))
+}
+
+/// [`accept`], waiting for a connection unless `nonblock`: what a blocking
+/// `accept(2)` and the native `SYS_TCP_ACCEPT` do. The wait is
+/// [`wait_until`]'s -- a sleep backing off from 1 ms to 10 ms between looks,
+/// `Interrupted` on a deliverable signal, reported as a wait on the socket --
+/// not a spin, which kept a CPU and the daemon busy for as long as no client
+/// came.
+///
+/// # Errors
+///
+/// As [`accept`]; `WouldBlock` only for `nonblock`; `Interrupted` on a signal.
+pub fn accept_wait(
+    handle: SocketHandle,
+    nonblock: bool,
+) -> KernelResult<(SocketHandle, AcceptedPeer)> {
+    wait_until(handle, nonblock, || accept(handle))
 }
 
 /// Whether a socket handle refers to a listening (server) socket. Lets the syscall

@@ -1029,29 +1029,42 @@ pub fn connect(handle: usize, peer_ip: Ipv4Addr, peer_port: u16) -> KernelResult
 /// `InvalidArgument` for a socket not bound, or a value the option does not
 /// take (Linux's `EINVAL`).
 pub fn set_option(handle: usize, option: McastOption, value: u64) -> KernelResult<()> {
-    // A hop count: 0 to 255, or -1 (all ones) for the default.
-    let hops = |v: u64| match v {
-        u64::MAX => Ok(McastOptions::DEFAULT.ttl),
-        v => u8::try_from(v).map_err(|_| KernelError::InvalidArgument),
-    };
+    let value = mcast_value(option, value)?;
     let mut sockets = SOCKETS.lock();
     let sock = sockets
         .get_mut(handle)
         .filter(|s| s.active)
         .ok_or(KernelError::InvalidArgument)?;
     match option {
-        McastOption::Ttl => sock.mcast.ttl = hops(value)?,
+        McastOption::Ttl => sock.mcast.ttl = value,
         McastOption::Loop => sock.mcast.loop_v4 = value != 0,
-        McastOption::Hops6 => sock.mcast.hops_v6 = hops(value)?,
-        McastOption::Loop6 => {
-            sock.mcast.loop_v6 = match value {
-                0 => false,
-                1 => true,
-                _ => return Err(KernelError::InvalidArgument),
-            };
-        }
+        McastOption::Hops6 => sock.mcast.hops_v6 = value,
+        McastOption::Loop6 => sock.mcast.loop_v6 = value != 0,
     }
     Ok(())
+}
+
+/// What native multicast `option` set to `value` means, by the native ABI's
+/// rules -- one place, for the kernel stack's sockets ([`set_option`]) and the
+/// daemon's (`syscall::handlers`): a TTL or hop limit is 0 to 255, or all
+/// ones for the default; IPv4's loop flag is any value, non-zero on; IPv6's
+/// is 0 or 1. Answers the hop count, or 1 or 0 for a loop flag.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a value outside those.
+pub fn mcast_value(option: McastOption, value: u64) -> KernelResult<u8> {
+    match option {
+        McastOption::Ttl | McastOption::Hops6 => match value {
+            u64::MAX => Ok(McastOptions::DEFAULT.ttl),
+            v => u8::try_from(v).map_err(|_| KernelError::InvalidArgument),
+        },
+        McastOption::Loop => Ok(u8::from(value != 0)),
+        McastOption::Loop6 => match value {
+            0 | 1 => Ok(u8::from(value == 1)),
+            _ => Err(KernelError::InvalidArgument),
+        },
+    }
 }
 
 /// Socket `handle`'s multicast `option`: a TTL or hop limit, or 1 or 0 for

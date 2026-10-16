@@ -583,6 +583,13 @@ pub const UDP_ADDR_HDR_LEN: usize = 24;
 /// Mirrors Linux `AF_INET`.
 pub const UDP_AF_INET: u16 = 2;
 
+/// The largest UDP payload the daemon sends or hands over in one datagram:
+/// one Ethernet frame (with a VLAN tag, 1522 bytes) less the Ethernet, IPv4
+/// and UDP headers. A larger `OP_UDP_SEND` or `OP_UDP_SEND6` payload is
+/// refused with [`ERR_MSG_SIZE`]; a receive window of [`UDP_ADDR_HDR_LEN`]
+/// plus this many bytes takes any datagram whole.
+pub const UDP_DGRAM_MAX: usize = 1480;
+
 /// `family` value for an IPv6 datagram source address ([`Sqe::pack_udp_addr`]).
 /// Mirrors Linux `AF_INET6`.
 pub const UDP_AF_INET6: u16 = 10;

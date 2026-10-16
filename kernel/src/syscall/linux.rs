@@ -41670,23 +41670,13 @@ fn socket_accept_from_user(
         None => return linux_err(errno::EBADF),
     };
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-    // Blocking-accept policy: if the listening fd is not O_NONBLOCK, retry the
-    // single-shot object-layer accept until a connection is ready (yielding the
-    // CPU between attempts) rather than returning EAGAIN to userspace. A
-    // non-blocking listener returns EAGAIN immediately.
+    // A listener that is not O_NONBLOCK waits for a connection (the daemon
+    // completes handshakes asynchronously), a signal ending the wait with
+    // EINTR; a non-blocking one answers EAGAIN at once.
     let listener_nonblock = entry.status_flags & oflags::O_NONBLOCK != 0;
-    let (new_handle, peer) = loop {
-        match crate::net::socket::accept(h) {
-            Ok(pair) => break pair,
-            Err(KernelError::WouldBlock) => {
-                if listener_nonblock {
-                    return linux_err(errno::EAGAIN);
-                }
-                // Yield and re-poll: the daemon completes handshakes asynchronously.
-                crate::sched::yield_now();
-            }
-            Err(e) => return linux_err(linux_errno_for(e)),
-        }
+    let (new_handle, peer) = match crate::net::socket::accept_wait(h, listener_nonblock) {
+        Ok(pair) => pair,
+        Err(e) => return linux_err(linux_errno_for(e)),
     };
     // Install the accepted socket as a new fd (same shape as sys_socket).
     let nonblock = flags & 0o4000 != 0;

@@ -1,8 +1,18 @@
-## A-NATIVE-SOCKETS-AND-DNS-STILL-USE-THE-KERNEL-STACK-WHICH-NO-LONGER-OWNS-THE-CARD (lane A, 2026-10-16) — OPEN
+## A-NATIVE-SOCKETS-AND-DNS-STILL-USE-THE-KERNEL-STACK-WHICH-NO-LONGER-OWNS-THE-CARD (lane A, 2026-10-16) — **CLOSED 2026-10-16**
 
-**Status:** OPEN (lane A). Found reading the kernel's remaining users of its
-network stack, for decision 934's next slice. By code reading; not yet
-reproduced by a test.
+**Status:** CLOSED (lane A), fixed by 36448ec86 the day it was found: while
+the daemon holds the card, a native socket made in the root network
+namespace is one of the daemon's (`net::native_socket`'s `Backing::Daemon`),
+and the kernel resolver sends its queries through a daemon socket. Shown by
+the boot's native parity checks (`spawn::check_native_resolve_parity`,
+`check_native_tcp_parity`: `SYS_DNS_RESOLVE` and `SYS_TCP_CONNECT`/`SEND`/
+`RECV` reaching the network). A container's network namespace is still the
+kernel stack's (`open-questions/A-Q29.md`). What the daemon's sockets do not
+do that the kernel's did is
+`known-issues/A-THE-NETWORK-DAEMON-S-SOCKETS-LACK-WHAT-THE-KERNEL-STACK-S-HAD.md`.
+
+Found reading the kernel's remaining users of its network stack, for
+decision 934's next slice, by code reading.
 
 **In short:** since 2026-09-12 the network daemon owns the network card by
 default, and the kernel's own network stack stops reading what arrives on

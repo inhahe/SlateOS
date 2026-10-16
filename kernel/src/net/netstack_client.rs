@@ -41,8 +41,8 @@
 //! A single fixed ring region carries both directions:
 //!
 //! ```text
-//! [ SND_OFF .. SND_OFF+SND_CAP )   send staging   (SND_CAP = 1024 = daemon TCP_SND_BUF)
-//! [ RCV_OFF .. RCV_OFF+RCV_CAP )   recv landing   (RCV_CAP =  512 = daemon MSG_CAP)
+//! [ SND_OFF .. SND_OFF+SND_CAP )   send staging   (SND_CAP = 2048: a whole datagram)
+//! [ RCV_OFF .. RCV_OFF+RCV_CAP )   recv landing   (RCV_CAP = 2048: a whole datagram)
 //! ```
 //!
 //! The caps match the daemon's per-op limits (`services/netstack/src/main.rs`):
@@ -65,14 +65,25 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 /// Send-staging window offset within the ring data area.
 const SND_OFF: u32 = 0;
-/// Send-staging window capacity. Matches the daemon's `TCP_SND_BUF` — a single
-/// `OP_SEND` with `data_len` above this is rejected, so we chunk to it.
-const SND_CAP: u32 = 1024;
+/// Send-staging window capacity: a whole datagram, IPv6's 16-byte destination
+/// before it ([`netipc::ring::UDP_DGRAM_MAX`]), with room to spare. A TCP send
+/// goes in pieces of [`TCP_SEND_CHUNK`].
+const SND_CAP: u32 = 2048;
+/// The most one `OP_SEND` carries: the daemon's `TCP_SND_BUF`, which refuses
+/// more.
+const TCP_SEND_CHUNK: usize = 1024;
 /// Recv-landing window offset (immediately after the send window).
 const RCV_OFF: u32 = SND_CAP;
-/// Recv-landing window capacity. Matches the daemon's `MSG_CAP` — a single
-/// `OP_RECV` returns at most this many bytes.
-const RCV_CAP: u32 = 512;
+/// Recv-landing window capacity: a whole datagram and its address header
+/// ([`netipc::ring::UDP_ADDR_HDR_LEN`] + [`netipc::ring::UDP_DGRAM_MAX`]), so
+/// no datagram the daemon holds is cut short in the handing over. One
+/// `OP_RECV` still returns at most the daemon's `MSG_CAP` (512) bytes.
+const RCV_CAP: u32 = 2048;
+// Both windows hold a whole datagram.
+const _: () = assert!(
+    RCV_CAP as usize >= netipc::ring::UDP_ADDR_HDR_LEN + netipc::ring::UDP_DGRAM_MAX
+        && SND_CAP as usize >= 16 + netipc::ring::UDP_DGRAM_MAX
+);
 /// Total ring data-area length: send window + recv window.
 const DATA_LEN: u32 = SND_CAP + RCV_CAP;
 
@@ -770,7 +781,7 @@ impl NetstackConn {
             // The ring per chunk, not for the whole buffer: a large send by one
             // socket lets other sockets' round-trips in between its chunks.
             let mut ring = RingGuard::acquire(&mut self.ring)?;
-            let end = off.saturating_add(SND_CAP as usize).min(buf.len());
+            let end = off.saturating_add(TCP_SEND_CHUNK).min(buf.len());
             let chunk = buf.get(off..end).ok_or(KernelError::InternalError)?;
             if !ring.write_data(SND_OFF as usize, chunk) {
                 return Err(KernelError::InternalError);
@@ -1100,11 +1111,9 @@ impl NetstackConn {
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to(&mut self, ip: &[u8; 4], port: u16, buf: &[u8]) -> KernelResult<i32> {
         let mut ring = RingGuard::acquire(&mut self.ring)?;
-        // A single datagram must fit the ring send window (the daemon also caps it
-        // to its per-datagram maximum and returns ERR_MSG_SIZE). Rather than
-        // silently truncate a payload larger than the window, reject it as EMSGSIZE
-        // — a datagram is all-or-nothing, so a partial send would corrupt it.
-        if buf.len() > SND_CAP as usize {
+        // A datagram is all-or-nothing: one larger than the daemon sends
+        // (`UDP_DGRAM_MAX`) is EMSGSIZE, never cut short.
+        if buf.len() > netipc::ring::UDP_DGRAM_MAX {
             return Err(KernelError::MsgSize);
         }
         let want = buf.len();
@@ -1150,11 +1159,11 @@ impl NetstackConn {
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to6(&mut self, ip6: &[u8; 16], port: u16, buf: &[u8]) -> KernelResult<i32> {
         let mut ring = RingGuard::acquire(&mut self.ring)?;
-        // The 16-byte destination address plus the payload must fit the ring send
-        // window; reject an oversized datagram as EMSGSIZE rather than truncating
-        // (a datagram is all-or-nothing).
+        // A datagram is all-or-nothing: one larger than the daemon sends
+        // (`UDP_DGRAM_MAX`) is EMSGSIZE, never cut short. The window holds it
+        // and the 16-byte destination before it.
         let want = buf.len();
-        if want.saturating_add(16) > SND_CAP as usize {
+        if want > netipc::ring::UDP_DGRAM_MAX {
             return Err(KernelError::MsgSize);
         }
         // Prepend the destination address, then the payload.

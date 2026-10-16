@@ -1257,10 +1257,11 @@ fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<V
     Err(KernelError::TimedOut)
 }
 
-/// The largest DNS answer [`dns_query_daemon`] takes: what EDNS0 offers at
-/// most (RFC 6891 §6.2.5), well above the 512 bytes a plain query is answered
-/// within.
-const MAX_DNS_REPLY: usize = 4096;
+/// The largest DNS answer [`dns_query_daemon`] takes: one datagram as the
+/// daemon hands it over whole ([`netipc::ring::UDP_DGRAM_MAX`]), above the 512
+/// bytes a plain query is answered within. (EDNS0 allows more, RFC 6891
+/// §6.2.5, but these queries offer none.)
+const MAX_DNS_REPLY: usize = netipc::ring::UDP_DGRAM_MAX;
 
 /// [`dns_query_raw`] over the network daemon, while it holds the card: the
 /// query goes as a datagram of a daemon-backed socket (`net::socket`), with
@@ -1269,13 +1270,10 @@ const MAX_DNS_REPLY: usize = 4096;
 /// kernel's own is `udp::bind`'s.
 fn dns_query_daemon(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
     use super::socket;
-    /// `AF_INET` and `AF_INET6`, the socket layer's domains.
-    const AF_INET: u16 = 2;
-    const AF_INET6: u16 = 10;
 
     let sock = socket::create_dgram(match server {
-        DnsServer::V4(_) => AF_INET,
-        DnsServer::V6(_) => AF_INET6,
+        DnsServer::V4(_) => socket::AF_INET,
+        DnsServer::V6(_) => socket::AF_INET6,
     })?;
     let outcome = (|| {
         let mut reply = crate::mm::user::alloc_zeroed_vec(MAX_DNS_REPLY)?;

@@ -3387,8 +3387,11 @@ const UDP_QLEN: usize = 2;
 /// Maximum UDP payload we buffer per datagram (one Ethernet MTU minus the IPv4
 /// and UDP headers — a datagram that would exceed this on send is rejected with
 /// [`netipc::ring::ERR_MSG_SIZE`]).
-const UDP_DGRAM_MAX: usize =
-    MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN + udp::HEADER_LEN);
+const UDP_DGRAM_MAX: usize = netipc::ring::UDP_DGRAM_MAX;
+// The ring's limit is this daemon's frame, less its headers.
+const _: () = assert!(
+    UDP_DGRAM_MAX == MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN + udp::HEADER_LEN)
+);
 /// First ephemeral local port handed out by [`UdpSocks::bind`] when a caller
 /// binds to port 0 (the IANA dynamic/ephemeral range base).
 const UDP_EPHEMERAL_BASE: u16 = 49152;
@@ -4887,6 +4890,15 @@ fn ring_tcp_process(
             netipc::ring::OP_UDP_GETOPT => {
                 let (option, _) = netipc::ring::Sqe::unpack_udp_opt(sqe.aux);
                 udp_getopt(net, key(id_space, sqe.conn_id), option)
+            }
+            // A payload larger than one datagram is refused, never cut short.
+            netipc::ring::OP_UDP_SEND if sqe.data_len as usize > UDP_DGRAM_MAX => {
+                netipc::ring::ERR_MSG_SIZE
+            }
+            netipc::ring::OP_UDP_SEND6
+                if (sqe.data_len as usize).saturating_sub(16) > UDP_DGRAM_MAX =>
+            {
+                netipc::ring::ERR_MSG_SIZE
             }
             netipc::ring::OP_UDP_SEND => {
                 // Send one datagram from the bound socket to aux=[dst_ip:4][port_be:2].

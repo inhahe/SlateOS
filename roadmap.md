@@ -3337,7 +3337,9 @@ D's to act on once answered).
   tested on the host against each provider's documented answers.
   **It updates nothing on SlateOS yet**, for three reasons
   (`known-issues/D-DYNAMIC-DNS-UPDATES-NOTHING-YET.md`):
-  - its passwords have nowhere to be kept (D-Q4);
+  - its passwords have nowhere to be kept yet: the operator's answer is a
+    system section of the password manager, unlocked with a TPM-held key
+    (D-Q4, design-decisions §1187), which does not exist yet;
   - nothing in userspace speaks TLS
     (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`);
   - it is not on the image or started at boot.
@@ -3369,20 +3371,58 @@ D's to act on once answered).
   through to them, and `waitpid` gets `__WALL`. LLDB stays a later
   alternative: it needs all of LLVM and Clang ported first.
 
-- `[-]` `[D]` **Mono, .NET on Linux** (2026-10-07; design-decisions §1050,
-  adopted from the same list). The Mono 6.14.1 runtime, `mono-sgen`, links
-  against our `libc.a` with nothing missing (`scripts/mono-spike/`). It is
-  built with cooperative GC suspend, since SlateOS has no per-thread signal
-  masks. The class libraries are built natively on the host by
-  `scripts/mono-spike/bcl.sh`. The image carries `/bin/mono`, `mscorlib.dll`,
-  Mono's library map and a test program. C called by name works through
-  `dlsym` over the symbols the runtime exports (design-decisions §1184).
-  **Not yet seen running on SlateOS:** `services/ctest-mono-runs` runs it
-  and waits on lane A's generic rung. The runtime turns a fault into an
-  exception by rewriting the faulting thread's signal context, which no
-  native program here has needed before. Next after it runs: the rest of
-  the class libraries (`System.dll`, `System.Core.dll` ...), and
-  `MonoPosixHelper` linked into the runtime.
+- `[ ]` `[D]` **.NET: `dotnet/runtime`** (the operator's change from Mono,
+  2026-10-10, design-decisions §1246; the runtime and release, §1192).
+  CoreCLR first, at .NET 10, with `/bin/dotnet` rolling a .NET 8 program
+  forward. What CoreCLR asks of the C library, in the order it meets it:
+  a signal aimed at one thread whose handler rewrites its context (GC
+  suspension; faults turned into exceptions) -- per-thread signals exist
+  since lane A's §1542; code mapped twice, writable and executable, for its
+  W^X policy (a `memfd` mapped shared twice), or that policy off; and its
+  own unwinder, built in. dotnet/runtime's own Mono is the fallback (§1192).
+- `[-]` `[D]` **Mono 6.14, the measure for .NET** (2026-10-07;
+  design-decisions §1050). Superseded as the .NET port by `dotnet/runtime`
+  above, and kept until CoreCLR runs, as the measure of what the C library
+  gives a .NET runtime. The Mono 6.14.1 runtime, `mono-sgen`, links against
+  our `libc.a` with nothing missing (`scripts/mono-spike/`), built with
+  cooperative GC suspend. The class libraries are built natively on the host
+  by `scripts/mono-spike/bcl.sh`. The image carries `/bin/mono`,
+  `mscorlib.dll`, Mono's library map and a test program. C called by name
+  works through `dlsym` over the symbols the runtime exports
+  (design-decisions §1184). **Not yet seen running on SlateOS:**
+  `services/ctest-mono-runs` runs it and waits on lane A's generic rung.
+
+- `[ ]` `[D]` **The C library rewritten clean-room where it was translated
+  from glibc** (the operator's D-Q6, design-decisions §1189): the CP1255,
+  CP1258, TCVN, T.61 and TSCII converters, the C23 maths functions and the
+  narrowing checks, `clog10`, `<obstack.h>`'s macros, argp, the timezone
+  code, the logger, the crypt API's order of checks and `<crypt.h>`, and the
+  regex parser's order of checks -- each from its standard or manual page,
+  held to its existing glibc oracle. The rule from now on: glibc is run, not
+  read.
+- `[ ]` `[D]` **Chinese, Japanese and Korean in `iconv`** (D-Q5,
+  design-decisions §1188): EUC-JP, Shift-JIS, ISO-2022-JP, EUC-KR, GBK,
+  GB18030, Big5 and IBM's double-byte sets, their tables as files in
+  `/usr/lib/iconv/` that the library maps on first use, made by the same
+  generator as the one-byte tables and installed by the rootfs recipe.
+- `[ ]` `[D]` **The "C" locale one byte a character, `C.UTF-8` the user's
+  setting** (D-Q7, design-decisions §1190): the conversions, `MB_CUR_MAX`,
+  `CODESET`, the classes and `iconv`'s default follow the thread's locale,
+  and `setlocale(LC_ALL, "")` gives `C.UTF-8`.
+- `[ ]` `[D]` **A background service's passwords in a system section of
+  the password manager** (D-Q4, design-decisions §1187). Each service reads
+  its passwords through one function; the section itself is the password
+  manager's, and the key that unlocks it at startup the TPM's (lane A) --
+  requests to file. Blocks the dynamic-DNS service's sign-in to a provider.
+- `[ ]` `[D]` **A Let's Encrypt (ACME) client** (the operator's note on
+  F-Q6, 2026-10-09): turning remote desktop on gets a certificate for the
+  machine's dynamic-DNS name, in the same steps (lane F's
+  `requests/f-cd-turning-on-remote-desktop-sets-up-reaching-the-machine.md`).
+  A service beside `services/dyndns`; needs TLS in userspace first
+  (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`).
+- Waiting on the operator: **D-Q3** (where shared memory, message queues
+  and named semaphores live between programs): the operator's concerns of
+  2026-10-09 are answered in the question, with a fifth option.
 
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;

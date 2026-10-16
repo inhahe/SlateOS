@@ -84,7 +84,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | relayed 2026-10-10 (D: its Mono item in `roadmap.md` becomes `dotnet/runtime`); B: recorded 2026-10-11 -- the §1050 list in lane B's backlog names `dotnet/runtime` and points to §6.13 |
+| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | D: recorded 2026-10-16 -- the item in `roadmap.md` is `dotnet/runtime` now, and §1192 says which of its runtimes comes first (CoreCLR) and which release (.NET 10); B: recorded 2026-10-11 -- the §1050 list in lane B's backlog names `dotnet/runtime` and points to §6.13 |
 | the ports asked for by name, listed in `roadmap-detailed.md` | E | `roadmap-detailed.md` §6.13 | recorded |
 
 ## chat, 2026-10-10: a consent prompt takes no keystrokes
@@ -142,7 +142,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | F-Q8 | F | -- | relayed 2026-10-09: **B**, translate FFmpeg's H.264 decoder (lane F had recommended A) |
 | F-Q9 | F | -- | relayed 2026-10-09: **B**, translate FFmpeg's fixed-point AAC decoder (lane F had recommended A) |
 | F-Q10 | F | -- | relayed 2026-10-09: A, Chrome's colour library; Little CMS when printing is built |
-| F-Q6 | F, C, D | -- | relayed 2026-10-09: turning remote desktop on offers, in the same steps, a dynamic-DNS name (lane D's `services/dyndns`) and a Let's Encrypt certificate -- whatever is not yet set up |
+| F-Q6 | F, C, D | -- | relayed 2026-10-09: turning remote desktop on offers, in the same steps, a dynamic-DNS name (lane D's `services/dyndns`) and a Let's Encrypt certificate -- whatever is not yet set up. D: recorded 2026-10-16 -- an ACME client for the certificate is lane D's, a service beside `services/dyndns`, in `roadmap.md` |
 | The MIT licence | operator | `LICENSE`, lane-a-wip `13032901f` | **committed, held off `main`** (2026-10-15): at the repository root it makes lane C's `gather-notices.py` fail every boot test; lane A restores it, and its owner entry in `which-lane.py`, when lane C's fix is on `main` (`requests/a-c-gather-notices-reads-the-repository-root-as-a-crate.md`) |
 | The file reform (`todo2.txt`, `roadmap.md`, `known-issues.md`) | A | §1530 | answered in chat: done for the issues, decisions and questions, and finished roadmap blocks moved to `roadmap-done.md`, with a search database; **not** done for `todo.txt` (59,315 lines) -- lane A's, on its roadmap. `todo2.txt` is the operator's own and was never part of it |
 | Process Lasso's controls | B | `open-questions/B-Q26.md` → §1074 | **answered 2026-10-11 (B-Q26: A)**: a program's remembered settings gain the processors it may use, a cap on its processor use and a profile while it runs. Lane A asked the same thing back as A-Q27, which this answer settles (lane A told 2026-10-15) |
@@ -181,12 +181,12 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | C-Q32 | C | -- | relayed 2026-10-09 (A) |
 | C-Q33 | C | -- | relayed 2026-10-09 (C if startup programs depend on each other, else A) |
 | C-Q34 | C | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
-| D-Q3 | D | -- | relayed 2026-10-09; **concerns raised, no option chosen yet** |
-| D-Q4 | D | -- | relayed 2026-10-09 (B) |
-| D-Q5 | D | -- | relayed 2026-10-09 (B) |
-| D-Q6 | D | -- | relayed 2026-10-09 (B) |
-| D-Q7 | D | -- | relayed 2026-10-09 (Claude's recommendation) |
-| D-Q8 | D | -- | relayed 2026-10-09 (B, with a question about swap files) |
+| D-Q3 | D | -- | **back to the operator** (2026-10-16): the three concerns answered in `open-questions/D-Q3.md`, with lane A's fifth option (E, a name-keeper service handing out the kernel's shared-memory capabilities), now Claude's recommendation; no option chosen yet |
+| D-Q4 | D | §1187 | recorded 2026-10-16 (B) |
+| D-Q5 | D | §1188 | recorded 2026-10-16 (B) |
+| D-Q6 | D | §1189 | recorded 2026-10-16 (B) |
+| D-Q7 | D | §1190 | recorded 2026-10-16 (Claude's recommendation) |
+| D-Q8 | D | §1191 | recorded 2026-10-16 (B; the library asks the kernel's lock since lane A built it, and the swap question is answered there: a swap file by default, a partition at install, lane A building both) |
 | E-Q1 | E | §1235 | recorded (whisper.cpp; the port is lane D's, the model package lane B's, the dictation front end lane E's) |
 | E-Q2 | E | §1236 | recorded: weather and the dictionary's online lookups off until turned on; the programs whose purpose is the internet (speed test, IRC, torrents, VPN, remote desktop, the scanner's WHOIS) unchanged. The table in §1236 says how "those three things" was read |
 | E-Q3 | E | §1237 | recorded (`pkg rollback` exists; a desktop entry for it waits on `requests/e-b-programs-can-ask-the-package-manager-to-roll-back.md`) |

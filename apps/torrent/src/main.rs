@@ -2321,6 +2321,19 @@ const NOTICE_H: f32 = 48.0;
 /// The most characters the magnet dialog takes. A magnet link with a dozen
 /// trackers is a few kilobytes; this is past any.
 const MAX_MAGNET_CHARS: usize = 8192;
+/// The most characters the search box takes.
+const SEARCH_CAPACITY: usize = 256;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 12.0;
+
+/// The text fields a right-click menu can be opened on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The magnet dialog's box.
+    Magnet,
+    /// The search box.
+    Search,
+}
 
 /// The sidebar's filters, in the order the number keys choose them.
 const FILTERS: [TorrentFilter; 7] = [
@@ -2629,13 +2642,16 @@ pub struct TorrentApp {
     since_sample_ms: u64,
     /// Whether the search box has the keys.
     pub search_active: bool,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it.
+    search_editor: TextInput,
     /// How far the transfer list is scrolled, in rows. It did not scroll:
     /// rows past the bottom were not drawn.
     pub transfer_scroll: usize,
-    /// The magnet box's right-click menu -- Cut, Copy, Paste, Delete,
-    /// Select all -- while it is up
+    /// The magnet box's or the search box's right-click menu -- Cut, Copy,
+    /// Paste, Delete, Select all -- while it is up
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
-    field_menu: fieldmenu::FieldMenu<()>,
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2835,6 +2851,7 @@ impl TorrentApp {
             sessions: HashMap::new(),
             since_sample_ms: 0,
             search_active: false,
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             transfer_scroll: 0,
             field_menu: fieldmenu::FieldMenu::new(),
             hover: None,
@@ -2993,12 +3010,12 @@ impl TorrentApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
-        // The magnet box's right-click menu takes the presses and the keys
-        // while it is up, as any menu does.
+        // A box's right-click menu takes the presses and the keys while it
+        // is up, as any menu does.
         match self.field_menu.event(event) {
             fieldmenu::Outcome::Window => {}
             fieldmenu::Outcome::Taken => return EventResult::Consumed,
-            fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
+            fieldmenu::Outcome::Chosen(field, id) => return self.do_menu_row(field, id),
             fieldmenu::Outcome::RightPressElsewhere(x, y) => {
                 let _another = self.open_field_menu(x, y);
                 return EventResult::Consumed;
@@ -3648,34 +3665,61 @@ impl TorrentApp {
             },
             self.focus_ring_width,
         );
-        let placeholder = self.search_query.is_empty() && !self.search_active;
-        f.push(RenderCommand::Text {
-            x: search.x + 10.0,
-            y: search.y + 9.0,
-            text: if placeholder {
-                String::from("Search names and labels  ( / )")
-            } else {
-                self.search_query.clone()
-            },
-            font_size: 12.0,
-            color: if placeholder {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(search.w - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
         if self.search_active {
-            let typed = text::measure(&self.search_query, 12.0, FontWeightHint::Regular);
-            f.push(RenderCommand::FillRect {
-                x: search.x + 10.0 + typed.min(search.w - 22.0),
-                y: search.y + 8.0,
-                width: guitk::textedit::CARET_WIDTH,
-                height: 16.0,
-                color: self.palette.text,
-                corner_radii: CornerRadii::ZERO,
+            // The box with the keys: its text, with the caret and the
+            // selection where they are -- the end of the text if the search
+            // changed under the box's editor.
+            let synced = self.search_editor.text() == self.search_query;
+            let mut tree = RenderTree::new();
+            guitk::textedit::draw(
+                &mut tree,
+                &guitk::textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        text::TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: true,
+                    x: search.x + 10.0,
+                    y: search.y + 8.0,
+                    width: (search.w - 20.0).max(0.0),
+                    line_height: 16.0,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: guitk::textedit::CARET_WIDTH,
+                },
+            );
+            for command in tree.commands {
+                f.push(command);
+            }
+        } else {
+            let placeholder = self.search_query.is_empty();
+            f.push(RenderCommand::Text {
+                x: search.x + 10.0,
+                y: search.y + 9.0,
+                text: if placeholder {
+                    String::from("Search names and labels  ( / )")
+                } else {
+                    self.search_query.clone()
+                },
+                font_size: SEARCH_TEXT_SIZE,
+                color: if placeholder {
+                    self.palette.subtext0
+                } else {
+                    self.palette.text
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(search.w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         f.hit(Target::Search, search);
@@ -4798,12 +4842,16 @@ impl TorrentApp {
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                let Some(target) = self
-                    .frame(self.win_width, self.win_height)
-                    .hit_test(event.x, event.y)
-                else {
+                let frame = self.frame(self.win_width, self.win_height);
+                let Some(target) = frame.hit_test(event.x, event.y) else {
                     return EventResult::Ignored;
                 };
+                // A press in the search box puts its caret where it lands.
+                if target == Target::Search
+                    && let Some(rect) = frame.rect_of(|t| *t == Target::Search)
+                {
+                    self.place_search_caret(rect, event.x);
+                }
                 self.press(target)
             }
             MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
@@ -5027,24 +5075,47 @@ impl TorrentApp {
         }
     }
 
-    /// A right press: over the magnet box, its menu where the press landed,
-    /// the box's caret and selection left as they are, so Cut and Copy act on
-    /// what the user selected (design-decisions 1454). Anywhere else, nothing.
+    /// A right press: over the magnet box or the search box, that box's menu
+    /// where the press landed -- the search box given the keys -- the box's
+    /// caret and selection left as they are, so Cut and Copy act on what the
+    /// user selected (design-decisions 1454). Anywhere else, nothing.
+    ///
+    /// Found in the frame as it is now: the dialog lays a backdrop over the
+    /// whole window, so the magnet box is found only while it is up and the
+    /// search box only while it is not.
     fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
-        if !self.show_add_dialog || self.target_at(x, y) != Some(Target::MagnetField) {
-            return EventResult::Ignored;
-        }
         let viewport = (self.win_width, self.win_height);
-        self.field_menu
-            .open((), self.magnet_input.edit_menu(), x, y, viewport);
+        let target = self.frame(self.win_width, self.win_height).hit_test(x, y);
+        let (field, menu) = match target {
+            Some(Target::MagnetField) => (MenuField::Magnet, self.magnet_input.edit_menu()),
+            Some(Target::Search) => {
+                self.sync_search_editor();
+                self.search_active = true;
+                (MenuField::Search, self.search_editor.edit_menu())
+            }
+            _ => return EventResult::Ignored,
+        };
+        self.field_menu.open(field, menu, x, y, viewport);
         EventResult::Consumed
     }
 
-    /// The menu's row `id`, chosen: done to the magnet box as its key would
-    /// be, the last attempt's complaint put away if the link changed.
-    fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
-        if self.magnet_input.edit_command(id) == KeyEdit::Changed {
-            self.magnet_error = None;
+    /// The menu's row `id`, chosen for `field`: done to the box as its key
+    /// would be -- the magnet box's last complaint put away if the link
+    /// changed, the list following a change to the search.
+    fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
+        match field {
+            MenuField::Magnet => {
+                if self.magnet_input.edit_command(id) == KeyEdit::Changed {
+                    self.magnet_error = None;
+                }
+            }
+            MenuField::Search => {
+                self.sync_search_editor();
+                if self.search_editor.edit_command(id) == KeyEdit::Changed {
+                    let typed = self.search_editor.text().to_owned();
+                    self.set_search(&typed);
+                }
+            }
         }
         EventResult::Consumed
     }
@@ -5093,37 +5164,72 @@ impl TorrentApp {
         }
     }
 
-    /// Keys while the search box has them.
-    ///
-    /// Its own keys are plain, and it types what was typed: AltGr, which
-    /// arrives as Ctrl+Alt, typed nothing, and Alt+X typed an `x`.
-    /// Backspace is refused only to Alt and the Windows key.
+    /// Keys while the search box has them: Escape empties it and gives the
+    /// keys back, Enter and Tab give them back keeping the search, and the
+    /// rest is the box's (`textline::apply_key_on_clipboard`), at its
+    /// caret, on the program's clipboard -- which types what a key typed,
+    /// AltGr's among it, and not a command's letter. Answers whether the box
+    /// did anything with the key.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
         match key.key {
             Key::Escape if plain => {
                 self.search_active = false;
-                self.search_query.clear();
+                self.set_search("");
+                return EventResult::Consumed;
             }
-            Key::Enter | Key::Tab if plain => self.search_active = false,
-            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
-                if self.search_query.pop().is_none() {
-                    return EventResult::Ignored;
-                }
+            Key::Enter | Key::Tab if plain => {
+                self.search_active = false;
+                return EventResult::Consumed;
             }
-            _ => {
-                if !textline::types_into_field(key) {
-                    return EventResult::Ignored;
-                }
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-            }
+            _ => {}
         }
-        self.transfer_scroll = 0;
-        EventResult::Consumed
+        self.sync_search_editor();
+        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
+        let typed = self.search_editor.text().to_owned();
+        self.set_search(&typed);
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Load the search box's editor from `search_query` when the search
+    /// changed underneath it, its caret at the end.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: the list follows it, from its top.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            text.clone_into(&mut self.search_query);
+            self.transfer_scroll = 0;
+        }
+    }
+
+    /// A press in the search box `rect` at `x`: its caret where the press
+    /// landed, against the text as the box draws it.
+    fn place_search_caret(&mut self, rect: Rect, x: f32) {
+        let drawn = if self.search_active {
+            self.search_editor.cursor()
+        } else {
+            text::TextCursor::default()
+        };
+        self.sync_search_editor();
+        let cursor = guitk::textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 20.0).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - 10.0,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 }
 
@@ -7945,5 +8051,145 @@ about anything -- it drew {} text command(s)",
         assert_eq!(shown_bytes(b"plain"), "plain");
         assert_eq!(shown_bytes("caf\u{e9}".as_bytes()), "caf\u{e9}");
         assert_eq!(shown_bytes(b"a\xffb\xfe"), "a\\xFFb\\xFE");
+    }
+
+    // ------------------------------------------------------------------
+    // The search box: a caret, a selection, the program's clipboard and a
+    // right-click menu (2026-10-16)
+    // ------------------------------------------------------------------
+
+    /// **The search box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::Search);
+        probe::type_str(&mut app, "lbre");
+        for _ in 0..3 {
+            probe::key(&mut app, &probe::press(Key::Left));
+        }
+        assert_eq!(
+            probe::key(&mut app, &probe::typing("i")),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            app.search_query, "libre",
+            "typing did not go in at the caret"
+        );
+        assert_eq!(
+            probe::key(
+                &mut app,
+                &probe::press_with(Key::F4, guitk::event::Modifiers::alt())
+            ),
+            EventResult::Ignored,
+            "the search box answered a chord of the window's"
+        );
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.search_query, "ibre",
+            "Delete did not take the first character"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "x",
+            "typing did not replace the selection"
+        );
+        assert!(
+            app.frame(app.win_width, app.win_height)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "x")),
+            "the search is not drawn by the field editor, caret and all"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let mut app = seeded();
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        let (start, y) = (search.x + 11.0, search.y + search.h / 2.0);
+        press_at(&mut app, start, y);
+        assert!(app.search_active, "the press did not give the box the keys");
+        probe::type_str(&mut app, "ab");
+        press_at(&mut app, start, y);
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "xab",
+            "the press did not put the caret at the start"
+        );
+    }
+
+    /// **A search set from outside the box is the box's too**: what the box
+    /// edits is reloaded from the search, its caret at the end, so typing
+    /// carries on from it rather than from what the box last held.
+    #[test]
+    fn a_search_set_from_outside_is_the_boxs_too() {
+        let mut app = seeded();
+        app.search_query = String::from("ubuntu");
+        probe::key(&mut app, &probe::press(Key::Slash));
+        assert!(app.search_active, "control: / gives the search the keys");
+        probe::type_str(&mut app, "x");
+        assert_eq!(app.search_query, "ubuntux");
+    }
+
+    /// **A change to the search shows the list from its top**, where what it
+    /// found begins; a move of the caret leaves the list where it is.
+    #[test]
+    fn a_change_to_the_search_shows_the_list_from_its_top() {
+        // Every transfer matches "Ite" and "Item" alike, so the list is as
+        // long after the change as before it: only the change can scroll it.
+        let mut app = many_torrents(40);
+        app.selected_torrent = None;
+        probe::click(&mut app, Target::Search);
+        probe::type_str(&mut app, "Ite");
+        app.transfer_scroll = 2;
+        probe::key(&mut app, &probe::press(Key::Left));
+        assert_eq!(app.transfer_scroll, 2, "a caret move scrolled the list");
+        probe::key(&mut app, &probe::press(Key::End));
+        probe::type_str(&mut app, "m");
+        assert_eq!(app.search_query, "Item");
+        assert_eq!(
+            app.transfer_scroll, 0,
+            "the list did not go back to its top"
+        );
+    }
+
+    /// **The search box has a right-click menu**, as the magnet box does --
+    /// Cut, Copy, Paste, Delete and Select all, on the program's clipboard --
+    /// and it gives the box the keys.
+    #[test]
+    fn the_search_boxs_right_click_menu_edits_the_search() {
+        use guitk::editmenu::EditCommand;
+        let mut app = seeded();
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        assert_eq!(app.field_menu.field(), Some(MenuField::Search));
+        assert!(app.search_active, "the box was not given the keys");
+        probe::type_str(&mut app, "x");
+        assert_eq!(
+            app.search_query, "",
+            "a key reached the box through the menu"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.field_menu.is_up(), "Escape left the menu up");
+        assert!(app.search_active, "Escape reached the box through the menu");
+
+        guitk::clipboard::set_text("libre");
+        probe::click_with(&mut app, Target::Search, MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        press_at(&mut app, x, y);
+        assert_eq!(app.search_query, "libre", "Paste did not paste");
     }
 }

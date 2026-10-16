@@ -3772,6 +3772,7 @@ name = "servicemenus"
 version = "0.1.0"
 dependencies = [
  "desktopentry",
+ "guitk",
  "pathcodec",
  "scratchdir",
  "settingsfile",

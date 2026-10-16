@@ -14336,8 +14336,7 @@ impl DesktopShell {
         if rows.is_empty() {
             return;
         }
-        let mut offer = Vec::new();
-        let built = Self::service_menu_items(&rows, &mut offer);
+        let (built, offer) = servicemenus::menu_items(&rows, Self::MENU_SERVICE_BASE);
         // After the menu's first group -- Open, and Open with -- set off by a
         // line; the icon's own line follows them.
         let at = items
@@ -14358,7 +14357,7 @@ impl DesktopShell {
         Some(
             self.selected_paths()?
                 .iter()
-                .map(|path| Self::service_target(path))
+                .map(servicemenus::Target::of_path)
                 .collect(),
         )
     }
@@ -14507,62 +14506,6 @@ impl DesktopShell {
                 .pop()
                 .map_or(ShellAction::Pass, ShellAction::Launch)
         }
-    }
-
-    /// `path` as a service menu sees it: its kind by its extension, and
-    /// `text/plain` too when that kind is text -- a shell script is offered
-    /// what a text file is.
-    fn service_target(path: &Path) -> servicemenus::Target {
-        let extension = path
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or_default();
-        let kind = guitk::filetypes::detect_from_extension(extension);
-        let mut target = servicemenus::Target::at(path, kind.mime_type);
-        if kind.is_text && !target.is_dir && target.mime != "text/plain" {
-            target.inherits.push(String::from("text/plain"));
-        }
-        target
-    }
-
-    /// The menu rows for `rows`, numbered from [`MENU_SERVICE_BASE`] in
-    /// order, each item's menu and id recorded in `offer` at its number.
-    ///
-    /// [`MENU_SERVICE_BASE`]: Self::MENU_SERVICE_BASE
-    fn service_menu_items(
-        rows: &[servicemenus::Row<'_>],
-        offer: &mut Vec<Option<(std::ffi::OsString, String)>>,
-    ) -> Vec<MenuItem> {
-        let mut built = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id = Self::MENU_SERVICE_BASE
-                .saturating_add(u64::try_from(offer.len()).unwrap_or(u64::MAX));
-            built.push(match row {
-                servicemenus::Row::Separator => MenuItem::Separator,
-                servicemenus::Row::Item { menu, action } => {
-                    offer.push(Some((menu.id.clone(), action.id.clone())));
-                    MenuItem::Action {
-                        id,
-                        label: action.name.clone(),
-                        shortcut: None,
-                        icon: action.icon.clone(),
-                        enabled: true,
-                        checked: None,
-                    }
-                }
-                servicemenus::Row::Submenu { label, icon, rows } => {
-                    offer.push(None);
-                    MenuItem::Submenu {
-                        id,
-                        label: label.clone(),
-                        icon: icon.clone(),
-                        enabled: true,
-                        children: Self::service_menu_items(rows, offer),
-                    }
-                }
-            });
-        }
-        built
     }
 
     /// Run an icon menu's service-menu item, if `id` is one: its command for

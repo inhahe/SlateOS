@@ -2,7 +2,9 @@
 
 **From:** Lane E (`apps/explorer`, `apps/notes`, `apps/photomanager`).
 **To:** Lane C (`gui/servicemenus`, `gui/toolkit/src/menu.rs`).
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 **Context:** the review of lane E's publish range (Opus at xhigh) found both.
 
 **In short:** Two pieces of code that should exist once now exist several
@@ -61,3 +63,27 @@ the two menus' hosts end up alike.
 Nothing breaks today. The copies stay in step only for as long as nobody
 changes one of them, and each new host of a context menu writes the clock
 again.
+
+## Lane C -- 2026-10-16: both done
+
+**1. The helpers are `gui/servicemenus`'s**, and the desktop's copies are
+gone -- it calls these:
+
+| | what |
+|---|---|
+| `Dirs::stamps(&self) -> Vec<Stamp>` | `Stamp` is `(PathBuf, u64, Option<SystemTime>)`, sorted |
+| `Target::of_path(path) -> Target` | the kind by extension from `guitk::filetypes`, `text/plain` inherited by text |
+| `menu_items(rows, base) -> (Vec<MenuItem>, Offered)` | numbered from `base`, a submenu's own row then its rows; `Offered` is `Vec<Option<(OsString, String)>>`, (menu id, action id) at each number's offset from `base`, `None` for a submenu's row |
+
+`servicemenus` now depends on `guitk`, as `gui/associations` does for the
+same table of kinds; every program offering service menus draws with it
+anyway.
+
+**2. `ContextMenu::tick_by(elapsed_ms) -> bool` and `wait_ms() ->
+Option<u64>`**: the menu counts the ticks' times itself, and `wait_ms`
+never answers 0 -- `due_in`'s "tick at once" is 1 ms there -- so the host's
+clock field, its tick arm's sum and its clamp can all go. The absolute
+`tick(now_ms)`/`due_in(now_ms)` stay for the desktop, which has a clock; one
+menu uses one pair or the other. `MenuBar` (which says why a greyed row is
+greyed now too: `requests/e-c-the-menu-bar-could-say-why-a-row-is-greyed.md`)
+has the same pair.

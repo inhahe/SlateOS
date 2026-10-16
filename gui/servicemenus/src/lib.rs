@@ -99,6 +99,7 @@
 //!   for slowness, and nothing can make a menu slow to open.
 
 use desktopentry::{DesktopEntry, Locale};
+use guitk::menu::{MenuItem, MenuItemId};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -220,7 +221,43 @@ impl Dirs {
     pub fn searched(&self) -> Vec<PathBuf> {
         self.places().into_iter().map(|place| place.dir).collect()
     }
+
+    /// Every service-menu file in the [`searched`](Self::searched)
+    /// directories, with its size and when it was last written, sorted: what
+    /// changes when a menu is installed, removed or edited (design-decisions
+    /// §1448), for a program that reads the menus again only then. The
+    /// directories' own files only, as [`scan`] reads them.
+    #[must_use]
+    pub fn stamps(&self) -> Vec<Stamp> {
+        let mut stamps = Vec::new();
+        for dir in self.searched() {
+            // A directory that is not there has no menus -- the ordinary
+            // state of most of them.
+            let Ok(listing) = fs::read_dir(&dir) else {
+                continue;
+            };
+            // An entry the listing cannot give is one the scan cannot read
+            // either.
+            for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+                if path.extension() != Some(OsStr::new("desktop")) {
+                    continue;
+                }
+                let Ok(meta) = fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.is_file() {
+                    stamps.push((path, meta.len(), meta.modified().ok()));
+                }
+            }
+        }
+        stamps.sort();
+        stamps
+    }
 }
+
+/// A menu file as [`Dirs::stamps`] last saw it: its path, its size, and when
+/// it was last written, where the file system says.
+pub type Stamp = (PathBuf, u64, Option<std::time::SystemTime>);
 
 /// One directory service menus are read from.
 struct Place {
@@ -366,6 +403,22 @@ impl Target {
             is_dir,
             path,
         }
+    }
+
+    /// `path` as a service menu sees it: its kind by its extension, from the
+    /// tree's one table of them (`guitk::filetypes`), and `text/plain` too
+    /// when that kind is text -- a shell script is offered what a text file
+    /// is. A folder is a folder whatever its name ([`at`](Self::at)).
+    #[must_use]
+    pub fn of_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+        let kind = guitk::filetypes::detect_from_extension(extension);
+        let mut target = Self::at(path, kind.mime_type);
+        if kind.is_text && !target.is_dir && target.mime != "text/plain" {
+            target.inherits.push(String::from("text/plain"));
+        }
+        target
     }
 }
 
@@ -569,6 +622,57 @@ pub enum Row<'a> {
         /// Its rows.
         rows: Vec<Row<'a>>,
     },
+}
+
+/// What each number [`menu_items`] gave runs, at the number's offset from the
+/// base it was given: the menu's id and the action's, or `None` for a
+/// submenu's own row, which runs nothing.
+pub type Offered = Vec<Option<(OsString, String)>>;
+
+/// `rows` as a context menu's items, numbered from `base` in order -- a
+/// submenu's own row, then its rows -- and what each number runs.
+///
+/// A chosen item is looked up again by its names ([`Scan::find`]) rather than
+/// kept as a reference: the menus may have been read again since the context
+/// menu opened, and a menu gone since has nothing left to run.
+#[must_use]
+pub fn menu_items(rows: &[Row<'_>], base: MenuItemId) -> (Vec<MenuItem>, Offered) {
+    let mut offered = Vec::new();
+    let items = numbered(rows, base, &mut offered);
+    (items, offered)
+}
+
+/// [`menu_items`], numbering on from the rows `offered` already holds.
+fn numbered(rows: &[Row<'_>], base: MenuItemId, offered: &mut Offered) -> Vec<MenuItem> {
+    let mut built = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = base.saturating_add(u64::try_from(offered.len()).unwrap_or(u64::MAX));
+        built.push(match row {
+            Row::Separator => MenuItem::Separator,
+            Row::Item { menu, action } => {
+                offered.push(Some((menu.id.clone(), action.id.clone())));
+                MenuItem::Action {
+                    id,
+                    label: action.name.clone(),
+                    shortcut: None,
+                    icon: action.icon.clone(),
+                    enabled: true,
+                    checked: None,
+                }
+            }
+            Row::Submenu { label, icon, rows } => {
+                offered.push(None);
+                MenuItem::Submenu {
+                    id,
+                    label: label.clone(),
+                    icon: icon.clone(),
+                    enabled: true,
+                    children: numbered(rows, base, offered),
+                }
+            }
+        });
+    }
+    built
 }
 
 /// One thing a menu puts in a list: an item, or a line.

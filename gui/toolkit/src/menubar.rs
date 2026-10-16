@@ -583,6 +583,9 @@ pub struct MenuBar {
     reasons: Vec<(MenuItemId, String)>,
     /// The greyed row the pointer rests on, when it has a reason to show.
     resting: Option<Resting>,
+    /// The time [`tick_by`](Self::tick_by) has counted, for a host told how
+    /// long passed rather than what time it is.
+    clock_ms: u64,
 }
 
 /// The pointer resting on a greyed row that has a reason, in any open panel:
@@ -614,6 +617,7 @@ impl MenuBar {
             dropdown_widths,
             reasons: Vec::new(),
             resting: None,
+            clock_ms: 0,
         }
     }
 
@@ -727,6 +731,26 @@ impl MenuBar {
             })
     }
 
+    /// Let `elapsed_ms` pass -- an `Event::Tick`'s -- on the bar's own clock:
+    /// [`tick`](Self::tick) at the time counted so far, for a host that is
+    /// told how long passed rather than what time it is, so it keeps no clock
+    /// of its own. Returns whether a reason appeared now. A bar is ticked one
+    /// way or the other, not both: the two clocks are not the same.
+    pub fn tick_by(&mut self, elapsed_ms: u64) -> bool {
+        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        self.tick(self.clock_ms)
+    }
+
+    /// How long a host ticking with [`tick_by`](Self::tick_by) may sleep
+    /// before the bar has something to do, in milliseconds -- never 0, so a
+    /// host that sleeps for it does not spin: the "tick at once" that
+    /// [`due_in`](Self::due_in) answers as `Some(0)` is 1 ms here. `None`
+    /// when nothing waits.
+    #[must_use]
+    pub fn wait_ms(&self) -> Option<u64> {
+        self.due_in(self.clock_ms).map(|ms| ms.max(1))
+    }
+
     /// The reason showing now, if one is: the greyed row's the pointer rests
     /// on, in the open dropdown or a submenu open from it.
     #[must_use]
@@ -745,10 +769,12 @@ impl MenuBar {
         let entry = match self
             .open_submenu
             .as_deref()
-            .and_then(|sub| entry_in_submenu_chain(children, sub, mx, my, self.viewport))
-        {
-            Some(in_submenu) => in_submenu,
-            None => {
+            .map_or(InChain::Outside, |sub| {
+                entry_in_submenu_chain(children, sub, mx, my, self.viewport)
+            }) {
+            InChain::OnRow(entry) => Some(entry),
+            InChain::OffRow => None,
+            InChain::Outside => {
                 let panel = self.dropdown_panel(top_idx);
                 if !panel.contains(mx, my) {
                     return None;
@@ -773,7 +799,11 @@ impl MenuBar {
     /// it, the reason hidden with it.
     fn rest_on(&mut self, row: Option<MenuItemId>, x: f32, y: f32) {
         match row {
-            Some(id) if self.resting.as_ref().is_some_and(|resting| resting.id == id) => {}
+            Some(id)
+                if self
+                    .resting
+                    .as_ref()
+                    .is_some_and(|resting| resting.id == id) => {}
             Some(id) => {
                 self.resting = Some(Resting {
                     id,
@@ -1617,31 +1647,41 @@ fn hover_in_submenu_chain(
     false
 }
 
+/// Where a point is in the submenu chain ([`entry_in_submenu_chain`]).
+enum InChain {
+    /// Over none of the chain's panels.
+    Outside,
+    /// Over one of them, but on no row: a separator, the padding.
+    OffRow,
+    /// On a row.
+    OnRow(MenuBarEntry),
+}
+
 /// The row under `(mx, my)` in the submenu chain, deepest panel first as the
-/// other walkers go: `None` when the pointer is over none of the chain's
-/// panels, `Some(None)` over one of them but on no row (a separator, the
-/// padding), and `Some(Some(entry))` on a row. `parent_entries` means what it
-/// does in [`click_in_submenu_chain`].
+/// other walkers go. `parent_entries` means what it does in
+/// [`click_in_submenu_chain`].
 fn entry_in_submenu_chain(
     parent_entries: &[MenuBarEntry],
     sub: &OpenSubmenu,
     mx: f32,
     my: f32,
     viewport: (f32, f32),
-) -> Option<Option<MenuBarEntry>> {
+) -> InChain {
     let entries = resolve_submenu_entries(parent_entries, sub);
-    if let Some(found) = sub
-        .child
-        .as_deref()
-        .and_then(|child| entry_in_submenu_chain(&entries, child, mx, my, viewport))
-    {
-        return Some(found);
+    if let Some(child) = sub.child.as_deref() {
+        let found = entry_in_submenu_chain(&entries, child, mx, my, viewport);
+        if !matches!(found, InChain::Outside) {
+            return found;
+        }
     }
     let panel = submenu_panel(&entries, sub, viewport);
     if !panel.contains(mx, my) {
-        return None;
+        return InChain::Outside;
     }
-    Some(panel.index_at(&entries, my).and_then(|i| entries.get(i)).cloned())
+    match panel.index_at(&entries, my).and_then(|i| entries.get(i)) {
+        Some(entry) => InChain::OnRow(entry.clone()),
+        None => InChain::OffRow,
+    }
 }
 
 /// Send `dy` wheel notches to whichever panel of the chain the pointer is over.
@@ -3927,7 +3967,11 @@ mod tests {
 
         let at = on_row(&bar, 4);
         move_to(&mut bar, at);
-        assert_eq!(bar.due_in(1000), Some(0), "the wait starts at the next tick");
+        assert_eq!(
+            bar.due_in(1000),
+            Some(0),
+            "the wait starts at the next tick"
+        );
         assert!(!bar.tick(1000));
         let delay = bar.due_in(1000).expect("waiting");
         assert!(delay > 0);
@@ -3938,7 +3982,9 @@ mod tests {
         assert_eq!(bar.due_in(1000 + delay), None, "showing is not waiting");
         assert!(!bar.tick(1000 + delay + 100), "it appears once");
         let palette = Palette::for_mode(false);
-        assert!(texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned()));
+        assert!(
+            texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned())
+        );
 
         // Moving within the row keeps it; leaving the row hides it.
         move_to(&mut bar, (at.0 + 5.0, at.1));
@@ -3947,7 +3993,27 @@ mod tests {
         move_to(&mut bar, first);
         assert_eq!(bar.showing_reason(), None);
         assert_eq!(bar.due_in(1000 + delay), None);
-        assert!(!texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned()));
+        assert!(
+            !texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned())
+        );
+    }
+
+    /// **A bar keeps its own clock for a host told only how long passed**,
+    /// as a context menu does.
+    #[test]
+    fn a_bar_ticked_by_elapsed_time_keeps_its_own_clock() {
+        let mut bar = explained_bar();
+        assert_eq!(bar.wait_ms(), None);
+        let at = on_row(&bar, 4);
+        move_to(&mut bar, at);
+        assert_eq!(bar.wait_ms(), Some(1), "tick at once, without a busy loop");
+        assert!(!bar.tick_by(16));
+        let delay = bar.wait_ms().expect("waiting");
+        assert!(delay > 1);
+        assert!(!bar.tick_by(delay - 1));
+        assert!(bar.tick_by(1), "the reason appeared");
+        assert_eq!(bar.showing_reason(), Some("Nothing has been saved yet"));
+        assert_eq!(bar.wait_ms(), None);
     }
 
     /// **Only a greyed row with a reason says anything**: a row that can be
@@ -3989,7 +4055,11 @@ mod tests {
 
         move_to(&mut bar, at);
         bar.handle_key_event(&press(Key::Down), SCREEN);
-        assert_eq!(bar.due_in(0), Some(0), "a key that moves the highlight leaves the row");
+        assert_eq!(
+            bar.due_in(0),
+            Some(0),
+            "a key that moves the highlight leaves the row"
+        );
         bar.handle_key_event(&press(Key::Escape), SCREEN);
         assert!(!bar.is_open());
         assert_eq!(bar.due_in(0), None, "the bar closed");
@@ -3997,7 +4067,11 @@ mod tests {
 
         bar.explain(4, "Save it first");
         bar.set_items(make_bar().items);
-        assert_eq!(bar.reason(4), Some("Save it first"), "reasons name rows, not positions");
+        assert_eq!(
+            bar.reason(4),
+            Some("Save it first"),
+            "reasons name rows, not positions"
+        );
     }
 
     /// **A greyed row in a submenu of the bar is explained too.**
@@ -4028,7 +4102,10 @@ mod tests {
         let paste_special = on_row(&bar, 0);
         move_to(&mut bar, paste_special);
         let at = {
-            let sub = bar.open_submenu.as_deref().expect("hovering opened the submenu");
+            let sub = bar
+                .open_submenu
+                .as_deref()
+                .expect("hovering opened the submenu");
             let entries = resolve_submenu_entries(children_of(&bar.items, 0), sub);
             let panel = submenu_panel(&entries, sub, SCREEN);
             let top = panel.row_top(&entries, 1).expect("the row is on screen");
@@ -4039,6 +4116,9 @@ mod tests {
         bar.tick(0);
         let delay = bar.due_in(0).expect("waiting");
         assert!(bar.tick(delay));
-        assert_eq!(bar.showing_reason(), Some("What was copied is not a picture"));
+        assert_eq!(
+            bar.showing_reason(),
+            Some("What was copied is not a picture")
+        );
     }
 }

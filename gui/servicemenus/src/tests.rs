@@ -1146,3 +1146,122 @@ fn submenus_keep_their_priority() {
     let rows = found.rows(&Choices::default(), &[file("text/plain")]);
     assert_eq!(drawn(&rows), ["Zed[z1]", "Zzz[a1]", "Top[t1]", "t0"]);
 }
+
+/// **The rows become a context menu's items, numbered from the base in
+/// order** -- a submenu's own row, then its rows -- and each number says
+/// what it runs: a submenu's row nothing, a line no number at all.
+#[test]
+fn rows_become_numbered_menu_items() {
+    let f = Fixture::new("menu-items");
+    f.install(
+        Origin::System,
+        "a.desktop",
+        &laid_out("X-KDE-Submenu=Image", &["rotate", "flip"]),
+    );
+    f.install(
+        Origin::System,
+        "b.desktop",
+        &laid_out("X-KDE-Priority=TopLevel", &["go"]),
+    );
+    let found = scan(&f.dirs(), None);
+    let rows = found.rows(&Choices::default(), &[file("text/plain")]);
+    assert_eq!(drawn(&rows), ["Image[flip rotate]", "go"]);
+
+    let (items, offered) = menu_items(&rows, 500);
+    let ids = |items: &[MenuItem]| -> Vec<(MenuItemId, String)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { id, label, .. } | MenuItem::Submenu { id, label, .. } => {
+                    Some((*id, label.clone()))
+                }
+                MenuItem::Separator => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        ids(&items),
+        [(500, "Image".to_owned()), (503, "go".to_owned())]
+    );
+    let MenuItem::Submenu { children, .. } = &items[0] else {
+        panic!("the submenu: {items:?}");
+    };
+    assert_eq!(
+        ids(children),
+        [(501, "flip".to_owned()), (502, "rotate".to_owned())]
+    );
+    let runs = |n: usize| {
+        offered[n]
+            .as_ref()
+            .map(|(menu, action)| (menu.to_str().unwrap(), action.as_str()))
+    };
+    assert_eq!(runs(0), None, "a submenu's own row runs nothing");
+    assert_eq!(runs(1), Some(("a.desktop", "flip")));
+    assert_eq!(runs(2), Some(("a.desktop", "rotate")));
+    assert_eq!(runs(3), Some(("b.desktop", "go")));
+    assert_eq!(offered.len(), 4);
+}
+
+/// **A file is what its extension says, and text is also `text/plain`**: a
+/// shell script is offered a text file's menus; a folder is a folder
+/// whatever its name.
+#[test]
+fn a_path_is_the_kind_its_extension_says() {
+    let f = Fixture::new("of-path");
+    let script = f.scratch.dir().join("build.sh");
+    fs::write(&script, "echo\n").unwrap();
+    let target = Target::of_path(&script);
+    assert!(!target.is_dir);
+    assert_ne!(target.mime, "text/plain", "{target:?}");
+    assert!(
+        target.inherits.contains(&String::from("text/plain")),
+        "{target:?}"
+    );
+
+    let plain = f.scratch.dir().join("notes.txt");
+    fs::write(&plain, "x\n").unwrap();
+    let target = Target::of_path(&plain);
+    assert_eq!(target.mime, "text/plain");
+    assert!(
+        target.inherits.is_empty(),
+        "text/plain is not listed twice: {target:?}"
+    );
+
+    let folder = f.scratch.dir().join("photos.txt");
+    fs::create_dir(&folder).unwrap();
+    let target = Target::of_path(&folder);
+    assert!(target.is_dir);
+    assert_eq!(target.mime, "inode/directory");
+    assert!(target.inherits.is_empty());
+}
+
+/// **The stamps change when a menu is installed, edited or removed**, and
+/// list only the menu files where menus are read from.
+#[test]
+fn the_stamps_follow_the_menu_files() {
+    let f = Fixture::new("stamps");
+    let dirs = f.dirs();
+    assert!(dirs.stamps().is_empty(), "no directories, no menus");
+
+    f.install(Origin::System, "a.desktop", &simple("all/all;", "x"));
+    f.install(Origin::System, "notes.txt", "not a menu");
+    let first = dirs.stamps();
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].0.ends_with("a.desktop"));
+
+    f.install(Origin::User, "b.desktop", &simple("all/all;", "x"));
+    let second = dirs.stamps();
+    assert_eq!(second.len(), 2);
+    assert_ne!(second, first);
+
+    f.install(
+        Origin::System,
+        "a.desktop",
+        &simple("all/all;", "a longer command"),
+    );
+    let third = dirs.stamps();
+    assert_ne!(third, second, "an edit that changes the size is seen");
+
+    fs::remove_file(f.scratch.dir().join("user/kio/servicemenus/b.desktop")).unwrap();
+    assert_eq!(dirs.stamps().len(), 1);
+}

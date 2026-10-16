@@ -223,6 +223,9 @@ pub struct ContextMenu {
     reasons: Vec<(MenuItemId, String)>,
     /// The greyed row the pointer rests on, when it has a reason to show.
     resting: Option<Resting>,
+    /// The time [`tick_by`](Self::tick_by) has counted, for a host told how
+    /// long passed rather than what time it is.
+    clock_ms: u64,
 }
 
 /// The pointer resting on a greyed row that has a reason: which row, where
@@ -250,6 +253,7 @@ impl ContextMenu {
             viewport: FALLBACK_VIEWPORT,
             reasons: Vec::new(),
             resting: None,
+            clock_ms: 0,
         }
     }
 
@@ -343,6 +347,26 @@ impl ContextMenu {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+
+    /// Let `elapsed_ms` pass -- an `Event::Tick`'s -- on the menu's own clock:
+    /// [`tick`](Self::tick) at the time counted so far, for a host that is
+    /// told how long passed rather than what time it is, so it keeps no clock
+    /// of its own. Returns whether a reason appeared now. A menu is ticked one
+    /// way or the other, not both: the two clocks are not the same.
+    pub fn tick_by(&mut self, elapsed_ms: u64) -> bool {
+        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        self.tick(self.clock_ms)
+    }
+
+    /// How long a host ticking with [`tick_by`](Self::tick_by) may sleep
+    /// before the menu has something to do, in milliseconds -- never 0, so a
+    /// host that sleeps for it does not spin: the "tick at once" that
+    /// [`due_in`](Self::due_in) answers as `Some(0)` is 1 ms here. `None`
+    /// when nothing waits.
+    #[must_use]
+    pub fn wait_ms(&self) -> Option<u64> {
+        self.due_in(self.clock_ms).map(|ms| ms.max(1))
     }
 
     /// The reason showing now, if one is: the greyed row's the pointer rests
@@ -1310,14 +1334,6 @@ impl ContextMenu {
         strip.top(target).unwrap_or_else(|| strip.bottom()) - self.y
     }
 
-    /// Move hover to the next selectable row, skipping separators and disabled
-    /// items and wrapping round the ends.
-    ///
-    /// A menu with no selectable row at all — every entry a separator, or every
-    /// action disabled — leaves the hover where it was, which for a freshly
-    /// opened menu is nowhere. That is the only outcome that does not lie: there
-    /// is no row for the arrow key to land on, so pretending one is highlighted
-    /// would make Enter act on a disabled item.
     /// How many rows the panel shows whole at its current scroll: a menu's
     /// windowful, for Page Up and Page Down.
     fn rows_in_view(&self) -> usize {
@@ -1348,6 +1364,14 @@ impl ContextMenu {
         }
     }
 
+    /// Move hover to the next selectable row, skipping separators and disabled
+    /// items and wrapping round the ends.
+    ///
+    /// A menu with no selectable row at all — every entry a separator, or every
+    /// action disabled — leaves the hover where it was, which for a freshly
+    /// opened menu is nowhere. That is the only outcome that does not lie: there
+    /// is no row for the arrow key to land on, so pretending one is highlighted
+    /// would make Enter act on a disabled item.
     fn move_hover(&mut self, forward: bool) {
         let len = self.items.len();
         // The current row is not a candidate for its own successor, so the walk
@@ -2919,6 +2943,27 @@ mod tests {
         assert_eq!(menu.showing_reason(), None);
         assert_eq!(menu.due_in(due), None);
         assert!(!texts(&menu.render(&palette)).contains(&"Nothing has been copied".to_owned()));
+    }
+
+    /// **A menu keeps its own clock for a host told only how long passed**:
+    /// `tick_by` counts the ticks' times, and `wait_ms` says how long to
+    /// sleep -- never 0, the "tick at once" being 1 ms -- so the host keeps no
+    /// clock and needs no clamp.
+    #[test]
+    fn a_menu_ticked_by_elapsed_time_keeps_its_own_clock() {
+        let mut menu = explained_menu();
+        assert_eq!(menu.wait_ms(), None);
+        let (x, y) = middle(&menu, 3);
+        menu.handle_mouse_move(x, y);
+        assert_eq!(menu.wait_ms(), Some(1), "tick at once, without a busy loop");
+        assert!(!menu.tick_by(16));
+        let delay = u64::from(DEFAULT_TOOLTIP_DELAY_MS);
+        assert_eq!(menu.wait_ms(), Some(delay));
+        assert!(!menu.tick_by(delay - 1));
+        assert_eq!(menu.wait_ms(), Some(1));
+        assert!(menu.tick_by(1), "the reason appeared");
+        assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+        assert_eq!(menu.wait_ms(), None);
     }
 
     /// **Only a greyed row with a reason says anything**: a row that can be

@@ -233,36 +233,6 @@ fn default_service_dirs() -> servicemenus::Dirs {
     }
 }
 
-/// Every service-menu file where they are read from, with its size and when
-/// it was last written, in order: what changes when a menu is installed,
-/// removed or edited (design-decisions §1448). The directories' own files
-/// only, as the scan reads them.
-fn service_menu_stamps(dirs: &servicemenus::Dirs) -> Vec<AppStamp> {
-    let mut stamps = Vec::new();
-    for dir in dirs.searched() {
-        // A directory that is not there has no menus -- the ordinary state
-        // of most of them.
-        let Ok(listing) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        // An entry the listing cannot give is one the scan cannot read
-        // either.
-        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
-            if path.extension() != Some(std::ffi::OsStr::new("desktop")) {
-                continue;
-            }
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
-            };
-            if meta.is_file() {
-                stamps.push((path, meta.len(), meta.modified().ok()));
-            }
-        }
-    }
-    stamps.sort();
-    stamps
-}
-
 /// What became of an attempt to put a picture on a surface.
 ///
 /// Distinguishes the two kinds of failure that must not be confused: one
@@ -594,9 +564,9 @@ pub struct ShellSession<T: Transport> {
     /// menu (design-decisions §1448) -- are looked for.
     service_dirs: servicemenus::Dirs,
     /// Every service-menu file as it was at the last read
-    /// (`service_menu_stamps`) -- `None` before the first. Compared on each
-    /// right-click, so a menu installed while the desktop is up is offered
-    /// at the next one, without every file read at every click.
+    /// (`servicemenus::Dirs::stamps`) -- `None` before the first. Compared on
+    /// each right-click, so a menu installed while the desktop is up is
+    /// offered at the next one, without every file read at every click.
     service_dirs_seen: Option<Vec<AppStamp>>,
     /// Service-menu files, and items in them, the last read could not use,
     /// each with why, for the binary to report
@@ -2082,7 +2052,7 @@ impl<T: Transport> ShellSession<T> {
     /// first time. Menus that cannot be used, and items of usable ones that
     /// cannot, are kept for [`Self::take_service_menu_problems`].
     fn refresh_service_menus(&mut self) {
-        let stamps = service_menu_stamps(&self.service_dirs);
+        let stamps = self.service_dirs.stamps();
         if self.service_dirs_seen.as_ref() == Some(&stamps) {
             return;
         }

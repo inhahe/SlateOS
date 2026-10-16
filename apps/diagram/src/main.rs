@@ -3298,7 +3298,7 @@ impl DiagramApp {
             let vis_color = if layer.visible {
                 self.palette.green
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::FillRect {
                 x: 14.0,

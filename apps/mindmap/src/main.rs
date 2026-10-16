@@ -3632,7 +3632,7 @@ impl MindMapApp {
             let text_color = if is_active {
                 self.palette.text
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             let (tx, ty, tw, th) = self.tab_rect(i);
             cmds.push(RenderCommand::FillRect {

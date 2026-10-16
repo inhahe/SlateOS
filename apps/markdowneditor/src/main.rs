@@ -3063,7 +3063,7 @@ pub fn render_editor(
         let num_color = if line_num == doc.cursor_line {
             pal.text
         } else {
-            pal.overlay0
+            pal.subtext0
         };
         cmds.push(RenderCommand::Text {
             x: text::right_x(
@@ -3397,7 +3397,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         let cb_color = if checked {
                             ctx.palette.green
                         } else {
-                            ctx.palette.overlay0
+                            ctx.palette.subtext0
                         };
                         ctx.cmds.push(RenderCommand::Text {
                             x: ctx.x,

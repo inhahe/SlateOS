@@ -4176,7 +4176,7 @@ impl RemindersApp {
                 },
                 font_size: SEARCH_TEXT_SIZE,
                 color: if empty {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else {
                     self.palette.text
                 },
@@ -4605,7 +4605,7 @@ impl RemindersApp {
         // Title
         let text_x = checkbox_x + 30.0;
         let title_color = if task.completed {
-            self.palette.overlay0
+            self.palette.subtext0
         } else {
             self.palette.text
         };
@@ -4834,7 +4834,7 @@ impl RemindersApp {
         row_y += 12.0;
 
         // Detail fields
-        let field_label_color = self.palette.overlay0;
+        let field_label_color = self.palette.subtext0;
         let field_value_color = self.palette.subtext1;
 
         // Due date
@@ -5062,7 +5062,7 @@ impl RemindersApp {
                     continue;
                 }
                 let st_color = if st.completed {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else {
                     self.palette.text
                 };

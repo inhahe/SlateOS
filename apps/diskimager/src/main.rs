@@ -3937,7 +3937,7 @@ impl DiskImagerApp {
             &self.expected_hash
         };
         let hash_color = if self.expected_hash.is_empty() {
-            self.palette.overlay0
+            self.palette.subtext0
         } else {
             self.palette.text
         };

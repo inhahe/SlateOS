@@ -4038,7 +4038,7 @@ impl WhiteboardApp {
             let vis_color = if layer.visible {
                 self.palette.green
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: panel_x + 10.0,
@@ -4055,7 +4055,7 @@ impl WhiteboardApp {
             let lock_color = if layer.locked {
                 self.palette.red
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: panel_x + 26.0,

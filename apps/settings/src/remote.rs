@@ -761,7 +761,7 @@ fn render_text_field(
         value.to_string()
     };
     let text_color = if value.is_empty() {
-        pal.overlay0
+        pal.subtext0
     } else {
         pal.text
     };

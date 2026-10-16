@@ -2753,7 +2753,7 @@ impl PasswordApp {
             let text_color = if *active {
                 self.palette.text
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,

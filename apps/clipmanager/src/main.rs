@@ -1463,7 +1463,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
     let filter_label = state.type_filter.map_or("All Types", ClipType::label);
     let filter_color = state
         .type_filter
-        .map_or(state.palette.overlay0, |t| t.badge_color(&state.palette));
+        .map_or(state.palette.subtext0, |t| t.badge_color(&state.palette));
     let badge = Rect::new(x + w - 100.0, y + 7.0, 80.0, 22.0);
     state.palette.push_surface(
         frame,

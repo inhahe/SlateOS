@@ -3485,7 +3485,7 @@ impl HexEditor {
                 let text_color = if offset == doc.cursor && doc.cursor_in_hex {
                     self.palette.blue
                 } else if byte == 0 {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else if byte.is_ascii_graphic() || byte == b' ' {
                     self.palette.text
                 } else {
@@ -3572,7 +3572,7 @@ impl HexEditor {
                     } else if byte.is_ascii_graphic() || byte == b' ' {
                         self.palette.text
                     } else {
-                        self.palette.overlay0
+                        self.palette.subtext0
                     };
 
                     tree.push(RenderCommand::Text {

@@ -1309,7 +1309,7 @@ impl UnitConverterApp {
         let star_color = if self.is_current_favorite() {
             self.palette.yellow
         } else {
-            self.palette.overlay0
+            self.palette.subtext0
         };
         tree.push(RenderCommand::Text {
             x: layout.star.x + 8.0,
@@ -1602,7 +1602,7 @@ impl UnitConverterApp {
         guitk::field::draw(tree, &self.palette, rect, state, self.focus_ring_width);
 
         let text_color = if text == "..." || text == "Invalid input" {
-            self.palette.overlay0
+            self.palette.subtext0
         } else {
             self.palette.text
         };

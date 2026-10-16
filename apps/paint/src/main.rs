@@ -4417,7 +4417,7 @@ impl PaintApp {
             let vis_color = if layer.visible {
                 self.theme.green
             } else {
-                self.theme.overlay0
+                self.theme.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: px + 12.0,

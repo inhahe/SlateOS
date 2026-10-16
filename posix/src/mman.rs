@@ -475,7 +475,7 @@ pub extern "C" fn pkey_set(_key: i32, _access_rights: u32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// mlock / munlock / msync / madvise (stubs)
+// mlock / munlock / msync / madvise
 // ---------------------------------------------------------------------------
 
 /// Flags for msync.
@@ -526,145 +526,105 @@ fn range_overflows(addr: *const core::ffi::c_void, len: SizeT) -> bool {
     (addr as u64).checked_add(len as u64).is_none()
 }
 
-/// Phase 171 helper: read the current `RLIMIT_MEMLOCK` soft limit.
-///
-/// Wraps `crate::resource::getrlimit` and returns the `rlim_cur` value
-/// (u64).  On the (unreachable) failure path returns `u64::MAX`,
-/// which keeps the gate open — matching "infinity" / "no limit"
-/// semantics.
-fn current_memlock_limit() -> u64 {
-    let mut rl = crate::resource::Rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    let rc = crate::resource::getrlimit(crate::resource::RLIMIT_MEMLOCK, &raw mut rl);
-    if rc == 0 { rl.rlim_cur } else { u64::MAX }
+/// What a `SYS_MEMORY_LOCK` call came to.
+enum Locking {
+    /// The kernel's answer: 0, or -1 with its errno set.
+    Answered(i32),
+    /// A kernel without the call.
+    NoCall,
 }
 
-/// Phase 171: replicate Linux's `mm/mlock.c::can_do_mlock` /
-/// over-limit checks for a request of `len` bytes.
-///
-/// Linux logic:
-///   bool can_do_mlock(void) {
-///       if (rlimit(RLIMIT_MEMLOCK) != 0) return true;
-///       if (capable(CAP_IPC_LOCK))       return true;
-///       return false;
-///   }
-/// then in `do_mlock`:
-///   locked = current->mm->locked_vm + (len >> PAGE_SHIFT);
-///   if (locked > lock_limit && !capable(CAP_IPC_LOCK))
-///       return -ENOMEM;
-///
-/// In our flat model we have no per-task locked_vm tracker, so the
-/// over-limit check collapses to `len > rlim_cur`.  Returns:
-///   - `Ok(())` on pass (CAP_IPC_LOCK held, or within the limit);
-///   - `Err(EPERM)` on the `can_do_mlock` failure (rlim == 0 and no cap);
-///   - `Err(ENOMEM)` on the over-limit failure (len > rlim, no cap).
-///
-/// Callers should immediately convert the error to an errno-set and
-/// `-1` return.  The check happens *after* argument-domain validation
-/// (page alignment, overflow) — Linux's order.
-fn check_mlock_caps(len: u64) -> Result<(), i32> {
-    let has_cap = crate::sys_capability::has_capability(crate::sys_capability::CAP_IPC_LOCK);
-    if has_cap {
-        return Ok(());
-    }
-    let lim = current_memlock_limit();
-    // can_do_mlock: rlim == 0 → EPERM.
-    if lim == 0 {
-        return Err(errno::EPERM);
-    }
-    // Over-limit: len > rlim → ENOMEM.  Linux's check is on
-    // `locked_vm + new pages`; with locked_vm = 0 in our flat model
-    // this simplifies to `len > rlim`.
-    if len > lim {
-        return Err(errno::ENOMEM);
-    }
-    Ok(())
+/// One `SYS_MEMORY_LOCK` call. The kernel takes Linux's arguments and makes
+/// Linux's checks in Linux's order -- who may lock (`RLIMIT_MEMLOCK`, or the
+/// `MEMORY_LOCK` right, `CAP_IPC_LOCK`), how much, which pages -- and its
+/// errno is set here unchanged.
+fn memory_lock(op: u64, a: u64, b: u64, c: u64) -> Locking {
+    lock_answer(syscall4(SYS_MEMORY_LOCK, op, a, b, c))
 }
 
-/// Lock pages in memory.
+/// [`memory_lock`]'s answer `ret`: 0 for done, a negated Linux errno set as
+/// it is, [`Locking::NoCall`] from a kernel without the call (or the host,
+/// which has none).
+fn lock_answer(ret: i64) -> Locking {
+    if ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    {
+        return Locking::NoCall;
+    }
+    if ret >= 0 {
+        return Locking::Answered(0);
+    }
+    errno::set_errno(i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EIO));
+    Locking::Answered(-1)
+}
+
+/// A lock a kernel without `SYS_MEMORY_LOCK` cannot make: `EAGAIN`, POSIX's
+/// "some or all of the memory could not be locked" -- never a "done" for
+/// memory nothing locked (design-decisions 1191).
+fn could_not_lock() -> i32 {
+    errno::set_errno(errno::EAGAIN);
+    -1
+}
+
+/// `EINVAL`, -1.
+fn invalid() -> i32 {
+    errno::set_errno(errno::EINVAL);
+    -1
+}
+
+/// Lock pages in memory: `mlock2(addr, len, 0)`.
 ///
-/// Validates inputs (addr must be page-aligned; addr + len must not
-/// overflow) and otherwise succeeds silently — we have no kernel
-/// page-pinning yet, so the lock is logically a no-op, but caller
-/// bugs (unaligned addr, wrap-around range) now produce real EINVAL
-/// instead of silent success.
-///
-/// Phase 171: also enforce Linux's `can_do_mlock` /
-/// `over-RLIMIT_MEMLOCK` gates for callers without `CAP_IPC_LOCK`:
-///   - `RLIMIT_MEMLOCK == 0` and no cap → `EPERM`;
-///   - `len > RLIMIT_MEMLOCK` and no cap → `ENOMEM`.
-/// Validation order matches Linux's `mm/mlock.c::do_mlock`: EINVAL
-/// for argument-domain failures fires before EPERM/ENOMEM for the
-/// capability/rlimit gate.
+/// The kernel's, through `SYS_MEMORY_LOCK`, answering as Linux's: `addr`
+/// need not be aligned -- the range is widened to whole pages -- and `EPERM`
+/// comes first for a caller who may lock nothing (`RLIMIT_MEMLOCK` 0 and no
+/// right to lock), then `ENOMEM` past the limit or at a page with no mapping,
+/// `EINVAL` for a range that wraps. A kernel without the call: `EINVAL` for a
+/// range that wraps, else `EAGAIN` (design-decisions 1191).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
-    if !is_page_aligned(addr) || range_overflows(addr, len) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if let Err(e) = check_mlock_caps(len as u64) {
-        errno::set_errno(e);
-        return -1;
-    }
-    0
+    mlock2(addr, len, 0)
 }
 
-/// Unlock pages in memory.
-///
-/// Same validation as `mlock`; same lock-is-a-no-op success path.
+/// Unlock pages in memory: the kernel's, as [`mlock`]'s lock is, with
+/// Linux's answers -- no right is needed to unlock. A kernel without the call
+/// has locked nothing, so there is nothing to undo: 0, or `EINVAL` for a
+/// range that wraps.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
-    if !is_page_aligned(addr) || range_overflows(addr, len) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    match memory_lock(MEMORY_UNLOCK_RANGE, addr as u64, len as u64, 0) {
+        Locking::Answered(r) => r,
+        Locking::NoCall if range_overflows(addr, len) => invalid(),
+        Locking::NoCall => 0,
     }
-    0
 }
 
-/// Lock all pages in the process address space.
-///
-/// Validates `flags`: must contain at least one of MCL_CURRENT or
-/// MCL_FUTURE (Linux rejects bare 0), and no unknown bits.  MCL_ONFAULT
-/// requires either MCL_CURRENT or MCL_FUTURE.
-///
-/// Phase 171: enforce Linux's `can_do_mlock` gate for callers
-/// without `CAP_IPC_LOCK` — if `RLIMIT_MEMLOCK == 0` and the cap is
-/// not held, return `-1`/EPERM.  The over-limit ENOMEM gate doesn't
-/// apply here because `mlockall` has no explicit `len`; Linux uses
-/// `mm->total_vm` against the rlimit, which we approximate by only
-/// firing the EPERM branch (no caller can ask for "at most N bytes
-/// locked" through mlockall).
+/// Lock every mapping, now (`MCL_CURRENT`), later (`MCL_FUTURE`) or both,
+/// faulting pages in unless `MCL_ONFAULT`: the kernel's, with Linux's
+/// answers (`EINVAL` for no `MCL_CURRENT` or `MCL_FUTURE` or an unknown bit,
+/// then `EPERM`, then `ENOMEM` past the limit). A kernel without the call:
+/// the same `EINVAL`, else `EAGAIN`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlockall(flags: i32) -> i32 {
-    let known = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
-    // Reject unknown bits.
-    if flags & !known != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    match memory_lock(MEMORY_LOCK_ALL, u64::from(flags.cast_unsigned()), 0, 0) {
+        Locking::Answered(r) => r,
+        Locking::NoCall => {
+            let known = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
+            if flags & !known != 0 || flags & (MCL_CURRENT | MCL_FUTURE) == 0 {
+                return invalid();
+            }
+            could_not_lock()
+        }
     }
-    // Must have at least one of MCL_CURRENT or MCL_FUTURE.
-    if flags & (MCL_CURRENT | MCL_FUTURE) == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // Phase 171: can_do_mlock gate.  Pass len=0 so only the EPERM
-    // branch (rlim == 0 + no cap) can fire; the ENOMEM branch is
-    // suppressed because mlockall has no caller-supplied length.
-    if let Err(e) = check_mlock_caps(0) {
-        errno::set_errno(e);
-        return -1;
-    }
-    0
 }
 
-/// Unlock all pages.
-///
-/// Takes no arguments; always succeeds (matches Linux).
+/// Unlock every mapping, and forget `MCL_FUTURE`: the kernel's. A kernel
+/// without the call has locked nothing: 0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munlockall() -> i32 {
-    0
+    match memory_lock(MEMORY_UNLOCK_ALL, 0, 0, 0) {
+        Locking::Answered(r) => r,
+        Locking::NoCall => 0,
+    }
 }
 
 /// Synchronize a mapped region to its backing store.
@@ -1140,16 +1100,37 @@ mod tests {
         assert_eq!(MADV_DONTNEED, 4);
     }
 
-    // -- Stub functions succeed --
+    // -- Memory locking on the host: a kernel without SYS_MEMORY_LOCK --
 
+    /// Errno after `call`, with the answer.
+    fn locked(call: impl FnOnce() -> i32) -> (i32, i32) {
+        errno::set_errno(0);
+        let r = call();
+        (r, errno::get_errno())
+    }
+
+    /// A kernel that cannot lock is told so: every lock answers `EAGAIN` and
+    /// every unlock 0 -- never a "done" for memory nothing locked
+    /// (design-decisions 1191). The host has no kernel, so it is that kernel
+    /// here. (Every lock answered 0 until 2026-10-11.)
     #[test]
-    fn test_mlock_stubs_succeed() {
-        assert_eq!(mlock(core::ptr::null(), 4096), 0);
-        assert_eq!(munlock(core::ptr::null(), 4096), 0);
-        // mlockall(0) is invalid per Linux — flags must contain at least
-        // one of MCL_CURRENT or MCL_FUTURE.
-        assert_eq!(mlockall(MCL_CURRENT), 0);
-        assert_eq!(munlockall(), 0);
+    fn a_kernel_without_the_call_cannot_lock() {
+        let eagain = (-1, errno::EAGAIN);
+        assert_eq!(locked(|| mlock(core::ptr::null(), 4096)), eagain);
+        assert_eq!(locked(|| mlock2(core::ptr::null(), 4096, 0)), eagain);
+        assert_eq!(
+            locked(|| mlock2(core::ptr::null(), 4096, MLOCK_ONFAULT)),
+            eagain
+        );
+        for flags in [
+            MCL_CURRENT,
+            MCL_FUTURE,
+            MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT,
+        ] {
+            assert_eq!(locked(|| mlockall(flags)), eagain, "{flags}");
+        }
+        assert_eq!(locked(|| munlock(core::ptr::null(), 4096)), (0, 0));
+        assert_eq!(locked(|| munlockall()), (0, 0));
     }
 
     #[test]
@@ -1163,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_mlockall_unknown_flag_einval() {
-        // Bit 31 isn't a defined MCL_* flag.
+        // Bit 30 isn't a defined MCL_* flag.
         errno::set_errno(0);
         let ret = mlockall(MCL_CURRENT | (1 << 30));
         assert_eq!(ret, -1);
@@ -1184,38 +1165,39 @@ mod tests {
     /// `MMAN_PAGE_SIZE` is private, so `unistd`'s
     /// `every_spelling_of_the_page_size_agrees` cannot reach it; this is that
     /// test's arm inside this module.  A mismatch would not raise an error
-    /// anywhere — it would make `mlock` reject addresses that `getpagesize()`
-    /// told the caller were correctly aligned.
+    /// anywhere — it would make `msync` and `madvise` reject addresses that
+    /// `getpagesize()` told the caller were correctly aligned.
     #[test]
     fn mman_page_size_matches_unistd() {
         assert_eq!(MMAN_PAGE_SIZE, crate::unistd::PAGE_SIZE as u64);
     }
 
+    /// An unaligned address is no error: Linux's `mlock` and `munlock` widen
+    /// the range to whole pages (they answered `EINVAL` here until
+    /// 2026-10-11).
     #[test]
-    fn test_mlock_unaligned_addr_einval() {
-        // Page size is 16384; 1 is not aligned.
-        errno::set_errno(0);
-        let ret = mlock(1 as *const core::ffi::c_void, 16384);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_munlock_unaligned_addr_einval() {
-        errno::set_errno(0);
-        let ret = munlock(0x100 as *const core::ffi::c_void, 16384);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+    fn mlock_takes_an_unaligned_address() {
+        assert_eq!(
+            locked(|| mlock(1 as *const core::ffi::c_void, 16384)),
+            (-1, errno::EAGAIN)
+        );
+        assert_eq!(
+            locked(|| munlock(0x100 as *const core::ffi::c_void, 16384)),
+            (0, 0)
+        );
     }
 
     #[test]
     fn test_mlock_overflow_einval() {
-        // u64::MAX as a pointer; any length > 0 overflows.
+        // A range that wraps the address space.
         errno::set_errno(0);
         let ret = mlock(usize::MAX as *const core::ffi::c_void, 16384);
         assert_eq!(ret, -1);
-        // The addr is also not page-aligned, but EINVAL covers either case.
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(
+            locked(|| munlock(usize::MAX as *const core::ffi::c_void, 16384)),
+            (-1, errno::EINVAL)
+        );
     }
 
     #[test]
@@ -1937,60 +1919,7 @@ mod tests {
         assert_eq!(ret, MAP_FAILED);
     }
 
-    // -- Stubs accept various argument combos --
-
-    #[test]
-    fn test_mlock_with_nonzero_addr() {
-        // Use an address that's actually page-aligned (16384 = 0x4000).
-        assert_eq!(mlock(0x4000 as *const core::ffi::c_void, 16384), 0);
-    }
-
-    #[test]
-    fn test_munlock_with_nonzero_addr() {
-        assert_eq!(munlock(0x4000 as *const core::ffi::c_void, 16384), 0);
-    }
-
-    #[test]
-    fn test_mlockall_mcl_current() {
-        assert_eq!(mlockall(MCL_CURRENT), 0);
-    }
-
-    #[test]
-    fn test_mlockall_mcl_future() {
-        assert_eq!(mlockall(MCL_FUTURE), 0);
-    }
-
-    #[test]
-    fn test_mlockall_combined_flags() {
-        assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT), 0);
-    }
-
     // -- mlock2 --
-
-    #[test]
-    fn test_mlock2_no_flags() {
-        // flags == 0 is equivalent to mlock
-        assert_eq!(mlock2(core::ptr::null(), 4096, 0), 0);
-    }
-
-    #[test]
-    fn test_mlock2_onfault() {
-        assert_eq!(mlock2(core::ptr::null(), 4096, MLOCK_ONFAULT), 0);
-    }
-
-    #[test]
-    fn test_mlock2_with_addr() {
-        // 0x4000 = 16384 = page-aligned.
-        assert_eq!(mlock2(0x4000 as *const core::ffi::c_void, 16384, 0), 0);
-    }
-
-    #[test]
-    fn test_mlock2_with_addr_onfault() {
-        assert_eq!(
-            mlock2(0x4000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT),
-            0
-        );
-    }
 
     #[test]
     fn test_mlock2_unknown_flag_einval() {
@@ -3240,397 +3169,35 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // Phase 171: mlock / mlock2 / mlockall — CAP_IPC_LOCK + RLIMIT_MEMLOCK
-    // gating per Linux's `mm/mlock.c::can_do_mlock` and over-limit ENOMEM.
-    //
-    // Pre-Phase-171 behaviour: any caller could call `mlock(addr, len)`
-    // and succeed (after EINVAL alignment / overflow checks).  No cap
-    // probe, no rlimit consultation.  An unprivileged process could
-    // logically pin arbitrary amounts of memory.
-    //
-    // Linux semantics:
-    //   can_do_mlock(): true iff rlim(RLIMIT_MEMLOCK) > 0 OR CAP_IPC_LOCK.
-    //   do_mlock(): if !can_do_mlock() → -EPERM;
-    //               if locked_vm + new > rlim && !CAP_IPC_LOCK → -ENOMEM.
-    //
-    // Our flat model has no per-task locked_vm — we approximate the
-    // over-limit check as `len > rlim_cur`.  Default RLIMIT_MEMLOCK in
-    // our reset_global_state is RLIM_INFINITY, so the privileged path
-    // (held cap or infinite rlim) lets every call succeed; the gates
-    // become observable only when (a) caps are dropped *and* (b) the
-    // rlimit is set to a finite value via setrlimit.
-    //
-    // Validation order: EINVAL (alignment, overflow, unknown flags)
-    // beats EPERM/ENOMEM, matching Linux's `do_mlock` order.
+    // Memory locking is the kernel's (design-decisions 1191): who may lock,
+    // how much and which pages are `SYS_MEMORY_LOCK`'s checks, made in
+    // Linux's order, and its errno reaches the caller unchanged. (Until
+    // 2026-10-11 the library judged `RLIMIT_MEMLOCK` and `CAP_IPC_LOCK`
+    // itself, then answered "done" for memory nothing locked.)
     // ----------------------------------------------------------------------
 
-    mod mlock_cap_phase171 {
-        use super::*;
-        use crate::resource::{RLIM_INFINITY, RLIMIT_MEMLOCK, Rlimit, setrlimit};
-
-        const PAGE: usize = 16384;
-
-        /// Snapshot/restore-on-drop guard — same pattern as Phase
-        /// 77 / 164–170.
-        struct CapGuard {
-            lo: u32,
-            hi: u32,
-        }
-        impl CapGuard {
-            fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
-            }
-        }
-        impl Drop for CapGuard {
-            fn drop(&mut self) {
-                let mut hdr = crate::sys_capability::CapUserHeader {
-                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                    pid: 0,
-                };
-                let data = [
-                    crate::sys_capability::CapUserData {
-                        effective: self.lo,
-                        permitted: u32::MAX,
-                        inheritable: 0,
-                    },
-                    crate::sys_capability::CapUserData {
-                        effective: self.hi,
-                        permitted: u32::MAX,
-                        inheritable: 0,
-                    },
-                ];
-                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            }
-        }
-
-        /// RAII rlimit restorer for `RLIMIT_MEMLOCK`.  Snapshots the
-        /// current `(rlim_cur, rlim_max)` and restores it on drop.
-        ///
-        /// This matters *within* a test (lower the limit, assert the
-        /// rejection, carry on), not across tests: the limit table is
-        /// per-thread on host builds and libtest runs each test on its own
-        /// thread, so a limit this test changes is invisible to every other
-        /// one. See `resource::limit_store`.
-        struct MemlockGuard {
-            saved: Rlimit,
-        }
-        impl MemlockGuard {
-            fn snapshot() -> Self {
-                let mut rl = Rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                let rc = crate::resource::getrlimit(RLIMIT_MEMLOCK, &mut rl);
-                assert_eq!(rc, 0);
-                Self { saved: rl }
-            }
-        }
-        impl Drop for MemlockGuard {
-            fn drop(&mut self) {
-                // Restore via the raw setrlimit path — note Linux's
-                // unprivileged setrlimit cannot raise rlim_max, but
-                // our setrlimit stub doesn't enforce that, so the
-                // restore is reliable.
-                let _ = setrlimit(RLIMIT_MEMLOCK, &self.saved as *const _);
-            }
-        }
-
-        fn drop_cap_ipc_lock() {
-            use crate::sys_capability::CAP_IPC_LOCK;
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            let (new_lo, new_hi) = if CAP_IPC_LOCK < 32 {
-                (lo & !(1u32 << CAP_IPC_LOCK), hi)
-            } else {
-                (lo, hi & !(1u32 << (CAP_IPC_LOCK - 32)))
-            };
-            let mut hdr = crate::sys_capability::CapUserHeader {
-                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                pid: 0,
-            };
-            let data = [
-                crate::sys_capability::CapUserData {
-                    effective: new_lo,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-                crate::sys_capability::CapUserData {
-                    effective: new_hi,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-            ];
-            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0, "capset must succeed when dropping CAP_IPC_LOCK");
-            assert!(!crate::sys_capability::has_capability(CAP_IPC_LOCK));
-        }
-
-        fn set_memlock(cur: u64, max: u64) {
-            let rl = Rlimit {
-                rlim_cur: cur,
-                rlim_max: max,
-            };
-            let rc = setrlimit(RLIMIT_MEMLOCK, &rl as *const _);
-            assert_eq!(rc, 0);
-        }
-
-        // -- Per-error-class ---------------------------------------------
-
-        /// `mlock` with rlim==0 and no cap → EPERM (can_do_mlock fails).
-        #[test]
-        fn test_mlock_phase171_rlim_zero_no_cap_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
+    /// The kernel's answer, as the caller is given it: 0 is done; a negated
+    /// Linux errno is that errno; a kernel without the call is
+    /// `Locking::NoCall`, which each call answers for itself.
+    #[test]
+    fn a_kernels_lock_answer_is_passed_on() {
+        assert!(matches!(lock_answer(0), Locking::Answered(0)));
+        for e in [errno::EPERM, errno::ENOMEM, errno::EINVAL, errno::EAGAIN] {
             errno::set_errno(0);
-            let r = mlock(core::ptr::null(), PAGE);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert!(
+                matches!(lock_answer(-i64::from(e)), Locking::Answered(-1)),
+                "{e}"
+            );
+            assert_eq!(errno::get_errno(), e);
         }
-
-        /// `mlock` with finite rlim and oversized len without cap →
-        /// ENOMEM (over-limit branch).
-        #[test]
-        fn test_mlock_phase171_over_limit_no_cap_enomem() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            // 1 page worth of rlim — request 2 pages.
-            set_memlock(PAGE as u64, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlock(core::ptr::null(), 2 * PAGE);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::ENOMEM);
-        }
-
-        /// `mlock` with finite rlim and request within rlim without
-        /// cap → success.  Confirms the gate is len-sensitive.
-        #[test]
-        fn test_mlock_phase171_within_limit_no_cap_ok() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(8 * PAGE as u64, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlock(core::ptr::null(), 4 * PAGE);
-            assert_eq!(r, 0);
-        }
-
-        // -- Ordering matrix ---------------------------------------------
-
-        /// EINVAL on unaligned addr beats EPERM (alignment check
-        /// fires before cap probe).
-        #[test]
-        fn test_mlock_phase171_einval_alignment_beats_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY); // rlim==0 → would be EPERM
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlock(1 as *const core::ffi::c_void, PAGE);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        /// EINVAL on overflow beats ENOMEM (overflow check fires
-        /// before the over-limit branch).
-        #[test]
-        fn test_mlock_phase171_einval_overflow_beats_enomem() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(PAGE as u64, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlock(usize::MAX as *const core::ffi::c_void, PAGE);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        // -- mlock2 -------------------------------------------------------
-
-        /// `mlock2` shares the gate.
-        #[test]
-        fn test_mlock2_phase171_rlim_zero_no_cap_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlock2(core::ptr::null(), PAGE, 0);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-        }
-
-        /// `mlock2` with unknown flag beats the cap gate (EINVAL
-        /// first).
-        #[test]
-        fn test_mlock2_phase171_einval_flag_beats_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            // 1 << 30 is not MLOCK_ONFAULT.
-            let r = mlock2(core::ptr::null(), PAGE, 1 << 30);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        // -- mlockall -----------------------------------------------------
-
-        /// `mlockall` with rlim==0 and no cap → EPERM.
-        #[test]
-        fn test_mlockall_phase171_rlim_zero_no_cap_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlockall(MCL_CURRENT);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-        }
-
-        /// `mlockall` doesn't ENOMEM under no cap + finite rlim —
-        /// only the EPERM branch is reachable because mlockall has
-        /// no caller-supplied length.
-        #[test]
-        fn test_mlockall_phase171_finite_rlim_no_cap_ok() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(PAGE as u64, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlockall(MCL_CURRENT);
-            assert_eq!(r, 0);
-        }
-
-        /// `mlockall` EINVAL on unknown flag beats EPERM.
-        #[test]
-        fn test_mlockall_phase171_einval_flag_beats_eperm() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            let r = mlockall(1 << 30);
-            assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        }
-
-        // -- Workflow -----------------------------------------------------
-
-        /// Realtime-audio-daemon workflow: while privileged,
-        /// mlockall succeeds; daemon drops cap; subsequent mlock of
-        /// an oversize buffer ENOMEMs; a sized-down mlock succeeds.
-        #[test]
-        fn test_mlock_phase171_workflow_lock_then_drop_then_size_down() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            // Privileged: lockall succeeds.
-            errno::set_errno(0);
-            assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE), 0);
-            // Drop cap, set 4-page rlim.
-            set_memlock(4 * PAGE as u64, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            // Oversize → ENOMEM.
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), 8 * PAGE), -1);
-            assert_eq!(errno::get_errno(), errno::ENOMEM);
-            // Sized-down → ok.
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), 2 * PAGE), 0);
-        }
-
-        // -- Recovery -----------------------------------------------------
-
-        /// After EPERM, restoring CAP_IPC_LOCK lets the same call
-        /// succeed.
-        #[test]
-        fn test_mlock_phase171_recovery_restore_cap_lets_lock_succeed() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), PAGE), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
-            // Restore caps to default-all.
-            let mut hdr = crate::sys_capability::CapUserHeader {
-                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
-                pid: 0,
-            };
-            let data = [
-                crate::sys_capability::CapUserData {
-                    effective: u32::MAX,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-                crate::sys_capability::CapUserData {
-                    effective: u32::MAX,
-                    permitted: u32::MAX,
-                    inheritable: 0,
-                },
-            ];
-            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), PAGE), 0);
-        }
-
-        // -- Sentinel -----------------------------------------------------
-
-        /// With CAP_IPC_LOCK held, even rlim==0 doesn't block mlock —
-        /// the cap short-circuits both branches.
-        #[test]
-        fn test_mlock_phase171_sentinel_with_cap_rlim_zero_ok() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            assert!(crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_IPC_LOCK,
-            ));
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), 16 * PAGE), 0);
-        }
-
-        // -- Cross-checks -------------------------------------------------
-
-        /// `munlock` is *not* gated (matches Linux — unlocking is
-        /// always permitted).
-        #[test]
-        fn test_mlock_phase171_munlock_unaffected() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            errno::set_errno(0);
-            assert_eq!(munlock(core::ptr::null(), PAGE), 0);
-        }
-
-        /// `munlockall` is *not* gated.
-        #[test]
-        fn test_mlock_phase171_munlockall_unaffected() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(0, RLIM_INFINITY);
-            drop_cap_ipc_lock();
-            assert_eq!(munlockall(), 0);
-        }
-
-        /// Default state (default caps, RLIM_INFINITY memlock) is
-        /// fully permissive — confirms no regression in the common
-        /// case after Phase 171.
-        #[test]
-        fn test_mlock_phase171_default_state_permissive() {
-            let _gc = CapGuard::snapshot();
-            let _gl = MemlockGuard::snapshot();
-            set_memlock(RLIM_INFINITY, RLIM_INFINITY);
-            errno::set_errno(0);
-            assert_eq!(mlock(core::ptr::null(), 64 * PAGE), 0);
-            assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE), 0);
-            assert_eq!(mlock2(core::ptr::null(), 16 * PAGE, MLOCK_ONFAULT), 0);
-        }
+        assert!(matches!(
+            lock_answer(errno::native::NO_SUCH_SYSCALL),
+            Locking::NoCall
+        ));
+        assert!(matches!(
+            lock_answer(crate::syscall::HOST_ENOSYS),
+            Locking::NoCall
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -4587,34 +4154,23 @@ pub extern "C" fn mremap(
 /// identically to `mlock`.
 pub const MLOCK_ONFAULT: i32 = 1;
 
-/// Lock pages in memory, with flags.
-///
-/// Linux extension.  `flags == 0` is equivalent to `mlock`.
-/// `flags == MLOCK_ONFAULT` locks pages only as they are faulted in,
-/// rather than faulting them all in immediately.
-///
-/// Validates inputs the same way `mlock` does (page-aligned addr,
-/// non-overflowing range), plus rejects unknown flag bits with EINVAL.
-/// Otherwise no-op: no kernel page-pinning yet.
-///
-/// Phase 171: shares the `check_mlock_caps` gate with `mlock` —
-/// callers without `CAP_IPC_LOCK` and a zero or exceeded
-/// `RLIMIT_MEMLOCK` fail with EPERM / ENOMEM matching Linux.
+/// Lock pages in memory, with flags: [`mlock`], and with `MLOCK_ONFAULT`
+/// pages locked as they are faulted in rather than all at once. The kernel's,
+/// with Linux's answers (`EINVAL` for an unknown flag first). A kernel without
+/// the call: `EINVAL` for an unknown flag or a range that wraps, else `EAGAIN`
+/// (design-decisions 1191).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock2(addr: *const core::ffi::c_void, len: SizeT, flags: i32) -> i32 {
-    if !is_page_aligned(addr) || range_overflows(addr, len) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    match memory_lock(
+        MEMORY_LOCK_RANGE,
+        addr as u64,
+        len as u64,
+        u64::from(flags.cast_unsigned()),
+    ) {
+        Locking::Answered(r) => r,
+        Locking::NoCall if flags & !MLOCK_ONFAULT != 0 || range_overflows(addr, len) => invalid(),
+        Locking::NoCall => could_not_lock(),
     }
-    if flags & !MLOCK_ONFAULT != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if let Err(e) = check_mlock_caps(len as u64) {
-        errno::set_errno(e);
-        return -1;
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------

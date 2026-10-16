@@ -1173,6 +1173,22 @@ pub const SYS_SHM_MAP_AT: u64 = 235;
 /// [`SYS_SHM_MAP_AT`]'s flag: replace whatever is mapped in the range (Linux's
 /// `SHM_REMAP`) -- the native `MAP_FIXED`'s bit.
 pub const SHM_MAP_FIXED: u64 = 1 << 5;
+
+/// `SYS_MEMORY_LOCK(op, a, b, c)` -- Linux's memory locking, on lane A's
+/// kernel since 2026-10-07 (`requests/d-a-mlock-locks-nothing.md`): Linux's
+/// arguments, and its errnos as `-errno` in Linux's order. Who may lock and
+/// how much is the kernel's to judge: a non-zero `RLIMIT_MEMLOCK`, or the
+/// `MEMORY_LOCK` right (`CAP_IPC_LOCK`). A kernel without it answers
+/// `NoSuchSyscall`.
+pub const SYS_MEMORY_LOCK: u64 = 1145;
+/// [`SYS_MEMORY_LOCK`] operation: lock a range, `mlock2(addr, len, flags)`.
+pub const MEMORY_LOCK_RANGE: u64 = 0;
+/// [`SYS_MEMORY_LOCK`] operation: unlock a range, `munlock(addr, len)`.
+pub const MEMORY_UNLOCK_RANGE: u64 = 1;
+/// [`SYS_MEMORY_LOCK`] operation: lock every mapping, `mlockall(flags)`.
+pub const MEMORY_LOCK_ALL: u64 = 2;
+/// [`SYS_MEMORY_LOCK`] operation: unlock every mapping, `munlockall()`.
+pub const MEMORY_UNLOCK_ALL: u64 = 3;
 // Later pipe additions live in the free extension range (657+): the original
 // 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
 // buffered bytes without consuming, wait_readable blocks for data/EOF.

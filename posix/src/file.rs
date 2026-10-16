@@ -76,10 +76,12 @@ fn validate_open_flags(flags: i32) -> bool {
 /// Translates POSIX `open(path, flags, mode)` to our native
 /// `SYS_FS_OPEN(path_ptr, path_len, flags, create_mode)`.
 ///
-/// When `O_CREAT` is set and the file is created, the on-disk permission
-/// bits are `mode & ~umask` (masked to the low 9 bits) — computed here and
-/// passed to the kernel as the 4th syscall argument.  Without `O_CREAT` the
-/// mode is ignored (arg3 = 0, which the kernel reads as "unspecified").
+/// When `O_CREAT` is set and the file is created, `mode`'s permission bits
+/// (`mode & 0o7777`, [`create_mode_bits`]) are passed to the kernel as the
+/// 4th syscall argument, and the kernel applies the process's umask -- or
+/// the directory's default ACL, which replaces it -- where the file is made.
+/// Without `O_CREAT` the mode is ignored (arg3 = 0, which the kernel reads
+/// as "unspecified").
 ///
 /// Returns a file descriptor on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -5264,11 +5266,14 @@ static mut UMASK_VALUE: ModeT = 0o022;
 
 /// Set file mode creation mask.
 ///
-/// Stores the new mask and returns the previous one. The mask this libc
-/// applies to `open`, `mkdir` and friends is its own copy, `UMASK_VALUE`; the
-/// kernel keeps the process's record of it too (design-decisions.md §960), so
-/// that it survives `exec` and reaches a spawned child, and this keeps that
-/// record current. Start-up reads it back ([`init_umask_from_record`]).
+/// Stores the new mask and returns the previous one. The kernel keeps the
+/// process's mask (design-decisions.md §960) -- it survives `exec`, reaches a
+/// spawned child, and is what the kernel applies where `open`, `mkdir` and
+/// their kin create something -- and this keeps that record current.
+/// `UMASK_VALUE`, this library's copy, is what it reports back and what
+/// `bind` of a Unix socket masks with, the one creation whose mode the
+/// kernel takes already masked. Start-up reads the record back
+/// ([`init_umask_from_record`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umask(cmask: ModeT) -> ModeT {
     // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
@@ -5305,7 +5310,8 @@ pub(crate) fn init_umask_from_record() {
 /// The kernel's record of this process's file-creation mask
 /// (`SYS_PROCESS_UMASK`, design-decisions.md §960).
 ///
-/// `UMASK_VALUE` stays what this libc applies; the record is what outlives it.
+/// `UMASK_VALUE` is this library's copy, for `bind` and for `umask`'s answer;
+/// the record is what the kernel applies, and what outlives the process.
 mod umask_record {
     use super::ModeT;
 

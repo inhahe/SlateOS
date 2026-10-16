@@ -61,6 +61,13 @@ pub fn has_ic(t: &Term) -> bool {
         && (t.has(string::DELETE_CHARACTER) || t.has(string::PARM_DCH))
 }
 
+/// `has_il ()`.
+#[must_use]
+pub fn has_il(t: &Term) -> bool {
+    (t.has(string::INSERT_LINE) || t.has(string::PARM_INSERT_LINE))
+        && (t.has(string::DELETE_LINE) || t.has(string::PARM_DELETE_LINE))
+}
+
 /// `DelCharCost (sp, count)`.
 fn del_char_cost(t: &Term, count: i32) -> i32 {
     if t.has(string::PARM_DCH) {

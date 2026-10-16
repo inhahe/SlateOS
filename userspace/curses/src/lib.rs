@@ -431,6 +431,22 @@ pub fn nocbreak() -> bool {
     ok(Screen::nocbreak)
 }
 
+/// `idlok (stdscr, flag)`: [`Screen::idlok`]; `ERR` without a screen.
+pub fn idlok(flag: bool) -> bool {
+    ok(|sp| {
+        sp.idlok(flag);
+        true
+    })
+}
+
+/// `idcok (stdscr, flag)`: [`Screen::idcok`]; nothing without a screen.
+pub fn idcok(flag: bool) {
+    ok(|sp| {
+        sp.idcok(flag);
+        true
+    });
+}
+
 /// `beep ()`.
 pub fn beep() -> bool {
     ok(Screen::beep)

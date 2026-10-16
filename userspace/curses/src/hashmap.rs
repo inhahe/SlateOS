@@ -531,6 +531,7 @@ pub fn scroll_optimize(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -551,5 +552,46 @@ mod tests {
         let b = [Cell::new2(0x61, 0), Cell::new2(0x62, 0), Cell::blank()];
         assert_eq!(update_cost(&a, &b), 2);
         assert_eq!(update_cost(&a, &a), 0);
+    }
+
+    /// A screen of one row per byte of `rows`, each row that byte three
+    /// times.
+    fn screen_of(rows: &[u8]) -> Window {
+        let lines = i32::try_from(rows.len()).unwrap();
+        let mut w = Window::newwin(lines, 3, 0, 0, (lines, 3), 0).unwrap();
+        for (line, &r) in w.lines.iter_mut().zip(rows) {
+            line.text.fill(Cell::new2(i32::from(r), 0));
+        }
+        w
+    }
+
+    /// A run of lines moving is kept when it is long enough and dropped
+    /// when it is not -- and its length is the lines that move, a new line
+    /// just above it not counted in.
+    #[test]
+    fn a_run_shorter_than_three_lines_is_not_scrolled() {
+        let opts = crate::screen::Options {
+            output: crate::term::Sink::Memory(Vec::new()),
+            input: -1,
+            use_env: false,
+        };
+        let t = crate::screen::Screen::newterm(
+            b"xterm-256color",
+            &opts,
+            Box::new(crate::testing::CLocale),
+        )
+        .unwrap()
+        .t;
+        let curscr = screen_of(b"ABCDE");
+        let blank = Cell::blank();
+        // A, B and C one row down, below a new row X: kept. (E stays where
+        // it was, so the run does not grow onto it.)
+        let mut long = HashState::default();
+        long.hash_map(&t, &screen_of(b"XABCE"), &curscr, 5, &blank);
+        assert_eq!(long.oldnum, [NEWINDEX, 0, 1, 2, NEWINDEX]);
+        // Only A and B: dropped, though X stands right above them.
+        let mut short = HashState::default();
+        short.hash_map(&t, &screen_of(b"XABDZ"), &curscr, 5, &blank);
+        assert_eq!(short.oldnum, [NEWINDEX; 5]);
     }
 }

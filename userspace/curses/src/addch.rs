@@ -876,4 +876,121 @@ mod tests {
         assert_eq!(other.attr & (A_BOLD | A_REVERSE), A_BOLD | A_REVERSE);
         assert_eq!(other.pair(), 4);
     }
+
+    /// A blank added through the byte family becomes the background, and a
+    /// background that is a wide character is put as it is -- not taken
+    /// for the byte of a multibyte character.
+    #[test]
+    fn a_wide_background_goes_in_whole_for_a_blank() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        let mut w = win(1, 4);
+        w.bkgd = Cell::new2(0x2192, A_NORMAL);
+        assert!(waddnstr(&mut w, &c, b" ", -1));
+        assert_eq!(w.lines[0].text[0].ch(), 0x2192);
+        assert_eq!(w.curx, 1);
+    }
+
+    /// Putting a wide background drops the multibyte character begun
+    /// before it: a byte that would have finished that character, added
+    /// later at the same place, stands alone.
+    #[test]
+    fn a_wide_background_drops_the_character_begun_before_it() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        let mut w = win(1, 6);
+        w.bkgd = Cell::new2(0x2192, A_NORMAL);
+        // The first byte of "é", held for the next.
+        assert!(waddnstr(&mut w, &c, b"\xc3", -1));
+        assert_eq!(w.addch_used, 1);
+        assert!(waddnstr(&mut w, &c, b" ", -1));
+        assert_eq!(w.addch_used, 0);
+        w.wmove(0, 0);
+        assert!(waddnstr(&mut w, &c, b"\xa9", -1));
+        assert_eq!(text(&w, 0), "M-)   ");
+    }
+
+    /// Carriage control clears the wrapped flag and leaves every other
+    /// flag as it was, in both families.
+    #[test]
+    fn carriage_control_clears_only_the_wrapped_flag() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        for wide in [false, true] {
+            for code in [0x0a_u8, 0x0d, 0x08] {
+                let mut w = win(3, 4);
+                w.wmove(1, 2);
+                w.flags |= WRAPPED;
+                let kept = w.flags & !WRAPPED;
+                assert_ne!(kept, 0, "wmove marks the window moved");
+                let ok = if wide {
+                    waddnwstr(&mut w, &c, &[WChar::from(code)], -1)
+                } else {
+                    waddnstr(&mut w, &c, &[code], -1)
+                };
+                assert!(ok);
+                assert_eq!(w.flags, kept, "{code:#04x}, wide: {wide}");
+            }
+        }
+    }
+
+    /// The wide family's tab, carriage return and backspace move the
+    /// cursor as the byte family's do.
+    #[test]
+    fn wide_control_characters_move_the_cursor() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        let wide = |s: &str| {
+            s.chars()
+                .map(|ch| u32::from(ch).cast_signed())
+                .collect::<Vec<_>>()
+        };
+        let mut w = win(3, 10);
+        assert!(waddnwstr(&mut w, &c, &wide("ab\tc\r"), -1));
+        assert_eq!(text(&w, 0), "ab      c ");
+        assert_eq!((w.cury, w.curx), (0, 0));
+        assert!(waddnwstr(&mut w, &c, &wide("xyz\n"), -1));
+        assert_eq!(text(&w, 0), "xyz       ", "the newline cleared the line");
+        assert_eq!((w.cury, w.curx), (1, 0));
+        assert!(waddnwstr(&mut w, &c, &wide("q\x08r"), -1));
+        assert_eq!(text(&w, 1), "r         ");
+        assert_eq!((w.cury, w.curx), (1, 1));
+    }
+
+    /// A tab whose stop lies past the edge clears the rest of the line and
+    /// goes to the next, in both families, rather than filling lines with
+    /// blanks until the stop.
+    #[test]
+    fn a_tab_past_the_edge_goes_to_the_next_line() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        for wide in [false, true] {
+            let mut w = win(3, 10);
+            w.wmove(0, 9);
+            let ok = if wide {
+                waddnwstr(&mut w, &c, &[0x09], -1)
+            } else {
+                waddnstr(&mut w, &c, b"\t", -1)
+            };
+            assert!(ok, "wide: {wide}");
+            assert_eq!((w.cury, w.curx), (1, 0), "wide: {wide}");
+        }
+    }
+
+    /// A combining character added after a cell that is the second half of
+    /// a wide character -- as column 0 of a window cut out of a line
+    /// through one -- joins that cell in the wide family, whose search
+    /// stops at column 0 as upstream's `j > 0` does.
+    #[test]
+    fn a_wide_combining_character_joins_column_0_whatever_it_holds() {
+        let u = Utf8;
+        let c = ctx(&u, 0);
+        let mut w = win(1, 4);
+        let mut half = Cell::with_char(0x4e2d, A_NORMAL);
+        half.set_widec_ext(1);
+        w.lines[0].text[0] = half;
+        w.wmove(0, 1);
+        assert!(waddnwstr(&mut w, &c, &[0x301], -1));
+        assert_eq!(w.lines[0].text[0].chars[..2], [0x4e2d, 0x301]);
+    }
 }

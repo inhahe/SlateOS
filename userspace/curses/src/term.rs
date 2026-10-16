@@ -628,14 +628,15 @@ impl Term {
         self.putp_cap(string::ORIG_PAIR)
     }
 
-    /// `_nc_reset_colors ()`.
-    pub fn reset_colors(&mut self) -> bool {
+    /// `_nc_reset_colors ()`: `op` and `oc` sent, and the colours given
+    /// marked to be given again. Upstream also answers whether either was
+    /// sent, which neither of its callers reads, nor do these.
+    pub fn reset_colors(&mut self) {
         if self.color_defs > 0 {
             self.color_defs = self.color_defs.wrapping_neg();
         }
-        let pair = self.reset_color_pair();
-        let colors = self.putp_cap(string::ORIG_COLORS);
-        pair || colors
+        self.reset_color_pair();
+        self.putp_cap(string::ORIG_COLORS);
     }
 
     /// `toggled_colors (c)`: SVr4's order of `setf`'s colours.

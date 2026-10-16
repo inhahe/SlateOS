@@ -898,6 +898,23 @@ impl Screen {
         self.keypad_on = flag;
     }
 
+    /// `idlok (stdscr, flag)`: whether an update may scroll by deleting and
+    /// inserting lines when it cannot with a scrolling region -- never on a
+    /// terminal that can do neither.
+    pub fn idlok(&mut self, flag: bool) {
+        let on = flag && (update::has_il(&self.t) || self.t.has(string::CHANGE_SCROLL_REGION));
+        self.stdscr.idlok = on;
+        self.t.idlok = on;
+    }
+
+    /// `idcok (stdscr, flag)`: whether an update may insert and delete
+    /// characters -- never on a terminal that cannot.
+    pub fn idcok(&mut self, flag: bool) {
+        let on = flag && update::has_ic(&self.t);
+        self.stdscr.idcok = on;
+        self.t.idcok = on;
+    }
+
     /// `cbreak ()`: input a character at a time, interrupt characters still
     /// signals, carriage return not made newline.
     pub fn cbreak(&mut self) -> bool {
@@ -1522,6 +1539,44 @@ mod tests {
         assert_eq!(marks, (0, 4), "the wiped half is changed too");
     }
 
+    /// A change ending on the first half of a wide character in the window
+    /// is copied with the rest of that character -- and on, as upstream
+    /// copies, up to the next wide character's first half -- while one
+    /// ending on an ordinary cell is copied as it is.
+    #[test]
+    fn a_change_ending_on_a_wide_character_copies_all_of_it() {
+        let letters = || {
+            let mut w = Window::newwin(1, 6, 0, 0, (1, 6), 0).unwrap();
+            for (i, c) in w.lines[0].text.iter_mut().enumerate() {
+                *c = Cell::new2(0x61 + i32::try_from(i).unwrap(), 0);
+            }
+            w.lines[0].firstchar = NOCHANGE;
+            w.lines[0].lastchar = NOCHANGE;
+            w
+        };
+        let mut win = Window::newwin(1, 6, 0, 0, (1, 6), 0).unwrap();
+        let mut first = Cell::with_char(0x4e2d, 0);
+        first.set_widec_ext(0);
+        let mut second = first;
+        second.set_widec_ext(1);
+        win.lines[0].text[0] = Cell::new2(0x70, 0);
+        win.lines[0].text[1] = Cell::new2(0x71, 0);
+        win.lines[0].text[2] = first;
+        win.lines[0].text[3] = second;
+        let mut newscr = letters();
+        copy_changes(&win, &mut newscr, (0, 0), (2, 2), 5);
+        let text = &newscr.lines[0].text;
+        assert_eq!(text[1].ch(), 0x62, "before the change: not copied");
+        assert!(text[2].is_widec_base());
+        assert!(text[3].is_widec_ext(), "{:?}", text[3]);
+        assert!(text[4].is_blank() && text[5].is_blank());
+        let mut newscr = letters();
+        copy_changes(&win, &mut newscr, (0, 0), (0, 0), 5);
+        let text = &newscr.lines[0].text;
+        assert_eq!(text[0].ch(), 0x70);
+        assert_eq!(text[1].ch(), 0x62, "past the change: not copied");
+    }
+
     /// `normal_delay`: a delay that is not mandatory is padded unless
     /// `NCURSES_NO_PADDING` says not to (xterm has no `xon` and no `pb`).
     #[test]
@@ -1564,6 +1619,34 @@ mod tests {
         };
         assert_eq!(kept, b"a", "out before the pause");
         assert_eq!(s.t.take_written(), b"ab");
+    }
+
+    /// `has_colors` needs both halves of a way to set colours: `setf` with
+    /// `setb`, `setaf` with `setab`, or `scp`.
+    #[test]
+    fn colours_need_both_a_foreground_and_a_background_string() {
+        let mut s = xterm(Box::new(CLocale));
+        assert!(s.t.has_colors());
+        for cap in [
+            string::SET_A_FOREGROUND,
+            string::SET_A_BACKGROUND,
+            string::SET_FOREGROUND,
+            string::SET_BACKGROUND,
+            string::SET_COLOR_PAIR,
+        ] {
+            s.t.entry.set_string(cap, None);
+        }
+        assert!(!s.t.has_colors());
+        s.t.entry
+            .set_string(string::SET_FOREGROUND, Some(b"\x1b[3%p1%dm".to_vec()));
+        assert!(!s.t.has_colors(), "setf alone");
+        s.t.entry
+            .set_string(string::SET_BACKGROUND, Some(b"\x1b[4%p1%dm".to_vec()));
+        assert!(s.t.has_colors());
+        s.t.entry.set_string(string::SET_FOREGROUND, None);
+        s.t.entry
+            .set_string(string::SET_A_FOREGROUND, Some(b"\x1b[3%p1%dm".to_vec()));
+        assert!(!s.t.has_colors(), "setaf with setb");
     }
 
     #[test]
@@ -1805,6 +1888,17 @@ mod tests {
         assert_eq!(
             (i32::from(sp.stdscr.maxy), i32::from(sp.stdscr.maxx)),
             (9, 19)
+        );
+        // Narrower alone, and shorter alone.
+        assert!(sp.resizeterm(10, 15));
+        assert_eq!(
+            (i32::from(sp.stdscr.maxy), i32::from(sp.stdscr.maxx)),
+            (9, 14)
+        );
+        assert!(sp.resizeterm(8, 15));
+        assert_eq!(
+            (i32::from(sp.stdscr.maxy), i32::from(sp.stdscr.maxx)),
+            (7, 14)
         );
         assert!(!sp.resizeterm(0, 20));
         assert!(!sp.resize_term(10, -1));

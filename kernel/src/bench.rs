@@ -8868,7 +8868,7 @@ fn bench_net_ns_arp_lookup() {
 // Cryptographic benchmarks
 // ---------------------------------------------------------------------------
 
-/// SHA-256 on a 64-byte input (common: TLS record MAC, file hashing).
+/// SHA-256 on a 64-byte input (file hashing, the HMAC of file encryption).
 fn bench_crypto_sha256_64() {
     use crate::crypto;
 
@@ -8909,7 +8909,8 @@ fn bench_crypto_sha256_1k() {
     );
 }
 
-/// HMAC-SHA256 with 32-byte key and 64-byte message (TLS Finished, HKDF).
+/// HMAC-SHA256 with 32-byte key and 64-byte message (file encryption's
+/// encrypt-then-MAC, `fs::encrypt`).
 fn bench_crypto_hmac_sha256() {
     use crate::crypto;
 
@@ -8930,7 +8931,8 @@ fn bench_crypto_hmac_sha256() {
     score("crypto_hmac_sha256", &result, 15000);
 }
 
-/// ChaCha20 encryption of 1 KiB (TLS/SSH bulk data encryption).
+/// ChaCha20 encryption of 1 KiB (file and disk encryption's bulk cipher, and
+/// the CSPRNG's core).
 fn bench_crypto_chacha20_1k() {
     use crate::crypto;
 
@@ -8968,7 +8970,7 @@ fn bench_crypto_chacha20_1k() {
 ///
 /// This benchmark exists because `crypto.rs` had no CRC coverage at all while
 /// three filesystems depend on it. The `crypto_*` benchmarks around it measure
-/// ChaCha20, Poly1305 and the SHA family — none of which share a line of code
+/// ChaCha20 and the SHA family — none of which share a line of code
 /// with the CRC tables. So the boot harness's "perf-critical file changed,
 /// benchmark it" advisory could fire on a CRC change and be discharged by a
 /// suite that never executed one, which is worse than having no advisory: it
@@ -9285,10 +9287,6 @@ fn bench_http_gzip_8k() {
     // Target: 1ms — larger content takes proportionally longer.
     score("http_gzip_8KiB", &result, 1_000_000);
 }
-
-// ---------------------------------------------------------------------------
-// Dashboard API benchmarks (net zone)
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Self-test

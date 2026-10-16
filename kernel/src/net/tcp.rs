@@ -1598,8 +1598,13 @@ fn conn_mut(conns: &mut [TcpConnection], handle: usize) -> KernelResult<&mut Tcp
     conns.get_mut(handle).ok_or(KernelError::InvalidArgument)
 }
 
-/// [`connect`], with the connection's generation as well, read under the
-/// lock that assigned it: what `net::native_socket` issues a handle for.
+/// Open a TCP connection to `remote_ip`:`remote_port` from network
+/// namespace `ns_id` (`netns::ROOT_NS` for the host's; connections in
+/// different namespaces are fully independent), performing the 3-way
+/// handshake (SYN, SYN-ACK, ACK).
+///
+/// Answers the connection's handle and its generation, read under the lock
+/// that assigned it: what `net::native_socket` issues a handle for.
 pub fn connect_tagged(
     ns_id: NetNsId,
     remote_ip: IpAddr,
@@ -3108,12 +3113,10 @@ pub fn peek(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
 /// `Interrupted` if a deliverable signal arrives first; `InvalidArgument` for
 /// a handle that names no connection.
 ///
-/// A program's blocking receive (`SYS_TCP_RECV`). [`read_blocking`] polls for
-/// a fixed time instead, which its callers in the kernel -- the HTTP client,
-/// the web server -- want; a blocking `recv` has no such limit, and until
-/// 2026-10-09 the native call answered "try again" after five seconds
-/// (known-issues `A-NATIVE-TCP-RECV-BLOCKING-RETURNS-EAGAIN-AFTER-5S`). It
-/// sleeps between looks -- 1 ms, doubling to 10 ms, as the daemon path's
+/// A program's blocking receive (`SYS_TCP_RECV`). A blocking `recv` has no
+/// time limit, and until 2026-10-09 the native call answered "try again"
+/// after five seconds (known-issues
+/// `A-NATIVE-TCP-RECV-BLOCKING-RETURNS-EAGAIN-AFTER-5S`). It sleeps between looks -- 1 ms, doubling to 10 ms, as the daemon path's
 /// `net::socket` waits -- rather than spinning, and drives the stack
 /// ([`super::poll`]) before each, which is what delivers the segments it is
 /// waiting for. The sleeps are reported to `/proc/<pid>/wchan` as a wait on a
@@ -3686,8 +3689,17 @@ pub fn bind_tagged(ns_id: NetNsId, port: u16) -> KernelResult<(usize, u32)> {
     Ok((slot, generation))
 }
 
-/// [`accept`], with the accepted connection's generation as well, as its
-/// backlog entry recorded it (see [`connect_tagged`]).
+/// Accept an incoming TCP connection on listener `listener_handle`: wait (by
+/// polling) until one completes the 3-way handshake and is placed in the
+/// listener's backlog.
+///
+/// Answers the connection's handle and its generation, as its backlog entry
+/// recorded it (see [`connect_tagged`]).
+///
+/// # Errors
+///
+/// - `InvalidArgument` — invalid listener handle.
+/// - `TimedOut` — no connection arrived within the timeout.
 pub fn accept_tagged(listener_handle: usize) -> KernelResult<(usize, u32)> {
     // Validate the listener exists.
     {

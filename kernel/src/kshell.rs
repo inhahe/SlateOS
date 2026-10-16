@@ -111398,8 +111398,6 @@ fn cmd_service_limits(args: &str) {
     }
 }
 
-// String formatting uses small bounded values.
-
 fn cmd_dns(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: nslookup <domain-name>");

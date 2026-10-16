@@ -74,9 +74,10 @@ const RED_DOT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1
 
 const INK: Color = Color::rgb(0x20, 0x80, 0xc0);
 
-/// Every built-in icon parses, draws something legible at the sizes the
+/// Every built-in drawing parses, draws something legible at the sizes the
 /// desktop uses, and draws it in the colour asked for -- they are all
-/// `currentColor`.
+/// `currentColor`. (The built-in pictures keep their own colours: see
+/// `the_start_button_is_the_logo_drawn_round`.)
 ///
 /// Legible is a pixel at least three-quarters covered. Not a wholly solid one:
 /// a line two units wide in a 24-unit icon is a pixel and a third wide at 16
@@ -87,7 +88,10 @@ const INK: Color = Color::rgb(0x20, 0x80, 0xc0);
 #[test]
 fn every_built_in_icon_draws_in_the_colour_it_is_asked_for() {
     let theme = IconTheme::named(OsStr::new("no-such-theme"), Fixture::new("builtin").dirs());
-    for name in built_in_names() {
+    let drawings = built_in_names()
+        .into_iter()
+        .filter(|name| BUILT_IN_RASTER.iter().all(|(raster, _, _)| raster != name));
+    for name in drawings {
         for size in [16, 24, 48] {
             let icon = theme
                 .render(name, size, INK)
@@ -115,6 +119,59 @@ fn every_built_in_icon_draws_in_the_colour_it_is_asked_for() {
             assert_eq!(icon.argb[0] >> 24, 0, "{name} fills its corner");
         }
     }
+}
+
+/// **The start button's picture is the system's logo, drawn round**: its own
+/// colours whatever it is asked to be drawn in, the corners of its square
+/// clear, its middle solid -- and a theme with a `start-here` of its own
+/// draws that instead.
+#[test]
+fn the_start_button_is_the_logo_drawn_round() {
+    let f = Fixture::new("logo");
+    let theme = IconTheme::named(OsStr::new("mine"), f.dirs());
+    for size in [16, 32, 64] {
+        let logo = theme
+            .render("start-here", size, INK)
+            .expect("the logo draws");
+        assert_eq!(logo.size, size);
+        let at = |x: u32, y: u32| logo.argb[(y * size + x) as usize];
+        for (x, y) in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)] {
+            assert_eq!(
+                at(x, y) >> 24,
+                0,
+                "corner ({x}, {y}) at {size} is not clear"
+            );
+        }
+        let middle = at(size / 2, size / 2);
+        assert_eq!(middle >> 24, 0xFF, "the middle at {size} is not solid");
+        assert!(
+            logo.argb
+                .iter()
+                .any(|px| px >> 24 == 0xFF && px & 0x00FF_FFFF != 0x0020_80C0),
+            "the logo was drawn in the ink instead of its own colours"
+        );
+        // Round: a point just inside the circle's edge is drawn, one just
+        // outside it, in from the corner, is not.
+        let r = size / 2;
+        assert!(at(r, 1) >> 24 > 0, "the top of the circle at {size}");
+        assert_eq!(at(1, 1) >> 24, 0, "outside the circle at {size}");
+    }
+
+    f.put("user", "mine", "start-here", SQUARE.as_bytes());
+    let own = theme
+        .render("start-here", 16, INK)
+        .expect("the theme's own draws");
+    assert!(
+        own.argb
+            .iter()
+            .all(|px| px >> 24 == 0 || px & 0x00FF_FFFF == 0x0020_80C0),
+        "a theme's own start-here was not the one drawn"
+    );
+    assert_eq!(
+        own.argb[0] >> 24,
+        0xFF,
+        "the theme's square fills its corner"
+    );
 }
 
 /// The renderer's byte order, pinned: a red disc comes out red, not blue.

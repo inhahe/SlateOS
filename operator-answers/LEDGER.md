@@ -24,7 +24,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|
-| C-Q28: the logo is `xor2.png`, not `xor.png` (both at the integration tree's root, untracked) | C | -- | relayed 2026-10-16 |
+| C-Q28: the logo is `xor2.png`, not `xor.png` (both at the integration tree's root, untracked) | C | §1604 | recorded 2026-10-16 by lane C: `xor2.png` is the built-in icon theme's `start-here` (`gui/appearance/assets/slateos-logo.png`), drawn round on the start button |
 | LithicBackup's port backs a file up, or makes its new version, when its writer finalizes it, and keeps its quiet-time rules for writers that never do: Linux programs, Windows programs under Wine, and the rest | E | `roadmap-detailed.md`, LithicBackup's entry | recorded by lane F; relayed 2026-10-16 to lane E, whose item it is |
 
 ## open-questions/answers.3.txt
@@ -176,7 +176,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | A-Q26 | A | §1568 (B, and the operator's "Allow" for this run only) | recorded |
 | B-Q22 | B | §1072 (your design). Your questions, answered: yes to each -- one `kill`, procps-ng's with SlateOS's options; the system picks the route (SlateOS's message to a program that answers it, the Linux signal to one that does not), and an option forces either; and the third strength is *terminate* -- stop now, ask nothing -- between *close* (may ask "save first?") and *force*. The task manager gets the same three (asked of lane E). Done 2026-10-09: procps-ng's `kill` ported, so `kill PID` is `SIGTERM` everywhere, never the forced end; the message waits on lane A's kernel half, then lane B's library | recorded |
 | B-Q25 | B | §1071 (A: a lost output is reported, in `which`, `ed`, `hostname` and `patch`; done 2026-10-09) | recorded |
-| C-Q28 | C | §1604 (the logo is `xor2.png` -- the operator, 2026-10-16 -- now `gui/desktop/assets/xor2.png`; the start button is to draw it) | recorded 2026-10-12, the file corrected 2026-10-16 |
+| C-Q28 | C | §1604 (the logo is `xor2.png` -- the operator, 2026-10-16 -- now `gui/appearance/assets/slateos-logo.png`, the built-in icon theme's `start-here`, which the start button draws round) | recorded 2026-10-12, the file corrected and drawn 2026-10-16 |
 | C-Q29 | C | §1605 (A; both questions answered there, as lane A answered them) | recorded 2026-10-12 |
 | C-Q32 | C | §1607 | recorded 2026-10-12 |
 | C-Q33 | C | §1608 (C: startup programs do depend on each other and on services) | recorded 2026-10-12 |

@@ -422,8 +422,6 @@ const START_ORB_INNER_ALPHA: u8 = 107;
 const START_ORB_GLOW_BLUR: f32 = 18.0;
 /// The glow's strength.
 const START_ORB_GLOW_ALPHA: u8 = 230;
-/// The start picture's share of the orb's width.
-const START_ORB_PICTURE_SHARE: f32 = 0.55;
 // The gaps between the tiles -- after the start button, between two tiles,
 // between the pinned programs and the windows -- are the theme's
 // `taskbar-panel` spacing (`appearance::panel::PanelStyle`), whose built-in
@@ -10288,11 +10286,14 @@ impl DesktopShell {
     /// `:hover`, and while its menu is open, which the reference does not
     /// mark but which the bar has always shown.
     ///
-    /// The reference fills the orb with the system's logo; there is none in
-    /// the repository yet (`open-questions.md` C-Q28), so the picture is the
-    /// icon theme's `start-here`, on the accent. The renderer draws no
-    /// gradients, so the gloss and the shade are each a pill of translucent
-    /// white or black, the gloss in two steps.
+    /// The orb is filled with the icon theme's `start-here`: the system's
+    /// logo, the XOR pattern the operator supplied, drawn round
+    /// (design-decisions 1604) -- or, for a theme that ships a `start-here` of
+    /// its own, that, as a distribution's logo is drawn in its menu button.
+    /// The accent under it shows only where a theme's picture leaves it
+    /// clear. The renderer draws no gradients, so the gloss and the shade
+    /// over it are each a pill of translucent white or black, the gloss in two
+    /// steps.
     fn draw_start_orb(&self, tree: &mut RenderTree) {
         let orb = self.start_orb_rect();
         let d = orb.w;
@@ -10355,10 +10356,10 @@ impl DesktopShell {
             ring,
             CornerRadii::all(d / 2.0 + light),
         );
-        // The orb, and the picture on it.
+        // The orb, and the picture filling it.
         let body = self.theme.taskbar_accent;
         fill_round(tree, orb, body, round);
-        let px = self.icon_px(d * START_ORB_PICTURE_SHARE / self.scale(1.0).max(f32::EPSILON));
+        let px = self.icon_px(d / self.scale(1.0).max(f32::EPSILON));
         #[allow(clippy::cast_precision_loss)]
         let side = px as f32;
         image_centred(

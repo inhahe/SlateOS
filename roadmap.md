@@ -2901,8 +2901,9 @@ live.
   (`design-decisions.md` §1408). Round and glossy, in the accent with the
   start picture on it, a ring of light round it and a shadow under it, glowing
   under the pointer and while its menu is open, and named "Start" when the
-  pointer rests on it. Kept inside the bar, whose surface ends at its edge; the
-  system's logo takes the picture's place when there is one (C-Q28).
+  pointer rests on it. Kept inside the bar, whose surface ends at its edge.
+  Since 2026-10-16 the orb is the system's logo, the XOR pattern, drawn round
+  (C-Q28, §1604).
 
 - `[C]` **The start menu's search field is the reference's** -- done
   2026-09-26. It was an accent-coloured ring with "Type to search" in it; it

@@ -283,10 +283,6 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../themes/aero/icons/action-unavailable.svg"),
     ),
     (
-        "start-here",
-        include_str!("../themes/aero/icons/start-here.svg"),
-    ),
-    (
         "pan-start",
         include_str!("../themes/aero/icons/pan-start.svg"),
     ),
@@ -424,10 +420,30 @@ const BUILT_IN: &[(&str, &str)] = &[
     ),
 ];
 
+/// The built-in theme's pictures that are pictures rather than drawings:
+/// `(name, PNG, drawn round)`. One: `start-here`, the start button's, which
+/// is the system's logo -- the XOR pattern the operator supplied
+/// (design-decisions 1604) -- drawn round, as the design asks for "a round,
+/// shrunken version of the XOR logo". A theme that ships its own
+/// `start-here` draws that instead, as for any other name.
+///
+/// Kept outside the theme's `icons` folder: that holds only what the desktop
+/// reads from a theme on disk, `<name>.svg` drawings in `currentColor`
+/// (`themecheck`), and the logo is neither -- it is compiled in.
+const BUILT_IN_RASTER: &[(&str, &[u8], bool)] = &[(
+    "start-here",
+    include_bytes!("../assets/slateos-logo.png"),
+    true,
+)];
+
 /// The names the built-in theme draws, for a caller that lists them.
 #[must_use]
 pub fn built_in_names() -> Vec<&'static str> {
-    BUILT_IN.iter().map(|(name, _)| *name).collect()
+    BUILT_IN
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(BUILT_IN_RASTER.iter().map(|(name, _, _)| *name))
+        .collect()
 }
 
 /// The built-in theme's icons, `(name, SVG)`, one for each name it draws --
@@ -614,6 +630,12 @@ impl IconTheme {
             return None;
         }
         for candidate in candidates(name) {
+            if let Some((_, png, round)) = BUILT_IN_RASTER
+                .iter()
+                .find(|(built, _, _)| *built == candidate)
+            {
+                return raster_icon(png, size, color, *round);
+            }
             if let Some((_, svg)) = BUILT_IN.iter().find(|(built, _)| *built == candidate) {
                 return render_svg(svg, size, color);
             }
@@ -748,8 +770,20 @@ fn render_raster(path: &Path, size: u32, color: Color) -> Option<Icon> {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let image = imagecodec::decode(&bytes, imagecodec::Limits::default()).ok()?;
-    let argb: Vec<u32> = fit_square(&image, size)
+    raster_icon(&bytes, size, color, false)
+}
+
+/// The PNG `bytes` as an icon, fitted into a `size`-pixel square and faded
+/// by `color`'s alpha as [`render_raster`] says -- and, when `round`, clipped
+/// to the circle the square holds. `None` for a picture that will not decode
+/// or that draws nothing.
+fn raster_icon(bytes: &[u8], size: u32, color: Color, round: bool) -> Option<Icon> {
+    let image = imagecodec::decode(bytes, imagecodec::Limits::default()).ok()?;
+    let mut fitted = fit_square(&image, size);
+    if round {
+        clip_to_circle(&mut fitted, size);
+    }
+    let argb: Vec<u32> = fitted
         .into_iter()
         .map(|px| {
             let [a, r, g, b] = px.to_be_bytes();
@@ -762,6 +796,33 @@ fn render_raster(path: &Path, size: u32, color: Color) -> Option<Icon> {
         return None;
     }
     Some(Icon { size, argb })
+}
+
+/// `argb`, a `size`-pixel square of pixels, clipped to the circle inside it:
+/// each pixel's alpha times how much of the pixel the circle covers, so the
+/// edge is smooth rather than stepped.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a pixel's index and an icon's size, both at most MAX_ICON_PX squared, are exact in f32; an alpha times a coverage in 0..=1 rounds into 0..=255"
+)]
+fn clip_to_circle(argb: &mut [u32], size: u32) {
+    let side = size as usize;
+    if side == 0 {
+        return;
+    }
+    let r = size as f32 / 2.0;
+    for (row, line) in argb.chunks_mut(side).enumerate() {
+        let y = row as f32 + 0.5 - r;
+        for (column, px) in line.iter_mut().enumerate() {
+            let x = column as f32 + 0.5 - r;
+            let cover = (r - x.hypot(y) + 0.5).clamp(0.0, 1.0);
+            let [a, red, green, blue] = px.to_be_bytes();
+            let alpha = (f32::from(a) * cover).round() as u8;
+            *px = u32::from_be_bytes([alpha, red, green, blue]);
+        }
+    }
 }
 
 /// `image` fitted into a `size`-pixel square: scaled to the largest size that

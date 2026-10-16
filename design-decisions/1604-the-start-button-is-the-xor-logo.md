@@ -9,8 +9,9 @@ button drew a stand-in -- four plain squares. Asked for the file
 `xor2.png`, 129 by 128 pixels, a many-coloured XOR pattern -- not the larger
 `xor.png` beside it, as the operator told lane F in chat on 2026-10-16
 (`operator-answers/2026-10-16-chat-to-lane-f.txt`). It is now the
-repository's (`gui/desktop/assets/xor2.png`), and the start button is to
-draw it, round and shrunken.
+repository's, as the built-in icon theme's `start-here`
+(`gui/appearance/assets/slateos-logo.png`, compiled in), and the start
+button draws it, round and shrunken.
 
 **The answer, verbatim** (`operator-answers/2026-10-09-open-questions-answers.txt`):
 
@@ -19,4 +20,9 @@ draw it, round and shrunken.
 **What it obliges:** the start button draws the logo, clipped to a circle at
 the button's size, instead of the icon theme's `start-here` stand-in -- the
 theme's picture kept as what a theme that ships its own `start-here` draws,
-which C-Q28 promised. Tracked in `roadmap.md` under the start button.
+which C-Q28 promised.
+
+**Done 2026-10-16:** the built-in theme's `start-here` is the logo, a PNG
+drawn round (`appearance::icons`, `BUILT_IN_RASTER`), in place of the
+four-square drawing; the orb is filled with it. A theme with a `start-here`
+of its own draws that, as for any other icon name.

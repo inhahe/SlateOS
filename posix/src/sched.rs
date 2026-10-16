@@ -542,8 +542,7 @@ pub(crate) fn affinity_errno(ret: i64) -> i32 {
 /// Whether `ret` says there are no affinity calls to ask: a kernel without
 /// lane A's (every kernel before 1100/1101), or, in the host build, no kernel.
 fn no_affinity_calls(ret: i64) -> bool {
-    ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    crate::syscall::lacks_call(ret)
 }
 
 /// Restrict thread `thread` (0: the calling one) to the CPUs of `mask` that

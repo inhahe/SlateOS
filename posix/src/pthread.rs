@@ -1230,9 +1230,7 @@ fn kernel_join(thread_id: PthreadT, retval: *mut *mut u8, timeout_ns: u64) -> Ke
             errno::native::WOULD_BLOCK => return KernelJoin::Joining,
             // A signal: wait again, for what is left of the time.
             errno::native::INTERRUPTED => {}
-            r if r == errno::native::NO_SUCH_SYSCALL
-                || (cfg!(not(target_os = "none")) && r == syscall::HOST_ENOSYS) =>
-            {
+            r if crate::syscall::lacks_call(r) => {
                 return KernelJoin::Unsupported;
             }
             _ => return KernelJoin::Gone,

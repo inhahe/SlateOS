@@ -156,9 +156,7 @@ fn open_tmpfile(dir: &[u8], flags: i32) -> Fd {
         native,
     );
     // A kernel without the call -- or, in the host build, no kernel at all.
-    if ret == crate::errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }
@@ -3806,7 +3804,7 @@ pub(crate) fn is_pinnable_component(name: &[u8]) -> bool {
 /// wrappers under `cargo test` behave exactly as they did before this fast path
 /// existed.
 fn pinned_answer(ret: i64) -> Option<i32> {
-    if ret == crate::errno::native::NO_SUCH_SYSCALL || ret == crate::syscall::HOST_ENOSYS {
+    if crate::syscall::lacks_call(ret) {
         return None;
     }
     Some(errno::translate(ret) as i32)
@@ -4883,9 +4881,7 @@ fn link_descriptor(fd: i32, newdirfd: i32, newpath: *const u8) -> i32 {
     match ret {
         r if r >= 0 => 0,
         // A kernel without the call -- or, in the host build, no kernel.
-        r if r == crate::errno::native::NO_SUCH_SYSCALL
-            || (cfg!(not(target_os = "none")) && r == crate::syscall::HOST_ENOSYS) =>
-        {
+        r if crate::syscall::lacks_call(r) => {
             errno::set_errno(errno::ENOENT);
             -1
         }
@@ -8445,7 +8441,7 @@ fn openat2_forward_inner(
         // is an answer that must be passed through. Deliberately not checked
         // on the scratch-cwd open above — that one failing says nothing about
         // whether 661 exists.
-        if ret == crate::errno::native::NO_SUCH_SYSCALL || ret == crate::syscall::HOST_ENOSYS {
+        if crate::syscall::lacks_call(ret) {
             *missing = true;
         }
         return errno::translate(ret) as Fd;

@@ -546,15 +546,13 @@ fn memory_lock(op: u64, a: u64, b: u64, c: u64) -> Locking {
 /// it is, [`Locking::NoCall`] from a kernel without the call (or the host,
 /// which has none).
 fn lock_answer(ret: i64) -> Locking {
-    if ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         return Locking::NoCall;
     }
     if ret >= 0 {
         return Locking::Answered(0);
     }
-    errno::set_errno(i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EIO));
+    errno::set_errno(errno::door_errno(ret));
     Locking::Answered(-1)
 }
 

@@ -308,9 +308,7 @@ fn seals_answer(entry: &fdtable::FdEntry, call: impl FnOnce(u64) -> i64) -> Resu
         return Err(errno::EINVAL);
     }
     let ret = call(entry.handle);
-    if ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         return Err(errno::EINVAL);
     }
     if ret < 0 {
@@ -432,8 +430,7 @@ pub(crate) fn lock_errno(ret: i64) -> i32 {
 /// `SYS_FS_RECORD_LOCK` (every kernel before lane A's 1093), or, in the host
 /// build, no kernel at all.
 fn no_lock_table(ret: i64) -> bool {
-    ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    crate::syscall::lacks_call(ret)
 }
 
 /// Release every record lock this process holds on the file `handle` is

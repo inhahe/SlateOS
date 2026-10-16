@@ -118,13 +118,7 @@ fn answer(ret: i64) -> Result<i64, i32> {
     if ret >= 0 {
         return Ok(ret);
     }
-    if ret == errno::native::INTERRUPTED {
-        return Err(errno::EINTR);
-    }
-    if ret == errno::native::NO_SUCH_SYSCALL {
-        return Err(errno::ENOSYS);
-    }
-    Err(i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EIO))
+    Err(errno::door_errno(ret))
 }
 
 /// The call flags a descriptor's status flags ask for.
@@ -163,9 +157,7 @@ pub(crate) fn open(resolved: &[u8], flags: i32) -> Option<i32> {
         resolved.as_ptr() as u64,
         resolved.len() as u64,
     );
-    if ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         return None;
     }
     let handle = match answer(ret) {

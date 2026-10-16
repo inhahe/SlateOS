@@ -1434,6 +1434,19 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 /// hundreds (-100, -200, -300, -400, -500, -600, -700).
 pub(crate) const HOST_ENOSYS: i64 = -38;
 
+/// Whether a native call's answer `ret` says the kernel lacks the call: its
+/// "no such syscall", or -- in a host build, where every call answers
+/// [`HOST_ENOSYS`] -- that there is no kernel at all. The one test for it,
+/// rather than a copy at each call that falls back on an older kernel's
+/// behaviour, where the copies had come to differ (Opus's review of lane D's
+/// round 202).
+#[inline]
+#[must_use]
+pub(crate) fn lacks_call(ret: i64) -> bool {
+    ret == crate::errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == HOST_ENOSYS)
+}
+
 // Host-only shim for the wall-clock / monotonic-clock syscalls.  These
 // are by far the most-called bare `syscall0` in the posix crate (>20
 // call sites in epoll/poll/socket/file/time/sys_times/unistd), and on

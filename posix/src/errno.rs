@@ -377,6 +377,36 @@ pub(crate) mod native {
     pub const WRONG_SOCKET_TYPE: i64 = -708;
 }
 
+/// The errno for a negative answer `ret` of a call that answers Linux's
+/// errnos as `-errno` -- lane A's device door and the calls that follow its
+/// convention (`SYS_MEMORY_LOCK`, `SYS_CPU_CLOCK`, `SYS_POSIX_TIMER`, ...).
+/// Such a number is its own errno. But a native code can reach the caller
+/// past the call's body -- the dispatcher's "no such syscall", a wait's
+/// `Interrupted`, a user-copy helper's `InvalidAddress` -- and is translated
+/// as any native error is ([`errno_for`]). Linux's errnos stop at 133
+/// (`EHWPOISON`), so a code below -133 is native; within -100..=-133 only
+/// the memory band, -100..=-103, is -- whose Linux twins are network errnos
+/// (`ENETDOWN` .. `ECONNABORTED`) no such call answers -- and the rest of that
+/// range is Linux's own (`ETIMEDOUT`, `EOWNERDEAD`, ...). Of the low native
+/// codes only those two come from outside a body. Until 2026-10-16 a native
+/// code was stored as its own number, so `InvalidAddress` became errno 101,
+/// `ENETUNREACH` (Fable's review of lane D's round 202).
+#[must_use]
+pub(crate) fn door_errno(ret: i64) -> i32 {
+    /// The largest Linux errno, `EHWPOISON`.
+    const LINUX_ERRNO_MAX: i64 = 133;
+    if ret == native::INTERRUPTED {
+        return EINTR;
+    }
+    if ret == native::NO_SUCH_SYSCALL {
+        return ENOSYS;
+    }
+    if ret < -LINUX_ERRNO_MAX || (-103..=-100).contains(&ret) {
+        return errno_for(ret);
+    }
+    i32::try_from(ret.unsigned_abs()).unwrap_or(EIO)
+}
+
 /// The errno a native kernel error code corresponds to.
 ///
 /// Split out of [`translate`] so there is exactly one such table in the
@@ -516,6 +546,28 @@ pub fn translate(ret: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A door call's own answer is a negated Linux errno; the native codes
+    /// that reach it from outside its body are translated as native ones --
+    /// `InvalidAddress` is `EFAULT`, not errno 101 (`ENETUNREACH`).
+    #[test]
+    fn a_door_answer_is_linuxs_unless_it_is_a_native_code() {
+        assert_eq!(door_errno(-22), EINVAL);
+        assert_eq!(door_errno(-1), EPERM);
+        // Linux's own large errnos are its: ETIMEDOUT, EOWNERDEAD, EHWPOISON.
+        assert_eq!(door_errno(-110), ETIMEDOUT);
+        assert_eq!(door_errno(-133), 133);
+        assert_eq!(door_errno(native::OUT_OF_MEMORY), ENOMEM);
+        assert_eq!(door_errno(native::INTERRUPTED), EINTR);
+        assert_eq!(door_errno(native::NO_SUCH_SYSCALL), ENOSYS);
+        assert_eq!(
+            door_errno(native::INVALID_ADDRESS),
+            errno_for(native::INVALID_ADDRESS)
+        );
+        assert_eq!(door_errno(native::INVALID_ADDRESS), EFAULT);
+        assert_eq!(door_errno(native::PERMISSION_DENIED), EACCES);
+        assert_eq!(door_errno(native::TOO_MANY_REFERENCES), ETOOMANYREFS);
+    }
 
     // errno is per-thread on every build (see `crate::perthread`), so tests
     // running in parallel on the harness's thread pool cannot clobber each

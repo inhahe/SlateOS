@@ -1,8 +1,8 @@
-//! The C library's `FILE`s as dc meets them.
+//! The C library's `FILE`s, modelled: for a port whose output shows how
+//! glibc's stdio buffers -- GNU dc's and bc's.
 //!
-//! What dc writes and reads goes through stdio, and stdio's buffering is
-//! visible: standard output is written in blocks, flushed where dc says
-//! `fflush` (after each value printed) and not before a `!` command runs a
+//! In dc, for one, stdio's buffering is visible: standard output is written
+//! in blocks, flushed where dc says `fflush` (after each value printed) and not before a `!` command runs a
 //! shell -- so a "... unimplemented" note, which dc writes to standard output
 //! without a flush, comes out after the shell command's own output. Standard
 //! input is read a block at a time, so a command run by `!` reads from where
@@ -17,7 +17,7 @@
 //!   keeps its `errno` for the `perror` that reports it.
 
 /// glibc's buffer for a file or a pipe: `st_blksize`, which is 4096 on the
-/// files and pipes dc meets.
+/// files and pipes these programs meet.
 pub const BUF_SIZE: usize = 4096;
 
 /// Where an [`Output`] writes: a descriptor, or (for tests) memory.
@@ -66,6 +66,15 @@ impl Output {
             error: false,
             errno: 0,
         }
+    }
+
+    /// `setvbuf (stdout, NULL, _IOLBF, 0)`: flushed after each newline. The
+    /// buffer keeps its size: glibc gives a buffer `setvbuf` names none for
+    /// the file's block size, as it would have.
+    #[must_use]
+    pub const fn line_buffered(mut self) -> Self {
+        self.line_buffered = true;
+        self
     }
 
     /// `fwrite`, `putchar`, `fprintf`: `bytes` into the buffer, and out when
@@ -281,7 +290,11 @@ mod tests {
             panic!()
         };
         assert_eq!(kept.len(), BUF_SIZE, "the block, and the rest kept");
-        assert_eq!(o.take_written().len(), BUF_SIZE + 1, "and the rest on a flush");
+        assert_eq!(
+            o.take_written().len(),
+            BUF_SIZE + 1,
+            "and the rest on a flush"
+        );
     }
 
     #[test]
@@ -297,6 +310,16 @@ mod tests {
             panic!()
         };
         assert_eq!(kept.as_slice(), b"no newline then\n");
+    }
+
+    #[test]
+    fn an_output_made_line_buffered_goes_out_at_a_newline() {
+        let mut l = Output::new(Sink::Memory(Vec::new()), false, false).line_buffered();
+        l.write(b"x\n");
+        let Sink::Memory(kept) = &l.sink else {
+            panic!()
+        };
+        assert_eq!(kept.as_slice(), b"x\n");
     }
 
     #[test]

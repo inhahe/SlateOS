@@ -1,0 +1,12 @@
+[package]
+name = "cstdio"
+version = "0.1.0"
+edition = "2024"
+description = "The C library's FILE buffering, modelled, for ports whose output shows it"
+
+[dependencies]
+# Descriptors and terminals, through the C library.
+libcall = { path = "../../libcall" }
+
+[lints]
+workspace = true

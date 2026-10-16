@@ -4,8 +4,8 @@
 //!
 //! The modules follow upstream's files: [`eval`](crate) the input language
 //! (`eval.c`), the stacks and registers (`stack.c`, `array.c`), the numbers'
-//! glue and output (`numeric.c`), and the C library's `FILE`s as dc meets
-//! them ([`io`]), whose buffering dc's output shows.
+//! glue and output (`numeric.c`); the C library's `FILE`s, whose buffering
+//! dc's output shows, are `cstdio`'s ([`io`]).
 //!
 //! # Where this differs from upstream, on purpose
 //!
@@ -17,7 +17,8 @@
 //!   so) where C's ends in `SIGSEGV`, at a depth that differs with the frame
 //!   sizes.
 
-pub mod io;
+/// The C library's `FILE`s, as dc meets them.
+pub use cstdio as io;
 
 mod eval;
 mod numeric;

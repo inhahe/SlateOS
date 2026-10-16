@@ -870,6 +870,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cstdio"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+]
+
+[[package]]
 name = "cstrtol"
 version = "0.1.0"
 
@@ -955,6 +962,7 @@ name = "dc"
 version = "0.1.0"
 dependencies = [
  "bcnumber",
+ "cstdio",
  "cstrtol",
  "errmsg",
  "getoptlong",

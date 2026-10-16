@@ -5,6 +5,8 @@ edition = "2024"
 description = "GNU dc 1.4.1 (bc 1.07.1), ported: an arbitrary-precision reverse-Polish calculator"
 
 [dependencies]
+# The C library's FILE buffering, which dc's output shows.
+cstdio = { path = "../cstdio" }
 # bc's number.c: every digit dc prints comes from its algorithms.
 bcnumber = { path = "../bcnumber" }
 # getopt_long's options and its diagnostics, as glibc words them.

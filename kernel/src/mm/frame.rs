@@ -1719,14 +1719,14 @@ const fn zeroed_words(total_frames: usize) -> usize {
     total_frames.div_ceil(64)
 }
 
-/// The bitmap word holding frame `addr`'s bit, and the bit's mask; `None`
-/// before [`init`] or for a frame past the managed range.
-// arithmetic_side_effects: divisions and remainders by non-zero constants.
+/// The bitmap word holding the bit of the frame with index `idx` (its
+/// address over `FRAME_SIZE`); `None` before [`init`] or for a frame past the
+/// managed range.
+// arithmetic_side_effects: a division by a non-zero constant.
 #[allow(clippy::arithmetic_side_effects)]
-fn freed_zeroed_bit(addr: u64) -> Option<(&'static AtomicU64, u64)> {
+fn freed_zeroed_word(idx: u64) -> Option<&'static AtomicU64> {
     let ptr = FREED_ZEROED_PTR.load(Ordering::Acquire);
     let words = FREED_ZEROED_WORDS.load(Ordering::Acquire);
-    let idx = addr / FRAME_SIZE as u64;
     let word = idx / 64;
     if ptr == 0 || word >= words {
         return None;
@@ -1734,31 +1734,51 @@ fn freed_zeroed_bit(addr: u64) -> Option<(&'static AtomicU64, u64)> {
     // SAFETY: `init` published `words` aligned `u64`s at `ptr`, in the
     // permanently reserved metadata region, and never changes them; `word`
     // is below `words`. `AtomicU64` has `u64`'s layout.
-    let cell = unsafe { &*(ptr as *const AtomicU64).add(word as usize) };
-    Some((cell, 1u64 << (idx % 64)))
+    Some(unsafe { &*(ptr as *const AtomicU64).add(word as usize) })
 }
 
 /// Record what freeing `count` frames from `addr` left in them: all zero
-/// (`zeroed`), or not.
+/// (`zeroed`), or not. A word of the bitmap at a time, so a large block costs
+/// one operation per 64 frames.
+// arithmetic_side_effects: `bit` is below 64, so `here` is 1..=64 and below
+// what is left of the range, and the shifts are by less than 64.
+#[allow(clippy::arithmetic_side_effects)]
 fn note_freed(addr: u64, count: u64, zeroed: bool) {
-    for i in 0..count {
-        let Some((cell, mask)) =
-            freed_zeroed_bit(addr.saturating_add(i.saturating_mul(FRAME_SIZE as u64)))
-        else {
+    let mut idx = addr / FRAME_SIZE as u64;
+    let end = idx.saturating_add(count);
+    while idx < end {
+        let Some(cell) = freed_zeroed_word(idx) else {
             return;
         };
-        if zeroed {
-            cell.fetch_or(mask, Ordering::Release);
+        let bit = idx % 64;
+        let here = (64 - bit).min(end - idx);
+        let mask = if here == 64 {
+            u64::MAX
         } else {
+            ((1u64 << here) - 1) << bit
+        };
+        // Read first, and write only bits that change: with zero-on-free off
+        // every bit stays 0, and the free path then dirties no line that 512
+        // frames' frees share. A frame is freed by one caller at a time, so
+        // these frames' bits cannot change between the read and the write.
+        let now = cell.load(Ordering::Relaxed) & mask;
+        if zeroed && now != mask {
+            cell.fetch_or(mask, Ordering::Release);
+        } else if !zeroed && now != 0 {
             cell.fetch_and(!mask, Ordering::Release);
         }
+        idx += here;
     }
 }
 
 /// Whether frame `addr`'s last free left it all zero: for a frame the caller
 /// has just been allocated, whether it is all zero now.
+// arithmetic_side_effects: a division and a remainder by non-zero constants.
+#[allow(clippy::arithmetic_side_effects)]
 fn freed_zeroed(addr: u64) -> bool {
-    freed_zeroed_bit(addr).is_some_and(|(cell, mask)| cell.load(Ordering::Acquire) & mask != 0)
+    let idx = addr / FRAME_SIZE as u64;
+    freed_zeroed_word(idx)
+        .is_some_and(|cell| cell.load(Ordering::Acquire) & (1u64 << (idx % 64)) != 0)
 }
 
 /// Zero a single frame on the free path using non-temporal stores.
@@ -3723,11 +3743,43 @@ pub fn test_zero_on_free() -> KernelResult<()> {
 /// Frames [`zeroed_alloc_after_buddy_frees`] cycles through the buddy lists.
 const BUDDY_CYCLE_FRAMES: usize = 64;
 
+/// [`note_freed`] on a span of frames that crosses a word of the bitmap, in
+/// a block of two words' frames taken for the purpose (whose bits are the
+/// test's alone): exactly the span's bits are set, then exactly cleared.
+fn note_freed_spans_words() -> KernelResult<()> {
+    const ORDER: usize = 7;
+    const FRAMES: u64 = 128; // 2^ORDER: two words of the bitmap
+    let block = alloc_order(ORDER)?;
+    let base = block.addr();
+    let frame = |i: u64| base.saturating_add(i.saturating_mul(FRAME_SIZE as u64));
+    note_freed(base, FRAMES, false);
+    note_freed(frame(62), 4, true);
+    let set: [bool; 6] =
+        core::array::from_fn(|i| freed_zeroed(frame((i as u64).saturating_add(61))));
+    note_freed(frame(62), 4, false);
+    let cleared = (61..67).all(|i| !freed_zeroed(frame(i)));
+    // SAFETY: allocated above by alloc_order(ORDER), sole owner, freed once.
+    unsafe {
+        free_order(block, ORDER)?;
+    }
+    if set != [false, true, true, true, true, false] || !cleared {
+        serial_println!(
+            "[mm]   FAIL: frames 61..67 of a block after recording 62..66 zeroed: {set:?}; \
+             cleared again: {cleared}"
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 /// With zero-on-free on: write [`BUDDY_CYCLE_FRAMES`] frames, free them
-/// through the buddy lists (`free_order`, not the per-CPU cache), and check
-/// that the next as many [`alloc_frame_zeroed`] frames are all zero. A free
-/// block carries the lists' links in its first bytes; were they left there,
-/// a frame recorded as zeroed would come back with them.
+/// through the buddy lists (`free_order`, not the per-CPU cache), take as
+/// many back from the lists (`alloc_order`, past the per-CPU cache and the
+/// zero pool, either of which would hand out frames that never passed
+/// through them), and check that every one recorded as zeroed is all zero:
+/// what [`alloc_frame_zeroed`] trusts the record for. A free block carries
+/// the lists' links in its first bytes; were they left there, a frame
+/// recorded as zeroed would come back with them.
 fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
     let mut frames = [0u64; BUDDY_CYCLE_FRAMES];
     let mut taken = 0usize;
@@ -3750,8 +3802,18 @@ fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
         }
     }
     let mut bad: Option<(u64, usize, u8)> = None;
+    let mut recorded = 0usize;
+    let mut back = 0usize;
     for slot in &mut frames {
-        let frame = alloc_frame_zeroed()?;
+        let Ok(frame) = alloc_order(0) else {
+            break;
+        };
+        *slot = frame.addr();
+        back = back.saturating_add(1);
+        if !freed_zeroed(frame.addr()) {
+            continue;
+        }
+        recorded = recorded.saturating_add(1);
         let ptr = frame.to_virt(hhdm) as *const u8;
         // SAFETY: allocated, HHDM valid, exclusively ours.
         let first = unsafe {
@@ -3764,20 +3826,26 @@ fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
         if let (None, Some((off, byte))) = (bad, first) {
             bad = Some((frame.addr(), off, byte));
         }
-        *slot = frame.addr();
     }
-    for &addr in &frames {
+    for &addr in frames.iter().take(back) {
         let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
-        // SAFETY: allocated above by alloc_frame_zeroed, sole owner.
+        // SAFETY: allocated above by alloc_order(0), sole owner.
         unsafe {
-            free_frame(frame)?;
+            free_order(frame, 0)?;
         }
     }
     if let Some((addr, off, byte)) = bad {
         serial_println!(
-            "[mm]   FAIL: after frees through the buddy lists, alloc_frame_zeroed gave \
-             frame {addr:#x} with byte {off} = {byte:#04x}: what a free block held \
-             reached the next owner"
+            "[mm]   FAIL: after frees through the buddy lists, frame {addr:#x}, recorded as \
+             zeroed, has byte {off} = {byte:#04x}: what a free block held would reach \
+             alloc_frame_zeroed's next owner"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if recorded == 0 {
+        serial_println!(
+            "[mm]   FAIL: none of {back} frames taken back from the buddy lists was one \
+             freed zeroed there: the check checked nothing"
         );
         return Err(KernelError::InternalError);
     }
@@ -3848,6 +3916,7 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
         return Err(KernelError::InternalError);
     }
     through_buddy?;
+    note_freed_spans_words()?;
 
     // A free that does not zero records that it did not: with the mode off,
     // a written frame freed is not handed out as zeroed.

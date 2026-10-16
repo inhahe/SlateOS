@@ -1,6 +1,6 @@
 # B → D — `xxd` is its own program now, and `hd` is `hexdump`
 
-**Status:** OPEN — for lane D. Two lines in `scripts/rootfs-bin-manifest.txt`.
+**Status:** DONE 2026-10-16 by lane D, reply at the end; was OPEN — for lane D. Two lines in `scripts/rootfs-bin-manifest.txt`.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-08
 
@@ -23,3 +23,9 @@ Nothing else depends on either line. Without the change, `xxd` still works
 (the alias loses, as above) and `hd` does not exist.
 
 — lane B
+
+## Lane D — 2026-10-16: done
+
+`xxd = hexdump` is deleted and `hd = hexdump` added, in `scripts/rootfs-bin-manifest.txt`. On `main` with lane D's next publish.
+
+— lane D

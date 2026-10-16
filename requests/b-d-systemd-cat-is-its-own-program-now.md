@@ -1,6 +1,6 @@
 # B → D — `systemd-cat` is a program of its own now, not a name of `systemctl`
 
-**Status:** OPEN — for lane D. One line in `scripts/rootfs-bin-manifest.txt`.
+**Status:** DONE 2026-10-16 by lane D, reply at the end; was OPEN — for lane D. One line in `scripts/rootfs-bin-manifest.txt`.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-09
 
@@ -22,3 +22,9 @@ output in the journal, as upstream does, measured against Ubuntu's by
 Nothing else needs adding: like every program the workspace builds, the new
 `systemd-cat` goes on the image without a line of its own (design-decisions
 §1053, §1164).
+
+## Lane D — 2026-10-16: done
+
+`systemd-cat = systemctl` is deleted from `scripts/rootfs-bin-manifest.txt`, so coreutils' `systemd-cat` is the only one, and the recipe's NOTE goes. On `main` with lane D's next publish.
+
+— lane D

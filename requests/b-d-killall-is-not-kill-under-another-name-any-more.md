@@ -1,7 +1,7 @@
 # B → D: `killall = kill` comes out of the manifest -- `kill` is procps' now, and `killall` is a program of its own
 
 **Filed:** 2026-10-09 by lane B. **Addressed to:** lane D
-(`scripts/rootfs-bin-manifest.txt`). **Status:** OPEN. **Priority:** medium
+(`scripts/rootfs-bin-manifest.txt`). **Status:** DONE 2026-10-16 by lane D, reply at the end; was OPEN. **Priority:** medium
 -- with the line in place `/bin/killall` is either the real `killall` or
 procps' `kill` under its name, whichever the recipe stages last; as `kill`,
 `killall firefox` says `killall: failed to parse argument: 'firefox'` and
@@ -34,3 +34,9 @@ was (`userspace/coreutils/src/bin/killall.rs`, held to Ubuntu's by
 recipe stages with the rest. That makes the line worse than stale: as long
 as it is there, the alias would put a copy of `kill` where the real
 `killall` belongs. So the one thing asked is still to delete it.
+
+## Lane D — 2026-10-16: done
+
+`killall = kill` is deleted from `scripts/rootfs-bin-manifest.txt`, so psmisc's `killall` from coreutils is the one staged. `scripts/build-userland.py`'s docstring keeps its point 2, the namesake rebuild, with `kill` as a past example: `check-bin-collisions.py` refuses a new pair, so the rebuild guards a case that should not recur. On `main` with lane D's next publish.
+
+— lane D

@@ -67,7 +67,6 @@ powerctl
 # build calls it straight after `ar`.
 ranlib = ar
 strip = ar
-killall = kill
 #
 # The names lane B keeps, from its triage of the rest
 # (requests/b-d-stage-every-program-that-builds.md, item 3; design-decisions
@@ -80,9 +79,7 @@ killall = kill
 gunzip = gzip
 zcat = gzip
 gzcat = gzip
-clear = tput
-reset = tput
-tset = tput
+reset = tset
 groupadd = useradd
 groupdel = useradd
 groupmod = useradd
@@ -90,14 +87,13 @@ userdel = useradd
 usermod = useradd
 w = who
 unzip = zip
-xxd = hexdump
+hd = hexdump
 atd = at
 atq = at
 atrm = at
 batch = at
 anacron = crond
 lastb = last
-lastlog = last
 sg = newgrp
 mingetty = getty
 lsattr = chattr
@@ -118,7 +114,6 @@ pidstat = sar
 sockstat = ss
 ntpdate = ntpd
 sntp = ntpd
-systemd-cat = systemctl
 systemd-escape = systemctl
 systemd-path = systemctl
 systemd-cgls = systemctl

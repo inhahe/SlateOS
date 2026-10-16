@@ -1,6 +1,6 @@
 # B → D — `lastlog` is its own program now
 
-**Status:** OPEN — for lane D. One line in `scripts/rootfs-bin-manifest.txt`.
+**Status:** DONE 2026-10-16 by lane D, reply at the end; was OPEN — for lane D. One line in `scripts/rootfs-bin-manifest.txt`.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-08
 
@@ -23,3 +23,9 @@ Nothing else depends on the line. Without the change, `lastlog` still works
 (the alias loses, as above).
 
 — lane B
+
+## Lane D — 2026-10-16: done
+
+`lastlog = last` is deleted from `scripts/rootfs-bin-manifest.txt`; `lastb = last` stays. On `main` with lane D's next publish.
+
+— lane D

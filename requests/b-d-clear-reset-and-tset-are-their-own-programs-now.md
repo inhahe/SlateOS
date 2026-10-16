@@ -1,6 +1,6 @@
 # B → D — `clear` and `tset` are programs of their own now, and `reset` is `tset`
 
-**Status:** OPEN — for lane D. Three lines in `scripts/rootfs-bin-manifest.txt`.
+**Status:** DONE 2026-10-16 by lane D, reply at the end; was OPEN — for lane D. Three lines in `scripts/rootfs-bin-manifest.txt`.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-08
 
@@ -29,3 +29,9 @@ terminal's hardware tab stops). It needs no line: every program the
 workspace builds goes on the image (design-decisions §1053).
 
 — lane B
+
+## Lane D — 2026-10-16: done
+
+`clear = tput` and `tset = tput` are deleted, and `reset = tput` is `reset = tset`, in `scripts/rootfs-bin-manifest.txt`. On `main` with lane D's next publish.
+
+— lane D

@@ -30,12 +30,14 @@ that is not the one meant:
    userspace/.cargo/config.toml, and without it cleans the host's directory
    and reports 0 files.
 2. A name two packages build ships as the one built by the package named after
-   it: `kill` is both a coreutils binary and the `userspace/kill` crate, and
-   the second is the one meant (known-issues B-FORTY-TWO-BINARY-NAMES-ARE-
-   BUILT-BY-TWO-PACKAGES). Both write `release/kill`, and cargo keeps whichever
-   it linked last; building the namesake package again, alone, at the end
-   leaves its copy there, since cargo links a requested package's outputs
-   into `release/` whether it rebuilt them or found them fresh.
+   it, as `kill` once was both a coreutils binary and the `userspace/kill`
+   crate, the second the one meant (known-issues B-FORTY-TWO-BINARY-NAMES-ARE-
+   BUILT-BY-TWO-PACKAGES; resolved 2026-10-09, and `check-bin-collisions.py`
+   now refuses a new pair, so this guards a case that should not recur). Both
+   write `release/<name>`, and cargo keeps whichever it linked last; building
+   the namesake package again, alone, at the end leaves its copy there, since
+   cargo links a requested package's outputs into `release/` whether it
+   rebuilt them or found them fresh.
 3. `--keep-going`, so one package that does not build costs only its own
    programs -- and this exits 1 naming them, since a program that does not
    build is a defect in the tree, not a smaller image.

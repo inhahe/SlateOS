@@ -1448,6 +1448,39 @@ def gated_ran(serial: Serial, markers: tuple[str, ...]) -> dict[str, bool]:
     return {m: (m in serial.text) for m in markers}
 
 
+def gate_cache_summary(path: str) -> dict | None:
+    """What the gate cache did in a boot, from its outcome log (gate-cache.py's
+    `log`, one `label, outcome, seconds, kind, reason` row per gate): for each
+    outcome, and for each kind of reason a gate ran instead of replaying, how
+    many gates and how many seconds, as `[n, seconds]`. None when the log
+    cannot be read or holds no row. The kinds are what the weekly process
+    review counts across boots: which cause keeps the cache from serving."""
+    outcomes: dict[str, list] = {}
+    why: dict[str, list] = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 3:
+                    continue
+                try:
+                    secs = float(cols[2])
+                except ValueError:
+                    continue
+                for table, key in ((outcomes, cols[1]),
+                                   (why, cols[3] if len(cols) > 3 else "")):
+                    if key:
+                        slot = table.setdefault(key, [0, 0.0])
+                        slot[0] += 1
+                        slot[1] += secs
+    except OSError:
+        return None
+    if not outcomes:
+        return None
+    return {name: {k: [n, round(s, 1)] for k, (n, s) in sorted(table.items())}
+            for name, table in (("outcomes", outcomes), ("why", why))}
+
+
 def build_record(serial: Serial | None, verdict: str, args,
                  host_fail: str | None = None) -> dict:
     # `--commit`/`--branch` win over asking git, and boot-test.sh always passes
@@ -1534,6 +1567,10 @@ def build_record(serial: Serial | None, verdict: str, args,
         rec["gates_seconds"] = args.gates_seconds
     if args.script_seconds is not None:
         rec["script_seconds"] = args.script_seconds
+    if args.gate_cache_log:
+        summary = gate_cache_summary(args.gate_cache_log)
+        if summary is not None:
+            rec["gate_cache"] = summary
     # Disk pressure, which is a cause of boot-test failures this file could not
     # previously distinguish from kernel failures.
     #
@@ -2348,6 +2385,14 @@ def main(argv=None) -> int:
                              "build together, which is exactly the conflation "
                              "this field exists to end. The first rows to "
                              "carry it will say.")
+    parser.add_argument("--gate-cache-log", default="", metavar="PATH",
+                        help="the gate cache's outcome log for this run "
+                             "(GATE_CACHE_LOG): the row then carries "
+                             "`gate_cache`, the gates per outcome and per kind "
+                             "of reason they ran instead of replaying, with "
+                             "their seconds -- what keeps the cache from "
+                             "serving, counted where every boot can be added "
+                             "up. Absent when the cache was off.")
     parser.add_argument("--script-seconds", type=float, default=None,
                         help="seconds the whole boot-test.sh run took, start "
                              "to finish. `wall_seconds` is QEMU alone, so "

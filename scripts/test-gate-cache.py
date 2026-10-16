@@ -418,11 +418,23 @@ def cases(fx: Fixture) -> None:
     env = dict(os.environ, GATE_CACHE_LOG=logf)
     fx.run(scratch, env=env)  # its entry is current, so this is a hit
     fx.run(writer, env=env)
+    logged_input = fx.write("data/logged.txt", "one\n")
+    logged = fx.checker(f"""
+        print(open({logged_input!r}, encoding="utf-8").read().strip())
+    """)
+    fx.run(logged, env=env)
+    fx.write("data/logged.txt", "two\n")
+    fx.run(logged, env=env)
     with open(logf, encoding="utf-8") as fh:
         rows = [ln.rstrip("\n").split("\t") for ln in fh]
     check("each invocation logs its label and outcome",
-          [r[:2] for r in rows], [["t", "HIT"], ["t", "SKIP"]])
+          [r[:2] for r in rows], [["t", "HIT"], ["t", "SKIP"], ["t", "MISS"], ["t", "MISS"]])
     check("...and how long it took", all(float(r[2]) >= 0 for r in rows), True)
+    check("...and why a gate ran, as a kind to count and the reason itself",
+          [(r[3], r[4].endswith("logged.txt changed")) for r in rows],
+          [("", False), ("writes outside its own directories", False),
+           ("no entry", False), ("a file it read changed", True)])
+    reason_kinds()
 
     # --- run_checker routes a Python gate through the cache, and nothing else ----
     import msysbash
@@ -596,6 +608,40 @@ def entry_for(fx: Fixture, script: str) -> dict:
             e["_path"] = path
             return e
     raise AssertionError(f"no cache entry for {script}")
+
+
+def reason_kinds() -> None:
+    """Every reason the driver and the tracer give, as each words it, is
+    counted under a kind without a path, a date or a value in it -- so the
+    same cause adds up across gates and boots -- and one nobody wrote a
+    pattern for is "other", not lost."""
+    import srcload
+    gc = srcload.load(DRIVER, "gate_cache_kinds")
+    path = os.path.join(tempfile.gettempdir(), "some dir", "x.py")
+    samples = {
+        "no entry": "no entry",
+        "recorded on 2026-10-15, and entries last one UTC day": "recorded on another UTC day",
+        "environment variable LANE changed": "environment variable LANE",
+        f"the listing of {path} changed": "a directory listing changed",
+        f"what an import of json finds in {path} changed": "what an import finds changed",
+        f"isfile of {path} changed": "isfile of a path changed",
+        f"{path} changed": "a file it read changed",
+        f"{path} changed while the gate ran": "an input changed while the gate ran",
+        "git ls-files -z answers differently": "git ls-files -z answers differently",
+        "runs 'cargo.exe', whose reads cannot be seen": "runs cargo",
+        "a shell command line: ['ls']": "a shell command line",
+        f"writes {path}, outside the directories the run created": "writes outside its own directories",
+        f"open on {path}, outside the directories the run created": "open outside its own directories",
+        "socket.connect: an input the tracer cannot see": "socket.connect: an input the tracer cannot see",
+        "git status against a repository the run did not create":
+            "git status on a repository the run did not create",
+        f"shadowed: {path}* would shadow the json module the tracer loaded first":
+            "a file would shadow a module the tracer loaded",
+        "traced exit 1, untraced 0": "traced and untraced runs disagreed",
+        "something nobody has written yet": "other",
+    }
+    got = {r: gc.reason_kind(r) for r in samples}
+    check("each reason is counted under its kind", got, samples)
 
 
 def _lookup_reason(fx: Fixture, entry: dict) -> str:

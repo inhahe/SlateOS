@@ -896,6 +896,9 @@ class _Args:
     # argparse's default: boot-test.sh passes --failed-check only when a check
     # after the marker failed the boot.
     failed_check = ""
+    # argparse's default: boot-test.sh passes --gate-cache-log only when the
+    # gate cache was on and logged something.
+    gate_cache_log = ""
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.
@@ -2519,6 +2522,39 @@ def test_a_backwards_clock_is_shown_not_hidden(bh):
     rec = {"script_seconds": 100.0, "gates_seconds": 600.0}
     check("the contradiction survives to the reader",
           dict(bh.phase_breakdown(rec))["other"], -500.0)
+
+
+def test_the_gate_cache_is_counted_on_the_row(bh, tmpdir):
+    """A boot's row says what the gate cache did and why gates ran: per
+    outcome and per kind of reason, gates and seconds. Rows written before
+    reasons were logged (three columns) still count their outcomes, and a
+    torn row counts nothing."""
+    rows = [
+        ["a", "HIT", "0.5", "", ""],
+        ["b", "MISS", "10.0", "recorded on another UTC day",
+         "recorded on 2026-10-15, and entries last one UTC day"],
+        ["c", "MISS", "20.0", "recorded on another UTC day",
+         "recorded on 2026-10-15, and entries last one UTC day"],
+        ["d", "UNCACHEABLE", "30.0", "runs cargo", "runs 'cargo.exe', whose reads cannot be seen"],
+        ["e", "SKIP", "5.25", "runs cargo", "runs 'cargo.exe', whose reads cannot be seen"],
+        ["f", "MISS", "1.0"],
+        ["torn line"],
+    ]
+    log = os.path.join(tmpdir, "gate-cache.tsv")
+    with open(log, "w", encoding="utf-8", newline="\n") as fh:
+        fh.writelines("\t".join(r) + "\n" for r in rows)
+    args = _Args()
+    args.gate_cache_log = log
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("the row counts the cache's outcomes, with their seconds",
+          rec.get("gate_cache", {}).get("outcomes"),
+          {"HIT": [1, 0.5], "MISS": [3, 31.0], "SKIP": [1, 5.2], "UNCACHEABLE": [1, 30.0]})
+    check("...and why gates ran, by kind",
+          rec.get("gate_cache", {}).get("why"),
+          {"recorded on another UTC day": [2, 30.0], "runs cargo": [2, 35.2]})
+    args.gate_cache_log = os.path.join(tmpdir, "never-written.tsv")
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("no log, no field", "gate_cache" in rec, False)
 
 
 def main():

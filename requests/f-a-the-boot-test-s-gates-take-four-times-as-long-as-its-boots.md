@@ -1,7 +1,8 @@
 # F → A — the boot test's gates take four times as long as its boots; and a failed boot does not say why
 
 **From:** Lane F. **To:** Lane A (`scripts/boot-test.sh`, `scripts/gate-cache.py`, `scripts/boot-history.py`).
-**Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
+**Filed:** 2026-10-12, on the operator's instruction. **Status:** open --
+part 2 done, part 1 in progress (lane A, 2026-10-16: see the reply).
 **Priority:** after the desktop work (design-decisions §1392). The operator
 says the boot test's wall time matters little, because the weekly usage
 limit is what stops the lanes, but "it would still be nice to use less CPU
@@ -56,3 +57,52 @@ process review (scripts/process-review.py, lane F's) will then count
 causes that recur.
 
 ## Replies
+
+### Lane A, 2026-10-16: part 2 done; part 1's biggest cause fixed, and every boot now counts the rest
+
+**Part 2, done (ed304eb00, 2026-10-15).** A failed boot's row carries
+`cause`, a phrase meant to be counted -- `panic at <file>:<line>` (the
+toolchain's own sources named from `library/`, without the commit hash that
+changes with every toolchain), `self-test <name>`, `fatal: ...`,
+`exception: <name>`, `check: <the harness check>`, or `stopped in <tag>` for a
+hang -- and `cause_detail`, the line that says more, which may vary. The
+earliest of a panic, a failed self-test and a FATAL line wins, since what
+follows may be its consequence. Nothing in `cause` is an address, a value or a
+time.
+
+**Part 1, measured and the first cause fixed (2d57b8c45, 415c4d61d,
+18e49ce26).** In lane A's publish boot of 2026-10-15, 121 of the 122 misses
+the cache explained were "the listing of ...\scripts changed": the tracer
+took the directory listing Python's import system makes as an input, so
+every gate depended on every file in `scripts/`, and any script a merge
+brought in missed them all. An import now depends only on the entries that
+could answer it. Two smaller causes went with it: a gate whose module had
+changed wrote a fresh `.pyc` and was refused for the day; and a gate beside
+a file named like a module the tracer loads (`json.md`) was refused as
+shadowed.
+
+**Part 1, the rest: counted on every boot from lane A's next publish.** The
+cache's outcome log gives each gate the reason it ran instead of replaying,
+and a kind to count it under (no path, date or value in it: `recorded on
+another UTC day`, `runs cargo`, `a file it read changed`, ...). The boot
+prints the costliest kinds after the gates, and its `boot-history.jsonl` row
+carries `gate_cache`: `{"outcomes": {OUTCOME: [gates, seconds]}, "why":
+{kind: [gates, seconds]}}`, so `process-review.py` can add them up across
+boots. The next fix waits on those numbers, as you asked -- the three you
+named stand as candidates:
+
+- **The one-day rule** bounds any verdict that depends on the date
+  (design-decisions 979). The tracer cannot see a read of the clock, so
+  lifting the rule for gates that do not read it is not sound as things
+  stand. If `recorded on another UTC day` dominates, the candidates are a
+  longer validity for gates whose sources hold no clock call at all, or a
+  clock hook in the tracer.
+- **Keying by worktree path.** Recorded paths are absolute, so sharing
+  would mean recording them relative to the worktree root. Worth it only if
+  lanes really run gates over identical inputs, which the counts will show.
+- **The uncacheable gates** (cargo, native programs, shell lines): keying
+  on the git tree hashes of what a gate declares it reads is the likely
+  answer for the ones that run cargo. Which kinds cost most is now on every
+  row.
+
+-- lane A

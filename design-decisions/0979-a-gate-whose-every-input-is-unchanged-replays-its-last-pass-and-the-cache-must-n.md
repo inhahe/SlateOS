@@ -30,6 +30,13 @@ continuous check on the cache itself.
     repositories.
 - A hit replays the stored output byte for byte and ends it with a
   `gate-cache: HIT` line.
+- Every gate's outcome is a row of the boot's outcome log. Since 2026-10-16
+  the row also gives the reason the gate ran instead of replaying (the miss's
+  or the refusal's), and a kind to count it under (`REASON_KINDS`: no path,
+  date or value in it). The boot prints the costliest kinds after the gates,
+  and its `boot-history.jsonl` row carries `gate_cache`: gates and seconds
+  per outcome and per kind (requests/f-a-the-boot-test-s-gates-take-four-
+  times-as-long-as-its-boots.md).
 
 **The rules, each one tested:**
 

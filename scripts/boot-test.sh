@@ -3497,6 +3497,13 @@ record_boot_outcome() {
     if [ -n "${GATES_SECONDS:-}" ]; then
         args+=(--gates-seconds "$GATES_SECONDS")
     fi
+    # What the gate cache did, and why the gates it did not serve ran: counted
+    # on the row so that a cause which keeps coming back can be added up
+    # across boots (requests/f-a-the-boot-test-s-gates-take-four-times-as-
+    # long-as-its-boots.md).
+    if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_LOG:-}" ] && [ -s "$GATE_CACHE_LOG" ]; then
+        args+=(--gate-cache-log "$GATE_CACHE_LOG")
+    fi
     if [ -n "${BOOT_TEST_START_EPOCH:-}" ]; then
         local script_secs=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
         # Guarded against a backwards clock for the same reason `wall` below is:
@@ -8858,6 +8865,18 @@ if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_LOG:-}" ] && [ -s "$GATE_C
             for (k in n) out = out sprintf("%s%d %s (%.0fs)", (out == "" ? "" : ", "), n[k], tolower(k), s[k])
             print out
         }' "$GATE_CACHE_LOG") ==="
+    # Why the gates the cache did not serve ran, costliest first: the reason
+    # each miss, refusal or remembered refusal gave, by kind (gate-cache.py's
+    # REASON_KINDS). Every row, with its full reason, stays in the log.
+    _gc_why=$(awk -F'\t' '$4 != "" { n[$4]++; s[$4] += $3 }
+        END { for (k in n) printf "%.0f\t%d\t%s\n", s[k], n[k], k }' "$GATE_CACHE_LOG" |
+        sort -t"$(printf '\t')" -k1,1nr | head -8)
+    if [ -n "$_gc_why" ]; then
+        echo "=== Gate cache: why gates ran, costliest first (every row in $GATE_CACHE_LOG) ==="
+        printf '%s\n' "$_gc_why" | while IFS="$(printf '\t')" read -r _gc_s _gc_n _gc_k; do
+            printf '    %6ss  %4s gates  %s\n' "$_gc_s" "$_gc_n" "$_gc_k"
+        done
+    fi
     if grep -q "VERIFY-FAILED" "$GATE_CACHE_LOG"; then
         # Named here, because the note itself ("VERIFY FAILED for ...") is the
         # gate's stderr, which a gate that passed keeps in its own log rather

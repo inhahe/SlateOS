@@ -57,6 +57,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,8 @@ import gatecache_trace as gt  # noqa: E402
 FORMAT = 2
 #: A file modified this close to the recording is always re-hashed.
 RACY_NS = 2_000_000_000
+#: The most of a reason a GATE_CACHE_LOG row keeps.
+LOG_REASON_WIDTH = 300
 #: The files whose behaviour an entry depends on besides its inputs.
 TOOL_FILES = ("gate-cache.py", "gatecache_trace.py", "gatecache_tee.py",
               os.path.join("gatecache_site", "sitecustomize.py"))
@@ -322,20 +325,85 @@ def store(store_dir: str, key: str, entry: dict) -> None:
     os.replace(tmp, path)
 
 
+#: What a reason a gate ran is counted as: `(pattern, kind)`, the first whose
+#: pattern matches the start of the reason winning, with `\N` in the kind
+#: taken from the pattern's group N. A kind keeps the words that say what to
+#: fix -- which variable, which program, which git command -- and never a
+#: path, a date or a value, so that the same cause reads the same on every
+#: boot and the boot test can add them up.
+REASON_KINDS: tuple[tuple[str, str], ...] = (
+    # Why a lookup found no usable entry (`validate`, `main`).
+    (r"no entry$", "no entry"),
+    (r"the entry is from another format$", "an entry of another format"),
+    (r"recorded on .*, and entries last one UTC day$", "recorded on another UTC day"),
+    (r"an earlier refusal to cache has expired$", "an earlier refusal expired"),
+    (r"unreadable entry", "an unreadable entry"),
+    (r"environment variable (\S+) (?:changed|differed)", r"environment variable \1"),
+    (r"the listing of .* changed while the gate ran$", "an input changed while the gate ran"),
+    (r"what an import of .* changed while the gate ran$", "an input changed while the gate ran"),
+    (r"the listing of .* changed$", "a directory listing changed"),
+    (r"what an import of \S+ finds in .* changed$", "what an import finds changed"),
+    (r"git's version or global/system configuration changed$", "git's configuration changed"),
+    (r"git (\S+(?: \S+)?) answers differently$", r"git \1 answers differently"),
+    (r".* changed while the gate ran$", "an input changed while the gate ran"),
+    (r"(exists|lexists|isfile|isdir|islink|full|lfull|access:\d+) of .* changed$",
+     r"\1 of a path changed"),
+    (r".* changed$", "a file it read changed"),
+    # Why a run could not be stored (`merge`, the tracer's refusals).
+    (r"runs '([^']+?)(?:\.exe)?'", r"runs \1"),
+    (r'runs "([^"]+?)(?:\.exe)?"', r"runs \1"),
+    (r"a shell command line", "a shell command line"),
+    (r"writes .*, outside the directories the run created$", "writes outside its own directories"),
+    (r"(\S+) on .*, outside the directories the run created$", r"\1 outside its own directories"),
+    (r"(\S+): an input the tracer cannot see$", r"\1: an input the tracer cannot see"),
+    (r"tracer fault on (\S+?):", r"a tracer fault on \1"),
+    (r"git (\S+) against a repository the run did not create$",
+     r"git \1 on a repository the run did not create"),
+    (r"git (\S+) reads an inherited stdin", r"git \1 reads an inherited stdin"),
+    (r"git .* left no record$", "a git command left no record"),
+    (r"a git command read more stdin", "a git command read more stdin than is kept"),
+    (r"a Python child ran untraced", "a Python child ran untraced"),
+    (r"walks the whole environment", "walks the whole environment"),
+    (r"left .* behind", "left a directory behind"),
+    (re.escape(gt.SHADOWED), "a file would shadow a module the tracer loaded"),
+    (r"a trace file was never finished", "a trace file was never finished"),
+    (r"the checker's own trace is missing", "the checker's own trace is missing"),
+    (r"the trace directory vanished", "the trace directory vanished"),
+    (r"traced exit -?\d+, untraced -?\d+$", "traced and untraced runs disagreed"),
+    (r"cached exit -?\d+, fresh exit -?\d+$", "a verification disagreed"),
+)
+
+
+def reason_kind(reason: str) -> str:
+    """The kind `reason` is counted under (`REASON_KINDS`); "other" when no
+    pattern knows it, the reason itself still in the log beside it."""
+    for pattern, kind in REASON_KINDS:
+        m = re.match(pattern, reason)
+        if m:
+            return m.expand(kind)
+    return "other"
+
+
 def note(text: str) -> None:
     sys.stderr.write(f"gate-cache: {text}\n")
     sys.stderr.flush()
 
 
-def log(outcome: str, label: str, started: float) -> None:
-    """One `<label>\\t<outcome>\\t<seconds>` row to GATE_CACHE_LOG, for the boot
-    test's end-of-gates summary. `>>` of a short line is atomic."""
+def log(outcome: str, label: str, started: float, reason: str = "") -> None:
+    """One `<label>\\t<outcome>\\t<seconds>\\t<kind>\\t<reason>` row to
+    GATE_CACHE_LOG, for the boot test's end-of-gates summary and the boot's
+    history row. `reason` says why the gate ran rather than replayed (a
+    miss's, a refusal's) and `kind` is what it is counted as (`reason_kind`);
+    both are empty for a run that needs no reason. `>>` of a short line is
+    atomic."""
     path = os.environ.get("GATE_CACHE_LOG")
     if not path:
         return
+    detail = " ".join(reason.split())[:LOG_REASON_WIDTH]
+    kind = reason_kind(detail) if detail else ""
     try:
         with open(path, "a", encoding="utf-8", newline="\n") as fh:
-            fh.write(f"{label}\t{outcome}\t{time.monotonic() - started:.1f}\n")
+            fh.write(f"{label}\t{outcome}\t{time.monotonic() - started:.1f}\t{kind}\t{detail}\n")
     except OSError:
         pass
 
@@ -393,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
             rc = subprocess.run(command).returncode
             note(f"SKIP {label} -- found uncacheable earlier today "
                  f"({entry['uncacheable'][0]}); run untraced.")
-            log("SKIP", label, started)
+            log("SKIP", label, started, entry["uncacheable"][0])
             return rc
         entry, reason = None, "an earlier refusal to cache has expired"
 
@@ -440,7 +508,7 @@ def main(argv: list[str] | None = None) -> int:
                          f"fresh exit {rc}\n")
         except OSError:
             pass
-        log("VERIFY-FAILED", label, started)
+        log("VERIFY-FAILED", label, started, f"cached exit {entry['rc']}, fresh exit {rc}")
         return rc
     head = (f"VERIFIED {label} -- a fresh run agreed with the cached verdict (exit {rc})"
             if verify else f"MISS {label} ({reason})")
@@ -472,10 +540,10 @@ def main(argv: list[str] | None = None) -> int:
                                        "scripts": script_digests(command)})
             except OSError:
                 pass
-            log("TRACED-RUN-DIFFERED", label, started)
+            log("TRACED-RUN-DIFFERED", label, started, f"traced exit {rc}, untraced {untraced}")
             return untraced
         note(f"{head}; exit {rc} (also untraced), not stored (only passes are).")
-        log(outcome, label, started)
+        log(outcome, label, started, "" if verify else reason)
         return rc
     try:
         if inputs is None:
@@ -498,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
             store(store_dir, key, {"format": FORMAT, "label": label, "argv": command,
                                    "utc_date": today(), "uncacheable": why,
                                    "scripts": script_digests(command)})
-            log("UNCACHEABLE", label, started)
+            log("UNCACHEABLE", label, started, why[0] if why else "")
             return verdict
         store(store_dir, key, {
             "format": FORMAT, "label": label, "argv": command, "cwd": cwd,
@@ -513,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
              f"{len(inputs['env'])} variables, {len(inputs['git_reads'])} git answers.")
     except OSError as exc:
         note(f"{head}; could not store ({exc}).")
-    log(outcome, label, started)
+    log(outcome, label, started, "" if verify else reason)
     return rc
 
 

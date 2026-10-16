@@ -45,3 +45,10 @@ hold none, and say `Credit balance is too low`.
 A positive test (the array is there) is better than a list of failure
 messages: the next way a session fails without reviewing will have a message
 nobody has seen yet.
+
+**Seen again by lane B, 2026-10-15** -- with a message nobody had seen yet,
+as foretold: `You've hit your session limit · resets 1:10pm
+(America/New_York)`, exit 0, for both runs of lane B's batch
+`8c86fe6ed..47b5788b9` at tier max (`20261015T115245-47b5788b9960-*`).
+`review-batch.py` again said `-- done` and printed the trailers; lane B read
+the reports, did not use the record, and is running the batch again.

@@ -79,6 +79,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rustlex  # noqa: E402
+
 # The calls that mean "this function drives an application event loop".
 #
 # `ShellSession::start` earns its place the hard way: on 2026-09-16 this gate
@@ -177,7 +180,29 @@ def function_bodies(text: str) -> list[tuple[int, str, str]]:
         i = j + 1 if j > at else at + 3
 
 
-def test_region(path: Path, text: str) -> int:
+def test_files_of(texts: dict[Path, str], root: Path) -> set[Path]:
+    """The files among `texts` that are test code as a whole: a crate's
+    integration tests (its `tests/` directory), and the modules a build of its
+    `src/` compiles only for its tests (`rustlex.test_module_files`, which
+    reads the `#[cfg(test)] mod x;` declarations as cargo resolves them). Not
+    by name: a test module is not always called `tests`, and a `tests.rs`
+    nothing gates is production."""
+    by_crate: dict[Path, dict[Path, str]] = {}
+    out: set[Path] = set()
+    for path, text in texts.items():
+        crate = crate_of(path, root)
+        if crate is None:
+            continue
+        if (crate / "tests") in path.parents:
+            out.add(path)
+        elif (crate / "src") in path.parents:
+            by_crate.setdefault(crate, {})[path] = text
+    for crate_texts in by_crate.values():
+        out |= rustlex.test_module_files(crate_texts)
+    return out
+
+
+def test_region(path: Path, text: str, test_files: set[Path]) -> int:
     """The offset after which a `fn` in `text` is test code, or -1 for none.
 
     Widening HARNESS_CALLS to a production API made scope matter. The original
@@ -187,8 +212,7 @@ def test_region(path: Path, text: str) -> int:
     shell's own `fn main` was reported as an unguarded test. A gate that tells
     you to put a test-only mutex in `main` has stopped describing the bug.
     """
-    name = path.name
-    if name == "tests.rs" or "tests" in path.parts:
+    if path in test_files:
         # A file that is nothing but tests -- the `#[cfg(test)]` that gates it
         # is on the `mod` line in the parent, not in here.
         return 0
@@ -222,6 +246,7 @@ def scan(root: Path) -> tuple[list[tuple[Path, int]], int, int]:
         if any(call in text for call in HARNESS_CALLS):
             harness_files.add(path)
 
+    test_files = test_files_of(texts, root)
     offenders: list[tuple[Path, int]] = []
     for path in sorted(harness_files):
         crate = crate_of(path, root)
@@ -229,7 +254,7 @@ def scan(root: Path) -> tuple[list[tuple[Path, int]], int, int]:
             # No writer in this binary: nothing to race against today. The
             # known-issues entry calls these latent, and they are not findings.
             continue
-        region = test_region(path, texts[path])
+        region = test_region(path, texts[path], test_files)
         if region < 0:
             continue
         funcs = [f for f in function_bodies(texts[path]) if f[0] >= 0]
@@ -333,6 +358,26 @@ def selftest() -> int:
     ])
     names = {n for _, n, _b in function_bodies(wrapper_src)}
     case("a helper and its caller are both seen", names == {"helper", "a_test_using_the_helper"})
+
+    # Which files are test code: by declaration, not by name.
+    crate = Path("probe")
+    texts = {
+        crate / "src" / "lib.rs": "#[cfg(test)]\nmod harness_checks;\nmod tests;\n",
+        crate / "src" / "harness_checks.rs": "fn t() {}",
+        crate / "src" / "tests.rs": "pub fn live() {}",
+        crate / "tests" / "integration.rs": "fn t() {}",
+    }
+    original_crate_of = globals()["crate_of"]
+    globals()["crate_of"] = lambda path, _root: crate
+    try:
+        found = test_files_of(texts, Path("."))
+    finally:
+        globals()["crate_of"] = original_crate_of
+    case("a test module of any name is test code",
+         crate / "src" / "harness_checks.rs" in found)
+    case("an ungated tests.rs is production", crate / "src" / "tests.rs" not in found)
+    case("an integration test is test code", crate / "tests" / "integration.rs" in found)
+    case("the crate root is production", crate / "src" / "lib.rs" not in found)
 
     failed = sum(1 for _, ok in cases if not ok)
     print(f"\nselftest: {len(cases) - failed}/{len(cases)} cases pass")

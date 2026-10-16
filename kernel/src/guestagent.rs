@@ -35,8 +35,9 @@
 //! | `sh <len>` | a kernel-shell command line | `ok <status> <len>`, then its output |
 //!
 //! Grants are `-` for none, or words joined by `,` from the C fixtures'
-//! vocabulary (`proc::spawn::ctest_generic_grant`: `file`, `secureboot`), so
-//! a program tried here holds what its fixture would at boot.
+//! vocabulary (`proc::spawn::ctest_generic_grant`: `file`, `secureboot`,
+//! `reload_kernel`, and a display server's `socket`, `input` and `service`),
+//! so a program tried here holds what it would at boot.
 //!
 //! Any request may be answered `err <len>` and a message instead. A request
 //! line the agent cannot read ends the exchange: it answers `err`, forgets
@@ -581,9 +582,16 @@ pub fn self_test() -> KernelResult<()> {
     if !matches!(parse(&long), Parsed::Invalid(_)) {
         return fail("an endless request line was waited on");
     }
+    let display_ok = grants_of(b"socket,input,service")
+        == Ok(alloc::vec![
+            (ResourceType::Socket, 0, Rights::READ | Rights::WRITE),
+            (ResourceType::InputDevice, 0, Rights::READ),
+            (ResourceType::Service, 0, Rights::WRITE),
+        ]);
     if grants_of(b"-").map(|g| g.len()) != Ok(0)
         || grants_of(b"file").map(|g| g.len()) != Ok(1)
         || grants_of(b"file,nonesuch").is_ok()
+        || !display_ok
     {
         return fail("grant words");
     }

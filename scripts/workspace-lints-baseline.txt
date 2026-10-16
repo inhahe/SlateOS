@@ -78,7 +78,6 @@ userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)
 userspace/irqbalance  # bare deny(clippy::all)
 userspace/jq
-userspace/kill
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex
@@ -122,7 +121,6 @@ userspace/service
 userspace/ss
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
-userspace/top
 userspace/traceroute
 userspace/udevd
 userspace/unshare  # bare deny(clippy::all)
@@ -130,7 +128,6 @@ userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
-userspace/watch
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

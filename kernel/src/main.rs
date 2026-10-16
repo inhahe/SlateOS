@@ -1400,41 +1400,23 @@ extern "C" fn kernel_main() -> ! {
             // that only exists while something is reading it.
             keyboard::start_usb_hid_poller();
 
-            // Step 20e-2: Add disk-backed swap alongside zram.
-            // Multi-device swap: zram (priority 100) handles most evictions with
-            // zero I/O latency; disk (priority 0) catches overflow when zram is full.
-            // In QEMU, a second virtio-blk disk is available as "vda" (or "vdb"
-            // if the boot disk is also virtio).  Try known swap device names.
-            //
-            // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
-            for swap_dev in &["vdb", "vda"] {
-                // Never claim a device that holds a filesystem: `init_disk` writes a
-                // raw swap area over whatever is there, so probing first is the
-                // difference between "use the spare disk" and "destroy the rootfs".
-                // The Path-Z glibc rootfs (rootfs.ext4) is attached as a virtio-blk
-                // device (typically vdb) and must survive untouched for the /mnt mount
-                // below — skip any device that already contains an ext4 superblock.
-                // A raw swap image (swap.img, all zeros) has no ext4 magic and is still
-                // selected here.
-                if fs::ext4::probe(swap_dev) {
-                    serial_println!(
-                        "[boot] Skipping {} for swap: holds an ext4 filesystem (reserved for rootfs)",
-                        swap_dev
-                    );
-                    continue;
-                }
-                if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
-                    serial_println!(
-                        "[boot] Disk swap added on {} (zram + disk tiered)",
-                        swap_dev
-                    );
-                    // Run the disk-specific self-test now that a disk backend
-                    // is active.
-                    // RAN-IF: "[swap] Running disk backend self-test..."
-                    mm::swap::self_test_disk();
-                    break;
-                }
+            // Step 20e-2: Disk swap behind zram: every whole device that says
+            // it is swap -- Linux's `mkswap` header, which the boot test writes
+            // on its swap.img (`scripts/mkswap.py`) -- and nothing else.
+            // zram (priority 100) takes evictions first; a disk area, -2 and
+            // down, the overflow. Swap files and partitions are userspace's
+            // to turn on (`swapon`).
+            let swap_areas = mm::swap::activate_signed_devices();
+            if swap_areas > 0 {
+                serial_println!("[boot] Disk swap: {} area(s) behind zram", swap_areas);
+                // RAN-IF: "[swap] Running disk backend self-test..."
+                mm::swap::self_test_disk();
             }
+            // The areas themselves, on RAM disks of the test's own: whatever
+            // disks this machine has.
+            selftest::dispatch_debug("Swap areas", selftest::Severity::Integrity, || {
+                mm::swap::self_test_areas()
+            });
 
             // Step 20f: Mount root filesystem.
             // Try to mount a FAT filesystem from the first block device.
@@ -1504,6 +1486,12 @@ extern "C" fn kernel_main() -> ! {
                     }
                 }
             }
+
+            // A swap file on that ext4, turned on and off (`mm::swapctl`): skips
+            // itself without one.
+            selftest::dispatch_debug("Swap file", selftest::Severity::Integrity, || {
+                mm::swapctl::self_test_file()
+            });
 
             // Probe for ISO 9660 filesystems (CD-ROM images).
             // In QEMU, an ISO image can be attached as a virtio-blk device.

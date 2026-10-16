@@ -489,6 +489,7 @@ impl Ps {
         ItemCtx {
             hertz: hz,
             boot_tics: items::cvt_u64(up * items::dbl(hz)),
+            pgs2k_shift: coreutils::procps::pids::pgs2k_shift(self.page_size),
             devname: Devname::new(self.root.clone()),
             root: self.root.clone(),
         }
@@ -845,9 +846,7 @@ fn effective_uid() -> u32 {
 
 /// `getpagesize`: `sysconf (_SC_PAGESIZE)`.
 fn page_size() -> i64 {
-    const SC_PAGESIZE: i32 = 30;
-    let p = libcall::conf::sysconf(SC_PAGESIZE);
-    if p > 0 { p } else { 4096 }
+    libcall::conf::page_size()
 }
 
 /// `ioctl (fd, TIOCGWINSZ)`: (columns, rows).

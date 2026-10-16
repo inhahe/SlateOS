@@ -388,6 +388,12 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             Ok(Some((rtype, id)))
         }
         ResourceType::Channel => {
+            // A program's lifecycle endpoint stays the program's: a child
+            // holding it too would take requests meant for the parent, and
+            // keep it open after the parent closed it (design-decisions 1569).
+            if crate::proc::lifecycle::is_program_end(id) {
+                return Ok(None);
+            }
             // Bump the end's holder count so parent and child each own one
             // reference to the same channel end -- same id, since the handle
             // *is* the end. A Linux-ABI channel descriptor inherited across

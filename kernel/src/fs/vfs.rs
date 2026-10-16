@@ -922,6 +922,25 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Claim the regular file `ino` for swap: answer the device sectors it
+    /// occupies, in file order -- every block of it allocated; a file with a
+    /// hole is `InvalidArgument` -- and refuse from now until
+    /// [`Self::swapfile_release`] to write it, change its size or its blocks,
+    /// or remove or rename it: the kernel writes those sectors directly,
+    /// past the filesystem, as Linux's `S_SWAPFILE` file is written.
+    /// `DeviceBusy` when it is claimed already. The default, for a filesystem
+    /// that cannot give a file's sectors, is `NotSupported`.
+    fn swapfile_claim(&mut self, ino: u64) -> KernelResult<SwapFile> {
+        let _ = ino;
+        Err(KernelError::NotSupported)
+    }
+
+    /// Let go of the file `ino` claimed by [`Self::swapfile_claim`]: it may
+    /// be written, resized, removed and renamed again.
+    fn swapfile_release(&mut self, ino: u64) {
+        let _ = ino;
+    }
+
     /// Return optional debug/statistics information.
     ///
     /// Default returns an empty string.  Filesystem implementations
@@ -1973,6 +1992,54 @@ pub fn dev_of(fs_id: u64) -> u32 {
 #[must_use]
 pub fn linux_dev_t(dev: u32) -> u64 {
     u64::from(dev & 0xff) | (u64::from(dev & 0xffff_ff00) << 12)
+}
+
+/// A regular file claimed for swap ([`FileSystem::swapfile_claim`]): where it
+/// is on its device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwapFile {
+    /// The block device its filesystem is on, by its name in the registry.
+    pub device: String,
+    /// Its sectors on the device, in file order: the first at the file's
+    /// start, each run contiguous on the device.
+    pub extents: Vec<crate::mm::swap::AreaExtent>,
+}
+
+/// A regular file in use as swap ([`Vfs::swapfile_claim_resolved`]): held as
+/// an open file is held -- its inode pinned, its mount refusing `umount`, a
+/// lazy unmount leaving the filesystem until the claim goes -- and claimed
+/// from its filesystem, which refuses to change it meanwhile.
+///
+/// Dropping it lets go: the caches' copies of the file are dropped first,
+/// since what swap wrote past them is newer and no write can have dirtied
+/// them while the claim stood; then the filesystem's claim; then the hold.
+pub struct SwapFileClaim {
+    hold: FileHold,
+    file: SwapFile,
+}
+
+impl SwapFileClaim {
+    /// The file's system-wide identity.
+    #[must_use]
+    pub fn id(&self) -> FileId {
+        self.hold.id()
+    }
+
+    /// Where the file is on its device.
+    #[must_use]
+    pub fn file(&self) -> &SwapFile {
+        &self.file
+    }
+}
+
+impl Drop for SwapFileClaim {
+    fn drop(&mut self) {
+        for e in &self.file.extents {
+            super::cache::invalidate_range(&self.file.device, e.dev_sector, e.sectors);
+        }
+        crate::mm::page_cache::invalidate_identity(self.hold.fs_id, self.hold.ino);
+        self.hold.fs.lock().swapfile_release(self.hold.ino);
+    }
 }
 
 /// A system-wide-unique identity for a filesystem object.
@@ -6859,6 +6926,45 @@ impl Vfs {
             return Ok(None);
         }
         Ok(Some(FileId { fs_id, ino }))
+    }
+
+    /// Claim the regular file at **already-resolved** `path` for swap: hold
+    /// it as an open file is held, claim it from its filesystem
+    /// ([`FileSystem::swapfile_claim`]), and leave what the kernel is about to
+    /// write past the filesystem as the only copy of those sectors -- the
+    /// device's dirty sectors are written back first (what `mkswap` wrote,
+    /// above all), then the sector cache's copies of the file's sectors and
+    /// the page cache's of its pages are dropped.
+    ///
+    /// The file must be one the caller could open for writing, as Linux's
+    /// `swapon` opens it: on a writable mount, writable by the caller, and
+    /// neither immutable nor append-only. (A container's read-only volumes
+    /// are the caller's to check, on the path before it was resolved.)
+    ///
+    /// # Errors
+    ///
+    /// The access checks', the lookup's, and the filesystem's
+    /// ([`FileSystem::swapfile_claim`]); `NotSupported` for a file that
+    /// cannot be held (no stable inode, or not a regular file); a failed
+    /// write-back, after which the claim is let go.
+    pub fn swapfile_claim_resolved(path: impl AsRef<Path>) -> KernelResult<SwapFileClaim> {
+        let path = path.as_ref();
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Write)?;
+        let hold = Self::open_object(path)?.ok_or(KernelError::NotSupported)?;
+        let file = {
+            let mut fs = hold.fs.lock();
+            attr_policy::may_open(ino_attrs(&mut **fs, hold.ino), true, false, false)?;
+            fs.swapfile_claim(hold.ino)?
+        };
+        let claim = SwapFileClaim { hold, file };
+        crate::mm::page_cache::invalidate_identity(claim.hold.fs_id, claim.hold.ino);
+        // On failure the claim is dropped, which lets go of it.
+        super::cache::flush(&claim.file.device)?;
+        for e in &claim.file.extents {
+            super::cache::invalidate_range(&claim.file.device, e.dev_sector, e.sectors);
+        }
+        Ok(claim)
     }
 
     // -------------------------------------------------------------------

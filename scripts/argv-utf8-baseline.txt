@@ -114,7 +114,6 @@ userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
-userspace/top/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/unshare/src/main.rs:argv-as-string
@@ -122,7 +121,6 @@ userspace/update-alternatives/src/main.rs:argv-as-string
 userspace/updatedb/src/main.rs:argv-as-string
 userspace/useradm/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:argv-as-string
-userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string

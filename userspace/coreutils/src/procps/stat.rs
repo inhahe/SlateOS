@@ -1,8 +1,9 @@
 //! `/proc/stat`, transcribed from procps-ng 4.0.4's `library/stat.c`: the
 //! summary `cpu` line's ticks and the system counters, with the one reading of
 //! history the library keeps so that a `DELTA` item is the difference of two
-//! reads. That is all of the file `vmstat` asks for; the per-CPU, per-core and
-//! NUMA tables `top` uses are not here.
+//! reads -- all `vmstat` asks for, as [`Stat`] -- and, for `top`, the same for
+//! every `cpuN` line, each CPU tied to its core from `/proc/cpuinfo`, as
+//! [`StatInfo`] (`procps_stat_reap`).
 //!
 //! # What the parse keeps from `stat_read_failed`
 //!
@@ -30,6 +31,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use super::scanf::{Scan, c_str};
 
@@ -290,6 +292,395 @@ fn baseline(previous: Reading, new: &Reading) -> Reading {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The per-CPU reading `top` makes: `procps_stat_reap`.
+// ---------------------------------------------------------------------------
+
+/// `STAT_SUMMARY_ID`: the summary stack's `STAT_TIC_ID`.
+pub const STAT_SUMMARY_ID: i32 = -11111;
+/// `STAT_NODE_INVALID`: `STAT_TIC_NUMA_NODE` of a CPU no node was found for.
+pub const STAT_NODE_INVALID: i32 = -22222;
+/// `STAT_TIC_TYPE_CORE`'s values: a power-saving core, and a full one (0 is
+/// "unsure").
+pub const E_CORE: i32 = 1;
+/// See [`E_CORE`].
+pub const P_CORE: i32 = 2;
+/// A core's second thread when it has only one.
+const VACANT: i32 = -1;
+/// `CORE_BUFSIZ`: `fgets` reads `/proc/cpuinfo` in pieces of at most one less
+/// than this.
+const CORE_BUFSIZ: usize = 1024;
+
+/// `struct stat_core`: one core, and the (at most two) CPUs on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Core {
+    id: i32,
+    kind: i32,
+    thread_1: i32,
+    thread_2: i32,
+}
+
+/// `stat_core_add`: `cpu` is on core `core`. A core seen with a second thread
+/// is a full core; a third replaces the second.
+fn core_add(cores: &mut Vec<Core>, core: i32, cpu: i32) {
+    if let Some(c) = cores.iter_mut().find(|c| c.id == core) {
+        if cpu == c.thread_1 || cpu == c.thread_2 {
+            return;
+        }
+        c.thread_2 = cpu;
+        c.kind = P_CORE;
+        return;
+    }
+    cores.push(Core {
+        id: core,
+        kind: 0,
+        thread_1: cpu,
+        thread_2: VACANT,
+    });
+}
+
+/// `stat_cores_check`: once any core has two threads, every core with one is
+/// taken for a power-saving core. Without any, all stay "unsure".
+fn cores_check(cores: &mut [Core]) {
+    if cores.iter().any(|c| c.kind == P_CORE) {
+        for c in cores.iter_mut().filter(|c| c.thread_2 == VACANT) {
+            c.kind = E_CORE;
+        }
+    }
+}
+
+/// `fgets (buf, CORE_BUFSIZ, fp)` over a whole file: each line, or each piece
+/// of at most `CORE_BUFSIZ - 1` bytes of a longer one.
+fn fgets_pieces(text: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let line_end = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(rest.len(), |nl| nl.saturating_add(1));
+        let take = line_end.min(CORE_BUFSIZ - 1);
+        let (piece, tail) = rest.split_at(take);
+        out.push(piece);
+        rest = tail;
+    }
+    out
+}
+
+/// `stat_cores_verify`'s walk of `/proc/cpuinfo`: each `processor` line, then
+/// its `core id` -- or, at a blank line before one, the CPU's own number. A
+/// processor whose entry the file ends inside is not added. A line that does
+/// not convert leaves the number from before it.
+fn cores_verify(text: &[u8], cores: &mut Vec<Core>) {
+    let pieces = fgets_pieces(c_str(text));
+    let mut it = pieces.into_iter();
+    let (mut a_cpu, mut a_core) = (0i32, 0i32);
+    'processors: while let Some(buf) = it.next() {
+        if buf.first() != Some(&b'p') || !contains(buf, b"processor") {
+            continue;
+        }
+        let mut sc = Scan::new(buf);
+        if let Some(v) = sc.lit(b"processor : ").and_then(|()| sc.int()) {
+            a_cpu = v;
+        }
+        loop {
+            let Some(buf) = it.next() else {
+                break 'processors;
+            };
+            if buf.first() == Some(&b'\n') {
+                a_core = a_cpu;
+                break;
+            }
+            if buf.first() != Some(&b'c') || !contains(buf, b"core id") {
+                continue;
+            }
+            let mut sc = Scan::new(buf);
+            if let Some(v) = sc.lit(b"core id : ").and_then(|()| sc.int()) {
+                a_core = v;
+            }
+            break;
+        }
+        core_add(cores, a_core, a_cpu);
+    }
+    cores_check(cores);
+}
+
+/// `strstr` as a test.
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `struct hist_tic`: one CPU's ticks now and at the reading before.
+#[derive(Clone, Copy, Debug, Default)]
+struct HistTic {
+    id: i32,
+    numa_node: i32,
+    new: Jifs,
+    old: Jifs,
+    /// The core this CPU is on, as an index into [`StatInfo::cores`].
+    core: Option<usize>,
+    saved_id: i32,
+}
+
+impl HistTic {
+    /// `stat_derive_unique`'s guard: when any of the five sums ran backwards
+    /// -- a CPU taken offline or brought back -- the old reading is replaced by
+    /// the new, so every delta is 0.
+    fn derive_unique(&mut self) {
+        let went_back = self
+            .new
+            .sums()
+            .iter()
+            .zip(self.old.sums())
+            .any(|(&now, before)| now < before);
+        if went_back {
+            self.old = self.new;
+        }
+    }
+}
+
+/// One stack of `top`'s `Stat_items`: a CPU's, a node's, or the summary's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TicStack {
+    /// `STAT_TIC_ID`: the CPU's number, a node's, or [`STAT_SUMMARY_ID`].
+    pub id: i32,
+    /// `STAT_TIC_NUMA_NODE`.
+    pub numa_node: i32,
+    /// `STAT_TIC_TYPE_CORE`: [`E_CORE`], [`P_CORE`], or 0.
+    pub type_core: i32,
+    /// `STAT_TIC_DELTA_USER` and the nine after it, in `/proc/stat`'s order:
+    /// user, nice, system, idle, iowait, irq, softirq, steal, guest,
+    /// guest_nice.
+    pub delta: [i64; 10],
+    /// `STAT_TIC_SUM_DELTA_USER`, `_SYSTEM`, `_IDLE`, `_BUSY` and `_TOTAL`.
+    pub sum_delta: [i64; 5],
+}
+
+impl TicStack {
+    /// `stat_assign_results` for `top`'s items, from one history entry and
+    /// the core it is on.
+    fn of(t: &HistTic, cores: &[Core]) -> Self {
+        let field = |j: &Jifs| {
+            [
+                j.user, j.nice, j.system, j.idle, j.iowait, j.irq, j.sirq, j.stolen, j.guest,
+                j.gnice,
+            ]
+        };
+        let (new, old) = (field(&t.new), field(&t.old));
+        let mut delta = [0i64; 10];
+        for (d, (n, o)) in delta.iter_mut().zip(new.iter().zip(old.iter())) {
+            *d = tic_delta(*n, *o);
+        }
+        let (ns, os) = (t.new.sums(), t.old.sums());
+        let mut sum_delta = [0i64; 5];
+        for (d, (n, o)) in sum_delta.iter_mut().zip(ns.iter().zip(os.iter())) {
+            *d = tic_delta(*n, *o);
+        }
+        Self {
+            id: t.id,
+            numa_node: t.numa_node,
+            type_core: t.core.and_then(|c| cores.get(c)).map_or(0, |c| c.kind),
+            delta,
+            sum_delta,
+        }
+    }
+}
+
+/// `struct stat_reaped`: the summary, every CPU, and every NUMA node.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reaped {
+    pub summary: TicStack,
+    pub cpus: Vec<TicStack>,
+    /// Always empty: the nodes come from `libnuma`, which SlateOS does not
+    /// have -- `numa_max_node()` is -1 without it, so there are none.
+    pub numa: Vec<TicStack>,
+}
+
+/// procps' `struct stat_info` as `top` uses it: `/proc/stat` held open, the
+/// summary's and every CPU's history, and the cores.
+#[derive(Debug)]
+pub struct StatInfo {
+    file: File,
+    sys_new: Sys,
+    cpu_hist: HistTic,
+    cpus: Vec<HistTic>,
+    n_cpus: usize,
+    cores: Vec<Core>,
+    cpuinfo: PathBuf,
+    cpu_count_hwm: usize,
+    /// `stat_read_failed`'s `static int once_sw`: the first CPU line ever
+    /// read is linked to its core whatever its number.
+    once_sw: bool,
+}
+
+impl StatInfo {
+    /// `procps_stat_new`: the cores found, then the priming read, so that the
+    /// first reap's deltas already mean something.
+    ///
+    /// # Errors
+    ///
+    /// `/proc/stat` could not be opened or read, or its summary line was
+    /// short. A missing `/proc/cpuinfo` is not an error: there are no cores.
+    pub fn new(root: &Path) -> io::Result<Self> {
+        let mut info = Self {
+            file: File::open(root.join("stat"))?,
+            sys_new: Sys::default(),
+            cpu_hist: HistTic {
+                id: STAT_SUMMARY_ID,
+                numa_node: STAT_NODE_INVALID,
+                ..HistTic::default()
+            },
+            cpus: Vec::new(),
+            n_cpus: 0,
+            cores: Vec::new(),
+            cpuinfo: root.join("cpuinfo"),
+            cpu_count_hwm: 0,
+            once_sw: false,
+        };
+        info.verify_cores();
+        info.read()?;
+        Ok(info)
+    }
+
+    /// `stat_cores_verify`, tolerant of a missing file.
+    fn verify_cores(&mut self) {
+        if let Ok(text) = std::fs::read(&self.cpuinfo) {
+            cores_verify(&text, &mut self.cores);
+        }
+    }
+
+    /// `stat_read_failed`: the whole file again, every reading moved to the
+    /// old one first.
+    fn read(&mut self) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut text = Vec::new();
+        self.file.read_to_end(&mut text)?;
+        let text = c_str(&text);
+
+        // The summary, over the reading before it.
+        self.cpu_hist.old = self.cpu_hist.new;
+        let reading = parse(
+            text,
+            &Reading {
+                cpu: self.cpu_hist.new,
+                sys: self.sys_new,
+            },
+        )?;
+        self.cpu_hist.new = reading.cpu;
+        self.cpu_hist.derive_unique();
+        self.sys_new = reading.sys;
+
+        // The CPU lines: each into the slot of its position, until the first
+        // line that is not one.
+        let mut at = text
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(text.len(), |nl| nl.saturating_add(1));
+        let mut i = 0usize;
+        loop {
+            if self.cpus.len() <= i {
+                self.cpus.push(HistTic::default());
+            }
+            let line = text.get(at..).unwrap_or_default();
+            let Some(slot) = self.cpus.get_mut(i) else {
+                break;
+            };
+            slot.old = slot.new;
+            slot.numa_node = STAT_NODE_INVALID;
+            if !scan_cpu_line(line, slot) {
+                break;
+            }
+            slot.derive_unique();
+            if !self.once_sw {
+                self.once_sw = true;
+                slot.saved_id = -1;
+            }
+            if slot.saved_id != slot.id {
+                slot.saved_id = slot.id;
+                let id = slot.id;
+                slot.core = self
+                    .cores
+                    .iter()
+                    .position(|c| id == c.thread_1 || id == c.thread_2);
+            }
+            i = i.saturating_add(1);
+            match line.iter().position(|&c| c == b'\n') {
+                Some(nl) => at = at.saturating_add(nl).saturating_add(1),
+                None => break,
+            }
+        }
+        self.n_cpus = i;
+        if self.cpu_count_hwm < self.n_cpus {
+            if self.cpu_count_hwm != 0 {
+                self.verify_cores();
+            }
+            self.cpu_count_hwm = self.n_cpus;
+        }
+        Ok(())
+    }
+
+    /// `procps_stat_reap`: read again, and the stacks. `numa_too` is
+    /// `STAT_REAP_NUMA_NODES_TOO`, which reaps no node here (see
+    /// [`Reaped::numa`]).
+    ///
+    /// # Errors
+    ///
+    /// The read failed, as [`StatInfo::new`] says.
+    pub fn reap(&mut self, numa_too: bool) -> io::Result<Reaped> {
+        let _ = numa_too; // no nodes without libnuma: both kinds reap alike
+        self.read()?;
+        let cpus = self
+            .cpus
+            .get(..self.n_cpus)
+            .unwrap_or_default()
+            .iter()
+            .map(|t| TicStack::of(t, &self.cores))
+            .collect();
+        Ok(Reaped {
+            summary: TicStack::of(&self.cpu_hist, &self.cores),
+            cpus,
+            numa: Vec::new(),
+        })
+    }
+}
+
+/// `sscanf (bp, "cpu%d %llu %llu …", &id, …)` into `slot`, writing each field
+/// as it converts -- so a line that stops short leaves what it did convert --
+/// and true when it made the eight conversions a CPU line needs.
+fn scan_cpu_line(line: &[u8], slot: &mut HistTic) -> bool {
+    let mut sc = Scan::new(line);
+    if sc.lit(b"cpu").is_none() {
+        return false;
+    }
+    let Some(id) = sc.int() else {
+        return false;
+    };
+    slot.id = id;
+    let mut n = 1usize;
+    let j = &mut slot.new;
+    for field in [
+        &mut j.user,
+        &mut j.nice,
+        &mut j.system,
+        &mut j.idle,
+        &mut j.iowait,
+        &mut j.irq,
+        &mut j.sirq,
+        &mut j.stolen,
+        &mut j.guest,
+        &mut j.gnice,
+    ] {
+        match sc.ulong() {
+            Some(v) => {
+                *field = v;
+                n = n.saturating_add(1);
+            }
+            None => break,
+        }
+    }
+    n >= 8
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -409,5 +800,101 @@ procs_blocked 1\n";
         let text = b"cpu 1 2 3 4 5 6 7 8 9 10\nintr 7\n\0ctxt 4\n";
         let r = parse(text, &Reading::default()).unwrap();
         assert_eq!((r.sys.intr, r.sys.ctxt), (7, 0));
+    }
+
+    /// Four CPUs on three cores: 0 and 1 share core 0, 2 and 3 have one each.
+    const CPUINFO: &[u8] = b"processor\t: 0\nvendor_id\t: X\ncore id\t\t: 0\n\n\
+processor\t: 1\ncore id\t\t: 0\n\n\
+processor\t: 2\ncore id\t\t: 4\n\n\
+processor\t: 3\nmodel name\t: no core id here\n\n";
+
+    #[test]
+    fn a_core_with_two_threads_is_full_and_then_lone_ones_save_power() {
+        let mut cores = Vec::new();
+        cores_verify(CPUINFO, &mut cores);
+        let kinds: Vec<(i32, i32)> = cores.iter().map(|c| (c.id, c.kind)).collect();
+        // CPU 3 has no `core id`, so its blank line makes it core 3.
+        assert_eq!(kinds, [(0, P_CORE), (4, E_CORE), (3, E_CORE)]);
+        // Without any core of two threads, every core is "unsure".
+        let mut alone = Vec::new();
+        cores_verify(
+            b"processor : 0\ncore id : 0\n\nprocessor : 1\ncore id : 1\n\n",
+            &mut alone,
+        );
+        assert!(alone.iter().all(|c| c.kind == 0));
+    }
+
+    #[test]
+    fn a_processor_the_file_ends_inside_is_not_added() {
+        let mut cores = Vec::new();
+        cores_verify(
+            b"processor : 0\ncore id : 0\n\nprocessor : 1\nvendor : X\n",
+            &mut cores,
+        );
+        assert_eq!(cores.len(), 1);
+    }
+
+    #[test]
+    fn a_cpu_line_converts_what_it_can_and_needs_eight() {
+        let mut slot = HistTic::default();
+        assert!(scan_cpu_line(b"cpu3 1 2 3 4 5 6 7 8 9 10\n", &mut slot));
+        assert_eq!((slot.id, slot.new.user, slot.new.gnice), (3, 1, 10));
+        let mut short = HistTic::default();
+        assert!(!scan_cpu_line(b"cpu7 1 2\n", &mut short));
+        assert_eq!((short.id, short.new.user, short.new.nice), (7, 1, 2));
+        assert!(!scan_cpu_line(b"intr 1 2 3 4 5 6 7 8 9\n", &mut short));
+    }
+
+    fn world(stat: &[u8]) -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("procps-stat");
+        std::fs::write(dir.path("stat"), stat).unwrap();
+        std::fs::write(dir.path("cpuinfo"), CPUINFO).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_reap_gives_each_cpu_its_change_and_its_core() {
+        let dir = world(
+            b"cpu  40 0 40 400 0 0 0 0 0 0\n\
+cpu0 10 0 10 100 0 0 0 0 0 0\ncpu1 10 0 10 100 0 0 0 0 0 0\n\
+cpu2 10 0 10 100 0 0 0 0 0 0\ncpu3 10 0 10 100 0 0 0 0 0 0\nintr 5\n",
+        );
+        let mut info = StatInfo::new(dir.dir()).unwrap();
+        std::fs::write(
+            dir.path("stat"),
+            b"cpu  50 0 44 440 0 0 0 0 0 0\n\
+cpu0 15 0 11 110 0 0 0 0 0 0\ncpu1 10 0 10 100 0 0 0 0 0 0\n\
+cpu2 10 0 13 115 0 0 0 0 0 0\ncpu3 15 0 10 115 0 0 0 0 0 0\nintr 9\n",
+        )
+        .unwrap();
+        let r = info.reap(false).unwrap();
+        assert_eq!(r.summary.id, STAT_SUMMARY_ID);
+        assert_eq!(r.summary.numa_node, STAT_NODE_INVALID);
+        assert_eq!(r.summary.type_core, 0);
+        assert_eq!(
+            (r.summary.delta[0], r.summary.delta[2], r.summary.delta[3]),
+            (10, 4, 40)
+        );
+        assert_eq!(r.summary.sum_delta[4], 54);
+        let ids: Vec<i32> = r.cpus.iter().map(|c| c.id).collect();
+        assert_eq!(ids, [0, 1, 2, 3]);
+        let types: Vec<i32> = r.cpus.iter().map(|c| c.type_core).collect();
+        assert_eq!(types, [P_CORE, P_CORE, E_CORE, E_CORE]);
+        assert_eq!(r.cpus[0].delta[0], 5);
+        assert_eq!(r.cpus[1].sum_delta[4], 0);
+        assert!(r.numa.is_empty());
+    }
+
+    #[test]
+    fn a_cpu_whose_ticks_ran_back_measures_from_itself() {
+        let dir = world(b"cpu  10 0 10 100 0 0 0 0 0 0\ncpu0 10 0 10 100 0 0 0 0 0 0\n");
+        let mut info = StatInfo::new(dir.dir()).unwrap();
+        std::fs::write(
+            dir.path("stat"),
+            b"cpu  10 0 10 100 0 0 0 0 0 0\ncpu0 50 0 10 90 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+        let r = info.reap(false).unwrap();
+        assert_eq!(r.cpus[0].delta, [0; 10], "idle ran back: every delta is 0");
     }
 }

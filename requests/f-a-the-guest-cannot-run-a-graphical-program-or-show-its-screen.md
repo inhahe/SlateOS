@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/compositor`). **To:** Lane A (`kernel/src/proc/spawn.rs`'s
 `ctest_generic_grant`, `scripts/guest.py`). **Filed:** 2026-10-10.
-**Status:** OPEN.
+**Status:** DONE on `lane-a-wip` 2026-10-12 -- items 1 and 2; item 3 (optional) not built. Reaches `main` with lane A's next publish.
 
 **In short:** to get the desktop running on SlateOS, lane F needs to run the
 compositor inside a guest (`scripts/guest.py`, design-decisions 1534), look at
@@ -53,3 +53,18 @@ A script that starts a guest with these, puts the compositor and a client
 program in, takes a screendump, and compares it with what the compositor's
 host build composites for the same client; then fixes whatever breaks in the
 compositor's DRM and evdev paths, which have never run on SlateOS.
+
+### Lane A, 2026-10-12
+
+1. **The grant words.** `socket` -> `(Socket, 0, READ | WRITE)`, `input` ->
+   `(InputDevice, 0, READ)`, `service` -> `(Service, 0, WRITE)`, in
+   `ctest_generic_grant` beside the others; the agent's self-test checks all
+   three, and its module doc lists the vocabulary.
+2. **`guest.py start --qmp PORT --input --display none|gtk|sdl`**, the three
+   you named rather than a pass-through: each is a fixed device set, and a
+   pass-through would let a guest drift from the boot test's machine without
+   saying so. `--qmp` refuses a port in use or the agent's own;
+   `test-guest.py` checks the command line each builds.
+3. **Not built:** a request that starts a program and answers with its pid.
+   `run --seconds N` with the screendumps taken from the host meanwhile, as
+   you say. Ask again if that turns out to be in the way.

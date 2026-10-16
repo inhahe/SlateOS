@@ -1,5 +1,35 @@
 ## Resolved — lane B
 
+- B-Q23 and B-Q26 -- answered by the operator; each is written up in
+  `design-decisions/` with the operator's words:
+  - B-Q23 What is SlateOS for? -- (§1073) **"Claude's recommendation"**, given
+    in chat to lane F on 2026-10-10: E, the installer's "what is this machine
+    for" question decides what is installed, with B as what "desktop" means --
+    everything but the six network servers. The image keeps everything until
+    an installer exists (§1053).
+  - B-Q26 Process Lasso's controls -- (§1074) **A**, in
+    `open-questions/answers.3.txt` on 2026-10-11: a program's remembered
+    settings gain the processors it may use, a cap on its processor use and a
+    profile while it runs (`roadmap-detailed.md` §1.3).
+
+- B-Q22, B-Q24 and B-Q25 -- answered by the operator on 2026-10-09, in
+  `open-questions/answers.txt` in the integration tree, relayed verbatim by
+  lane A; each is written up in `design-decisions/` with the operator's words:
+  - B-Q22 Which of the two `kill`s do we keep? -- (§1072) **the operator's own
+    design**: one `kill` that can ask a program to close (it may ask "save
+    first?"), to terminate (stop, asking nothing) or force it, sent as the
+    SlateOS message to a program that answers it and as a Linux signal to one
+    that does not; the same three in the task manager; every program taught
+    to answer the message. The parts are on the lanes' roadmaps.
+  - B-Q24 New passwords: SHA-512 or yescrypt? -- (§1070) **A, yescrypt**, as
+    Ubuntu, Debian and Fedora; done the same day.
+  - B-Q25 Copy an original's silence about lost output, or report it? --
+    (§1071) **A, report it**, in `which`, `ed`, `hostname` and `patch`; done
+    the same day.
+
+  The question of what SlateOS is for, the one lane B question left in the
+  queue, has no answer in the file -- a second `B-Q24` line may have been
+  meant for it -- and stays open; lane A has asked the operator.
 - B-Q8 through B-Q21 (not B-Q15) -- answered by the operator on 2026-09-27
   in lane F's session and relayed verbatim to lane B; each is written up in
   `design-decisions.md` with the operator's words:
@@ -31,9 +61,8 @@
     their WinDirStat fork, a debugger, a LithicBackup reimplementation) are now
     on the roadmap.
   - B-Q19 A standing rule for search-and-replace edits? -- (§1051) **yes, both
-    habits, in the `CLAUDE.md` of all three accounts** -- to be applied when
-    the operator confirms in lane B's own session, since the answer came by
-    relay.
+    habits, in the `CLAUDE.md` of all three accounts** -- applied 2026-10-09 by
+    lane A, at the operator's direction in lane A's session.
   - B-Q20 `shred --random-source` -- (§1052) the premise had gone: `shred` is now
     a port of GNU's with the option working; the one detail the operator
     proposed differently (restart a source file each pass) is kept as GNU's

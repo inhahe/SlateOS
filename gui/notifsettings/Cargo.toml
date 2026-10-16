@@ -22,6 +22,10 @@ settingsfile = { path = "../settingsfile" }
 # see gui/daywindow/src/lib.rs, which lists the three that already were.
 daywindow = { path = "../daywindow" }
 
+# A sound file of the user's, written into the file whatever bytes its path
+# holds -- the encoding `servicemenus` keeps a menu's file name in.
+pathcodec = { path = "../pathcodec" }
+
 [dev-dependencies]
 # `settingsfile::testing` for the tests that run against a scratch
 # configuration directory instead of the developer's own.

@@ -3582,8 +3582,15 @@ impl DesktopShell {
                     notifsettings::Importance::Silent
                 };
             }
+            // The pane's switch is on or off. Off is none; on again is the
+            // theme's sound -- unless the program had a sound of its own,
+            // which switching it on leaves as it was.
             (notif_pane::AppSettingKind::Sound, notif_pane::SettingValue::Bool(on)) => {
-                rule.sound = on;
+                rule.sound = match (on, rule.sound) {
+                    (false, _) => notifsettings::NotifSound::Off,
+                    (true, notifsettings::NotifSound::Off) => notifsettings::NotifSound::Theme,
+                    (true, kept) => kept,
+                };
             }
             (notif_pane::AppSettingKind::Banner, notif_pane::SettingValue::Bool(on)) => {
                 rule.banner = on;
@@ -13756,11 +13763,27 @@ impl DesktopShell {
         // banner (hear it now, read it later) is a choice a user can make.
         // Nor to the pane being shut: a card added to a list the user is
         // reading is easily missed.
+        // Its own sound when the program has one -- one of the theme's, or a
+        // file of the user's -- except for an urgent one, which keeps the
+        // warning: urgency is the one thing the sound says that the
+        // program's name does not.
         if !notif.silent
-            && rule.sound
+            && rule.sound.is_heard()
             && let Some(name) = event_sounds::for_notification(notif.priority)
         {
-            self.sound_event(name);
+            match &rule.sound {
+                notifsettings::NotifSound::Named(own)
+                    if notif.priority != notif_pane::NotifPriority::Urgent =>
+                {
+                    self.sound_event(own);
+                }
+                notifsettings::NotifSound::File(path)
+                    if notif.priority != notif_pane::NotifPriority::Urgent =>
+                {
+                    self.sound_file(path, name);
+                }
+                _ => self.sound_event(name),
+            }
         }
         let id = self.notifications.push_notification(notif);
         if let Some(mut shown) = pop_up {
@@ -15929,9 +15952,27 @@ impl DesktopShell {
     /// [`FLASH_SPACING_MS`](Self::FLASH_SPACING_MS) after the last.
     pub fn sound_event(&mut self, name: &str) {
         let choice = self.event_sounds.sound(&self.appearance, name);
+        self.alert_for(&choice);
+    }
+
+    /// Sound a file of the user's -- a program's notification sound -- in
+    /// place of the event `stand_in`, which sounds instead when the file
+    /// cannot be played ([`EventSounds::sound_file`](event_sounds::EventSounds::sound_file)),
+    /// with the visual alert [`sound_event`](Self::sound_event) gives.
+    pub fn sound_file(&mut self, path: &std::path::Path, stand_in: &str) {
+        let choice = self
+            .event_sounds
+            .sound_file(&self.appearance, path, stand_in);
+        self.alert_for(&choice);
+    }
+
+    /// The visual alert for a sound chosen as `choice`: a flash, for a user
+    /// who asked to see sounds, unless the choice is silence or the last
+    /// flash was too lately.
+    fn alert_for(&mut self, choice: &appearance::sounds::SoundChoice) {
         let alert = self.appearance.sounds.visual_alert;
         if alert == appearance::VisualAlert::Off
-            || choice == appearance::sounds::SoundChoice::Silent
+            || *choice == appearance::sounds::SoundChoice::Silent
             || self.flash_settling()
         {
             return;

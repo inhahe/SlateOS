@@ -530,7 +530,7 @@ impl NotificationPane {
             let mut card = Node::new(part, Role::ListItem, app.app_name.clone(), place(part));
             let on = app.importance != Importance::Silent;
             let mut said = vec![app.importance.label()];
-            if app.sound {
+            if app.sound.is_heard() {
                 said.push("sound");
             }
             if app.banner {

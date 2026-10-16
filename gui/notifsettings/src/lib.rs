@@ -42,7 +42,7 @@
 //! apps:
 //!   Mail:
 //!     importance: priority
-//!     sound: false
+//!     sound: bell        # true: the theme's; false: none; or a file's path
 //!     banner: true
 //! history:
 //!   days: 7
@@ -149,8 +149,9 @@ pub struct AppRule {
     /// boolean beside it would be a second way to say "no" that the consumer
     /// does not read.
     pub importance: Importance,
-    /// Whether its notifications make a sound.
-    pub sound: bool,
+    /// What its notifications sound like: the theme's notification sound,
+    /// none, one of the theme's sounds, or a file of the user's.
+    pub sound: NotifSound,
     /// Whether they appear as a banner, rather than only in the list.
     pub banner: bool,
 }
@@ -168,7 +169,7 @@ impl AppRule {
         Self {
             app_name: app_name.to_string(),
             importance: Importance::Normal,
-            sound: true,
+            sound: NotifSound::Theme,
             banner: true,
         }
     }
@@ -186,10 +187,66 @@ impl AppRule {
 
     /// This rule with sound and banner set.
     #[must_use]
-    pub fn with_alerts(mut self, sound: bool, banner: bool) -> Self {
+    pub fn with_alerts(mut self, sound: NotifSound, banner: bool) -> Self {
         self.sound = sound;
         self.banner = banner;
         self
+    }
+}
+
+/// What a program's notifications sound like (`apps.<name>.sound`).
+///
+/// One key in the file, as it always was: `true` is the theme's notification
+/// sound and `false` none, so a file written before this reads as it did; a
+/// word is one of the theme's sounds by its sound naming name (`bell`,
+/// `complete`, `message`); a path from `/` is a file of the user's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotifSound {
+    /// The theme's notification sound: what a program the user never
+    /// configured gets.
+    Theme,
+    /// None.
+    Off,
+    /// One of the theme's sounds, by its sound naming name -- the theme's
+    /// file of that name where it has one, else the built-in.
+    Named(String),
+    /// A sound file of the user's. One that cannot be read or decoded when a
+    /// notification arrives sounds as [`Theme`](Self::Theme) does, so a file
+    /// moved or deleted does not silence a program unasked.
+    File(std::path::PathBuf),
+}
+
+impl NotifSound {
+    /// Whether a notification under it makes a sound at all.
+    #[must_use]
+    pub fn is_heard(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The sound `text` in the file names, when it is not `true` or `false`:
+    /// a path from `/` -- or absolute where this runs, a drive's on a
+    /// development host -- as `pathcodec` writes one; a sound naming name --
+    /// lower-case letters, digits and `-`, not beginning with `-`; and the
+    /// theme's for anything else -- a relative path, an empty value, a word
+    /// with capitals -- since a misspelt sound is no reason to silence a
+    /// program, which the user did not ask for.
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        let text = text.trim();
+        let path = pathcodec::decode_path(text);
+        if text.starts_with('/') || path.is_absolute() {
+            return Self::File(path);
+        }
+        let is_name = !text.is_empty()
+            && !text.starts_with('-')
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if is_name {
+            Self::Named(text.to_owned())
+        } else {
+            Self::Theme
+        }
     }
 }
 
@@ -500,8 +557,14 @@ impl NotifSettings {
             {
                 rule.importance = v;
             }
-            if let Some(v) = doc.get_bool(&["apps", &name, "sound"]) {
-                rule.sound = v;
+            if let Some(on) = doc.get_bool(&["apps", &name, "sound"]) {
+                rule.sound = if on {
+                    NotifSound::Theme
+                } else {
+                    NotifSound::Off
+                };
+            } else if let Some(text) = doc.get_str(&["apps", &name, "sound"]) {
+                rule.sound = NotifSound::from_text(&text);
             }
             if let Some(v) = doc.get_bool(&["apps", &name, "banner"]) {
                 rule.banner = v;
@@ -560,7 +623,14 @@ impl NotifSettings {
         for rule in &self.apps {
             let name = rule.app_name.as_str();
             doc.set_str(&["apps", name, "importance"], rule.importance.yaml_name());
-            doc.set_bool(&["apps", name, "sound"], rule.sound);
+            match &rule.sound {
+                NotifSound::Theme => doc.set_bool(&["apps", name, "sound"], true),
+                NotifSound::Off => doc.set_bool(&["apps", name, "sound"], false),
+                NotifSound::Named(sound) => doc.set_str(&["apps", name, "sound"], sound),
+                NotifSound::File(path) => {
+                    doc.set_str(&["apps", name, "sound"], &pathcodec::encode_path(path));
+                }
+            }
             doc.set_bool(&["apps", name, "banner"], rule.banner);
         }
         doc.set_i64(&["history", "days"], i64::from(self.history.days));
@@ -937,7 +1007,7 @@ mod tests {
     fn an_unconfigured_program_gets_the_same_answer_focus_assist_already_gave() {
         let s = NotifSettings::default();
         assert_eq!(s.rule_for("Mail").importance, Importance::Normal);
-        assert!(s.rule_for("Mail").sound);
+        assert_eq!(s.rule_for("Mail").sound, NotifSound::Theme);
         assert!(s.rule_for("Mail").banner);
     }
 
@@ -977,12 +1047,55 @@ mod tests {
             s.set_rule(AppRule::new(name));
         }
         let mut edited = AppRule::new("Mail");
-        edited.sound = false;
+        edited.sound = NotifSound::Off;
         s.set_rule(edited);
 
         let order: Vec<&str> = s.apps.iter().map(|r| r.app_name.as_str()).collect();
         assert_eq!(order, vec!["Mail", "Chat", "Updates"]);
-        assert!(!s.rule_for("Mail").sound);
+        assert_eq!(s.rule_for("Mail").sound, NotifSound::Off);
+    }
+
+    /// **A program's sound is one key, read as it was written**: `true` and
+    /// `false` as they always were, a sound's name, and a file's path --
+    /// whatever its bytes -- each back as itself; and a value that is none of
+    /// these is the theme's sound, never silence.
+    #[test]
+    fn a_programs_sound_reads_back_as_it_was_written() {
+        // A space and a letter beyond ASCII; a path's every byte is
+        // `pathcodec`'s to keep, and its own tests hold that.
+        let file = std::path::PathBuf::from("/home/u/chime \u{e9}t\u{e9}.oga");
+        let mut before = NotifSettings::default();
+        for (app, sound) in [
+            ("Theme", NotifSound::Theme),
+            ("Off", NotifSound::Off),
+            ("Bell", NotifSound::Named("bell".to_owned())),
+            ("Mine", NotifSound::File(file.clone())),
+        ] {
+            let mut rule = AppRule::new(app);
+            rule.sound = sound;
+            before.set_rule(rule);
+        }
+        let mut doc = Document::new();
+        before.write_into(&mut doc);
+        let text = doc.to_text();
+        assert!(
+            text.contains("sound: true") && text.contains("sound: false"),
+            "{text}"
+        );
+        assert!(text.contains("sound: bell"), "{text}");
+        let after = NotifSettings::read_from(&Document::parse(&text));
+        assert_eq!(after.rule_for("Theme").sound, NotifSound::Theme);
+        assert_eq!(after.rule_for("Off").sound, NotifSound::Off);
+        assert_eq!(
+            after.rule_for("Bell").sound,
+            NotifSound::Named("bell".to_owned())
+        );
+        assert_eq!(after.rule_for("Mine").sound, NotifSound::File(file));
+
+        for odd in ["Bell", "sounds/bell.oga", "-x", "", "bell!"] {
+            assert_eq!(NotifSound::from_text(odd), NotifSound::Theme, "{odd:?}");
+        }
+        assert!(!NotifSound::Off.is_heard() && NotifSound::Theme.is_heard());
     }
 
     #[test]
@@ -990,7 +1103,7 @@ mod tests {
         let mut before = NotifSettings::default();
         let mut mail = AppRule::new("Mail");
         mail.importance = Importance::Critical;
-        mail.sound = false;
+        mail.sound = NotifSound::Off;
         before.set_rule(mail);
         before.set_rule(AppRule::new("Chat"));
 

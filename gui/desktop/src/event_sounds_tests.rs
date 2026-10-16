@@ -198,6 +198,56 @@ fn a_programs_rule_turns_its_sound_off() {
     });
 }
 
+/// **A program's own sound is what its notifications make**: one of the
+/// theme's by its name, or a file of the user's -- recorded under the event
+/// it stands in for -- and an urgent one keeps the warning whatever the
+/// program chose. The pane's switch turned off and on again gives the
+/// theme's: off forgets the program's own, as the switch can say no more.
+#[test]
+fn a_program_sounds_as_its_rule_says() {
+    settingsfile::testing::with_scratch_config("event-sounds-own", |root| {
+        let chime = root.join("chime.oga");
+        let mut file = notifsettings::NotifFile::load();
+        for (app, sound) in [
+            ("Chat", notifsettings::NotifSound::Named("bell".to_owned())),
+            ("Mail", notifsettings::NotifSound::File(chime.clone())),
+        ] {
+            let mut rule = notifsettings::AppRule::new(app);
+            rule.sound = sound;
+            file.settings.set_rule(rule);
+        }
+        file.save().expect("save the rules");
+        let mut s = DesktopShell::new(1920, 1080);
+        s.load_notification_rules();
+
+        s.notify(notif("Chat", NotifPriority::Normal));
+        s.notify(notif("Mail", NotifPriority::Normal));
+        s.notify(notif("Chat", NotifPriority::Urgent));
+        assert_eq!(heard(&s), ["bell", "message-new-instant", "dialog-warning"]);
+        let mail = s.event_sounds.recent().nth(1).expect("Mail's");
+        assert_eq!(
+            mail.choice,
+            appearance::sounds::SoundChoice::File(chime),
+            "the file was what was chosen"
+        );
+
+        s.apply_app_notification_setting("Chat", AppSettingKind::Sound, SettingValue::Bool(false));
+        s.notify(notif("Chat", NotifPriority::Normal));
+        s.apply_app_notification_setting("Chat", AppSettingKind::Sound, SettingValue::Bool(true));
+        s.notify(notif("Chat", NotifPriority::Normal));
+        assert_eq!(
+            heard(&s),
+            [
+                "bell",
+                "message-new-instant",
+                "dialog-warning",
+                "message-new-instant"
+            ],
+            "off, then on again: the theme's, the bell having been switched off"
+        );
+    });
+}
+
 /// **One that arrives while the pane is open still sounds**: it pops up no
 /// toast, the pane showing it already, but a card added to a list being
 /// read is easily missed.

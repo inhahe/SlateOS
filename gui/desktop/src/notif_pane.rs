@@ -2720,7 +2720,7 @@ impl NotificationPane {
 
             // Status text row.
             let mut status_parts = Vec::new();
-            if app.sound {
+            if app.sound.is_heard() {
                 status_parts.push("Sound");
             }
             if app.banner {
@@ -4524,7 +4524,7 @@ mod tests {
             Importance::Normal,
             "a program the user has said nothing about is neither silenced nor promoted"
         );
-        assert!(pane.app_settings[0].sound);
+        assert!(pane.app_settings[0].sound.is_heard());
         assert!(pane.app_settings[0].banner);
     }
 

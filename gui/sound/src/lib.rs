@@ -205,6 +205,29 @@ pub fn render(sound: &Sound, volume: f32) -> Result<Vec<i16>, PlayError> {
     Ok(convert::to_native(&audio, volume))
 }
 
+/// `sound` rendered as [`render`] renders it -- or, when it is a file that
+/// cannot be read, is too large or will not decode, `otherwise` in its place.
+/// A sound the user chose from their own files that has since been moved or
+/// deleted then still sounds, as what it stood in for, rather than going
+/// quiet unasked. A device's failure is not a reason to try `otherwise`: it
+/// would fail the same way.
+///
+/// # Errors
+///
+/// Whatever rendering the one played met.
+pub fn render_or(
+    sound: &Sound,
+    otherwise: Option<&Sound>,
+    volume: f32,
+) -> Result<Vec<i16>, PlayError> {
+    match (render(sound, volume), otherwise) {
+        (Err(PlayError::Read(_) | PlayError::TooLarge | PlayError::Decode(_)), Some(other)) => {
+            render(other, volume)
+        }
+        (rendered, _) => rendered,
+    }
+}
+
 /// Play `sound` at `volume` (0 to 1) on `sys`, here and to the end: render
 /// it, write it as the ring takes it, and wait until it has played. What
 /// [`play`] does on a thread of its own; public so a host with a device of
@@ -220,8 +243,13 @@ pub fn play_on<S: PcmSys>(sys: S, sound: &Sound, volume: f32) -> Result<(), Play
         return Ok(());
     }
     let samples = render(sound, volume)?;
+    play_samples_on(sys, &samples)
+}
+
+/// Play `samples`, rendered, on `sys`, to the end.
+fn play_samples_on<S: PcmSys>(sys: S, samples: &[i16]) -> Result<(), PlayError> {
     let mut playback = Playback::open(sys)?;
-    playback.write(&samples)?;
+    playback.write(samples)?;
     playback.finish()?;
     Ok(())
 }
@@ -265,6 +293,23 @@ impl Drop for Place {
 /// [`PlayError::NoThread`] if no thread could be started, and
 /// [`PlayError::Unsupported`] where this crate has no device to play on.
 pub fn play(sound: Sound, volume: f32) -> Result<(), PlayError> {
+    spawn(sound, None, volume)
+}
+
+/// Play `sound` as [`play`] does, or `otherwise` when `sound` is a file that
+/// cannot be read or decoded ([`render_or`]) -- decided on the playing
+/// thread, so the caller never reads or decodes the file itself.
+///
+/// # Errors
+///
+/// As [`play`].
+pub fn play_or(sound: Sound, otherwise: Sound, volume: f32) -> Result<(), PlayError> {
+    spawn(sound, Some(otherwise), volume)
+}
+
+/// [`play`] and [`play_or`]: `sound`, or failing it `otherwise`, on a thread
+/// of its own.
+fn spawn(sound: Sound, otherwise: Option<Sound>, volume: f32) -> Result<(), PlayError> {
     if silent(volume) {
         return Ok(());
     }
@@ -280,7 +325,10 @@ pub fn play(sound: Sound, volume: f32) -> Result<(), PlayError> {
             // silently, which is what it would have been anyway.
             let _outcome = pcm::open_device()
                 .map_err(PlayError::Device)
-                .and_then(|device| play_on(device, &sound, volume));
+                .and_then(|device| {
+                    let samples = render_or(&sound, otherwise.as_ref(), volume)?;
+                    play_samples_on(device, &samples)
+                });
         })
         .map(|_detached| ())
         .map_err(|e| PlayError::NoThread(e.kind()))

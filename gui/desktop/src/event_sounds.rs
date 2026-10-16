@@ -166,6 +166,43 @@ impl EventSounds {
         }
         choice
     }
+
+    /// Sound the file at `path` -- a program's notification sound of the
+    /// user's own -- or, when it cannot be read or decoded as it is played,
+    /// the event `stand_in` as `appearance` says, so a file moved or deleted
+    /// does not silence the program unasked. Recorded under `stand_in`, the
+    /// event it sounds for; heard if the process allows it, at the system
+    /// sounds' volume.
+    pub fn sound_file(
+        &mut self,
+        appearance: &AppearanceSettings,
+        path: &std::path::Path,
+        stand_in: &str,
+    ) -> SoundChoice {
+        let choice = SoundChoice::File(path.to_path_buf());
+        while self.recent.len() >= RECENT && self.recent.pop_front().is_some() {}
+        self.recent.push_back(Asked {
+            event: stand_in.to_owned(),
+            choice: choice.clone(),
+        });
+        if playback_allowed() {
+            let volume = appearance.sounds.volume;
+            let own = sound::Sound::File(path.to_path_buf());
+            let otherwise = match appearance.sound_for(stand_in) {
+                SoundChoice::File(theirs) => Some(sound::Sound::File(theirs)),
+                SoundChoice::BuiltIn(event) => {
+                    sound::BuiltIn::for_event(&event).map(sound::Sound::BuiltIn)
+                }
+                SoundChoice::Silent => None,
+            };
+            // Unheard for a reason of the system's: see `sound`.
+            let _unheard = match otherwise {
+                Some(otherwise) => sound::play_or(own, otherwise, volume),
+                None => sound::play(own, volume),
+            };
+        }
+        choice
+    }
 }
 
 #[cfg(test)]

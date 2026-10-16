@@ -173,3 +173,33 @@ fn a_sounds_length_is_its_frames_at_its_rate() {
     };
     assert_eq!((none.frames(), none.duration_ms()), (0, 0));
 }
+
+/// **A file that cannot be played gives way to what it stood in for**: a
+/// missing file, or one that is not a sound, renders as `otherwise`; a file
+/// that plays renders as itself; and with nothing to give way to, the error
+/// is the answer.
+#[test]
+fn a_file_that_cannot_be_played_gives_way_to_its_stand_in() {
+    let dir = ScratchDir::new("sound-render-or");
+    let fallback = Sound::BuiltIn(BuiltIn::Message);
+    let theirs = render(&fallback, 1.0).unwrap();
+
+    let missing = Sound::File(dir.path("gone.wav"));
+    assert_eq!(render_or(&missing, Some(&fallback), 1.0).unwrap(), theirs);
+    assert!(matches!(
+        render_or(&missing, None, 1.0),
+        Err(PlayError::Read(std::io::ErrorKind::NotFound))
+    ));
+
+    let junk = dir.path("junk.wav");
+    std::fs::write(&junk, b"not a sound").unwrap();
+    assert_eq!(
+        render_or(&Sound::File(junk), Some(&fallback), 1.0).unwrap(),
+        theirs
+    );
+
+    let tone = dir.path("tone.wav");
+    std::fs::write(&tone, wav_file(48_000, &[8192; 480])).unwrap();
+    let own = render_or(&Sound::File(tone), Some(&fallback), 1.0).unwrap();
+    assert_eq!(own.len(), 960, "its own, not the stand-in");
+}

@@ -40,9 +40,11 @@ use std::path::{Path, PathBuf};
 use osfont::select::{self, Query};
 use osfont::sfnt::{Face, Style};
 
-/// Extensions worth opening. Checked case-insensitively, since Windows font
-/// directories are full of `.TTF` and Unix ones of `.ttf`.
-const FONT_EXTENSIONS: [&str; 4] = ["ttf", "ttc", "otf", "otc"];
+/// The extensions of the files the index reads ([`is_font_file`]). Checked
+/// case-insensitively, since Windows font directories are full of `.TTF` and
+/// Unix ones of `.ttf`. Public so a program offering to install a font offers
+/// what the index will read, from this one list.
+pub const FONT_EXTENSIONS: [&str; 4] = ["ttf", "ttc", "otf", "otc"];
 
 /// How deep to recurse. Font trees nest by foundry or by script
 /// (`/usr/share/fonts/truetype/dejavu/`), but not deeply; a bound stops a
@@ -110,6 +112,15 @@ pub struct FaceInfo {
     /// Not necessarily the same length as `families`: two spellings that
     /// differ only in case are one name to the index and one entry here.
     pub display: Vec<String>,
+    /// The family a font menu groups this face under, as the face spells it:
+    /// its typographic family (name id 16) where it has one, else its legacy
+    /// family (name id 1). Noto Sans's files call themselves "Noto Sans"
+    /// typographically and "Noto Sans SemiBold", "Noto Sans Light" and so on
+    /// in the legacy name, which named one style each; grouped by those, a
+    /// list shows a family per style. The face still answers to both
+    /// ([`families`](Self::families)): a document naming "Noto Sans SemiBold"
+    /// still finds it.
+    pub family: String,
     /// Weight, slant and width, from the face's own `OS/2` table.
     pub style: Style,
     /// The lightest and the heaviest weight the face draws, on the CSS
@@ -217,6 +228,8 @@ impl FontDb {
         // renderable if a caller finds it some other way.
         let mut families = BTreeSet::new();
         let mut display = BTreeSet::new();
+        // The first name found, in this order: the typographic one.
+        let mut family = None;
         for id in [
             osfont::sfnt::name_id::TYPOGRAPHIC_FAMILY,
             osfont::sfnt::name_id::FAMILY,
@@ -226,17 +239,19 @@ impl FontDb {
                 if !name.is_empty() {
                     families.insert(name.to_lowercase());
                     display.insert(name.to_string());
+                    family.get_or_insert_with(|| name.to_string());
                 }
             }
         }
-        if families.is_empty() {
+        let Some(family) = family else {
             return;
-        }
+        };
         let style = face.style();
         self.faces.push(FaceInfo {
             path: path.to_path_buf(),
             families: families.into_iter().collect(),
             display: display.into_iter().collect(),
+            family,
             weights: weight_range(&face, style.weight),
             style,
             monospaced: face.is_monospaced(),
@@ -261,13 +276,16 @@ impl FontDb {
         self.faces.is_empty()
     }
 
-    /// Every distinct family name, sorted — what a font picker lists.
+    /// Every family, sorted -- what a font picker lists: each face's
+    /// [`family`](FaceInfo::family), the name a font menu groups it under,
+    /// not each name it answers to, so Noto Sans is one entry and not one per
+    /// style. A face's other name still finds it ([`find`](Self::find)).
     #[must_use]
     pub fn families(&self) -> Vec<String> {
         Self::spellings(self.faces.iter())
     }
 
-    /// The display spellings of `faces`, one per name, sorted.
+    /// The families of `faces`, one per name, sorted.
     ///
     /// Keyed on the lower-cased name and valued by the spelling, so that two
     /// faces disagreeing about capitalisation ("DejaVu Sans" and "DejaVu
@@ -281,9 +299,8 @@ impl FontDb {
     fn spellings<'a>(faces: impl Iterator<Item = &'a FaceInfo>) -> Vec<String> {
         let mut seen: BTreeMap<String, &str> = BTreeMap::new();
         for face in faces {
-            for name in &face.display {
-                seen.entry(name.to_lowercase()).or_insert(name.as_str());
-            }
+            seen.entry(face.family.to_lowercase())
+                .or_insert(face.family.as_str());
         }
         seen.into_values().map(str::to_string).collect()
     }
@@ -426,8 +443,9 @@ impl std::error::Error for LoadError {
     }
 }
 
-/// Whether `path` has an extension worth opening.
-fn is_font_file(path: &Path) -> bool {
+/// Whether `path` is a file the index reads: one of [`FONT_EXTENSIONS`].
+#[must_use]
+pub fn is_font_file(path: &Path) -> bool {
     path.extension().is_some_and(|ext| {
         FONT_EXTENSIONS
             .iter()
@@ -445,10 +463,15 @@ fn is_font_file(path: &Path) -> bool {
 #[must_use]
 pub fn system_font_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from("/usr/share/fonts")];
-    // Per-user fonts, which on SlateOS and on Unix alike override system ones
-    // — hence pushed after, since a later directory's faces sort later and
-    // ties go to the earlier candidate. (Overriding by *name* is the caller's
-    // business; this only decides which file a tie resolves to.)
+    // Per-user fonts. The order of these folders decides nothing about which
+    // file wins a tie between two equally good faces: `FontDb::finish` sorts
+    // the faces by path, and the tie goes to the path that sorts first -- one
+    // rule, so the toolkit and the compositor, scanning apart, agree. That
+    // happens to put the user's face first on every system this runs on
+    // (`/home` before `/usr`; `C:\Users` before `C:\Windows`), which is the
+    // winner wanted, but by the paths, not by this list. (Overriding by *name*
+    // is the caller's business; this only decides which file a tie resolves
+    // to.)
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(Path::new(&home).join(".local/share/fonts"));
         dirs.push(Path::new(&home).join(".fonts"));
@@ -479,6 +502,12 @@ mod tests {
                 path: PathBuf::from(path),
                 families: families.iter().map(|f| f.to_lowercase()).collect(),
                 display: families.iter().map(|f| (*f).to_string()).collect(),
+                // The first name given is the typographic one, as a fixture
+                // lists them.
+                family: families
+                    .first()
+                    .map(|f| (*f).to_string())
+                    .unwrap_or_default(),
                 style: Style {
                     weight: *weight,
                     italic: *italic,
@@ -618,8 +647,49 @@ mod tests {
     #[test]
     fn the_family_list_is_deduplicated_and_sorted() {
         let db = arial();
-        assert_eq!(db.families(), vec!["arial", "arial narrow"]);
+        assert_eq!(db.families(), vec!["arial"]);
         assert!(FontDb::new().families().is_empty());
+    }
+
+    /// **A family is listed once, by the name a font menu groups it under**:
+    /// Noto Sans's styles, each also calling itself by a legacy name of one
+    /// style, are one entry -- and each still answers to its other name.
+    #[test]
+    fn a_family_is_listed_by_its_typographic_name_and_found_by_either() {
+        let db = db(&[
+            ("NotoSans-Regular.ttf", &["Noto Sans"], 400, false, 5),
+            (
+                "NotoSans-SemiBold.ttf",
+                &["Noto Sans", "Noto Sans SemiBold"],
+                600,
+                false,
+                5,
+            ),
+            (
+                "NotoSans-Light.ttf",
+                &["Noto Sans", "Noto Sans Light"],
+                300,
+                false,
+                5,
+            ),
+            ("Solo.ttf", &["Solo"], 400, false, 5),
+        ]);
+        assert_eq!(db.families(), vec!["Noto Sans", "Solo"]);
+        assert_eq!(
+            found(&db, "Noto Sans SemiBold", Query::regular()),
+            "NotoSans-SemiBold.ttf"
+        );
+    }
+
+    /// **The files the index reads are the extensions it lists**, in any case.
+    #[test]
+    fn a_font_file_is_one_of_the_listed_extensions_in_any_case() {
+        for name in ["a.ttf", "a.TTF", "a.otc", "dir/b.Otf", "c.ttc"] {
+            assert!(is_font_file(Path::new(name)), "{name}");
+        }
+        for name in ["a.woff2", "a.txt", "ttf", "a.ttf.bak"] {
+            assert!(!is_font_file(Path::new(name)), "{name}");
+        }
     }
 
     /// The list a picker shows keeps the font's own capitals.

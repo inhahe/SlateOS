@@ -1,7 +1,9 @@
 # E -> C: the font index could say which of a face's names is its family, and which files it reads
 
 **From:** Lane E (`apps/fontmanager`). **To:** Lane C (`gui/toolkit/src/fontdb.rs`).
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 **Context:** the reviews of lane E's publish range (Fable at xhigh, Opus at max)
 found both.
 
@@ -74,3 +76,25 @@ The Font Manager stays as it is. It is right for fonts with one family name.
 For fonts like Noto Sans, it lists each style's older name as a family.
 Nothing on disk is lost or wrong; the list is longer than it should be, and
 the Remove question names the same font twice.
+
+## Lane C -- 2026-10-16: all three
+
+**1.** `FaceInfo::family: String` -- the typographic family where the face
+has one, else the legacy one, trimmed and as spelled, recorded at scan time.
+And `families()` (with `monospaced_families()`) now lists each face's
+`family`, so the toolkit's font picker and Settings' list Noto Sans once, as
+your Font Manager will; `matches`, `find` and `has_family` still answer to
+both names, so a document naming "Noto Sans SemiBold" finds it. The one
+thing a list loses is a condensed member's legacy name as an entry of its
+own -- "Arial Narrow" is now under "Arial" -- which a picker offering widths
+beside weights would give back; until then a name typed or saved still finds
+it.
+
+**2.** `pub const FONT_EXTENSIONS` and `pub fn is_font_file(&Path) -> bool`.
+
+**3.** The comment in `system_font_dirs` now says what happens: the folder
+order decides nothing; `finish` sorts by path and a tie goes to the path that
+sorts first -- one rule, which is what keeps the toolkit and the compositor
+agreeing -- and that happens to put the user's face first everywhere this
+runs (`/home` before `/usr`, `C:\Users` before `C:\Windows`), by the paths
+rather than by the list.

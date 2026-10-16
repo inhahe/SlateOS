@@ -165,12 +165,6 @@ MAIN = [
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
     (
-        'Alt+Backspace deletes from the search',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                self.search_query.pop();',
-        '            Key::Backspace => {\n                self.search_query.pop();',
-        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
-    ),
-    (
         "the search types a command's letter",
         '            _ if !textline::types_into_field(key) => EventResult::Ignored,\n',
         '',
@@ -200,16 +194,8 @@ MAIN = [
     # is handing the editor the key as it came -- chord and all.
     (
         "the form's editor is given the key without its chord",
-        "textline::apply_key(&mut self.form_editor, key, &self.form_clipboard, FONT_SIZE);",
-        "textline::apply_key(\n"
-        "            &mut self.form_editor,\n"
-        "            &KeyEvent {\n"
-        "                modifiers: guitk::event::Modifiers::NONE,\n"
-        "                ..key.clone()\n"
-        "            },\n"
-        "            &self.form_clipboard,\n"
-        "            FONT_SIZE,\n"
-        "        );",
+        "textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);",
+        "textline::apply_key_on_clipboard(\n            &mut self.form_editor,\n            &KeyEvent {\n                modifiers: guitk::event::Modifiers::NONE,\n                ..key.clone()\n            },\n            FONT_SIZE,\n        );",
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
 ]
@@ -317,27 +303,14 @@ MAIN += [
     ),
     (
         "the form types only at its end",
-        "        if self.form_editor.text() != text {\n"
-        "            self.form_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(",
-        "        if textline::types_into_field(key) {\n"
-        "            self.form_text_mut(field).push_str(&key.text);\n"
-        "            return EventResult::Consumed;\n"
-        "        }\n"
-        "        if self.form_editor.text() != text {\n"
-        "            self.form_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(",
+        "        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
+        "        if textline::types_into_field(key) {\n            self.form_text_mut(field).push_str(&key.text);\n            return EventResult::Consumed;\n        }\n        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
         [EDITS],
     ),
     (
         "a box whose text changed is edited as it used to read",
-        "        if self.form_editor.text() != text {\n"
-        "            self.form_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(",
-        "        let edit = textline::apply_key(",
+        "        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
+        "        let edit = textline::apply_key_on_clipboard(",
         [EDITS],
     ),
     (
@@ -347,9 +320,9 @@ MAIN += [
         [EDITS],
     ),
     (
-        "a copy or a cut takes nothing to the clipboard",
-        "            self.form_clipboard = copied;\n",
-        "            let _ = copied;\n",
+        "the form keeps a clipboard of its own",
+        "textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);",
+        "textline::apply_key(&mut self.form_editor, key, \"\", FONT_SIZE);",
         [EDITS],
     ),
     (
@@ -415,8 +388,8 @@ MAIN += [
     ),
     (
         "the search's caret is at its start",
-        "                TextCursor::from(self.search_query.len()),\n",
-        "                TextCursor::default(),\n",
+        "                if synced {\n                    self.search_editor.cursor()\n",
+        "                if synced {\n                    TextCursor::default()\n",
         [SEARCH],
     ),
     (
@@ -604,9 +577,104 @@ MAIN += [
     ),
     (
         "the window does not wake for a checkbox's reason",
-        '                .map_or(own, |ms| own.min(Duration::from_millis(ms))),',
-        '                .map_or(own, |_| own),',
+        "        Some(soonest.map_or(own, |ms| own.min(Duration::from_millis(ms))))\n",
+        "        Some(soonest.map_or(own, |_| own))\n",
         ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
+# The search box edits at a caret, the form's boxes share the program's
+# clipboard, and both have right-click menus (2026-10-16).
+S_CARET = "the_search_box_edits_at_a_caret"
+S_PRESS = "a_press_in_the_search_box_puts_the_caret_there"
+S_SYNC = "a_search_emptied_by_escape_is_empty_in_the_box"
+S_MENU = "the_search_boxs_right_click_menu_edits_the_search"
+F_MENU = "the_forms_right_click_menu_edits_its_boxes"
+
+MAIN += [
+    (
+        "the search types only at its end",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
+        "        let end = self.search_editor.text().len();\n        self.search_editor.set_cursor(TextCursor::from(end));\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
+        [S_CARET],
+    ),
+    (
+        "the search's editor is not reloaded",
+        "        self.sync_search_editor();\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
+        [S_SYNC],
+    ),
+    (
+        "what is typed is not searched for",
+        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n        if edit.handled {\n",
+        "        if edit.handled {\n",
+        [S_CARET],
+    ),
+    (
+        "a key typed into the search is reported unanswered",
+        "        self.set_search(&typed);\n        if edit.handled {\n",
+        "        self.set_search(&typed);\n        if false {\n",
+        [S_CARET],
+    ),
+    (
+        "the search's clipboard chords are the window's",
+        "                Key::A | Key::C | Key::X | Key::V | Key::Left | Key::Right | Key::Backspace => {\n",
+        "                Key::Left | Key::Right | Key::Backspace => {\n",
+        [S_CARET],
+    ),
+    (
+        "the arrows do not move the search's caret",
+        "            Key::Left | Key::Right | Key::Backspace => self.search_key(key),\n",
+        "            Key::Backspace => self.search_key(key),\n",
+        [S_CARET],
+    ),
+    (
+        "the list does not follow the search",
+        "            text.clone_into(&mut self.search_query);\n            self.reanchor_selection();\n",
+        "            text.clone_into(&mut self.search_query);\n",
+        [S_CARET],
+    ),
+    (
+        "a press in the search box puts the caret nowhere",
+        "        if self.search_box_rect().contains(x, y) {\n            self.press_search_box(x);\n",
+        "        if self.search_box_rect().contains(x, y) {\n",
+        [S_PRESS],
+    ),
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(mouse.x, mouse.y),\n",
+        "",
+        [S_MENU, F_MENU],
+    ),
+    (
+        "the keys reach a box through its menu",
+        "            fieldmenu::Outcome::Taken => EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => self.dispatch(event),\n",
+        [S_MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [S_MENU],
+    ),
+    (
+        "a row chosen does nothing to a form box",
+        "                if self.form_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [F_MENU],
+    ),
+    (
+        "the form's right-click leaves the keyboard where it was",
+        "            if self.form_focus != FormFocus::Text(field) {\n                self.focus_form_field(field);\n            }\n",
+        "",
+        [F_MENU],
+    ),
+    (
+        "the menu is not drawn",
+        "        rt.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [S_MENU],
     ),
 ]
 

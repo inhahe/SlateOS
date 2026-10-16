@@ -35,7 +35,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, Response};
 
 use std::collections::BTreeMap;
@@ -131,6 +131,8 @@ const BOX_TEXT_INSET: f32 = 8.0;
 /// line in a list, and a description two lines under it
 /// (`DESCRIPTION_MAX_LINES`), so more than this is never seen.
 const FORM_CAPACITY: usize = 256;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 
 // ============================================================================
@@ -1899,6 +1901,15 @@ pub enum ScheduleControl {
     Faster,
 }
 
+/// The text boxes a right-click menu can be opened on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The search box.
+    Search,
+    /// A box of the new-snapshot form.
+    Form(FormField),
+}
+
 /// One of the new-snapshot form's two text boxes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FormField {
@@ -2019,7 +2030,11 @@ pub struct SystemRestoreUI {
     /// reloaded whenever the field changes or its text changes under it.
     form_editor: TextInput,
     /// What Ctrl+C or Ctrl+X last took from the form, for Ctrl+V.
-    form_clipboard: String,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it.
+    search_editor: TextInput,
+    /// The search box's or a form box's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// How wide the mark is round a box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -2122,7 +2137,8 @@ impl SystemRestoreUI {
             current_timestamp: 0,
             form_focus: FormFocus::Text(FormField::Name),
             form_editor: textline::field_holding("", FORM_CAPACITY),
-            form_clipboard: String::new(),
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             locations,
             work: None,
@@ -2284,6 +2300,8 @@ impl SystemRestoreUI {
         if self.progress.is_some() {
             self.render_progress_overlay(&mut rt);
         }
+        // A box's right-click menu, over the box it is for.
+        rt.commands.extend(self.field_menu.render(&self.palette));
 
         if self.show_help {
             guitk::shortcut::render_card(
@@ -2488,7 +2506,18 @@ impl SystemRestoreUI {
                 _ => Some((mouse.x, mouse.y)),
             };
         }
-        let mut result = self.dispatch(event);
+        // A box's right-click menu takes the presses, the keys, the pointer
+        // and the wheel while it is up, as any menu does -- a row chosen, a
+        // press outside putting it away and reaching nothing under it.
+        let mut result = match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => self.dispatch(event),
+            fieldmenu::Outcome::Taken => EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => self.do_menu_row(field, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                self.open_field_menu(x, y);
+                EventResult::Consumed
+            }
+        };
         // The comparison follows the pair, however the pair changed: a key,
         // a click, a deletion. Worked out here rather than when drawn, which
         // happens far more often and must not read the store.
@@ -2496,6 +2525,10 @@ impl SystemRestoreUI {
         if let Event::Tick { elapsed_ms } = event {
             self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
             if self.why_disabled.tick(self.clock_ms) {
+                result = EventResult::Consumed;
+            }
+            // The menu's dimmed rows say why while the pointer rests on one.
+            if self.field_menu.tick(*elapsed_ms) {
                 result = EventResult::Consumed;
             }
         }
@@ -3014,6 +3047,11 @@ impl SystemRestoreUI {
                 // construction with no writer, so the status bar's "Filter:"
                 // half could never appear and the list could not be narrowed
                 // to, say, the snapshots taken before an update.
+                // The search box's own chords: select all, copy, cut, paste,
+                // and the caret by the word.
+                Key::A | Key::C | Key::X | Key::V | Key::Left | Key::Right | Key::Backspace => {
+                    self.search_key(key)
+                }
                 Key::F => {
                     self.type_filter = SnapshotType::step_filter(self.type_filter);
                     // The selection is a snapshot id, and the filter may have
@@ -3075,13 +3113,11 @@ impl SystemRestoreUI {
                 }
                 EventResult::Consumed
             }
-            // Backspace edits the search, so it is refused only to Alt and
-            // the Windows key.
-            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
-                self.search_query.pop();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
+            // The search box's caret keys: Left and Right across it, Shift
+            // with them to select, Backspace before the caret -- the field's,
+            // which leaves a chord with Alt or the Windows key to the window.
+            // Home, End, Enter and Delete are the list's.
+            Key::Left | Key::Right | Key::Backspace => self.search_key(key),
             Key::Escape if plain => {
                 // The search box is the only thing Escape can clear here, and
                 // clearing it is the only way to get back to the whole list
@@ -3089,22 +3125,130 @@ impl SystemRestoreUI {
                 if self.search_query.is_empty() {
                     return EventResult::Ignored;
                 }
-                self.search_query.clear();
-                self.reanchor_selection();
+                self.set_search("");
                 EventResult::Consumed
             }
             // What was typed goes to the search, AltGr's letters among it; the
             // letter a command carries does not -- Alt+X searched for `x`.
             _ if !textline::types_into_field(key) => EventResult::Ignored,
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-                self.reanchor_selection();
-                EventResult::Consumed
+            _ => self.search_key(key),
+        }
+    }
+
+    /// A key for the search box -- which has the keyboard whenever the list
+    /// is on screen -- at its caret, on the program's clipboard
+    /// (`textline::apply_key_on_clipboard`): the list follows a change to
+    /// the search. Answers whether the box did anything with the key.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        self.sync_search_editor();
+        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);
+        let typed = self.search_editor.text().to_owned();
+        self.set_search(&typed);
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Load the search box's editor from `search_query` when the search
+    /// changed underneath it -- Escape empties it -- its caret at the end.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: the list, and the selection with it,
+    /// follows.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            text.clone_into(&mut self.search_query);
+            self.reanchor_selection();
+        }
+    }
+
+    /// A press in the search box at `x`: its caret where the press landed,
+    /// against the text as the box draws it.
+    fn press_search_box(&mut self, x: f32) {
+        let rect = self.search_box_rect();
+        self.sync_search_editor();
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            self.search_editor.cursor(),
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
+    }
+
+    /// A right press at `(x, y)`: over a box of the new-snapshot form, or
+    /// over the search box while the list is on screen, that box's menu
+    /// where the press landed -- a form box given the keyboard -- its caret
+    /// and selection left as they are, so Cut and Copy act on what the user
+    /// selected (design-decisions 1454). Anywhere else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let viewport = (self.window_width, self.window_height);
+        if self.dialog_frame().is_some() {
+            let Some((field, _)) = self
+                .form_boxes()
+                .into_iter()
+                .flatten()
+                .find(|(_, rect)| rect.contains(x, y))
+            else {
+                return EventResult::Ignored;
+            };
+            if self.form_focus != FormFocus::Text(field) {
+                self.focus_form_field(field);
             }
+            self.sync_form_editor(field);
+            let menu = self.form_editor.edit_menu();
+            self.field_menu
+                .open(MenuField::Form(field), menu, x, y, viewport);
+            return EventResult::Consumed;
+        }
+        if self.progress.is_some() || !self.search_box_rect().contains(x, y) {
+            return EventResult::Ignored;
+        }
+        self.sync_search_editor();
+        let menu = self.search_editor.edit_menu();
+        self.field_menu
+            .open(MenuField::Search, menu, x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for `field`: done to the box as its key
+    /// would be -- the list following a change to the search, a form box's
+    /// text written back.
+    fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
+        match field {
+            MenuField::Search => {
+                self.sync_search_editor();
+                if self.search_editor.edit_command(id) == KeyEdit::Changed {
+                    let typed = self.search_editor.text().to_owned();
+                    self.set_search(&typed);
+                }
+            }
+            MenuField::Form(form_field) => {
+                self.sync_form_editor(form_field);
+                if self.form_editor.edit_command(id) == KeyEdit::Changed {
+                    let edited = self.form_editor.text().to_owned();
+                    *self.form_text_mut(form_field) = edited;
+                }
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// Load the form's editor from box `field`'s text when that changed
+    /// underneath it.
+    fn sync_form_editor(&mut self, field: FormField) {
+        if self.form_editor.text() != self.form_text(field) {
+            let text = self.form_text(field).to_owned();
+            self.form_editor.set_text(&text);
         }
     }
 
@@ -3135,7 +3279,8 @@ impl SystemRestoreUI {
     }
 
     /// `key` in the form's box that has the keyboard: a field's keys
-    /// (`textline::apply_key` -- the caret, the selection, the clipboard,
+    /// (`textline::apply_key_on_clipboard` -- the caret, the selection, the
+    /// program's clipboard,
     /// typing), the box's text written back when the key changed it.
     fn edit_form(&mut self, key: &KeyEvent) -> EventResult {
         let field = match self.form_focus {
@@ -3150,13 +3295,8 @@ impl SystemRestoreUI {
             }
         };
         let text = self.form_text(field).to_owned();
-        if self.form_editor.text() != text {
-            self.form_editor.set_text(&text);
-        }
-        let edit = textline::apply_key(&mut self.form_editor, key, &self.form_clipboard, FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.form_clipboard = copied;
-        }
+        self.sync_form_editor(field);
+        let edit = textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);
         if !edit.handled {
             return EventResult::Ignored;
         }
@@ -3186,6 +3326,7 @@ impl SystemRestoreUI {
         }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(mouse.x, mouse.y),
             MouseEventKind::Scroll { dy, .. } => {
                 // The toolkit's own notch-to-pixel conversion, scaled by the
                 // row height of whichever view is showing, so the wheel travels
@@ -3241,6 +3382,11 @@ impl SystemRestoreUI {
             // reach the window behind: the whole point of the dimmed backdrop
             // the renderer draws is that it is in the way.
             self.dialog = DialogKind::None;
+            return EventResult::Consumed;
+        }
+
+        if self.search_box_rect().contains(x, y) {
+            self.press_search_box(x);
             return EventResult::Consumed;
         }
 
@@ -3895,8 +4041,8 @@ impl SystemRestoreUI {
     /// How the search box is drawn: with the keyboard while what is typed
     /// goes to it -- whenever no dialog, list of keys or work in progress is
     /// over the window -- and red while what is in it finds no restore
-    /// point. Never lit under the pointer: a press on it does nothing, the
-    /// keys being its already.
+    /// point. Never lit under the pointer: a press on it only places the
+    /// caret, the keys being its already.
     fn search_box_state(&self) -> field::State {
         field::State {
             hovered: false,
@@ -3989,18 +4135,27 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box: what is typed is appended to it, so its caret is at
-        // the end.
+        // Search box: with its caret and selection where they are -- the
+        // end of the text if the search changed under the box's editor.
         let rect = self.search_box_rect();
         let state = self.search_box_state();
         field::draw(rt, &self.palette, rect, state, self.focus_ring_width);
+        let synced = self.search_editor.text() == self.search_query;
         self.render_box_text(
             rt,
             rect,
             (
                 &self.search_query,
-                TextCursor::from(self.search_query.len()),
-                None,
+                if synced {
+                    self.search_editor.cursor()
+                } else {
+                    TextCursor::from(self.search_query.len())
+                },
+                if synced {
+                    self.search_editor.selection_anchor()
+                } else {
+                    None
+                },
             ),
             state.focused,
             "Search snapshots...",
@@ -6402,11 +6557,14 @@ impl App for SystemRestoreUI {
         } else {
             CLOCK_STEP
         };
-        Some(
-            self.why_disabled
-                .due_in(self.clock_ms)
-                .map_or(own, |ms| own.min(Duration::from_millis(ms))),
-        )
+        let soonest = [
+            self.why_disabled.due_in(self.clock_ms),
+            self.field_menu.due_in(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        Some(soonest.map_or(own, |ms| own.min(Duration::from_millis(ms))))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -7400,7 +7558,7 @@ working filter from a broken one"
         );
 
         // A paste stops at what a box holds.
-        ui.form_clipboard = "x".repeat(FORM_CAPACITY + 10);
+        guitk::clipboard::set_text(&"x".repeat(FORM_CAPACITY + 10));
         ui.handle_event(&ctrl(Key::A));
         ui.handle_event(&ctrl(Key::V));
         assert_eq!(
@@ -10199,5 +10357,192 @@ working filter from a broken one"
             .collect();
         assert!(texts.iter().any(|t| t == "3 of 12 files"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "25%"));
+    }
+
+    // ------------------------------------------------------------------
+    // The search box and the form's boxes: a caret, the program's
+    // clipboard and a right-click menu (2026-10-16)
+    // ------------------------------------------------------------------
+
+    fn right_click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// Press the up menu's row for `command`.
+    fn choose_row(ui: &mut SystemRestoreUI, command: guitk::editmenu::EditCommand) {
+        let (x, y) = ui
+            .field_menu
+            .row_middle(command)
+            .unwrap_or_else(|| panic!("no {command:?} row"));
+        ui.handle_event(&click(x, y));
+    }
+
+    fn middle(r: Rect) -> (f32, f32) {
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// **The search box edits at a caret**: Left and Right move it, typing
+    /// goes in where it is, Backspace takes the character before it, and
+    /// Ctrl+A selects what typing then replaces -- each change searching
+    /// again. Home and End stay the list's.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        type_text(&mut ui, "Netwrk");
+        ui.handle_event(&press(Key::Left));
+        ui.handle_event(&press(Key::Left));
+        assert_eq!(
+            ui.handle_event(&types('o')),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            ui.search_query, "Network",
+            "typing did not go in at the caret"
+        );
+        assert_eq!(
+            ui.visible_rows().len(),
+            1,
+            "the list does not follow the search"
+        );
+        ui.handle_event(&press(Key::Backspace));
+        assert_eq!(
+            ui.search_query, "Netwrk",
+            "Backspace did not take the character before the caret"
+        );
+        ui.handle_event(&ctrl(Key::A));
+        type_text(&mut ui, "x");
+        assert_eq!(ui.search_query, "x", "typing did not replace the selection");
+
+        ui.handle_event(&ctrl(Key::A));
+        ui.handle_event(&ctrl(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            "x",
+            "Ctrl+C did not copy the search"
+        );
+        guitk::clipboard::set_text("Network");
+        ui.handle_event(&ctrl(Key::V));
+        assert_eq!(
+            ui.search_query, "Network",
+            "Ctrl+V did not paste the program's clipboard"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        type_text(&mut ui, "ab");
+        let rect = ui.search_box_rect();
+        ui.handle_event(&click(rect.x + BOX_TEXT_INSET + 1.0, rect.y + rect.h / 2.0));
+        type_text(&mut ui, "x");
+        assert_eq!(
+            ui.search_query, "xab",
+            "the press did not put the caret at the start"
+        );
+    }
+
+    /// **The search the list's Escape empties is the box's too**: the box
+    /// reloads what it edits from the search, so the next key starts a new
+    /// one rather than bringing the old one back.
+    #[test]
+    fn a_search_emptied_by_escape_is_empty_in_the_box() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        type_text(&mut ui, "Net");
+        ui.handle_event(&press(Key::Escape));
+        assert_eq!(ui.search_query, "", "control: Escape empties the search");
+        type_text(&mut ui, "w");
+        assert_eq!(ui.search_query, "w", "the old search came back");
+    }
+
+    /// **The search box has a right-click menu** -- Cut, Copy, Paste, Delete
+    /// and Select all, on the program's clipboard -- and the list follows a
+    /// paste.
+    #[test]
+    fn the_search_boxs_right_click_menu_edits_the_search() {
+        use guitk::editmenu::EditCommand;
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let (x, y) = middle(ui.search_box_rect());
+        assert_eq!(ui.handle_event(&right_click(x, y)), EventResult::Consumed);
+        assert!(
+            ui.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        assert_eq!(ui.field_menu.field(), Some(MenuField::Search));
+        type_text(&mut ui, "x");
+        assert_eq!(
+            ui.search_query, "",
+            "a key reached the box through the menu"
+        );
+        ui.handle_event(&press(Key::Escape));
+        assert!(!ui.field_menu.is_up(), "Escape left the menu up");
+
+        guitk::clipboard::set_text("Network");
+        ui.handle_event(&right_click(x, y));
+        choose_row(&mut ui, EditCommand::Paste);
+        assert_eq!(ui.search_query, "Network", "Paste did not paste");
+        assert_eq!(
+            ui.visible_rows().len(),
+            1,
+            "the list did not follow the paste"
+        );
+    }
+
+    /// **The form's boxes have the right-click menu too**, on the program's
+    /// clipboard, the one their keys cut to and paste from -- and a
+    /// right-click gives the box the keyboard.
+    #[test]
+    fn the_forms_right_click_menu_edits_its_boxes() {
+        use guitk::editmenu::EditCommand;
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        ui.handle_event(&ctrl(Key::N));
+        assert_eq!(
+            ui.dialog,
+            DialogKind::CreateSnapshot,
+            "control: Ctrl+N opens the form"
+        );
+        type_text(&mut ui, "Before update");
+        let boxes = ui.form_boxes().expect("the form's boxes");
+        let name = middle(boxes[0].1);
+        ui.handle_event(&right_click(name.0, name.1));
+        assert_eq!(
+            ui.field_menu.field(),
+            Some(MenuField::Form(FormField::Name)),
+            "a right-click on the name offered nothing"
+        );
+        choose_row(&mut ui, EditCommand::SelectAll);
+        ui.handle_event(&right_click(name.0, name.1));
+        choose_row(&mut ui, EditCommand::Copy);
+        assert_eq!(
+            guitk::clipboard::text(),
+            "Before update",
+            "Copy copied nowhere"
+        );
+
+        let description = middle(boxes[1].1);
+        guitk::clipboard::set_text("Weekly");
+        ui.handle_event(&right_click(description.0, description.1));
+        assert_eq!(
+            ui.form_focus,
+            FormFocus::Text(FormField::Description),
+            "the right-click did not give the box the keyboard"
+        );
+        choose_row(&mut ui, EditCommand::Paste);
+        assert_eq!(
+            ui.form_text(FormField::Description),
+            "Weekly",
+            "Paste did not paste"
+        );
+        assert_eq!(
+            ui.form_text(FormField::Name),
+            "Before update",
+            "the other box changed"
+        );
     }
 }

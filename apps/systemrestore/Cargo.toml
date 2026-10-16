@@ -3,6 +3,9 @@ name = "systemrestore"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The search box's and the form's right-click menus: Cut, Copy, Paste,
+# Delete, Select all.
+fieldmenu = { path = "../fieldmenu" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

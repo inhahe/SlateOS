@@ -3518,25 +3518,44 @@ pub(crate) fn _test_reset_no_new_privs(value: bool) {
 /// image -- as Linux resets it there; inherited across `fork` with the rest of
 /// memory, as Linux's is.
 ///
-/// Kept here, as [`nnp`]'s bit is, because no native call reaches the kernel's
-/// copy (`pcb.linux_dumpable`, which the Linux ABI's `prctl` sets):
-/// `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`
-/// asks lane A for one. Nothing on SlateOS acts on the flag yet -- it writes
-/// no core files, and neither `/proc` nor `ptrace` consults it -- so reading
-/// it back is all it does, and that is exact here. It was refused `EINVAL`
-/// until 2026-10-05, which made GNU `timeout` warn "disabling core dumps
-/// failed" on every signal death it passed on.
+/// The kernel's (`SYS_PROCESS_DUMPABLE`, 1142, lane A's answer in
+/// `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`):
+/// the flag the Linux ABI's `prctl` sets, which `/proc` consults -- a
+/// process that is not dumpable can be inspected only by root or a holder of
+/// a capability for it -- and which `fork` copies and `exec` resets to 1.
+/// Until 2026-10-16 the flag was this library's own, which nothing in the
+/// kernel saw; it is still, for a kernel without the call. It was refused
+/// `EINVAL` until 2026-10-05, which made GNU `timeout` warn "disabling core
+/// dumps failed" on every signal death it passed on.
 #[cfg(target_os = "none")]
 mod dumpable {
+    use crate::syscall::{DUMPABLE_GET, DUMPABLE_SET, SYS_PROCESS_DUMPABLE, lacks_call, syscall2};
     use core::sync::atomic::{AtomicU8, Ordering};
 
+    /// The flag on a kernel without the call.
     static DUMPABLE: AtomicU8 = AtomicU8::new(1);
 
     pub(super) fn get() -> u8 {
-        DUMPABLE.load(Ordering::Relaxed)
+        let ret = syscall2(SYS_PROCESS_DUMPABLE, DUMPABLE_GET, 0);
+        if lacks_call(ret) {
+            return DUMPABLE.load(Ordering::Relaxed);
+        }
+        // The kernel answers 0, 1 or 2; it cannot refuse its own caller.
+        u8::try_from(ret).unwrap_or(1)
     }
-    pub(super) fn set(v: u8) {
-        DUMPABLE.store(v, Ordering::Relaxed);
+
+    /// Set the flag to `v`, which the caller has checked is 0 or 1, as
+    /// Linux's `prctl` checks it; the kernel's refusal, as an errno.
+    pub(super) fn set(v: u8) -> Result<(), i32> {
+        let ret = syscall2(SYS_PROCESS_DUMPABLE, DUMPABLE_SET, u64::from(v));
+        if lacks_call(ret) {
+            DUMPABLE.store(v, Ordering::Relaxed);
+            return Ok(());
+        }
+        if ret < 0 {
+            return Err(crate::errno::door_errno(ret));
+        }
+        Ok(())
     }
 }
 
@@ -3550,10 +3569,11 @@ mod dumpable {
     pub(super) fn get() -> u8 {
         DUMPABLE.try_with(core::cell::Cell::get).unwrap_or(1)
     }
-    pub(super) fn set(v: u8) {
+    pub(super) fn set(v: u8) -> Result<(), i32> {
         // A failed `try_with` means the thread is shutting down and the value
         // is about to be discarded anyway.
         let _ = DUMPABLE.try_with(|c| c.set(v));
+        Ok(())
     }
 }
 
@@ -3657,8 +3677,13 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
                 crate::errno::set_errno(crate::errno::EINVAL);
                 return -1;
             };
-            dumpable::set(v);
-            0
+            match dumpable::set(v) {
+                Ok(()) => 0,
+                Err(e) => {
+                    crate::errno::set_errno(e);
+                    -1
+                }
+            }
         }
         PR_GET_DUMPABLE => i32::from(dumpable::get()),
         PR_GET_SECCOMP => {

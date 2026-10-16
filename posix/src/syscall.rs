@@ -1222,6 +1222,16 @@ pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
 /// [`SYS_POSIX_TIMER`] operation: `timer_delete(a = id)`.
 pub const POSIX_TIMER_DELETE: u64 = 4;
 
+/// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
+/// the Linux ABI's `prctl(PR_SET_DUMPABLE)` sets and `/proc` consults; on
+/// lane A's kernel since 2026-10-07. Linux's errnos as `-errno`.
+pub const SYS_PROCESS_DUMPABLE: u64 = 1142;
+/// [`SYS_PROCESS_DUMPABLE`] operation: the flag (0, 1, or 2 if the kernel
+/// set it so).
+pub const DUMPABLE_GET: u64 = 0;
+/// [`SYS_PROCESS_DUMPABLE`] operation: set it to `value`, 0 or 1.
+pub const DUMPABLE_SET: u64 = 1;
+
 /// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
 /// off; does not return on success. Needs the `POWER_OFF` right on a
 /// class-wide `Process` capability (`PermissionDenied`); `NotSupported`, the

@@ -801,6 +801,14 @@ impl BuddyAllocator {
 
         self.free_lists[order].count = self.free_lists[order].count.saturating_sub(1);
 
+        // Off the lists, the block keeps nothing of its node: a frame freed
+        // zeroed is handed out as zeroed (`FREED_ZEROED_PTR`), and must still
+        // be, whichever lists it passed through.
+        // SAFETY: as the read above; the block is unlinked and still ours.
+        unsafe {
+            node_ptr.write(FreeNode { next: 0, prev: 0 });
+        }
+
         // Mark as allocated (no longer on any free list).
         let idx = self.frame_index(addr);
         self.set_info(idx, INFO_ALLOCATED);
@@ -1660,13 +1668,12 @@ pub fn zero_pool_stats() -> (u64, u64) {
 // ## Transition Safety
 //
 // When zero-on-free is enabled at runtime (not just at boot), existing
-// free frames are NOT pre-zeroed.  A generation counter tracks how many
-// frames have been zeroed-on-free.  Once the counter exceeds `total_frames`,
-// we know all frames in the system have been through at least one free
-// cycle, and `alloc_frame_zeroed()` can safely skip inline zeroing.
-//
-// Before settling, `alloc_frame_zeroed()` continues to zero inline as
-// usual, so correctness is always maintained.
+// free frames are NOT pre-zeroed. So what `alloc_frame_zeroed()` may skip is
+// decided per frame: every free records whether it left that frame zeroed
+// (`FREED_ZEROED`), and only a frame whose last free did is handed out without
+// a memset. The buddy lists keep their bookkeeping in the first bytes of a
+// free block, and clear it as a block leaves a list (`remove_free`), so a
+// frame zeroed on free is still zero when it is allocated.
 //
 // Based on:
 // - Windows "zero page thread" (system thread that pre-zeros free pages)
@@ -1690,56 +1697,68 @@ fn is_zero_on_free() -> bool {
 /// Update the cached zero-on-free mode.
 ///
 /// Called by the sysctl dispatch handler when `mm.zero_on_alloc` changes.
-/// Also resets the generation counter when switching to zero-on-free mode
-/// so that settled detection starts fresh.
+/// Nothing else changes with it: frames freed before are known not zeroed
+/// ([`FREED_ZEROED_PTR`]), whichever way the mode went.
 pub fn set_zero_on_free_mode(active: bool) {
-    let was = ZERO_ON_FREE_ACTIVE.swap(active, Ordering::Release);
-    if active && !was {
-        // Switching to zero-on-free: reset the generation counter so
-        // alloc_frame_zeroed() doesn't skip zeroing until all frames
-        // have been freed at least once under the new mode.
-        ZERO_ON_FREE_COUNT.store(0, Ordering::Release);
-        ZERO_ON_FREE_SETTLED.store(false, Ordering::Release);
+    ZERO_ON_FREE_ACTIVE.store(active, Ordering::Release);
+}
+
+/// One bit per frame (frame index `i` is bit `i % 64` of word `i / 64`):
+/// set when the frame's last free left it all zero, clear when it did not
+/// or it has never been freed. Read only by [`alloc_frame_zeroed`], on a
+/// frame it has just been given -- between a frame's allocation and its next
+/// free the bit is stale, and no one asks. Carved from the allocator's
+/// metadata region in [`init`]; zero (`FREED_ZEROED_WORDS` too) before that.
+static FREED_ZEROED_PTR: AtomicU64 = AtomicU64::new(0);
+
+/// The number of `u64` words at [`FREED_ZEROED_PTR`].
+static FREED_ZEROED_WORDS: AtomicU64 = AtomicU64::new(0);
+
+/// Words of the [`FREED_ZEROED_PTR`] bitmap for `total_frames` frames.
+const fn zeroed_words(total_frames: usize) -> usize {
+    total_frames.div_ceil(64)
+}
+
+/// The bitmap word holding frame `addr`'s bit, and the bit's mask; `None`
+/// before [`init`] or for a frame past the managed range.
+// arithmetic_side_effects: divisions and remainders by non-zero constants.
+#[allow(clippy::arithmetic_side_effects)]
+fn freed_zeroed_bit(addr: u64) -> Option<(&'static AtomicU64, u64)> {
+    let ptr = FREED_ZEROED_PTR.load(Ordering::Acquire);
+    let words = FREED_ZEROED_WORDS.load(Ordering::Acquire);
+    let idx = addr / FRAME_SIZE as u64;
+    let word = idx / 64;
+    if ptr == 0 || word >= words {
+        return None;
+    }
+    // SAFETY: `init` published `words` aligned `u64`s at `ptr`, in the
+    // permanently reserved metadata region, and never changes them; `word`
+    // is below `words`. `AtomicU64` has `u64`'s layout.
+    let cell = unsafe { &*(ptr as *const AtomicU64).add(word as usize) };
+    Some((cell, 1u64 << (idx % 64)))
+}
+
+/// Record what freeing `count` frames from `addr` left in them: all zero
+/// (`zeroed`), or not.
+fn note_freed(addr: u64, count: u64, zeroed: bool) {
+    for i in 0..count {
+        let Some((cell, mask)) =
+            freed_zeroed_bit(addr.saturating_add(i.saturating_mul(FRAME_SIZE as u64)))
+        else {
+            return;
+        };
+        if zeroed {
+            cell.fetch_or(mask, Ordering::Release);
+        } else {
+            cell.fetch_and(!mask, Ordering::Release);
+        }
     }
 }
 
-/// Number of frames zeroed-on-free since the mode was enabled.
-///
-/// Once this reaches `total_frames`, we know all frames have been
-/// through at least one zero-on-free cycle, and `alloc_frame_zeroed()`
-/// can skip inline zeroing.
-static ZERO_ON_FREE_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Set once `ZERO_ON_FREE_COUNT >= total_frames`.  After this point,
-/// `alloc_frame_zeroed()` can safely skip inline zeroing because every
-/// frame in the system has been zeroed during a free operation.
-static ZERO_ON_FREE_SETTLED: AtomicBool = AtomicBool::new(false);
-
-/// Record that a frame was zeroed during a free operation.
-///
-/// Increments the generation counter.  When the counter reaches
-/// `total_frames`, sets the `ZERO_ON_FREE_SETTLED` flag (one-time
-/// transition to steady state).
-#[inline]
-fn mark_zeroed_on_free() {
-    if ZERO_ON_FREE_SETTLED.load(Ordering::Relaxed) {
-        return; // Already settled — no bookkeeping needed.
-    }
-    let count = ZERO_ON_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
-    // Check if we've now zeroed enough frames to cover the whole system.
-    // This is a heuristic: it counts total frees, not unique frames.
-    // In practice, after total_frames frees, virtually all frames have
-    // been recycled (the birthday paradox works in our favor).
-    if let Some(s) = stats() {
-        if count.saturating_add(1) >= s.total_frames as u64 {
-            ZERO_ON_FREE_SETTLED.store(true, Ordering::Release);
-            serial_println!(
-                "[mm] Zero-on-free settled: {} frees >= {} total frames",
-                count.saturating_add(1),
-                s.total_frames,
-            );
-        }
-    }
+/// Whether frame `addr`'s last free left it all zero: for a frame the caller
+/// has just been allocated, whether it is all zero now.
+fn freed_zeroed(addr: u64) -> bool {
+    freed_zeroed_bit(addr).is_some_and(|(cell, mask)| cell.load(Ordering::Acquire) & mask != 0)
 }
 
 /// Zero a single frame on the free path using non-temporal stores.
@@ -1888,25 +1907,28 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
 
     // We need 1 byte per frame for page_info + 2 bytes per frame for
     // refcount + 4 bytes per frame for the per-frame cgroup charge tag + 1
-    // byte per frame for the frame-owner tag, plus alignment padding before
-    // the (u16) refcount array and before the (u32) cgroup array.  The owner
-    // array is u8 so it needs no further alignment.
+    // byte per frame for the frame-owner tag + 1 bit per frame for "zeroed
+    // by its last free", plus alignment padding before the (u16) refcount
+    // array, the (u32) cgroup array and the (u64) bitmap.  The owner array
+    // is u8 so it needs no further alignment.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
     let cgroup_offset = (refcount_offset + total_frames * 2 + 3) & !3; // align up to 4
     let owner_offset = cgroup_offset + total_frames * 4;
-    let metadata_bytes = owner_offset + total_frames;
+    let zeroed_offset = (owner_offset + total_frames + 7) & !7; // align up to 8
+    let metadata_bytes = zeroed_offset + zeroed_words(total_frames) * 8;
     let metadata_frames = (align_up(metadata_bytes as u64, frame_size) / frame_size) as usize;
     let metadata_size = (metadata_frames as u64) * frame_size;
 
     serial_println!(
-        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B, cgroup: {}B, owner: {}B]",
+        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B, cgroup: {}B, owner: {}B, zeroed: {}B]",
         metadata_bytes,
         metadata_frames,
         metadata_size / 1024,
         total_frames,
         total_frames * 2,
         total_frames * 4,
-        total_frames
+        total_frames,
+        zeroed_words(total_frames) * 8
     );
 
     // Find the first USABLE region large enough for the metadata.
@@ -2023,6 +2045,7 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
     let cgroup_offset = (refcount_offset + total_frames * 2 + 3) & !3; // align up to 4
     let owner_offset = cgroup_offset + total_frames * 4;
+    let zeroed_offset = (owner_offset + total_frames + 7) & !7; // align up to 8
     let metadata_virt = (metadata_phys + hhdm_offset) as *mut u8;
     // SAFETY: metadata_phys is in a USABLE memory region, the HHDM maps
     // it to metadata_virt, and we have exclusive access during early boot
@@ -2042,7 +2065,17 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
         // per-frame owner tags: fill with 0 = Owner::Free ("not allocated").
         let owner_ptr = metadata_virt.add(owner_offset);
         core::ptr::write_bytes(owner_ptr, 0, total_frames);
+        // "zeroed by its last free": no frame has been freed yet.
+        let zeroed_ptr = metadata_virt.add(zeroed_offset);
+        core::ptr::write_bytes(zeroed_ptr, 0, zeroed_words(total_frames) * 8);
     }
+    // Published like the cgroup array below. `zeroed_offset` is a multiple
+    // of 8 and `metadata_virt` frame-aligned, so the words are aligned for
+    // `AtomicU64`.
+    // SAFETY: zeroed_offset is within the metadata region plan_metadata sized.
+    let zeroed_virt = unsafe { metadata_virt.add(zeroed_offset) };
+    FREED_ZEROED_PTR.store(zeroed_virt as u64, Ordering::Release);
+    FREED_ZEROED_WORDS.store(zeroed_words(total_frames) as u64, Ordering::Release);
     // SAFETY: refcount_offset is even, so metadata_virt + refcount_offset
     // is 2-byte aligned (metadata_virt is frame-aligned = 16 KiB aligned).
     let refcount_virt = unsafe { metadata_virt.add(refcount_offset) as *mut u16 };
@@ -2255,25 +2288,18 @@ pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
         }
     }
 
-    // Fast path 2: zero-on-free mode, settled (all frames pre-zeroed).
-    //
-    // After every frame in the system has been through at least one
-    // free cycle with zero-on-free active, all frames on the free lists
-    // and in per-CPU caches are pre-zeroed.  `alloc_frame()` returns a
-    // pre-zeroed frame, so we skip the inline memset entirely.
-    //
-    // OPT: This removes the 16 KiB zero from the allocation hot path
-    // (~3µs savings per alloc).  The cost was amortised across the
-    // free path instead.
-    if is_zero_on_free() && ZERO_ON_FREE_SETTLED.load(Ordering::Acquire) {
+    let frame = alloc_frame()?;
+
+    // Fast path 2: a frame its last free zeroed (zero-on-free mode) is still
+    // all zero: nothing has written it since (`FREED_ZEROED_PTR`). This moves
+    // the 16 KiB memset off the allocation hot path, onto the free path.
+    if freed_zeroed(frame.addr()) {
         ZERO_POOL_HITS.fetch_add(1, Ordering::Relaxed);
-        return alloc_frame();
+        return Ok(frame);
     }
 
-    // Slow path: allocate + zero inline.
+    // Slow path: zero inline.
     ZERO_POOL_MISSES.fetch_add(1, Ordering::Relaxed);
-
-    let frame = alloc_frame()?;
 
     let hhdm = crate::mm::page_table::hhdm().ok_or_else(|| {
         // Can't zero without HHDM — free the frame and return error.
@@ -2635,11 +2661,8 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
         // fault hot path) to free_frame() (less latency-sensitive).
         // The frame is exclusively ours (refcount ≤ 1 confirmed above),
         // so zeroing is safe.
-        if is_zero_on_free() {
-            if zero_on_free_frame(frame) {
-                mark_zeroed_on_free();
-            }
-        }
+        let zeroed = is_zero_on_free() && zero_on_free_frame(frame);
+        note_freed(frame.addr(), 1, zeroed);
 
         // KASAN: the frame is confirmed sole-owned above and zero-on-free has
         // made its last write, so this is the point past which no legitimate
@@ -2728,12 +2751,9 @@ unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
 
     // Zero-on-free: zero the block BEFORE taking the global lock to
     // avoid holding the lock during the expensive zeroing operation.
-    if is_zero_on_free() && sole_owned && zero_on_free_block(frame.addr(), order) {
-        let frames_in_block = 1u64 << order;
-        for _ in 0..frames_in_block {
-            mark_zeroed_on_free();
-        }
-    }
+    // A shared frame is not freed here, and its next free sets its bit.
+    let zeroed = is_zero_on_free() && sole_owned && zero_on_free_block(frame.addr(), order);
+    note_freed(frame.addr(), 1u64 << order, zeroed);
 
     // KASAN: after the last legitimate write (the memset above), before the
     // block reaches a free list.
@@ -3685,6 +3705,70 @@ pub fn test_zero_on_free() -> KernelResult<()> {
     r
 }
 
+/// Frames [`zeroed_alloc_after_buddy_frees`] cycles through the buddy lists.
+const BUDDY_CYCLE_FRAMES: usize = 64;
+
+/// With zero-on-free on: write [`BUDDY_CYCLE_FRAMES`] frames, free them
+/// through the buddy lists (`free_order`, not the per-CPU cache), and check
+/// that the next as many [`alloc_frame_zeroed`] frames are all zero. A free
+/// block carries the lists' links in its first bytes; were they left there,
+/// a frame recorded as zeroed would come back with them.
+fn zeroed_alloc_after_buddy_frees(hhdm: u64) -> KernelResult<()> {
+    let mut frames = [0u64; BUDDY_CYCLE_FRAMES];
+    let mut taken = 0usize;
+    for slot in &mut frames {
+        let Ok(frame) = alloc_frame() else {
+            break;
+        };
+        // SAFETY: just allocated, exclusively ours, HHDM valid.
+        unsafe {
+            core::ptr::write_bytes(frame.to_virt(hhdm) as *mut u8, 0xC3, FRAME_SIZE);
+        }
+        *slot = frame.addr();
+        taken = taken.saturating_add(1);
+    }
+    for &addr in frames.iter().take(taken) {
+        let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
+        // SAFETY: allocated above by alloc_frame, sole owner, freed once.
+        unsafe {
+            free_order(frame, 0)?;
+        }
+    }
+    let mut bad: Option<(u64, usize, u8)> = None;
+    for slot in &mut frames {
+        let frame = alloc_frame_zeroed()?;
+        let ptr = frame.to_virt(hhdm) as *const u8;
+        // SAFETY: allocated, HHDM valid, exclusively ours.
+        let first = unsafe {
+            core::slice::from_raw_parts(ptr, FRAME_SIZE)
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|&(_, b)| b != 0)
+        };
+        if let (None, Some((off, byte))) = (bad, first) {
+            bad = Some((frame.addr(), off, byte));
+        }
+        *slot = frame.addr();
+    }
+    for &addr in &frames {
+        let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
+        // SAFETY: allocated above by alloc_frame_zeroed, sole owner.
+        unsafe {
+            free_frame(frame)?;
+        }
+    }
+    if let Some((addr, off, byte)) = bad {
+        serial_println!(
+            "[mm]   FAIL: after frees through the buddy lists, alloc_frame_zeroed gave \
+             frame {addr:#x} with byte {off} = {byte:#04x}: what a free block held \
+             reached the next owner"
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let hhdm = match crate::mm::page_table::hhdm() {
         Some(h) => h,
@@ -3729,6 +3813,14 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
         free_frame(frame2)?;
     }
 
+    // The free recorded what it left: zeroed.
+    let recorded_zeroed = freed_zeroed(frame2.addr());
+
+    // Frames that pass through the buddy lists, whose bookkeeping lives in
+    // the first bytes of a free block, still come back zero from
+    // `alloc_frame_zeroed` without a memset.
+    let through_buddy = zeroed_alloc_after_buddy_frees(hhdm);
+
     // Restore original sysctl.
     let _ = crate::sysctl::set(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC, original);
 
@@ -3736,23 +3828,30 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
         serial_println!("[mm]   FAIL: zero-on-free frame still has non-zero data!");
         return Err(KernelError::InternalError);
     }
+    if !recorded_zeroed {
+        serial_println!("[mm]   FAIL: a frame zeroed on free is not recorded as zeroed");
+        return Err(KernelError::InternalError);
+    }
+    through_buddy?;
 
-    // Verify the generation counter incremented (at least 2 frees
-    // with zero-on-free active: the first frame and frame2).
-    let count = ZERO_ON_FREE_COUNT.load(Ordering::Relaxed);
-    if count < 2 {
-        serial_println!(
-            "[mm]   FAIL: zero-on-free counter {} < 2 (expected at least 2 frees)",
-            count,
-        );
+    // A free that does not zero records that it did not: with the mode off,
+    // a written frame freed is not handed out as zeroed.
+    let dirty = alloc_frame()?;
+    // SAFETY: just allocated, exclusively ours, HHDM valid.
+    unsafe {
+        core::ptr::write_bytes(dirty.to_virt(hhdm) as *mut u8, 0x5A, FRAME_SIZE);
+    }
+    let zero_on_free_now = is_zero_on_free();
+    // SAFETY: sole owner.
+    unsafe {
+        free_frame(dirty)?;
+    }
+    if !zero_on_free_now && freed_zeroed(dirty.addr()) {
+        serial_println!("[mm]   FAIL: a frame freed unzeroed is recorded as zeroed");
         return Err(KernelError::InternalError);
     }
 
-    serial_println!(
-        "[mm]   Zero-on-free: OK (counter={}, settled={})",
-        count,
-        ZERO_ON_FREE_SETTLED.load(Ordering::Relaxed),
-    );
+    serial_println!("[mm]   Zero-on-free: OK (recorded per frame, buddy bookkeeping cleared)");
 
     // -----------------------------------------------------------------------
     // Test 8: Cgroup memory integration — fast-exit when disabled

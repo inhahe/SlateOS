@@ -1,7 +1,8 @@
 ## Resolved — lane C
 - **The start button should be the XOR logo: can you add it?** (C-Q28) --
-  answered 2026-10-09: done, `xor.png` put in the integration tree; it is
-  the repository's now and the start button is to draw it, round. §1604.
+  answered 2026-10-09: done, `xor2.png` put in the integration tree (not
+  the `xor.png` beside it, the operator said 2026-10-16); it is the
+  repository's now and the start button is to draw it, round. §1604.
 
 - **Should copy and paste travel through the window system?** (C-Q29) --
   answered 2026-10-09: yes, A; a program with no window reaches the clipboard

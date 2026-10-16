@@ -6,9 +6,11 @@
 version of the XOR logo", and the logo was not in the repository, so the
 button drew a stand-in -- four plain squares. Asked for the file
 (`open-questions.md` C-Q28), the operator put it in the integration tree:
-`xor.png`, 257 by 256 pixels, a many-coloured XOR pattern. It is now the
-repository's (`gui/desktop/assets/xor.png`), and the start button is to draw
-it, round and shrunken.
+`xor2.png`, 129 by 128 pixels, a many-coloured XOR pattern -- not the larger
+`xor.png` beside it, as the operator told lane F in chat on 2026-10-16
+(`operator-answers/2026-10-16-chat-to-lane-f.txt`). It is now the
+repository's (`gui/desktop/assets/xor2.png`), and the start button is to
+draw it, round and shrunken.
 
 **The answer, verbatim** (`operator-answers/2026-10-09-open-questions-answers.txt`):
 

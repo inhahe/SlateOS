@@ -29,9 +29,11 @@
 //! ## Key Management
 //!
 //! - Named keystores hold 256-bit symmetric keys
-//! - Keys are derived from passphrases via SHA256(passphrase || name)
-//!   (simplified; a full KDF like Argon2 would be used in production)
-//! - Each file gets a unique random 12-byte nonce
+//! - Keys are derived from passphrases via SHA256(passphrase || name): one
+//!   fast hash, which a stolen file does not resist (known-issues
+//!   `A-FS-ENCRYPT-HAND-ROLLS-ITS-CIPHER-AND-DERIVES-KEYS-WITH-ONE-SHA-256`)
+//! - Each file gets a random 12-byte nonce, from the kernel's
+//!   random-number generator
 //!
 //! ## Usage
 //!
@@ -78,150 +80,38 @@ const NONCE_SIZE: usize = 12;
 const HMAC_SIZE: usize = 32;
 
 // ---------------------------------------------------------------------------
-// ChaCha20 implementation (RFC 7539)
+// Primitives
 // ---------------------------------------------------------------------------
 
-/// ChaCha20 quarter round operation.
-fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    state[a] = state[a].wrapping_add(state[b]);
-    state[d] ^= state[a];
-    state[d] = state[d].rotate_left(16);
+use crate::crypto::hmac_sha256;
 
-    state[c] = state[c].wrapping_add(state[d]);
-    state[b] ^= state[c];
-    state[b] = state[b].rotate_left(12);
+/// How long [`generate_nonce`] waits for the random-number generator to be
+/// seeded, as `fs::diskencrypt` waits for its salts.
+const RNG_WAIT_NS: u64 = 5_000_000_000;
 
-    state[a] = state[a].wrapping_add(state[b]);
-    state[d] ^= state[a];
-    state[d] = state[d].rotate_left(8);
-
-    state[c] = state[c].wrapping_add(state[d]);
-    state[b] ^= state[c];
-    state[b] = state[b].rotate_left(7);
-}
-
-/// Generate a ChaCha20 block (64 bytes of keystream).
-fn chacha20_block(key: &[u8; KEY_SIZE], counter: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 64] {
-    // "expand 32-byte k"
-    let mut state: [u32; 16] = [
-        0x61707865,
-        0x3320646e,
-        0x79622d32,
-        0x6b206574,
-        u32::from_le_bytes([key[0], key[1], key[2], key[3]]),
-        u32::from_le_bytes([key[4], key[5], key[6], key[7]]),
-        u32::from_le_bytes([key[8], key[9], key[10], key[11]]),
-        u32::from_le_bytes([key[12], key[13], key[14], key[15]]),
-        u32::from_le_bytes([key[16], key[17], key[18], key[19]]),
-        u32::from_le_bytes([key[20], key[21], key[22], key[23]]),
-        u32::from_le_bytes([key[24], key[25], key[26], key[27]]),
-        u32::from_le_bytes([key[28], key[29], key[30], key[31]]),
-        counter,
-        u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]),
-        u32::from_le_bytes([nonce[4], nonce[5], nonce[6], nonce[7]]),
-        u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]),
-    ];
-
-    let initial = state;
-
-    // 20 rounds (10 double rounds).
-    for _ in 0..10 {
-        // Column rounds.
-        quarter_round(&mut state, 0, 4, 8, 12);
-        quarter_round(&mut state, 1, 5, 9, 13);
-        quarter_round(&mut state, 2, 6, 10, 14);
-        quarter_round(&mut state, 3, 7, 11, 15);
-        // Diagonal rounds.
-        quarter_round(&mut state, 0, 5, 10, 15);
-        quarter_round(&mut state, 1, 6, 11, 12);
-        quarter_round(&mut state, 2, 7, 8, 13);
-        quarter_round(&mut state, 3, 4, 9, 14);
-    }
-
-    // Add initial state.
-    for i in 0..16 {
-        state[i] = state[i].wrapping_add(initial[i]);
-    }
-
-    // Serialize to bytes (little-endian).
-    let mut output = [0u8; 64];
-    for i in 0..16 {
-        let bytes = state[i].to_le_bytes();
-        output[i * 4] = bytes[0];
-        output[i * 4 + 1] = bytes[1];
-        output[i * 4 + 2] = bytes[2];
-        output[i * 4 + 3] = bytes[3];
-    }
-
-    output
-}
-
-/// Encrypt or decrypt data using ChaCha20 (XOR with keystream).
-/// ChaCha20 is its own inverse — same operation for encrypt and decrypt.
+/// ChaCha20 over `data`, as the FENC format runs it: the keystream from
+/// block counter 1, RFC 8439's convention for encryption. Its own inverse.
 fn chacha20_crypt(key: &[u8; KEY_SIZE], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    let mut counter: u32 = 1; // RFC 7539: start at 1 for encryption.
-
-    let mut offset = 0;
-    while offset < data.len() {
-        let block = chacha20_block(key, counter, nonce);
-        let remaining = data.len() - offset;
-        let chunk_size = remaining.min(64);
-
-        for i in 0..chunk_size {
-            output.push(data[offset + i] ^ block[i]);
-        }
-
-        offset += chunk_size;
-        counter = counter.wrapping_add(1);
-    }
-
-    output
+    let mut out = data.to_vec();
+    crate::crypto::chacha20_xor(key, nonce, 1, &mut out);
+    out
 }
 
-// ---------------------------------------------------------------------------
-// HMAC-SHA256
-// ---------------------------------------------------------------------------
-
-/// Compute HMAC-SHA256(key, message).
-fn hmac_sha256(key: &[u8; KEY_SIZE], message: &[u8]) -> [u8; HMAC_SIZE] {
-    use crate::crypto::Sha256;
-
-    /// SHA-256 block size (512 bits = 64 bytes).
-    const BLOCK_SIZE: usize = 64;
-
-    // Pad key to block size.
-    let mut key_pad = [0u8; BLOCK_SIZE];
-    if key.len() <= BLOCK_SIZE {
-        key_pad[..key.len()].copy_from_slice(key);
-    } else {
-        let h = crate::crypto::sha256(key);
-        key_pad[..32].copy_from_slice(&h);
+/// A nonce for one file, from the kernel's random-number generator. A
+/// ChaCha20 nonce must never repeat under one key, and a key here is
+/// derived from a passphrase -- the same on every boot -- so a counter or a
+/// clock, which restart with the machine, will not do.
+///
+/// # Errors
+///
+/// `WouldBlock` if the generator is still not seeded after [`RNG_WAIT_NS`].
+fn generate_nonce() -> KernelResult<[u8; NONCE_SIZE]> {
+    if !crate::rng::is_ready() && !crate::rng::wait_until_ready(RNG_WAIT_NS) {
+        return Err(KernelError::WouldBlock);
     }
-
-    // Inner pad.
-    let mut ipad = [0x36u8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        ipad[i] ^= key_pad[i];
-    }
-
-    // Outer pad.
-    let mut opad = [0x5cu8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        opad[i] ^= key_pad[i];
-    }
-
-    // Inner hash: SHA256(ipad || message)
-    let mut inner = Sha256::new();
-    inner.update(&ipad);
-    inner.update(message);
-    let inner_hash = inner.finalize();
-
-    // Outer hash: SHA256(opad || inner_hash)
-    let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner_hash);
-    outer.finalize()
+    let mut nonce = [0u8; NONCE_SIZE];
+    crate::rng::fill(&mut nonce);
+    Ok(nonce)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +258,7 @@ pub fn encrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     drop(state);
 
     // Generate random nonce.
-    let nonce = generate_nonce();
+    let nonce = generate_nonce()?;
 
     // Encrypt.
     let ciphertext = chacha20_crypt(&key, &nonce, data);
@@ -508,30 +398,6 @@ fn derive_key(passphrase: &str, salt: &str) -> [u8; KEY_SIZE] {
     hasher.update(salt.as_bytes());
     hasher.update(b"FENC_KDF_V1");
     hasher.finalize()
-}
-
-/// Generate a random 12-byte nonce using TSC + timekeeping.
-fn generate_nonce() -> [u8; NONCE_SIZE] {
-    let mut nonce = [0u8; NONCE_SIZE];
-
-    // Mix TSC, realtime clock, and a counter for uniqueness.
-    // SAFETY: `_rdtsc` reads the timestamp counter and is always valid
-    // on x86_64 when RDTSC is supported (all CPUs since Pentium).
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let rt = crate::timekeeping::clock_realtime();
-
-    let tsc_bytes = tsc.to_le_bytes();
-    let rt_bytes = rt.to_le_bytes();
-
-    // First 8 bytes from TSC (high entropy from timing jitter).
-    nonce[0..8].copy_from_slice(&tsc_bytes);
-    // Last 4 bytes from clock XOR with more TSC bits.
-    nonce[8] = rt_bytes[0] ^ tsc_bytes[3];
-    nonce[9] = rt_bytes[1] ^ tsc_bytes[5];
-    nonce[10] = rt_bytes[2] ^ tsc_bytes[7];
-    nonce[11] = rt_bytes[3] ^ tsc_bytes[1];
-
-    nonce
 }
 
 /// Constant-time byte array comparison (prevents timing attacks).
@@ -676,12 +542,12 @@ fn test_key_management() {
 
 fn test_nonce_uniqueness() {
     // Generate multiple nonces — they should all be different.
-    let n1 = generate_nonce();
-    let n2 = generate_nonce();
-    let n3 = generate_nonce();
+    let n1 = generate_nonce().expect("the RNG is seeded");
+    let n2 = generate_nonce().expect("the RNG is seeded");
+    let n3 = generate_nonce().expect("the RNG is seeded");
 
-    // At minimum, not all the same (TSC should vary).
-    assert!(n1 != n2 || n2 != n3, "nonces should vary");
+    // 96 random bits each: any two alike is a broken generator.
+    assert!(n1 != n2 && n2 != n3 && n1 != n3, "nonces are distinct");
 
     serial_println!("[encrypt]   nonce uniqueness: ok");
 }

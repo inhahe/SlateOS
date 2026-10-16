@@ -3465,14 +3465,14 @@ def _synth_elf(path, symbols, *, ident_class=2, ident_data=1, magic=b"\x7fELF"):
 def test_hot_symbols_read_legacy_mangling(bh, tmpdir):
     elf = _synth_elf(os.path.join(tmpdir, "legacy.elf"), [
         ("_ZN4sha28compress17h8234a763022d2833E", 0xffffffff80afce00),
-        ("_ZN6kernel6crypto15sha512_compress17hff0d9f03de4c6bb2E",
+        ("_ZN6kernel3net3tcp15tcp_checksum_ip17hff0d9f03de4c6bb2E",
          0xffffffff80af5580),
     ])
     got = bh.elf_symbol_addresses(elf)
     check("legacy mangling: compress address is read",
           got.get("crypto::compress"), "0xffffffff80afce00")
-    check("legacy mangling: sha512_compress is read",
-          got.get("crypto::sha512_compress"), "0xffffffff80af5580")
+    check("legacy mangling: tcp_checksum_ip is read",
+          got.get("net::tcp::tcp_checksum_ip"), "0xffffffff80af5580")
 
 
 def test_hot_symbols_read_v0_mangling(bh, tmpdir):

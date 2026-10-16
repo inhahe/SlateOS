@@ -7619,11 +7619,8 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("CRC-32", selftest::Severity::Diagnostic, || {
                 crypto::self_test_crc32()
             });
-            selftest::dispatch_debug("TLS crypto", selftest::Severity::Diagnostic, || {
-                crypto::self_test_tls_crypto()
-            });
-            selftest::dispatch_debug("Ed25519/SHA-512", selftest::Severity::Diagnostic, || {
-                crypto::self_test_ed25519()
+            selftest::dispatch_debug("HMAC/ChaCha20", selftest::Severity::Diagnostic, || {
+                crypto::self_test_hmac_chacha20()
             });
         }
         case();

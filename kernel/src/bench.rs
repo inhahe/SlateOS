@@ -4220,16 +4220,10 @@ pub fn run_all() {
     // --- Cryptographic primitives ---
     bench_crypto_sha256_64();
     bench_crypto_sha256_1k();
-    bench_crypto_sha512_64();
     bench_crypto_hmac_sha256();
     bench_crypto_chacha20_1k();
-    bench_crypto_poly1305_1k();
     bench_crypto_crc32c_4k();
     bench_crypto_crc32_4k();
-    bench_crypto_chacha20_poly1305_1k();
-    bench_crypto_x25519();
-    bench_crypto_ed25519_sign();
-    bench_crypto_ed25519_verify();
 
     // --- VFS deep-path and throughput benchmarks ---
     bench_vfs_stat_deep();
@@ -8915,23 +8909,6 @@ fn bench_crypto_sha256_1k() {
     );
 }
 
-/// SHA-512 on a 64-byte input (Ed25519 key derivation, per-signature).
-fn bench_crypto_sha512_64() {
-    use crate::crypto;
-
-    let data = [0xEFu8; 64];
-    let result = run("crypto_sha512_64B", 2000, || {
-        let _ = core::hint::black_box(crypto::sha512(core::hint::black_box(&data)));
-    });
-
-    serial_println!(
-        "[bench]   crypto_sha512_64B: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    score("crypto_sha512_64B", &result, 6000);
-}
-
 /// HMAC-SHA256 with 32-byte key and 64-byte message (TLS Finished, HKDF).
 fn bench_crypto_hmac_sha256() {
     use crate::crypto;
@@ -8980,32 +8957,6 @@ fn bench_crypto_chacha20_1k() {
         }
     );
     score("crypto_chacha20_1KiB", &result, 40000);
-}
-
-/// Poly1305 MAC of 1 KiB (TLS/SSH authentication tag).
-fn bench_crypto_poly1305_1k() {
-    use crate::crypto;
-
-    let key = [0x05u8; 32];
-    let data = [0xAAu8; 1024];
-    let result = run("crypto_poly1305_1KiB", 1000, || {
-        let _ = core::hint::black_box(crypto::poly1305(
-            core::hint::black_box(&key),
-            core::hint::black_box(&data),
-        ));
-    });
-
-    serial_println!(
-        "[bench]   crypto_poly1305_1KiB: min {}ns ({}cy)  [{} MiB/s]",
-        result.min_ns,
-        result.min_cycles,
-        if result.min_ns > 0 {
-            1_000_000_000u64 / result.min_ns * 1024 / (1024 * 1024)
-        } else {
-            0
-        }
-    );
-    score("crypto_poly1305_1KiB", &result, 30000);
 }
 
 /// CRC32C (Castagnoli) over 4 KiB — ext4 and Btrfs metadata verification.
@@ -9071,135 +9022,6 @@ fn bench_crypto_crc32_4k() {
         }
     );
     score("crypto_crc32_4KiB", &result, 60000);
-}
-
-/// ChaCha20-Poly1305 AEAD encrypt of 1 KiB (TLS 1.3 / SSH record layer).
-///
-/// This is the combined cipher used for every TLS record and SSH packet.
-/// It measures the full encrypt+MAC pipeline.
-fn bench_crypto_chacha20_poly1305_1k() {
-    use crate::crypto;
-
-    let key = [0x06u8; 32];
-    let nonce = [0x07u8; 12];
-    let aad = [0x08u8; 13]; // Typical TLS record header.
-    let mut buf = [0xBBu8; 1024];
-
-    let result = run("crypto_aead_1KiB", 500, || {
-        // Reset plaintext each iteration (encrypt is in-place).
-        for b in buf.iter_mut() {
-            *b = 0xBB;
-        }
-        let _ = core::hint::black_box(crypto::chacha20_poly1305_encrypt(
-            core::hint::black_box(&key),
-            core::hint::black_box(&nonce),
-            core::hint::black_box(&aad),
-            core::hint::black_box(&mut buf),
-        ));
-    });
-
-    // OpenSSL chacha20-poly1305 1KiB: ~2000ns.  QEMU target: 100000ns.
-    score("crypto_aead_1KiB", &result, 100_000);
-    serial_println!(
-        "[bench]   crypto_aead_1KiB: min {}ns ({}cy)  [{} MiB/s]",
-        result.min_ns,
-        result.min_cycles,
-        if result.min_ns > 0 {
-            1_000_000_000u64 / result.min_ns * 1024 / (1024 * 1024)
-        } else {
-            0
-        }
-    );
-}
-
-/// X25519 Diffie-Hellman key exchange (one scalar multiplication).
-///
-/// This runs once per TLS handshake and once per SSH key exchange.
-/// Not a hot path, but establishes the baseline for connection setup
-/// latency.  Uses basepoint multiplication (public key derivation).
-fn bench_crypto_x25519() {
-    use crate::crypto;
-
-    // Use a fixed scalar to avoid RNG cost in the measurement.
-    let scalar: [u8; 32] = {
-        let mut s = [0u8; 32];
-        for (i, b) in s.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(7).wrapping_add(0x42);
-        }
-        s[0] &= 248;
-        s[31] &= 127;
-        s[31] |= 64;
-        s
-    };
-
-    let result = run("crypto_x25519", 100, || {
-        let _ = core::hint::black_box(crypto::x25519_base(core::hint::black_box(&scalar)));
-    });
-
-    serial_println!(
-        "[bench]   crypto_x25519: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target from baselines.toml: 2_000_000ns (2ms per key exchange).
-    score("crypto_x25519", &result, 2_000_000);
-}
-
-/// Ed25519 signature generation (per SSH auth, per signed message).
-///
-/// Includes two SHA-512 hashes plus scalar multiplication — the most
-/// expensive per-connection operation for SSH public key authentication.
-fn bench_crypto_ed25519_sign() {
-    use crate::crypto;
-
-    let seed = [0x09u8; 32];
-    let message = [0xCCu8; 128];
-
-    let result = run("crypto_ed25519_sign", 50, || {
-        let _ = core::hint::black_box(crypto::ed25519_sign(
-            core::hint::black_box(&seed),
-            core::hint::black_box(&message),
-        ));
-    });
-
-    serial_println!(
-        "[bench]   crypto_ed25519_sign: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target from baselines.toml: 5_000_000ns (5ms per signature).
-    score("crypto_ed25519_sign", &result, 5_000_000);
-}
-
-/// Ed25519 signature verification (per SSH host key check, per cert verify).
-///
-/// The costliest single operation in a TLS or SSH handshake — includes
-/// point decompression, two scalar multiplications, and SHA-512.
-fn bench_crypto_ed25519_verify() {
-    use crate::crypto;
-
-    let seed = [0x0Au8; 32];
-    let message = [0xDDu8; 128];
-
-    // Pre-compute a valid signature to verify.
-    let pubkey = crypto::ed25519_public_key(&seed);
-    let sig = crypto::ed25519_sign(&seed, &message);
-
-    let result = run("crypto_ed25519_verify", 50, || {
-        let _ = core::hint::black_box(crypto::ed25519_verify(
-            core::hint::black_box(&pubkey),
-            core::hint::black_box(&message),
-            core::hint::black_box(&sig),
-        ));
-    });
-
-    serial_println!(
-        "[bench]   crypto_ed25519_verify: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target from baselines.toml: 10_000_000ns (10ms per verify).
-    score("crypto_ed25519_verify", &result, 10_000_000);
 }
 
 // ---------------------------------------------------------------------------

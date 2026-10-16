@@ -1224,7 +1224,7 @@ BENCH_COVERAGE=(
     # adding benchmarks; `rdtsc_overhead` is correctly cited by nothing (it
     # measures the harness, not the kernel) and `hpet_read` is a live question
     # -- see known-issues.md.
-    "kernel/src/crypto.rs|crypto_sha256_64B crypto_sha256_1KiB crypto_sha512_64B crypto_hmac_sha256 crypto_chacha20_1KiB crypto_poly1305_1KiB crypto_aead_1KiB crypto_ed25519_sign crypto_ed25519_verify crypto_x25519 crypto_crc32_4KiB crypto_crc32c_4KiB"
+    "kernel/src/crypto.rs|crypto_sha256_64B crypto_sha256_1KiB crypto_hmac_sha256 crypto_chacha20_1KiB crypto_crc32_4KiB crypto_crc32c_4KiB"
     "kernel/src/apic.rs|isr_latency"
 )
 
@@ -1979,10 +1979,8 @@ TIMEOUT=2400
 TIMEOUT_EXPLICIT=0
 # Timeout used when --bench is given and --timeout= is not.  The benchmark
 # suite runs *after* BOOT_OK, as a deferred low-priority task, and it is not
-# cheap under TCG: the asymmetric-crypto benchmarks alone are tens of seconds
-# each (ed25519_sign averages ~433ms per iteration for 50 iterations).  A
-# --bench run at the 480s boot default therefore reaches BOOT_OK and is then
-# killed part-way through the crypto section, reporting "Boot test FAILED
+# cheap under TCG.  A --bench run at the 480s boot default reached BOOT_OK and
+# was then killed part-way through the suite, reporting "Boot test FAILED
 # (BENCH_OK not reached)" for a kernel that booted perfectly.  That is a
 # harness false negative, and it happened.
 BENCH_TIMEOUT=1200

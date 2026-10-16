@@ -408,7 +408,8 @@ except ImportError:  # pragma: no cover -- a checkout missing the module
 #: symbol size, same mangled hash); `crypto::compress` merely moved to
 #: `…80afce00`, and moving it anywhere else -- two unrelated addresses were
 #: tried -- restored the original number exactly.  `crypto_sha512_64B`, a
-#: near-identical routine at a different address, was unaffected.  See
+#: near-identical routine at a different address (deleted since, with the
+#: kernel's TLS and SSH), was unaffected.  See
 #: A-A-4x-CRYPTO-"REGRESSION" in known-issues.md.
 #:
 #: Recording the addresses turns a repeat of that into a one-line observation
@@ -441,7 +442,6 @@ except ImportError:  # pragma: no cover -- a checkout missing the module
 #: of the series; the pattern beside it records where the code actually is.
 HOT_SYMBOLS = {
     "crypto::compress": "4sha28compress",
-    "crypto::sha512_compress": "6crypto15sha512_compress",
     "net::tcp::tcp_checksum_ip": "3tcp15tcp_checksum_ip",
 }
 

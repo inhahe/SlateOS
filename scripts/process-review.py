@@ -47,6 +47,7 @@ import sys
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -120,6 +121,42 @@ def meter_windows(samples: list[dict], calls: list[tuple[float, float, float]],
     return out
 
 
+class Request(NamedTuple):
+    """One API request a session made: when, on which model, and its tokens
+    by kind (input, output, cache writes of 5 min and 1 h, cache reads)."""
+    ts: float
+    model: str
+    inp: int
+    outp: int
+    cw5: int
+    cw1h: int
+    cr: int
+
+
+def requests_since(db: sqlite3.Connection, since: float) -> dict[tuple[str, str], Request]:
+    """Every API request in the usage analyzer's database after `since`
+    (epoch seconds), keyed by (transcript path, request id). A transcript
+    repeats a request's usage on every line of its response, so the line with
+    the most tokens stands for it."""
+    best: dict[tuple[str, str], Request] = {}
+    for path, req, ts, model, inp, outp, cw5, cw1h, cr in db.execute(
+            "select path, req_id, ts, model, inp, outp, cw5, cw1h, cr from lines "
+            "where ts > ? and req_id is not null", (since,)):
+        row = Request(ts, model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
+        prev = best.get((path, req))
+        if prev is None or sum(row[2:]) > sum(prev[2:]):
+            best[(path, req)] = row
+    return best
+
+
+def dollars(req: Request, price_for) -> tuple[float, float]:
+    """A request's cost at API prices, as (cache reads, everything else);
+    `price_for` is the analyzer's per-model price table."""
+    p_in, p_out, p_w5, p_w1h, p_r = price_for(req.model)
+    return (req.cr * p_r / 1e6,
+            (req.inp * p_in + req.outp * p_out + req.cw5 * p_w5 + req.cw1h * p_w1h) / 1e6)
+
+
 def meter_fit(cua: Path) -> str:
     """How heavily the weekly meter weighs cache reads, from the analyzer's
     database and usage samples; a paragraph, or why there is none."""
@@ -141,19 +178,9 @@ def meter_fit(cua: Path) -> str:
     since = min((s["ts"] for ss in samples.values() for s in ss), default=0)
     db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     account_of = dict(db.execute("select path, account from files"))
-    best: dict[tuple[str, str], tuple] = {}
-    for path, req, ts, model, inp, outp, cw5, cw1h, cr in db.execute(
-            "select path, req_id, ts, model, inp, outp, cw5, cw1h, cr from lines "
-            "where ts > ? and req_id is not null", (since,)):
-        row = (ts, model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
-        prev = best.get((path, req))
-        if prev is None or sum(row[2:]) > sum(prev[2:]):
-            best[(path, req)] = row
     calls: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-    for (path, _), (ts, model, inp, outp, cw5, cw1h, cr) in best.items():
-        p_in, p_out, p_w5, p_w1h, p_r = config.price_for(model)
-        calls[account_of.get(path)].append(
-            (ts, cr * p_r / 1e6, (inp * p_in + outp * p_out + cw5 * p_w5 + cw1h * p_w1h) / 1e6))
+    for (path, _), req in requests_since(db, since).items():
+        calls[account_of.get(path)].append((req.ts, *dollars(req, config.price_for)))
     rows = []
     for account, ss in samples.items():
         rows += meter_windows(ss, sorted(calls.get(account, [])), FIT_WINDOW)
@@ -340,41 +367,31 @@ def backlog_section(root: Path, today: dt.date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The report, and the proposals
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Context per lane: what the context trial compares
 # ---------------------------------------------------------------------------
 
-LANE_TITLE = re.compile(r"^OS ([A-F])$")
+#: A lane's session, by its title: `OS A` as `go.bat` names them, or the
+#: agent names `Lane A` and `Lane-A`.
+LANE_TITLE = re.compile(r"^(?:OS|Lane)[ -]([A-F])$", re.I)
 
 
 def context_rows(db: sqlite3.Connection, since: float, price_for) -> dict[str, list[float]]:
-    """Per lane, from the usage analyzer's database since `since` (epoch
+    """Per lane, from the usage analyzer's database after `since` (epoch
     seconds): [API calls, context tokens summed over them, compactions, API
-    $]. A session is a lane's by its title, `OS A` to `OS F`."""
+    $]. A session is a lane's by its title (`LANE_TITLE`)."""
     lane_of: dict[str, str] = {}
     for path, title in db.execute("select path, title from titles"):
-        m = LANE_TITLE.match(title or "")
+        m = LANE_TITLE.match((title or "").strip())
         if m:
-            lane_of[path] = m.group(1)
-    best: dict[tuple[str, str], tuple] = {}
-    for path, req, model, inp, outp, cw5, cw1h, cr in db.execute(
-            "select path, req_id, model, inp, outp, cw5, cw1h, cr from lines "
-            "where ts > ? and req_id is not null", (since,)):
+            lane_of[path] = m.group(1).upper()
+    rows: dict[str, list[float]] = {}
+    for (path, _), req in requests_since(db, since).items():
         if path not in lane_of:
             continue
-        row = (model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
-        if (path, req) not in best or sum(row[1:]) > sum(best[(path, req)][1:]):
-            best[(path, req)] = row
-    rows: dict[str, list[float]] = {}
-    for (path, _), (model, inp, outp, cw5, cw1h, cr) in best.items():
         r = rows.setdefault(lane_of[path], [0, 0, 0, 0.0])
-        p_in, p_out, p_w5, p_w1h, p_r = price_for(model)
         r[0] += 1
-        r[1] += inp + cw5 + cw1h + cr
-        r[3] += (inp * p_in + outp * p_out + cw5 * p_w5 + cw1h * p_w1h + cr * p_r) / 1e6
+        r[1] += req.inp + req.cw5 + req.cw1h + req.cr
+        r[3] += sum(dollars(req, price_for))
     for (path,) in db.execute("select path from prompts where kind = 'compact' and ts > ?",
                               (since,)):
         if path in lane_of:
@@ -382,7 +399,31 @@ def context_rows(db: sqlite3.Connection, since: float, price_for) -> dict[str, l
     return rows
 
 
-def context_section(cua: Path, since: str) -> str:
+def lane_commits(logs: Path, lane: str, since: float) -> int:
+    """How many commits lane `lane` (`A`) made after `since` (epoch seconds),
+    on `lane-<x>` and its own `lane-<x>-*` branches, read from their reflogs
+    in `logs` (`<git-common-dir>/logs/refs/heads`). Only an entry `git commit`
+    wrote counts: the lane's own work. What reached the branch by a merge, a
+    fast-forward to `main` (which brings every other lane's commits), a
+    cherry-pick of a commit already counted, or an amend, does not."""
+    n = 0
+    for f in logs.glob(f"lane-{lane.lower()}*"):
+        if f.name != f"lane-{lane.lower()}" and not f.name.startswith(f"lane-{lane.lower()}-"):
+            continue
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            head, _, message = line.partition("\t")
+            fields = head.split()
+            if (len(fields) >= 2 and fields[-2].isdigit() and int(fields[-2]) > since
+                    and (message.startswith("commit: ") or message.startswith("commit (initial): "))):
+                n += 1
+    return n
+
+
+def context_section(cua: Path, since: float) -> str:
+    """The report's context section: per lane, the API calls made after
+    `since` (epoch seconds), their context, compactions and cost, and the
+    commits the lane made in the same time. `cua` is the usage analyzer's
+    directory."""
     db_path = cua / "state" / "cua.sqlite"
     if not db_path.is_file():
         return "## Context per lane\n\nThe usage analyzer's database is missing.\n"
@@ -392,8 +433,9 @@ def context_section(cua: Path, since: str) -> str:
     except ImportError:
         return "## Context per lane\n\nThe usage analyzer could not be imported.\n"
     db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-    start = dt.datetime.fromisoformat(since).replace(tzinfo=dt.timezone.utc).timestamp()
-    rows = context_rows(db, start, config.price_for)
+    rows = context_rows(db, since, config.price_for)
+    logs = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()) \
+        / "logs" / "refs" / "heads"
     lines = ["## Context per lane",
              "",
              "What the context trial compares (`os/go.bat`: account c's lanes, E and F, "
@@ -404,10 +446,12 @@ def context_section(cua: Path, since: str) -> str:
              "",
              "| lane | API calls | context per call | compactions | API $ | commits | API $ per commit |",
              "|---|---:|---:|---:|---:|---:|---:|"]
+    if not rows:
+        lines[-2:] = ["No session titled `OS A` to `OS F` (or `Lane A`) made an API call "
+                      "in this time, so there is nothing to compare."]
     for lane in sorted(rows):
         calls, ctx, compactions, cost = rows[lane]
-        commits = len(git("rev-list", "--no-merges", f"--since={since}",
-                          f"refs/remotes/origin/lane-{lane.lower()}").split())
+        commits = lane_commits(logs, lane, since)
         per = f"{cost / commits:.2f}" if commits else "-"
         lines.append(f"| {lane} | {calls} | {ctx / calls / 1000:.0f}k | {compactions} | "
                      f"{cost:.0f} | {commits} | {per} |" if calls else
@@ -415,15 +459,23 @@ def context_section(cua: Path, since: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# The report, and the proposals
+# ---------------------------------------------------------------------------
+
 def report(today: dt.date, cua: Path) -> str:
     since = (today - dt.timedelta(days=7)).isoformat()
+    # The context section's costs and commits are both counted from this one
+    # instant, midnight UTC: a `--since=<date>` would mean that date at the
+    # current local time to git, and the two would cover different spans.
+    start = dt.datetime.fromisoformat(since).replace(tzinfo=dt.timezone.utc).timestamp()
     history = REPO / "bench" / "boot-history.jsonl"
     rows = load_history(history)
     log = git("log", f"--since={since}", "--grep=^Reviewed: ", "--format=%x1e%H%n%B",
               "refs/remotes/origin/main")
     return "\n".join([
         f"# How SlateOS is being built: the week to {today.isoformat()}", "",
-        usage_section(cua), context_section(cua, since), boot_section(rows, since),
+        usage_section(cua), context_section(cua, start), boot_section(rows, since),
         review_section(log), backlog_section(REPO, today)])
 
 
@@ -564,18 +616,39 @@ def self_test() -> int:
             " cw5 int, cw1h int, cr int);"
             "create table prompts(path text, uuid text, ts real, kind text, native int);")
         db.executemany("insert into titles values (?, 0, 'custom-title', ?)",
-                       [("e.jsonl", "OS E"), ("x.jsonl", "something else")])
+                       [("e.jsonl", "OS E"), ("x.jsonl", "something else"),
+                        ("b.jsonl", "Lane-B"), ("c.jsonl", "lane c")])
         db.executemany("insert into lines values (?, ?, ?, 'm', ?, 0, 0, 0, ?)", [
             ("e.jsonl", "r1", 100, 1000, 299000),   # one request, logged twice
             ("e.jsonl", "r1", 100, 1000, 299000),
             ("e.jsonl", "r2", 100, 0, 100000),
             ("e.jsonl", "r0", 1, 0, 9),             # before the window
-            ("x.jsonl", "r9", 100, 0, 1)])          # not a lane
+            ("x.jsonl", "r9", 100, 0, 1),           # not a lane
+            ("b.jsonl", "r5", 100, 0, 7),           # the agent names count too
+            ("c.jsonl", "r6", 100, 0, 7)])
         db.executemany("insert into prompts values (?, 'u', ?, ?, 0)",
                        [("e.jsonl", 100, "compact"), ("e.jsonl", 100, "human")])
         got = context_rows(db, 50, lambda m: (0, 0, 0, 0, 1.0))
-        expect("context rows", {k: v[:3] for k, v in got.items()}, {"E": [2, 400000, 1]})
+        expect("context rows", {k: v[:3] for k, v in got.items()},
+               {"E": [2, 400000, 1], "B": [1, 7, 0], "C": [1, 7, 0]})
         expect("context cost", round(got["E"][3], 6), 0.399)
+        # A lane's commits are the ones `git commit` made on its branches: not
+        # a fast-forward to main, a merge, a cherry-pick, an amend, or another
+        # lane's branch, nor anything before the window.
+        logs = root / "logs"
+        logs.mkdir()
+        z = "0" * 40
+        entry = "{z} {z} T <t@t> {ts} +0000\t{msg}\n"
+        (logs / "lane-e").write_text("".join(entry.format(z=z, ts=ts, msg=msg) for ts, msg in (
+            (40, "commit: too early"), (60, "commit: one"), (61, "commit (initial): two"),
+            (62, "merge origin/main: Fast-forward"), (63, "commit (merge): Merge main"),
+            (64, "cherry-pick: moved"), (65, "commit (amend): fixed"))),
+            encoding="utf-8", newline="\n")
+        (logs / "lane-e-wip").write_text(entry.format(z=z, ts=70, msg="commit: three"),
+                                         encoding="utf-8", newline="\n")
+        (logs / "lane-ex").write_text(entry.format(z=z, ts=70, msg="commit: not E's"),
+                                      encoding="utf-8", newline="\n")
+        expect("a lane's own commits", lane_commits(logs, "E", 50), 3)
         # A proposal that cannot run still leaves the numbers written.
         global newest_claude
         saved = newest_claude

@@ -59,15 +59,18 @@
 //! `requests/b-d-libc-syslog-could-reach-journalctl-today.md`
 //! (design-decisions §1166). On a kernel with them, records go to whatever
 //! listens at `/dev/log`, as glibc's do -- lane B's `syslogd`, once it binds
-//! the path -- and, with nothing there, nowhere. A record becomes one JSON line in
-//! `/var/log/syslog.jsonl`, in `journalrec`'s spelling, appended under the
-//! journal's lock as `logger` and `syslogd` append theirs (`journalio`'s
-//! protocol, design-decisions §1037).
+//! the path -- and, with nothing there (the connect answering `ENOENT` or
+//! `ECONNREFUSED`), to the journal again, one record at a time: glibc's would
+//! lose them, and nothing starts a `syslogd` at boot yet. A record becomes
+//! one JSON line in `/var/log/syslog.jsonl`, in `journalrec`'s spelling,
+//! appended under the journal's lock as `logger` and `syslogd` append theirs
+//! (`journalio`'s protocol, design-decisions §1037).
 //!
-//! The journal is chosen where glibc would have connected, and only when the
-//! socket call fails with exactly that error, so it retires itself once the
-//! sockets exist. Everything around it is glibc's: a failed append is a failed
-//! send, retried once and then given to `LOG_CONS`.
+//! The journal is chosen where glibc would have connected: for good when the
+//! socket call fails with `EAFNOSUPPORT`, and for one record when no daemon
+//! answers at `/dev/log`, so that the next record looks for the daemon again
+//! and goes to it once it is there. Everything around it is glibc's: a failed
+//! append is a failed send, retried once and then given to `LOG_CONS`.
 //!
 //! A record whose tag or message is not UTF-8 cannot become a JSON string
 //! without being altered, so it goes to standard error instead -- once, so not
@@ -245,6 +248,10 @@ struct State {
     connected: bool,
     /// Connected to the journal rather than to a socket (module docs).
     journal: bool,
+    /// The journal stands in for a daemon that is not there -- nothing
+    /// listened at `/dev/log` -- so it is given up after each record, and
+    /// the next looks for the daemon again.
+    standin: bool,
     /// `LogStat`: `openlog`'s options.
     log_stat: i32,
     /// `LogTag`: `openlog`'s identity, or null for the program's name. Kept,
@@ -263,6 +270,7 @@ impl State {
         log_file: -1,
         connected: false,
         journal: false,
+        standin: false,
         log_stat: 0,
         log_tag: core::ptr::null(),
         log_facility: LOG_USER,
@@ -422,6 +430,13 @@ fn openlog_internal(st: &mut State, ident: *const u8, logstat: i32, logfac: i32)
                     };
                     continue;
                 }
+                if failed == errno::ENOENT || failed == errno::ECONNREFUSED {
+                    // Nothing listens at /dev/log: the journal stands in for
+                    // the daemon, for this record (module docs).
+                    st.connected = true;
+                    st.journal = true;
+                    st.standin = true;
+                }
             } else {
                 st.connected = true;
             }
@@ -442,6 +457,7 @@ fn closelog_internal(st: &mut State) {
     st.log_file = -1;
     st.connected = false;
     st.journal = false;
+    st.standin = false;
 }
 
 /// glibc's `syslog (INTERNALLOG, "syslog: unknown facility/priority: %x",
@@ -572,6 +588,11 @@ unsafe fn vsyslog_internal(pri: i32, fmt: *const u8, va: Option<VaList>) {
                 }
             }
         }
+    }
+    // A journal standing in for an absent daemon serves this record only:
+    // the next looks at /dev/log again, where the daemon may have started.
+    if st.standin {
+        closelog_internal(st);
     }
 }
 

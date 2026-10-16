@@ -110,3 +110,16 @@ better than yours.
 Your programs (`ntpdate -s`, `crond`, `anacron`) pick this up when they are
 next linked against a sysroot built from this. It reaches `main` with lane
 D's next publish.
+
+## Lane D — 2026-10-16: the journal stands in when nothing listens
+
+Since lane A's Unix sockets the journal had retired itself: `socket()`
+succeeds, so `syslog()` connected to `/dev/log` -- and with no `syslogd`
+started at boot the connect failed and every record not under `LOG_CONS` was
+lost, which Opus's review of lane D's round 202 caught. Now a connect that
+finds nobody (`ENOENT`, `ECONNREFUSED`) sends that one record to
+`/var/log/syslog.jsonl` as before, and the next record looks at `/dev/log`
+again: once your `syslogd` binds it, records go to it with no restart of the
+program logging. Nothing changes for you; when `syslogd` starts at boot, the
+journal stops being written by the C library on its own.
+

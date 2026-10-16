@@ -92,6 +92,10 @@ pub(super) mod world {
         pub console: Vec<u8>,
         /// Whether `/dev/console` opens.
         pub console_opens: bool,
+        /// Whether `/var/log` exists, so that the journal can be made: not
+        /// in glibc's world, which has no journal to stand in for an absent
+        /// daemon, so that its transcripts hold.
+        pub journal_dir: bool,
         pub pid: i32,
         pub now: i64,
         /// What `localtime_r` gives: year-1900, month, day, hour, minute,
@@ -142,6 +146,7 @@ pub(super) mod world {
                 stderr: Vec::new(),
                 console: Vec::new(),
                 console_opens: true,
+                journal_dir: true,
                 pid: 4242,
                 now: 1_790_843_180,
                 clock: Some([126, 9, 1, 8, 26, 20]),
@@ -353,6 +358,9 @@ pub(super) mod world {
                 let e = w.open_errors.remove(0);
                 return fail(e, -1);
             }
+            if !w.journal_dir && path.starts_with(b"/var/log/") {
+                return fail(errno::ENOENT, -1);
+            }
             let ino = match w.paths.get(path).copied() {
                 Some(ino) => ino,
                 None if flags & O_CREAT != 0 => {
@@ -489,6 +497,7 @@ fn fresh(w: World) -> MutexGuard<'static, ()> {
 /// at `/dev/log` (`none`: a socket nobody listens on), a console that opens.
 fn glibc_world(kind: &str) -> World {
     let mut w = World::new();
+    w.journal_dir = false;
     match kind {
         "dgram" => w.start(SOCK_DGRAM),
         "stream" => w.start(SOCK_STREAM),
@@ -1147,6 +1156,53 @@ fn without_unix_sockets_a_record_is_a_journal_line() {
         0,
         "the journal is closed again"
     );
+}
+
+/// With Unix-domain sockets but nothing listening at `/dev/log`, a record
+/// is a journal line, where glibc's would be lost: nothing starts a
+/// `syslogd` at boot (Opus's review of lane D's round 202). Nothing goes to
+/// the console under `LOG_CONS`, the record having been filed, and `errno`
+/// is as it was.
+#[test]
+fn with_nothing_at_dev_log_a_record_is_a_journal_line() {
+    let _g = fresh(World::new());
+    openlog(b"tag\0".as_ptr(), LOG_PID | LOG_CONS, LOG_DAEMON);
+    errno::set_errno(77);
+    log(LOG_ERR, b"nobody listens");
+    assert_eq!(errno::get_errno(), 77);
+    let journal = world::with(|w| w.journal().map(<[u8]>::to_vec));
+    assert_eq!(
+        journal.as_deref(),
+        Some(journalrec_line("err", "tag", "nobody listens", 4242, Some("daemon")).as_slice())
+    );
+    let (sent, stderr, console) = look();
+    assert!(sent.is_empty() && stderr.is_empty() && console.is_empty());
+    assert_eq!(
+        world::with(|w| w.open_descriptors()),
+        0,
+        "nothing is kept open"
+    );
+}
+
+/// The journal stands in for an absent daemon one record at a time: once a
+/// daemon listens at `/dev/log`, the next record goes to it, and the journal
+/// is left as it was.
+#[test]
+fn a_daemon_that_starts_gets_the_next_record() {
+    let _g = fresh(World::new());
+    openlog(b"tag\0".as_ptr(), 0, LOG_USER);
+    log(LOG_INFO, b"before");
+    let before = world::with(|w| w.journal().map(<[u8]>::to_vec));
+    assert!(before.is_some(), "the first record is the journal's");
+    world::with(|w| w.start(SOCK_DGRAM));
+    log(LOG_INFO, b"after");
+    let (sent, _, _) = look();
+    assert_eq!(sent.len(), 1, "the second record is the daemon's: {sent:?}");
+    assert!(
+        String::from_utf8_lossy(&sent[0]).ends_with("tag: after"),
+        "{sent:?}"
+    );
+    assert_eq!(world::with(|w| w.journal().map(<[u8]>::to_vec)), before);
 }
 
 /// Every message is escaped as `journalrec::escape` escapes it, byte for

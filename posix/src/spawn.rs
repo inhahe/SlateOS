@@ -63,12 +63,14 @@
 //!   in the parent after the spawn syscall completes.
 //!
 //! ## Limitations
-//! - `posix_spawnattr`'s attributes are recorded, and none is applied: the
-//!   child starts in the parent's process group, session and signal mask
-//!   whatever the attribute object says (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES;
-//!   until 2026-10-06 this line said `POSIX_SPAWN_SETPGROUP` was supported,
-//!   which no code did). What cannot be done at all is refused instead: a
-//!   cgroup (`ENOTSUP`) and a terminal's foreground group (`ENOSYS`).
+//! - `posix_spawnattr`'s process group, session, signal mask and signals
+//!   to reset (`SETPGROUP`, `SETSID`, `SETSIGMASK`, `SETSIGDEF`) are applied
+//!   by the kernel before the child's first instruction, through
+//!   `SpawnEx2Args`; until 2026-10-16 none was. `RESETIDS`, `SETSCHEDPARAM`
+//!   and `SETSCHEDULER` are recorded and not applied
+//!   (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES). What cannot be done at all
+//!   is refused instead: a cgroup (`ENOTSUP`) and a terminal's foreground
+//!   group (`ENOSYS`).
 
 use crate::errno;
 use crate::mman;
@@ -193,6 +195,26 @@ pub struct SpawnEx2Args {
     pub cwd_ptr: u64,
     /// Length of the path at `cwd_ptr`, at most [`crate::syscall::CWD_RECORD_MAX`].
     pub cwd_len: u64,
+    /// `POSIX_SPAWN_SETPGROUP`: 0 leaves the child in its parent's process
+    /// group, 1 puts it in `pgid` (0 there being the child's own pid, a new
+    /// group it leads). These six fields are `posix_spawnattr_t`'s
+    /// ([`SpawnAttrFields`]), applied by the kernel before the child's first
+    /// instruction; zero in all six asks for nothing. A value with no
+    /// meaning is refused, `InvalidArgument`.
+    pub pgid_mode: u64,
+    /// The group, with `pgid_mode` 1; 0 otherwise.
+    pub pgid: u64,
+    /// `POSIX_SPAWN_SETSIGMASK`: 0 gives the child its parent's blocked
+    /// mask, 1 gives it `sigmask`.
+    pub sigmask_set: u64,
+    /// With `sigmask_set` 1, the child's blocked set, bit `n - 1` for signal
+    /// `n`; 0 otherwise.
+    pub sigmask: u64,
+    /// `POSIX_SPAWN_SETSIGDEF`: the signals the child does not inherit as
+    /// ignored, bit `n - 1` for signal `n`.
+    pub sigdefault: u64,
+    /// `POSIX_SPAWN_SETSID`: 1 starts the child in a new session it leads.
+    pub setsid: u64,
 }
 
 /// A mismatch here is an ABI break that would show up as the kernel reading a
@@ -201,7 +223,7 @@ pub struct SpawnEx2Args {
 /// the size, which is exactly the thing a `const` assertion can guarantee and
 /// a test can only observe on a run somebody makes.
 const _: () = {
-    assert!(size_of::<SpawnEx2Args>() == 144);
+    assert!(size_of::<SpawnEx2Args>() == 192);
     assert!(align_of::<SpawnEx2Args>() == 8);
     // The prefix through `envc` must be layout-identical to `SpawnExArgs`, or
     // "version 1 plus a size field" is not what we are sending.
@@ -290,6 +312,12 @@ pub fn spawn_ex2_args(caps: Option<&[CapEntryInfo]>) -> SpawnEx2Args {
         cap_count,
         cwd_ptr: 0,
         cwd_len: 0,
+        pgid_mode: 0,
+        pgid: 0,
+        sigmask_set: 0,
+        sigmask: 0,
+        sigdefault: 0,
+        setsid: 0,
     }
 }
 
@@ -1052,20 +1080,16 @@ pub const POSIX_SPAWN_VALID_FLAGS: i16 = POSIX_SPAWN_RESETIDS
 ///
 /// Every field is *recorded* faithfully, and each `posix_spawnattr_get*`
 /// returns exactly what the matching setter stored — a caller that
-/// round-trips an attribute object gets its own value back.  Whether the
-/// spawn path then *acts* on a field is a separate question, and today
-/// `sigdefault`, `sigmask`, `schedpriority` and `schedpolicy` are
-/// recorded but not applied: we have no POSIX signal delivery to reset
-/// or block, and no per-process scheduler policy to install at spawn
-/// time.
+/// round-trips an attribute object gets its own value back.  The spawn
+/// sends `pgroup`, `sigmask` and `sigdefault` to the kernel when their flags
+/// ask (`spawn_attrs`); `schedpriority` and `schedpolicy` are recorded but
+/// not applied, there being no per-process scheduler policy to install at
+/// spawn time.
 ///
-/// Recording them anyway is not busywork.  A `posix_spawnattr_setsigmask`
-/// that returned `ENOSYS` would push every caller onto a `fork`/`exec`
-/// fallback — CPython's `os.posix_spawn` does exactly that — which is a
-/// worse outcome than a spawn that ignores a mask the child would have
-/// inherited as empty regardless.  When signal delivery and scheduler
-/// policies land, the spawn path reads these fields and no caller
-/// changes.
+/// Recording those anyway is not busywork.  A setter that returned `ENOSYS`
+/// would push every caller onto a `fork`/`exec` fallback — CPython's
+/// `os.posix_spawn` does exactly that — which is a worse outcome than a
+/// spawn that leaves the child the scheduling its parent has.
 #[repr(C)]
 pub struct PosixSpawnattrT {
     /// Attribute flags (bitwise OR of POSIX_SPAWN_* constants).
@@ -1233,6 +1257,58 @@ fn refused_request(
         }
     }
     None
+}
+
+/// What a spawn's attribute object asks the kernel to do before the child's
+/// first instruction: [`SpawnEx2Args`]'s last six fields, in its terms.
+///
+/// `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF` and `SETSID`.
+/// `RESETIDS`, `SETSCHEDPARAM` and `SETSCHEDULER` are recorded and not
+/// applied (known-issues `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SpawnAttrFields {
+    pgid_mode: u64,
+    pgid: u64,
+    sigmask_set: u64,
+    sigmask: u64,
+    sigdefault: u64,
+    setsid: u64,
+}
+
+impl SpawnAttrFields {
+    /// Whether it asks for nothing, which the original spawn call can carry.
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// [`SpawnAttrFields`] for the attribute object at `attrp`, NULL asking for
+/// nothing. A signal set is its first 64 signals, all a native process has;
+/// a group is the `pid_t` it was given, which the kernel refuses if negative.
+fn spawn_attrs(attrp: *const PosixSpawnattrT) -> SpawnAttrFields {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(attr) = (unsafe { attrp.as_ref() }) else {
+        return SpawnAttrFields::default();
+    };
+    let flags = attr.flags;
+    let mut fields = SpawnAttrFields::default();
+    if flags & POSIX_SPAWN_SETPGROUP != 0 {
+        fields.pgid_mode = 1;
+        // Sign-extended, so that a negative group reaches the kernel as one
+        // and is refused rather than read as a large positive id.
+        fields.pgid = i64::from(attr.pgroup).cast_unsigned();
+    }
+    if flags & POSIX_SPAWN_SETSIGMASK != 0 {
+        fields.sigmask_set = 1;
+        fields.sigmask = attr.sigmask.bits[0];
+    }
+    if flags & POSIX_SPAWN_SETSIGDEF != 0 {
+        fields.sigdefault = attr.sigdefault.bits[0];
+    }
+    if flags & POSIX_SPAWN_SETSID != 0 {
+        fields.setsid = 1;
+    }
+    fields
 }
 
 /// Set the process group in a spawn attributes object.
@@ -1951,32 +2027,30 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
     count
 }
 
-/// The handles an `exec` should close, written to `out` (each entry's `fd`
-/// 0, which the kernel ignores), and how many: those of `child`'s
-/// close-on-exec descriptors that no kept descriptor shares, each once.
+/// The handles an `exec` drops a descriptor of, written to `out` (each
+/// entry's `fd` 0, which the kernel ignores), and how many: those of
+/// `child`'s close-on-exec descriptors, each once.
 ///
-/// A handle a kept descriptor also names stays open, as Linux keeps an open
-/// file description while any descriptor refers to it -- `dup2(fd, 1)` of a
-/// close-on-exec `fd` must leave standard output working. (The kernel checks
-/// that too; deciding it here keeps the list to what will be closed.) Kinds
-/// with no `fd_handle_type` -- named Unix sockets, and the userspace-only
-/// epoll, timerfd and inotify -- never reach the list, since
-/// [`inheritable_fds`] leaves them out of both halves: the kernel refuses a
-/// list naming a type it does not know.
+/// A handle a kept descriptor also names is listed too. The kernel keeps it
+/// open, as Linux keeps an open file description while any descriptor
+/// refers to it -- `dup2(fd, 1)` of a close-on-exec `fd` must leave standard
+/// output working -- but still counts the dropped descriptor as closed for
+/// what any close does: the process's record locks on the file are released
+/// (`pcb::ExecCloseList`'s `shared`). Leaving such a handle off the list, as
+/// this did until 2026-10-16, kept the locks across the `exec` (Opus's
+/// review of lane D's round 202). Kinds with no `fd_handle_type` -- named
+/// Unix sockets, and the userspace-only epoll, timerfd and inotify -- never
+/// reach the list, since [`inheritable_fds`] leaves them out of both halves:
+/// the kernel refuses a list naming a type it does not know.
 fn exec_close_list(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize {
     let mut count = 0usize;
     for &(handle_type, handle) in child.cloexec.iter().flatten() {
-        let kept = child
-            .virt
-            .iter()
-            .flatten()
-            .any(|&kept| kept == (handle_type, handle));
         let listed = out
             .get(..count)
             .unwrap_or_default()
             .iter()
             .any(|e| (e.handle_type, e.handle) == (handle_type, handle));
-        if kept || listed {
+        if listed {
             continue;
         }
         if let Some(dst) = out.get_mut(count) {
@@ -2068,8 +2142,9 @@ fn build_fd_map(
 ///   Applied to the parent's fd table to build the kernel fd_map.
 ///   The child retrieves inherited fds via `SYS_PROCESS_GET_INITIAL_FDS`
 ///   during startup.
-/// - `attrp`: Spawn attributes (flags, process group).  Recorded but most
-///   flags have no effect yet.
+/// - `attrp`: Spawn attributes: the child's process group, session, signal
+///   mask and signals reset from ignored, applied by the kernel before the
+///   child runs (the module's "Limitations" names what is not).
 /// - `argv`: Null-terminated array of argument strings for the child.
 ///   Packed and passed to the kernel; the child retrieves them via
 ///   `SYS_PROCESS_GET_ARGS` during startup.  May be null.
@@ -2096,7 +2171,19 @@ pub extern "C" fn posix_spawn(
     // authority, so anything narrower here would be this libc inventing a
     // sandbox its callers never asked for. Narrowing is opt-in only, via
     // `slateos_spawn_caps`.
-    unsafe { spawn_impl(pid, path, file_actions, argv, envp, None) }
+    unsafe {
+        spawn_impl(
+            pid,
+            path,
+            file_actions,
+            argv,
+            envp,
+            SpawnAsks {
+                caps: None,
+                attrs: spawn_attrs(attrp),
+            },
+        )
+    }
 }
 
 /// Spawn a process holding **exactly** the capabilities in `caps`.
@@ -2180,7 +2267,19 @@ pub unsafe extern "C" fn slateos_spawn_caps(
     } else {
         unsafe { core::slice::from_raw_parts(caps, cap_count) }
     };
-    unsafe { spawn_impl(pid, path, file_actions, argv, envp, Some(list)) }
+    unsafe {
+        spawn_impl(
+            pid,
+            path,
+            file_actions,
+            argv,
+            envp,
+            SpawnAsks {
+                caps: Some(list),
+                attrs: spawn_attrs(attrp),
+            },
+        )
+    }
 }
 
 /// The whole of `posix_spawn`, with the capability policy left open.
@@ -2199,7 +2298,8 @@ pub unsafe extern "C" fn slateos_spawn_caps(
 /// # Safety
 ///
 /// `path`, `file_actions`, `argv`, `envp` and `pid` carry `posix_spawn`'s
-/// contract; `caps`, if `Some`, must remain valid for the syscall's duration.
+/// contract; `asks.caps`, if `Some`, must remain valid for the syscall's
+/// duration.
 // argc/envc and argv/envp pair on the canonical exec-family naming;
 // the visual similarity is intentional and worth keeping.
 #[allow(clippy::similar_names)]
@@ -2209,7 +2309,7 @@ unsafe fn spawn_impl(
     file_actions: *const PosixSpawnFileActionsT,
     argv: *const *const u8,
     envp: *const *const u8,
-    caps: Option<&[CapEntryInfo]>,
+    asks: SpawnAsks<'_>,
 ) -> i32 {
     if path.is_null() {
         return errno::EFAULT;
@@ -2224,7 +2324,16 @@ unsafe fn spawn_impl(
     };
     let argv_packed = argv_buf.get(..argv_len).unwrap_or(&[]);
     // SAFETY: forwarded from this function's own contract.
-    unsafe { spawn_loaded(pid, path, &image, argv_packed, file_actions, envp, caps) }
+    unsafe { spawn_loaded(pid, path, &image, argv_packed, file_actions, envp, asks) }
+}
+
+/// What a spawn asks of the kernel besides the program, its arguments and its
+/// descriptors: the capabilities the child is given -- `None` its parent's
+/// whole table, as `posix_spawn` must -- and what the attribute object asks.
+#[derive(Clone, Copy)]
+struct SpawnAsks<'a> {
+    caps: Option<&'a [CapEntryInfo]>,
+    attrs: SpawnAttrFields,
 }
 
 /// The spawn syscall a request needs, with its argument struct.
@@ -2252,8 +2361,9 @@ fn spawn_request(
     v1: SpawnExArgs,
     caps: Option<&[CapEntryInfo]>,
     child_cwd: Option<&[u8]>,
+    attrs: SpawnAttrFields,
 ) -> SpawnRequest {
-    if caps.is_none() && child_cwd.is_none() {
+    if caps.is_none() && child_cwd.is_none() && attrs.is_empty() {
         return SpawnRequest::V1(v1);
     }
     // `spawn_ex2_args` fills `struct_size` and the capability policy; writing
@@ -2275,6 +2385,12 @@ fn spawn_request(
         args.cwd_ptr = dir.as_ptr() as u64;
         args.cwd_len = dir.len() as u64;
     }
+    args.pgid_mode = attrs.pgid_mode;
+    args.pgid = attrs.pgid;
+    args.sigmask_set = attrs.sigmask_set;
+    args.sigmask = attrs.sigmask;
+    args.sigdefault = attrs.sigdefault;
+    args.setsid = attrs.setsid;
     SpawnRequest::V2(args)
 }
 
@@ -2301,8 +2417,9 @@ unsafe fn spawn_loaded(
     argv_packed: &[u8],
     file_actions: *const PosixSpawnFileActionsT,
     envp: *const *const u8,
-    caps: Option<&[CapEntryInfo]>,
+    asks: SpawnAsks<'_>,
 ) -> i32 {
+    let SpawnAsks { caps, attrs } = asks;
     let mut envp_buf = [0u8; EXEC_PACKED_MAX];
     let Some(envp_packed_len) = pack_cstring_array(envp, &mut envp_buf) else {
         errno::set_errno(errno::E2BIG);
@@ -2380,7 +2497,7 @@ unsafe fn spawn_loaded(
         envc: envc as u64,
     };
     // Each struct lives in its arm until the syscall that reads it returns.
-    let ret = match spawn_request(v1, caps, child_cwd) {
+    let ret = match spawn_request(v1, caps, child_cwd, attrs) {
         SpawnRequest::V1(args) => syscall1(SYS_PROCESS_SPAWN_EX, (&raw const args) as u64),
         SpawnRequest::V2(args) => syscall1(SYS_PROCESS_SPAWN_EX2, (&raw const args) as u64),
     };
@@ -2528,7 +2645,10 @@ pub extern "C" fn posix_spawnp(
                         argv_packed,
                         file_actions,
                         envp,
-                        None,
+                        SpawnAsks {
+                            caps: None,
+                            attrs: spawn_attrs(attrp),
+                        },
                     )
                 };
             }
@@ -5379,9 +5499,9 @@ mod tests {
     /// would hand the kernel a count where it expects a pointer — an
     /// `InvalidAddress` at best and a read of unrelated memory at worst.
     #[test]
-    fn ex2_layout_is_eighteen_u64s() {
+    fn ex2_layout_is_twenty_four_u64s() {
         use core::mem::{align_of, size_of};
-        assert_eq!(size_of::<SpawnEx2Args>(), 144);
+        assert_eq!(size_of::<SpawnEx2Args>(), 192);
         assert_eq!(align_of::<SpawnEx2Args>(), 8);
         let a = zero_ex2();
         for (i, off) in [
@@ -5403,6 +5523,12 @@ mod tests {
             offset_of_field!(SpawnEx2Args, a, cap_count),
             offset_of_field!(SpawnEx2Args, a, cwd_ptr),
             offset_of_field!(SpawnEx2Args, a, cwd_len),
+            offset_of_field!(SpawnEx2Args, a, pgid_mode),
+            offset_of_field!(SpawnEx2Args, a, pgid),
+            offset_of_field!(SpawnEx2Args, a, sigmask_set),
+            offset_of_field!(SpawnEx2Args, a, sigmask),
+            offset_of_field!(SpawnEx2Args, a, sigdefault),
+            offset_of_field!(SpawnEx2Args, a, setsid),
         ]
         .into_iter()
         .enumerate()
@@ -5476,6 +5602,18 @@ mod tests {
         assert_eq!(a.cap_count, 0);
         // No directory: the child starts in its parent's.
         assert_eq!((a.cwd_ptr, a.cwd_len), (0, 0));
+        // No attributes: its parent's group, session, mask and ignored set.
+        assert_eq!(
+            (
+                a.pgid_mode,
+                a.pgid,
+                a.sigmask_set,
+                a.sigmask,
+                a.sigdefault,
+                a.setsid
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
         // Every version-1 field left for the caller.
         assert_eq!(
             (
@@ -5785,11 +5923,13 @@ mod tests {
         assert_eq!(found.map(|e| e.handle), Some(4040));
     }
 
-    /// What an `exec` asks the kernel to close: each close-on-exec handle
-    /// once, and none a kept descriptor shares. Built on a table of its own,
-    /// not the process's, which other tests change.
+    /// What an `exec` tells the kernel it drops a descriptor of: each
+    /// close-on-exec handle once, those a kept descriptor shares included --
+    /// the kernel keeps those open and releases the record locks the dropped
+    /// descriptor's close would. Built on a table of its own, not the
+    /// process's, which other tests change.
     #[test]
-    fn exec_closes_close_on_exec_handles_no_kept_descriptor_shares() {
+    fn exec_lists_every_close_on_exec_handle_once() {
         use fd_handle_type::{FILE, PIPE};
         let mut child = ChildFds {
             virt: [None; MAX_FD_MAP],
@@ -5808,7 +5948,7 @@ mod tests {
             .iter()
             .map(|e| (e.handle_type, e.handle))
             .collect();
-        assert_eq!(listed, [(PIPE, 10), (FILE, 12)]);
+        assert_eq!(listed, [(PIPE, 10), (PIPE, 11), (FILE, 12)]);
         assert!(out[..count].iter().all(|e| e.fd == 0));
 
         // Nothing close-on-exec: an empty list, which clears the kernel's.
@@ -6109,7 +6249,7 @@ mod tests {
     #[test]
     fn a_plain_spawn_stays_on_version_1() {
         assert!(matches!(
-            spawn_request(v1_probe(), None, None),
+            spawn_request(v1_probe(), None, None, SpawnAttrFields::default()),
             SpawnRequest::V1(_)
         ));
     }
@@ -6119,7 +6259,9 @@ mod tests {
     #[test]
     fn a_chdir_action_goes_to_version_2_with_its_directory() {
         let dir = b"/srv/data";
-        let SpawnRequest::V2(a) = spawn_request(v1_probe(), None, Some(dir)) else {
+        let SpawnRequest::V2(a) =
+            spawn_request(v1_probe(), None, Some(dir), SpawnAttrFields::default())
+        else {
             panic!("a directory cannot travel in version 1");
         };
         assert_v1_fields_copied(&a);
@@ -6131,12 +6273,99 @@ mod tests {
     /// starts where its parent is.
     #[test]
     fn a_capability_subset_alone_sends_no_directory() {
-        let SpawnRequest::V2(a) = spawn_request(v1_probe(), Some(&[]), None) else {
+        let SpawnRequest::V2(a) =
+            spawn_request(v1_probe(), Some(&[]), None, SpawnAttrFields::default())
+        else {
             panic!("a subset needs version 2");
         };
         assert_v1_fields_copied(&a);
         assert_eq!(a.cap_mode, SPAWN_CAP_MODE_SUBSET);
         assert_eq!((a.cwd_ptr, a.cwd_len), (0, 0));
+    }
+
+    /// An attribute object that asks for anything goes to version 2 with
+    /// each of its six fields, every capability still inherited and no
+    /// directory: `system()` leaves `SIGINT` and `SIGQUIT` ignored in itself
+    /// and default in its shell only through `sigdefault` (Opus's review of
+    /// lane D's round 202: the shell had both ignored, so `^C` could not stop
+    /// what it ran).
+    #[test]
+    fn spawn_attributes_go_to_version_2_with_their_fields() {
+        let attrs = SpawnAttrFields {
+            pgid_mode: 1,
+            pgid: 0,
+            sigmask_set: 1,
+            sigmask: 1 << 16,
+            sigdefault: (1 << 1) | (1 << 2),
+            setsid: 0,
+        };
+        let SpawnRequest::V2(a) = spawn_request(v1_probe(), None, None, attrs) else {
+            panic!("attributes cannot travel in version 1");
+        };
+        assert_v1_fields_copied(&a);
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_INHERIT_ALL);
+        assert_eq!((a.cwd_ptr, a.cwd_len), (0, 0));
+        assert_eq!(
+            (
+                a.pgid_mode,
+                a.pgid,
+                a.sigmask_set,
+                a.sigmask,
+                a.sigdefault,
+                a.setsid
+            ),
+            (1, 0, 1, 1 << 16, 6, 0)
+        );
+    }
+
+    /// The attribute object's flags decide which of its values are sent:
+    /// a value whose flag is clear stays zero, as the kernel requires, and a
+    /// group is sign-extended so that a negative one is refused there.
+    #[test]
+    fn spawn_attrs_send_what_the_flags_ask() {
+        assert!(spawn_attrs(core::ptr::null()).is_empty());
+        // SAFETY: an attribute object is plain integers and bytes, for
+        // which all zeros is a value; `posix_spawnattr_init` sets it anyway.
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        assert_eq!(posix_spawnattr_init(&raw mut attr), 0);
+        let mut set = crate::signal::SigsetT::EMPTY;
+        set.bits[0] = 0b1010;
+        assert_eq!(posix_spawnattr_setsigmask(&raw mut attr, &raw const set), 0);
+        assert_eq!(
+            posix_spawnattr_setsigdefault(&raw mut attr, &raw const set),
+            0
+        );
+        assert_eq!(posix_spawnattr_setpgroup(&raw mut attr, 77), 0);
+        assert!(spawn_attrs(&raw const attr).is_empty(), "no flags, nothing");
+        assert_eq!(
+            posix_spawnattr_setflags(
+                &raw mut attr,
+                POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID
+            ),
+            0
+        );
+        assert_eq!(
+            spawn_attrs(&raw const attr),
+            SpawnAttrFields {
+                pgid_mode: 1,
+                pgid: 77,
+                sigmask_set: 0,
+                sigmask: 0,
+                sigdefault: 0b1010,
+                setsid: 1,
+            }
+        );
+        assert_eq!(
+            posix_spawnattr_setflags(
+                &raw mut attr,
+                POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETPGROUP
+            ),
+            0
+        );
+        assert_eq!(posix_spawnattr_setpgroup(&raw mut attr, -3), 0);
+        let f = spawn_attrs(&raw const attr);
+        assert_eq!((f.sigmask_set, f.sigmask), (1, 0b1010));
+        assert_eq!(f.pgid, (-3_i64).cast_unsigned());
     }
 
     /// An `open` action that fails fails the spawn with the open's errno. It

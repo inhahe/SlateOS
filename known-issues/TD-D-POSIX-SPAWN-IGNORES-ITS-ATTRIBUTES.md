@@ -1,39 +1,43 @@
 ### [D] TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES — 2026-09-24 — OPEN
 
-**Status:** OPEN — lane D's code; the proper fix needs spawn-time fields in
-lane A's `SpawnEx2Args`, requested 2026-09-25 in
-`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
+**Status:** OPEN — three of seven attributes left. `POSIX_SPAWN_SETPGROUP`,
+`SETSIGMASK`, `SETSIGDEF` and `SETSID` are applied since 2026-10-16, through
+lane A's `SpawnEx2Args` fields (`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`).
+`RESETIDS`, `SETSCHEDPARAM` and `SETSCHEDULER` are still recorded and not
+applied.
 
-**In short:** a program can ask `posix_spawn` to start its child in a new
-process group, with certain signals blocked or reset, or in a new session. All
-of those requests are accepted and then ignored: the child starts in the
-parent's group, with the parent's signal mask. Job-control shells and anything
-using Rust's `Command::process_group` get a child that `^C` and `fg`/`bg` will
-treat as part of the parent.
+**In short:** a program can ask `posix_spawn` to start its child with its
+effective user and group reset to its real ones, or with a scheduling policy
+and priority. Those requests are accepted and then ignored: the child starts
+with the parent's ids and scheduling. Until 2026-10-16 the same was true of
+the process group, the session and the signal mask, and of the signals to
+reset from ignored -- which had become a regression once ignored signals
+reached the kernel: `system()` ran its shell with `SIGINT` and `SIGQUIT`
+ignored, so `^C` could not stop what it ran (Opus's review of lane D's round
+202).
 
-**Where:** `posix/src/spawn.rs` — `posix_spawn` and `posix_spawnp` take
-`attrp` and hand nothing of it to `spawn_impl`. `posix_spawnattr_set*` store
-their values faithfully (and have tests), so the object is right and the
-consumer is missing: `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`,
-`SETSID`, `RESETIDS` and `SETSCHEDULER` are all no-ops. The module doc's claim
-that `SETPGROUP` "is meaningfully supported" was not true of the code; it says
-so now (2026-10-06). What cannot be done at all is refused instead of ignored:
-since 2026-10-06 a spawn asking for a cgroup (`POSIX_SPAWN_SETCGROUP`) fails
-`ENOTSUP`, and one with a terminal foreground action
-(`posix_spawn_file_actions_addtcsetpgrp_np`) fails `ENOSYS` until the kernel
-can apply it with the rest (the request's `fg_tty_fd`).
+**Where:** `posix/src/spawn.rs` — `spawn_attrs` turns the four applied
+attributes into `SpawnEx2Args`'s six fields; nothing reads `RESETIDS`,
+`schedpolicy` or `schedpriority`.
 
-**Who reaches it:** Rust `std` on this target takes the `posix_spawn` path for
-any `Command` without a `pre_exec` closure; `process_group(pgid)` there
-becomes `POSIX_SPAWN_SETPGROUP`. (Oils uses `pre_exec`, so it takes the
-`fork` + `execvp` path and calls `setpgid` itself — not affected.)
+**Who reaches it:** a set-user-id program that spawns a helper with
+`RESETIDS` to drop its privilege (the child keeps it -- the safe direction
+would be to refuse); one that spawns a real-time worker with
+`SETSCHEDULER`, as `rtkit`-style tools do (the child runs at the parent's
+policy).
 
-**Proper fix:** the child must be in its group and have its mask *before* its
-first instruction, which the parent cannot arrange after the spawn returns
-without a race. That means `SpawnEx2Args` fields — `pgid`, `sigmask`,
-`sigdefault`, a `setsid` flag — applied by the kernel as `SpawnOptions` already
-applies `cwd` and `uid_gid`; `struct_size` makes them additive. The interim of
-calling `setpgid(child, pgid)` from the parent after the syscall is the race
-shells tolerate for `fork`, but it is not what `posix_spawn` promises, and it
-does not help the signal attributes at all. File with the cwd request if lane A
-takes that one, since both widen the same struct.
+Today the library reports a process's effective ids as its real ones
+(`posix/src/unistd.rs`, `geteuid`), not having taken up lane A's separate
+ids (`SYS_PROCESS_GET_IDS`, 1160), so as far as it can see `RESETIDS` has
+nothing to reset. **Taking up 1160 must settle `RESETIDS` in the same
+change** -- apply it, or refuse a spawn that asks for it while the ids
+differ -- or a set-user-id program's helper will silently keep the
+privilege it was meant to drop.
+
+**Proper fix:** `RESETIDS` is "effective ids := real ids" before the first
+instruction, which needs either a `SpawnEx2Args` field or the child's own
+`SYS_PROCESS_SET_IDS` (1159) call before `main` -- the first is
+race-free, the second runs code with the old ids first. `SETSCHEDULER` and
+`SETSCHEDPARAM` need lane A's per-thread policy (`SYS_THREAD_SCHEDULER`,
+1146) applied to the child's first thread at spawn, which `SpawnEx2Args`
+has no field for: a request to lane A for both, as for the four done.

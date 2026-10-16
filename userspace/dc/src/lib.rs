@@ -247,11 +247,15 @@ pub fn show_id(id: u8, suffix: &[u8]) -> Vec<u8> {
     } else {
         format!("0{id:o}")
     };
-    let mut text = if id.is_ascii_graphic() {
-        format!("'{}' ({octal})", char::from(id)).into_bytes()
+    let mut text = Vec::new();
+    if id.is_ascii_graphic() {
+        // A register's name, one graphic byte: `'%c'` is dc's own spelling.
+        text.extend_from_slice(&[b'\'', id, b'\'', b' ', b'(']);
+        text.extend_from_slice(octal.as_bytes());
+        text.push(b')');
     } else {
-        octal.into_bytes()
-    };
+        text.extend_from_slice(octal.as_bytes());
+    }
     text.extend_from_slice(suffix);
     text
 }

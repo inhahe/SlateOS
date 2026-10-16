@@ -161,33 +161,43 @@ pub fn read(doc: &Document) -> Option<Loaded> {
         ));
         return Some(loaded);
     }
-    let names = doc.keys(&[RULES]);
-    let mut seen: Vec<&str> = Vec::with_capacity(names.len());
-    for name in &names {
-        if seen.contains(&name.as_str()) {
-            loaded.problems.push(Problem {
-                rule: name.clone(),
-                what: "another rule above has the same name".to_owned(),
-            });
-            continue;
-        }
-        seen.push(name.as_str());
-        if loaded.rules.len() >= MAX_RULES {
-            loaded.problems.push(Problem {
-                rule: name.clone(),
-                what: format!("only {MAX_RULES} rules are kept"),
-            });
-            continue;
-        }
-        match read_rule(doc, name, loaded.rules.len()) {
+    for Entry { name, rule } in entries(doc) {
+        match rule {
             Ok(rule) => loaded.rules.push(rule),
-            Err(what) => loaded.problems.push(Problem {
-                rule: name.clone(),
-                what,
-            }),
+            Err(what) => loaded.problems.push(Problem { rule: name, what }),
         }
     }
     Some(loaded)
+}
+
+/// One rule under `rules`: its name, and the rule or why it is not applied.
+struct Entry {
+    name: String,
+    rule: Result<WindowRule, String>,
+}
+
+/// Every rule under `rules`, in the file's order, each read or refused: a
+/// name used above, a rule past [`MAX_RULES`] readable ones, and a rule
+/// [`read_rule`] cannot read are refused. [`read`] reports these, and
+/// [`write()`] keeps the refused ones' text.
+fn entries(doc: &Document) -> Vec<Entry> {
+    let names = doc.keys(&[RULES]);
+    let mut out: Vec<Entry> = Vec::with_capacity(names.len());
+    let mut readable = 0;
+    for name in names {
+        let rule = if out.iter().any(|entry| entry.name == name) {
+            Err("another rule above has the same name".to_owned())
+        } else if readable >= MAX_RULES {
+            Err(format!("only {MAX_RULES} rules are kept"))
+        } else {
+            read_rule(doc, &name, readable)
+        };
+        if rule.is_ok() {
+            readable = readable.saturating_add(1);
+        }
+        out.push(Entry { name, rule });
+    }
+    out
 }
 
 /// The rule named `name`, the `index`th readable one.
@@ -369,15 +379,22 @@ fn opacity(text: &str) -> Result<f32, String> {
 }
 
 /// Write `rules` -- highest priority first -- into `doc` as its rules,
-/// replacing what it had there and leaving everything else as it was.
+/// replacing the rules it could read and leaving everything else as it was.
+///
+/// **A rule `doc` holds that [`read`] cannot read is kept**, as the lines its
+/// author wrote, below the rules written: it is not applied, so where it
+/// stands means nothing until it is mended, and a program that saves the
+/// rules it read -- Settings, flipping one switch -- must not delete the
+/// rule a [`Problem`] is telling its author to mend. Only its indentation may
+/// change, to the block's. The exception is `rules` holding something that
+/// is not a rule apiece (`rules: none`, a `-` list): that goes, whole, since a
+/// named rule written beside a list would not be YAML at all, so a caller
+/// with a [`Problem`] whose `rule` is empty must not write without asking.
 ///
 /// The `rules` key is written even for no rules at all, so that what reads
 /// back is "none" and not the defaults ([`read`]).
 pub fn write(rules: &[&WindowRule], doc: &mut Document) {
     if doc.contains(&[RULES]) {
-        // Something that is not a rule apiece -- `rules: none`, a `-` list --
-        // goes first, whole: what is written is exactly the rules given, and
-        // a named rule written beside a list would not be YAML at all.
         let scalar = doc.get_str(&[RULES]).is_some();
         let listed = doc.get_seq(&[RULES]).is_some_and(|items| !items.is_empty());
         if scalar || listed {
@@ -386,11 +403,19 @@ pub fn write(rules: &[&WindowRule], doc: &mut Document) {
         // Empty the block and write into it, so the rules stay where the user
         // had them among their comments. Removing the block itself would move
         // it: a key yamldoc adds goes after the file's last line that is not
-        // a comment, which in a file of comments and rules is the top.
-        for name in doc.keys(&[RULES]) {
-            doc.remove(&[RULES, &name]);
+        // a comment, which in a file of comments and rules is the top. Each
+        // rule is taken in the file's order, so a name used twice takes the
+        // occurrence `entries` judged.
+        let mut kept = Vec::new();
+        for entry in entries(doc) {
+            let lines = take(doc, &entry.name);
+            if entry.rule.is_err() {
+                kept.push(lines);
+            }
         }
+        let empty = doc.to_text();
         put_rules(rules, doc);
+        put_below(doc, &empty, &kept);
     } else {
         // No block: the rules go at the end, below whatever the file says --
         // spliced as text for the reason above, since through yamldoc they
@@ -429,6 +454,97 @@ fn put_rules(rules: &[&WindowRule], doc: &mut Document) {
         }
         write_actions(&rule.actions, &mut put);
     }
+}
+
+/// The lines of `text`, each with any `\r` it had, so a kept rule goes back
+/// as it came.
+fn lines_of(text: &str) -> Vec<&str> {
+    text.split('\n').collect()
+}
+
+/// The one run of lines that differs between `before` and `after`, when one
+/// run was taken out of the one or put into the other:
+/// `(start, before_end, after_end)`, `before[start..before_end]` having become
+/// `after[start..after_end]`.
+fn changed_run(before: &[&str], after: &[&str]) -> (usize, usize, usize) {
+    let start = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    let same_end = before
+        .iter()
+        .skip(start)
+        .rev()
+        .zip(after.iter().skip(start).rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        start,
+        before.len().saturating_sub(same_end),
+        after.len().saturating_sub(same_end),
+    )
+}
+
+/// Take the first rule named `name` out of the rules block of `doc`, and
+/// answer its lines as the file had them: the run of lines the text lost,
+/// since [`Document::remove`] takes out one run and changes nothing else.
+fn take(doc: &mut Document, name: &str) -> Vec<String> {
+    let before = doc.to_text();
+    doc.remove(&[RULES, name]);
+    let after = doc.to_text();
+    let before_lines = lines_of(&before);
+    let (start, end, _) = changed_run(&before_lines, &lines_of(&after));
+    before_lines
+        .get(start..end)
+        .unwrap_or_default()
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
+}
+
+/// The spaces and tabs `line` starts with.
+fn indent_of(line: &str) -> &str {
+    let rest = line.trim_start_matches([' ', '\t']);
+    line.get(..line.len().saturating_sub(rest.len()))
+        .unwrap_or_default()
+}
+
+/// Put `kept` -- rules [`write()`] kept, each as the file had its lines -- at
+/// the end of the rules block of `doc`, below the rules [`put_rules`] just
+/// wrote there. `empty` is `doc`'s text before it did, the block empty.
+///
+/// The end of the block is found as [`take`] finds a rule: as the run of
+/// lines `put_rules` added, which yamldoc writes together at the block's end,
+/// and the kept rules move to the indentation yamldoc gave those. With none
+/// added, the block is its `rules:` line alone -- the first line of the run
+/// that removing the key would take out -- and the kept rules go under it as
+/// they were.
+fn put_below(doc: &mut Document, empty: &str, kept: &[Vec<String>]) {
+    if kept.is_empty() {
+        return;
+    }
+    let text = doc.to_text();
+    let lines = lines_of(&text);
+    let empty_lines = lines_of(empty);
+    let (start, _, end) = changed_run(&empty_lines, &lines);
+    let (at, indent) = if end > start {
+        (end, lines.get(start).map(|line| indent_of(line)))
+    } else {
+        let mut bare = Document::parse(empty);
+        bare.remove(&[RULES]);
+        let bare = bare.to_text();
+        let (header, _, _) = changed_run(&empty_lines, &lines_of(&bare));
+        (header.saturating_add(1), None)
+    };
+    let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    let moved = kept.iter().flat_map(|rule| {
+        let was = rule.first().map_or("", |line| indent_of(line));
+        rule.iter()
+            .map(move |line| match (indent, line.strip_prefix(was)) {
+                (Some(indent), Some(rest)) => format!("{indent}{rest}"),
+                _ => line.clone(),
+            })
+    });
+    let at = at.min(out.len());
+    out.splice(at..at, moved.collect::<Vec<_>>());
+    *doc = Document::parse(&out.join("\n"));
 }
 
 /// One value as the file writes it: a flag as `true`/`false` and a number

@@ -2054,7 +2054,8 @@ pub struct DesktopShell {
     pub focused_window: Option<WindowId>,
     /// Current virtual desktop index (0-based).
     pub current_desktop: u32,
-    /// Number of virtual desktops.
+    /// Number of virtual desktops: `windowrules::DESKTOPS`, which Settings
+    /// offers to rules too.
     pub num_desktops: u32,
     /// Screen dimensions.
     pub screen_width: u32,
@@ -2994,7 +2995,7 @@ impl DesktopShell {
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
-            num_desktops: 4,
+            num_desktops: windowrules::DESKTOPS,
             screen_width,
             screen_height,
             taskbar_height: 40,

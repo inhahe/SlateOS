@@ -338,6 +338,13 @@ pub enum EvalMode {
 /// Maximum number of rules allowed.
 pub const MAX_RULES: usize = 256;
 
+/// How many virtual desktops there are, so how many a rule can send a
+/// window to: `desktop: 1` to `desktop: 4` in the file, and a rule naming one
+/// past them is dropped when it is applied. The desktop shell makes this
+/// many and Settings offers this many, both from here, so the two cannot
+/// disagree.
+pub const DESKTOPS: u32 = 4;
+
 /// Maximum remembered window states.
 const MAX_REMEMBERED: usize = 128;
 

@@ -327,3 +327,139 @@ fn writing_no_rules_reads_back_as_none() {
         );
     }
 }
+
+/// The rules of `doc` as `read` finds them: the readable ones' names, and
+/// each problem as `(rule, what)`.
+fn names_and_problems(doc: &Document) -> (Vec<String>, Vec<(String, String)>) {
+    let loaded = read(doc).unwrap();
+    (
+        loaded.rules.iter().map(|r| r.name.clone()).collect(),
+        loaded
+            .problems
+            .iter()
+            .map(|p| (p.rule.clone(), p.what.clone()))
+            .collect(),
+    )
+}
+
+/// **A rule the file cannot read survives a save of the rules it could**,
+/// as the lines its author wrote -- their comment too -- below the rules
+/// written, and reads back as the same problem; the rule that was changed
+/// reads back changed. Settings saving `load()`'s rules with one switch
+/// flipped used to delete it
+/// (`requests/e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`).
+#[test]
+fn a_rule_the_file_cannot_read_survives_a_save() {
+    let start = "# mine\nrules:\n  Chat:\n    app: chat\n    taskbar: flase  # meant false\n  Terminal:\n    app: terminal\n";
+    let mut doc = Document::parse(start);
+    let (_, before) = names_and_problems(&doc);
+    assert_eq!(before.len(), 1);
+
+    let mut loaded = read(&doc).unwrap();
+    loaded.rules[0].enabled = false;
+    write(&loaded.rules.iter().collect::<Vec<_>>(), &mut doc);
+
+    let text = doc.to_text();
+    assert!(
+        text.contains("  Chat:\n    app: chat\n    taskbar: flase  # meant false\n"),
+        "{text}"
+    );
+    assert!(text.starts_with("# mine\nrules:\n"), "{text}");
+    assert!(
+        text.find("Terminal:").unwrap() < text.find("Chat:").unwrap(),
+        "kept below the rules written:\n{text}"
+    );
+    let (names, after) = names_and_problems(&doc);
+    assert_eq!(names, ["Terminal"]);
+    assert_eq!(after, before, "the same problem, still told");
+    assert!(
+        !read(&doc).unwrap().rules[0].enabled,
+        "the change was written"
+    );
+}
+
+/// **A kept rule moves to the block's indentation** where the file used
+/// another, so the file stays YAML and the rule reads back as it did; and
+/// with no rules written, it is the whole block, as it was.
+#[test]
+fn a_kept_rule_takes_the_blocks_indentation() {
+    let start = "rules:\n    Chat:\n        app: chat\n        state: hidden\n    Terminal:\n        app: terminal\n";
+    let doc = Document::parse(start);
+    let (_, before) = names_and_problems(&doc);
+    let loaded = read(&doc).unwrap();
+
+    let mut saved = doc.clone();
+    write(&loaded.rules.iter().collect::<Vec<_>>(), &mut saved);
+    let (names, after) = names_and_problems(&saved);
+    assert_eq!(names, ["Terminal"], "\n{}", saved.to_text());
+    assert_eq!(after, before, "\n{}", saved.to_text());
+
+    let mut emptied = doc.clone();
+    write(&[], &mut emptied);
+    let (names, after) = names_and_problems(&emptied);
+    assert!(names.is_empty(), "\n{}", emptied.to_text());
+    assert_eq!(after, before, "\n{}", emptied.to_text());
+    assert!(
+        emptied
+            .to_text()
+            .contains("    Chat:\n        app: chat\n        state: hidden\n")
+    );
+}
+
+/// **Every kind of rule `read` refuses is kept**: a name used a second
+/// time -- the second, not the first, which is the rule written -- and a
+/// rule past the most the engine keeps.
+#[test]
+fn a_second_rule_of_a_name_and_one_past_the_limit_are_kept() {
+    let mut doc =
+        Document::parse("rules:\n  Mail:\n    app: mail\n  Mail:\n    app: post  # the second\n");
+    let (_, before) = names_and_problems(&doc);
+    let loaded = read(&doc).unwrap();
+    write(&loaded.rules.iter().collect::<Vec<_>>(), &mut doc);
+    let text = doc.to_text();
+    assert!(text.contains("    app: post  # the second\n"), "{text}");
+    let (names, after) = names_and_problems(&doc);
+    assert_eq!(names, ["Mail"]);
+    assert_eq!(after, before);
+    assert_eq!(
+        read(&doc).unwrap().rules[0].criteria,
+        MatchCriteria::AppId("mail".into())
+    );
+
+    let mut text = String::from("rules:\n");
+    for n in 0..=MAX_RULES {
+        text.push_str(&format!("  rule {n}:\n    app: app{n}\n"));
+    }
+    let mut doc = Document::parse(&text);
+    let loaded = read(&doc).unwrap();
+    write(&loaded.rules.iter().collect::<Vec<_>>(), &mut doc);
+    let loaded = read(&doc).unwrap();
+    assert_eq!(loaded.rules.len(), MAX_RULES);
+    assert_eq!(loaded.problems.len(), 1);
+    assert_eq!(loaded.problems[0].rule, format!("rule {MAX_RULES}"));
+}
+
+/// **Through the file, as Settings does it**: `store` given `load()`'s rules
+/// keeps the one it could not read.
+#[test]
+fn storing_what_was_loaded_keeps_what_could_not_be_read() {
+    settingsfile::testing::with_scratch_config("windowrules-kept", |_| {
+        let path = settingsfile::path_for(CONFIG_NAME).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "rules:\n  Chat:\n    app: chat\n    taskbar: flase\n  Terminal:\n    app: terminal\n",
+        )
+        .unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.problems.len(), 1);
+        store(&loaded.rules.iter().collect::<Vec<_>>()).unwrap();
+        let again = load().unwrap();
+        assert_eq!(again.problems, loaded.problems);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("    taskbar: flase\n")
+        );
+    });
+}

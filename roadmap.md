@@ -1528,6 +1528,15 @@ list moved to lane D on 2026-09-22):
   cases agree. Then shipped in `getty`'s place, once the console answers
   `KDGKBMODE` (`requests/b-d-the-console-could-answer-as-a-virtual-console.md`).
 
+- `[-]` `[B]` **GNU gzip 1.12, ported** (Ubuntu's `1.12-1ubuntu3.2`, its two
+  CVE fixes included) -- replacing `userspace/gzip`, written from scratch,
+  whose fixed-Huffman-only deflate made files nobody else's gzip makes. Held
+  to Ubuntu's `/usr/bin/gzip` by `scripts/gzip-diff.sh`, compressed bytes
+  included; `gunzip`, `zcat` and `uncompress` are the port under Ubuntu's
+  script names; `userspace/gzip/fuzz/` fuzzes every decoder. The image's
+  names wait on lane D
+  (`requests/b-d-gzip-is-gnu-gzip-now-uncompress-in-gzcat-out.md`).
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

@@ -1704,7 +1704,11 @@ dependencies = [
 name = "gzip"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
  "quoting",
+ "stdfdguard",
 ]
 
 [[package]]

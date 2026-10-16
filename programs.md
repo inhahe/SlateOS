@@ -110,7 +110,7 @@ two disagree.
 | `getty` | Virtual terminal login manager (agetty/mingetty) | yes |  | `mingetty` |
 | `grep` | Select the lines of its input that match a pattern. | yes | `coreutils` |  |
 | `groups` | Print the groups a user is in. | yes | `coreutils` |  |
-| `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
+| `gzip` | Compress or expand files. | yes |  | `gunzip`, `zcat`, `gzcat` |
 | `hardlink` | File deduplication utility. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
 | `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |

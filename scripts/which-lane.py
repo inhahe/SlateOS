@@ -681,6 +681,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "getopt-ambiguity-check.py",
         "getopt-diff.sh",
         "grep-diff.sh",
+        "gzip-diff.sh",
         "head-diff.sh",
         "hexdump-diff.sh",
         "host-errmsg-baseline.txt",

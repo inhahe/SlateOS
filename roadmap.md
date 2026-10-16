@@ -2854,13 +2854,26 @@ D's to act on once answered).
   readiness; `requests/e-ad-no-application-can-reach-the-sound-device.md`,
   its two gaps asked in `requests/d-a-the-device-door-s-two-gaps.md`).
   **Closes** as each fixture passes in a lane D boot on lane A's kernel.
-  **Next:** lane A's calls of 2026-10-07 on `lane-a-wip` -- `SYS_MEMORY_LOCK`
-  (1145; `mlock` and kin pass straight through, closing D-Q8),
-  `SYS_PROCESS_GETGROUPS` (1143), `SYS_MMAP_FILE` (1144), the null-buffer
-  shortcuts in `posix/src/file.rs` that lane A's `cc3806b84` makes
-  unnecessary, and the PI-futex fast path (`a6e37445d`) -- then
-  `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential service, and the
-  deferred filesystem operations (1126-1128) if a C caller needs them.
+  **Done 2026-10-16:** `SYS_MEMORY_LOCK` (1145, closing D-Q8), the power
+  calls (1167/1168/1139), the six `posix_spawn` attribute fields, the
+  CPU-time clocks (`SYS_CPU_CLOCK`, 1156), `ITIMER_VIRTUAL`/`ITIMER_PROF`,
+  POSIX timers (`SYS_POSIX_TIMER`, 1141; all but `SIGEV_THREAD`), the
+  dumpable flag (`SYS_PROCESS_DUMPABLE`, 1142), "now" as the set-times calls'
+  request -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
+  `ctest-dumpable`.
+  **Next**, in this order: per-thread signal masks in the library (the
+  kernel's are per thread since §1542, the library's `blocked_mask_ptr` is
+  still the process's; `requests/a-d-signal-masks-are-per-thread-and-tgkill-aims-at-the-thread.md`),
+  then `SIGEV_THREAD` on them with `SIGRTMIN` reported as 34 and 32/33 the
+  library's (glibc's numbering); named pipes (1157/1158); the set-id calls
+  (1159/1160, settling `posix_spawn`'s `RESETIDS` with them); getgroups
+  (1143); `swapon`/`swapoff` (1175/1176); descriptor passing (1169/1170);
+  the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);
+  `SYS_MMAP_FILE` (1144); `profil` over `ITIMER_PROF`; the null-buffer
+  shortcuts `cc3806b84` makes unnecessary; the PI-futex fast path
+  (`a6e37445d`); `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential
+  service; and the deferred filesystem operations (1126-1128) if a C caller
+  needs them.
 
 - `[D]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~2151).
   **CPython half measured and closed 2026-08-16:** CPython 3.12.3 links against

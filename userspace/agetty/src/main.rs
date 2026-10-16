@@ -1,8 +1,10 @@
-//! `agetty`: the command. Stage 1 of the port (`lib.rs`) -- the command
-//! line, the printed answers (`--help`, `--version`, `--list-speeds`),
-//! `--show-issue` and `--reload`. Running on a line is stage 2; until then
-//! the binary is built only with the `port` feature, for
-//! `scripts/agetty-diff.sh`.
+//! `agetty` -- open a terminal line, ask for a login name, and run `login`.
+//!
+//! The command: the printed answers (`--help`, `--version`,
+//! `--list-speeds`), `--show-issue` and `--reload` here, and a run on a
+//! line in `run.rs`. util-linux 2.39.3's, ported (`lib.rs`). Until it
+//! ships in `getty`'s place the binary is built only with the `port`
+//! feature, for `scripts/agetty-diff.sh`.
 
 use std::ffi::OsString;
 use std::process::ExitCode;

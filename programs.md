@@ -13,14 +13,15 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**501 programs; 342 on the image, 6 carried inside the kernel.**
+**502 programs; 342 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 316
+## Userland utilities and services (`userspace/`, lane B) -- 317
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
 | `acl` | POSIX access control list utility. | yes |  |  |
 | `acpi` | Power management info (acpi/acpid) | yes |  |  |
+| `agetty` | Open a terminal line, ask for a login name, and run `login`. |  |  |  |
 | `ar` | Archive and Object File Tools | yes |  | `ranlib`, `strip` |
 | `arch` | Print machine architecture. | yes | `coreutils` |  |
 | `arp` | ARP Table Management Utility | yes |  |  |

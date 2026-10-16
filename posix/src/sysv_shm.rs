@@ -660,6 +660,9 @@ fn attach(shmid: i32, shmaddr: usize, shmflg: i32) -> Result<usize, i32> {
     }
     let (handle, len) = (seg.handle, pages_of(seg.size).unwrap_or(0) * SHMLBA);
     let mapped = backing::map(handle, write, addr, shmflg & SHM_REMAP != 0)?;
+    if shmflg & SHM_REMAP != 0 {
+        displaced(&mut t, mapped, len, slot);
+    }
     let Some(a) = t.tables().attaches.claim(usize::MAX, || Attach::EMPTY) else {
         backing::unmap(mapped, len);
         return Err(errno::ENOMEM);
@@ -679,6 +682,59 @@ fn attach(shmid: i32, shmaddr: usize, shmflg: i32) -> Result<usize, i32> {
         seg.lpid = pid;
     }
     Ok(mapped)
+}
+
+/// What a `SHM_REMAP` attach at `[addr, addr + len)` did to the attaches
+/// already there: the range is the new segment's now. An attach it covers
+/// whole is detached -- its record goes, its segment's `nattch` falls, and a
+/// removed segment that was its last attach is freed, as Linux's `shm_close`
+/// does when the mapping goes -- and one it covers in part keeps the part
+/// before the new range, or failing that the part after.
+///
+/// Until 2026-10-16 the displaced attach stayed live: its segment was never
+/// freed after `IPC_RMID`, and a `shmdt` of the address found its record
+/// before the new one's (Opus's review of lane D's round 202). Not Linux's,
+/// for an attach the new range splits in two: Linux keeps both pieces,
+/// counted twice in `nattch`; here the piece after the new range is mapped
+/// with no record, and stays until the process ends.
+///
+/// `attaching` is the segment the new range holds: one of its own earlier
+/// attaches displaced is not its last, removed or not, since the new attach
+/// is about to count.
+fn displaced(t: &mut Locked, addr: usize, len: usize, attaching: usize) {
+    let end = addr.saturating_add(len);
+    let cap = t.tables().attaches.cap();
+    for i in 0..cap {
+        let Some(rec) = t.tables().attaches.get(i) else {
+            continue;
+        };
+        let rec_end = rec.addr.saturating_add(rec.len);
+        if !rec.live || rec_end <= addr || end <= rec.addr {
+            continue;
+        }
+        if rec.addr < addr {
+            // The part before the new range stays attached.
+            rec.len = addr.saturating_sub(rec.addr);
+            continue;
+        }
+        if end < rec_end {
+            // The part after it stays attached.
+            rec.len = rec_end.saturating_sub(end);
+            rec.addr = end;
+            continue;
+        }
+        let slot = rec.slot;
+        *rec = Attach::EMPTY;
+        t.tables().attaches.release(i);
+        let gone = t.seg(slot).is_some_and(|seg| {
+            seg.nattch = seg.nattch.saturating_sub(1);
+            seg.dtime = now_secs();
+            seg.dest && seg.nattch == 0
+        });
+        if gone && slot != attaching {
+            t.destroy(slot);
+        }
+    }
 }
 
 /// `shmdt` — detach the segment attached at `shmaddr`.
@@ -1039,6 +1095,86 @@ mod tests {
         assert_eq!(stat_of(id).shm_nattch, 0);
         assert_ne!(stat_of(id).shm_dtime, 0);
         rm(id);
+    }
+
+    /// A `SHM_REMAP` attach over another segment's whole attach detaches it:
+    /// its count falls, and a segment removed while attached is freed --
+    /// the remapped-over record no longer answers `shmdt` (Opus's review of
+    /// lane D's round 202). The host cannot place a mapping, so the attach's
+    /// effect on the tables is driven directly.
+    #[test]
+    fn a_remap_over_a_whole_attach_detaches_it() {
+        let a = get(IPC_PRIVATE, 2 * SHMLBA, 0o600);
+        let b = get(IPC_PRIVATE, 2 * SHMLBA, 0o600);
+        let at = shmat(a, core::ptr::null(), 0);
+        assert_ne!(at, FAIL);
+        assert_eq!(shmctl(a, IPC_RMID, core::ptr::null_mut()), 0);
+        assert_eq!(stat_of(a).shm_nattch, 1, "removed, still attached");
+        {
+            let mut t = lock();
+            let b_slot = t.resolve(b).expect("b exists");
+            displaced(&mut t, at.addr(), 2 * SHMLBA, b_slot);
+        }
+        // SAFETY: `shmid_ds` is plain integers, for which all zeros is a
+        // value.
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        errno::set_errno(0);
+        err(shmctl(a, IPC_STAT, &raw mut ds), -1, errno::EINVAL);
+        err(shmdt(at), -1, errno::EINVAL);
+        rm(b);
+    }
+
+    /// A remap over part of an attach keeps the rest attached: the part
+    /// before the new range, or failing that the part after.
+    #[test]
+    fn a_remap_over_part_of_an_attach_keeps_the_rest() {
+        let a = get(IPC_PRIVATE, 4 * SHMLBA, 0o600);
+        let at = shmat(a, core::ptr::null(), 0);
+        assert_ne!(at, FAIL);
+        let base = at.addr();
+        let span = |t: &mut Locked| {
+            let cap = t.tables().attaches.cap();
+            (0..cap)
+                .filter_map(|i| {
+                    t.tables()
+                        .attaches
+                        .get(i)
+                        .filter(|r| r.live)
+                        .map(|r| (r.addr, r.len))
+                })
+                .collect::<std::vec::Vec<_>>()
+        };
+        {
+            let mut t = lock();
+            // The tail of a's range: its head stays.
+            displaced(&mut t, base + 3 * SHMLBA, 2 * SHMLBA, usize::MAX);
+            assert_eq!(span(&mut t), [(base, 3 * SHMLBA)]);
+            // Its head: the rest after the new range stays.
+            displaced(&mut t, base - SHMLBA, 2 * SHMLBA, usize::MAX);
+            assert_eq!(span(&mut t), [(base + SHMLBA, 2 * SHMLBA)]);
+        }
+        assert_eq!(stat_of(a).shm_nattch, 1, "still attached, once");
+        assert_eq!(shmdt(core::ptr::with_exposed_provenance(base + SHMLBA)), 0);
+        assert_eq!(stat_of(a).shm_nattch, 0);
+        rm(a);
+    }
+
+    /// One of a removed segment's own earlier attaches, displaced by a new
+    /// attach of it, does not free it: the new attach counts.
+    #[test]
+    fn a_remap_over_its_own_segment_does_not_free_it() {
+        let a = get(IPC_PRIVATE, SHMLBA, 0o600);
+        let at = shmat(a, core::ptr::null(), 0);
+        assert_eq!(shmctl(a, IPC_RMID, core::ptr::null_mut()), 0);
+        {
+            let mut t = lock();
+            let slot = t.resolve(a).expect("a still attaches by id");
+            displaced(&mut t, at.addr(), SHMLBA, slot);
+        }
+        assert_eq!(stat_of(a).shm_nattch, 0, "detached, and not freed");
+        let again = shmat(a, core::ptr::null(), 0);
+        assert_ne!(again, FAIL, "still attaches by its id");
+        assert_eq!(shmdt(again), 0);
     }
 
     #[test]

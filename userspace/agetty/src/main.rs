@@ -14,7 +14,7 @@ use ulclosestream::Stdout;
 
 /// `AGETTY_RELOAD_FILENAME`: the file whose touch tells running agettys to
 /// print the prompt again.
-const RELOAD_FILE: &str = "/run/agetty.reload";
+const RELOAD_FILE: &std::ffi::CStr = c"/run/agetty.reload";
 
 fn main() -> ExitCode {
     let mut argv = std::env::args_os();
@@ -48,8 +48,15 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
         Parsed::Reload => match reload_agettys() {
             Ok(()) => 0,
             Err((what, e)) => {
-                let msg = format!("{what} {RELOAD_FILE}: {}", errmsg::strerror(&e));
-                sys.errx(msg.as_bytes()).0
+                let why = errmsg::strerror(&std::io::Error::from_raw_os_error(e));
+                let msg: [&[u8]; 5] = [
+                    what.as_bytes(),
+                    b" ",
+                    RELOAD_FILE.to_bytes(),
+                    b": ",
+                    why.as_bytes(),
+                ];
+                sys.errx(&msg.concat()).0
             }
         },
         Parsed::ShowIssue(op) => {
@@ -81,25 +88,13 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
     }
 }
 
-/// `reload_agettys ()`: create the trigger file if need be, and touch it.
-/// The failure: which step, as upstream words it, and why.
-fn reload_agettys() -> Result<(), (&'static str, std::io::Error)> {
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // `S_IRUSR|S_IWUSR`.
-        open.mode(0o600);
-    }
-    let file = open.open(RELOAD_FILE).map_err(|e| ("cannot open", e))?;
-    // `futimens (fd, NULL)`: both times, now.
-    let now = std::time::SystemTime::now();
-    file.set_times(
-        std::fs::FileTimes::new()
-            .set_accessed(now)
-            .set_modified(now),
-    )
-    .map_err(|e| ("cannot touch file", e))?;
-    Ok(())
+/// `reload_agettys ()`: create the trigger file if need be (`S_IRUSR |
+/// S_IWUSR`), and touch it -- `futimens (fd, NULL)`, which needs only
+/// write permission, where setting given times needs the file's owner.
+/// The failure: which step, as upstream words it, and the `errno`.
+fn reload_agettys() -> Result<(), (&'static str, i32)> {
+    let fd = libcall::fd::open_create_write(RELOAD_FILE, 0o600).map_err(|e| ("cannot open", e))?;
+    let touched = libcall::fd::touch_now(fd);
+    let closed = libcall::fd::close(fd);
+    touched.and(closed).map_err(|e| ("cannot touch file", e))
 }

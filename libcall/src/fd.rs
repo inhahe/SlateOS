@@ -64,6 +64,9 @@ mod sys {
         pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
         pub fn open(path: *const core::ffi::c_char, flags: i32, ...) -> i32;
+        // Two `struct timespec`s, as four 64-bit words; only ever passed
+        // null here.
+        pub fn futimens(fd: i32, times: *const [i64; 4]) -> i32;
     }
 
     /// `O_RDONLY`.
@@ -99,6 +102,86 @@ fn open_read_one(path: &core::ffi::CStr) -> Result<i32, i32> {
 #[cfg(not(unix))]
 fn open_read_one(_path: &core::ffi::CStr) -> Result<i32, i32> {
     Err(ENOSYS)
+}
+
+/// `O_CREAT`.
+pub const O_CREAT: i32 = 0o100;
+
+/// Open `path` for reading, creating it -- empty, with permissions `mode`
+/// -- if it is not there: `open (path, O_CREAT | O_CLOEXEC | O_RDONLY,
+/// mode)`, which the standard library will not do (it creates only for
+/// writing). The descriptor, the caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports: `EACCES`, `ENOENT` for a missing directory, `EROFS`
+/// and the rest; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_create_read(path: &core::ffi::CStr, mode: u32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_CREAT | sys::O_CLOEXEC | sys::O_RDONLY;
+        // SAFETY: a NUL-terminated path the call only reads, the flags, and
+        // the mode `O_CREAT` reads as the third argument, an `unsigned int`.
+        let fd = unsafe { sys::open(path.as_ptr(), flags, mode) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(ENOSYS)
+    }
+}
+
+/// Set the file on `fd`'s access and change times to now: `futimens (fd,
+/// NULL)` -- which, unlike setting given times (all the standard library
+/// offers), anyone who may write the file may do, its owner or not.
+///
+/// # Errors
+///
+/// `EACCES` or `EPERM` without write permission, `EBADF`, `EROFS`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn touch_now(fd: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: a null `times` asks for "now" for both times; nothing of
+        // ours is read or written.
+        if unsafe { sys::futimens(fd, core::ptr::null()) } == 0 {
+            Ok(())
+        } else {
+            Err(last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(ENOSYS)
+    }
+}
+
+/// `O_WRONLY`.
+pub const O_WRONLY: i32 = 0o1;
+
+/// Open `path` for writing, creating it -- empty, with permissions `mode`
+/// -- if it is not there, close-on-exec: `open (path, O_CREAT | O_CLOEXEC |
+/// O_WRONLY, mode)`. Unlike the standard library's, this does not ask for
+/// `O_TRUNC` or anything else. The descriptor, the caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_create_write(path: &core::ffi::CStr, mode: u32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_CREAT | sys::O_CLOEXEC | O_WRONLY;
+        // SAFETY: as in `open_create_read`.
+        let fd = unsafe { sys::open(path.as_ptr(), flags, mode) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(ENOSYS)
+    }
 }
 
 /// `O_RDWR`.
@@ -535,6 +618,71 @@ mod tests {
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
         assert_eq!(O_RDWR, posix::fcntl::O_RDWR);
         assert_eq!(O_NOCTTY, posix::fcntl::O_NOCTTY);
+        assert_eq!(O_CREAT, posix::fcntl::O_CREAT);
+        assert_eq!(O_WRONLY, posix::fcntl::O_WRONLY);
+    }
+
+    /// A file opened for writing is created as asked, not emptied when it
+    /// is there, and its times set to now.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_touched_to_now() {
+        extern crate std;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(std::format!("libcall-touch-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("trigger");
+        std::fs::write(&path, b"kept").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = open_create_write(&c, 0o600).unwrap();
+        touch_now(fd).unwrap();
+        let _ = close(fd);
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), 4);
+        assert!(meta.modified().unwrap() > old);
+        std::fs::remove_file(&path).unwrap();
+        let fd = open_create_write(&c, 0o640).unwrap();
+        let _ = close(fd);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file opened for reading is created if need be, with the mode
+    /// asked for, and opened again as it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_created_to_be_read() {
+        extern crate std;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(std::format!("libcall-create-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("trigger");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = open_create_read(&c, 0o600).unwrap();
+        let _ = close(fd);
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!((meta.len(), meta.permissions().mode() & 0o777), (0, 0o600));
+        let fd = open_create_read(&c, 0o644).unwrap();
+        let _ = close(fd);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            open_create_read(c"/nonexistent/dir/trigger", 0o600),
+            Err(crate::ENOENT)
+        );
     }
 
     /// A line opened as a getty opens it is read-write and survives `exec`;

@@ -63,9 +63,11 @@ EOF
 # leader whose controlling terminal is a fresh pseudo-terminal, on all three
 # standard streams, at the speed named first (`-` the kernel's). The second
 # argument is what to do at the keyboard, a JSON list of steps --
-# ["wait", TEXT] until the line shows TEXT, ["send", BYTES] (code points
-# below 256), ["sleep", SECONDS]. What the line showed goes to standard
-# output; the status is the command's (128 + N for signal N).
+# ["wait", TEXT] until the line shows TEXT, ["waitn", TEXT, N] until it has
+# shown it N times, ["send", BYTES] (code points below 256), ["sleep",
+# SECONDS], ["run", ARGV] to run a command beside it, ["write", PATH, TEXT]
+# to rewrite a file. What the line showed goes to standard output; the
+# status is the command's (128 + N for signal N).
 cat > online.py <<'EOF'
 import fcntl
 import json
@@ -111,16 +113,24 @@ def pump(timeout):
     return True
 
 
-for kind, arg in steps:
-    if kind == 'wait':
+for step in steps:
+    kind, arg = step[0], step[1]
+    if kind in ('wait', 'waitn'):
         want = arg.encode('latin-1')
-        while want not in shown and time.time() < deadline:
+        times = int(step[2]) if kind == 'waitn' else 1
+        while shown.count(want) < times and time.time() < deadline:
             if pump(0.1) is False:
                 break
     elif kind == 'send':
         os.write(master, arg.encode('latin-1'))
     elif kind == 'sleep':
         time.sleep(float(arg))
+    elif kind == 'run':
+        subprocess.run(arg, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    elif kind == 'write':
+        with open(arg, 'w', encoding='latin-1') as f:
+            f.write(step[2])
 while time.time() < deadline:
     if child.poll() is not None:
         while pump(0.05):
@@ -314,6 +324,8 @@ w lineissue 'Welcome to \l at \b'
 line_side() {
   local side=$1 speed=$2 steps=$3; shift 3
   rm -f "$DIFF_TMP/login.$side"
+  # A case's fixture, made afresh for each side: `LINE_SETUP`, a command.
+  if [ -n "${LINE_SETUP:-}" ]; then eval "$LINE_SETUP"; fi
   diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" AGETTY_OUT="$DIFF_TMP/login.$side" \
     timeout -k 2 60 python3 "$DIFF_TMP/online.py" "$speed" "$steps" \
     agetty -l "$DIFF_TMP/fakelogin" "$@" </dev/null
@@ -388,6 +400,26 @@ line_case - '[]' -t 1 -f lineissue -
 # Refusals, after the ten seconds' wait.
 line_case - '[["wait","login: "],["send","-froot\r"]]' -f lineissue -
 line_case - "$name" -l /nonexistent/login -f lineissue -
+
+# --- a reload -------------------------------------------------------------------
+# `agetty --reload` touches /run/agetty.reload, which a getty waiting for a
+# name watches; the issue is shown again if it changed, and only while
+# nothing is typed. Only where this user may write that file.
+if [ -w /run/agetty.reload ]; then
+  re="$DIFF_TMP/reissue"
+  LINE_SETUP='w reissue before'
+  reload='["run",["agetty","--reload"]]'
+  line_case - '[["wait","login: "],["write","'"$re"'","after\n"],'"$reload"',["waitn","login: ",2],["send","root\r"]]' -f reissue -
+  line_case - '[["wait","login: "],'"$reload"',["sleep","2"],["send","root\r"]]' -f reissue -
+  line_case - '[["wait","login: "],["send","ro"],["write","'"$re"'","after\n"],'"$reload"',["sleep","2"],["send","ot\r"]]' -f reissue -
+  line_case - '[["wait","login: "],["send","r\u007f"],["write","'"$re"'","after\n"],'"$reload"',["waitn","login: ",2],["send","root\r"]]' -f reissue -
+  line_case - '[["wait","ENTER"],["write","'"$re"'","after\n"],'"$reload"',["waitn","ENTER",2],["send","\r"],["wait","login: "],["send","root\r"]]' -p -f reissue -
+  line_case - '[["wait","login: "],'"$reload"',["waitn","login: ",2],["send","root\r"]]' -i -
+  LINE_SETUP=
+else
+  echo "SKIP the reload cases: /run/agetty.reload is not writable here"
+  echo "     (as root, once: install -m 666 /dev/null /run/agetty.reload)"
+fi
 
 # --- closed and full descriptors ----------------------------------------------
 for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do

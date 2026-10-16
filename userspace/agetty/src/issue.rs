@@ -131,6 +131,26 @@ pub struct Issue {
     /// `op->osrelease`: `os-release`, once a read of it succeeded -- read
     /// once a process, as upstream keeps it.
     pub osrelease: Option<Vec<u8>>,
+    /// `mem_old`: the issue as last printed, to tell whether a reload
+    /// changed it.
+    pub mem_old: Option<Vec<u8>>,
+    /// `netlink_groups`: the address changes the last evaluation's `\4` and
+    /// `\6` showed addresses for, to be listened for.
+    pub netlink_groups: u32,
+}
+
+/// `issue_is_changed (ie)`: whether the issue evaluated last differs from
+/// the one printed last, compared as C strings. When it does not, the new
+/// one is taken as printed. No issue at all is always a change.
+pub fn issue_is_changed(ie: &mut Issue) -> bool {
+    let c_str = |m: &[u8]| m.split(|&b| b == 0).next().unwrap_or_default().to_vec();
+    match (&ie.mem_old, &ie.mem) {
+        (Some(old), Some(new)) if c_str(old) == c_str(new) => {
+            ie.mem_old = ie.mem.take();
+            false
+        }
+        _ => true,
+    }
 }
 
 /// One evaluation of the issue file: the options, the line's input speed,
@@ -167,6 +187,7 @@ impl<'a> Eval<'a> {
     /// `eval_issue_file (ie, op, tp)`: the issue, into `ie.mem`.
     pub fn eval(&mut self, ie: &mut Issue) {
         self.output_open = false;
+        ie.netlink_groups = 0;
         if self.op.flags & F_ISSUE == 0 {
             return;
         }
@@ -391,6 +412,12 @@ impl<'a> Eval<'a> {
                 };
                 let iface = r.argument(IFACE_MAXSZ);
                 self.output_iface_ip(out, &addrs, iface.as_deref(), family);
+                // The address shown may change: listen for it to.
+                ie.netlink_groups |= if c == b'4' {
+                    libcall::netlink::RTMGRP_IPV4_IFADDR
+                } else {
+                    libcall::netlink::RTMGRP_IPV6_IFADDR
+                };
             }
             other => out.push(other),
         }
@@ -828,6 +855,70 @@ mod tests {
         assert_eq!(expand(b"\\4{nope}"), b"");
         // No IPv6 interface: the host's address, asked for mapped ones.
         assert_eq!(expand(b"\\6"), b"192.0.2.8");
+    }
+
+    /// The groups of address changes an evaluation asks to hear.
+    fn groups_for(text: &[u8]) -> u32 {
+        let scratch = scratchdir::ScratchDir::new("agetty-issue-groups");
+        let root = scratch.path("root");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(root.join("etc/issue"), text).unwrap();
+        let paths = Paths::under(&root);
+        let op = Options::default();
+        let mut ie = Issue {
+            netlink_groups: 0xffff,
+            ..Issue::default()
+        };
+        Eval::new(&op, 0, &paths, &Fixed, &mut Said::default()).eval(&mut ie);
+        ie.netlink_groups
+    }
+
+    #[test]
+    fn an_address_shown_is_listened_for() {
+        use libcall::netlink::{RTMGRP_IPV4_IFADDR, RTMGRP_IPV6_IFADDR};
+        assert_eq!(groups_for(b"plain"), 0);
+        assert_eq!(groups_for(b"\\4"), RTMGRP_IPV4_IFADDR);
+        assert_eq!(groups_for(b"\\6{eth0}"), RTMGRP_IPV6_IFADDR);
+        assert_eq!(
+            groups_for(b"\\4 \\6"),
+            RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR
+        );
+    }
+
+    #[test]
+    fn an_issue_is_changed_unless_it_reads_as_the_last_printed() {
+        let mut ie = Issue {
+            mem_old: Some(b"one\n".to_vec()),
+            mem: Some(b"one\n".to_vec()),
+            ..Issue::default()
+        };
+        assert!(!issue_is_changed(&mut ie));
+        // The new one is taken as printed.
+        assert_eq!(
+            (ie.mem.as_deref(), ie.mem_old.as_deref()),
+            (None, Some(&b"one\n"[..]))
+        );
+        let mut ie = Issue {
+            mem_old: Some(b"one\n".to_vec()),
+            mem: Some(b"two\n".to_vec()),
+            ..Issue::default()
+        };
+        assert!(issue_is_changed(&mut ie));
+        assert_eq!(ie.mem.as_deref(), Some(&b"two\n"[..]));
+        // As C strings: what follows a NUL is not compared.
+        let mut ie = Issue {
+            mem_old: Some(b"one\0x".to_vec()),
+            mem: Some(b"one\0y".to_vec()),
+            ..Issue::default()
+        };
+        assert!(!issue_is_changed(&mut ie));
+        // No issue at all, before or now, is always a change.
+        assert!(issue_is_changed(&mut Issue::default()));
+        let mut ie = Issue {
+            mem_old: Some(b"one\n".to_vec()),
+            ..Issue::default()
+        };
+        assert!(issue_is_changed(&mut ie));
     }
 
     #[test]

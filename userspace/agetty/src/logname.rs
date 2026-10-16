@@ -28,6 +28,10 @@ pub trait Port {
     fn write(&mut self, bytes: &[u8]);
     /// `xusleep (250000)`, before a read that would block is tried again.
     fn pause(&mut self);
+    /// `wait_for_term_input (STDIN_FILENO)`: wait until there is something
+    /// to read -- `true` -- or the issue may have changed: `--reload` was
+    /// asked for, or an address the issue shows changed (`false`).
+    fn wait_for_input(&mut self) -> bool;
 }
 
 /// How reading a name ended, short of an error.
@@ -37,6 +41,8 @@ pub enum Read {
     Name(Vec<u8>),
     /// A BREAK (a NUL byte) on a line with speeds to try: the next one.
     NextSpeed,
+    /// The issue may have changed while nothing was typed.
+    Reload,
 }
 
 /// One pass of `get_logname`'s reading, from a fresh prompt to an end of
@@ -61,6 +67,11 @@ pub fn read_name(
     let mut name: Vec<u8> = Vec::new();
     cp.eol = 0;
     while cp.eol == 0 {
+        // Nothing typed yet, or everything rubbed out: the issue may be
+        // shown afresh before anything more is read.
+        if name.is_empty() && !port.wait_for_input() {
+            return Ok(Read::Reload);
+        }
         let byte = loop {
             match port.read_byte() {
                 Ok(b) => break b,
@@ -217,13 +228,17 @@ mod tests {
     use super::*;
     use crate::tests::Said;
 
-    /// A line whose input is scripted: bytes, then errors or end of file.
+    /// A line whose input is scripted: bytes, then errors or end of file --
+    /// and, before the reads `reloads` names (counted from 0), a reload
+    /// instead of input.
     #[derive(Default)]
     struct Script {
         input: Vec<Result<Option<u8>, i32>>,
         at: usize,
         out: Vec<u8>,
         pauses: usize,
+        reloads: Vec<usize>,
+        waits: Vec<usize>,
     }
 
     impl Script {
@@ -247,6 +262,56 @@ mod tests {
         fn pause(&mut self) {
             self.pauses += 1;
         }
+        fn wait_for_input(&mut self) -> bool {
+            self.waits.push(self.at);
+            !self.reloads.contains(&self.at)
+        }
+    }
+
+    #[test]
+    fn the_wait_comes_whenever_nothing_is_typed() {
+        let mut port = Script::typing(b"ab\x7f\x7fc\r");
+        let r = read_name(
+            &mut port,
+            &Options::default(),
+            false,
+            &mut Chardata::default(),
+            &mut Said::default(),
+        );
+        assert_eq!(r, Ok(Read::Name(b"c".to_vec())));
+        // Before the first byte, and after the second rub-out.
+        assert_eq!(port.waits, [0, 4]);
+    }
+
+    #[test]
+    fn a_reload_while_nothing_is_typed_ends_the_read() {
+        let mut port = Script {
+            reloads: vec![2],
+            ..Script::typing(b"a\x08b\r")
+        };
+        let mut cp = Chardata::default();
+        let r = read_name(
+            &mut port,
+            &Options::default(),
+            false,
+            &mut cp,
+            &mut Said::default(),
+        );
+        assert_eq!(r, Ok(Read::Reload));
+        assert_eq!(cp.erase, 0x08);
+        // Once something is typed, nothing interrupts it.
+        let mut port = Script {
+            reloads: vec![1, 2],
+            ..Script::typing(b"ab\r")
+        };
+        let r = read_name(
+            &mut port,
+            &Options::default(),
+            false,
+            &mut Chardata::default(),
+            &mut Said::default(),
+        );
+        assert_eq!(r, Ok(Read::Name(b"ab".to_vec())));
     }
 
     fn read(input: &[u8], op: &Options) -> (Result<Read, Exit>, Chardata, Vec<u8>, Said) {

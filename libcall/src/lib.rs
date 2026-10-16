@@ -74,6 +74,7 @@ pub mod inotify;
 pub mod locale;
 pub mod lock;
 pub mod netdb;
+pub mod netlink;
 pub mod power;
 pub mod priority;
 pub mod process;

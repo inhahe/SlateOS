@@ -245,6 +245,14 @@ impl Inotify {
         Err(crate::ENOSYS)
     }
 
+    /// The descriptor, for a caller that waits on it together with others
+    /// ([`crate::fd::wait_readable_among`]). It stays this instance's: the
+    /// caller must not close it.
+    #[must_use]
+    pub fn fd(&self) -> i32 {
+        self.fd
+    }
+
     /// Wait up to `timeout_ms` for something to read -- `-1` waits for ever
     /// -- answering whether there is. An interruption counts as nothing yet.
     ///

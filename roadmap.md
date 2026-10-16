@@ -1523,10 +1523,10 @@ list moved to lane D on 2026-09-22):
   through it. In stages, each held to Ubuntu's `/usr/sbin/agetty` by
   `scripts/agetty-diff.sh` before the next: (1) the command line,
   `--show-issue` and the issue file's escapes; (2) the line opened and set
-  up, the name read, `login` run; (3) `utmp`/`wtmp` -- all three done
-  2026-10-15, 183 cases agree; (4) the prompt printed again on `--reload`.
-  Then shipped in `getty`'s place, once the console answers `KDGKBMODE`
-  (`requests/b-d-the-console-could-answer-as-a-virtual-console.md`).
+  up, the name read, `login` run; (3) `utmp`/`wtmp`; (4) the issue shown
+  again on `--reload` or an address change -- all four done 2026-10-16, 189
+  cases agree. Then shipped in `getty`'s place, once the console answers
+  `KDGKBMODE` (`requests/b-d-the-console-could-answer-as-a-virtual-console.md`).
 
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over

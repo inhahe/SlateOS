@@ -12,7 +12,7 @@
 //! | 1 | the command line, `--help`, `--version`, `--list-speeds`, `--reload`'s trigger, `--show-issue` and the issue file's escapes | [`options`], [`speeds`], [`issue`] |
 //! | 2 | the line opened and set up, the name read, `login` run | [`run`], [`termio`], [`logname`], [`prompt`], [`login`], [`logindefs`], [`ttys`] |
 //! | 3 | the `LOGIN_PROCESS` record in `utmp` and `wtmp` | [`utmp`] |
-//! | 4 | the prompt printed again on a reload | to come |
+//! | 4 | the issue and prompt shown again on `--reload`, or when an address the issue shows changes | [`run`]'s `Reload`, [`issue::issue_is_changed`] |
 //!
 //! Until it ships, the `agetty` binary is built only with the `port`
 //! feature, and `userspace/getty`, which it replaces, serves.
@@ -30,6 +30,9 @@
 //!    or `--kill-chars`.** Upstream reads its 0 as a NUL, and a NUL is in
 //!    every string `strchr` searches, so it is taken for an erase or a kill
 //!    -- on a line that hung up, again and again at full speed.
+//! 5. **The netlink socket that hears address changes is closed on `exec`.**
+//!    Upstream's is not, and `login` and the shell after it inherit a
+//!    socket nothing reads.
 
 pub mod issue;
 pub mod login;
@@ -72,6 +75,7 @@ pub trait Diag {
 }
 
 /// The real thing.
+#[derive(Clone)]
 pub struct System {
     /// `argv[0]`, as getopt names the program.
     pub argv0: Vec<u8>,

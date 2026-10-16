@@ -17,7 +17,7 @@ use std::os::unix::io::FromRawFd;
 
 use libcall::termios::{self as tc, Termios};
 
-use crate::issue::{Eval, Issue, Paths, SystemHost};
+use crate::issue::{Eval, Issue, Paths, SystemHost, issue_is_changed};
 use crate::logindefs::LoginDefs;
 use crate::logname::{Port, Read, finish_name, read_name};
 use crate::options::{
@@ -76,10 +76,20 @@ fn with_file<R>(fd: i32, f: impl FnOnce(&File) -> R) -> R {
     f(&file)
 }
 
-/// The line, standard input and output, as `get_logname` reads from it.
-struct Line;
+/// The line, standard input and output, as `get_logname` reads from it --
+/// and what tells it to show the issue again. `log` is where a warning
+/// about the reload file goes: the program's own diagnostics, borrowed
+/// apart from the reading's.
+struct Line<'a> {
+    reload: &'a mut Reload,
+    log: System,
+}
 
-impl Port for Line {
+impl Port for Line<'_> {
+    fn wait_for_input(&mut self) -> bool {
+        self.reload.wait_for_term_input(0, &mut self.log)
+    }
+
     fn read_byte(&mut self) -> Result<Option<u8>, i32> {
         let mut c = [0u8; 1];
         match libcall::fd::read(0, &mut c)? {
@@ -181,10 +191,14 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
 
     let mut cp = Chardata::default();
     let mut issue = Issue::default();
+    let mut reload = Reload {
+        watch: Watch::Untried,
+        netlink: None,
+    };
     let mut username = op.autolog.clone();
 
     if op.flags & F_NOPROMPT != 0 {
-        eval_issue(&mut issue, op, &tp, sys);
+        eval_issue(&mut issue, op, &tp, &mut reload, sys);
         print_issue(&mut issue, op, &mut tp);
     } else {
         if op.flags & F_NOHOSTNAME == 0
@@ -194,8 +208,8 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
             op.flags |= F_NOHOSTNAME;
         }
         if let Some(autolog) = &op.autolog {
-            eval_issue(&mut issue, op, &tp, sys);
-            do_prompt(&mut issue, op, &mut tp);
+            eval_issue(&mut issue, op, &tp, &mut reload, sys);
+            do_prompt(&mut issue, op, &mut tp, &mut reload, sys);
             out(&join(&[
                 crate::prompt::LOGIN_PROMPT,
                 autolog,
@@ -204,7 +218,8 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
         } else {
             let mut speeds = Speeds { index: None };
             loop {
-                if let Some(name) = get_logname(&mut issue, op, &mut tp, &mut cp, sys)? {
+                if let Some(name) = get_logname(&mut issue, op, &mut tp, &mut cp, &mut reload, sys)?
+                {
                     username = Some(name);
                     break;
                 }
@@ -571,10 +586,148 @@ fn next_speed(op: &Options, tp: &mut Termios, speeds: &mut Speeds) {
     let _ = tc::set_attr(0, tc::TCSANOW, tp);
 }
 
-/// `eval_issue_file (ie, op, tp)`.
-fn eval_issue(ie: &mut Issue, op: &Options, tp: &Termios, sys: &mut System) {
+/// `eval_issue_file (ie, op, tp)`, and then -- the issue showing an
+/// address -- the netlink socket that hears it change.
+fn eval_issue(ie: &mut Issue, op: &Options, tp: &Termios, reload: &mut Reload, sys: &mut System) {
     let paths = Paths::default();
     Eval::new(op, tc::input_speed(tp), &paths, &SystemHost, sys).eval(ie);
+    if ie.netlink_groups != 0 {
+        reload.open_netlink(ie.netlink_groups);
+    }
+}
+
+/// `AGETTY_RELOAD_FILENAME`: touched by `agetty --reload`.
+const RELOAD_FILE: &std::ffi::CStr = c"/run/agetty.reload";
+
+/// `inotify_fd`'s three states.
+enum Watch {
+    /// `AGETTY_RELOAD_FDNONE`: the reload file is not there yet; it is
+    /// made, and watched, at the next wait.
+    Untried,
+    /// The file is there and the watch could not be made.
+    Failed,
+    /// The file is watched.
+    On(libcall::inotify::Inotify),
+}
+
+/// What tells a waiting getty to show the issue again: a touch of
+/// [`RELOAD_FILE`], and a change of an address the issue shows.
+struct Reload {
+    watch: Watch,
+    /// `netlink_fd`.
+    netlink: Option<i32>,
+}
+
+impl Reload {
+    /// `open_netlink ()`: listen for `groups`' address changes -- once; the
+    /// socket made first stays.
+    fn open_netlink(&mut self, groups: u32) {
+        if self.netlink.is_none() {
+            self.netlink = libcall::netlink::open_route(groups).ok();
+        }
+    }
+
+    /// Stop listening: `close (netlink_fd)`.
+    fn close_netlink(&mut self) {
+        if let Some(fd) = self.netlink.take() {
+            let _ = libcall::fd::close(fd);
+        }
+    }
+
+    /// `process_netlink ()`: read what the socket has said, without
+    /// waiting: whether an address changed. An end or an error closes it.
+    fn process_netlink(&mut self) -> bool {
+        let mut triggered = false;
+        while let Some(fd) = self.netlink {
+            let mut buf = [0u8; 4096];
+            match libcall::netlink::receive(fd, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => match libcall::netlink::first_message(buf.get(..n).unwrap_or_default()) {
+                    libcall::netlink::Said::End => {
+                        self.close_netlink();
+                        break;
+                    }
+                    libcall::netlink::Said::Change => triggered = true,
+                    libcall::netlink::Said::Nothing => {}
+                },
+                // "Failure, just stop listening for changes".
+                Err(_) => {
+                    self.close_netlink();
+                    break;
+                }
+            }
+        }
+        triggered
+    }
+
+    /// `wait_for_term_input (fd)`: wait for something to read on `fd` --
+    /// `true` -- or for a reason to show the issue again: `false`. The
+    /// reload file is made and watched the first time; one that cannot be
+    /// made is warned of, and tried again, every time.
+    fn wait_for_term_input(&mut self, fd: i32, log: &mut dyn Diag) -> bool {
+        if matches!(self.watch, Watch::Untried) {
+            match libcall::fd::open_create_read(RELOAD_FILE, 0o600) {
+                Ok(file) => {
+                    self.watch = match libcall::inotify::Inotify::new() {
+                        Ok(watch) => {
+                            let mask = libcall::inotify::IN_ATTRIB | libcall::inotify::IN_MODIFY;
+                            let _ = watch.watch(RELOAD_FILE, mask);
+                            Watch::On(watch)
+                        }
+                        Err(_) => Watch::Failed,
+                    };
+                    let _ = libcall::fd::close(file);
+                }
+                Err(e) => log.log_warn(
+                    format!(
+                        "failed to create reload file: /run/agetty.reload: {}",
+                        strerror(e)
+                    )
+                    .as_bytes(),
+                ),
+            }
+        }
+        loop {
+            let mut fds = vec![fd];
+            let watch_at = match &self.watch {
+                Watch::On(watch) => {
+                    let at = fds.len();
+                    fds.push(watch.fd());
+                    Some(at)
+                }
+                _ => None,
+            };
+            let netlink_at = self.netlink.map(|nl| {
+                let at = fds.len();
+                fds.push(nl);
+                at
+            });
+            // "If waiting fails, just fall through, presumably reading input
+            // will fail".
+            let Ok(ready) = libcall::fd::wait_readable_among(&fds, -1) else {
+                return true;
+            };
+            let is_ready = |at: Option<usize>| at.is_some_and(|i| ready & (1 << i) != 0);
+            if ready & 1 != 0 {
+                return true;
+            }
+            if is_ready(netlink_at) {
+                if !self.process_netlink() {
+                    continue;
+                }
+            } else if is_ready(watch_at)
+                && let Watch::On(watch) = &self.watch
+            {
+                // "Just drain the inotify buffer".
+                let mut buf = [0u8; 512];
+                while watch
+                    .read(&mut buf)
+                    .is_ok_and(|mut events| events.next().is_some())
+                {}
+            }
+            return false;
+        }
+    }
 }
 
 /// `print_issue_file (ie, op, tp)`: a new line first, unless
@@ -590,28 +743,55 @@ fn print_issue(ie: &mut Issue, op: &Options, tp: &mut Termios) {
         tp.c_oflag |= tc::ONLCR | tc::OPOST;
         let _ = tc::set_attr(0, tc::TCSADRAIN, tp);
     }
-    if let Some(mem) = ie.mem.take()
+    if let Some(mem) = &ie.mem
         && !mem.is_empty()
     {
-        out(&mem);
+        out(mem);
     }
     if ie.do_tcrestore {
         tp.c_oflag = oflag;
         let _ = tc::set_attr(0, tc::TCSADRAIN, tp);
     }
+    // What was printed, to tell a reload's issue from.
+    ie.mem_old = ie.mem.take();
+}
+
+/// The screen cleared before the issue is shown again, on a virtual
+/// console that is cleared at all.
+fn clear_for_reload(op: &Options) {
+    if op.flags & F_VCONSOLE != 0 && op.flags & F_NOCLEAR == 0 {
+        termio_clear();
+    }
 }
 
 /// `do_prompt (ie, op, tp)`: the issue, the pause for Enter under
-/// `--login-pause`, a virtual console's keyboard hint, the host's name and
+/// `--login-pause` -- the issue shown again if a reload changes it while
+/// waiting -- a virtual console's keyboard hint, the host's name and
 /// `login: `.
-fn do_prompt(ie: &mut Issue, op: &Options, tp: &mut Termios) {
-    print_issue(ie, op, tp);
-    if op.flags & F_LOGINPAUSE != 0 {
-        out(b"[press ENTER to login]\n");
-        // `getc (stdin)`: a buffer's worth is read, and what follows the
-        // first byte is lost with the buffer.
-        let mut buf = [0u8; 1024];
-        let _ = libcall::fd::read(0, &mut buf);
+fn do_prompt(
+    ie: &mut Issue,
+    op: &Options,
+    tp: &mut Termios,
+    reload: &mut Reload,
+    sys: &mut System,
+) {
+    loop {
+        print_issue(ie, op, tp);
+        if op.flags & F_LOGINPAUSE != 0 {
+            out(b"[press ENTER to login]\n");
+            if !reload.wait_for_term_input(0, sys) {
+                eval_issue(ie, op, tp, reload, sys);
+                if issue_is_changed(ie) {
+                    clear_for_reload(op);
+                    continue;
+                }
+            }
+            // `getc (stdin)`: a buffer's worth is read, and what follows
+            // the first byte is lost with the buffer.
+            let mut buf = [0u8; 1024];
+            let _ = libcall::fd::read(0, &mut buf);
+        }
+        break;
     }
     if op.flags & F_NOHINTS == 0
         && op.autolog.is_none()
@@ -632,12 +812,14 @@ fn do_prompt(ie: &mut Issue, op: &Options, tp: &mut Termios) {
 }
 
 /// `get_logname (ie, op, tp, cp)`: the name -- prompted for again after an
-/// empty one -- or `None` for a BREAK that asks for the next speed.
+/// empty one, and after a reload that changed the issue while nothing was
+/// typed -- or `None` for a BREAK that asks for the next speed.
 fn get_logname(
     ie: &mut Issue,
     op: &Options,
     tp: &mut Termios,
     cp: &mut Chardata,
+    reload: &mut Reload,
     sys: &mut System,
 ) -> Result<Option<Vec<u8>>, Exit> {
     *cp = Chardata::default();
@@ -647,16 +829,36 @@ fn get_logname(
         let _ = libcall::clock::nanosleep(1, 0);
     }
     let _ = tc::flush(0, tc::TCIFLUSH);
-    eval_issue(ie, op, tp, sys);
+    eval_issue(ie, op, tp, reload, sys);
     loop {
-        do_prompt(ie, op, tp);
-        let echo = tp.c_lflag & tc::ECHO != 0;
-        match read_name(&mut Line, op, echo, cp, sys)? {
-            Read::NextSpeed => return Ok(None),
-            Read::Name(name) if name.is_empty() => {}
-            Read::Name(mut name) => {
-                finish_name(&mut name, op, cp, sys)?;
-                return Ok(Some(name));
+        do_prompt(ie, op, tp, reload, sys);
+        loop {
+            let echo = tp.c_lflag & tc::ECHO != 0;
+            let mut line = Line {
+                reload: &mut *reload,
+                log: sys.clone(),
+            };
+            match read_name(&mut line, op, echo, cp, sys)? {
+                Read::NextSpeed => return Ok(None),
+                Read::Reload => {
+                    // "refresh prompt -- discard input data, clear terminal
+                    // and call do_prompt() again".
+                    if op.flags & F_VCONSOLE == 0 {
+                        let _ = libcall::clock::nanosleep(1, 0);
+                    }
+                    eval_issue(ie, op, tp, reload, sys);
+                    if !issue_is_changed(ie) {
+                        continue;
+                    }
+                    let _ = tc::flush(0, tc::TCIFLUSH);
+                    clear_for_reload(op);
+                    break;
+                }
+                Read::Name(name) if name.is_empty() => break,
+                Read::Name(mut name) => {
+                    finish_name(&mut name, op, cp, sys)?;
+                    return Ok(Some(name));
+                }
             }
         }
     }

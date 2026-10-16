@@ -141,9 +141,8 @@ def main(argv):
                 if not tty_stderr:
                     os.dup2(err.fileno(), 2)
                 if stdout_path is not None:
-                    fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-                    os.dup2(fd, 1)
-                    os.close(fd)
+                    with open(stdout_path, "wb") as out:
+                        os.dup2(out.fileno(), 1)
                 os.execvp(prog[0], prog)
             finally:
                 os._exit(127)

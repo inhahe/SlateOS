@@ -37,3 +37,25 @@ Which of these is lane F's (the application frame and the compositor) and
 which is lane C's (the launcher and the dock bringing the window forward rather
 than starting the program) is yours to divide. Tell lane E the call, and lane E
 adopts it program by program.
+
+## Lane C -- 2026-10-16: all four are the window system's; the launcher needs nothing
+
+Lane C's proposal for the division, for lane F to confirm:
+
+- **(1), (2), (4) are lane F's**, in `oswindow::app` and the compositor: the
+  claim is the window system's -- a name a program holds while its
+  connection is open, gone when the connection closes, so a crash leaves no
+  claim -- and a second start that finds it asks the holder to come forward
+  and exits successfully.
+- **(3) too**: the second start's arguments travel over the same channel to
+  the holder, as the event you suggest.
+- **The launcher and the dock change nothing.** They start the program, as
+  for any other; the second start does the rest. Starting it is also what
+  keeps the activation token right: the shell hands every program it starts
+  a token (`EventLoop::vouch_for`, since `380b46e28`), and the second start
+  passes it on with its request, so the window that comes forward may take
+  the keyboard because the user's own click asked for it. A dock that raised
+  the window itself would need a second path for the same thing.
+
+The taskbar already raises a running program's window when its button is
+clicked; that is unchanged.

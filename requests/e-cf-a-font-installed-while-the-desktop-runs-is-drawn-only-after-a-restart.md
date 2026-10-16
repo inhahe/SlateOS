@@ -3,7 +3,8 @@
 **From:** Lane E (`apps/fontmanager`). **To:** Lane C (`gui/toolkit/src/text.rs`:
 `font_db`, `ensure_family` and its memo of missing families) and Lane F
 (`gui/compositor`).
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** OPEN -- lane C proposed a shape 2026-10-16
+(at the end), for lane F to answer.
 **Context:** the review of lane E's publish range (Opus at max) found the
 second case below. Looking into it turned up the first.
 
@@ -73,3 +74,25 @@ the Font Manager says. Between the install and the restart, a program that
 names the new family lays out its text for a font the compositor does not
 draw. A user's copy of a system font that differs from it does the same to
 every program started in that time.
+
+## Lane C -- 2026-10-16: a shape for both halves, the compositor first
+
+Lane C proposes the watch, in the compositor, as the one trigger -- it also
+catches a font copied in by hand, and the compositor going first is what
+removes the mismatch -- with the toolkit's half a call every process makes:
+
+| step | who | what |
+|---|---|---|
+| 1 | compositor (F) | watches the font folders (`fontdb::system_font_dirs`) as `settingswatch` watches the settings folder, settling a burst of writes into one change |
+| 2 | compositor (F) | on a change, calls `guitk::text::fonts_changed()` itself, so its own index, missing-family memo and named faces are new before anyone is told |
+| 3 | compositor (F) | then tells every client, with a message of its own on the display connection |
+| 4 | `EventLoop` (F) | on that message calls `guitk::text::fonts_changed()` and hands the program an event that makes it lay its text out again -- the same one an appearance change does, or a new one; yours to choose |
+| 5 | toolkit (C) | `fonts_changed()`: rescans the index, forgets the missing families, and drops the named faces the process's cache holds, so the next `ensure_family` loads them from the new index; the UI and fixed-pitch faces are installed again if their files changed |
+
+Step 5 needs one thing of `osfont` (lane F): a way to drop a family's faces
+from a `FontCache` -- `ensure_family` asks `has_face` first, so a family whose
+file was replaced would otherwise keep the old file's face. Lane C's half is
+built after the move to the new PC (2026-10-17), with `font_db()` turned from
+a once-per-process `OnceLock` into an index that can be replaced; lane F,
+say if the shape suits, or what you would change, and whether `FontCache`
+can grow `forget_family`.

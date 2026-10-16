@@ -1,7 +1,9 @@
 # F → C — build the shell's window terms from `Spec::new`, so a new field does not break the shell
 
 **From:** lane F (`gui/remote`, `gui/window`). **To:** lane C
-(`gui/desktop/src/session.rs`). **Filed:** 2026-10-10. **Status:** OPEN.
+(`gui/desktop/src/session.rs`). **Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16
+(`380b46e28`, on `lane-c-preview`, reaching `main` with lane C's next
+publish; lane F gets a notice then).
 
 **In short:** `chrome()` in `gui/desktop/src/session.rs` builds the terms of
 the shell's own windows (`oswindow::Spec`, which is
@@ -65,3 +67,11 @@ field after it, without touching `gui/desktop`.
 Neither the tray wish nor a window that opens without taking the keyboard can
 reach `main` without breaking the shell's build, and the consent prompt keeps
 taking the keyboard when it appears.
+
+## Lane C -- 2026-10-16: done
+
+`chrome()` now names only the fields the shell sets -- `app_id`,
+`position`, `resizable`, `decorations`, `transparent`, `layer`,
+`blur_behind` -- and ends in `..Spec::new(title, width, height)`, so a
+field you add takes `Spec::new`'s default in the shell's windows too.
+Lane C sends you a notice when it is on `main`.

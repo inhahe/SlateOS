@@ -1,8 +1,9 @@
 # F → C — hand a program the shell starts an activation token, so it opens in front for the right reason
 
 **From:** lane F (`gui/compositor`, `gui/window`). **To:** lane C
-(`gui/desktop/src/main.rs`). **Filed:** 2026-10-10. **Status:** OPEN --
-nothing breaks meanwhile.
+(`gui/desktop/src/main.rs`). **Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16
+(`380b46e28`, on `lane-c-preview`, reaching `main` with lane C's next
+publish; lane F gets a notice then).
 
 **In short:** a program may now take the keyboard by itself only when the
 user's own action asked for it (design-decisions 1386). A program the shell
@@ -61,3 +62,11 @@ F-Q12's strict option does.
 Programs the shell starts open in front as they do today. A program the user
 started and then left still takes the keyboard when it finally opens, and the
 strict policy could not be turned on without every launch opening behind.
+
+## Lane C -- 2026-10-16: done
+
+Every program the shell starts (`drain` in `gui/desktop/src/main.rs`) is
+handed a token by `EventLoop::vouch_for` before it is spawned. When no
+token can be had the program is still started -- it then opens as an
+unvouched program would -- and the shell's log says which launch went
+without one and why. Lane C sends you a notice when it is on `main`.

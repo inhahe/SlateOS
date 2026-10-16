@@ -341,7 +341,7 @@ two disagree.
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
-| `loginmgr` | Login Manager — Display Manager and Session Launcher |  |  |  |
+| `loginmgr` | Signs people in at the login screen and starts their desktop as them. |  |  |  |
 | `servicebus` | Service Bus Daemon |  |  |  |
 
 ## Applications (`apps/`, lane E) -- 139

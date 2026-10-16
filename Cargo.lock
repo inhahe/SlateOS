@@ -2313,8 +2313,9 @@ name = "loginmgr"
 version = "0.1.0"
 dependencies = [
  "authlib",
- "guitk",
- "quoting",
+ "libcall",
+ "libservicebus",
+ "loginusers",
  "scratchdir",
  "userdb",
 ]

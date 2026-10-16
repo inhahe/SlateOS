@@ -49,6 +49,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# At the top, not where the guard group first wanted it: every scratch tree
+# below is removed with it (`gitenv.remove_tree`, which takes git's read-only
+# objects too), in `finally` blocks that may run before that group does.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gitenv  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "scripts" / "run-checker.sh"
 HOOK = ROOT / "scripts" / "hooks" / "pre-push"
@@ -90,7 +96,8 @@ def extract_run_checker(text: str) -> str:
 
 
 def child_env() -> dict[str, str]:
-    """This process's environment with every `CHECKER_*` setting removed.
+    """This process's environment with every `CHECKER_*` and `GATE_CACHE*`
+    setting removed.
 
     Every driver below is run under this rather than under a plain inherited
     environment, because the settings the library reads are *exported* by at
@@ -115,8 +122,21 @@ def child_env() -> dict[str, str]:
     and unset alike, so an empty value would happen to work today and would
     stop working the moment a fallback is written `${CHECKER_PROG-checker}`.
     Unset is the state group 6 is about.
+
+    `GATE_CACHE*` is the same leak, found the same way on 2026-10-01 (lane A's
+    rq17 refused to build on it). `boot-test.sh` exports `GATE_CACHE=1` and
+    `GATE_CACHE_DRIVER` for its gates, and `run_checker` wraps a `.py` checker
+    in the cache when it sees them. Under the boot test, then, every fixture
+    checker ran through `gate-cache.py`, whose `gate-cache: MISS ...` line was
+    the first thing a silent checker "said" -- and groups 9 and 10 read it as
+    the decline reason a silent checker must not have. Run by hand, the suite
+    passed.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("CHECKER_")}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not (k.startswith("CHECKER_") or k.startswith("GATE_CACHE"))
+    }
 
 
 class KeptLog:
@@ -257,6 +277,34 @@ def run(
         errors="replace",
         env=child_env(),
     )
+
+
+def run_guarded(repo: Path, func: str, script: Path, guard: bool) -> subprocess.CompletedProcess:
+    """Drive `run_checker` from inside the scratch repository `repo`.
+
+    The environment is `child_env()` minus every git repository binding, and
+    that is load-bearing: this suite itself runs inside the push hook, where
+    GIT_DIR names the repository being pushed -- the very accident the guard
+    exists for. `gitenv.clean_env()` keeps git talking to `repo` and nothing
+    else, in the driver and in the fake checkers it runs.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import gitenv  # noqa: E402
+
+    driver = repo / f"driver-{script.stem}{'-guard' if guard else ''}.sh"
+    driver.write_text(
+        "set -u\n"
+        + preamble(repo, True)
+        + ("CHECKER_REPO_GUARD=1\n" if guard else "")
+        + f"{func}\n"
+        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}"\n'
+        + 'echo "MARKER-RETURNED rc=$?"\n',
+        encoding="utf-8",
+        newline="",
+    )
+    env = gitenv.clean_env(child_env())
+    return subprocess.run(["sh", str(driver)], cwd=str(repo), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", env=env)
 
 
 def start(
@@ -1224,8 +1272,120 @@ def main() -> int:
         for p in kept:
             p.unlink()
 
+        # ------------------------------------------------------------------
+        # A gate must not change the repository it judges. The two accidents
+        # (2026-08-29, 2026-09-26) were checker self-tests whose scratch
+        # repository was the real one; the guard fingerprints this worktree's
+        # HEAD, its index content and the shared config (less branch.*) around
+        # each gate and stops the run if a gate changed any of them -- and
+        # nothing another lane changes meanwhile, which is the other half of
+        # what is pinned here. Driven in a scratch repository standing in for
+        # the one being pushed.
+        print("group: the repository guard")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import gitenv  # noqa: E402
+
+        judged = tmp_root / "judged"
+        judged.mkdir()
+        genv = gitenv.clean_env()
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "g@example.invalid"],
+                    ["config", "user.name", "g"], ["config", "commit.gpgsign", "false"],
+                    ["commit", "-q", "--allow-empty", "-m", "base"]):
+            subprocess.run(["git", *cmd], cwd=str(judged), env=genv, check=True,
+                           capture_output=True)
+        (judged / "tracked.txt").write_text("x\n", encoding="utf-8", newline="")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=str(judged), env=genv, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "tracked"], cwd=str(judged), env=genv,
+                       check=True)
+
+        def git_step(argv: str) -> str:
+            return ("import subprocess\n"
+                    f"subprocess.run({argv!r}.split(), check=True, capture_output=True)\n"
+                    "print('did it')\n")
+
+        # Another lane: a second worktree of the same repository, on its own
+        # branch. What it does during a gate is not the gate's doing.
+        other = tmp_root / "judged-other-lane"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "other-lane", str(other)],
+                       cwd=str(judged), env=genv, check=True, capture_output=True)
+        other_lane_commits = (
+            "import subprocess\n"
+            f"subprocess.run(['git', '-C', {str(other)!r}, 'commit', '-q', "
+            "'--allow-empty', '-m', 'other lane'], check=True, capture_output=True)\n"
+            "print('did it')\n")
+
+        cases = [
+            ("a clean gate passes the guard", "print('ok')\n", False),
+            ("a gate that runs `git status` (index stat refresh) passes",
+             git_step("git status --porcelain"), False),
+            ("a gate that commits is stopped",
+             git_step("git commit -q --allow-empty -m fixture"), True),
+            ("a gate that stages a file is stopped",
+             "open('new.txt', 'w').write('n')\n" + git_step("git add new.txt"), True),
+            ("a gate that sets core.bare is stopped",
+             git_step("git config core.bare true"), True),
+            ("a gate that switches this worktree to another branch is stopped",
+             git_step("git checkout -q -b escaped"), True),
+            # The false positive of the first version, 2026-09-26: lane E's
+            # branch moved while test-boot-test.py ran, and a clean push was
+            # stopped. Six worktrees share one refs namespace.
+            ("another lane committing on its own branch meanwhile is not a change",
+             other_lane_commits, False),
+            ("nor is a tracking entry another lane writes (branch.*)",
+             git_step("git config branch.other-lane.remote origin"), False),
+        ]
+        for index, (label, body, should_stop) in enumerate(cases):
+            script = fake_checker(tmp_root, f"guard-case-{index}", body)
+            r = run_guarded(judged, func, script, guard=True)
+            out = r.stdout + r.stderr
+            stopped = "CHANGED THE REPOSITORY" in out
+            # Stopped runs exit from inside run_checker, so the driver's marker
+            # line is the second half of each verdict: present exactly when the
+            # gate was allowed to return.
+            check(label, stopped == should_stop and (("MARKER-RETURNED" in out) != should_stop),
+                  out.strip()[-400:])
+            if should_stop:
+                check(f"{label}: and the gate is named", "gate 'testgate'" in out)
+            # Undo what the case did. Each case fingerprints its own before and
+            # after, so this only keeps the fixture tidy; a commit a case added
+            # can stay.
+            for undo in (["config", "core.bare", "false"], ["checkout", "-q", "main"],
+                         ["reset", "-q", "--hard", "HEAD"], ["clean", "-qfd"]):
+                subprocess.run(["git", *undo], cwd=str(judged), env=genv, capture_output=True)
+
+        committing = fake_checker(tmp_root, "guard-off", git_step("git commit -q --allow-empty -m off"))
+        r = run_guarded(judged, func, committing, guard=False)
+        out = r.stdout + r.stderr
+        check("without CHECKER_REPO_GUARD the guard stays out of the way",
+              "MARKER-RETURNED rc=0" in out and "CHANGED THE REPOSITORY" not in out,
+              out.strip()[-300:])
+
+        # The shape every lane pushes from: a LINKED worktree, whose own git
+        # directory (`.git/worktrees/<name>`) has no `config` at all -- the one
+        # all worktrees share is in the common directory. The 2026-09-26
+        # accident set core.bare=true there, from a lane's worktree, and every
+        # linked worktree kept working: only the main checkout noticed, six
+        # hours later, when the operator's `git status` in it failed. So the
+        # guard must fingerprint `--git-common-dir`'s config; `--git-dir`'s
+        # would find no file and see nothing change.
+        linked = tmp_root / "judged-linked"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "linked", str(linked)],
+                       cwd=str(judged), env=genv, check=True, capture_output=True)
+        bare = fake_checker(tmp_root, "guard-linked", git_step("git config core.bare true"))
+        r = run_guarded(linked, func, bare, guard=True)
+        out = r.stdout + r.stderr
+        shared = subprocess.run(["git", "config", "--get", "core.bare"], cwd=str(judged),
+                                env=genv, capture_output=True, text=True).stdout.strip()
+        check("the gate in a linked worktree really wrote the shared config",
+              shared == "true", f"core.bare in the common config: {shared!r}")
+        check("and the guard, run from that worktree, stops it",
+              "CHANGED THE REPOSITORY" in out and "MARKER-RETURNED" not in out,
+              out.strip()[-400:])
+        subprocess.run(["git", "config", "core.bare", "false"], cwd=str(judged), env=genv,
+                       capture_output=True)
+
     finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+        gitenv.remove_tree(tmp_root)
 
     print()
     if failures:

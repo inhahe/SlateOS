@@ -9,7 +9,7 @@
 //! otherwise; linear (across only) where the height stays or shrinks to a
 //! third, or the source is one row; and nearest-sample where the width stays
 //! or shrinks to a third under linear, or the source is one sample wide.
-//! Then it picks code by the sizes ([`Method`]): a copy, rows alone, fixed
+//! Then it picks code by the sizes (`Method`, here): a copy, rows alone, fixed
 //! kernels for 3/4, 1/2, 3/8 and 1/4 on both sides and for twice the size,
 //! and the general box, bilinear and nearest-sample scalers. Each is ported
 //! as libyuv's C computes it: its 16.16 fixed-point steps, its roundings, the

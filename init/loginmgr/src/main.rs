@@ -138,11 +138,6 @@ impl UserAccount {
         Self { record }
     }
 
-    /// The underlying record.
-    fn record(&self) -> &userdb::Record {
-        &self.record
-    }
-
     /// Create a new user account with a plaintext password (will be hashed).
     fn new_with_password(
         uid: u32,
@@ -334,28 +329,43 @@ fn load_user_database() -> Vec<UserAccount> {
         .collect()
 }
 
-/// Save the user database.
+/// The account `username` as the database at `path` holds it now, or `None`
+/// if it has no such account.
 ///
-/// The records are written back into the file they came from, so comments,
-/// ordering and every unrecognised field are preserved; only the fields this
-/// program changed differ. Writing is atomic — see [`userdb::UserDb::save`].
-fn save_user_database(users: &[UserAccount]) -> Result<(), std::io::Error> {
-    let mut db = userdb::UserDb::load(userdb::DEFAULT_PATH)?;
-    let existing: Vec<userdb::Record> = db.records().to_vec();
-    let records = db.records_mut();
-    records.clear();
-    for user in users {
-        records.push(user.record().clone());
-    }
-    // Records that were in the file but are not in this list are dropped —
-    // which is right when a user is deleted, and would be a disaster if the
-    // caller had loaded a subset. Nothing loads a subset; the assertion is
-    // recorded here rather than left implicit.
-    debug_assert!(
-        existing.len() >= records.len() || existing.is_empty(),
-        "save_user_database writes the whole database, not a subset"
-    );
-    db.save(userdb::DEFAULT_PATH)
+/// # Errors
+///
+/// The database exists and cannot be read.
+fn current_account(
+    path: &std::path::Path,
+    username: &str,
+) -> Result<Option<UserAccount>, std::io::Error> {
+    let db = userdb::UserDb::load(path)?;
+    Ok(db.find(username).cloned().map(UserAccount::from_record))
+}
+
+/// Count one login for `username` in the database at `path`, at `at`.
+///
+/// Under the hold (`userdb::Lock`), the database is read as it is now, and
+/// only this account's login time and count change before it is saved.
+///
+/// Until 2026-10-07 this saved the whole list the program loaded when it
+/// started. That put every account back as it was then, so the first login
+/// after any change undid it: a password `passwd` had set was forgotten, an
+/// account `useradd` had made was deleted, and a lock `passwd -l` had applied
+/// was lifted.
+///
+/// # Errors
+///
+/// The hold, the read or the save failed.
+fn save_login(path: &std::path::Path, username: &str, at: u64) -> Result<(), std::io::Error> {
+    let _lock = userdb::UserDb::lock(path)?;
+    let mut db = userdb::UserDb::load(path)?;
+    let Some(record) = db.find_mut(username) else {
+        // Gone since it was checked: nothing to count it against.
+        return Ok(());
+    };
+    record.record_login(at);
+    db.save(path)
 }
 
 /// Default user accounts for a fresh system.
@@ -539,8 +549,15 @@ impl AccessibilitySettings {
 pub struct LoginManager {
     /// Current view being displayed.
     pub current_view: LoginView,
-    /// All user accounts on the system.
+    /// All user accounts on the system, as they were when the list was
+    /// loaded: what the screen shows. A password is checked, and a login
+    /// counted, against [`LoginManager::db_path`] as it is at that moment.
     pub users: Vec<UserAccount>,
+    /// The account database, read again for every password check and
+    /// changed in place for every login (see `save_login`). `None` for a
+    /// manager whose accounts exist only in memory -- `with_users`, which is
+    /// what the tests build -- where [`LoginManager::users`] is the truth.
+    db_path: Option<std::path::PathBuf>,
     /// Index of the currently selected user in the user list.
     pub selected_user_index: usize,
     /// Current password input (masked on screen).
@@ -591,6 +608,7 @@ impl LoginManager {
         Self {
             current_view: LoginView::UserSelect,
             users,
+            db_path: Some(std::path::PathBuf::from(userdb::DEFAULT_PATH)),
             selected_user_index: 0,
             password_input: String::new(),
             password_visible: false,
@@ -629,6 +647,7 @@ impl LoginManager {
         Self {
             current_view: LoginView::UserSelect,
             users: Vec::new(),
+            db_path: None,
             selected_user_index: 0,
             password_input: String::new(),
             password_visible: false,
@@ -706,12 +725,25 @@ impl LoginManager {
             ));
         }
 
-        // Find the user.
-        let user = self
-            .users
-            .iter()
-            .find(|u| u.username() == username)
-            .cloned();
+        // Find the user -- as the database holds the account *now*, not as
+        // it held it when this program started. Checked against the list
+        // loaded at startup, a password `passwd` changed a moment ago was
+        // refused here and the old one accepted, until a restart; and an
+        // account deleted since could still log in.
+        let user = match &self.db_path {
+            Some(path) => match current_account(path, username) {
+                Ok(account) => account,
+                Err(_) => {
+                    // Nothing was guessed, so nothing is counted.
+                    return Err("The account database cannot be read.".to_string());
+                }
+            },
+            None => self
+                .users
+                .iter()
+                .find(|u| u.username() == username)
+                .cloned(),
+        };
         let Some(user) = user else {
             // Counted, and reported in the same words a wrong password gets.
             // A greeter lists its users, so this is not the enumeration
@@ -735,6 +767,12 @@ impl LoginManager {
                 self.auth.reset(username);
                 if let Some(u) = self.users.iter_mut().find(|u| u.uid() == user.uid()) {
                     u.record.record_login(now);
+                }
+                // Into the database, changing nothing else. Unchecked: a
+                // login count that could not be written is not a reason to
+                // refuse the person who just typed the right password.
+                if let Some(path) = &self.db_path {
+                    let _ = save_login(path, username, now);
                 }
                 Ok(())
             }
@@ -788,9 +826,8 @@ impl LoginManager {
         let session = SessionInfo::new(&user, session_id, self.current_time);
         self.sessions.insert(session_id, session.clone());
 
-        // Save updated login stats.
-        let _ = save_user_database(&self.users);
-
+        // The login it follows was saved when it was counted, in
+        // `authenticate` (`save_login`).
         Ok(session)
     }
 
@@ -2390,6 +2427,101 @@ mod tests {
     }
 
     // ========================================================================
+    // Against the database, as `new` runs
+    // ========================================================================
+
+    /// A manager over the database at `path`, as `new` is over
+    /// `/etc/users.yaml`.
+    fn manager_over(path: &std::path::Path) -> LoginManager {
+        let users = userdb::UserDb::load(path)
+            .expect("the scratch database reads")
+            .records()
+            .iter()
+            .cloned()
+            .map(UserAccount::from_record)
+            .collect();
+        LoginManager {
+            users,
+            db_path: Some(path.to_path_buf()),
+            ..LoginManager::new_internal()
+        }
+    }
+
+    /// A database holding `alice`, with `password`.
+    fn database_with(scratch: &scratchdir::ScratchDir, password: &str) -> std::path::PathBuf {
+        let path = scratch.path("users.yaml");
+        let mut db = userdb::UserDb::new();
+        let mut alice = userdb::Record::new();
+        alice.set_uid(1000);
+        alice.set("username", "alice");
+        alice
+            .set_password_with_salt(password, "saltsalt")
+            .expect("the salt is one crypt can carry");
+        db.push(alice);
+        db.save(&path).expect("save");
+        path
+    }
+
+    /// What another tool -- `passwd`, `useradd` -- does to the database while
+    /// this program is up.
+    fn meanwhile(path: &std::path::Path, change: impl FnOnce(&mut userdb::UserDb)) {
+        let mut db = userdb::UserDb::load(path).expect("load");
+        change(&mut db);
+        db.save(path).expect("save");
+    }
+
+    /// A password set by `passwd` while the screen is up is the one the next
+    /// attempt is checked against. It was checked against the list loaded at
+    /// startup until 2026-10-07, so the old password went on working.
+    #[test]
+    fn a_password_changed_after_startup_is_the_one_accepted() {
+        let scratch = scratchdir::ScratchDir::new("loginmgr-fresh");
+        let path = database_with(&scratch, "old");
+        let mut mgr = manager_over(&path);
+        meanwhile(&path, |db| {
+            db.find_mut("alice")
+                .expect("alice")
+                .set_password_with_salt("new", "saltsalt")
+                .expect("salt");
+        });
+        assert!(mgr.authenticate("alice", "old").is_err());
+        assert!(mgr.authenticate("alice", "new").is_ok());
+    }
+
+    #[test]
+    fn an_account_deleted_after_startup_cannot_log_in() {
+        let scratch = scratchdir::ScratchDir::new("loginmgr-deleted");
+        let path = database_with(&scratch, "pw");
+        let mut mgr = manager_over(&path);
+        meanwhile(&path, |db| db.records_mut().clear());
+        assert!(mgr.authenticate("alice", "pw").is_err());
+    }
+
+    /// A login counts itself in the database and changes nothing else. It
+    /// used to save the whole list loaded at startup, which deleted any
+    /// account made since and undid any password set since.
+    #[test]
+    fn a_login_keeps_what_other_tools_changed_since_startup() {
+        let scratch = scratchdir::ScratchDir::new("loginmgr-keeps");
+        let path = database_with(&scratch, "pw");
+        let mut mgr = manager_over(&path);
+        meanwhile(&path, |db| {
+            let mut bob = userdb::Record::new();
+            bob.set_uid(1001);
+            bob.set("username", "bob");
+            db.push(bob);
+        });
+        mgr.current_time = 5000;
+        assert!(mgr.authenticate("alice", "pw").is_ok());
+        assert!(mgr.start_session(1000).is_ok());
+        let db = userdb::UserDb::load(&path).expect("load");
+        assert!(db.find("bob").is_some(), "an account made since startup");
+        let alice = db.find("alice").expect("alice");
+        assert_eq!((alice.login_count(), alice.last_login()), (1, 5000));
+        assert_eq!(alice.check_password("pw"), userdb::Auth::Accepted);
+    }
+
+    // ========================================================================
     // Authentication tests
     // ========================================================================
 
@@ -2811,7 +2943,7 @@ mod tests {
             UserAccount::new_with_password(1000, "testuser", "Test User", "pass", false),
             UserAccount::guest_account(),
         ] {
-            db.push(account.record().clone());
+            db.push(account.record.clone());
         }
 
         let parsed: Vec<UserAccount> = userdb::UserDb::parse(&db.to_text())
@@ -2855,7 +2987,7 @@ mod tests {
         account.record.record_login(1234);
 
         let mut out = userdb::UserDb::new();
-        out.push(account.record().clone());
+        out.push(account.record.clone());
         let saved = out.to_text();
         assert!(saved.contains("groups: [\"users\", \"admin\"]"), "{saved}");
         assert!(saved.contains("home: \"/home/alice\""), "{saved}");

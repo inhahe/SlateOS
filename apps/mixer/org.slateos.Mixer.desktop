@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sound Mixer
+Comment=Set each program's volume and the sound devices
+Icon=multimedia-volume-control
+Exec=mixer
+Categories=AudioVideo;Audio;Mixer;
+Keywords=volume;sound;audio;

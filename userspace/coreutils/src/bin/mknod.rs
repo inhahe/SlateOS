@@ -26,10 +26,13 @@
 //! in the new node's place. A bad `-m` is reported before the operands are
 //! even counted, which is upstream's order and not `mkfifo`'s.
 //!
-//! # Options this implementation does not have
+//! # `-Z` and `--context`
 //!
-//! `-Z` and `--context`, as in `mkfifo`: refused by name rather than ignored,
-//! because silently dropping a requested security context is the defect.
+//! As upstream on a kernel with neither SELinux nor SMACK, which SlateOS is
+//! (design-decisions §1064): `-Z`, or `--context` without a value, is accepted
+//! in silence, and `--context=CTX` is `mknod: warning: ignoring --context; it
+//! requires an SELinux/SMACK-enabled kernel` from inside the option loop, after
+//! which the node is made. They used to be refused by name.
 //!
 //! # On this system
 //!
@@ -121,22 +124,27 @@ for details about the options it supports.
     .to_string()
 }
 
-/// The option loop. Operands are checked later, after `-m`.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+/// Upstream's warning for a context *named* on a kernel with neither SELinux
+/// nor SMACK -- the sentence `mkdir.c`, `mkfifo.c` and `mknod.c` share.
+const IGNORING_CONTEXT: &str =
+    "warning: ignoring --context; it requires an SELinux/SMACK-enabled kernel";
+
+/// The option loop. Operands are checked later, after `-m`. What upstream's
+/// loop would have printed on the way is appended to `warnings`, in order.
+fn parse_args(args: &[OsString], warnings: &mut Vec<String>) -> Result<Request, getopt::Error> {
     let mut mode: Option<OsString> = None;
     let mut operands: Vec<OsString> = Vec::new();
     for item in MKNOD.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
         match item? {
             Opt::Short(b'm', value) | Opt::Long("mode", value) => mode = value,
-            Opt::Short(b'Z', _) => {
-                return Err(
-                    MKNOD.usage_referring("option -Z is not implemented by this mknod".to_string())
-                );
-            }
-            Opt::Long("context", _) => {
-                return Err(MKNOD.usage_referring(
-                    "option '--context' is not implemented by this mknod".to_string(),
-                ));
+            // The default context, on a kernel that has none: nothing to set,
+            // and upstream says nothing. Module docs.
+            Opt::Short(b'Z', _) => {}
+            Opt::Long("context", value) => {
+                // `--context=` names one too: an empty `optarg` is not null.
+                if value.is_some() {
+                    warnings.push(IGNORING_CONTEXT.to_string());
+                }
             }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
@@ -353,7 +361,14 @@ mod imp {
     pub fn main() -> ExitCode {
         stdfd::restore();
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-        let (mode_spec, operands) = match parse_args(&args) {
+        let mut warnings = Vec::new();
+        let parsed = parse_args(&args, &mut warnings);
+        // Before whatever ended the parse: upstream prints each from inside
+        // its option loop.
+        for w in &warnings {
+            diag!("mknod: {w}");
+        }
+        let (mode_spec, operands) = match parsed {
             Ok(Request::Make { mode, operands }) => (mode, operands),
             Ok(Request::Help) => {
                 let mut out = Stream::stdout();
@@ -554,17 +569,44 @@ mod tests {
         );
     }
 
+    fn parse(words: &[&str]) -> (Result<Request, getopt::Error>, Vec<String>) {
+        let mut warnings = Vec::new();
+        let parsed = parse_args(&argv(words), &mut warnings);
+        (parsed, warnings)
+    }
+
     #[test]
     fn options() {
         assert_eq!(
-            parse_args(&argv(&["-m", "600", "q", "p"])).unwrap(),
+            parse(&["-m", "600", "q", "p"]).0.unwrap(),
             Request::Make {
                 mode: Some("600".into()),
                 operands: argv(&["q", "p"])
             }
         );
-        assert!(parse_args(&argv(&["-Z", "q", "p"])).is_err());
-        assert!(parse_args(&argv(&["--context=x", "q", "p"])).is_err());
-        assert_eq!(parse_args(&argv(&["q", "--help"])).unwrap(), Request::Help);
+        assert_eq!(parse(&["q", "--help"]).0.unwrap(), Request::Help);
+    }
+
+    /// Design-decisions §1064: the default context is accepted in silence, a
+    /// named one -- `--context=` included -- warned about, and the run goes on.
+    #[test]
+    fn the_context_options_are_taken_as_upstream_takes_them_without_selinux() {
+        let make = Request::Make {
+            mode: None,
+            operands: argv(&["q", "p"]),
+        };
+        for words in [&["-Z", "q", "p"][..], &["--context", "q", "p"][..]] {
+            let (parsed, warnings) = parse(words);
+            assert_eq!(parsed.unwrap(), make, "{words:?}");
+            assert!(warnings.is_empty(), "{words:?}: {warnings:?}");
+        }
+        for words in [
+            &["--context=x", "q", "p"][..],
+            &["--context=", "q", "p"][..],
+        ] {
+            let (parsed, warnings) = parse(words);
+            assert_eq!(parsed.unwrap(), make, "{words:?}");
+            assert_eq!(warnings, vec![IGNORING_CONTEXT.to_string()], "{words:?}");
+        }
     }
 }

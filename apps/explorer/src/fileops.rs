@@ -877,11 +877,18 @@ impl OperationJournal {
 pub enum UndoTarget {
     /// The item now sits at this path; undo moves it back to the source.
     Path(PathBuf),
-    /// The item became this recycle-bin entry. Undo must go back *through the
-    /// bin*, by id, so that the bin's metadata and its data stay in step --
-    /// renaming the file out from under the bin would leave a listed entry
-    /// whose data is gone.
-    Recycled(String),
+    /// The item became this entry of the recycle bin in the folder `bin`.
+    /// Undo must go back *through the bin*, by id, so that the bin's metadata
+    /// and its data stay in step -- renaming the file out from under the bin
+    /// would leave a listed entry whose data is gone. Which bin is part of it:
+    /// each drive has its own (design-decisions §1238), and an id names an
+    /// entry only in its own bin.
+    Recycled {
+        /// The bin's folder.
+        bin: PathBuf,
+        /// The entry's id in it.
+        id: String,
+    },
     /// The operation left nothing to reverse: a permanent delete, or an action
     /// that was skipped. Undoing it is a no-op, and saying so is the point --
     /// the caller needs to be able to tell the user nothing came back.
@@ -2130,7 +2137,7 @@ fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
 ///
 /// - Copy undo: delete the copied files.
 /// - Move undo: move files back to their original locations.
-/// - Recycle undo: restore through `bin`, by entry id.
+/// - Recycle undo: restore through the bin the record names, by entry id.
 /// - Permanent-delete undo: nothing, and the count says so.
 ///
 /// # Why it returns a count
@@ -2143,12 +2150,11 @@ fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// Propagates the underlying filesystem error. Also fails if a record holds a
-/// [`UndoTarget::Recycled`] and `bin` is `None`, or if a recycled target turns
-/// up under an operation that cannot produce one -- both mean the record and
-/// the operation disagree, and guessing which is right would be how a wrong
-/// file gets moved.
-pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result<usize> {
+/// Propagates the underlying filesystem error. Also fails if a recycled
+/// target turns up under an operation that cannot produce one -- the record
+/// and the operation disagree, and guessing which is right would be how a
+/// wrong file gets moved.
+pub fn execute_undo(record: &UndoRecord) -> io::Result<usize> {
     let mismatch = |op: &str| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2176,7 +2182,7 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                             restored = restored.saturating_add(1);
                         }
                     }
-                    UndoTarget::Recycled(_) => return Err(mismatch("copy")),
+                    UndoTarget::Recycled { .. } => return Err(mismatch("copy")),
                     UndoTarget::Nothing => {}
                 }
             }
@@ -2196,7 +2202,7 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                             restored = restored.saturating_add(1);
                         }
                     }
-                    UndoTarget::Recycled(_) => return Err(mismatch("link")),
+                    UndoTarget::Recycled { .. } => return Err(mismatch("link")),
                     UndoTarget::Nothing => {}
                 }
             }
@@ -2210,7 +2216,7 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                             restored = restored.saturating_add(1);
                         }
                     }
-                    UndoTarget::Recycled(_) => return Err(mismatch("move")),
+                    UndoTarget::Recycled { .. } => return Err(mismatch("move")),
                     UndoTarget::Nothing => {}
                 }
             }
@@ -2224,14 +2230,8 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                             restored = restored.saturating_add(1);
                         }
                     }
-                    UndoTarget::Recycled(id) => {
-                        let Some(bin) = bin else {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "undoing a recycle needs the bin it went into",
-                            ));
-                        };
-                        bin.restore(id)?;
+                    UndoTarget::Recycled { bin, id } => {
+                        RecycleBin::new(bin.clone()).restore(id)?;
                         restored = restored.saturating_add(1);
                     }
                     // A permanent delete. Nothing to bring back, and the
@@ -2250,7 +2250,7 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                             restored = restored.saturating_add(1);
                         }
                     }
-                    UndoTarget::Recycled(_) => return Err(mismatch("restore")),
+                    UndoTarget::Recycled { .. } => return Err(mismatch("restore")),
                     UndoTarget::Nothing => {}
                 }
             }
@@ -3094,7 +3094,7 @@ mod tests {
             timestamp: SystemTime::now(),
         };
 
-        execute_undo(&record, None).unwrap();
+        execute_undo(&record).unwrap();
         assert!(!dst.exists());
         // Source should still exist (copy undo only removes the destination).
         assert!(src.exists());
@@ -3115,7 +3115,7 @@ mod tests {
             timestamp: SystemTime::now(),
         };
 
-        execute_undo(&record, None).unwrap();
+        execute_undo(&record).unwrap();
         assert!(src.exists());
         assert!(!dst.exists());
         assert_eq!(read_file(&src), "moved data");
@@ -3138,7 +3138,7 @@ mod tests {
             timestamp: SystemTime::now(),
         };
 
-        let restored = execute_undo(&record, None).expect("a no-op undo is not an error");
+        let restored = execute_undo(&record).expect("a no-op undo is not an error");
         assert_eq!(restored, 0, "nothing was restored, and it must say so");
         assert!(
             !gone.exists(),
@@ -3146,25 +3146,46 @@ mod tests {
         );
     }
 
-    /// Undoing a recycle without the bin is refused rather than skipped.
-    ///
-    /// The skip is the original defect in miniature: there is a file to
-    /// restore and no way to reach it, which is a caller error, not a
-    /// successful undo of nothing.
+    /// **Undoing a recycle restores from the bin the record names** -- the
+    /// one on the file's own drive, of the several there are
+    /// (design-decisions §1238) -- and an entry that bin does not hold is an
+    /// error, not an undo of nothing.
     #[test]
-    fn undoing_a_recycle_without_the_bin_is_an_error() {
+    fn undoing_a_recycle_restores_from_the_bin_it_names() {
+        let scratch = scratchdir::ScratchDir::new("undo_drive_bin");
+        let dir = scratch.dir();
+        let stick_bin = RecycleBin::new(dir.join("stick-bin"));
+        let photo = dir.join("photo.jpg");
+        fs::write(&photo, "jpeg").unwrap();
+        let id = stick_bin.recycle(&photo).unwrap();
+
         let record = UndoRecord {
             id: 1,
             operation: FileOperation::Recycle,
             entries: vec![(
-                PathBuf::from("/notes.txt"),
-                UndoTarget::Recycled("e1".into()),
+                photo.clone(),
+                UndoTarget::Recycled {
+                    bin: stick_bin.root().to_path_buf(),
+                    id: id.clone(),
+                },
             )],
             timestamp: SystemTime::now(),
         };
+        assert_eq!(execute_undo(&record).unwrap(), 1);
+        assert_eq!(fs::read_to_string(&photo).unwrap(), "jpeg");
 
-        let err = execute_undo(&record, None).expect_err("no bin means it cannot be done");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        // Named in a bin that does not hold it: refused.
+        let elsewhere = UndoRecord {
+            entries: vec![(
+                photo.clone(),
+                UndoTarget::Recycled {
+                    bin: dir.join("home-bin"),
+                    id,
+                },
+            )],
+            ..record
+        };
+        assert!(execute_undo(&elsewhere).is_err());
     }
 
     // ----------------------------------------------------------------
@@ -3813,7 +3834,7 @@ mod tests {
             entries: vec![(target_dir.clone(), UndoTarget::Path(link.clone()))],
             timestamp: SystemTime::now(),
         };
-        let removed = execute_undo(&record, None).expect("undo");
+        let removed = execute_undo(&record).expect("undo");
 
         assert_eq!(removed, 1);
         assert!(

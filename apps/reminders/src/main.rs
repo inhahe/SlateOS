@@ -23,6 +23,18 @@
 //! - Multi-panel UI: sidebar (categories + views), main list, detail panel
 //!
 //! Uses the guitk library for UI rendering with a Catppuccin Mocha dark theme.
+//!
+//! # Two windows
+//!
+//! Reminders may be open twice, and neither window loses the other's work
+//! (design-decisions §1239): a save reads the list's file first and puts in
+//! only what this window changed since it last read or wrote it -- a merge by
+//! id (`recordfile::merge`) -- and the window is woken to read the file again
+//! when another saves (`recordfile::Watch`). Ids are random, so two windows
+//! do not give out the same one. Two windows changing the same reminder at
+//! once is the one case where the later save wins, for that reminder alone;
+//! and a reminder the other window deleted while this one's form was open on
+//! it is put back by the form's Save.
 
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::too_many_lines)]
@@ -1114,7 +1126,6 @@ pub struct Notification {
 
 pub struct TaskStore {
     tasks: Vec<Task>,
-    next_id: u64,
     /// How many changes the store has had. The window keeps the list on disk
     /// and writes it when this moves: counted here, where every change
     /// happens, rather than by each place that makes one (§1206).
@@ -1127,29 +1138,29 @@ impl Default for TaskStore {
     }
 }
 
+impl recordfile::Record for Task {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 impl TaskStore {
     pub fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            next_id: 1,
             revision: 0,
         }
     }
 
-    /// A store holding `tasks`, as read back from the file: new ids go past
-    /// every id they use.
+    /// A store holding `tasks`, as read back from the file.
     pub fn from_tasks(tasks: Vec<Task>) -> Self {
-        let next_id = tasks
-            .iter()
-            .map(|t| t.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        Self {
-            tasks,
-            next_id,
-            revision: 0,
-        }
+        Self { tasks, revision: 0 }
+    }
+
+    /// Hold `tasks` instead, as they are after a save or another window's,
+    /// without counting a change: what was not saved is still not saved.
+    pub fn set_tasks(&mut self, tasks: Vec<Task>) {
+        self.tasks = tasks;
     }
 
     /// How many changes the store has had.
@@ -1161,15 +1172,26 @@ impl TaskStore {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Add `task`, giving it a number no reminder here has -- and, being
+    /// random, that no other window will give out either
+    /// ([`recordfile::fresh_id`]): the largest so far plus one, as it was,
+    /// is the number two windows open on one list both give out
+    /// (design-decisions §1239).
     pub fn add(&mut self, mut task: Task) -> u64 {
-        let id = self.next_id;
-        // Saturating: a wrapped counter hands out an id that already exists,
-        // and both selection and completion are by id.
-        self.next_id = self.next_id.saturating_add(1);
+        let id = recordfile::fresh_id(|id| self.tasks.iter().any(|t| t.id == id));
         task.id = id;
         self.tasks.push(task);
         self.changed();
         id
+    }
+
+    /// Put back `task`, with its own number: a reminder another window
+    /// deleted while this one was changing it, which the change brings back.
+    pub fn put_back(&mut self, task: Task) {
+        if self.get(task.id).is_none() {
+            self.tasks.push(task);
+            self.changed();
+        }
     }
 
     pub fn remove(&mut self, id: u64) -> bool {
@@ -1434,6 +1456,25 @@ const NO_HOME: &str = "Nothing is kept: no home directory is set";
 /// directory.
 fn tasks_path() -> Option<std::path::PathBuf> {
     settingsfile::config_dir().map(|dir| dir.join("reminders").join("tasks.txt"))
+}
+
+/// The reminders the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a list -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only what was understood.
+fn read_tasks_file(path: &std::path::Path, max_bytes: usize) -> Result<Option<Vec<Task>>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_tasks(&read.text).map(Some)
 }
 
 /// A moment as written: `YYYY-MM-DD HH:MM`.
@@ -2120,6 +2161,10 @@ fn field_with(value: &str) -> TextInput {
 pub struct TaskForm {
     /// The reminder being changed, or `None` for a new one.
     pub id: Option<u64>,
+    /// The reminder as it was when the form opened on it: what a Save puts
+    /// back, with the change, if another window deletes it meanwhile
+    /// (design-decisions §1239).
+    original: Option<Task>,
     title: TextInput,
     due_date: TextInput,
     due_time: TextInput,
@@ -2146,6 +2191,7 @@ impl TaskForm {
         let due_at = DateTime::new(date, Time::new(hour, 0).unwrap_or(now.time));
         Self {
             id: None,
+            original: None,
             title: TextInput::new(),
             due_date: field_with(&due_at.date.format_short()),
             due_time: field_with(&due_at.time.format_24h()),
@@ -2165,6 +2211,7 @@ impl TaskForm {
     pub fn editing(t: &Task) -> Self {
         Self {
             id: Some(t.id),
+            original: Some(t.clone()),
             title: field_with(&t.title),
             due_date: field_with(&t.due.map(|d| d.date.format_short()).unwrap_or_default()),
             due_time: field_with(&t.due.map(|d| d.time.format_24h()).unwrap_or_default()),
@@ -2345,6 +2392,16 @@ pub struct RemindersApp {
     persist: bool,
     /// The store's revision when the list was last written or read.
     kept_revision: u64,
+    /// The reminders as this window last read or wrote them: what a save
+    /// merges this window's changes against, so another window's, saved
+    /// since, are kept rather than written over (design-decisions §1239).
+    base: Vec<Task>,
+    /// The list's file as this window last read or wrote it, to tell another
+    /// window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the list's file, which wakes the window when another one
+    /// saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// Why the list is not being kept, when it is not.
     store_error: Option<String>,
     /// "Your latest changes are not saved", while it is being asked.
@@ -2387,6 +2444,9 @@ impl RemindersApp {
             show_completed_subtasks: true,
             persist: false,
             kept_revision: 0,
+            base: Vec::new(),
+            file_stamp: None,
+            watch: None,
             store_error: None,
             question: None,
             running: true,
@@ -2425,45 +2485,88 @@ impl RemindersApp {
     /// [`load_tasks`](Self::load_tasks) with the size limit given, so a test
     /// can reach it without writing sixteen megabytes.
     fn load_tasks_within(&mut self, path: &std::path::Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
-            }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_tasks(&read.text) {
-            Ok(tasks) => {
+        match read_tasks_file(path, max_bytes) {
+            // None there yet: a first run.
+            Ok(None) => {}
+            Ok(Some(tasks)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base.clone_from(&tasks);
                 self.store = TaskStore::from_tasks(tasks);
                 self.kept_revision = self.store.revision();
                 self.selected_task_id = self.current_tasks().first().map(|t| t.id);
             }
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
+    }
+
+    /// Show `tasks`: what this window and the file hold together, after a
+    /// save or another window's. What is chosen stays chosen while it is
+    /// there; a reminder another window deleted is no longer chosen, waited
+    /// on for a delete, or announced.
+    fn adopt(&mut self, tasks: Vec<Task>) {
+        self.store.set_tasks(tasks);
+        let gone = |id: &u64| self.store.get(*id).is_none();
+        if self.selected_task_id.as_ref().is_some_and(gone) {
+            self.selected_task_id = self.current_tasks().first().map(|t| t.id);
+        }
+        if self.pending_delete.as_ref().is_some_and(gone) {
+            self.pending_delete = None;
+        }
+        let store = &self.store;
+        self.notifications
+            .retain(|n| store.get(n.task_id).is_some());
+    }
+
+    /// Read the list again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's unsaved changes put into it. Whether what is
+    /// shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case. So is one that has gone.
+    fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = tasks_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(Some(theirs)) = read_tasks_file(&path, MAX_TASKS_BYTES) else {
+            return false;
+        };
+        let shown = if self.unkept() {
+            recordfile::merge(&self.base, self.store.all(), &theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown != self.store.all();
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown);
+        changed
     }
 
     /// Write the list, if it has changed since it was last written and this
     /// window keeps anything. A failure is said under the header, and the
     /// next event tries again.
+    ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it, reminder by reminder
+    /// (design-decisions §1239). Written whole and over, as it used to be,
+    /// the window that saved last threw away the other's reminders.
     fn keep(&mut self) {
         if !self.persist || self.store.revision() == self.kept_revision {
             return;
@@ -2472,7 +2575,30 @@ impl RemindersApp {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = tasks_text(&self.store);
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_tasks_file(&path, MAX_TASKS_BYTES)
+        };
+        let theirs = match read {
+            Ok(Some(theirs)) => theirs,
+            // None there -- a first run, or gone since: nothing has been
+            // deleted from it, so it is what this window started from.
+            Ok(None) => self.base.clone(),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Your reminders were not saved: {} could not be read ({why}), so \
+                     nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = recordfile::merge(&self.base, self.store.all(), &theirs);
+        let text = tasks_text(&TaskStore::from_tasks(merged.clone()));
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
@@ -2481,6 +2607,11 @@ impl RemindersApp {
             Ok(()) => {
                 self.kept_revision = self.store.revision();
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base.clone_from(&merged);
+                self.adopt(merged);
             }
             Err(err) => {
                 self.store_error = Some(format!(
@@ -2557,7 +2688,12 @@ impl RemindersApp {
         };
         let base = match form.id.and_then(|id| self.store.get(id)) {
             Some(task) => task.clone(),
-            None => Task::new(0, "", self.now),
+            // Deleted by another window while this one was changing it, or
+            // new: the reminder as the form opened on it, or a fresh one.
+            None => form
+                .original
+                .clone()
+                .unwrap_or_else(|| Task::new(0, "", self.now)),
         };
         let task = match form.to_task(&base) {
             Ok(task) => task,
@@ -2570,6 +2706,11 @@ impl RemindersApp {
             Some(id) => {
                 if let Some(kept) = self.store.get_mut(id) {
                     *kept = task;
+                } else {
+                    // The change is the later one: an edit here beats a
+                    // deletion elsewhere, as in a merge (design-decisions
+                    // §1239). It was dropped without a word.
+                    self.store.put_back(task);
                 }
                 id
             }
@@ -5191,6 +5332,27 @@ impl App for RemindersApp {
         Some(Duration::from_secs(30))
     }
 
+    /// Watch the list's file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its list.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = tasks_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the list's file written: read it again if another
+    /// window wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     /// Closing asks first only when the latest changes cannot be saved; the
     /// window then waits for the answer (`KeepOpen`) with the question drawn.
     fn on_event(&mut self, event: &Event) -> Response {
@@ -6171,6 +6333,12 @@ mod tests {
             !texts.iter().any(|t| t.contains("Nothing is kept")),
             "a claim that nothing is kept, which is no longer so"
         );
+    }
+
+    /// `tasks` with their numbers taken off, to compare a list with one an
+    /// import made: an import gives every task a new number.
+    fn without_ids(tasks: &[Task]) -> Vec<Task> {
+        tasks.iter().map(|t| Task { id: 0, ..t.clone() }).collect()
     }
 
     fn make_now() -> DateTime {
@@ -7179,11 +7347,12 @@ mod tests {
         let count = store2.import_json(&json, now);
         assert_eq!(count, 1);
 
-        // Both stores number from the same counter, so the ids match without
-        // special handling and the comparison can be of the whole store.
+        // An import gives every task a new number -- random, so two windows
+        // do not give out the same one (design-decisions §1239) -- so the
+        // stores are compared without them.
         assert_eq!(
-            store2.all(),
-            store.all(),
+            without_ids(store2.all()),
+            without_ids(store.all()),
             "a task did not survive export and re-import unchanged"
         );
 
@@ -7239,8 +7408,8 @@ mod tests {
         let mut store2 = TaskStore::new();
         assert_eq!(store2.import_json(&json, now), 1);
         assert_eq!(
-            store2.all(),
-            store.all(),
+            without_ids(store2.all()),
+            without_ids(store.all()),
             "an unfinished task with a finished step did not survive import"
         );
     }
@@ -7287,8 +7456,8 @@ mod tests {
             imported.first().map(|t| &t.subtasks)
         );
         assert_eq!(
-            store2.all(),
-            store.all(),
+            without_ids(store2.all()),
+            without_ids(store.all()),
             "a step whose title contains JSON punctuation did not survive"
         );
     }
@@ -7314,8 +7483,8 @@ mod tests {
         let mut store2 = TaskStore::new();
         assert_eq!(store2.import_json(&json, now), 1);
         assert_eq!(
-            store2.all(),
-            store.all(),
+            without_ids(store2.all()),
+            without_ids(store.all()),
             "a note containing JSON punctuation was read as JSON"
         );
     }
@@ -7330,8 +7499,8 @@ mod tests {
         let mut store2 = TaskStore::new();
         assert_eq!(store2.import_json(&json, now), 1);
         assert_eq!(
-            store2.all(),
-            store.all(),
+            without_ids(store2.all()),
+            without_ids(store.all()),
             "a task with no due date, no completion and no snooze did not \
              survive export and re-import"
         );
@@ -7780,8 +7949,7 @@ mod tests {
     fn z_then_a_digit_snoozes_the_selected_reminder() {
         let now = make_now();
         let mut app = RemindersApp::new(1200.0, 800.0, now);
-        let id = 1;
-        app.store.add(Task::new(id, "Water the plants", now));
+        let id = app.store.add(Task::new(0, "Water the plants", now));
         app.selected_task_id = Some(id);
         assert!(
             app.store.get(id).expect("the task").snoozed_until.is_none(),
@@ -7808,8 +7976,7 @@ mod tests {
     fn a_digit_answering_the_snooze_prompt_does_not_change_the_view() {
         let now = make_now();
         let mut app = RemindersApp::new(1200.0, 800.0, now);
-        let id = 1;
-        app.store.add(Task::new(id, "Water the plants", now));
+        let id = app.store.add(Task::new(0, "Water the plants", now));
         app.selected_task_id = Some(id);
         app.set_view(ViewFilter::All);
         let before = app.view;
@@ -7834,8 +8001,7 @@ mod tests {
     fn another_key_cancels_the_snooze_prompt() {
         let now = make_now();
         let mut app = RemindersApp::new(1200.0, 800.0, now);
-        let id = 1;
-        app.store.add(Task::new(id, "Water the plants", now));
+        let id = app.store.add(Task::new(0, "Water the plants", now));
         app.selected_task_id = Some(id);
         app.handle_event(&press(Key::Z));
 
@@ -7864,8 +8030,7 @@ mod tests {
     fn the_snooze_durations_are_shown() {
         let now = make_now();
         let mut app = RemindersApp::new(1200.0, 800.0, now);
-        let id = 1;
-        app.store.add(Task::new(id, "Water the plants", now));
+        let id = app.store.add(Task::new(0, "Water the plants", now));
         app.selected_task_id = Some(id);
         app.handle_event(&press(Key::Z));
 
@@ -8234,9 +8399,18 @@ mod tests {
     #[test]
     fn a_list_that_cannot_be_read_whole_is_refused_and_says_why() {
         let now = make_now();
-        let mut store = TaskStore::new();
-        store.add(awkward_task("One", now));
-        store.add(awkward_task("Two", now));
+        // Numbered 1 and 2, so a case below can name one by its number: new
+        // ids are random (design-decisions §1239).
+        let store = TaskStore::from_tasks(vec![
+            Task {
+                id: 1,
+                ..awkward_task("One", now)
+            },
+            Task {
+                id: 2,
+                ..awkward_task("Two", now)
+            },
+        ]);
         let good = tasks_text(&store);
         let cases: [(&str, String, &str); 9] = [
             (
@@ -8290,6 +8464,262 @@ mod tests {
             let said = parse_tasks(&text).map(|_| ()).unwrap_err();
             assert!(said.contains(why), "{name}: {said}");
         }
+    }
+
+    /// A window of Reminders kept in the scratch settings folder.
+    fn kept_window() -> RemindersApp {
+        RemindersApp::from_settings(1200.0, 800.0, make_now())
+    }
+
+    /// A reminder `title` added to `app`'s list, and its number.
+    fn add_titled(app: &mut RemindersApp, title: &str) -> u64 {
+        app.store.add(Task::new(0, title, make_now()))
+    }
+
+    /// The titles of the reminders kept, read as a new window would.
+    fn kept_titles() -> Vec<String> {
+        let mut titles: Vec<String> = kept_window()
+            .store
+            .all()
+            .iter()
+            .map(|t| t.title.clone())
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    /// **Two windows each add a reminder, and both are kept.** Each wrote its
+    /// own copy of the list whole, so the last to save threw away the other's
+    /// reminders (design-decisions §1239).
+    #[test]
+    fn two_windows_each_add_a_reminder_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("reminders-two-windows", |_| {
+            let mut first = kept_window();
+            let mut second = kept_window();
+            add_titled(&mut first, "From the first");
+            first.keep();
+            add_titled(&mut second, "From the second");
+            second.keep();
+            assert_eq!(kept_titles(), ["From the first", "From the second"]);
+        });
+    }
+
+    /// **A window reads the list again when another saves**, keeping what it
+    /// has not saved; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("reminders-hear", |_| {
+            let mut first = kept_window();
+            add_titled(&mut first, "One");
+            first.keep();
+            let mut second = kept_window();
+            add_titled(&mut first, "Two");
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert_eq!(second.store.len(), 2);
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+            assert!(!second.unkept(), "hearing left something to save");
+
+            let mine = add_titled(&mut second, "Not yet saved");
+            add_titled(&mut first, "Three");
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(second.store.get(mine).is_some(), "an unsaved reminder went");
+            assert_eq!(second.store.len(), 4);
+            assert!(second.unkept(), "the unsaved reminder is taken for saved");
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert_eq!(kept_titles(), ["Not yet saved", "One", "Three", "Two"]);
+        });
+    }
+
+    /// A reminder another window deleted stays deleted when this window
+    /// saves next -- one this window made, and one it heard of from the
+    /// other's save. A save compares with what the window last wrote or read;
+    /// a reminder it has that is not in that is taken for one it made since,
+    /// and kept.
+    #[test]
+    fn a_reminder_deleted_in_another_window_stays_deleted() {
+        settingsfile::testing::with_scratch_config("reminders-stays-deleted", |_| {
+            let mut first = kept_window();
+            add_titled(&mut first, "Start");
+            first.keep();
+            let mut second = kept_window();
+
+            let made_here = add_titled(&mut second, "Made here");
+            second.keep();
+            assert!(first.reread_if_changed());
+            first.delete_task(made_here);
+            first.keep();
+            add_titled(&mut second, "Later");
+            second.keep();
+            assert!(
+                !kept_titles().contains(&String::from("Made here")),
+                "a reminder made here and deleted there came back"
+            );
+
+            let heard_of = add_titled(&mut first, "Heard of");
+            first.keep();
+            assert!(second.reread_if_changed());
+            first.delete_task(heard_of);
+            first.keep();
+            add_titled(&mut second, "Later still");
+            second.keep();
+            assert_eq!(kept_titles(), ["Later", "Later still", "Start"]);
+        });
+    }
+
+    /// What another window deleted is no longer chosen, waited on for a
+    /// delete, or announced.
+    #[test]
+    fn what_another_window_deleted_is_no_longer_chosen() {
+        settingsfile::testing::with_scratch_config("reminders-chosen-gone", |_| {
+            let mut first = kept_window();
+            let doomed = add_titled(&mut first, "Doomed");
+            add_titled(&mut first, "Stays");
+            first.keep();
+            let mut second = kept_window();
+            second.selected_task_id = Some(doomed);
+            second.pending_delete = Some(doomed);
+            second.notifications.push(Notification {
+                task_id: doomed,
+                message: String::from("Reminder: Doomed"),
+                triggered_at: make_now(),
+                dismissed: false,
+            });
+
+            first.delete_task(doomed);
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert_ne!(
+                second.selected_task_id,
+                Some(doomed),
+                "a deleted reminder is chosen"
+            );
+            assert_eq!(second.pending_delete, None, "a delete waits on nothing");
+            assert!(
+                second.notifications.is_empty(),
+                "a deleted reminder is still announced"
+            );
+        });
+    }
+
+    /// A reminder another window deleted while this one's form was open on
+    /// it is put back by the form's Save, with the change: an edit here beats
+    /// a deletion elsewhere. The Save found nothing to put it in and dropped
+    /// it without a word.
+    #[test]
+    fn a_reminder_deleted_elsewhere_while_changed_here_is_saved_back() {
+        settingsfile::testing::with_scratch_config("reminders-form-deleted", |_| {
+            let mut first = kept_window();
+            let id = add_titled(&mut first, "Shared");
+            first.keep();
+            let mut second = kept_window();
+            let task = second.store.get(id).unwrap().clone();
+            second.form = Some(TaskForm::editing(&task));
+            fill_field(&mut second, TaskField::Title, "Changed here");
+
+            first.delete_task(id);
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.store.get(id).is_none(),
+                "control: the other window's delete was heard"
+            );
+            second.save_form();
+            second.keep();
+            let kept = kept_window();
+            let back = kept
+                .store
+                .get(id)
+                .expect("the changed reminder was dropped");
+            assert_eq!(back.title, "Changed here");
+            assert_eq!(back.created, task.created);
+        });
+    }
+
+    /// A list file deleted while the window is open is written back whole at
+    /// the next save: a file that is not there has had nothing deleted from
+    /// it, so no reminder this window has is taken for one another window
+    /// deleted.
+    #[test]
+    fn a_list_file_deleted_while_open_is_written_back_whole() {
+        settingsfile::testing::with_scratch_config("reminders-file-deleted", |_| {
+            let mut app = kept_window();
+            add_titled(&mut app, "One");
+            add_titled(&mut app, "Two");
+            app.keep();
+            std::fs::remove_file(tasks_path().unwrap()).unwrap();
+            add_titled(&mut app, "Three");
+            app.keep();
+            assert_eq!(kept_titles(), ["One", "Three", "Two"]);
+        });
+    }
+
+    /// Putting a reminder back that is there already adds nothing.
+    #[test]
+    fn a_reminder_put_back_is_not_there_twice() {
+        let mut store = TaskStore::new();
+        let id = store.add(Task::new(0, "Once", make_now()));
+        let task = store.get(id).unwrap().clone();
+        store.put_back(task);
+        assert_eq!(store.len(), 1);
+    }
+
+    /// A save whose write fails -- the list's file reads, and cannot be
+    /// replaced -- says so, and the next change tries again. A folder where
+    /// the file goes fails at the read, which a save does first
+    /// (design-decisions §1239), so the write's failure needs a file that
+    /// reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("reminders-unwritable", |_| {
+            let mut app = kept_window();
+            add_titled(&mut app, "First");
+            app.keep();
+            let path = tasks_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            add_titled(&mut app, "Unwritten");
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your reminders were not saved to "),
+                "{error}"
+            );
+            assert!(app.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
+        });
+    }
+
+    /// A save that finds the list's file broken -- another program wrote it
+    /// -- leaves it as it is and says so, rather than writing this window's
+    /// list over what it could not read.
+    #[test]
+    fn a_save_leaves_a_file_it_cannot_read_as_it_is() {
+        settingsfile::testing::with_scratch_config("reminders-save-unreadable", |_| {
+            let mut app = kept_window();
+            add_titled(&mut app, "Mine");
+            app.keep();
+            let path = tasks_path().unwrap();
+            std::fs::write(&path, "not a list\n").unwrap();
+            add_titled(&mut app, "Another");
+            app.keep();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a list\n");
+            let error = app.store_error.clone().expect("the refusal said nothing");
+            assert!(error.contains("could not be read"), "{error}");
+        });
     }
 
     #[test]
@@ -8648,8 +9078,10 @@ mod tests {
             type_in(&mut app, "Unkept");
             key(&mut app, Key::Enter);
             let error = app.store_error.clone().expect("a failed save said nothing");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239).
             assert!(
-                error.starts_with("Your reminders were not saved to "),
+                error.starts_with("Your reminders were not saved"),
                 "{error}"
             );
             assert!(matches!(

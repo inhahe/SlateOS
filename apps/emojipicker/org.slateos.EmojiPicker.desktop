@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Emoji Picker
+Comment=Find an emoji and copy it
+Icon=face-smile
+Exec=emojipicker
+Categories=Utility;
+Keywords=emoji;smiley;symbols;

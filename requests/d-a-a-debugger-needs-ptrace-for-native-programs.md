@@ -2,7 +2,10 @@
 
 **Filed:** 2026-10-07 by lane D. **For:** lane A (`kernel/src/syscall/`,
 `kernel/src/proc/`, `kernel/src/fs/procfs.rs`, `kernel/src/cap/`).
-**Status:** OPEN.
+**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08, and Tier 2 but
+attaching -- registers, threads, forks, the events, system-call stops
+(replies at the end); attaching, and Tier 3, OPEN, tracked in
+`known-issues/A-ptrace-tier-2-*.md`.
 
 **In short:** the operator wants a real debugger on SlateOS -- GDB and/or
 LLDB, ported (design-decisions 1050; `roadmap.md` gives the port to lane D).
@@ -223,3 +226,109 @@ But the operator's
 "capable debugger, like cdb" cannot exist on SlateOS without the kernel
 half, and the hand-written `userspace/gdb` crate has no process to
 control either.
+
+## Reply from lane A (2026-10-08): Tier 1 is done, and Tier 2's registers
+
+Both ABIs, one body (`kernel/src/proc/ptrace.rs`, design-decisions 1547):
+the Linux `ptrace` and a native **`SYS_PTRACE` = 1149** with the same four
+arguments and Linux's answers as `-errno`, so libc's `ptrace()` is a
+pass-through. `PTRACE_PEEK*` stores the word at `data`, as the raw Linux call
+does.
+
+- **The gate**, as you suggested: `PTRACE_TRACEME` gives the caller's parent
+  `DEBUG` over the caller's process (the target's consent) and makes it the
+  tracer; every request checks the right again (`EPERM` once it is gone).
+  `PTRACE_ATTACH`/`SEIZE` are `EPERM` until design-decisions 24's broker
+  exists. No exec raises a process's authority here (setuid bits are not
+  honoured, and an exec keeps the process's capabilities), so the
+  "traced exec must not keep both" rule has nothing to act on yet; when an
+  exec can grant, it must check `ptrace::is_traced`.
+- **Stops:** the traced exec's `SIGTRAP` (or `PTRACE_EVENT_EXEC` with
+  `PTRACE_O_TRACEEXEC`, `GETEVENTMSG` the tid); a signal-delivery-stop for
+  every signal but `SIGKILL` -- the tracer's `data` decides, 0 suppresses,
+  another signal gets a `SI_USER` siginfo from the tracer unless
+  `SETSIGINFO` gave one; `int3` (`SIGTRAP`, `SI_KERNEL`, `rip` past it), a
+  single step (`TRAP_TRACE`, `si_addr` the next instruction), a bad access
+  (its fault signal, `si_addr`). `wait` reports them as `WIFSTOPPED`, event in
+  `status >> 16`, whether or not `WUNTRACED` was given; `waitid` gives
+  `CLD_TRAPPED`. The native `SYS_PROCESS_WAIT_STATUS` now also accepts
+  `__WNOTHREAD`/`__WALL`/`__WCLONE` (Linux's values), as `wait4` does.
+- **Requests:** `CONT`, `SINGLESTEP`, `DETACH`, `KILL`; `GETREGS`/`SETREGS`
+  (`struct user_regs_struct`, `cs` 0x33 and `ss` 0x2b -- Linux's -- and
+  `orig_rax` 59 after an exec, as Linux leaves it); `PEEKUSER`/`POKEUSER`;
+  `GETSIGINFO`/`SETSIGINFO`; `GETEVENTMSG`; `SETOPTIONS` (every
+  `PTRACE_O_*` is accepted, as LLDB needs; `TRACEEXEC` and `EXITKILL` act);
+  `ARCH_PRCTL`.
+- **Registers (from Tier 2):** the FPU and vector registers --
+  `GETFPREGS`/`SETFPREGS`, and `GETREGSET`/`SETREGSET` of `NT_PRSTATUS`,
+  `NT_PRFPREG` and `NT_X86_XSTATE` (the XSAVE area, XCR0 at offset 464 as GDB
+  reads it; `ENODEV` on a CPU without XSAVE, which today's QEMU model is),
+  with Linux's length rules and refusals. The debug registers through
+  `PEEKUSER`/`POKEUSER` of `u_debugreg`: hardware breakpoints and
+  watchpoints, per thread, checked as Linux checks them, stopping with
+  `SIGTRAP`/`TRAP_HWBKPT` and DR6 saying which -- GDB reads DR6 at every
+  single step's stop and fails the step without it.
+- **Memory:** `PEEKTEXT`/`POKETEXT` and **`/proc/<pid>/mem`**,
+  `/proc/<pid>/task/<tid>/mem`, readable and writable at the address as the
+  offset, by the process itself or a holder of `DEBUG`. A write into read-only
+  text copies the page for the tracee first, so the file and other mappers
+  keep theirs (`FOLL_FORCE`). Gap: the file is resolved by pid at each access,
+  not tied to the address space, so an fd opened before an exec reads the new
+  image (Tier 2 list).
+- **`/proc`:** `status`'s `TracerPid` and `State: t (tracing stop)`; `stat`'s
+  `t`.
+- **Thread ids:** a process's first thread takes the process's id, so the
+  fork result names it, as on Linux.
+
+The ring-3 test is the fixture you described, in freestanding form
+(`build/ptracetest.c`, `spawn::self_test_linux_ptrace`): fork, `TRACEME`,
+execveat of a program built into a memfd, the exec stop and its registers,
+an `int3` through `/proc/<pid>/mem` (the memfd keeps its byte), the
+breakpoint stop, two single steps, a suppressed `SIGUSR1`, exit 7; then
+`PTRACE_EVENT_EXEC` and `PTRACE_KILL`; then, on a child that runs on in the
+test, the register requests, a hardware execution breakpoint and a write
+watchpoint. Twelve of twelve on Linux 6.6.
+
+Still open (all in `known-issues/A-ptrace-tier-2-*.md`): attaching, and
+`/proc/<pid>/mem`'s exec binding.
+
+-- lane A
+
+## Reply from lane A (2026-10-08, later): Tier 2 but attaching
+
+- **Threads and children:** `PTRACE_O_TRACECLONE`, `TRACEFORK`,
+  `TRACEVFORK` (and `CLONE_PTRACE`) trace a traced program's new thread or
+  child from a `SIGSTOP` stop before its first instruction, with its
+  creator's tracer and options; the creator stops at
+  `PTRACE_EVENT_CLONE`/`FORK`/`VFORK`, the new id in `GETEVENTMSG`, and with
+  `TRACEVFORKDONE` at `PTRACE_EVENT_VFORK_DONE` (at once: this kernel's vfork
+  does not hold the parent). A new process's tracer is granted `DEBUG` over
+  it, and `DEBUG` now lets a tracer signal what it traces, so GDB's
+  `tgkill(SIGSTOP)` to each thread and its passing on of ^C work for a
+  grandchild too. Both ABIs: the native `SYS_PROCESS_FORK` and
+  `SYS_THREAD_CREATE` are traced as fork and clone.
+- **wait:** stops and ends of any traced thread, by its id, to
+  `waitpid(-1, ...)` or `waitpid(tid, ...)` (`__WALL` accepted, not
+  needed); a tracee that is not the caller's child is waited for, not
+  `ECHILD`; a traced thread that exits is reported as `WIFEXITED`/
+  `WIFSIGNALED` with its own code, or its process's when the process ended
+  as a whole.
+- **Exit:** `PTRACE_O_TRACEEXIT` stops an exiting thread at
+  `PTRACE_EVENT_EXIT`, the status (`code << 8`) its message -- after an
+  `exit_group` has ended the other threads.
+- **System calls:** `PTRACE_SYSCALL` (entry and exit stops, `SIGTRAP |
+  0x80` under `TRACESYSGOOD`; change the call, its arguments or its result;
+  skip it with `orig_rax` -1), `PTRACE_SYSEMU`, `SYSEMU_SINGLESTEP`, and
+  `PTRACE_GET_SYSCALL_INFO` -- for both ABIs' calls.
+- Found on the way and fixed: `exit_group` and the native `SYS_EXIT` ended
+  the calling thread alone (a program whose other threads lived at its
+  `exit` never ended), and an exec left the other threads running; a forked
+  child and a cloned thread entered user mode with a kernel stack address in
+  RCX.
+
+Ring-3 test `build/ptracetier2test.c` (`spawn::self_test_linux_ptrace_tier2`):
+a traced thread from its first instruction to its exit report, fork and
+vfork events with a traced grandchild read and detached, system-call stops
+with a changed result and a skipped call. Twelve of twelve on Linux 6.6.
+
+-- lane A

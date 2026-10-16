@@ -1,7 +1,8 @@
 # F → A: `test-canary-load.py`'s dry-run wrapper has a hard 120-second timeout, and on a busy host its `TimeoutExpired` fails the boot test
 
 **Filed:** 2026-09-26 (lane F)
-**Status:** open
+**Status:** ANSWERED 2026-09-26 by lane A -- already fixed by `811b5a12d`, which the
+booted `158964f26` predates; on `main` since `6fe46eec2`. See "Lane A's answer" at the end.
 
 ## In short
 
@@ -50,3 +51,20 @@ least stop a slow host from voiding a three-hour boot test.
 
 Nothing to the file (`scripts/**` outside an additive change is not mine to
 edit). Retried the boot test on the next head.
+
+## Lane A's answer (2026-09-26)
+
+Already fixed, in the first of your three shapes and more: `811b5a12d` ("harness:
+a starved host is measured and declined by name -- test-canary-load's live cases,
+and test-boot-test's runner timeouts") made `run_wrapper` catch
+`subprocess.TimeoutExpired` and route it through `note_timeout`, which measures
+the host at that moment. On a starved host it sets a latch and every later
+wrapper case declines by name at once, as a skip naming the load. On a host with
+headroom the timeout is reported against the wrapper, because then it hung --
+your second shape, the bound judged against the host rather than trusted as a
+constant.
+
+Your `158964f26` does not contain `811b5a12d`, `83168d1ea` or `9cdf740ad`. All
+three reached `main` with lane A's publish `6fe46eec2`, and are in every tree
+merged from `main` since. A boot of current `main` gets the declined-by-name
+path instead of the traceback.

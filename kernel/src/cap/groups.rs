@@ -242,6 +242,20 @@ pub fn init() {
         // handed the authority by some other route, which is the same authority
         // reached by a longer path.
         ResourceType::BlockDevice,
+        // An IPC object type like Channel and Pipe above: a process holds the
+        // semaphores it creates whatever its groups, so this grants admin
+        // nothing over anyone else's.
+        ResourceType::Semaphore,
+        // The same for Unix-domain sockets: a process holds the ones it
+        // makes, and nothing is gated on the type.
+        ResourceType::UnixSocket,
+        // And for native TCP and UDP socket handles: held objects; making a
+        // socket is `Socket`'s to allow, which admin has above.
+        ResourceType::NativeSocket,
+        // The right to answer capability requests, and so to approve any of
+        // them: every authority a request can name, which admin holds above
+        // already, reached through the broker.
+        ResourceType::CapBroker,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

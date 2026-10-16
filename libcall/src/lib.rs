@@ -65,13 +65,22 @@ use core::ffi::CStr;
 
 pub mod clock;
 pub mod conf;
+pub mod crypt;
+pub mod env;
 pub mod epoll;
+pub mod fd;
+pub mod glob;
 pub mod inotify;
+pub mod locale;
 pub mod lock;
 pub mod netdb;
+pub mod power;
+pub mod priority;
 pub mod process;
 pub mod pty;
+pub mod shm;
 pub mod signal;
+pub mod socket;
 pub mod termios;
 pub mod utmp;
 
@@ -96,6 +105,9 @@ pub const ENOENT: i32 = 2;
 pub const EFAULT: i32 = 14;
 /// Invalid argument.
 pub const EINVAL: i32 = 22;
+/// Result too large -- also what `crypt_gensalt_rn` answers when a setting
+/// has no room in the buffer it was given.
+pub const ERANGE: i32 = 34;
 /// File name too long -- from `gethostname` when the buffer is too small.
 pub const ENAMETOOLONG: i32 = 36;
 /// Function not implemented.
@@ -169,6 +181,7 @@ mod sys {
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
         pub fn gethostname(name: *mut u8, len: usize) -> i32;
         pub fn getdomainname(name: *mut u8, len: usize) -> i32;
+        pub fn getlogin_r(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
         // `union sigval` is eight bytes and passed by value, which on x86-64
@@ -469,6 +482,61 @@ pub fn hostname_into(_buf: &mut [u8]) -> Result<usize, i32> {
     Err(ENOSYS)
 }
 
+/// The buffer [`xgethostname`] reads into: room for any `HOST_NAME_MAX`
+/// the C libraries this tree meets declare (64 on Linux, 255 on SlateOS)
+/// and its NUL, several times over.
+pub const XGETHOSTNAME_BUF: usize = 1025;
+
+/// util-linux's `xgethostname`: `gethostname` into `get_hostname_max () + 1`
+/// bytes -- 65 on Linux, 256 on SlateOS -- the last made 0. The name, as
+/// much of `buf` as it takes; `None` when `gethostname` fails, which with
+/// that buffer is when the name is longer than the system allows.
+///
+/// The size is the point: `gethostname` into more room than
+/// `HOST_NAME_MAX + 1` would read a name the system's own limit cuts short
+/// elsewhere, and into less fails where upstream's succeeds.
+pub fn xgethostname(buf: &mut [u8; XGETHOSTNAME_BUF]) -> Option<&[u8]> {
+    let sz = conf::hostname_max().saturating_add(1).min(XGETHOSTNAME_BUF);
+    let n = hostname_into(buf.get_mut(..sz)?).ok()?;
+    // `name[sz - 1] = '\0'`: a library that cuts the name short without
+    // saying so still gives a terminated one.
+    buf.get(..n.min(sz.saturating_sub(1)))
+}
+
+/// The name of the user logged in on this process's controlling terminal,
+/// written into `buf` with its NUL, and its length without it:
+/// `getlogin_r`.
+///
+/// Who that is is the C library's answer, not the process's own uid: glibc
+/// reads `/proc/self/loginuid` and, when it is unset, the utmp entry for the
+/// terminal on standard input -- so after `su` it is still the user who
+/// logged in. `write` prints both when they differ.
+///
+/// # Errors
+///
+/// `ENOTTY` or `ENXIO` with no terminal, `ENOENT` with no utmp entry for it,
+/// and `ERANGE` when `buf` is too short; [`ENOSYS`] off Unix.
+#[cfg(unix)]
+pub fn login_name_into(buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: the pointer and length are exactly `buf`'s, which the library
+    // writes within, NUL included, or not at all.
+    let rc = unsafe { sys::getlogin_r(buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+}
+
+/// [`login_name_into`] off Unix: always [`ENOSYS`].
+///
+/// # Errors
+///
+/// Always.
+#[cfg(not(unix))]
+pub fn login_name_into(_buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
 /// This machine's NIS domain name, written into `buf`, returning its length
 /// in bytes -- [`hostname_into`]'s sibling, for `getdomainname(2)`.
 ///
@@ -628,6 +696,36 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), i32> {
         return Err(EINVAL);
     }
     kill_one(pid, sig)
+}
+
+/// [`kill`] with `pid` as `kill(2)` takes it, the broadcast forms included:
+/// 0 is the caller's process group, -1 every process the caller may signal,
+/// below -1 the group `-pid`.
+///
+/// For the `kill` command, whose operands *are* those -- `kill -TERM -- -1234`
+/// stops a job -- and which a person types knowing what they ask. This is
+/// the "differently-named function" [`kill`]'s documentation keeps the
+/// broadcast forms behind: a process list acting on one selected row must not
+/// reach here.
+///
+/// # Errors
+///
+/// The `errno` set by `kill(2)`: [`EINVAL`] for a number that is no signal,
+/// [`ESRCH`] for no such process or group, [`EPERM`]; [`ENOSYS`] off Unix.
+pub fn kill_any(pid: i32, sig: i32) -> Result<(), i32> {
+    kill_one(pid, sig)
+}
+
+/// [`sigqueue`] with `pid` as the C library takes it: any value at all,
+/// which the kernel answers -- on Linux `ESRCH` for a `pid` below 1, there
+/// being no queued signal for a group. For the `kill` command, as
+/// [`kill_any`] is.
+///
+/// # Errors
+///
+/// The `errno` set by `sigqueue`, as for [`sigqueue`]; [`ENOSYS`] off Unix.
+pub fn sigqueue_any(pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+    sigqueue_one(pid, sig, value)
 }
 
 #[cfg(unix)]
@@ -817,6 +915,7 @@ mod tests {
         assert_eq!(ENOENT, posix::errno::ENOENT);
         assert_eq!(EFAULT, posix::errno::EFAULT);
         assert_eq!(EINVAL, posix::errno::EINVAL);
+        assert_eq!(ERANGE, posix::errno::ERANGE);
         assert_eq!(ENOSYS, posix::errno::ENOSYS);
         assert_eq!(EINTR, posix::errno::EINTR);
         assert_eq!(EAGAIN, posix::errno::EAGAIN);
@@ -929,6 +1028,19 @@ mod tests {
         assert!(hostname_into(&mut []).is_err());
     }
 
+    /// Who is logged in on the terminal depends on how the tests were run --
+    /// from a terminal with a utmp entry, or not -- so what is held to is the
+    /// shape: a terminated name within the buffer, or an `errno`.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_name_is_terminated_or_refused() {
+        let mut buf = [0xAAu8; 256];
+        match login_name_into(&mut buf) {
+            Ok(n) => assert_eq!(buf.get(n), Some(&0), "not terminated"),
+            Err(e) => assert!(e > 0, "{e}"),
+        }
+    }
+
     /// The library answers with a terminated name that fits the room it was
     /// given: Linux holds at most 64 bytes, `(none)` when unset.
     #[cfg(unix)]
@@ -953,6 +1065,7 @@ mod tests {
         assert_eq!(sethostname(b"host"), Err(ENOSYS));
         assert_eq!(setdomainname(b"domain"), Err(ENOSYS));
         assert_eq!(hostname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
+        assert_eq!(login_name_into(&mut [0u8; 32]), Err(ENOSYS));
         assert_eq!(domainname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));

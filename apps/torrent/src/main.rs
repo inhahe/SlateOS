@@ -2282,7 +2282,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -2632,8 +2632,10 @@ pub struct TorrentApp {
     /// How far the transfer list is scrolled, in rows. It did not scroll:
     /// rows past the bottom were not drawn.
     pub transfer_scroll: usize,
-    /// The text fields' clipboard.
-    clipboard: String,
+    /// The magnet box's right-click menu -- Cut, Copy, Paste, Delete,
+    /// Select all -- while it is up
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<()>,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2827,14 +2829,14 @@ impl TorrentApp {
             global_download_speed: SpeedTracker::new(60, 1000),
             global_upload_speed: SpeedTracker::new(60, 1000),
             show_add_dialog: false,
-            magnet_input: TextInput::new(),
+            magnet_input: textline::field_holding("", MAX_MAGNET_CHARS),
             magnet_error: None,
             add_save_path: ClientSettings::default().default_save_path.clone(),
             sessions: HashMap::new(),
             since_sample_ms: 0,
             search_active: false,
             transfer_scroll: 0,
-            clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
@@ -2991,6 +2993,17 @@ impl TorrentApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The magnet box's right-click menu takes the presses and the keys
+        // while it is up, as any menu does.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::Key(key) if key.pressed => {
                 let result = self.handle_key(key);
@@ -2998,7 +3011,14 @@ impl TorrentApp {
                 result
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
+            Event::Tick { elapsed_ms } => {
+                // The menu's wait beside the transfers'.
+                let reason = self.field_menu.tick(*elapsed_ms);
+                match self.handle_tick(*elapsed_ms) {
+                    EventResult::Ignored if !reason => EventResult::Ignored,
+                    _ => EventResult::Consumed,
+                }
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -4786,6 +4806,7 @@ impl TorrentApp {
                 };
                 self.press(target)
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             MouseEventKind::Move => {
                 let over = self.target_at(event.x, event.y);
                 if over == self.hover {
@@ -5006,6 +5027,28 @@ impl TorrentApp {
         }
     }
 
+    /// A right press: over the magnet box, its menu where the press landed,
+    /// the box's caret and selection left as they are, so Cut and Copy act on
+    /// what the user selected (design-decisions 1454). Anywhere else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        if !self.show_add_dialog || self.target_at(x, y) != Some(Target::MagnetField) {
+            return EventResult::Ignored;
+        }
+        let viewport = (self.win_width, self.win_height);
+        self.field_menu
+            .open((), self.magnet_input.edit_menu(), x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen: done to the magnet box as its key would
+    /// be, the last attempt's complaint put away if the link changed.
+    fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
+        if self.magnet_input.edit_command(id) == KeyEdit::Changed {
+            self.magnet_error = None;
+        }
+        EventResult::Consumed
+    }
+
     /// Keys while the magnet dialog is up. Its Enter and Escape are plain --
     /// Alt+Enter added the link -- and the field knows a command from typing.
     fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -5023,24 +5066,21 @@ impl TorrentApp {
                 EventResult::Consumed
             }
             _ => {
-                let clipboard = self.clipboard.clone();
                 let before = (
                     self.magnet_input.text().to_owned(),
                     self.magnet_input.cursor(),
                     self.magnet_input.selection_anchor(),
                 );
-                let copied = textline::apply_key(
+                // On the program's clipboard, which the box's right-click
+                // menu copies to and pastes from too.
+                let did_copy = textline::apply_key_on_clipboard(
                     &mut self.magnet_input,
                     key,
                     MAX_MAGNET_CHARS,
-                    &clipboard,
                     12.0,
                 )
-                .copied;
-                let did_copy = copied.is_some();
-                if let Some(text) = copied {
-                    self.clipboard = text;
-                }
+                .copied
+                .is_some();
                 let changed = self.magnet_input.text() != before.0;
                 if changed {
                     self.magnet_error = None;
@@ -5167,18 +5207,22 @@ impl App for TorrentApp {
     /// `PIECE_STEP` while one has peers, once a second while all are only
     /// looking for them.
     fn tick_interval(&self) -> Option<Duration> {
+        // The magnet box's menu, while a dimmed row the pointer rests on
+        // waits to say why.
+        let menu = self.field_menu.due_in().map(Duration::from_millis);
         if self.sessions.is_empty() {
-            return None;
+            return menu;
         }
         let busy = self
             .torrents
             .iter()
             .any(|t| self.sessions.contains_key(&t.id) && !t.peers.is_empty());
-        Some(if busy {
+        let transfers = if busy {
             PIECE_STEP
         } else {
             Duration::from_secs(1)
-        })
+        };
+        Some(menu.map_or(transfers, |menu| menu.min(transfers)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5197,7 +5241,10 @@ impl App for TorrentApp {
         self.keep_selection_visible();
         let frame = self.frame(width, height);
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // The magnet box's right-click menu, over everything.
+        tree.commands.extend(self.field_menu.render(&self.palette));
+        tree
     }
 }
 
@@ -7278,6 +7325,157 @@ about anything -- it drew {} text command(s)",
             probe::rect_of(&app, Target::Row(chosen)).is_some(),
             "the chosen transfer is off screen"
         );
+    }
+
+    /// **The magnet box's right-click menu pastes a link copied elsewhere**,
+    /// the last attempt's complaint going with the change; what Ctrl+C takes
+    /// the menu pastes; the menu is modal while it is up, and there is none
+    /// with the dialog away
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    #[test]
+    fn the_magnet_boxs_right_click_menu_pastes_a_link() {
+        use guitk::editmenu::EditCommand;
+        let mut app = TorrentApp::new();
+        probe::key(&mut app, &probe::ctrl(Key::U));
+        probe::type_str(&mut app, "not a magnet");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.magnet_error.is_some());
+
+        let link = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        guitk::clipboard::set_text(link);
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        assert_eq!(app.field_menu.row_lit(EditCommand::Copy), Some(false));
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::SelectAll)
+            .expect("Select all");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        let (w, h) = (app.win_width, app.win_height);
+        let tree = App::render(&mut app, w, h);
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "Paste"
+            )),
+            "the menu is not drawn"
+        );
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.field_menu.is_up());
+        assert_eq!(
+            app.magnet_input.text(),
+            link,
+            "Paste did not paste over the selection"
+        );
+        assert_eq!(app.magnet_error, None, "the complaint outlived the change");
+
+        // By key onto the program's clipboard, pasted from the menu.
+        guitk::clipboard::set_text("");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        assert_eq!(
+            guitk::clipboard::text(),
+            link,
+            "Ctrl+C kept a clipboard of its own"
+        );
+
+        // Escape puts the menu away, and not the dialog.
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.field_menu.is_up());
+        assert!(
+            app.show_add_dialog,
+            "Escape reached the dialog through the menu"
+        );
+
+        // A press outside puts it away and adds nothing.
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        probe::click(&mut app, Target::MagnetAdd);
+        assert!(!app.field_menu.is_up());
+        assert!(app.torrents.is_empty(), "the press went through the menu");
+
+        // With the dialog away, no menu.
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.show_add_dialog);
+        assert_eq!(
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: 300.0,
+                y: 300.0,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            })),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's clock**,
+    /// which the window asks for while it waits even with nothing
+    /// downloading -- and a paste from the menu stops at the box's capacity.
+    #[test]
+    fn the_magnet_menu_says_why_on_the_clock_and_pastes_to_the_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = TorrentApp::new();
+        probe::key(&mut app, &probe::ctrl(Key::U));
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "a clock with nothing to wait for"
+        );
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        guitk::clipboard::set_text(&"m".repeat(MAX_MAGNET_CHARS + 10));
+        probe::click_with(&mut app, Target::MagnetField, MouseButton::Right);
+        let (x, y) = app
+            .field_menu
+            .row_middle(EditCommand::Paste)
+            .expect("Paste");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(app.magnet_input.text().chars().count(), MAX_MAGNET_CHARS);
     }
 
     #[test]

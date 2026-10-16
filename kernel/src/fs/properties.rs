@@ -2,16 +2,20 @@
 //!
 //! Gathers comprehensive metadata about a file or directory for display
 //! in a "Properties" dialog (right-click → Properties).  Combines data
-//! from VFS metadata, ACLs, extended attributes, content analysis,
-//! and filesystem statistics into a single rich structure.
+//! from VFS metadata, ACLs, extended attributes and filesystem statistics
+//! into a single rich structure.
 //!
 //! ## Properties Tabs (modeled after Windows/macOS/KDE)
 //!
-//! - **General**: name, type, location, size, dates, attributes
+//! - **General**: name, location, size, dates, attributes
 //! - **Security**: permissions, owner, group, ACLs, capabilities
-//! - **Details**: content-specific metadata (from fileinfo)
 //! - **Checksums**: MD5, SHA-256, CRC32 for verification
 //! - **Previous Versions**: version history (from fs::history)
+//!
+//! What kind of file it is, what opens it, and what its contents say
+//! (an image's size, a song's artist) are not here: the kernel keeps no list
+//! of file types or programs. Those are userspace's -- `guitk::filetypes`
+//! and `gui/programs` (design-decisions 1425).
 //!
 //! ## Architecture
 //!
@@ -43,8 +47,6 @@ pub struct FileProperties {
     pub general: GeneralProperties,
     /// Security tab.
     pub security: SecurityProperties,
-    /// Content details (type-specific metadata).
-    pub details: Vec<DetailField>,
     /// Checksums.
     pub checksums: ChecksumProperties,
     /// Disk usage info (for directories).
@@ -56,12 +58,6 @@ pub struct FileProperties {
 pub struct GeneralProperties {
     /// Display name (filename).
     pub name: PathBuf,
-    /// File type description (e.g., "JPEG Image", "Python Script").
-    pub type_description: String,
-    /// MIME type.
-    pub mime_type: String,
-    /// Opens with (default application).
-    pub opens_with: String,
     /// Location (parent directory).
     pub location: PathBuf,
     /// Size in bytes.
@@ -116,17 +112,6 @@ pub struct SecurityProperties {
     pub xattrs: Vec<(String, String)>,
 }
 
-/// A single detail field (for the Details tab).
-#[derive(Debug, Clone)]
-pub struct DetailField {
-    /// Field name (e.g., "Width", "Bitrate", "Duration").
-    pub name: String,
-    /// Field value.
-    pub value: String,
-    /// Category (e.g., "Image", "Audio", "Document").
-    pub category: String,
-}
-
 /// Checksum values.
 #[derive(Debug, Clone)]
 pub struct ChecksumProperties {
@@ -176,11 +161,6 @@ pub fn gather(path: impl AsRef<Path>) -> KernelResult<FileProperties> {
 
     let general = gather_general(path, &meta)?;
     let security = gather_security(path, &meta);
-    let details = if is_dir {
-        Vec::new()
-    } else {
-        gather_details(path)
-    };
     let checksums = ChecksumProperties {
         crc32: None,
         sha256: None,
@@ -197,7 +177,6 @@ pub fn gather(path: impl AsRef<Path>) -> KernelResult<FileProperties> {
         path: path.to_path_buf(),
         general,
         security,
-        details,
         checksums,
         disk_usage,
     })
@@ -209,13 +188,6 @@ fn gather_general(path: &Path, meta: &crate::fs::FileMeta) -> KernelResult<Gener
     // which is what the dialog shows for the root.
     let name = path.file_name().unwrap_or(Path::new("/"));
     let location = path.parent().unwrap_or(Path::new("/"));
-
-    let mime_type = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
-    let type_desc = mime_to_description(mime_type);
-
-    let opens_with = crate::fs::associations::default_app_for_file(path)
-        .map(|a| a.app_name)
-        .unwrap_or_default();
 
     let is_symlink = meta.entry_type == crate::fs::EntryType::Symlink;
     let link_target = if is_symlink {
@@ -234,9 +206,6 @@ fn gather_general(path: &Path, meta: &crate::fs::FileMeta) -> KernelResult<Gener
 
     Ok(GeneralProperties {
         name: name.to_path_buf(),
-        type_description: String::from(type_desc),
-        mime_type: String::from(mime_type),
-        opens_with,
         location: location.to_path_buf(),
         size: meta.size,
         size_on_disk,
@@ -284,23 +253,6 @@ fn gather_security(_path: &Path, meta: &crate::fs::FileMeta) -> SecurityProperti
         acl_entries: Vec::new(), // Would query ACL subsystem.
         xattrs,
     }
-}
-
-/// Gather content-specific details using fileinfo.
-fn gather_details(path: &Path) -> Vec<DetailField> {
-    let info = match crate::fs::fileinfo::extract(path) {
-        Ok(i) => i,
-        Err(_) => return Vec::new(),
-    };
-
-    info.fields
-        .iter()
-        .map(|field| DetailField {
-            name: field.label.clone(),
-            value: field.value.display(),
-            category: String::from("Content"),
-        })
-        .collect()
 }
 
 /// Gather disk usage for a directory.
@@ -369,47 +321,6 @@ fn compute_crc32(data: &[u8]) -> u32 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert MIME type to human-readable description.
-fn mime_to_description(mime: &str) -> &str {
-    match mime {
-        "text/plain" => "Text Document",
-        "text/html" => "HTML Document",
-        "text/css" => "CSS Stylesheet",
-        "text/markdown" => "Markdown Document",
-        "text/x-python" => "Python Script",
-        "text/x-rust" => "Rust Source File",
-        "text/x-c" => "C Source File",
-        "text/x-shellscript" => "Shell Script",
-        "text/csv" => "CSV Spreadsheet",
-        "application/json" => "JSON File",
-        "application/pdf" => "PDF Document",
-        "application/zip" => "ZIP Archive",
-        "application/gzip" => "Gzip Archive",
-        "application/x-tar" => "Tar Archive",
-        "application/rtf" => "Rich Text Document",
-        "application/xml" => "XML Document",
-        "application/x-executable" => "Executable",
-        "application/x-sharedlib" => "Shared Library",
-        "image/png" => "PNG Image",
-        "image/jpeg" => "JPEG Image",
-        "image/gif" => "GIF Image",
-        "image/bmp" => "BMP Image",
-        "image/webp" => "WebP Image",
-        "image/svg+xml" => "SVG Image",
-        "audio/mpeg" => "MP3 Audio",
-        "audio/flac" => "FLAC Audio",
-        "audio/ogg" => "OGG Audio",
-        "audio/wav" => "WAV Audio",
-        "video/mp4" => "MP4 Video",
-        "video/webm" => "WebM Video",
-        "video/x-matroska" => "Matroska Video",
-        "application/octet-stream" => "Binary File",
-        "inode/directory" => "Folder",
-        "inode/symlink" => "Symbolic Link",
-        _ => "File",
-    }
-}
-
 /// Format Unix permissions as a string (e.g., "rwxr-xr-x").
 fn format_permissions(mode: u16) -> String {
     let mut s = String::with_capacity(9);
@@ -465,50 +376,41 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[properties] test 1 passed: permission format");
     }
 
-    // Test 2: MIME description.
-    {
-        assert_eq!(mime_to_description("image/png"), "PNG Image");
-        assert_eq!(mime_to_description("audio/mpeg"), "MP3 Audio");
-        assert_eq!(mime_to_description("text/plain"), "Text Document");
-        assert_eq!(mime_to_description("unknown/type"), "File");
-        serial_println!("[properties] test 2 passed: MIME descriptions");
-    }
-
-    // Test 3: CRC32 computation.
+    // Test 2: CRC32 computation.
     {
         let crc = compute_crc32(b"hello");
         // Known CRC32 for "hello" = 0x3610A686.
         assert_eq!(crc, 0x3610_A686);
         let crc_empty = compute_crc32(b"");
         assert_eq!(crc_empty, 0x0000_0000);
-        serial_println!("[properties] test 3 passed: CRC32");
+        serial_println!("[properties] test 2 passed: CRC32");
     }
 
-    // Test 4: gather properties (uses root directory which should exist).
+    // Test 3: gather properties (uses root directory which should exist).
     {
         let props = gather("/")?;
         assert_eq!(props.general.name.as_path(), Path::new("/"));
         assert!(props.general.is_directory);
-        serial_println!("[properties] test 4 passed: gather");
+        serial_println!("[properties] test 3 passed: gather");
     }
 
-    // Test 5: disk usage.
+    // Test 4: disk usage.
     {
         let usage = gather_disk_usage(Path::new("/"));
         // Root may legitimately be empty during early boot self-tests;
         // we only verify the call returns without panicking.
         let _ = (usage.file_count, usage.dir_count);
-        serial_println!("[properties] test 5 passed: disk usage");
+        serial_println!("[properties] test 4 passed: disk usage");
     }
 
-    // Test 6: stats.
+    // Test 5: stats.
     {
         let (gathers, checksums) = stats();
         assert!(gathers > 0);
         let _ = checksums; // u64, always >= 0
-        serial_println!("[properties] test 6 passed: stats");
+        serial_println!("[properties] test 5 passed: stats");
     }
 
-    serial_println!("[properties] all 6 self-tests passed");
+    serial_println!("[properties] all 5 self-tests passed");
     Ok(())
 }

@@ -9,10 +9,20 @@
 //! the file manager put things in the bin and nothing could show what was in
 //! it, so a file deleted more than one Undo ago could not be found again.
 //!
+//! # Every drive's bin, in one list
+//!
+//! Each drive keeps its own bin (design-decisions §1238, §1240): the home
+//! folder's drive `~/.recycle`, every other drive one at its top. The view
+//! lists them together, newest first, each row known by its bin and its id
+//! there ([`EntryKey`]) -- an id names an entry only within its own bin -- so
+//! Restore and Delete permanently act on the bin the row came from. The
+//! folder a row was deleted from names its drive. A bin that cannot be read
+//! hides none of the others; the status line says which drive it was.
+//!
 //! # Why not a folder
 //!
-//! The bin keeps each item as `~/.recycle/<id>/data`, beside a `meta.txt`
-//! saying where it came from. Listing that folder would show folders named by
+//! A bin keeps each item as `<bin>/<id>/data`, beside a `meta.txt` saying
+//! where it came from. Listing that folder would show folders named by
 //! ids -- `notes.txt_1a2b…` -- each holding a file called `data`, which is the
 //! one listing nobody can find a file in; and a Paste into it would put a
 //! file where the bin cannot see it. So this is a view of what
@@ -27,6 +37,7 @@
 //! and dialogs like every other file operation, and ask through its modal.
 
 use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use appearance::Palette;
@@ -39,9 +50,55 @@ use guitk::scrollbar;
 use guitk::style::CornerRadii;
 use guitk::theme::with_alpha;
 use pathtext::ShowPath;
-use recyclebin::{RecycleBin, RecycleEntry};
+use recyclebin::{DriveBin, RecycleBin, RecycleEntry};
 
 use crate::columns::format_datetime;
+
+/// Which entry, in which bin: the bin's folder and the entry's id there.
+///
+/// An id names an entry only within its own bin, and there is a bin on every
+/// drive (design-decisions §1238): two drives' bins may each hold an entry
+/// called `notes.txt_1a2b...`, and "delete that one" must reach the one shown.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryKey {
+    /// The bin's folder.
+    pub bin: PathBuf,
+    /// The entry's id in it.
+    pub id: String,
+}
+
+impl EntryKey {
+    /// The bin the entry is in.
+    #[must_use]
+    pub fn bin(&self) -> RecycleBin {
+        RecycleBin::new(self.bin.clone())
+    }
+}
+
+/// One thing in one drive's bin, as the view lists it.
+#[derive(Clone, Debug)]
+pub struct BinEntry {
+    /// The bin it is in.
+    pub bin: RecycleBin,
+    /// What that bin says of it.
+    pub entry: RecycleEntry,
+}
+
+impl BinEntry {
+    /// Which entry this is, in which bin.
+    #[must_use]
+    pub fn key(&self) -> EntryKey {
+        EntryKey {
+            bin: self.bin.root().to_path_buf(),
+            id: self.entry.id.clone(),
+        }
+    }
+
+    /// Whether this is the entry `key` names.
+    fn is(&self, key: &EntryKey) -> bool {
+        self.entry.id == key.id && self.bin.root() == key.bin.as_path()
+    }
+}
 
 /// Height of the strip of actions across the top of the view.
 pub const BAR_H: f32 = 40.0;
@@ -190,24 +247,27 @@ impl BinLayout {
     }
 }
 
-/// The recycle bin as the file pane shows it.
+/// The recycle bins as the file pane shows them: every drive's, in one list.
 #[derive(Debug)]
 pub struct BinView {
-    /// What [`RecycleBin::list`] answered: newest first, a damaged entry last.
-    entries: Vec<RecycleEntry>,
-    /// The chosen entries, by id.
+    /// What each bin's [`RecycleBin::list`] answered, merged: newest first
+    /// across every drive, a damaged entry last.
+    entries: Vec<BinEntry>,
+    /// The chosen entries, by key.
     ///
-    /// Ids and not row numbers, because every action reloads the list and a
+    /// Keys and not row numbers, because every action reloads the list and a
     /// row number is only good for the list it was taken from: after a
-    /// restore, "row 3" is a different file. An id names one entry for as
+    /// restore, "row 3" is a different file. A key names one entry for as
     /// long as that entry exists, and when it stops existing it drops out of
     /// the choice at the next reload rather than naming its neighbour.
-    chosen: BTreeSet<String>,
+    chosen: BTreeSet<EntryKey>,
     /// The row the keyboard is on, and the scroll that keeps it in sight.
     viewport: ListViewport,
     /// Where a Shift+arrow run starts from.
     anchor: Option<usize>,
-    /// Why the bin could not be read, when it could not.
+    /// Which bins could not be read, and why, when one could not. The others
+    /// are listed all the same: a stick whose bin is unreadable must not hide
+    /// what is in the home bin.
     error: Option<String>,
     /// The status line's summary, kept current by everything that changes
     /// what it describes.
@@ -215,9 +275,10 @@ pub struct BinView {
 }
 
 impl BinView {
-    /// Read `bin` and show it, scrolled to the top, with nothing chosen.
+    /// Read `bins` -- every drive's -- and show them, scrolled to the top,
+    /// with nothing chosen.
     #[must_use]
-    pub fn open(bin: &RecycleBin) -> Self {
+    pub fn open(bins: &[DriveBin]) -> Self {
         let mut view = Self {
             entries: Vec::new(),
             chosen: BTreeSet::new(),
@@ -226,28 +287,40 @@ impl BinView {
             error: None,
             summary: String::new(),
         };
-        view.reload(bin);
+        view.reload(bins);
         view
     }
 
-    /// Read the bin again.
+    /// Read the bins again.
     ///
     /// The choice keeps the entries that are still there; the keyboard's row
     /// stays where it was, so after a restore it rests on the item that slid
     /// up into the restored one's place.
-    pub fn reload(&mut self, bin: &RecycleBin) {
-        match bin.list() {
-            Ok(entries) => {
-                self.entries = entries;
-                self.error = None;
-            }
-            Err(e) => {
-                self.entries.clear();
-                self.error = Some(format!("The recycle bin could not be read: {e}"));
+    pub fn reload(&mut self, bins: &[DriveBin]) {
+        let mut entries = Vec::new();
+        let mut unread = Vec::new();
+        for drive in bins {
+            match drive.bin.list() {
+                Ok(list) => entries.extend(list.into_iter().map(|entry| BinEntry {
+                    bin: drive.bin.clone(),
+                    entry,
+                })),
+                Err(e) => unread.push(format!("{}: {e}", drive.label())),
             }
         }
-        let present: HashSet<&str> = self.entries.iter().map(|e| e.id.as_str()).collect();
-        self.chosen.retain(|id| present.contains(id.as_str()));
+        // Newest first across every drive, as each bin lists its own; an
+        // entry with no readable time last.
+        entries.sort_by_key(|e| std::cmp::Reverse(e.entry.recycled_at));
+        self.entries = entries;
+        self.error = (!unread.is_empty())
+            .then(|| format!("The recycle bin could not be read on {}", unread.join("; ")));
+        let present: HashSet<(&Path, &str)> = self
+            .entries
+            .iter()
+            .map(|e| (e.bin.root(), e.entry.id.as_str()))
+            .collect();
+        self.chosen
+            .retain(|key| present.contains(&(key.bin.as_path(), key.id.as_str())));
         let len = self.entries.len();
         self.anchor = self.anchor.filter(|&a| a < len);
         let cursor = self.viewport.selected();
@@ -257,16 +330,22 @@ impl BinView {
 
     /// Every entry, in the order drawn.
     #[must_use]
-    pub fn entries(&self) -> &[RecycleEntry] {
+    pub fn entries(&self) -> &[BinEntry] {
         &self.entries
+    }
+
+    /// The entry `key` names, if it is listed.
+    #[must_use]
+    pub fn find(&self, key: &EntryKey) -> Option<&BinEntry> {
+        self.entries.iter().find(|e| e.is(key))
     }
 
     /// The chosen entries, in the order drawn.
     #[must_use]
-    pub fn chosen(&self) -> Vec<&RecycleEntry> {
+    pub fn chosen(&self) -> Vec<&BinEntry> {
         self.entries
             .iter()
-            .filter(|e| self.chosen.contains(&e.id))
+            .filter(|e| self.chosen.contains(&e.key()))
             .collect()
     }
 
@@ -275,7 +354,7 @@ impl BinView {
     pub fn is_chosen(&self, index: usize) -> bool {
         self.entries
             .get(index)
-            .is_some_and(|e| self.chosen.contains(&e.id))
+            .is_some_and(|e| self.chosen.contains(&e.key()))
     }
 
     /// The row the keyboard is on.
@@ -313,8 +392,9 @@ impl BinView {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
+        let key = entry.key();
         self.chosen.clear();
-        self.chosen.insert(entry.id.clone());
+        self.chosen.insert(key);
         self.anchor = Some(index);
         self.viewport.select(Some(index), self.entries.len());
         self.refresh_summary();
@@ -322,7 +402,7 @@ impl BinView {
 
     /// Choose everything.
     pub fn choose_all(&mut self) {
-        self.chosen = self.entries.iter().map(|e| e.id.clone()).collect();
+        self.chosen = self.entries.iter().map(BinEntry::key).collect();
         self.refresh_summary();
     }
 
@@ -376,7 +456,7 @@ impl BinView {
             .iter()
             .skip(low)
             .take(high.saturating_sub(low).saturating_add(1))
-            .map(|e| e.id.clone())
+            .map(BinEntry::key)
             .collect();
         self.viewport.select(Some(index), self.entries.len());
         self.refresh_summary();
@@ -397,7 +477,7 @@ impl BinView {
     pub fn button_state(&self, button: BinButton) -> DisabledState {
         let reason = match button {
             BinButton::Restore if self.chosen.is_empty() => Some("Choose what to put back"),
-            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => {
+            BinButton::Restore if !self.chosen().iter().any(|e| e.entry.is_readable()) => {
                 Some("A damaged entry does not say where it came from, so it cannot be put back")
             }
             BinButton::DeleteForever if self.chosen.is_empty() => Some("Choose what to delete"),
@@ -501,11 +581,12 @@ impl BinView {
             );
         }
 
-        // The rows, or why there are none.
+        // The rows, or why there are none. A bin that could not be read
+        // hides none of the others' rows; the status line says which it was.
         let message = match (&self.error, self.entries.is_empty()) {
-            (Some(error), _) => Some(error.as_str()),
+            (Some(error), true) => Some(error.as_str()),
             (None, true) => Some("The recycle bin is empty."),
-            (None, false) => None,
+            (_, false) => None,
         };
         if let Some(message) = message {
             tree.text_in(
@@ -528,16 +609,17 @@ impl BinView {
         let columns = layout.columns();
         let rows = self.visible_rows(layout);
         for (row, index) in (rows.start..rows.end()).enumerate() {
-            let Some(entry) = self.entries.get(index) else {
+            let Some(item) = self.entries.get(index) else {
                 break;
             };
+            let entry = &item.entry;
             #[allow(
                 clippy::cast_precision_loss,
                 reason = "a row on screen: a handful, far inside f32's exact range"
             )]
             let y = layout.rows.y + row as f32 * ROW_H;
             let table_w = layout.table_w();
-            if self.chosen.contains(&entry.id) {
+            if self.chosen.contains(&item.key()) {
                 tree.fill_rect(
                     layout.rows.x,
                     y,
@@ -579,17 +661,30 @@ impl BinView {
 
     /// Recompute the status line's summary.
     fn refresh_summary(&mut self) {
-        self.summary = if let Some(error) = &self.error {
-            error.clone()
-        } else if self.entries.is_empty() {
-            "The recycle bin is empty".to_string()
+        let drives: HashSet<&Path> = self.entries.iter().map(|e| e.bin.root()).collect();
+        let mut summary = if self.entries.is_empty() {
+            match &self.error {
+                Some(error) => error.clone(),
+                None => "The recycle bin is empty".to_string(),
+            }
+        } else if drives.len() > 1 {
+            format!(
+                "{} in the recycle bins of {} drives",
+                items(self.entries.len()),
+                drives.len()
+            )
         } else {
-            let mut summary = format!("{} in the recycle bin", items(self.entries.len()));
+            format!("{} in the recycle bin", items(self.entries.len()))
+        };
+        if !self.entries.is_empty() {
             if !self.chosen.is_empty() {
                 summary.push_str(&format!(", {} chosen", self.chosen.len()));
             }
-            summary
-        };
+            if let Some(error) = &self.error {
+                summary.push_str(&format!(" -- {error}"));
+            }
+        }
+        self.summary = summary;
     }
 }
 
@@ -648,7 +743,7 @@ mod tests {
     )]
 
     use super::*;
-    use std::path::PathBuf;
+    use scratchdir::ScratchDir;
     use std::time::Duration;
 
     fn entry(id: &str, path: Option<&str>, secs: u64) -> RecycleEntry {
@@ -663,9 +758,26 @@ mod tests {
         }
     }
 
+    /// A view of `entries`, all in the home bin.
     fn view_of(entries: Vec<RecycleEntry>) -> BinView {
+        view_in(
+            entries
+                .into_iter()
+                .map(|entry| ("/home/u/.recycle", entry))
+                .collect(),
+        )
+    }
+
+    /// A view of `entries`, each in the bin whose folder is named with it.
+    fn view_in(entries: Vec<(&str, RecycleEntry)>) -> BinView {
         let mut view = BinView {
-            entries,
+            entries: entries
+                .into_iter()
+                .map(|(bin, entry)| BinEntry {
+                    bin: RecycleBin::new(PathBuf::from(bin)),
+                    entry,
+                })
+                .collect(),
             chosen: BTreeSet::new(),
             viewport: ListViewport::new(0),
             anchor: None,
@@ -685,7 +797,7 @@ mod tests {
     }
 
     fn chosen_ids(view: &BinView) -> Vec<&str> {
-        view.chosen().iter().map(|e| e.id.as_str()).collect()
+        view.chosen().iter().map(|e| e.entry.id.as_str()).collect()
     }
 
     #[test]
@@ -866,5 +978,70 @@ mod tests {
         assert_eq!(view.first_visible(), 20);
         view.fit(10);
         assert_eq!(view.first_visible(), 20, "the wheel's scroll was undone");
+    }
+
+    /// **Two drives' bins are one list, and an entry is known by its bin
+    /// too**: each bin names its own entries, so two may share an id, and
+    /// choosing one must not choose both.
+    #[test]
+    fn entries_of_two_drives_with_one_id_are_two_entries() {
+        let mut view = view_in(vec![
+            (
+                "/home/u/.recycle",
+                entry("notes.txt_1", Some("/home/u/notes.txt"), 200),
+            ),
+            (
+                "/media/stick/.recycle-1000",
+                entry("notes.txt_1", Some("/media/stick/notes.txt"), 100),
+            ),
+        ]);
+        assert_eq!(view.summary(), "2 items in the recycle bins of 2 drives");
+        view.choose_only(1);
+        let chosen = view.chosen();
+        assert_eq!(chosen.len(), 1, "one choice took both");
+        assert_eq!(
+            chosen[0].bin.root(),
+            Path::new("/media/stick/.recycle-1000")
+        );
+        assert_eq!(folder_text(&chosen[0].entry), "/media/stick");
+        let key = chosen[0].key();
+        assert!(view.find(&key).is_some_and(|e| e.bin.root() == key.bin));
+    }
+
+    /// **A bin that cannot be read hides none of the others**, and the
+    /// status line says which drive it was.
+    #[test]
+    fn a_bin_that_cannot_be_read_hides_none_of_the_others() {
+        let scratch = ScratchDir::new("binview_unreadable");
+        let home = recyclebin::RecycleBin::new(scratch.dir().join("home-bin"));
+        let note = scratch.dir().join("note.txt");
+        std::fs::write(&note, "n").unwrap();
+        home.recycle(&note).unwrap();
+        // A "bin" that is a file: listing it fails.
+        let broken = scratch.dir().join("stick-bin");
+        std::fs::write(&broken, "not a folder").unwrap();
+        let bins = [
+            DriveBin {
+                drive: None,
+                home: true,
+                bin: home,
+            },
+            DriveBin {
+                drive: Some(PathBuf::from("/media/stick")),
+                home: false,
+                bin: RecycleBin::new(broken),
+            },
+        ];
+        let view = BinView::open(&bins);
+        assert_eq!(
+            view.entries().len(),
+            1,
+            "the readable bin's entry was hidden"
+        );
+        assert!(
+            view.summary().contains("could not be read on /media/stick"),
+            "{}",
+            view.summary()
+        );
     }
 }

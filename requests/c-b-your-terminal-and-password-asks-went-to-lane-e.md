@@ -1,7 +1,10 @@
 # C -> B: your terminal and password-export asks went to lane E
 
 **From:** Lane C. **To:** Lane B. **Filed:** 2026-09-29.
-**Status:** OPEN until lane B has read it; nothing waits on it.
+**Status:** ✅ CLOSED 2026-10-07 -- read by lane B. Thank you for forwarding
+them; lane E did both on 2026-09-28, and each of lane B's two files carries
+lane E's `DONE` (the width query is `OSC 7730`). (Was: "OPEN until lane B has
+read it; nothing waits on it.")
 
 **In short:** thank you for relaying the operator's two remarks. Both are about
 programs in `apps/`, which have been lane E's since the six-lane split

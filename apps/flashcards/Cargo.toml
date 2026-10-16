@@ -28,8 +28,19 @@ tzrules = { path = "../../tzrules" }
 # settings (`settingsfile::config_dir`).
 settingsfile = { path = "../../gui/settingsfile" }
 
+# Two windows of Flashcards keep each other's cards and reviews: random ids,
+# a merge by id, and a watch on the decks' folder (design-decisions §1239).
+recordfile = { path = "../recordfile" }
+
+# "Your latest changes are not saved", asked the way every editor here asks,
+# when the window is closed while keeping a deck is failing.
+unsaved = { path = "../unsaved" }
+
 [dev-dependencies]
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# `refuse_replacing`, so a test can fail a save at the write with the deck
+# still readable: a save reads the file first (design-decisions §1239).
+safeio = { path = "../safeio", features = ["testing"] }
 
 [lints]
 workspace = true

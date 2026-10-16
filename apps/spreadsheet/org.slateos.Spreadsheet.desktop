@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spreadsheet
+Comment=Work with numbers in a grid, with formulas
+Icon=x-office-spreadsheet
+Exec=spreadsheet
+Categories=Office;Spreadsheet;
+Keywords=sheet;cells;formulas;

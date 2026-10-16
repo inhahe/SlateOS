@@ -179,6 +179,38 @@ impl SchedulerBackend {
         }
     }
 
+    /// [`PriorityRoundRobin::pick_next_masked`]: the real-time throttle's
+    /// pick. The other backends have no band to pass over and pick as
+    /// [`pick_next`](Self::pick_next) does.
+    pub fn pick_next_masked(&mut self, avoid_band: bool) -> Option<TaskId> {
+        match self {
+            Self::PriorityRR(s) => s.pick_next_masked(avoid_band),
+            _ => self.pick_next(),
+        }
+    }
+
+    /// The highest-priority level queued (the round-robin backend's
+    /// [`PriorityRoundRobin::top_level`]); `None` for the other backends,
+    /// whose order is not by level.
+    #[must_use]
+    pub fn top_level(&self) -> Option<u8> {
+        match self {
+            Self::PriorityRR(s) => s.top_level(),
+            _ => None,
+        }
+    }
+
+    /// Whether anything ordinary is queued
+    /// ([`PriorityRoundRobin::has_ordinary_work`]); for the other backends,
+    /// whether anything at all is.
+    #[must_use]
+    pub fn has_ordinary_work(&self) -> bool {
+        match self {
+            Self::PriorityRR(s) => s.has_ordinary_work(),
+            _ => self.has_real_work(),
+        }
+    }
+
     /// Add a task to the run queue at the given priority.
     #[inline]
     pub fn enqueue(&mut self, id: TaskId, priority: u8) {

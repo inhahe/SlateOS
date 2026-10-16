@@ -204,8 +204,11 @@ type PasswordCheck = authlib::Outcome;
 /// desktop lock screen — must answer the opposite way.  "Press Enter to
 /// unlock" is not a screen lock; on a console at the machine's keyboard, a
 /// deliberately passwordless account is a long-standing Unix choice.
-fn check_password(password: &str, hash: &str) -> PasswordCheck {
-    match authlib::check_stored(password.as_bytes(), hash.as_bytes()) {
+///
+/// A path that verifies nothing spends what `profile` says a check costs, the
+/// account database's own (see [`authlib::CostProfile`]).
+fn check_password(password: &str, hash: &str, profile: &authlib::CostProfile) -> PasswordCheck {
+    match authlib::check_stored_costing(password.as_bytes(), hash.as_bytes(), profile) {
         PasswordCheck::NoPassword if password.is_empty() => PasswordCheck::Accepted,
         PasswordCheck::NoPassword => PasswordCheck::Rejected,
         other => other,
@@ -701,21 +704,35 @@ fn do_login(
             name
         };
 
+        // What checking a password costs on this system, read before the
+        // account is looked up, so that the work done before the answer does
+        // not depend on whether the account exists.
+        let profile = authlib::CostProfile::of_store(users_yaml);
+
         // Look up the account. One record, so there is no "present in one
         // file and missing from the other" state to decide about.
         let (user, creds) = match lookup_account(users_yaml, &username) {
             Some(found) => found,
             None => {
                 attempts = attempts.saturating_add(1);
-                // Delay to slow brute force - simulate reading password even for bad users
+                // Asked for and spent as for an account that exists -- the
+                // prompt, then what checking the password would cost -- so
+                // that neither the prompt's absence nor a quicker refusal
+                // tells the person typing which names are accounts. Until
+                // 2026-10-07 the hash was skipped here, and an unknown name
+                // was refused milliseconds sooner than a known one.
                 if !cfg.force_login {
                     write!(writer, "Password: ")
                         .map_err(|e| LoginError::SystemError(e.to_string()))?;
                     writer
                         .flush()
                         .map_err(|e| LoginError::SystemError(e.to_string()))?;
-                    let mut _discard = String::new();
-                    let _ = reader.read_line(&mut _discard);
+                    let mut discard = String::new();
+                    // Unchecked: whatever was typed, or nothing, is refused
+                    // all the same, and a read error is refused there too.
+                    let _ = reader.read_line(&mut discard);
+                    let typed = discard.trim_end_matches('\n').trim_end_matches('\r');
+                    profile.burn(typed.as_bytes());
                 }
                 let line = refuse_attempt(auth, &username);
                 writeln!(writer, "{line}").map_err(|e| LoginError::SystemError(e.to_string()))?;
@@ -772,7 +789,7 @@ fn do_login(
                     retry_after_secs: 0,
                 }
             } else {
-                check_password(password, &creds.password_hash)
+                check_password(password, &creds.password_hash, &profile)
             };
             if outcome != PasswordCheck::Accepted {
                 attempts = attempts.saturating_add(1);
@@ -1536,7 +1553,11 @@ mod tests {
         assert_eq!(user.shell, PathBuf::from("/bin/nush"));
         assert!(!creds.locked);
         assert_eq!(
-            check_password("correct horse", &creds.password_hash),
+            check_password(
+                "correct horse",
+                &creds.password_hash,
+                &authlib::CostProfile::default()
+            ),
             PasswordCheck::Accepted
         );
     }
@@ -1579,13 +1600,13 @@ mod tests {
         assert!(lookup_account(&path, "alice").is_none());
     }
 
-    /// Hash `password` the way `passwd` and `chpasswd` now do, so the tests
-    /// below check the entry those tools actually write rather than one
-    /// hand-assembled here.
+    /// Hash `password` the way `passwd` and `chpasswd` now do -- the method
+    /// new passwords get, yescrypt -- so the tests below check the entry those
+    /// tools actually write rather than one hand-assembled here.
     fn shadow_entry_for(password: &str) -> String {
         let mut sb = posix::crypt::buf();
         let setting =
-            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"0123456789abcdef", &mut sb)
+            posix::crypt::setting_into(userdb::PASSWORD_METHOD, b"0123456789abcdef", &mut sb)
                 .expect("setting");
         let mut hb = posix::crypt::buf();
         posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hb)
@@ -1595,9 +1616,18 @@ mod tests {
 
     #[test]
     fn test_check_password_locked() {
-        assert_eq!(check_password("anything", "!"), PasswordCheck::Locked);
-        assert_eq!(check_password("anything", "!!"), PasswordCheck::Locked);
-        assert_eq!(check_password("anything", "*"), PasswordCheck::Locked);
+        assert_eq!(
+            check_password("anything", "!", &authlib::CostProfile::default()),
+            PasswordCheck::Locked
+        );
+        assert_eq!(
+            check_password("anything", "!!", &authlib::CostProfile::default()),
+            PasswordCheck::Locked
+        );
+        assert_eq!(
+            check_password("anything", "*", &authlib::CostProfile::default()),
+            PasswordCheck::Locked
+        );
     }
 
     /// A `!`-prefixed hash is the shadow-suite's way of locking an account
@@ -1607,24 +1637,39 @@ mod tests {
     fn test_check_password_locked_hash_does_not_authenticate() {
         let locked = format!("!{}", shadow_entry_for("correct horse"));
         assert_eq!(
-            check_password("correct horse", &locked),
+            check_password("correct horse", &locked, &authlib::CostProfile::default()),
             PasswordCheck::Locked
         );
     }
 
     #[test]
     fn test_check_password_empty_hash() {
-        assert_eq!(check_password("", ""), PasswordCheck::Accepted);
-        assert_eq!(check_password("anything", ""), PasswordCheck::Rejected);
+        assert_eq!(
+            check_password("", "", &authlib::CostProfile::default()),
+            PasswordCheck::Accepted
+        );
+        assert_eq!(
+            check_password("anything", "", &authlib::CostProfile::default()),
+            PasswordCheck::Rejected
+        );
     }
 
     /// There is no cleartext fallback: an entry that is not a hash cannot
     /// authenticate anything, least of all itself.
     #[test]
     fn test_check_password_has_no_cleartext_path() {
-        assert_eq!(check_password("secret", "secret"), PasswordCheck::Unusable);
-        assert_eq!(check_password("wrong", "secret"), PasswordCheck::Unusable);
-        assert_eq!(check_password("x", "x"), PasswordCheck::Unusable);
+        assert_eq!(
+            check_password("secret", "secret", &authlib::CostProfile::default()),
+            PasswordCheck::Unusable
+        );
+        assert_eq!(
+            check_password("wrong", "secret", &authlib::CostProfile::default()),
+            PasswordCheck::Unusable
+        );
+        assert_eq!(
+            check_password("x", "x", &authlib::CostProfile::default()),
+            PasswordCheck::Unusable
+        );
     }
 
     /// The regression for `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`:
@@ -1634,16 +1679,19 @@ mod tests {
     #[test]
     fn test_a_password_set_by_passwd_is_accepted_by_login() {
         let stored = shadow_entry_for("correct horse");
-        assert!(stored.starts_with("$6$"));
+        assert!(stored.starts_with("$y$j9T$"), "{stored}");
         assert_eq!(
-            check_password("correct horse", &stored),
+            check_password("correct horse", &stored, &authlib::CostProfile::default()),
             PasswordCheck::Accepted
         );
         assert_eq!(
-            check_password("correct hors", &stored),
+            check_password("correct hors", &stored, &authlib::CostProfile::default()),
             PasswordCheck::Rejected
         );
-        assert_eq!(check_password("", &stored), PasswordCheck::Rejected);
+        assert_eq!(
+            check_password("", &stored, &authlib::CostProfile::default()),
+            PasswordCheck::Rejected
+        );
     }
 
     /// The two formats this tree wrote before it called `crypt`: `passwd`'s
@@ -1657,7 +1705,7 @@ mod tests {
         for prefix in ["$sha256$", "$5$", "$6$", "$1$"] {
             let stored = format!("{prefix}0123456789abcdef${digest}");
             assert_eq!(
-                check_password("correct horse", &stored),
+                check_password("correct horse", &stored, &authlib::CostProfile::default()),
                 PasswordCheck::Unusable,
                 "{stored}"
             );
@@ -1677,11 +1725,11 @@ mod tests {
     fn test_login_verifies_against_a_published_vector() {
         const VECTOR: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
         assert_eq!(
-            check_password("Hello world!", VECTOR),
+            check_password("Hello world!", VECTOR, &authlib::CostProfile::default()),
             PasswordCheck::Accepted
         );
         assert_eq!(
-            check_password("Hello world", VECTOR),
+            check_password("Hello world", VECTOR, &authlib::CostProfile::default()),
             PasswordCheck::Rejected
         );
     }
@@ -2006,6 +2054,12 @@ mod tests {
         authlib::Authenticator::with_stores(missing)
     }
 
+    /// A clock that never moves, for a test about a delay: any fixed value,
+    /// since only differences matter, and there are none.
+    fn frozen_clock() -> u64 {
+        1_700_000_000
+    }
+
     /// A database path that does not exist, for the tests about *refusal*:
     /// every one of them is about a user who is not there.
     fn missing_db() -> PathBuf {
@@ -2018,7 +2072,13 @@ mod tests {
     /// hammering it.
     #[test]
     fn a_delayed_user_is_refused_at_the_console_and_not_counted_again() {
-        let mut auth = scratch_authenticator();
+        // A frozen clock: the first delay is one second, and between the last
+        // failure noted here and the check `do_login` makes after spending a
+        // password's cost, the real clock could cross into the next second --
+        // a few times in a hundred once that cost was yescrypt's
+        // (design-decisions §1070), when the delay has already run out and
+        // the answer is `Login incorrect`.
+        let mut auth = scratch_authenticator().with_clock(frozen_clock);
         // Spend the free attempts, then one more to start the delay.
         let mut expected = 0;
         while auth.rate_limited("someone").is_none() {
@@ -2108,8 +2168,14 @@ mod tests {
             let stored = posix::crypt::hash_into(b"test", setting.as_bytes(), &mut hb)
                 .unwrap_or_else(|| panic!("{method:?} hash"));
             assert!(stored.starts_with(method.prefix()), "{stored}");
-            assert_eq!(check_password("test", stored), PasswordCheck::Accepted);
-            assert_eq!(check_password("wrong", stored), PasswordCheck::Rejected);
+            assert_eq!(
+                check_password("test", stored, &authlib::CostProfile::default()),
+                PasswordCheck::Accepted
+            );
+            assert_eq!(
+                check_password("wrong", stored, &authlib::CostProfile::default()),
+                PasswordCheck::Rejected
+            );
         }
     }
 
@@ -2128,8 +2194,14 @@ mod tests {
         let default_rounds =
             posix::crypt::hash_into(b"test", b"$6$mysalt$", &mut db).expect("hash");
         assert_ne!(stored, default_rounds);
-        assert_eq!(check_password("test", stored), PasswordCheck::Accepted);
-        assert_eq!(check_password("wrong", stored), PasswordCheck::Rejected);
+        assert_eq!(
+            check_password("test", stored, &authlib::CostProfile::default()),
+            PasswordCheck::Accepted
+        );
+        assert_eq!(
+            check_password("wrong", stored, &authlib::CostProfile::default()),
+            PasswordCheck::Rejected
+        );
     }
 
     // ---- A console login, end to end ----

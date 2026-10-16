@@ -113,6 +113,11 @@ UNGATED: dict[str, str] = {
         "reports filesystem-wide capacity; the path only selects which mount, "
         "and nothing about the path itself is read or written"
     ),
+    "statvfs_resolved": (
+        "`statvfs` for `fstatfs` through a handle (fs::handle::HandleFile), on "
+        "the host path the open resolved and checked: filesystem-wide capacity, "
+        "the path only selecting which mount"
+    ),
     "trim": (
         "discards the filesystem's free blocks (the kernel side of fstrim(8)); "
         "the path only selects which mount, and free space belongs to no file"
@@ -122,6 +127,17 @@ UNGATED: dict[str, str] = {
         "that ACLs on individual paths have no opinion about"
     ),
     "sync_path": "flushes a filesystem's own cache; takes no per-file decision",
+    # --- an open file's binding, asked of a file the gate let open ---
+    "open_binding": (
+        "what an open of an already-resolved path is bound to (the generation "
+        "of the address space a /proc/<pid>/mem open reads), taken at the open "
+        "the gate checked; nothing about the file is read or written"
+    ),
+    "binding_current": (
+        "whether an open handle's binding (`open_binding`) still holds, asked "
+        "of a file already opened through the gate; nothing about the file is "
+        "read or written"
+    ),
     # --- callers that delegate to a gated sibling ---
     # (none: delegating methods do not call resolve_mount, so they never reach
     # rule 3.  Kept as a heading so the next person knows the category exists.)

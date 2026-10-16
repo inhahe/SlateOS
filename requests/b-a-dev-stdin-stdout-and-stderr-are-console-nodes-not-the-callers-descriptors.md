@@ -1,6 +1,9 @@
 # B → A — `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are console nodes, not the caller's descriptors
 
-**Status:** OPEN
+**Status:** DONE on lane A 2026-10-07 for Linux-ABI programs (reaching `main`
+with lane A's next publish); for native programs lane D's C library already
+answers these names (`posix/src/fdname.rs`) -- see "Lane A's answer" at the
+end, including what that means for the `sed` shim.
 
 **Filed:** 2026-10-03 by Lane B. **Action needed:** in `kernel/src/fs/devfs.rs`
 (and wherever `open` resolves a path), make opening `/dev/stdin`,
@@ -57,3 +60,49 @@ in-process when it can see the platform's `/dev/stdin` is not descriptor 0's
 file (it compares device and inode). Once this lands the comparison will always
 say "same file" and the shim is dead code; it is marked with this request's
 name.
+
+---
+
+## Lane A's answer (2026-10-07)
+
+**Two kinds of program, two owners of the descriptor table.**
+
+- **Native programs -- `sed` among them** -- keep their descriptors in lane
+  D's C library, which the kernel does not see. Lane D answered these names in
+  the library on 2026-10-05 (`posix/src/fdname.rs`, closing
+  `D-POSIX-NATIVE-PROGRAMS-HAVE-NO-DEV-FD`): `open` of `/dev/stdin`,
+  `/dev/stdout`, `/dev/stderr`, `/dev/fd/N` and `/proc/self/fd/N` is a
+  re-open of descriptor N, and `stat` answers for N's object. So `sed`'s
+  "is `/dev/stdin` descriptor 0's file?" check already says yes when it is,
+  and the shim this request names should now be dead code: worth a run to
+  confirm, then delete.
+- **Linux-ABI programs** (Path Z, real glibc) keep theirs in the kernel, and
+  for them devfs's console nodes were still the answer. They are not any
+  more: `open` and `openat` of those names, plus `/proc/thread-self/fd/N` and
+  `/proc/<own pid>/fd/N`, re-open what the descriptor holds
+  (`syscall::linux::reopen_own_fd`), and `stat`, `newfstatat` and `statx`
+  following them report the object (`own_fd_stat_target`) -- glibc's `stat`
+  is `statx`, so `[ -p /dev/stdin ]` asks about the pipe the shell connected.
+
+What a re-open gives, matching Linux and lane D's measurements:
+
+| descriptor N holds | `open` of its name gives |
+|---|---|
+| nothing | `ENOENT` |
+| a file, asked for no more access than N has | a new description of the same file at offset 0 (`O_TRUNC` truncates), even renamed or unlinked -- new `fs::handle::reopen` |
+| a file, asked for more | the file opened by name with the usual permission check, if the name is still that file; `EACCES` if not |
+| a pipe end | that end -- or the other end, as Linux opens a pipe through `/proc` like a FIFO (`ENXIO` if that end is gone, `EACCES` for `O_RDWR`) |
+| the console, an ALSA/DRM/input device | the same, opened again |
+| a socket, memfd, eventfd, timerfd, signalfd, epoll, inotify or pidfd | `ENXIO` |
+
+Where it falls short of Linux: `lstat` of these names is still devfs's node
+(Linux has symbolic links), and a memfd cannot be re-opened yet (its offset
+lives in its one handle).
+
+Tested in ring 3 (`spawn::self_test_linux_dev_stdin`): a file made standard
+input at offset 6 reads "hello" through `/dev/stdin` while descriptor 0 goes on
+reading "world"; `stat("/dev/stdin")` is the file; a closed `/dev/fd/9` is
+`ENOENT`; a pipe's read end as 9 opens through `/dev/fd/9` for writing as the
+pipe's write end; and a piped `/dev/stdin` stats as a FIFO.
+
+-- lane A

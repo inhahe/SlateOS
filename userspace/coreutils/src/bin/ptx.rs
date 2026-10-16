@@ -43,7 +43,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote, quotef};
-use coreutils::stdfd::{self, Stream};
+use coreutils::stdfd::{self, Reopen, Stream};
 use coreutils::xnum::{self, Status};
 use ere::{Regex, Search};
 use std::cmp::Ordering;
@@ -1323,12 +1323,6 @@ fn run(o: Options, sink: &mut dyn Write) -> Result<(), Fatal> {
     ptx.generate_all_output(sink)
 }
 
-/// Where the index goes: standard output, or `-G`'s OUTPUT file in its place.
-enum Sink {
-    Stdout(Stream),
-    File(io::BufWriter<std::fs::File>),
-}
-
 fn main() -> ExitCode {
     stdfd::close_stderr(real_main(), 1)
 }
@@ -1354,43 +1348,31 @@ fn real_main() -> ExitCode {
     };
 
     // `freopen (OUTPUT, "w", stdout)`, which upstream does before it reads
-    // anything -- and before it refuses a third operand.
-    let mut sink = match &options.output {
-        None => Sink::Stdout(Stream::stdout()),
-        Some(name) => match std::fs::File::create(name) {
-            Ok(f) => Sink::File(io::BufWriter::new(f)),
-            Err(why) => {
-                diag!("ptx: {}: {}", quotef(&os_bytes(name)), strerror(&why));
-                return ExitCode::FAILURE;
-            }
-        },
-    };
-    if let Some(extra) = &options.extra {
-        PTX.report(&PTX.usage_referring(format!("extra operand {}", quote(&os_bytes(extra)))));
+    // anything -- and before it refuses a third operand. The file becomes
+    // descriptor 1, where standard output is written, and goes through the
+    // same stream and the same `close_stdout`; a failure is reported with the
+    // `errno` glibc's `freopen` leaves -- `ptx -G f /nonexistent/x >&-` is
+    // `Bad file descriptor` (see `stdfd::freopen`).
+    if let Some(name) = &options.output
+        && let Err(why) = stdfd::freopen(name, Reopen::Write, 1)
+    {
+        diag!("ptx: {}: {}", quotef(&os_bytes(name)), strerror(&why));
         return ExitCode::FAILURE;
     }
+    let mut out = Stream::stdout();
+    if let Some(extra) = &options.extra {
+        PTX.report(&PTX.usage_referring(format!("extra operand {}", quote(&os_bytes(extra)))));
+        return stdfd::close_stdout("ptx", out, ExitCode::FAILURE);
+    }
 
-    let result = match &mut sink {
-        Sink::Stdout(out) => run(options, out),
-        Sink::File(out) => run(options, out),
-    };
-    let status = match result {
+    let status = match run(options, &mut out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Fatal(message)) => {
             diag!("ptx: {message}");
             ExitCode::FAILURE
         }
     };
-    match sink {
-        Sink::Stdout(out) => stdfd::close_stdout("ptx", out, status),
-        Sink::File(mut out) => match out.flush() {
-            Ok(()) => status,
-            Err(why) => {
-                diag!("ptx: write error: {}", strerror(&why));
-                ExitCode::FAILURE
-            }
-        },
-    }
+    stdfd::close_stdout("ptx", out, status)
 }
 
 #[cfg(test)]

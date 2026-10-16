@@ -352,7 +352,7 @@ FAR=
 # else in the suite can tell a `mv` that repairs that stripping from one that
 # merely asked for the bit and did not check.
 UMASK=
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); FAR=''; UMASK=''; }
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); FAR=''; UMASK=''; CLOSING=''; }
 reset_knobs
 
 # A fixture whose every path carries a pinned time, for the `STAMPS` cases.
@@ -416,7 +416,14 @@ run_one() {
     [ -z "$UMASK" ] || umask "$UMASK"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
-    diff_run timeout -k 2 30 env "${ENVV[@]}" mv "${args[@]}" >"$out" 2>"$err"
+    if [ -n "$CLOSING" ]; then
+      # Standard input or output closed for `mv` alone, after the captures;
+      # not `2>&-`, since `diff_run` duplicates standard error.
+      eval "diff_run timeout -k 2 30 env \"\${ENVV[@]}\" mv \"\${args[@]}\" \
+        >\"\$out\" 2>\"\$err\" $CLOSING"
+    else
+      diff_run timeout -k 2 30 env "${ENVV[@]}" mv "${args[@]}" >"$out" 2>"$err"
+    fi
   ) <"$answers"
   echo $? >"$rcf"
   return 0
@@ -467,6 +474,7 @@ compare() {
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   [ -z "$FAR" ] || label="$label   [far: $FAR]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
+  [ -z "$CLOSING" ] || label="$label   [$CLOSING]"
   [ -z "$UMASK" ] || label="$label   [umask: $UMASK]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$o_far" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$g_far" "$@"
@@ -1528,6 +1536,19 @@ run_case -b file.txt ro/dst
 # whatever `-b` says.
 TREE='mktree; printf old > dst'
 run_case -b file.txt dst dst2
+
+# =============================================================================
+# 18b. Standard input or output closed
+# =============================================================================
+# Upstream's `copy.c` (which `mv` uses when a rename cannot do) opens through
+# `fcntl--.h`, so nothing it opens lands on descriptor 0, 1 or 2; ours opens
+# plainly. They agree because `-v`'s line is written before the files are
+# opened, so none of ours holds descriptor 1 when standard output is written.
+CLOSING='>&-'; run_case file.txt moved.txt
+CLOSING='>&-'; run_case -v file.txt moved.txt
+CLOSING='>&-'; run_case -v tree dir
+CLOSING='<&-'; run_case -v file.txt moved.txt
+CLOSING='<&- >&-'; run_case -v file.txt tree/a.txt dir
 
 # =============================================================================
 # 19. --help and --version

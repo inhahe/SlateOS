@@ -1,6 +1,6 @@
 ### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-09 (the leaf-claim check reads zero), awaiting a boot on main.
 
 Boot `eb764a380`, with the reports deduped by site pair:
 
@@ -60,3 +60,49 @@ per-acquire tracking on paths dd-70 specifically chose the cheap type for --
 on measurements that, as recorded above, were never taken for this type until
 today. 489 instances, a cost/correctness trade, and a decision that is
 already written down: that is `open-questions.md`, not a unilateral sweep.
+
+**2026-10-02:** the pairs in `startmenu` -> `appregistry`, `columnview`,
+`filetype`, `openwith` and `findex` are gone with those modules
+(design-decisions 1528), so the next boot's count is the one to read.
+
+**2026-10-02, later (on lane-a-wip):** rq39's leaf check named nine site pairs
+on four outer locks, and all four are dealt with, two ways. Where the nesting
+was needless it is gone and the lock stays a cheap true leaf: `bookmarks` and
+`templates` kept their one-time-init flag as a lock of its own, held across the
+store it filled; it is an `AtomicBool` read and set under the store's lock now.
+`ipc::completion`'s `CP_TABLE` -- `try_lock`ed from the timer interrupt by
+`try_notify`, so a conversion would have had to settle lockdep's view of
+interrupt-context use first -- no longer wires an io_ring (`RING_TABLE`, then
+`THRDOWN`) while held: `register` and `unregister` do that outside it, under a
+new tracked `CP_WIRING` that serialises the two. Where the nesting is the design
+the lock is converted: `ipc::unix_socket`'s `TABLE` takes `stream_socket`'s
+`PAIRS` under it, is never taken in interrupt context and is no hot path, so it
+is a `crate::sync::Mutex` (`UNIX_SOCKETS`) that lockdep now watches. rq39 hung
+before the battery's end, so the count after these is the next full boot's.
+From the older list, three more the same day: `clipboard`'s `CURRENT` and
+`HISTORY` are one lock (`CLIPBOARD`); `dragdrop` copies its drop zones out
+before taking the session's lock; `cgroupfs`' `STATE`, held across the
+kernel's cgroup calls by design, is converted (`CGROUPFS`).
+
+**2026-10-09 (lane-a-wip): the count is zero.** The full boot of that day
+reported 476 acquisitions on 43 site pairs, every one of them under one of
+fourteen outer locks. All fourteen are converted to `crate::sync::Mutex`,
+which lockdep watches -- design-decisions 975's answer for a lock that has
+another taken under it -- and named for its diagnostics:
+
+| outer lock | what is taken under it | taken |
+|---|---|---|
+| `STATE` of `devhotplug`, `udriver`, `devpower`, `vmguest`, `initproc`, `reslimit`, `drvmon`, `svcstart`, `syshealth` | the event log's `EVENT_RING` (an event logged while the state is held); `svcstart` also `servicemgr`'s | when a device, driver, service or limit changes -- no hot path |
+| `ipc::fifo`'s `FIFOS` | the pipe table's | when a FIFO is opened or forgotten |
+| `proc::ptrace`'s `FPU` | `TRACEES`, by design -- the order a stop's way out takes them in | a debugger's register calls |
+| `cnetwork`'s `TABLE` | the bridge's and the veth table's | when a container network changes |
+| `termsession`'s `TABLE` | the lock a new session's set-up takes | session calls |
+| `audio_mixer`'s `MIX_SCRATCH` | each stream's ring (`MIX_SCRATCH` -> ring, documented, never the reverse) | once per mixing period |
+
+None is a hot path, so none needed the "revert by measurement" half of 975:
+the tracking costs tens of nanoseconds on calls that come at most once per
+mixing period. The next boot (lane-a-wip, one CPU, every self-test on):
+`[sync] leaf-claim check: no lock was acquired inside a PreemptSpinMutex`,
+lockdep's interrupt-context check clean (`0 violation(s), 0 suspect(s)`), no
+ordering violation, BOOT_OK. What stays to be watched is the check itself:
+a new nesting under a `PreemptSpinMutex` is named on the next boot.

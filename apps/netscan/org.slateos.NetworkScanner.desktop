@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Network Scanner
+Comment=Find the devices on a network
+Icon=network-workgroup
+Exec=netscan
+Categories=Network;Monitor;
+Keywords=scan;ports;devices;

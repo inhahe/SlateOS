@@ -17,7 +17,6 @@
 //! Integration:
 //!   → updatemgr (update lifecycle)
 //!   → installer (initial package seeding)
-//!   → appregistry (installed app metadata)
 //! ```
 
 #![allow(dead_code)]

@@ -147,6 +147,7 @@ pub fn list_devices() -> Vec<SwapDevice> {
         .map(|(i, info)| {
             let swap_type = match info.device_type {
                 "memory" => SwapType::Zram,
+                "file" => SwapType::File,
                 // "disk" and any future backend → Partition (closest match for
                 // a block-backed swap area).
                 _ => SwapType::Partition,

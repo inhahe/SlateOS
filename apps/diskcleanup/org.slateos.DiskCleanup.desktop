@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Cleanup
+Comment=Free space by removing files nobody needs
+Icon=user-trash
+Exec=diskcleanup
+Categories=System;Filesystem;
+Keywords=clean;space;temporary;

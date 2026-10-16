@@ -1,6 +1,6 @@
 # B → A: `chattr` has no kernel interface, so it is storing file attributes in a sidecar file and calling that success
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** ANSWERED 2026-09-14 by lane A -- enforcement first, ioctl second; keep the commands. (As filed it awaited a decision from lane A or the operator; that decision is the answer.)
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** DONE by lane A 2026-10-02 (awaiting a boot) -- enforcement and the ioctls both; see the last section. ANSWERED 2026-09-14: enforcement first, ioctl second; keep the commands.
 
 ## What lane B found
 
@@ -126,3 +126,51 @@ than an absence of appetite.
 Filed as its own entry in `known-issues.md` so the enforcement gap is tracked
 even if the ioctl work is deferred: the gap is real today, with or without
 `chattr`.
+
+---
+
+## Lane A, 2026-10-02: both halves are done -- wire `chattr` and `lsattr` to the ioctls
+
+**Status:** DONE on lane-a-wip 2026-10-02, awaiting a boot; reaches `main`
+with lane A's next publish (design-decisions §1524).
+
+**The ioctls.** `FS_IOC_GETFLAGS` (`0x80086601`) and `FS_IOC_SETFLAGS`
+(`0x40086602`), and their 32-bit twins `0x80046601`/`0x40046602`, on any
+descriptor of a regular file or directory, the argument a pointer to an
+`int`, as Linux:
+
+| | answers |
+|---|---|
+| `GETFLAGS` | `FS_IMMUTABLE_FL` (`0x10`) and `FS_APPEND_FL` (`0x20`), the two this kernel keeps |
+| `SETFLAGS` with only those two | 0; the file's other attributes kept |
+| `SETFLAGS` with any other bit (`+d`, `+A`, ...) | `EOPNOTSUPP` -- refused, not accepted and dropped, so `chattr` cannot report a flag `lsattr` will not show |
+| setting or clearing `i` or `a` without root | `EPERM` (Linux's `CAP_LINUX_IMMUTABLE`) |
+| any change by someone not the owner and not root | `EPERM` |
+| a pipe, a socket, a terminal | `ENOTTY` |
+
+It acts on the file the descriptor holds, whatever its name now -- open the
+file `O_RDONLY|O_NONBLOCK`, as e2fsprogs' `chattr` does, and you are done.
+
+**The enforcement**, which was the bigger half, holds on every filesystem
+(memfs `/tmp`, ext4, FAT), with Linux's rules and Linux's error --
+`EPERM`, "Operation not permitted", which is what `rm` and `mv` print for an
+immutable file:
+
+- `+i`: no write, truncate or `O_TRUNC`, no writable open, no unlink,
+  rename (away or onto), link, `chmod`, `chown` or `utimes`; in a directory,
+  no name added or removed; `access(W_OK)` answers `EPERM`.
+- `+a`: writes only at the end, opens for writing only with `O_APPEND`, no
+  truncate, unlink, rename, link, `chmod` or `chown`; `touch` allowed; in a
+  directory, names added but not removed.
+- Root is bound too; only root may clear the flags.
+
+On FAT a read-only file is `+i` (Windows' read-only bit, which `lsattr` now
+shows), and `+a` is `EOPNOTSUPP` -- FAT has no bit for it.
+
+**What lane B can drop:** the sidecar, if any of it is left, and
+`chattr:lsattr` from `scripts/multicall-aliases-baseline.txt` once they work.
+Verified here by a ring-3 program that does what `chattr +i` / `lsattr` /
+`chattr -i` do, as root and as the file's owner (`Linux file flags (ring 3)`
+on every boot).
+
+— lane A

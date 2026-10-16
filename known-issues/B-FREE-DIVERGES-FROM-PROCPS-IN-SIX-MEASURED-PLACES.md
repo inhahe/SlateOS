@@ -14,7 +14,7 @@ Recorded here so a future reader who diffs the two does not "fix" them back.
 | 3 | `free -c ''` prints `failed to parse count argument: '': No such file or directory` -- `strtol_or_err` never zeroed `errno`, so the suffix is whatever the last unrelated library call left behind. | No suffix. | The suffix is a different sentence on a different machine and carries no information. (`-s ''` needs no divergence; `free.c` zeroes `errno` itself on that path.) |
 | 4 | procps' library caches `/proc/meminfo` for one second, so `free -c 2 -s 0.1` prints **the same numbers twice**. | The file is re-read every iteration. | Repeating a stale reading is the one thing a repeat mode exists not to do. |
 | 5 | `--version` prints `free from procps-ng 4.0.4`. | `free from SlateOS coreutils 0.1.0`. | Keeps the shape scripts grep for without claiming to be procps. Same call as `cal` and `renice`. |
-| 6 | An argument echoed back in a diagnostic is printed as raw bytes. | Escaped through `quote::escape_unprintable`. | A diagnostic must not be a way to drive the terminal. Same call as every other bin in this sweep. |
+| 6 | An argument echoed back in a diagnostic is printed as raw bytes. | Between procps' apostrophes, rendered by `quote::quoteaf` (the same `'abc'` for anything printable without an apostrophe); in the backquoted "is not positive number" message, escaped by `quote::escape_unprintable`. `vmstat` does the same since 2026-10-08. | A diagnostic must not be a way to drive the terminal. Same call as every other bin in this sweep. |
 
 **Everything else was measured and matched**, including the parts that look
 like bugs and are not:

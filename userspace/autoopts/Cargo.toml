@@ -22,6 +22,9 @@ shellcmd = { path = "../shellcmd" }
 # A file name or a typed word in a diagnostic: upstream's bytes where they are
 # printable, octal escapes where not (design-decisions.md §1033).
 quoting = { path = "../quoting" }
+# C's strtoul at bases 8, 10 and 16, for the numbers in option values and the
+# escapes of quoted strings -- one parse for the tree.
+cstrtol = { path = "../cstrtol" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

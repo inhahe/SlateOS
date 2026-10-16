@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Minesweeper
+Comment=Clear the field without stepping on a mine
+Icon=applications-games
+Exec=minesweeper
+Categories=Game;LogicGame;
+Keywords=mines;puzzle;

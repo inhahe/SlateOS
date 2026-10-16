@@ -1,0 +1,35 @@
+# cea608_rollup.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 367033333 1568233333 1
+text 0000 - "line one"
+cue 1568233333 2902900000 1
+text 0000 - "line one"
+break
+text 0000 - "line two"
+cue 2902900000 4270933333 1
+text 0000 - "line two"
+break
+text 0000 - "line three"
+cue 4270933333 5705700000 1
+text 0000 - "line two"
+break
+text 0000 - "line three"
+break
+text 0000 - "now three rows"
+cue 5705700000 6973633333 1
+text 0000 - "line two"
+break
+text 0000 - "line three"
+break
+text 0000 - "now three rows"
+break
+text 0000 - "and four"
+cue 6973633333 8341666666 1
+text 0000 - "line three"
+break
+text 0000 - "now three rows"
+break
+text 0000 - "and four"
+break
+text 0000 - "line two rolls off"
+cue 9142466666 10410400000 1
+text 0000 - "after the erase"

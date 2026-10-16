@@ -1,27 +1,28 @@
 //! File sealing — immutability contracts for shared files.
 //!
-//! **NOT ENFORCED YET. A seal is recorded and nothing checks it.** Every
-//! `sealing::` reference outside this file is `procfs` (`stats`,
-//! `list_sealed`) or `kshell` (`add_seals`, `get_seals`); `fs/vfs.rs` and
-//! `fs/handle.rs` contain no reference to seals at all. So a seal can be
-//! applied, `/proc/sealing` will list the file as sealed, and a write to
-//! it succeeds. An unenforced *irrevocable* restriction is worse than no
-//! restriction, because the word invites reliance -- which is why this
-//! paragraph is first rather than a footnote.
+//! **Enforced since 2026-10-02** (design-decisions §1526). The VFS asks
+//! these rules on every change of a file's contents or size -- a write, an
+//! append, a whole-file write, a truncate, an allocation -- and on every
+//! `chmod`, under the filesystem's lock, on the file by its identity, so a
+//! seal holds whichever name or descriptor the change comes through. A
+//! refusal is `NotPermitted` (`EPERM`), as Linux refuses a sealed memfd's
+//! write. Every write asks [`any_sealed`] first, one relaxed load, and looks
+//! no further on a system that has sealed nothing.
 //!
-//! Note also what `stats()`'s `denied` count is worth. It IS incremented
-//! -- `DENIED_OPS.fetch_add` in `check_seals` -- but `check_seals` has one
-//! caller outside this module, `kshell`, which is a command a human types.
-//! No write or truncate path calls it. So the count reads 0 on any boot
-//! where nobody ran that command, and in `/proc` that reads as *nobody has
-//! tried* rather than *nothing in the write path asks*.
+//! Until then a seal was recorded and nothing checked it: a sealed file could
+//! be written, `/proc/sealing` listed it as sealed, and the `denied` count
+//! moved only for the kshell command that asks [`check_seals`] by hand.
 //!
-//! (An earlier version of this note said the count "can only ever be 0".
-//! That was false: one kshell command moves it. The counter is reachable,
-//! just not from anything that writes a file.)
+//! **Who may seal:** whoever holds the file open for writing -- Linux's rule
+//! for `F_ADD_SEALS` (`memfd_add_seals` refuses a descriptor without
+//! `FMODE_WRITE`). The native door is `SYS_FS_ADD_SEALS` /
+//! `SYS_FS_GET_SEALS` (1124, 1125), on a handle, in Linux's `F_SEAL_*` bits.
+//! The Linux `fcntl(F_ADD_SEALS)` stays a memfd's alone (`ipc::memfd`), as on
+//! Linux, where a regular file answers `EINVAL`.
 //!
-//! Enforcement belongs in the VFS write and truncate paths and needs a
-//! capability story; tracked in `known-issues.md`.
+//! **Not covered:** a writable shared mapping, which this kernel does not
+//! make yet (`mmap` answers `ENOSYS`); when it does, a `WRITE` seal must
+//! refuse one, as Linux's does.
 //!
 //! The design, which is what the rest of this module implements:
 //! file sealing (inspired by Linux's `memfd_seal`) is a mechanism to
@@ -60,7 +61,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
@@ -213,6 +214,96 @@ struct SealEntry {
 static SEAL_TABLE: PreemptSpinMutex<Vec<SealEntry>> =
     PreemptSpinMutex::named(Vec::new(), b"SEAL_TABLE");
 
+/// How many entries [`SEAL_TABLE`] holds, kept beside it so a write can ask
+/// [`any_sealed`] without taking the lock. Written under the lock after each
+/// change; read relaxed, since a write that races a seal being added is
+/// ordered by the filesystem lock both take, not by this.
+static SEALED_FILES: AtomicUsize = AtomicUsize::new(0);
+
+/// Record the table's size for [`any_sealed`]. Called with the table locked,
+/// after every change.
+fn recount(table: &[SealEntry]) {
+    SEALED_FILES.store(table.len(), Ordering::Relaxed);
+}
+
+/// Whether any file is sealed: the write paths' fast path.
+pub fn any_sealed() -> bool {
+    SEALED_FILES.load(Ordering::Relaxed) != 0
+}
+
+/// The seals on the file with identity `id` -- or named `path`, where its
+/// filesystem gives no identity -- as [`get_seals`] finds them, for a caller
+/// that has the identity already: the VFS, under the filesystem's lock,
+/// which must not call back into the VFS as `get_seals` does.
+pub fn seals_of(id: Option<crate::fs::vfs::FileId>, path: &Path) -> SealFlags {
+    SEAL_TABLE
+        .lock()
+        .iter()
+        .find(|e| seal_entry_matches(e, path, id))
+        .map_or(SealFlags::NONE, |e| e.flags)
+}
+
+/// A rule's verdict, counted: `NotPermitted` (`EPERM`) when `refused`.
+fn verdict(refused: bool) -> KernelResult<()> {
+    CHECK_OPS.fetch_add(1, Ordering::Relaxed);
+    if refused {
+        DENIED_OPS.fetch_add(1, Ordering::Relaxed);
+        Err(KernelError::NotPermitted)
+    } else {
+        Ok(())
+    }
+}
+
+/// May `len` bytes be written at `offset` into a file of `size` bytes under
+/// `seals`? Not under `WRITE`; not past the end under `GROW` -- Linux's
+/// `shmem_write_begin`.
+///
+/// # Errors
+///
+/// `NotPermitted`.
+pub fn may_write(seals: SealFlags, offset: u64, len: u64, size: u64) -> KernelResult<()> {
+    if seals.is_empty() {
+        return Ok(());
+    }
+    let end = offset.saturating_add(len);
+    verdict(seals.contains(SealFlags::WRITE) || (seals.contains(SealFlags::GROW) && end > size))
+}
+
+/// May a file of `old` bytes become `new` bytes -- a truncate, a whole-file
+/// write, an allocation past its end? Not smaller under `SHRINK`, not larger
+/// under `GROW` (Linux's `shmem_setattr` and `shmem_fallocate`), and neither
+/// under `WRITE`, which here freezes the contents outright, as this module
+/// has always meant it: Linux lets a write-sealed memfd be truncated, and
+/// these seals are not memfd's.
+///
+/// # Errors
+///
+/// `NotPermitted`.
+pub fn may_resize(seals: SealFlags, old: u64, new: u64) -> KernelResult<()> {
+    if seals.is_empty() || new == old {
+        return Ok(());
+    }
+    let freezes = if new < old {
+        SealFlags::SHRINK
+    } else {
+        SealFlags::GROW
+    };
+    verdict(seals.contains(freezes) || seals.contains(SealFlags::WRITE))
+}
+
+/// May the mode `old` become `new`? Not with an execute bit changed under
+/// `EXEC` -- Linux's `F_SEAL_EXEC` (`shmem_setattr`).
+///
+/// # Errors
+///
+/// `NotPermitted`.
+pub fn may_change_mode(seals: SealFlags, old: u16, new: u16) -> KernelResult<()> {
+    if seals.is_empty() {
+        return Ok(());
+    }
+    verdict(seals.contains(SealFlags::EXEC) && (old ^ new) & 0o111 != 0)
+}
+
 /// Statistics.
 static SEAL_OPS: AtomicU64 = AtomicU64::new(0);
 static CHECK_OPS: AtomicU64 = AtomicU64::new(0);
@@ -226,27 +317,47 @@ static DENIED_OPS: AtomicU64 = AtomicU64::new(0);
 ///
 /// Seals are additive — new seals are OR'd with existing ones.
 /// Returns an error if SealSeal is already set (no more seals allowed).
+///
+/// # Errors
+///
+/// `InvalidArgument` for an empty path or no seals; `NotPermitted` once
+/// `SEAL` is set; `ResourceExhausted` past [`MAX_SEALED_FILES`].
 pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<SealFlags> {
     let path = path.as_ref();
+    // Derived before the lock: `Vfs::file_identity` calls into the VFS,
+    // and holding SEAL_TABLE across that inverts the kernel's
+    // filesystem-lock -> module-state order.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    add_seals_to(id, path, new_seals)
+}
+
+/// [`add_seals`] for a caller that has the file's identity already -- a
+/// descriptor's (`SYS_FS_ADD_SEALS`). `path` is what the seal is reported
+/// under, and its key where the filesystem gives no identity.
+///
+/// # Errors
+///
+/// As [`add_seals`].
+pub fn add_seals_to(
+    id: Option<crate::fs::vfs::FileId>,
+    path: &Path,
+    new_seals: SealFlags,
+) -> KernelResult<SealFlags> {
     if path.is_empty() || new_seals.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
 
     SEAL_OPS.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
-
-    // Derived before the lock: `Vfs::file_identity` calls into the VFS,
-    // and holding SEAL_TABLE across that inverts the kernel's
-    // filesystem-lock -> module-state order.
-    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let mut table = SEAL_TABLE.lock();
 
     // Check existing entry.
     if let Some(entry) = table.iter_mut().find(|e| seal_entry_matches(e, path, id)) {
-        // Cannot add seals if SEAL is already set.
+        // Cannot add seals if SEAL is already set: `EPERM`, as Linux's
+        // `memfd_add_seals` answers.
         if entry.flags.contains(SealFlags::SEAL) {
             DENIED_OPS.fetch_add(1, Ordering::Relaxed);
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::NotPermitted);
         }
         entry.flags = entry.flags.union(new_seals);
         return Ok(entry.flags);
@@ -264,6 +375,7 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
         flags,
         sealed_at_ns: now,
     });
+    recount(&table);
 
     Ok(flags)
 }
@@ -306,7 +418,7 @@ pub fn check_seals(path: impl AsRef<Path>, op: SealOp) -> KernelResult<()> {
 
     if denied {
         DENIED_OPS.fetch_add(1, Ordering::Relaxed);
-        Err(KernelError::PermissionDenied)
+        Err(KernelError::NotPermitted)
     } else {
         Ok(())
     }
@@ -355,9 +467,9 @@ pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
 /// what is dropped is exactly what a lookup of this file would have found --
 /// including a path-keyed seal placed on the name before the file existed.
 fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
-    SEAL_TABLE
-        .lock()
-        .retain(|e| !seal_entry_matches(e, path, id));
+    let mut table = SEAL_TABLE.lock();
+    table.retain(|e| !seal_entry_matches(e, path, id));
+    recount(&table);
 }
 
 /// Names moved: rewrite every stored name `rename` maps to a new one. For an
@@ -371,10 +483,8 @@ fn rename_names(rename: &super::perfile::NameMap<'_>) {
     }
 }
 
-/// Self-test support: a `GROW` seal. Seals are not enforced yet (see the
-/// module docs), so none restricts what the lifecycle rungs do; `GROW` is the
-/// one that would stay harmless once they are, since the rungs never extend a
-/// file after planting.
+/// Self-test support: a `GROW` seal -- the one seal that restricts nothing
+/// the lifecycle rungs do, since they never extend a file after planting.
 fn plant_for_test(path: &Path) -> KernelResult<()> {
     add_seals(path, SealFlags::GROW).map(|_| ())
 }
@@ -392,9 +502,9 @@ fn reports_for_test(name: &Path) -> bool {
 /// A filesystem was unmounted: its mount id is never reused, so no identity
 /// on it can match again, and its seals are only garbage.
 fn forget_filesystem(fs_id: u64) {
-    SEAL_TABLE
-        .lock()
-        .retain(|e| e.id.is_none_or(|id| id.fs_id != fs_id));
+    let mut table = SEAL_TABLE.lock();
+    table.retain(|e| e.id.is_none_or(|id| id.fs_id != fs_id));
+    recount(&table);
 }
 
 /// List all sealed files.
@@ -423,7 +533,9 @@ pub fn reset_stats() {
 
 /// Clear all seal entries (for testing).
 pub fn clear_all() {
-    SEAL_TABLE.lock().clear();
+    let mut table = SEAL_TABLE.lock();
+    table.clear();
+    recount(&table);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +648,66 @@ pub fn self_test() -> KernelResult<()> {
     test_flags_parse();
     test_remove_on_delete();
     test_non_utf8_path();
+    test_rules()?;
 
-    serial_println!("[sealing] Self-test passed (7 tests).");
+    serial_println!("[sealing] Self-test passed (8 tests).");
+    Ok(())
+}
+
+/// The rules the VFS asks ([`may_write`], [`may_resize`],
+/// [`may_change_mode`]), alone, each seal against each kind of change -- and
+/// `NotPermitted`, `EPERM`, for every refusal. The VFS applying them is
+/// `vfs::self_test_seal_rules`.
+fn test_rules() -> KernelResult<()> {
+    let (w, g, s, x) = (
+        SealFlags::WRITE,
+        SealFlags::GROW,
+        SealFlags::SHRINK,
+        SealFlags::EXEC,
+    );
+    let no = Err(KernelError::NotPermitted);
+    let yes = Ok(());
+    let cases: [(&str, KernelResult<()>, KernelResult<()>); 16] = [
+        (
+            "unsealed: a write past the end",
+            may_write(SealFlags::NONE, 8, 4, 10),
+            yes,
+        ),
+        ("WRITE: a write in the middle", may_write(w, 0, 1, 10), no),
+        ("GROW: a write inside", may_write(g, 2, 4, 10), yes),
+        (
+            "GROW: a write to the end exactly",
+            may_write(g, 6, 4, 10),
+            yes,
+        ),
+        ("GROW: a write past the end", may_write(g, 8, 4, 10), no),
+        ("SHRINK: a write past the end", may_write(s, 8, 4, 10), yes),
+        ("SHRINK: smaller", may_resize(s, 10, 4), no),
+        ("SHRINK: larger", may_resize(s, 10, 40), yes),
+        ("GROW: larger", may_resize(g, 10, 40), no),
+        ("GROW: smaller", may_resize(g, 10, 4), yes),
+        ("WRITE: smaller", may_resize(w, 10, 4), no),
+        ("WRITE: the same size", may_resize(w, 10, 10), yes),
+        ("EXEC: an execute bit", may_change_mode(x, 0o644, 0o744), no),
+        (
+            "EXEC: no execute bit changed",
+            may_change_mode(x, 0o644, 0o600),
+            yes,
+        ),
+        ("WRITE: a chmod", may_change_mode(w, 0o644, 0o755), yes),
+        (
+            "EXEC|WRITE: an execute bit cleared",
+            may_change_mode(x.union(w), 0o755, 0o644),
+            no,
+        ),
+    ];
+    for (what, got, want) in cases {
+        if got != want {
+            serial_println!("[sealing]   FAIL: {}: got {:?}, want {:?}", what, got, want);
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[sealing]   rules: 16 cases: ok");
     Ok(())
 }
 

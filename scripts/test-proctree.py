@@ -16,6 +16,7 @@ that passed, so the resolution is worth pinning down.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -94,6 +95,51 @@ def test_wsl_launcher_detection() -> None:
         not proctree._is_wsl_launcher(r"C:\Program Files\Git\usr\bin\bash.exe"),
     )
     check("missing path is not the shim", not proctree._is_wsl_launcher(r"Z:\nope\bash.exe"))
+
+
+def test_app_execution_alias_detection() -> None:
+    """A WindowsApps alias is recognised by its reparse tag, and a Tree says so.
+
+    The negatives run everywhere; the positives need an alias to point at,
+    which this project's host has (`python3` resolves to one first) and a
+    stock POSIX host does not -- a named skip there, not a quiet pass.
+    """
+    check("the running interpreter is not an alias",
+          not proctree.is_app_execution_alias(sys.executable))
+    check("a missing path is not an alias",
+          not proctree.is_app_execution_alias(
+              os.path.join(tempfile.gettempdir(), "no-such-alias-probe.exe")))
+    check("nor is something that is not a path at all",
+          not proctree.is_app_execution_alias(None))
+    check("a real interpreter draws no warning",
+          proctree.alias_warning([sys.executable, "-c", "pass"]) is None)
+    check("a shell string names no program, so draws none",
+          proctree.alias_warning("python3 -c pass") is None)
+    alias = os.path.expandvars(
+        r"%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe")
+    if not proctree.IS_WINDOWS or not os.path.lexists(alias):
+        print(f"  SKIP no App Execution Alias on this host to test against "
+              f"({alias})")
+        return
+    check("the WindowsApps python3 is recognised as an alias",
+          proctree.is_app_execution_alias(alias))
+    warning = proctree.alias_warning([alias, "--version"]) or ""
+    check("its warning names the alias and what it costs",
+          "App Execution Alias" in warning and "outside the Job Object" in warning,
+          warning)
+    # The Tree itself, end to end: the warning reaches the caller's `warn`.
+    # `--version` so the launch is brief; bounded all the same, since what an
+    # alias starts is up to whatever package owns it.
+    heard: list[str] = []
+    with proctree.Tree([alias, "--version"], warn=heard.append,
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL) as tree:
+        try:
+            tree.proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            tree.kill()
+    check("a Tree started through it warns its caller",
+          any("App Execution Alias" in line for line in heard), f"{heard}")
 
 
 def test_shebang_detection() -> None:
@@ -205,6 +251,7 @@ def main() -> int:
         test_bare_shell_name_is_made_absolute,
         test_explicit_interpreter_path_is_respected,
         test_wsl_launcher_detection,
+        test_app_execution_alias_detection,
         test_shebang_detection,
         test_shell_is_usable,
         test_tree_runs_a_script_end_to_end,

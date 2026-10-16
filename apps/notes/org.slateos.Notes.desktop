@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Notes
+Comment=Write notes and link them into a wiki
+Icon=accessories-text-editor
+Exec=notes
+Categories=Office;
+Keywords=notes;wiki;

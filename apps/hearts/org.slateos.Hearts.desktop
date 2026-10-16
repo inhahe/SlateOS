@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hearts
+Comment=The Hearts card game against three computer players
+Icon=applications-games
+Exec=hearts
+Categories=Game;CardGame;
+Keywords=cards;

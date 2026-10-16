@@ -98,6 +98,11 @@ pub(crate) struct Yuv<T> {
     pub(crate) primaries: u16,
     pub(crate) transfer: u16,
     pub(crate) matrix: u16,
+    /// The container's ICC profile is the picture's colour, rather than its
+    /// code points (as Chrome takes it): not applied, and no HDR.
+    pub(crate) icc: bool,
+    /// The `clli` content light level, MaxCLL and MaxPALL in cd/m2.
+    pub(crate) light: Option<(u16, u16)>,
     /// Luma, then the two chroma planes (none for 4:0:0).
     pub(crate) planes: [Option<Plane<T>>; 3],
     pub(crate) alpha: Option<Plane<T>>,
@@ -145,6 +150,8 @@ impl<T: Sample> Yuv<T> {
             primaries: self.primaries,
             transfer: self.transfer,
             matrix: self.matrix,
+            icc: self.icc,
+            light: self.light,
             planes: [
                 luma.as_ref().map(|p| p.crop(xu, yu, wu, hu)),
                 match u {
@@ -417,6 +424,8 @@ fn decode_as<T: Sample + Scaled>(
         primaries: picture.colour.primaries,
         transfer: picture.colour.transfer,
         matrix: picture.colour.matrix,
+        icc: picture.icc.is_some(),
+        light: picture.clli,
         planes: [None, None, None],
         alpha: None,
         alpha_premultiplied: picture.alpha_premultiplied,

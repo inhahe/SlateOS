@@ -150,7 +150,9 @@ taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
 process whose name is not UTF-8 was dropped from the listing entirely -- and
 `pgrep` and `pkill` are the same binary, so such a process could not be
 signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
-day, which closes the set.
+day, which closes the set. (`userspace/top` is gone since 2026-10-15: `top` is
+procps-ng 4.0.4's now, reading `/proc` through `coreutils::procps`, the library
+layer `ps`, `free` and `vmstat` share.)
 
 ~~**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`,
 `lsof`, `strace`, `sysstat` and `who`~~ -- found by running the grep rather than
@@ -167,6 +169,19 @@ up, made by the person who wrote that correction.
 **Derived, not decremented:** no file under `userspace/` or `apps/` hand-parses
 `/proc/<pid>/stat` any more -- checked by looking for the `find('(')`/`rfind(')')`
 pair rather than for the path.
+
+> **2026-10-08: three files parse it again, on purpose.** The faithful
+> ports -- `coreutils/src/procps/readproc.rs` (procps-ng's `stat2proc`),
+> `coreutils/src/bin/pstree.rs` (psmisc's `read_proc`) and
+> `userspace/lsns/src/main.rs` (util-linux's `parse_proc_stat`) -- read
+> `stat` as their upstream does, because what each upstream's `sscanf` makes
+> of a line is part of what the port reproduces: a `%d` keeps a too-wide
+> field's low 32 bits, and a conversion that fails ends the scan where
+> `procinfo` would read a zero and go on. The first two share
+> `coreutils::procps::scanf` for it. That is upstream's rule, written down
+> once per upstream, not the drift between hand-rolled readers this entry is
+> about; the pair search above now finds these three and nothing else
+> (checked 2026-10-08).
 
 `kill`'s was the same shape as `pgrep`'s: `killall <name>` could not see a
 process whose name is not UTF-8, so it could not be killed by name. `who -u`

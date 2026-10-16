@@ -35,10 +35,17 @@ DIFF_NEED='timeout python3'
 
 pass=0; fail=0; broken=0; xfail=0
 
-# $1 = side (ours|gnu), rest = argv; stdin is the caller's.
+# $1 = side (ours|gnu), rest = argv; stdin is the caller's. With UTSNAME set,
+# the run is in a UTS namespace of its own (`unshare -Uru`) named that.
 run_side() {
   local side=$1; shift
-  diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  if [ -n "${UTSNAME:-}" ]; then
+    # shellcheck disable=SC2016  # $1 and $@ are the inner shell's
+    diff_run unshare -Uru sh -c 'hostname "$1" && shift && exec "$@"' sh "$UTSNAME" \
+      env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  else
+    diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  fi
 }
 
 # Each frame with its clock taken out.
@@ -167,6 +174,20 @@ case_ '' --no-act -s -t t 'x
 case_ '' --no-act -s --id=4294967295 -t t x
 case_ '' --no-act -s -i -t t x --id=77
 case_ '' --no-act -s -t "$(printf 'x%.0s' {1..200})" --rfc3164 x
+# The host name in the header: `xgethostname` reads it into
+# `sysconf (_SC_HOST_NAME_MAX) + 1` bytes, so 64 -- Linux's longest -- fits
+# with its NUL. (The port passed 64 for 65 bytes until 2026-10-09, and lost a
+# 64-byte name to ENAMETOOLONG.) A dot ends it in an RFC 3164 header.
+if unshare -Uru sh -c 'hostname x' 2>/dev/null; then
+  for name in "$(printf '%63s' '' | tr ' ' h)" "$(printf '%64s' '' | tr ' ' h)" \
+              "$(printf '%60s' '' | tr ' ' h).dom"; do
+    for hdr in --rfc3164 --rfc5424; do
+      UTSNAME=$name case_ '' "${NA[@]}" "$hdr" hello
+    done
+  done
+else
+  echo "logger-diff: no UTS namespace (unshare -Uru); the host name cases are skipped" >&2
+fi
 
 # --- priorities ------------------------------------------------------------------
 for p in user.notice notice LOCAL3.ERR 8.5 5 none 16 kernel.err critical 4294967304.5 0.3 mark.info 192.1 security.err .info user. user.info.x 96.1 8 12x; do
@@ -457,6 +478,52 @@ for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
   redir_case "$how" --no-act -s hello
   redir_case "$how" --no-act -s -f /dev/null hello
 done
+
+# --- the default tag is the real uid's name, not getlogin ()'s -----------------
+# util-linux 2.39.3's xgetlogin asks getpwuid (getuid ()) and nothing else.
+# getlogin () would name whoever utmp says logged in on the terminal on
+# standard input -- after `su`, the user who typed it. So: a terminal, a
+# utmp entry saying `daemon` logged in on it (bound over /run/utmp in a user
+# and mount namespace), and logger run as the namespace's root. The tag must
+# be `root`. Skipped where such namespaces are refused.
+if unshare -Urm true 2>/dev/null; then
+  ptylogin=$DIFF_TMP/ptylogin.py
+  cat >"$ptylogin" <<'PY'
+import os, struct, subprocess, sys
+utmp, user = sys.argv[1:3]
+cmd = sys.argv[3:]
+master, slave = os.openpty()
+line = os.ttyname(slave)[len("/dev/"):].encode()
+with open(utmp, "wb") as f:
+    f.write(struct.pack("<hxxi32s4s32s256shhiii16s20x", 7, os.getpid(), line, b"",
+                        user.encode(), b"", 0, 0, 0, 1700000000, 0, b""))
+p = subprocess.Popen(['unshare', '-Urm', 'sh', '-c',
+                      'mount --bind "$1" /run/utmp || exit 99; shift; exec "$@"',
+                      '_', utmp] + cmd, stdin=slave)
+os.close(slave)
+rc = p.wait()
+os.close(master)
+sys.exit(rc)
+PY
+  for who in daemon root nosuch; do
+    o_err=$(diff_run env LC_ALL=C.UTF-8 PATH="$bindir/ours:$PATH" timeout -k 2 20 \
+      python3 "$ptylogin" "$DIFF_TMP/utmp-ours" "$who" logger --no-act -s hello 2>&1 >/dev/null)
+    o_rc=$?
+    g_err=$(diff_run env LC_ALL=C.UTF-8 PATH="$bindir/gnu:$PATH" timeout -k 2 20 \
+      python3 "$ptylogin" "$DIFF_TMP/utmp-gnu" "$who" logger --no-act -s hello 2>&1 >/dev/null)
+    g_rc=$?
+    REPORT=$(printf '  ours (rc=%s): %s\n  gnu  (rc=%s): %s' "$o_rc" "$o_err" "$g_rc" "$g_err")
+    if [ "$o_rc" = 99 ] || [ "$g_rc" = 99 ] || [ "$o_rc" = 124 ] || [ "$g_rc" = 124 ]; then
+      AGREED=broken
+    elif [ "$(printf '%s\n' "$o_err" | normalize)" = "$(printf '%s\n' "$g_err" | normalize)" ] \
+         && [ "$o_rc" = "$g_rc" ] && printf '%s' "$g_err" | grep -q ' root: hello$'; then
+      AGREED=yes
+    else
+      AGREED=no
+    fi
+    report "terminal that utmp says $who logged in on: logger --no-act -s hello"
+  done
+fi
 
 echo "logger-diff: $pass passed ($xfail of them expected differences), $fail failed, $broken broken"
 [ "$fail" -eq 0 ] && [ "$broken" -eq 0 ]

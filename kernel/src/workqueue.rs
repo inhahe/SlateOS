@@ -364,24 +364,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(submit(test_work, 20));
     assert!(submit(test_work, 30));
 
-    // Yield to let the worker execute.
-    for _ in 0..10 {
-        crate::sched::yield_now();
-    }
-
+    // Wait, by the clock, for the worker to run all three. A fixed number of
+    // yields waited for it only on one CPU, where a yield runs it; on more,
+    // the worker may be on another CPU and the yields return at once -- which
+    // is why this used to accept "partial" rather than fail
+    // (`selftest::wait_until`).
+    let all_ran = crate::selftest::wait_until(5_000, || TEST_COUNTER.load(Ordering::Relaxed) == 60);
     let counter = TEST_COUNTER.load(Ordering::Relaxed);
-    let _after = executed_count();
-
-    if counter == 60 {
-        serial_println!("[workqueue]   Basic execution: OK (counter=60)");
-    } else {
-        // Worker might not have run yet (timing-dependent).
-        // Just verify submission worked.
+    if !all_ran {
         serial_println!(
-            "[workqueue]   Basic execution: partial (counter={}, may need more yields)",
-            counter,
+            "[workqueue]   FAIL: the worker ran {} of 60 within 5 s",
+            counter
         );
+        return Err(crate::error::KernelError::InternalError);
     }
+    serial_println!("[workqueue]   Basic execution: OK (counter=60)");
     // At minimum, submitted_count should have increased.
     assert!(
         submitted_count() >= before.saturating_add(3),
@@ -407,9 +404,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         QUEUE_CAPACITY,
     );
 
-    // Let worker drain.
-    for _ in 0..20 {
-        crate::sched::yield_now();
+    // Let the worker drain what was queued, by the clock: an empty queue,
+    // since other subsystems submit work too and the totals may never meet.
+    if !crate::selftest::wait_until(5_000, || pending_count() == 0) {
+        serial_println!(
+            "[workqueue]   FAIL: the queue did not drain within 5 s ({} still queued)",
+            pending_count()
+        );
+        return Err(crate::error::KernelError::InternalError);
     }
 
     // --- 3. Stats ---

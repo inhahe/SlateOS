@@ -1,0 +1,13 @@
+# hdr10_av1.mp4: what its frames say of their light, as ffprobe reads them (generate_hdr_fixtures.py).
+frame 0 matrix=9 primaries=9 transfer=16 range=limited
+  mastering primaries=35400/50000,14600/50000,8500/50000,39850/50000,6550/50000,2300/50000,15635/50000,16450/50000 luminance=10000000/10000,1/10000
+  light 1000,400
+frame 1 matrix=9 primaries=9 transfer=16 range=limited
+  mastering primaries=35400/50000,14600/50000,8500/50000,39850/50000,6550/50000,2300/50000,15635/50000,16450/50000 luminance=10000000/10000,1/10000
+  light 1000,400
+frame 2 matrix=9 primaries=9 transfer=16 range=limited
+  mastering primaries=35400/50000,14600/50000,8500/50000,39850/50000,6550/50000,2300/50000,15635/50000,16450/50000 luminance=10000000/10000,1/10000
+  light 1000,400
+frame 3 matrix=9 primaries=9 transfer=16 range=limited
+  mastering primaries=35400/50000,14600/50000,8500/50000,39850/50000,6550/50000,2300/50000,15635/50000,16450/50000 luminance=10000000/10000,1/10000
+  light 1000,400

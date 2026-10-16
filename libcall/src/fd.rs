@@ -1,0 +1,594 @@
+//! The descriptor table itself: putting a descriptor at a given number
+//! (`dup2`), copying one above the standard three (`F_DUPFD_CLOEXEC`), whether
+//! it survives an `exec` (`FD_CLOEXEC`), and closing one by number -- through
+//! the linked C library. And two questions asked of a descriptor: whether it
+//! is a terminal (`isatty`), and whether it will take a write within a time
+//! (`poll` for `POLLOUT`), which a program writing to other people's
+//! terminals -- journald's broadcast -- asks of each.
+//!
+//! What a program needs when it arranges another program's standard
+//! descriptors and then becomes that program, as `systemd-cat` does: std
+//! opens everything close-on-exec and owns what it opens, and has no word for
+//! "this socket is descriptor 1 from now on".
+//!
+//! On a host that is not unix every call answers [`ENOSYS`](crate::ENOSYS).
+
+#[cfg(not(unix))]
+use crate::ENOSYS;
+#[cfg(unix)]
+use crate::last_errno;
+
+/// `fcntl`'s command for a copy at the lowest free number at or above the
+/// argument, close-on-exec.
+#[cfg(any(unix, test))]
+const F_DUPFD_CLOEXEC: i32 = 1030;
+/// `fcntl`'s commands for the descriptor's own flags.
+#[cfg(any(unix, test))]
+const F_GETFD: i32 = 1;
+#[cfg(any(unix, test))]
+const F_SETFD: i32 = 2;
+/// The one descriptor flag: close on `exec`.
+#[cfg(any(unix, test))]
+const FD_CLOEXEC: i32 = 1;
+
+/// `poll`'s events: something to read, room to write, and a descriptor that
+/// is not open.
+#[cfg(any(unix, test))]
+const POLLIN: i16 = 0x0001;
+#[cfg(any(unix, test))]
+const POLLOUT: i16 = 0x0004;
+#[cfg(any(unix, test))]
+const POLLNVAL: i16 = 0x0020;
+/// `EBADF`.
+#[cfg(unix)]
+const EBADF: i32 = 9;
+
+#[cfg(unix)]
+mod sys {
+    /// C's `struct pollfd`.
+    #[repr(C)]
+    pub struct PollFd {
+        pub fd: i32,
+        pub events: i16,
+        pub revents: i16,
+    }
+
+    unsafe extern "C" {
+        pub fn dup2(old: i32, new: i32) -> i32;
+        pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        pub fn close(fd: i32) -> i32;
+        pub fn isatty(fd: i32) -> i32;
+        pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+        // `void *`, as the C library and Rust's runtime declare them.
+        pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
+        pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+        pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
+        pub fn open(path: *const core::ffi::c_char, flags: i32, ...) -> i32;
+    }
+
+    /// `O_RDONLY`.
+    pub const O_RDONLY: i32 = 0;
+    /// `O_CLOEXEC`, on Linux and in SlateOS's C library.
+    pub const O_CLOEXEC: i32 = 0o2_000_000;
+}
+
+/// Open `path` for reading, once: `open (path, O_RDONLY | O_CLOEXEC)`. The
+/// descriptor, the caller's to [`close`].
+///
+/// Once: an `open` that waits -- a FIFO with no writer yet -- and is
+/// interrupted by a signal's handler answers `EINTR` rather than waiting
+/// again, as the standard library's would, so that a program acting on its
+/// signals where it waits can act on that one.
+///
+/// # Errors
+///
+/// What `open` reports: `ENOENT`, `EACCES`, `EINTR` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_read(path: &core::ffi::CStr) -> Result<i32, i32> {
+    open_read_one(path)
+}
+
+#[cfg(unix)]
+fn open_read_one(path: &core::ffi::CStr) -> Result<i32, i32> {
+    // SAFETY: a NUL-terminated path the call only reads, and two flags; no
+    // third argument, which only `O_CREAT` and `O_TMPFILE` read.
+    let fd = unsafe { sys::open(path.as_ptr(), sys::O_RDONLY | sys::O_CLOEXEC) };
+    if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn open_read_one(_path: &core::ffi::CStr) -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
+/// Write `buf` to `fd` once: `write`. How many bytes went, which may be
+/// fewer than `buf` holds.
+///
+/// For a caller that must write without the standard library's stream --
+/// a curses screen, whose output has to be the bytes it means and nothing
+/// else, at the moment it flushes them.
+///
+/// # Errors
+///
+/// What `write` reports: `EINTR`, `EAGAIN`, `EBADF`, `EPIPE`, `EIO` and the
+/// rest; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i32> {
+    write_one(fd, buf)
+}
+
+#[cfg(unix)]
+fn write_one(fd: i32, buf: &[u8]) -> Result<usize, i32> {
+    // SAFETY: `buf` is readable for its whole length, which is what the
+    // call is told.
+    let n = unsafe { sys::write(fd, buf.as_ptr().cast(), buf.len()) };
+    usize::try_from(n).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn write_one(_fd: i32, _buf: &[u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// Write all of `buf` to `fd`: `write` again after a short write and after
+/// one a signal interrupted -- and, with `retry_would_block`, after
+/// `EAGAIN` as well, as ncurses' `_nc_flush` does -- until all of it is out.
+/// A write of nothing, or any other failure, abandons the rest.
+///
+/// For a program that writes a terminal byte by byte through the C library
+/// and has nowhere to report a terminal that has gone: `telnet`, `screen`,
+/// a curses screen.
+///
+/// # Errors
+///
+/// The `errno` of the write that failed; 0 for a write of nothing.
+pub fn write_all(fd: i32, buf: &[u8], retry_would_block: bool) -> Result<(), i32> {
+    let mut rest = buf;
+    while !rest.is_empty() {
+        match write(fd, rest) {
+            Ok(0) => return Err(0),
+            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
+            Err(crate::EINTR) => {}
+            Err(crate::EAGAIN) if retry_would_block => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// A pipe: `pipe`, as the read end and the write end. Neither is
+/// close-on-exec, as `pipe` leaves them -- what a program handing one end to
+/// a child it forks wants.
+///
+/// # Errors
+///
+/// `EMFILE`, `ENFILE`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn pipe() -> Result<(i32, i32), i32> {
+    pipe_one()
+}
+
+#[cfg(unix)]
+fn pipe_one() -> Result<(i32, i32), i32> {
+    let mut fds = [-1i32; 2];
+    // SAFETY: `fds` is two writable `int`s, which is what the call fills.
+    if unsafe { sys::pipe2(fds.as_mut_ptr(), 0) } == 0 {
+        Ok((fds[0], fds[1]))
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn pipe_one() -> Result<(i32, i32), i32> {
+    Err(ENOSYS)
+}
+
+/// Read from `fd` once into `buf`: `read`. How many bytes came, 0 at the
+/// end; never more than asked for, and nothing read ahead -- what a program
+/// reading keys one at a time between `select`s needs, which a buffered
+/// stream would take from under the next `select`.
+///
+/// # Errors
+///
+/// What `read` reports: `EINTR`, `EAGAIN`, `EBADF`, `EIO` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn read(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    read_one(fd, buf)
+}
+
+#[cfg(unix)]
+fn read_one(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: `buf` is writable for its whole length, which is what the call
+    // is told.
+    let n = unsafe { sys::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    usize::try_from(n).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn read_one(_fd: i32, _buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// Make descriptor `new` refer to what `old` refers to, closing whatever
+/// `new` was first: `dup2`. `new` is not close-on-exec afterwards. When the
+/// two are the same number nothing changes, as `dup2` itself does nothing.
+///
+/// # Errors
+///
+/// `EBADF` when `old` is not open or `new` is out of range, `EMFILE`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn dup2(old: i32, new: i32) -> Result<(), i32> {
+    dup2_one(old, new)
+}
+
+#[cfg(unix)]
+fn dup2_one(old: i32, new: i32) -> Result<(), i32> {
+    // SAFETY: two numbers; the call acts on the descriptor table only.
+    let rc = unsafe { sys::dup2(old, new) };
+    if rc < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+#[cfg(not(unix))]
+fn dup2_one(_old: i32, _new: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// A copy of `fd` at the lowest free number at or above `min`,
+/// close-on-exec: `fcntl (fd, F_DUPFD_CLOEXEC, min)`. The copy is the
+/// caller's to close.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open, `EINVAL` for a `min` out of range,
+/// `EMFILE`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn dup_above(fd: i32, min: i32) -> Result<i32, i32> {
+    dup_above_one(fd, min)
+}
+
+#[cfg(unix)]
+fn dup_above_one(fd: i32, min: i32) -> Result<i32, i32> {
+    // SAFETY: numbers only; `F_DUPFD_CLOEXEC` reads its third argument as an
+    // `int` and touches no memory.
+    let copy = unsafe { sys::fcntl(fd, F_DUPFD_CLOEXEC, min) };
+    if copy < 0 {
+        Err(last_errno())
+    } else {
+        Ok(copy)
+    }
+}
+
+#[cfg(not(unix))]
+fn dup_above_one(_fd: i32, _min: i32) -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
+/// Whether `fd` is closed by an `exec`: `FD_CLOEXEC` set or cleared with
+/// `F_SETFD`, the descriptor's other flags (there are none today) kept.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn set_close_on_exec(fd: i32, on: bool) -> Result<(), i32> {
+    set_close_on_exec_one(fd, on)
+}
+
+#[cfg(unix)]
+fn set_close_on_exec_one(fd: i32, on: bool) -> Result<(), i32> {
+    // SAFETY: `F_GETFD` takes no third argument and touches no memory.
+    let flags = unsafe { sys::fcntl(fd, F_GETFD) };
+    if flags < 0 {
+        return Err(last_errno());
+    }
+    let wanted = if on {
+        flags | FD_CLOEXEC
+    } else {
+        flags & !FD_CLOEXEC
+    };
+    if wanted == flags {
+        return Ok(());
+    }
+    // SAFETY: `F_SETFD` reads its third argument as an `int` and touches no
+    // memory.
+    let rc = unsafe { sys::fcntl(fd, F_SETFD, wanted) };
+    if rc < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+#[cfg(not(unix))]
+fn set_close_on_exec_one(_fd: i32, _on: bool) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Close descriptor `fd`: `close`.
+///
+/// For a descriptor the caller knows only by number -- one inherited, or one
+/// another call installed -- which nothing in the caller owns. Closing a
+/// descriptor something else owns makes that owner close whatever is given
+/// the number next, so the caller must be the only one that knows it.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open, `EINTR` or `EIO` from the close itself
+/// (the descriptor is gone either way, as Linux defines it);
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn close(fd: i32) -> Result<(), i32> {
+    close_one(fd)
+}
+
+#[cfg(unix)]
+fn close_one(fd: i32) -> Result<(), i32> {
+    // SAFETY: a number; the caller's contract (above) is that nothing else
+    // owns it.
+    let rc = unsafe { sys::close(fd) };
+    if rc < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+#[cfg(not(unix))]
+fn close_one(_fd: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Whether `fd` is a terminal: `isatty`. False for anything else, a
+/// descriptor that is not open included, and off Unix.
+#[must_use]
+pub fn is_terminal(fd: i32) -> bool {
+    is_terminal_one(fd)
+}
+
+#[cfg(unix)]
+fn is_terminal_one(fd: i32) -> bool {
+    // SAFETY: a number; the call asks the terminal layer about it and touches
+    // no memory of ours.
+    unsafe { sys::isatty(fd) == 1 }
+}
+
+#[cfg(not(unix))]
+fn is_terminal_one(_fd: i32) -> bool {
+    false
+}
+
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for `fd` to have
+/// something to read: `poll` for `POLLIN`. `Ok(true)` when it has -- or has
+/// reached its end, failed or hung up, which is when `select` too calls a
+/// descriptor readable and the read then says which -- and `Ok(false)` when
+/// the time ran out.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open (`POLLNVAL`), `EINTR` when a signal came
+/// first, `EINVAL`, `ENOMEM`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_readable(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    wait_readable_one(fd, timeout_ms)
+}
+
+/// The most descriptors [`wait_readable_among`] waits on at once.
+pub const WAIT_AMONG_MAX: usize = 8;
+
+/// [`wait_readable`] for several descriptors at once: one `poll` for
+/// `POLLIN` on each of `fds`, which ends as soon as any of them has
+/// something to read. Which ones have, as a mask -- bit `k` for `fds[k]` --
+/// and 0 when the time ran out.
+///
+/// For a program that waits on its terminal and on a pipe its signal
+/// handlers write to, so that a signal ends the wait however close to its
+/// start it came.
+///
+/// # Errors
+///
+/// As [`wait_readable`]: `EBADF` when one of `fds` is not open, `EINTR`
+/// when a signal came first, `ENOMEM`; `EINVAL` for more than
+/// [`WAIT_AMONG_MAX`] descriptors; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_readable_among(fds: &[i32], timeout_ms: i32) -> Result<u32, i32> {
+    wait_readable_among_impl(fds, timeout_ms)
+}
+
+#[cfg(unix)]
+fn wait_readable_among_impl(fds: &[i32], timeout_ms: i32) -> Result<u32, i32> {
+    if fds.len() > WAIT_AMONG_MAX {
+        return Err(crate::EINVAL);
+    }
+    let mut polls = [const {
+        sys::PollFd {
+            fd: -1,
+            events: POLLIN,
+            revents: 0,
+        }
+    }; WAIT_AMONG_MAX];
+    for (p, &fd) in polls.iter_mut().zip(fds) {
+        p.fd = fd;
+    }
+    let nfds = u64::try_from(fds.len()).unwrap_or(0);
+    // SAFETY: `polls` holds `WAIT_AMONG_MAX` live `struct pollfd`s in a
+    // row, of which the call reads and writes the first `nfds`.
+    let rc = unsafe { sys::poll(polls.as_mut_ptr(), nfds, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    let mut mask = 0u32;
+    for (k, p) in polls.iter().take(fds.len()).enumerate() {
+        if p.revents & POLLNVAL != 0 {
+            return Err(EBADF);
+        }
+        if p.revents != 0 {
+            mask |= 1 << k;
+        }
+    }
+    Ok(mask)
+}
+
+#[cfg(not(unix))]
+fn wait_readable_among_impl(_fds: &[i32], _timeout_ms: i32) -> Result<u32, i32> {
+    Err(ENOSYS)
+}
+
+#[cfg(unix)]
+fn wait_readable_one(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    let mut p = sys::PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `p` is one live `struct pollfd`, which the call reads and
+    // writes `revents` into; `nfds` says one.
+    let rc = unsafe { sys::poll(&raw mut p, 1, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    if rc == 0 {
+        return Ok(false);
+    }
+    if p.revents & POLLNVAL != 0 {
+        return Err(EBADF);
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn wait_readable_one(_fd: i32, _timeout_ms: i32) -> Result<bool, i32> {
+    Err(ENOSYS)
+}
+
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for `fd` to take a
+/// write: `poll` for `POLLOUT`, as systemd's `fd_wait_for_event` asks it.
+/// `Ok(true)` when it will -- or when it has failed or hung up, which the
+/// write itself then reports -- and `Ok(false)` when the time ran out.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open (`POLLNVAL`), `EINTR` when a signal came
+/// first, `EINVAL`, `ENOMEM`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_writable(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    wait_writable_one(fd, timeout_ms)
+}
+
+#[cfg(unix)]
+fn wait_writable_one(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    let mut p = sys::PollFd {
+        fd,
+        events: POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `p` is one live `struct pollfd`, which the call reads and
+    // writes `revents` into; `nfds` says one.
+    let rc = unsafe { sys::poll(&raw mut p, 1, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    if rc == 0 {
+        return Ok(false);
+    }
+    if p.revents & POLLNVAL != 0 {
+        return Err(EBADF);
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn wait_writable_one(_fd: i32, _timeout_ms: i32) -> Result<bool, i32> {
+    Err(ENOSYS)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    /// The restated numbers are the library's.
+    #[test]
+    fn the_numbers_are_the_librarys() {
+        assert_eq!(F_DUPFD_CLOEXEC, posix::fcntl_ops::F_DUPFD_CLOEXEC);
+        assert_eq!(F_GETFD, posix::fcntl_ops::F_GETFD);
+        assert_eq!(F_SETFD, posix::fcntl_ops::F_SETFD);
+        assert_eq!(FD_CLOEXEC, 1);
+        assert_eq!(POLLIN, posix::poll::POLLIN);
+        assert_eq!(POLLOUT, posix::poll::POLLOUT);
+        assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_opened_for_reading_reads_and_a_missing_one_says_so() {
+        assert_eq!(sys::O_CLOEXEC, posix::fcntl::O_CLOEXEC);
+        assert_eq!(sys::O_RDONLY, posix::fcntl::O_RDONLY);
+        let fd = open_read(c"/proc/self/stat").unwrap();
+        let mut buf = [0u8; 64];
+        let n = read(fd, &mut buf).unwrap();
+        assert!(n > 0, "something read");
+        // SAFETY: `F_GETFD` takes no third argument and touches no memory.
+        let flags = unsafe { sys::fcntl(fd, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, FD_CLOEXEC, "closed on exec");
+        close(fd).unwrap();
+        assert_eq!(open_read(c"/nonexistent/at/all"), Err(2), "ENOENT");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn nothing_opens_off_unix() {
+        assert_eq!(open_read(c"anything"), Err(crate::ENOSYS));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_no_terminal_and_takes_a_write_at_once() {
+        extern crate std;
+        use std::os::fd::AsRawFd;
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        assert!(!is_terminal(file.as_raw_fd()));
+        assert!(!is_terminal(-1));
+        assert_eq!(wait_writable(file.as_raw_fd(), 0), Ok(true));
+        // A number nothing has open. Taking one and closing it would race
+        // the test above, which `dup2`s onto the number after its own copy
+        // -- tests share one descriptor table and run at once.
+        assert_eq!(wait_writable(1 << 20, 0), Err(EBADF), "not open");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_lands_above_its_floor_and_closes_on_exec() {
+        extern crate std;
+        use std::os::fd::AsRawFd;
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let copy = dup_above(file.as_raw_fd(), 100).unwrap();
+        assert!(copy >= 100);
+        // Cleared and set again, each answered.
+        set_close_on_exec(copy, false).unwrap();
+        set_close_on_exec(copy, true).unwrap();
+        // dup2 onto a number of our choosing, then both closed.
+        let target = copy.checked_add(1).unwrap();
+        dup2(copy, target).unwrap();
+        close(target).unwrap();
+        close(copy).unwrap();
+        assert!(close(copy).is_err(), "closed twice");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_among_says_which_one_has_something() {
+        let (r1, w1) = pipe().unwrap();
+        let (r2, w2) = pipe().unwrap();
+        assert_eq!(wait_readable_among(&[r1, r2], 0), Ok(0));
+        assert_eq!(write(w2, b"x"), Ok(1));
+        assert_eq!(wait_readable_among(&[r1, r2], -1), Ok(0b10));
+        assert_eq!(wait_readable_among(&[r1, 1 << 20], 0), Err(EBADF));
+        assert_eq!(wait_readable_among(&[r1; 9], 0), Err(crate::EINVAL));
+        for fd in [r1, w1, r2, w2] {
+            close(fd).unwrap();
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn off_unix_every_call_declines() {
+        assert_eq!(wait_readable_among(&[0], 0), Err(ENOSYS));
+        assert_eq!(dup2(0, 1), Err(ENOSYS));
+        assert_eq!(dup_above(0, 3), Err(ENOSYS));
+        assert_eq!(set_close_on_exec(0, true), Err(ENOSYS));
+        assert_eq!(close(0), Err(ENOSYS));
+        assert!(!is_terminal(0));
+        assert_eq!(wait_writable(1, 0), Err(ENOSYS));
+    }
+}

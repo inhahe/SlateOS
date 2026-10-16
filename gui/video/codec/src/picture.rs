@@ -6,24 +6,29 @@
 //! converts only the ones it shows ([`Picture::to_frame`]).
 //!
 //! The conversion is `gui/video/yuv`'s port of libavif's, by the colour
-//! [`crate::colour`] settles on. A frame large enough to be worth it is
-//! converted in bands of rows, one to each core (`to_argb_rows`, whose every
-//! band is exactly those rows of the whole picture). VP9's 4:4:0 -- chroma
-//! at full width and half height, which neither libyuv nor libavif converts
-//! -- has its chroma brought to the full height first, as libyuv brings
-//! 4:2:0's chroma down its columns, and is then converted as 4:4:4.
+//! [`crate::colour`] settles on -- or, where Chrome converts the colour,
+//! `yuv::managed`'s transcription of Chrome's ([`Colour::converted`]): HDR
+//! (a PQ or HLG transfer), by the colour and the light the picture says it
+//! holds (design-decisions §1378), and SDR video that says its colour whole
+//! in primaries or a curve not sRGB's (§1381). A frame large enough to be
+//! worth it is converted in bands of rows, one to each core (`to_argb_rows`,
+//! whose every band is exactly those rows of the whole picture). VP9's 4:4:0
+//! -- chroma at full width and half height, which neither libyuv nor libavif
+//! converts -- has its chroma brought to the full height first, as libyuv
+//! brings 4:2:0's chroma down its columns, and is then converted as 4:4:4.
 
 use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 use std::thread;
 
 use rav1d::safe as av1;
+use yuv::managed::{self, Conversion, SdrCurve, Signal, Transfer};
 use yuv::reformat::{self, Format, Reformat};
 use yuv::{Plane, PlaneBuf};
 
-use crate::colour::{self, Colour};
+use crate::colour::{self, Colour, Prefer};
 use crate::decoder::Packet;
-use crate::{ColourHint, Error, Frame};
+use crate::{ColourHint, Error, Frame, Light};
 
 /// A decoded picture, not yet converted.
 pub struct Picture {
@@ -87,21 +92,39 @@ impl Picture {
         }
     }
 
-    /// The colour it is converted by: its bitstream's, the file's where the
-    /// bitstream is silent, and a guess from its size where both are.
+    /// The colour it is converted by: one its bitstream or its file says
+    /// whole, the one Chrome's decoder for it asks first; else its
+    /// bitstream's, the file's where the bitstream is silent, and a guess from
+    /// its size where both are (`crate::colour`).
     pub fn colour(&self) -> Colour {
         let (width, height) = self.size();
-        let said = match &self.planes {
-            Planes::Vp8 { picture, .. } => {
-                ColourHint::vp8(picture.color_space(), picture.clamping_type())
-            }
+        let (prefer, said) = match &self.planes {
+            Planes::Vp8 { picture, .. } => (
+                Prefer::File,
+                ColourHint::vp8(picture.color_space(), picture.clamping_type()),
+            ),
             Planes::Vp9 { picture, .. } => {
                 let (space, full_range) = picture.color();
-                ColourHint::vp9(space, full_range)
+                (
+                    Prefer::File,
+                    ColourHint::vp9(space, full_range, picture.bit_depth()),
+                )
             }
-            Planes::Av1(p) => ColourHint::av1(p.colour()),
+            Planes::Av1(p) => (Prefer::Bitstream, ColourHint::av1(p)),
         };
-        colour::resolve(said, self.hint, width, height)
+        colour::resolve(prefer, said, self.hint, width, height)
+    }
+
+    /// What it says of its light -- the display it was mastered on, and how
+    /// bright its content gets -- for whatever maps HDR video to a display:
+    /// its bitstream's (AV1's metadata OBUs), kind by kind, else its file's.
+    /// VP8 and VP9 carry none in the bitstream.
+    pub fn light(&self) -> Light {
+        let said = match &self.planes {
+            Planes::Av1(p) => ColourHint::av1(p).light,
+            Planes::Vp8 { .. } | Planes::Vp9 { .. } => Light::default(),
+        };
+        colour::light(said, self.hint.light)
     }
 
     /// The picture as pixels.
@@ -131,15 +154,97 @@ impl Picture {
     /// As [`Self::to_frame`]; `out` is then empty.
     pub fn to_pixels(&self, out: &mut Vec<u32>) -> Result<(), Error> {
         let colour = self.colour();
+        // Only HDR is shown by its light.
+        let look = Look {
+            colour,
+            light: match colour.managed().filter(|t| t.is_hdr()) {
+                Some(_) => self.light(),
+                None => Light::default(),
+            },
+        };
         let result = match &self.planes {
-            Planes::Vp8 { picture, alpha } => vp8_pixels(picture, alpha.as_ref(), colour, out),
-            Planes::Vp9 { picture, alpha } => vp9_pixels(picture, alpha.as_ref(), colour, out),
-            Planes::Av1(p) => av1_pixels(p, colour, out),
+            Planes::Vp8 { picture, alpha } => vp8_pixels(picture, alpha.as_ref(), look, out),
+            Planes::Vp9 { picture, alpha } => vp9_pixels(picture, alpha.as_ref(), look, out),
+            Planes::Av1(p) => av1_pixels(p, look, out),
         };
         if result.is_err() {
             out.clear();
         }
         result
+    }
+}
+
+/// What a picture is converted by: its colour, and -- for HDR -- its light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Look {
+    colour: Colour,
+    light: Light,
+}
+
+/// How a picture's rows become pixels: libavif's conversion, or Chrome's
+/// colour-managed one -- HDR's tone map, or an SDR picture's colours
+/// converted to sRGB's.
+#[derive(Clone, Copy)]
+enum Way<'a> {
+    Ordinary,
+    Managed(&'a Conversion<'a>),
+}
+
+impl Way<'_> {
+    /// `picture`'s rows from `first` into `out`, this way.
+    fn rows<T: Reformat>(
+        self,
+        picture: &reformat::Picture<'_, T>,
+        first: usize,
+        out: &mut [u32],
+    ) -> Result<(), reformat::Error> {
+        match self {
+            Self::Ordinary => reformat::to_argb_rows(picture, first, out),
+            Self::Managed(map) => managed::to_argb_rows(picture, map, first, out),
+        }
+    }
+}
+
+/// The tables Chrome's handling of `transfer` reads: made the first time a
+/// picture of it is shown -- a millisecond or two -- and kept for every
+/// picture after it.
+fn signal(transfer: Transfer) -> &'static Signal {
+    static PQ: OnceLock<Signal> = OnceLock::new();
+    static HLG: OnceLock<Signal> = OnceLock::new();
+    static SRGB: OnceLock<Signal> = OnceLock::new();
+    static GAMMA22: OnceLock<Signal> = OnceLock::new();
+    static GAMMA28: OnceLock<Signal> = OnceLock::new();
+    static SMPTE240: OnceLock<Signal> = OnceLock::new();
+    static LINEAR: OnceLock<Signal> = OnceLock::new();
+    static ST428: OnceLock<Signal> = OnceLock::new();
+    let cell = match transfer {
+        Transfer::Pq => &PQ,
+        Transfer::Hlg => &HLG,
+        Transfer::Sdr(SdrCurve::Srgb) => &SRGB,
+        Transfer::Sdr(SdrCurve::Gamma22) => &GAMMA22,
+        Transfer::Sdr(SdrCurve::Gamma28) => &GAMMA28,
+        Transfer::Sdr(SdrCurve::Smpte240) => &SMPTE240,
+        Transfer::Sdr(SdrCurve::Linear) => &LINEAR,
+        Transfer::Sdr(SdrCurve::St428) => &ST428,
+    };
+    cell.get_or_init(|| Signal::new(transfer))
+}
+
+/// The light `yuv::managed` reads: MaxCLL and the mastering display's peak, as
+/// Chrome takes them from FFmpeg's numbers, in single precision; `0.0` for
+/// what is not said.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "cd/m2, kept in single precision as Chrome keeps them; past 2^24 a MaxCLL is rounded as C's conversion rounds it"
+)]
+fn hdr_light(light: Light) -> managed::Light {
+    managed::Light {
+        max_cll: light.content.map_or(0.0, |c| c.max_cll as f32),
+        mastering_peak: light
+            .mastering
+            .and_then(|m| m.luminance)
+            .map_or(0.0, |l| l.max as f32),
     }
 }
 
@@ -175,16 +280,17 @@ struct Planar<'a, T> {
 }
 
 impl<T: Sample> Planar<'_, T> {
-    fn convert(&self, colour: Colour, out: &mut Vec<u32>) -> Result<(), Error> {
+    fn convert(&self, look: Look, out: &mut Vec<u32>) -> Result<(), Error> {
         let format = match (self.chroma.is_some(), self.subsampling) {
             (false, _) => Format::Yuv400,
             (true, (1, 1)) => Format::Yuv420,
             (true, (1, 0)) => Format::Yuv422,
             (true, (0, 0)) => Format::Yuv444,
-            (true, (0, 1)) => return self.convert_440(colour, out),
+            (true, (0, 1)) => return self.convert_440(look, out),
             (true, _) => return Err(Error::Colour(reformat::Error::Unsupported)),
         };
         let (u, v) = self.chroma.unzip();
+        let colour = look.colour;
         let picture = reformat::Picture {
             width: self.width,
             height: self.height,
@@ -199,11 +305,18 @@ impl<T: Sample> Planar<'_, T> {
             alpha: self.alpha,
             alpha_premultiplied: false,
         };
-        in_bands(&picture, out)
+        match colour.managed() {
+            None => in_bands(&picture, Way::Ordinary, out),
+            Some(transfer) => {
+                let map =
+                    Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));
+                in_bands(&picture, Way::Managed(&map), out)
+            }
+        }
     }
 
     /// 4:4:0: the chroma brought to the full height, then 4:4:4.
-    fn convert_440(&self, colour: Colour, out: &mut Vec<u32>) -> Result<(), Error> {
+    fn convert_440(&self, look: Look, out: &mut Vec<u32>) -> Result<(), Error> {
         let Some((u, v)) = self.chroma else {
             return Err(Error::Colour(reformat::Error::Size));
         };
@@ -213,7 +326,7 @@ impl<T: Sample> Planar<'_, T> {
             chroma: Some((u.view(), v.view())),
             ..*self
         };
-        full.convert(colour, out)
+        full.convert(look, out)
     }
 }
 
@@ -231,40 +344,49 @@ fn cores() -> usize {
     *CORES.get_or_init(|| thread::available_parallelism().map_or(1, NonZeroUsize::get))
 }
 
-/// `picture`'s pixels into `out`, a band of rows to each of the machine's
-/// cores (`yuv::reformat::to_argb_rows`, whose every band is exactly those
-/// rows of the whole picture): 8 ms for an HD frame on one thread becomes a
-/// fraction of that, for every frame a player shows.
+/// `picture`'s pixels into `out` by `way`, a band of rows to each of the
+/// machine's cores (`to_argb_rows`, whose every band is exactly those rows of
+/// the whole picture): 8 ms for an HD frame on one thread -- several times
+/// that for HDR -- becomes a fraction of it, for every frame a player shows.
 ///
 /// # Errors
 ///
 /// As `yuv::reformat::to_argb_into`; `out` is then empty.
 fn in_bands<T: Sample>(
     picture: &reformat::Picture<'_, T>,
+    way: Way<'_>,
     out: &mut Vec<u32>,
 ) -> Result<(), Error> {
     let pixels = picture.width.saturating_mul(picture.height);
     // At least two rows a band, as split takes them.
     let bands = (pixels / MIN_BAND_PIXELS).min(picture.height / 2);
-    split(picture, out, cores().min(bands))
+    split(picture, way, out, cores().min(bands))
 }
 
 /// [`in_bands`] in `bands` bands, a thread each; one or none on the calling
 /// thread.
 fn split<T: Sample>(
     picture: &reformat::Picture<'_, T>,
+    way: Way<'_>,
     out: &mut Vec<u32>,
     bands: usize,
 ) -> Result<(), Error> {
     let (width, height) = (picture.width, picture.height);
-    if bands <= 1 {
-        return reformat::to_argb_into(picture, out).map_err(Error::Colour);
-    }
     let size = Error::Colour(reformat::Error::Size);
-    let count = width.checked_mul(height).ok_or(size)?;
     out.clear();
+    // The picture's checks -- its colour, and its planes against its size --
+    // on a band of no rows, before anything is allocated for its pixels.
+    way.rows(picture, 0, &mut []).map_err(Error::Colour)?;
+    let count = width.checked_mul(height).ok_or(size)?;
     out.try_reserve_exact(count).map_err(|_| size)?;
     out.resize(count, 0);
+    if bands <= 1 {
+        let result = way.rows(picture, 0, out).map_err(Error::Colour);
+        if result.is_err() {
+            out.clear();
+        }
+        return result;
+    }
     // Whole pairs of rows to a band: 4:2:0's chroma comes a pair at a time.
     let rows = height.div_ceil(bands).next_multiple_of(2);
     let band = rows.checked_mul(width).ok_or(size)?;
@@ -272,9 +394,7 @@ fn split<T: Sample>(
         let workers: Vec<_> = out
             .chunks_mut(band)
             .zip((0..).step_by(rows))
-            .map(|(pixels, first)| {
-                scope.spawn(move || reformat::to_argb_rows(picture, first, pixels))
-            })
+            .map(|(pixels, first)| scope.spawn(move || way.rows(picture, first, pixels)))
             .collect();
         workers
             .into_iter()
@@ -361,7 +481,7 @@ fn view8(p: vp8::PlaneView<'_>) -> Plane<'_, u8> {
 fn vp8_pixels(
     picture: &vp8::Picture,
     alpha: Option<&vp8::Picture>,
-    colour: Colour,
+    look: Look,
     out: &mut Vec<u32>,
 ) -> Result<(), Error> {
     let size = |n: u32| usize::try_from(n).map_err(|_| Error::Colour(reformat::Error::Size));
@@ -379,7 +499,7 @@ fn vp8_pixels(
         chroma: Some((u, v)),
         alpha: alpha.and_then(|a| a.plane(0)).map(view8),
     }
-    .convert(colour, out)
+    .convert(look, out)
 }
 
 /// A VP9 plane as `yuv` reads it, in place.
@@ -408,7 +528,7 @@ fn fitting<'a>(
 fn vp9_pixels(
     picture: &vp9::Picture,
     alpha: Option<&vp9::Picture>,
-    colour: Colour,
+    look: Look,
     out: &mut Vec<u32>,
 ) -> Result<(), Error> {
     let size = |n: u32| usize::try_from(n).map_err(|_| Error::Colour(reformat::Error::Size));
@@ -430,7 +550,7 @@ fn vp9_pixels(
             chroma: Some((u, v)),
             alpha: alpha.and_then(|a| a.plane8(0)).map(view),
         }
-        .convert(colour, out)
+        .convert(look, out)
     } else {
         let [Some(y), Some(u), Some(v)] = [0, 1, 2].map(|i| picture.plane16(i).map(view)) else {
             return Err(missing);
@@ -444,7 +564,7 @@ fn vp9_pixels(
             chroma: Some((u, v)),
             alpha: alpha.and_then(|a| a.plane16(0)).map(view),
         }
-        .convert(colour, out)
+        .convert(look, out)
     }
 }
 
@@ -459,7 +579,7 @@ fn packed<T>(p: &av1::Plane<T>) -> Plane<'_, T> {
     }
 }
 
-fn av1_pixels(picture: &av1::Picture, colour: Colour, out: &mut Vec<u32>) -> Result<(), Error> {
+fn av1_pixels(picture: &av1::Picture, look: Look, out: &mut Vec<u32>) -> Result<(), Error> {
     let size = |n: u32| usize::try_from(n).map_err(|_| Error::Colour(reformat::Error::Size));
     let (w, h) = picture.size();
     let (width, height) = (size(w)?, size(h)?);
@@ -485,7 +605,7 @@ fn av1_pixels(picture: &av1::Picture, colour: Colour, out: &mut Vec<u32>) -> Res
                 .map(|(u, v)| (packed(u), packed(v))),
             alpha: None,
         }
-        .convert(colour, out)
+        .convert(look, out)
     } else {
         let y = picture.plane_u16(0).ok_or(missing)?;
         let (u, v) = (picture.plane_u16(1), picture.plane_u16(2));
@@ -501,7 +621,7 @@ fn av1_pixels(picture: &av1::Picture, colour: Colour, out: &mut Vec<u32>) -> Res
                 .map(|(u, v)| (packed(u), packed(v))),
             alpha: None,
         }
-        .convert(colour, out)
+        .convert(look, out)
     }
 }
 
@@ -555,7 +675,9 @@ mod tests {
         let colour = Colour {
             matrix: 1,
             primaries: 1,
+            transfer: 1,
             full_range: false,
+            whole: true,
         };
         let planar = Planar {
             width: 2,
@@ -566,8 +688,12 @@ mod tests {
             chroma: Some((u.view(), v.view())),
             alpha: None,
         };
+        let look = Look {
+            colour,
+            light: Light::default(),
+        };
         let mut got = Vec::new();
-        planar.convert(colour, &mut got).unwrap();
+        planar.convert(look, &mut got).unwrap();
         let (u4, v4) = (rows_doubled(u.view(), 4), rows_doubled(v.view(), 4));
         let mut want = Vec::new();
         Planar {
@@ -575,7 +701,7 @@ mod tests {
             chroma: Some((u4.view(), v4.view())),
             ..planar
         }
-        .convert(colour, &mut want)
+        .convert(look, &mut want)
         .unwrap();
         assert_eq!(got.len(), 8);
         assert_eq!(got, want);
@@ -596,10 +722,15 @@ mod tests {
             alpha: None,
         }
         .convert(
-            Colour {
-                matrix: 1,
-                primaries: 1,
-                full_range: false,
+            Look {
+                colour: Colour {
+                    matrix: 1,
+                    primaries: 1,
+                    transfer: 1,
+                    full_range: false,
+                    whole: true,
+                },
+                light: Light::default(),
             },
             &mut out,
         )
@@ -609,7 +740,7 @@ mod tests {
 
     /// A picture split across threads in any number of bands -- more bands
     /// than rows to spare, bands of odd and even heights, 4:2:0 and 4:2:2 at
-    /// two depths -- is the picture converted whole.
+    /// two depths, ordinary and HDR -- is the picture converted whole.
     #[test]
     fn bands_on_threads_are_the_whole_picture() {
         fn check<T: Sample + TryFrom<u32> + Default>(subsampling: (u8, u8), depth: u8) {
@@ -646,10 +777,17 @@ mod tests {
                 alpha_premultiplied: false,
             };
             let whole = reformat::to_argb(&picture).unwrap();
-            for bands in [2, 3, 5, 11, 12, 40] {
+            let map = Conversion::new(signal(Transfer::Pq), 9, managed::Light::default());
+            let hdr_whole = managed::to_argb(&picture, &map).unwrap();
+            for bands in [1, 2, 3, 5, 11, 12, 40] {
                 let mut out = Vec::new();
-                split(&picture, &mut out, bands).unwrap();
+                split(&picture, Way::Ordinary, &mut out, bands).unwrap();
                 assert_eq!(out, whole, "{depth}-bit {subsampling:?} in {bands} bands");
+                split(&picture, Way::Managed(&map), &mut out, bands).unwrap();
+                assert_eq!(
+                    out, hdr_whole,
+                    "HDR {depth}-bit {subsampling:?} in {bands} bands"
+                );
             }
         }
         check::<u8>((1, 1), 8);
@@ -691,7 +829,7 @@ mod tests {
             (0..5)
                 .map(|_| {
                     let start = std::time::Instant::now();
-                    split(&picture, &mut out, bands).unwrap();
+                    split(&picture, Way::Ordinary, &mut out, bands).unwrap();
                     start.elapsed().as_secs_f64() * 1000.0
                 })
                 .fold(f64::MAX, f64::min)

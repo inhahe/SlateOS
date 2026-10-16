@@ -37,6 +37,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(windows)]
 use std::time::Duration;
 
+/// A file a test can read and a save cannot replace (`testing` feature).
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 /// How many temporary names to try before giving up.
 ///
 /// A collision needs two saves of the same file in the same process to draw

@@ -291,8 +291,9 @@ ZONE=UTC
 PTY=             # "COLS ROWS": run with standard output on a pty that size
 ENVS=()          # extra NAME=VALUE for ps's environment
 CWDFILES=()      # files to create in the case's working directory
+REDIR=           # a redirection for ps itself: '>&-', '2>/dev/full' ...
 reset_knobs() {
-  WORLD=main; LOCALE=C.UTF-8; ZONE=UTC; PTY=; ENVS=(); CWDFILES=()
+  WORLD=main; LOCALE=C.UTF-8; ZONE=UTC; PTY=; ENVS=(); CWDFILES=(); REDIR=
 }
 
 # $1 = side, $2 = output prefix; the rest is ps's argv.
@@ -301,7 +302,7 @@ run_side() {
   local wdir=$work/worlds/$WORLD
   local -a envs=(env -i "PATH=$bindir/$side:/usr/bin:/bin" "LC_ALL=$LOCALE" "TZ=$ZONE" "${ENVS[@]}")
   local -a ns=(timeout -k 5 60 unshare -mUrpf --propagation private setsid sh -c '
-      w=$1 e=$2 hold=$3 ready=$4; shift 4
+      w=$1 e=$2 hold=$3 ready=$4 redir=$5; shift 5
       mount -t devpts -o newinstance,ptmxmode=0666 devpts /dev/pts || exit 125
       mount --bind /dev/pts/ptmx /dev/ptmx || exit 125
       rm -f "$ready"
@@ -314,7 +315,8 @@ run_side() {
       mount --bind "$e/nsswitch.conf" /etc/nsswitch.conf || exit 125
       mount --bind "$w/proc" /proc || exit 125
       cd "$w/cwd" || exit 125
-      exec "$@"' _ "$wdir" "$work/etc" "$holdpy" "$p.$side.ready" "${envs[@]}" ps "$@")
+      eval "exec \"\$@\" $redir"' _ "$wdir" "$work/etc" "$holdpy" "$p.$side.ready" "$REDIR" \
+      "${envs[@]}" ps "$@")
   if [ -n "$PTY" ]; then
     # shellcheck disable=SC2086 # COLS ROWS are two words on purpose
     diff_run python3 "$ptyrun" $PTY "${ns[@]}" >"$p.$side.out" 2>"$p.$side.err"
@@ -339,6 +341,7 @@ compare() {
   [ "$ZONE" != UTC ] && LABEL="$LABEL [TZ=$ZONE]"
   [ -n "$PTY" ] && LABEL="$LABEL [pty $PTY]"
   [ "${#ENVS[@]}" -gt 0 ] && LABEL="$LABEL [${ENVS[*]}]"
+  [ -n "$REDIR" ] && LABEL="$LABEL $REDIR"
   reset_knobs
 
   local o_rc g_rc
@@ -911,6 +914,22 @@ WORLD=nomem; run_case -eo pid,rss
 WORLD=nopidmax; run_case -ef
 WORLD=shortpidmax; run_case -ef
 WORLD=emptypidmax; run_case -ef
+
+# --- a standard descriptor that cannot be written --------------------------------
+# procps reports a closed or full standard output through `close_stdout`,
+# `ps: write error: REASON` and status 1, and fails a run whose diagnostic
+# could not be written. Ours wrote into the `/dev/null` the runtime put on a
+# closed descriptor and reported success until 2026-10-07: it expanded
+# `guard_std_fds!` and never called `stdfd::restore`. (A reader that leaves
+# is not asked here: this world's output is far shorter than a pipe holds,
+# so the reader would always have it all before leaving.)
+for redir in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
+  REDIR=$redir; run_case -p 1
+  REDIR=$redir; run_case -e -o pid,args
+  REDIR=$redir; run_case --bogus
+  REDIR=$redir; run_case --help
+  REDIR=$redir; run_case -p 99999
+done
 
 printf '\n%d passed, %d differed, %d broken, %d differ on purpose' \
   "$pass" "$fail" "$broken" "$xfail"

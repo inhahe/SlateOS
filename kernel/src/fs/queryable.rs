@@ -1,88 +1,88 @@
-//! Queryable file metadata / indexed attributes (BeOS BFS-inspired).
+//! Queryable file attributes: typed facts about a file -- `Audio:Artist` is
+//! "The Beatles", `Audio:Bitrate` is 320 -- that files can be found by, as
+//! BeOS's BFS let a person find any file by its attributes (`design.txt` lines
+//! 35-37). Unlike a tag (a label, `fs::tags`) an attribute has a name and a
+//! typed value; unlike a comment (`fs::fcomment`) it is for comparing.
 //!
-//! Provides a structured attribute store where files can carry typed
-//! key-value metadata beyond the basic filesystem attributes.  Unlike
-//! simple tags (which are untyped strings), queryable attributes have
-//! explicit types and support relational queries (equality, range,
-//! prefix, contains).
+//! **Each attribute is an extended attribute on the file, named
+//! `user.slate.<name>`** -- `user.slate.Audio:Artist` -- its value a type
+//! marker and the value, readable as text so `getfattr` shows it and
+//! `setfattr` can write it:
 //!
-//! ## Design Reference
+//! | Type | Kept as | Example |
+//! |---|---|---|
+//! | text | `t:` then the text, UTF-8 | `t:The Beatles` |
+//! | integer | `i:` then the number in decimal | `i:320` |
+//! | boolean | `b:true` or `b:false` | `b:true` |
+//! | bytes | `x:` then the bytes as they are | `x:...` |
 //!
-//! design.txt lines 35-37: "BFS (Be File System) had rich queryable
-//! metadata built in — you could search files by any attribute (artist,
-//! bitrate, email sender) as fast as a database query."
+//! A value some other tool set without a marker -- or with one whose rest does
+//! not fit it (`i:abc`) -- reads as text if it is UTF-8 and as bytes if not.
 //!
-//! design.txt line 249: "Database-as-filesystem — rich metadata and
-//! queries built into the filesystem."
+//! The file's filesystem keeps them, which settles what the table this used to
+//! be could not: they survive a reboot (on ext4), go with the file through
+//! every name and rename, end with it, and travel with `cp -a`, `tar --xattrs`
+//! and `rsync -X`. Programs reach them with the extended-attribute calls they
+//! already have (`getxattr(2)` and its family, through either ABI), under the
+//! `user.` namespace's rules (`fs::xattr_policy`): regular files and
+//! directories only, read as the file's read permission allows, written as
+//! its write permission does. That is the door design-decisions §978 asked
+//! for. What this module adds is for the kernel shell: typed reads and writes,
+//! and [`query`], which walks a subtree comparing -- bounded, and saying when
+//! it could not see all of it, since nothing indexes attributes. An index is a
+//! search service's to keep, in userspace.
 //!
-//! roadmap.md: "Queryable file metadata / indexed attributes (BeOS
-//! BFS-inspired)"
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Application sets attribute:
-//!   set_attr("/music/song.mp3", "Audio:Artist", AttrValue::Text("Beatles"))
-//!   set_attr("/music/song.mp3", "Audio:Bitrate", AttrValue::Int(320))
-//!
-//! Application queries:
-//!   query(&[Predicate::eq("Audio:Artist", "Beatles")], "/music")
-//!   query(&[Predicate::gt("Audio:Bitrate", 256)], "/music")
-//!   query(&[Predicate::contains("Email:Subject", "urgent")], "/mail")
-//!
-//! Index accelerates lookups:
-//!   AttrIndex: attr_name → BTreeMap<value, Set<path>>
-//! ```
-//!
-//! ## Attribute Naming Convention
-//!
-//! Attributes use a `Category:Name` convention (like BeOS):
-//! - `Audio:Artist`, `Audio:Album`, `Audio:Bitrate`, `Audio:Duration`
-//! - `Image:Width`, `Image:Height`, `Image:ColorSpace`
-//! - `Email:From`, `Email:Subject`, `Email:Date`
-//! - `Document:Author`, `Document:Title`, `Document:PageCount`
-//! - `App:*` — application-specific attributes
+//! Until 2026-10-09 the attributes were a table here, in memory: keyed by the
+//! file's identity since 2026-09-21 (§957), with hooks to follow renames and
+//! drop the dead, but gone at every reboot, reachable by no program, and
+//! written by whoever asked with no check of the file's permissions
+//! (design-decisions §1561). Nothing but the kernel shell and this module's
+//! self-test ever set one, so there is nothing to carry over.
 //!
 //! ## Limits
 //!
-//! - Max 64 attributes per file
-//! - Max 256 characters per attribute name
-//! - Max 4096 bytes per text attribute value
-//! - Max 65536 files in the attribute store
-//! - Max 1024 indexed attribute names
+//! - A name is printable ASCII (BeOS's `Category:Name`), at most
+//!   [`MAX_ATTR_NAME_LEN`] bytes: Linux's 255-byte attribute name less the
+//!   prefix.
+//! - A text or bytes value is at most [`MAX_VALUE_LEN`] bytes. A filesystem
+//!   may keep less, and says so: ext4 keeps all of a file's attributes in one
+//!   block.
+//! - At most [`MAX_ATTRS_PER_FILE`] on a file.
 
-#![allow(dead_code)]
-
-use crate::sync::Mutex;
-use alloc::collections::BTreeMap;
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::fswalk::{self, WalkAction, WalkOptions};
 use super::path::{Path, PathBuf};
+use super::{EntryType, Vfs};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum attributes per file.
-const MAX_ATTRS_PER_FILE: usize = 64;
+/// What every attribute's name begins with.
+pub const PREFIX: &[u8] = b"user.slate.";
 
-/// Maximum attribute name length.
-const MAX_ATTR_NAME_LEN: usize = 256;
+/// Linux's longest extended attribute name (`XATTR_NAME_MAX`).
+const XATTR_NAME_MAX: usize = 255;
 
-/// Maximum text value length in bytes.
-const MAX_TEXT_VALUE_LEN: usize = 4096;
+/// The longest attribute name: what [`PREFIX`] leaves of Linux's 255 bytes.
+pub const MAX_ATTR_NAME_LEN: usize = XATTR_NAME_MAX - PREFIX.len();
 
-/// Maximum files in the store.
-const MAX_FILES: usize = 65536;
+/// The longest text or bytes value.
+pub const MAX_VALUE_LEN: usize = 4096;
 
-/// Maximum indexed attribute names.
-const MAX_INDEXED_ATTRS: usize = 1024;
+/// The most attributes one file carries.
+pub const MAX_ATTRS_PER_FILE: usize = 64;
 
-/// Maximum query results.
+/// The most entries one [`query`] visits: each visit is a path lookup and a
+/// read of the file's attribute names, under the filesystem's lock, in the
+/// caller's time.
+const MAX_VISITED: u64 = 65536;
+
+/// The most results one [`query`] returns.
 const MAX_QUERY_RESULTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
@@ -92,18 +92,19 @@ const MAX_QUERY_RESULTS: usize = 4096;
 /// Typed attribute value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AttrValue {
-    /// Text string.
+    /// Text.
     Text(String),
-    /// 64-bit signed integer.
+    /// A 64-bit signed integer.
     Int(i64),
-    /// Boolean.
+    /// A boolean.
     Bool(bool),
     /// Raw bytes.
     Bytes(Vec<u8>),
 }
 
 impl AttrValue {
-    /// Returns the type name for display.
+    /// The type's name, for display.
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Text(_) => "text",
@@ -112,54 +113,47 @@ impl AttrValue {
             Self::Bytes(_) => "bytes",
         }
     }
-
-    /// Returns approximate size in bytes.
-    pub fn size(&self) -> usize {
-        match self {
-            Self::Text(s) => s.len(),
-            Self::Int(_) => 8,
-            Self::Bool(_) => 1,
-            Self::Bytes(b) => b.len(),
-        }
-    }
 }
 
 /// Comparison operator for queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
-    /// Exact equality.
+    /// Equal: text with ASCII letters' case ignored.
     Equal,
     /// Not equal.
     NotEqual,
-    /// Less than (Int only).
+    /// Less than (integers).
     LessThan,
-    /// Less than or equal (Int only).
+    /// Less than or equal (integers).
     LessEqual,
-    /// Greater than (Int only).
+    /// Greater than (integers).
     GreaterThan,
-    /// Greater than or equal (Int only).
+    /// Greater than or equal (integers).
     GreaterEqual,
-    /// Text contains substring (Text only).
+    /// Text contains (case ignored).
     Contains,
-    /// Text starts with prefix (Text only).
+    /// Text starts with (case ignored).
     StartsWith,
-    /// Text ends with suffix (Text only).
+    /// Text ends with (case ignored).
     EndsWith,
 }
 
-/// A single query predicate.
+/// A single query predicate: attribute `attr_name` compared by `op` with
+/// `value`. A file without the attribute, or with a value of another type,
+/// does not match it.
 #[derive(Debug, Clone)]
 pub struct Predicate {
-    /// Attribute name to match.
+    /// The attribute's name, without [`PREFIX`].
     pub attr_name: String,
-    /// Comparison operator.
+    /// The comparison.
     pub op: CompareOp,
-    /// Value to compare against.
+    /// What the file's value is compared with.
     pub value: AttrValue,
 }
 
 impl Predicate {
-    /// Create an equality predicate for text.
+    /// Text equality.
+    #[must_use]
     pub fn eq_text(name: &str, value: &str) -> Self {
         Self {
             attr_name: String::from(name),
@@ -168,7 +162,8 @@ impl Predicate {
         }
     }
 
-    /// Create an equality predicate for int.
+    /// Integer equality.
+    #[must_use]
     pub fn eq_int(name: &str, value: i64) -> Self {
         Self {
             attr_name: String::from(name),
@@ -177,7 +172,8 @@ impl Predicate {
         }
     }
 
-    /// Create a greater-than predicate for int.
+    /// Integer greater-than.
+    #[must_use]
     pub fn gt_int(name: &str, value: i64) -> Self {
         Self {
             attr_name: String::from(name),
@@ -186,7 +182,8 @@ impl Predicate {
         }
     }
 
-    /// Create a less-than predicate for int.
+    /// Integer less-than.
+    #[must_use]
     pub fn lt_int(name: &str, value: i64) -> Self {
         Self {
             attr_name: String::from(name),
@@ -195,7 +192,8 @@ impl Predicate {
         }
     }
 
-    /// Create a contains predicate for text.
+    /// Text contains.
+    #[must_use]
     pub fn contains(name: &str, substring: &str) -> Self {
         Self {
             attr_name: String::from(name),
@@ -204,7 +202,8 @@ impl Predicate {
         }
     }
 
-    /// Create a starts-with predicate for text.
+    /// Text starts-with.
+    #[must_use]
     pub fn starts_with(name: &str, prefix: &str) -> Self {
         Self {
             attr_name: String::from(name),
@@ -213,1196 +212,805 @@ impl Predicate {
         }
     }
 
-    /// Evaluate this predicate against a stored value.
+    /// Whether a file's value `stored` satisfies this predicate.
     fn matches(&self, stored: &AttrValue) -> bool {
-        match (&self.op, &self.value, stored) {
-            // Text equality.
-            (CompareOp::Equal, AttrValue::Text(a), AttrValue::Text(b)) => a.eq_ignore_ascii_case(b),
-            (CompareOp::NotEqual, AttrValue::Text(a), AttrValue::Text(b)) => {
-                !a.eq_ignore_ascii_case(b)
+        use AttrValue::{Bool, Bytes, Int, Text};
+        use CompareOp::{
+            Contains, EndsWith, Equal, GreaterEqual, GreaterThan, LessEqual, LessThan, NotEqual,
+            StartsWith,
+        };
+        match (self.op, &self.value, stored) {
+            (Equal, Text(a), Text(b)) => a.eq_ignore_ascii_case(b),
+            (NotEqual, Text(a), Text(b)) => !a.eq_ignore_ascii_case(b),
+            (Contains, Text(needle), Text(hay)) => contains_ignoring_ascii_case(hay, needle),
+            (StartsWith, Text(p), Text(hay)) => {
+                hay.len() >= p.len()
+                    && hay
+                        .as_bytes()
+                        .get(..p.len())
+                        .is_some_and(|h| h.eq_ignore_ascii_case(p.as_bytes()))
             }
-
-            // Text substring operations.
-            (CompareOp::Contains, AttrValue::Text(needle), AttrValue::Text(haystack)) => {
-                let h_lower = to_ascii_lowercase(haystack);
-                let n_lower = to_ascii_lowercase(needle);
-                h_lower.contains(n_lower.as_str())
+            (EndsWith, Text(s), Text(hay)) => {
+                hay.len() >= s.len()
+                    && hay
+                        .as_bytes()
+                        .get(hay.len().saturating_sub(s.len())..)
+                        .is_some_and(|h| h.eq_ignore_ascii_case(s.as_bytes()))
             }
-            (CompareOp::StartsWith, AttrValue::Text(prefix), AttrValue::Text(haystack)) => {
-                let h_lower = to_ascii_lowercase(haystack);
-                let p_lower = to_ascii_lowercase(prefix);
-                h_lower.starts_with(p_lower.as_str())
-            }
-            (CompareOp::EndsWith, AttrValue::Text(suffix), AttrValue::Text(haystack)) => {
-                let h_lower = to_ascii_lowercase(haystack);
-                let s_lower = to_ascii_lowercase(suffix);
-                h_lower.ends_with(s_lower.as_str())
-            }
-
-            // Int comparisons.
-            (CompareOp::Equal, AttrValue::Int(a), AttrValue::Int(b)) => a == b,
-            (CompareOp::NotEqual, AttrValue::Int(a), AttrValue::Int(b)) => a != b,
-            (CompareOp::LessThan, AttrValue::Int(threshold), AttrValue::Int(val)) => {
-                *val < *threshold
-            }
-            (CompareOp::LessEqual, AttrValue::Int(threshold), AttrValue::Int(val)) => {
-                *val <= *threshold
-            }
-            (CompareOp::GreaterThan, AttrValue::Int(threshold), AttrValue::Int(val)) => {
-                *val > *threshold
-            }
-            (CompareOp::GreaterEqual, AttrValue::Int(threshold), AttrValue::Int(val)) => {
-                *val >= *threshold
-            }
-
-            // Bool equality.
-            (CompareOp::Equal, AttrValue::Bool(a), AttrValue::Bool(b)) => a == b,
-            (CompareOp::NotEqual, AttrValue::Bool(a), AttrValue::Bool(b)) => a != b,
-
-            // Bytes equality.
-            (CompareOp::Equal, AttrValue::Bytes(a), AttrValue::Bytes(b)) => a == b,
-            (CompareOp::NotEqual, AttrValue::Bytes(a), AttrValue::Bytes(b)) => a != b,
-
-            // Type mismatch — no match.
+            (Equal, Int(a), Int(b)) => a == b,
+            (NotEqual, Int(a), Int(b)) => a != b,
+            (LessThan, Int(t), Int(v)) => v < t,
+            (LessEqual, Int(t), Int(v)) => v <= t,
+            (GreaterThan, Int(t), Int(v)) => v > t,
+            (GreaterEqual, Int(t), Int(v)) => v >= t,
+            (Equal, Bool(a), Bool(b)) => a == b,
+            (NotEqual, Bool(a), Bool(b)) => a != b,
+            (Equal, Bytes(a), Bytes(b)) => a == b,
+            (NotEqual, Bytes(a), Bytes(b)) => a != b,
+            // A type that does not compare this way, or another type.
             _ => false,
         }
     }
 }
 
-/// How to combine multiple predicates.
+/// How a query's predicates combine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryMode {
-    /// All predicates must match (AND).
+    /// Every predicate matches (AND).
     All,
-    /// At least one predicate must match (OR).
+    /// At least one matches (OR).
     Any,
 }
 
-/// A query result entry.
+/// One file a query found, with the predicates' attributes that matched.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
-    /// File path.
+    /// The path the walk reached it by: bytes, so a name that is not UTF-8 is
+    /// found and openable from the result.
     pub path: PathBuf,
-    /// Matching attribute values (name → value).
+    /// Each matching predicate's attribute and the file's value.
     pub matched_attrs: Vec<(String, AttrValue)>,
 }
 
-/// Attribute schema for indexed attributes.
-#[derive(Debug, Clone)]
-pub struct AttrSchema {
-    /// Attribute name.
-    pub name: String,
-    /// Expected value type.
+/// What a [`query`] found under its root.
+#[derive(Debug)]
+pub struct Found {
+    /// The matching files, in the order the walk met them.
+    pub results: Vec<QueryResult>,
+    /// Whether it stopped short of seeing everything under the root: too
+    /// many entries or results, a directory or a file's attributes that
+    /// could not be read, or a directory the walk left unread. Without it,
+    /// "nothing found" and "not all looked at" would read the same.
+    pub incomplete: bool,
+}
+
+/// An attribute name programs are expected to share, with its type: BeOS's
+/// convention of `Category:Name`. Advice, not a rule: any name may be set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WellKnown {
+    /// The attribute's name.
+    pub name: &'static str,
+    /// Its value's type: `text`, `int` or `bool`.
     pub value_type: &'static str,
-    /// Whether this attribute is indexed for fast queries.
-    pub indexed: bool,
-    /// Description.
-    pub description: String,
+    /// What it holds.
+    pub description: &'static str,
 }
 
-// ---------------------------------------------------------------------------
-// Internal storage
-// ---------------------------------------------------------------------------
-
-/// Per-file attribute set.
-struct FileAttrs {
-    /// File path.
-    path: PathBuf,
-    /// Attribute name → value.
-    attrs: BTreeMap<String, AttrValue>,
-}
-
-/// Global attribute store.
-/// The key an indexed-attribute record is filed under: the file's identity when
-/// it has one, otherwise its path.
-///
-/// Queryable attributes describe the FILE, so two names for one file must see
-/// one set of attributes; path keying gave a hard link its own empty record.
-/// `design-decisions.md` §957 gives the test: should this data survive the file
-/// at that path being REPLACED? For indexed attributes, no -- so identity is the
-/// right key. Contrast `fs::integrity`, whose baselines must stay path-keyed
-/// precisely because a replacement is the event they exist to detect.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum QueryKey {
-    Id(crate::fs::vfs::FileId),
-    Path(PathBuf),
-}
-
-/// Derive the key for a path. Every key is built by [`key_from`].
-///
-/// MUST be called before taking the `STORE` lock. `file_identity` calls into the
-/// VFS, and a module global held across that call inverts
-/// filesystem-lock -> module-state -- nine such sites were introduced and caught
-/// by `scripts/check-vfs-under-lock.py` on 2026-09-21.
-fn query_key(path: &Path) -> QueryKey {
-    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
-}
-
-/// The key for a file whose identity is already known: the one place a
-/// `QueryKey` is built, shared by [`query_key`] and the file-lifecycle hooks,
-/// which run after the name is gone and are handed the identity the VFS read
-/// while it still resolved.
-fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> QueryKey {
-    match id {
-        Some(id) => QueryKey::Id(id),
-        None => QueryKey::Path(path.to_path_buf()),
-    }
-}
-struct AttrStore {
-    /// Path → index in `files`.
-    ///
-    /// Keyed by `PathBuf`, not `String`, per design-decisions.md §261: a
-    /// filename may hold any byte but `/` and NUL, so a `String` key is
-    /// narrower than the thing it keys and two distinct files could share
-    /// one attribute set.
-    path_index: BTreeMap<QueryKey, usize>,
-    /// All files with attributes.
-    files: Vec<FileAttrs>,
-    /// Free slots (indices of removed entries).
-    free_slots: Vec<usize>,
-    /// Registered schemas.
-    schemas: BTreeMap<String, AttrSchema>,
-    /// Attribute name → (value_key → set of paths) for indexed attrs.
-    ///
-    /// The value_key is a string representation of the value for
-    /// BTreeMap ordering. This trades exact type fidelity for O(log n)
-    /// indexed lookup.
-    /// Attribute names and value keys stay `String` — both are validated
-    /// user-typed identifiers — but the *paths* they resolve to are
-    /// `PathBuf` (§261).
-    indexes: BTreeMap<String, BTreeMap<String, BTreeSet<PathBuf>>>,
-    /// Which attribute names are indexed.
-    indexed_names: BTreeSet<String>,
-}
-
-impl AttrStore {
-    const fn new() -> Self {
-        Self {
-            path_index: BTreeMap::new(),
-            files: Vec::new(),
-            free_slots: Vec::new(),
-            schemas: BTreeMap::new(),
-            indexes: BTreeMap::new(),
-            indexed_names: BTreeSet::new(),
-        }
-    }
-
-    /// Take `name` out of the index of `attr` under `value_key`, dropping the
-    /// value's set once it is empty.
-    ///
-    /// `name` must be the RECORD's name (`FileAttrs::path`), never the name a
-    /// caller happened to use: under identity keying a file with two names has
-    /// one record, and an index updated under whichever name each call used
-    /// would keep an entry for a value the file no longer has. `create_index`
-    /// has always used the record's name; every other index update now does.
-    fn unindex(&mut self, attr: &str, value_key: &str, name: &Path) {
-        if let Some(val_map) = self.indexes.get_mut(attr)
-            && let Some(names) = val_map.get_mut(value_key)
-        {
-            names.remove(name);
-            if names.is_empty() {
-                val_map.remove(value_key);
-            }
-        }
-    }
-
-    /// The indexed attributes of the record in slot `idx`, as
-    /// `(attribute, value key)` pairs.
-    fn indexed_pairs(&self, idx: usize) -> Vec<(String, String)> {
-        self.files.get(idx).map_or_else(Vec::new, |file| {
-            file.attrs
-                .iter()
-                .filter(|(name, _)| self.indexed_names.contains(name.as_str()))
-                .map(|(name, val)| (name.clone(), value_to_key(val)))
-                .collect()
-        })
-    }
-
-    /// Remove the record filed under `key`, with its index entries, and return
-    /// how many attributes it held; `None` if there was no such record.
-    fn drop_record(&mut self, key: &QueryKey) -> Option<usize> {
-        let idx = self.path_index.remove(key)?;
-        let pairs = self.indexed_pairs(idx);
-        let file = self.files.get_mut(idx)?;
-        let name = file.path.clone();
-        let count = core::mem::take(&mut file.attrs).len();
-        for (attr, value_key) in &pairs {
-            self.unindex(attr, value_key, &name);
-        }
-        self.free_slots.push(idx);
-        Some(count)
-    }
-
-    /// Give the record filed under `key` (in slot `idx`) the name `new_name`,
-    /// moving its index entries with it, and its key too when the key is a
-    /// path.
-    fn rename_record(&mut self, key: QueryKey, idx: usize, new_name: PathBuf) {
-        let pairs = self.indexed_pairs(idx);
-        let Some(file) = self.files.get_mut(idx) else {
-            return;
-        };
-        let old_name = core::mem::replace(&mut file.path, new_name.clone());
-        for (attr, value_key) in &pairs {
-            self.unindex(attr, value_key, &old_name);
-            self.indexes
-                .entry(attr.clone())
-                .or_default()
-                .entry(value_key.clone())
-                .or_default()
-                .insert(new_name.clone());
-        }
-        if let QueryKey::Path(_) = key {
-            self.path_index.remove(&key);
-            let new_key = QueryKey::Path(new_name);
-            // A path-keyed record already under the new name describes
-            // whatever the rename just replaced; the moved file's record takes
-            // its place, as the file took the name. `None` -- nothing was
-            // there -- is the usual answer and needs no handling.
-            let _ = self.drop_record(&new_key);
-            self.path_index.insert(new_key, idx);
-        }
-    }
-}
-
-static STORE: Mutex<AttrStore> = Mutex::new(AttrStore::new());
-static SET_COUNT: AtomicU64 = AtomicU64::new(0);
-static GET_COUNT: AtomicU64 = AtomicU64::new(0);
-static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// ASCII-lowercase a string (no_std friendly).
-fn to_ascii_lowercase(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            out.push((c as u8 + 32) as char);
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Convert an AttrValue to a sortable string key for the index.
-fn value_to_key(val: &AttrValue) -> String {
-    match val {
-        AttrValue::Text(s) => {
-            let mut key = String::from("T:");
-            key.push_str(&to_ascii_lowercase(s));
-            key
-        }
-        AttrValue::Int(n) => {
-            // Encode so negative numbers sort correctly.
-            // Map i64::MIN..i64::MAX to 0..u64::MAX.
-            let mapped = (*n as u64) ^ (1u64 << 63);
-            alloc::format!("I:{:020}", mapped)
-        }
-        AttrValue::Bool(b) => {
-            if *b {
-                String::from("B:1")
-            } else {
-                String::from("B:0")
-            }
-        }
-        AttrValue::Bytes(b) => {
-            let mut key = String::from("X:");
-            for byte in b.iter().take(64) {
-                key.push_str(&alloc::format!("{:02x}", byte));
-            }
-            key
-        }
-    }
-}
-
-/// Validate an attribute name.
-fn validate_name(name: &str) -> KernelResult<()> {
-    if name.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    if name.len() > MAX_ATTR_NAME_LEN {
-        return Err(KernelError::InvalidArgument);
-    }
-    // Must contain only printable ASCII (and colon for category:name).
-    for c in name.chars() {
-        if !c.is_ascii_graphic() {
-            return Err(KernelError::InvalidArgument);
-        }
-    }
-    Ok(())
-}
-
-/// Validate an attribute value.
-fn validate_value(val: &AttrValue) -> KernelResult<()> {
-    match val {
-        AttrValue::Text(s) if s.len() > MAX_TEXT_VALUE_LEN => Err(KernelError::InvalidArgument),
-        AttrValue::Bytes(b) if b.len() > MAX_TEXT_VALUE_LEN => Err(KernelError::InvalidArgument),
-        _ => Ok(()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Core API
-// ---------------------------------------------------------------------------
-
-/// Set an attribute on a file.
-pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelResult<()> {
-    let path = path.as_ref();
-    validate_name(name)?;
-    validate_value(&value)?;
-    SET_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    let mut store = STORE.lock();
-
-    let idx = if let Some(&i) = store.path_index.get(&key) {
-        i
-    } else {
-        // New file entry.
-        if store.path_index.len() >= MAX_FILES {
-            return Err(KernelError::ResourceExhausted);
-        }
-        let idx = if let Some(free) = store.free_slots.pop() {
-            store.files[free] = FileAttrs {
-                path: path.to_path_buf(),
-                attrs: BTreeMap::new(),
-            };
-            free
-        } else {
-            let i = store.files.len();
-            store.files.push(FileAttrs {
-                path: path.to_path_buf(),
-                attrs: BTreeMap::new(),
-            });
-            i
-        };
-        store.path_index.insert(key, idx);
-        idx
-    };
-
-    // Check capacity before mutating.
-    {
-        let file = &store.files[idx];
-        if !file.attrs.contains_key(name) && file.attrs.len() >= MAX_ATTRS_PER_FILE {
-            return Err(KernelError::ResourceExhausted);
-        }
-    }
-
-    // Update index if this attribute is indexed -- under the record's name,
-    // not `path`: see `AttrStore::unindex`.
-    let attr_name_owned = String::from(name);
-    let is_indexed = store.indexed_names.contains(&attr_name_owned);
-    if is_indexed {
-        let Some(record_name) = store.files.get(idx).map(|f| f.path.clone()) else {
-            // `idx` came from `path_index` or was just pushed, so this is a
-            // corrupted store rather than a missing file.
-            return Err(KernelError::InternalError);
-        };
-        // Remove old index entry if value is changing.
-        let old_key = store.files[idx].attrs.get(name).map(value_to_key);
-        if let Some(ok) = old_key {
-            store.unindex(name, &ok, &record_name);
-        }
-        // Insert new index entry.
-        let new_key = value_to_key(&value);
-        let val_map = store.indexes.entry(attr_name_owned.clone()).or_default();
-        val_map.entry(new_key).or_default().insert(record_name);
-    }
-
-    store.files[idx].attrs.insert(attr_name_owned, value);
-    Ok(())
-}
-
-/// Get an attribute from a file.
-pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
-    let path = path.as_ref();
-    GET_COUNT.fetch_add(1, Ordering::Relaxed);
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    let store = STORE.lock();
-    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
-    let file = &store.files[*idx];
-    file.attrs.get(name).cloned().ok_or(KernelError::NotFound)
-}
-
-/// Remove an attribute from a file.
-pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
-    let path = path.as_ref();
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    let mut store = STORE.lock();
-    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
-    let idx = *idx;
-
-    let removed = store.files[idx].attrs.remove(name);
-    if removed.is_none() {
-        return Err(KernelError::NotFound);
-    }
-
-    // Clean up index, under the record's name (see `AttrStore::unindex`).
-    if let Some(old_val) = &removed
-        && store.indexed_names.contains(name)
-    {
-        // `idx` came from `path_index`; a miss is a corrupted store.
-        let record_name = store
-            .files
-            .get(idx)
-            .map(|f| f.path.clone())
-            .ok_or(KernelError::InternalError)?;
-        store.unindex(name, &value_to_key(old_val), &record_name);
-    }
-
-    // If file has no more attributes, remove it entirely.
-    if store.files[idx].attrs.is_empty() {
-        store.path_index.remove(&key);
-        store.free_slots.push(idx);
-    }
-
-    Ok(())
-}
-
-/// List all attributes on a file.
-pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue)>> {
-    let path = path.as_ref();
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    let store = STORE.lock();
-    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
-    let file = &store.files[*idx];
-    Ok(file
-        .attrs
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect())
-}
-
-/// Remove all attributes from a file.
-pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
-    let path = path.as_ref();
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    STORE.lock().drop_record(&key).ok_or(KernelError::NotFound)
-}
-
-// ---------------------------------------------------------------------------
-// Index management
-// ---------------------------------------------------------------------------
-
-/// Mark an attribute name as indexed for fast queries.
-///
-/// Once indexed, all set/remove operations on this attribute update
-/// the reverse index automatically.
-pub fn create_index(attr_name: &str) -> KernelResult<()> {
-    validate_name(attr_name)?;
-    let mut store = STORE.lock();
-    if store.indexed_names.len() >= MAX_INDEXED_ATTRS {
-        return Err(KernelError::ResourceExhausted);
-    }
-    let name = String::from(attr_name);
-    if store.indexed_names.contains(&name) {
-        return Ok(()); // Already indexed.
-    }
-    store.indexed_names.insert(name.clone());
-
-    // Build index from existing data.
-    let mut val_map: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
-    for file in &store.files {
-        if let Some(val) = file.attrs.get(attr_name) {
-            let key = value_to_key(val);
-            val_map.entry(key).or_default().insert(file.path.clone());
-        }
-    }
-    if !val_map.is_empty() {
-        store.indexes.insert(name, val_map);
-    }
-    Ok(())
-}
-
-/// Remove an index on an attribute name.
-pub fn drop_index(attr_name: &str) -> KernelResult<()> {
-    let mut store = STORE.lock();
-    let name = String::from(attr_name);
-    if !store.indexed_names.remove(&name) {
-        return Err(KernelError::NotFound);
-    }
-    store.indexes.remove(&name);
-    Ok(())
-}
-
-/// List all indexed attribute names.
-pub fn list_indexes() -> Vec<String> {
-    let store = STORE.lock();
-    store.indexed_names.iter().cloned().collect()
-}
-
-// ---------------------------------------------------------------------------
-// Schema management
-// ---------------------------------------------------------------------------
-
-/// Register an attribute schema.
-pub fn register_schema(
-    name: &str,
-    value_type: &'static str,
-    description: &str,
-) -> KernelResult<()> {
-    validate_name(name)?;
-    let mut store = STORE.lock();
-    let is_indexed = store.indexed_names.contains(name);
-    store.schemas.insert(
-        String::from(name),
-        AttrSchema {
-            name: String::from(name),
-            value_type,
-            indexed: is_indexed,
-            description: String::from(description),
-        },
-    );
-    Ok(())
-}
-
-/// List all registered schemas.
-pub fn list_schemas() -> Vec<AttrSchema> {
-    let store = STORE.lock();
-    store.schemas.values().cloned().collect()
-}
-
-// ---------------------------------------------------------------------------
-// Query engine
-// ---------------------------------------------------------------------------
-
-/// Query files by attribute predicates.
-///
-/// Returns files where the predicates match according to the given mode
-/// (All = AND, Any = OR).  Optionally restricts to files under `root_path`.
-pub fn query(
-    predicates: &[Predicate],
-    mode: QueryMode,
-    root_path: Option<&Path>,
-) -> Vec<QueryResult> {
-    QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    if predicates.is_empty() {
-        return Vec::new();
-    }
-
-    let store = STORE.lock();
-    let mut results = Vec::new();
-
-    for file in &store.files {
-        // Skip files not under root_path.  The canonical subtree predicate
-        // avoids /tmp matching /tmpfile and tolerates a trailing slash on
-        // `root`. See fs::pathutil.
-        if let Some(root) = root_path {
-            if !crate::fs::pathutil::path_in_subtree(file.path.as_path(), root) {
-                continue;
-            }
-        }
-
-        if file.attrs.is_empty() {
-            continue;
-        }
-
-        let mut matched_attrs = Vec::new();
-        let mut all_match = true;
-        let mut any_match = false;
-
-        for pred in predicates {
-            if let Some(stored) = file.attrs.get(&pred.attr_name) {
-                if pred.matches(stored) {
-                    any_match = true;
-                    matched_attrs.push((pred.attr_name.clone(), stored.clone()));
-                } else {
-                    all_match = false;
-                }
-            } else {
-                all_match = false;
-            }
-        }
-
-        let include = match mode {
-            QueryMode::All => all_match,
-            QueryMode::Any => any_match,
-        };
-
-        if include {
-            results.push(QueryResult {
-                path: file.path.clone(),
-                matched_attrs,
-            });
-            if results.len() >= MAX_QUERY_RESULTS {
-                break;
-            }
-        }
-    }
-
-    results
-}
-
-/// Query using the index for a single equality predicate on an indexed attr.
-///
-/// Falls back to full scan if the attribute is not indexed.
-pub fn indexed_query(attr_name: &str, value: &AttrValue) -> Vec<PathBuf> {
-    QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let store = STORE.lock();
-    if store.indexed_names.contains(attr_name) {
-        let key = value_to_key(value);
-        if let Some(val_map) = store.indexes.get(attr_name) {
-            if let Some(paths) = val_map.get(&key) {
-                return paths.iter().cloned().collect();
-            }
-        }
-        return Vec::new();
-    }
-
-    // Fallback: full scan.
-    let mut results = Vec::new();
-    for file in &store.files {
-        if let Some(stored) = file.attrs.get(attr_name) {
-            if stored == value {
-                results.push(file.path.clone());
-                if results.len() >= MAX_QUERY_RESULTS {
-                    break;
-                }
-            }
-        }
-    }
-    results
-}
-
-/// Count files that have a given attribute (any value).
-pub fn count_with_attr(attr_name: &str) -> usize {
-    let store = STORE.lock();
-    store
-        .files
-        .iter()
-        .filter(|f| f.attrs.contains_key(attr_name))
-        .count()
-}
-
-/// Get all unique values for a given attribute name.
-pub fn unique_values(attr_name: &str) -> Vec<AttrValue> {
-    let store = STORE.lock();
-    let mut seen = BTreeSet::new();
-    let mut values = Vec::new();
-    for file in &store.files {
-        if let Some(val) = file.attrs.get(attr_name) {
-            let key = value_to_key(val);
-            if seen.insert(key) {
-                values.push(val.clone());
-            }
-        }
-    }
-    values
-}
-
-// ---------------------------------------------------------------------------
-// Rename support
-// ---------------------------------------------------------------------------
-
-/// Move the attributes recorded under `old_path` (and, for a directory, under
-/// every name below it) to `new_path`.
-///
-/// The VFS does this itself on every rename, through [`PER_FILE_STATE`] (see
-/// [`super::perfile`]), so production code has no reason to call it; it stays
-/// public as the direct form of that one event, which this module's self-test
-/// exercises. An identity-keyed record keeps its key -- the file is the same
-/// file -- and only the name it is reported under moves; a path-keyed record
-/// moves its key too.
-///
-/// This used to derive both keys by looking the names up, which cannot be
-/// right at any moment: before a rename `new_path` names nothing (or the file
-/// about to be replaced), and after it `old_path` names nothing.
-///
-/// # Errors
-///
-/// [`KernelError::NotFound`] if no record is stored under `old_path` or below
-/// it.
-pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
-    let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
-    let moved = rename_names_counted(&|p: &Path| super::pathutil::rebase(p, old_path, new_path));
-    if moved == 0 {
-        return Err(KernelError::NotFound);
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// File lifecycle (see `super::perfile`)
-// ---------------------------------------------------------------------------
-
-/// This table's part in the file lifecycle: attributes end with their file,
-/// and move with it when it is renamed. See [`super::perfile`] for why a
-/// `FileId`-keyed record that outlived its file would describe a stranger --
-/// and, here, return it from a query for the old file's values.
-pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
-    name: "queryable",
-    forget: forget_file,
-    rename: rename_names,
-    unmounted: forget_filesystem,
-    plant: plant_for_test,
-    finds: finds_for_test,
-    reports: reports_for_test,
-};
-
-/// The file is gone: drop its record and its index entries.
-fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
-    let key = key_from(id, path);
-    // `None`: the file had no attributes, which is nearly every file.
-    let _ = STORE.lock().drop_record(&key);
-}
-
-/// Names moved: see [`rename_names_counted`].
-fn rename_names(rename: &super::perfile::NameMap<'_>) {
-    rename_names_counted(rename);
-}
-
-/// Rewrite every record name `rename` maps to a new one, with its index
-/// entries; returns how many records moved.
-fn rename_names_counted(rename: &super::perfile::NameMap<'_>) -> usize {
-    let mut store = STORE.lock();
-    // Collected first: the index cannot be walked while records change.
-    let moved: Vec<(QueryKey, usize, PathBuf)> = store
-        .path_index
-        .iter()
-        .filter_map(|(key, &idx)| {
-            let file = store.files.get(idx)?;
-            rename(&file.path).map(|new| (key.clone(), idx, new))
-        })
-        .collect();
-    let count = moved.len();
-    for (key, idx, new_name) in moved {
-        store.rename_record(key, idx, new_name);
-    }
-    count
-}
-
-/// The attribute the lifecycle rungs plant: a name of its own, so no real
-/// query ever matches it.
-const LIFECYCLE_RUNG_ATTR: &str = "Perfile:Rung";
-
-/// Self-test support: plant [`LIFECYCLE_RUNG_ATTR`].
-fn plant_for_test(path: &Path) -> KernelResult<()> {
-    set_attr(path, LIFECYCLE_RUNG_ATTR, AttrValue::Int(1))
-}
-
-/// Self-test support: whether a lookup through `path` finds
-/// [`LIFECYCLE_RUNG_ATTR`]. Reads the store directly rather than through
-/// `get_attr`, which would count the lookup in `stats()`.
-fn finds_for_test(path: &Path) -> bool {
-    // Derived above the lock; see `query_key`.
-    let key = query_key(path);
-    let store = STORE.lock();
-    store
-        .path_index
-        .get(&key)
-        .and_then(|&idx| store.files.get(idx))
-        .is_some_and(|file| file.attrs.contains_key(LIFECYCLE_RUNG_ATTR))
-}
-
-/// Self-test support: whether a record is reported under `name`.
-fn reports_for_test(name: &Path) -> bool {
-    let store = STORE.lock();
-    store.path_index.values().any(|&idx| {
-        store
-            .files
-            .get(idx)
-            .is_some_and(|file| file.path.as_path() == name)
-    })
-}
-
-/// A filesystem was unmounted: its mount id is never reused, so no identity
-/// on it can match again, and its records are only garbage.
-fn forget_filesystem(fs_id: u64) {
-    let mut store = STORE.lock();
-    let dead: Vec<QueryKey> = store
-        .path_index
-        .keys()
-        .filter(|key| matches!(key, QueryKey::Id(id) if id.fs_id == fs_id))
-        .cloned()
-        .collect();
-    for key in &dead {
-        let _ = store.drop_record(key); // Listed just above, so always Some.
-    }
-}
+/// The well-known attributes.
+pub const WELL_KNOWN: &[WellKnown] = &[
+    WellKnown {
+        name: "Audio:Artist",
+        value_type: "text",
+        description: "Music artist or band name",
+    },
+    WellKnown {
+        name: "Audio:Album",
+        value_type: "text",
+        description: "Album name",
+    },
+    WellKnown {
+        name: "Audio:Title",
+        value_type: "text",
+        description: "Track title",
+    },
+    WellKnown {
+        name: "Audio:Genre",
+        value_type: "text",
+        description: "Music genre",
+    },
+    WellKnown {
+        name: "Audio:Year",
+        value_type: "int",
+        description: "Release year",
+    },
+    WellKnown {
+        name: "Audio:Track",
+        value_type: "int",
+        description: "Track number",
+    },
+    WellKnown {
+        name: "Audio:Bitrate",
+        value_type: "int",
+        description: "Audio bitrate in kbps",
+    },
+    WellKnown {
+        name: "Audio:Duration",
+        value_type: "int",
+        description: "Duration in seconds",
+    },
+    WellKnown {
+        name: "Image:Width",
+        value_type: "int",
+        description: "Image width in pixels",
+    },
+    WellKnown {
+        name: "Image:Height",
+        value_type: "int",
+        description: "Image height in pixels",
+    },
+    WellKnown {
+        name: "Image:ColorSpace",
+        value_type: "text",
+        description: "Color space (sRGB, AdobeRGB, ...)",
+    },
+    WellKnown {
+        name: "Image:Camera",
+        value_type: "text",
+        description: "Camera make and model",
+    },
+    WellKnown {
+        name: "Image:DateTaken",
+        value_type: "int",
+        description: "When the photo was taken (Unix time)",
+    },
+    WellKnown {
+        name: "Document:Author",
+        value_type: "text",
+        description: "Document author",
+    },
+    WellKnown {
+        name: "Document:Title",
+        value_type: "text",
+        description: "Document title",
+    },
+    WellKnown {
+        name: "Document:Subject",
+        value_type: "text",
+        description: "Document subject",
+    },
+    WellKnown {
+        name: "Document:PageCount",
+        value_type: "int",
+        description: "Number of pages",
+    },
+    WellKnown {
+        name: "Document:WordCount",
+        value_type: "int",
+        description: "Number of words",
+    },
+    WellKnown {
+        name: "Email:From",
+        value_type: "text",
+        description: "Sender's address",
+    },
+    WellKnown {
+        name: "Email:To",
+        value_type: "text",
+        description: "Recipient's address",
+    },
+    WellKnown {
+        name: "Email:Subject",
+        value_type: "text",
+        description: "Subject line",
+    },
+    WellKnown {
+        name: "Email:Date",
+        value_type: "int",
+        description: "When it was sent (Unix time)",
+    },
+    WellKnown {
+        name: "Email:Read",
+        value_type: "bool",
+        description: "Whether it has been read",
+    },
+    WellKnown {
+        name: "App:Rating",
+        value_type: "int",
+        description: "The user's rating (1-5)",
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
 
-/// Returns (file_count, total_attrs, set_ops, get_ops, query_ops, index_count).
-pub fn stats() -> (usize, usize, u64, u64, u64, usize) {
-    let store = STORE.lock();
-    let file_count = store.path_index.len();
-    let total_attrs: usize = store
-        .files
-        .iter()
-        .filter(|f| !f.attrs.is_empty())
-        .map(|f| f.attrs.len())
-        .sum();
-    let index_count = store.indexed_names.len();
-    (
-        file_count,
-        total_attrs,
-        SET_COUNT.load(Ordering::Relaxed),
-        GET_COUNT.load(Ordering::Relaxed),
-        QUERY_COUNT.load(Ordering::Relaxed),
-        index_count,
-    )
+static SET_COUNT: AtomicU64 = AtomicU64::new(0);
+static GET_COUNT: AtomicU64 = AtomicU64::new(0);
+static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// How many attributes were set or removed, read, and queried for, since boot
+/// or [`reset_stats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryStats {
+    /// Attributes set, removed or cleared.
+    pub sets: u64,
+    /// Attributes read, one at a time or a file's all.
+    pub gets: u64,
+    /// Queries.
+    pub queries: u64,
 }
 
-/// Reset statistics.
+/// The counters.
+#[must_use]
+pub fn stats() -> QueryStats {
+    QueryStats {
+        sets: SET_COUNT.load(Ordering::Relaxed),
+        gets: GET_COUNT.load(Ordering::Relaxed),
+        queries: QUERY_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+/// Zero the counters.
 pub fn reset_stats() {
     SET_COUNT.store(0, Ordering::Relaxed);
     GET_COUNT.store(0, Ordering::Relaxed);
     QUERY_COUNT.store(0, Ordering::Relaxed);
 }
 
-/// Clear all data (attributes, indexes, schemas).
-pub fn clear_all() {
-    let mut store = STORE.lock();
-    store.path_index.clear();
-    store.files.clear();
-    store.free_slots.clear();
-    store.schemas.clear();
-    store.indexes.clear();
-    store.indexed_names.clear();
-}
-
 // ---------------------------------------------------------------------------
-// Built-in schemas
+// Names and values
 // ---------------------------------------------------------------------------
 
-/// Register common attribute schemas (Audio, Image, Document, Email).
-pub fn register_builtins() -> KernelResult<()> {
-    // Audio attributes.
-    register_schema("Audio:Artist", "text", "Music artist or band name")?;
-    register_schema("Audio:Album", "text", "Album name")?;
-    register_schema("Audio:Title", "text", "Track title")?;
-    register_schema("Audio:Genre", "text", "Music genre")?;
-    register_schema("Audio:Year", "int", "Release year")?;
-    register_schema("Audio:Track", "int", "Track number")?;
-    register_schema("Audio:Bitrate", "int", "Audio bitrate in kbps")?;
-    register_schema("Audio:Duration", "int", "Duration in seconds")?;
-
-    // Image attributes.
-    register_schema("Image:Width", "int", "Image width in pixels")?;
-    register_schema("Image:Height", "int", "Image height in pixels")?;
-    register_schema(
-        "Image:ColorSpace",
-        "text",
-        "Color space (sRGB, AdobeRGB, etc.)",
-    )?;
-    register_schema("Image:Camera", "text", "Camera make and model")?;
-    register_schema("Image:DateTaken", "int", "Timestamp when photo was taken")?;
-
-    // Document attributes.
-    register_schema("Document:Author", "text", "Document author")?;
-    register_schema("Document:Title", "text", "Document title")?;
-    register_schema("Document:Subject", "text", "Document subject")?;
-    register_schema("Document:PageCount", "int", "Number of pages")?;
-    register_schema("Document:WordCount", "int", "Number of words")?;
-
-    // Email attributes.
-    register_schema("Email:From", "text", "Sender email address")?;
-    register_schema("Email:To", "text", "Recipient email address")?;
-    register_schema("Email:Subject", "text", "Email subject line")?;
-    register_schema("Email:Date", "int", "Email send timestamp")?;
-    register_schema("Email:Read", "bool", "Whether email has been read")?;
-
-    // Generic attributes.
-    register_schema("App:Rating", "int", "User rating (1-5)")?;
-    register_schema("App:Comment", "text", "User comment")?;
-
+/// Whether `name` may name an attribute: see the module's "Limits".
+fn validate_name(name: &str) -> KernelResult<()> {
+    if name.is_empty()
+        || name.len() > MAX_ATTR_NAME_LEN
+        || !name.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(KernelError::InvalidArgument);
+    }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Self-tests
-// ---------------------------------------------------------------------------
-
-/// Run self-tests for the queryable metadata module.
-///
-/// The suite asserts exact table contents, so it needs a table of its own.
-/// It used to get one by calling `clear_all()`, which — since this suite is
-/// reachable from the shell — deleted whatever the user had stored here and
-/// then reported success.  The live state is moved aside for the duration and
-/// put back afterwards; `crate::fs::selftest` records why this shape rather
-/// than the alternatives.
-pub fn self_test() -> KernelResult<()> {
-    // These counters live outside the table, so `with_pristine` cannot
-    // see them; save and restore them here so a run leaves no trace.
-    let saved_set_count = SET_COUNT.load(Ordering::Relaxed);
-    let saved_get_count = GET_COUNT.load(Ordering::Relaxed);
-    let saved_query_count = QUERY_COUNT.load(Ordering::Relaxed);
-    let result = crate::fs::selftest::with_pristine(&STORE, AttrStore::new(), self_test_inner);
-    SET_COUNT.store(saved_set_count, Ordering::Relaxed);
-    GET_COUNT.store(saved_get_count, Ordering::Relaxed);
-    QUERY_COUNT.store(saved_query_count, Ordering::Relaxed);
-    result
+/// The extended attribute `name` is kept in.
+fn xattr_name(name: &str) -> Vec<u8> {
+    let mut full = Vec::with_capacity(PREFIX.len().saturating_add(name.len()));
+    full.extend_from_slice(PREFIX);
+    full.extend_from_slice(name.as_bytes());
+    full
 }
 
-fn self_test_inner() -> KernelResult<()> {
+/// The attribute name an extended attribute's name gives, if it is one of
+/// ours: [`PREFIX`] then a name [`validate_name`] takes.
+fn attr_name_of(xattr: &[u8]) -> Option<&str> {
+    let rest = xattr.strip_prefix(PREFIX)?;
+    let name = core::str::from_utf8(rest).ok()?;
+    validate_name(name).ok()?;
+    Some(name)
+}
+
+/// `value` as it is kept: a type marker and the value (module documentation).
+fn encode(value: &AttrValue) -> KernelResult<Vec<u8>> {
+    let number;
+    let (marker, body): (&[u8], &[u8]) = match value {
+        AttrValue::Text(s) if s.len() > MAX_VALUE_LEN => return Err(KernelError::InvalidArgument),
+        AttrValue::Bytes(b) if b.len() > MAX_VALUE_LEN => return Err(KernelError::InvalidArgument),
+        AttrValue::Text(s) => (&b"t:"[..], s.as_bytes()),
+        AttrValue::Int(n) => {
+            number = alloc::format!("{n}");
+            (&b"i:"[..], number.as_bytes())
+        }
+        AttrValue::Bool(v) => (&b"b:"[..], if *v { &b"true"[..] } else { &b"false"[..] }),
+        AttrValue::Bytes(b) => (&b"x:"[..], b.as_slice()),
+    };
+    let mut out = Vec::new();
+    out.try_reserve(marker.len().saturating_add(body.len()))
+        .map_err(|_| KernelError::OutOfMemory)?;
+    out.extend_from_slice(marker);
+    out.extend_from_slice(body);
+    Ok(out)
+}
+
+/// The value a kept attribute holds. A value without a marker, or one whose
+/// rest does not fit its marker, reads untyped: text if it is UTF-8, bytes if
+/// not.
+fn decode(raw: &[u8]) -> AttrValue {
+    let typed = match raw.split_at_checked(2) {
+        Some((b"t:", rest)) => core::str::from_utf8(rest)
+            .ok()
+            .map(|s| AttrValue::Text(String::from(s))),
+        Some((b"i:", rest)) => core::str::from_utf8(rest)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .map(AttrValue::Int),
+        Some((b"b:", b"true")) => Some(AttrValue::Bool(true)),
+        Some((b"b:", b"false")) => Some(AttrValue::Bool(false)),
+        Some((b"x:", rest)) => Some(AttrValue::Bytes(rest.to_vec())),
+        _ => None,
+    };
+    typed.unwrap_or_else(|| match core::str::from_utf8(raw) {
+        Ok(s) => AttrValue::Text(String::from(s)),
+        Err(_) => AttrValue::Bytes(raw.to_vec()),
+    })
+}
+
+/// Whether `needle` occurs in `haystack`, ASCII letters' case ignored.
+fn contains_ignoring_ascii_case(haystack: &str, needle: &str) -> bool {
+    needle.is_empty()
+        || haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+// ---------------------------------------------------------------------------
+// One file's attributes
+// ---------------------------------------------------------------------------
+
+/// Give the file at `path` attribute `name` with `value`, replacing any it
+/// has. Asked as the caller: `setxattr`'s rules decide who may.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a name or a value outside the limits;
+/// `ResourceExhausted` for a new name on a file with [`MAX_ATTRS_PER_FILE`]
+/// already; the path's, the `user.` namespace's and the filesystem's -- one
+/// that keeps no attributes (FAT) answers `NotSupported`.
+pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelResult<()> {
+    let path = path.as_ref();
+    validate_name(name)?;
+    let encoded = encode(&value)?;
+    let full = xattr_name(name);
+    let held: Vec<Vec<u8>> = Vfs::list_xattrs(path)?;
+    let ours = held.iter().filter(|n| attr_name_of(n).is_some()).count();
+    if ours >= MAX_ATTRS_PER_FILE && !held.contains(&full) {
+        return Err(KernelError::ResourceExhausted);
+    }
+    SET_COUNT.fetch_add(1, Ordering::Relaxed);
+    Vfs::set_xattr(path, &full, &encoded)
+}
+
+/// The value of the file's attribute `name`. Asked as the caller, through a
+/// trailing symlink, as `getxattr` asks.
+///
+/// # Errors
+///
+/// `NoAttribute` when the file has none by that name; `InvalidArgument` for a
+/// name no attribute can have; the path's, the namespace's and the
+/// filesystem's.
+pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
+    validate_name(name)?;
+    GET_COUNT.fetch_add(1, Ordering::Relaxed);
+    Vfs::get_xattr(path.as_ref(), &xattr_name(name)).map(|raw| decode(&raw))
+}
+
+/// Remove the file's attribute `name`.
+///
+/// # Errors
+///
+/// `NoAttribute` when it has none by that name; otherwise as [`set_attr`].
+pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
+    validate_name(name)?;
+    SET_COUNT.fetch_add(1, Ordering::Relaxed);
+    Vfs::remove_xattr(path.as_ref(), &xattr_name(name))
+}
+
+/// Every attribute on the file, by name.
+///
+/// # Errors
+///
+/// As [`get_attr`].
+pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue)>> {
+    let path = path.as_ref();
+    GET_COUNT.fetch_add(1, Ordering::Relaxed);
+    let mut out = Vec::new();
+    for xattr in Vfs::list_xattrs(path)? {
+        let Some(name) = attr_name_of(&xattr) else {
+            continue;
+        };
+        match Vfs::get_xattr(path, &xattr) {
+            Ok(raw) => out.push((String::from(name), decode(&raw))),
+            // Removed between the listing and the read: gone, not an error.
+            Err(KernelError::NoAttribute) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Remove every attribute from the file; answers how many there were.
+///
+/// # Errors
+///
+/// As [`set_attr`].
+pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
+    let path = path.as_ref();
+    let mut removed: usize = 0;
+    for xattr in Vfs::list_xattrs(path)? {
+        if attr_name_of(&xattr).is_none() {
+            continue;
+        }
+        match Vfs::remove_xattr(path, &xattr) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(KernelError::NoAttribute) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    SET_COUNT.fetch_add(1, Ordering::Relaxed);
+    Ok(removed)
+}
+
+// ---------------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------------
+
+/// The files and directories under `root`, `root` included, whose attributes
+/// satisfy `predicates` -- every one ([`QueryMode::All`]) or any one
+/// ([`QueryMode::Any`]); no predicates match nothing. `/proc`, `/sys` and
+/// `/dev` are not walked (their files keep no attributes), and symlinks are
+/// not followed.
+///
+/// # Errors
+///
+/// `root`'s: `NotFound`, `NotADirectory`.
+pub fn query<R: AsRef<Path> + ?Sized>(
+    predicates: &[Predicate],
+    mode: QueryMode,
+    root: &R,
+) -> KernelResult<Found> {
+    QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
+    let mut found = Found {
+        results: Vec::new(),
+        incomplete: false,
+    };
+    if predicates.is_empty() {
+        return Ok(found);
+    }
+    let wanted: Vec<Vec<u8>> = predicates
+        .iter()
+        .map(|p| xattr_name(&p.attr_name))
+        .collect();
+    let opts = WalkOptions {
+        show_hidden: true,
+        include_root: true,
+        ..WalkOptions::default()
+    };
+    let mut visited: u64 = 0;
+    let stats = fswalk::walk_visit(root.as_ref(), &opts, |entry| {
+        visited = visited.saturating_add(1);
+        if visited > MAX_VISITED {
+            found.incomplete = true;
+            return WalkAction::Stop;
+        }
+        // Only these two carry `user.` attributes.
+        if !matches!(entry.entry_type, EntryType::File | EntryType::Directory) {
+            return WalkAction::Continue;
+        }
+        let held = match Vfs::list_xattrs_no_follow(&entry.path) {
+            Ok(held) => held,
+            // A filesystem that keeps no attributes: nothing to miss.
+            Err(KernelError::NotSupported) => return WalkAction::Continue,
+            // Gone mid-walk, or unreadable: a match that may not have been seen.
+            Err(_) => {
+                found.incomplete = true;
+                return WalkAction::Continue;
+            }
+        };
+        let mut matched = Vec::new();
+        let mut all = true;
+        for (pred, name) in predicates.iter().zip(&wanted) {
+            if !held.contains(name) {
+                all = false;
+                continue;
+            }
+            match Vfs::get_xattr_no_follow(&entry.path, name) {
+                Ok(raw) => {
+                    let value = decode(&raw);
+                    if pred.matches(&value) {
+                        matched.push((pred.attr_name.clone(), value));
+                    } else {
+                        all = false;
+                    }
+                }
+                Err(KernelError::NoAttribute) => all = false,
+                Err(_) => {
+                    all = false;
+                    found.incomplete = true;
+                }
+            }
+        }
+        let include = match mode {
+            QueryMode::All => all,
+            QueryMode::Any => !matched.is_empty(),
+        };
+        if include {
+            if found.results.len() >= MAX_QUERY_RESULTS {
+                found.incomplete = true;
+                return WalkAction::Stop;
+            }
+            found.results.push(QueryResult {
+                path: entry.path.clone(),
+                matched_attrs: matched,
+            });
+        }
+        WalkAction::Continue
+    })?;
+    if stats.errors > 0 || stats.unwalked > 0 {
+        found.incomplete = true;
+    }
+    Ok(found)
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Attributes as the file's extended attributes, on a scratch tree in `/tmp`
+/// (memfs):
+///
+/// 1. each type kept and read back, and what a program's `getxattr` sees is
+///    the marked value under `user.slate.<name>`;
+/// 2. a value another tool set reads untyped -- text, or bytes when not
+///    UTF-8 -- and a marker whose rest does not fit reads as text;
+/// 3. names and values outside the limits refused, removing one not there
+///    `NoAttribute`, clearing counts what it removed, and the per-file limit;
+/// 4. the file's, not a name's: a hard link sees them, a rename carries them,
+///    and a file made at the name of a deleted one has none;
+/// 5. queries: text with case ignored, integer ranges, substrings, all-of and
+///    any-of, within their root (which must exist), a directory's own
+///    attributes and a name that is not UTF-8 found, everything seen.
+///
+/// The counters are put back as they were: this is reachable from the shell,
+/// and a test run is not the user's activity.
+///
+/// # Errors
+///
+/// `InternalError` naming the first step that answered wrongly; the setup's.
+pub fn self_test() -> KernelResult<()> {
+    const DIR: &str = "/tmp/_qattr";
+    let saved = stats();
+    // Best effort, both ends: this test's own scratch tree.
+    let _ = Vfs::remove_recursive(DIR);
+    let result = self_test_on(DIR);
+    let _ = Vfs::remove_recursive(DIR);
+    SET_COUNT.store(saved.sets, Ordering::Relaxed);
+    GET_COUNT.store(saved.gets, Ordering::Relaxed);
+    QUERY_COUNT.store(saved.queries, Ordering::Relaxed);
+    result?;
+    crate::serial_println!(
+        "[qattr] Self-test passed (5 tests): typed values as user.slate.* attributes, untyped \
+         ones read, limits, links and renames, queries"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // one linear script
+fn self_test_on(dir: &str) -> KernelResult<()> {
     use crate::serial_println;
 
-    // A section that skips records why, so the closing line cannot claim nine
-    // self-tests passed when eight ran. `check-selftest-skips` refuses a build
-    // over an unconditional success after a skip, and it is right to: the last
-    // line is the one a reader believes.
-    let mut skips = crate::fs::selftest::Skips::new();
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[qattr]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let at = |name: &[u8]| {
+        let mut p = PathBuf::from(dir);
+        p.push(Path::new(name));
+        p
+    };
+    let song = at(b"song.mp3");
+    let alias = at(b"alias.mp3");
+    let moved = at(b"moved.mp3");
+    let odd = at(b"\xFFodd.mp3");
+    let sub = at(b"sub");
+    let deep = at(b"sub/deep.mp3");
+    let photo = at(b"photo.jpg");
 
-    // Save and reset state.
-    clear_all();
-    reset_stats();
-
-    // Test 1: set and get attributes.
-    {
-        set_attr(
-            "/test/song.mp3",
-            "Audio:Artist",
-            AttrValue::Text(String::from("Beatles")),
-        )?;
-        set_attr("/test/song.mp3", "Audio:Bitrate", AttrValue::Int(320))?;
-        let artist = get_attr("/test/song.mp3", "Audio:Artist")?;
-        assert_eq!(artist, AttrValue::Text(String::from("Beatles")));
-        let bitrate = get_attr("/test/song.mp3", "Audio:Bitrate")?;
-        assert_eq!(bitrate, AttrValue::Int(320));
-        serial_println!("[queryable] test 1 passed: set/get attributes");
+    Vfs::mkdir(dir)?;
+    Vfs::mkdir(&sub)?;
+    for p in [&song, &odd, &deep, &photo] {
+        Vfs::write_file(p, b"data")?;
     }
 
-    // Test 2: list attributes.
-    {
-        let attrs = list_attrs("/test/song.mp3")?;
-        assert_eq!(attrs.len(), 2);
-        serial_println!("[queryable] test 2 passed: list attributes");
+    // 1: each type, and the attribute a program reads.
+    let typed = [
+        ("Audio:Artist", AttrValue::Text(String::from("The Beatles"))),
+        ("Audio:Bitrate", AttrValue::Int(-320)),
+        ("Email:Read", AttrValue::Bool(true)),
+        ("App:Blob", AttrValue::Bytes(alloc::vec![0, 0xFF, b':'])),
+    ];
+    for (name, value) in &typed {
+        set_attr(&song, name, value.clone())?;
     }
-
-    // Test 3: query with equality.
-    {
-        set_attr(
-            "/test/song2.mp3",
-            "Audio:Artist",
-            AttrValue::Text(String::from("Beatles")),
-        )?;
-        set_attr(
-            "/test/song3.mp3",
-            "Audio:Artist",
-            AttrValue::Text(String::from("Stones")),
-        )?;
-        let results = query(
-            &[Predicate::eq_text("Audio:Artist", "Beatles")],
-            QueryMode::All,
-            None,
-        );
-        assert_eq!(results.len(), 2);
-        serial_println!("[queryable] test 3 passed: equality query");
+    let mut back = Vec::new();
+    for (name, _) in &typed {
+        back.push(get_attr(&song, name)?);
     }
-
-    // Test 4: query with range.
+    let program = Vfs::get_xattr(&song, b"user.slate.Audio:Bitrate")?;
+    let listed = list_attrs(&song)?;
+    if back.iter().zip(&typed).any(|(b, (_, v))| b != v)
+        || program != b"i:-320"
+        || listed.len() != typed.len()
     {
-        set_attr("/test/song2.mp3", "Audio:Bitrate", AttrValue::Int(128))?;
-        set_attr("/test/song3.mp3", "Audio:Bitrate", AttrValue::Int(256))?;
-        let results = query(
-            &[Predicate::gt_int("Audio:Bitrate", 200)],
-            QueryMode::All,
-            None,
+        serial_println!(
+            "[qattr]     read back {:?}, a program's {:?}, listed {}",
+            back,
+            program,
+            listed.len()
         );
-        // song.mp3 (320) and song3.mp3 (256) should match.
-        assert_eq!(results.len(), 2);
-        serial_println!("[queryable] test 4 passed: range query");
+        return fail("a typed value did not read back, or is not kept as user.slate.<name>");
     }
+    serial_println!("[qattr]   1: each type kept as a marked user.slate.* attribute: ok");
 
-    // Test 5: AND query (multiple predicates).
+    // 2: values set without a marker.
+    Vfs::set_xattr(&photo, b"user.slate.Image:Camera", b"Pentax K-1")?;
+    Vfs::set_xattr(&photo, b"user.slate.Image:Raw", b"\xFF\x00")?;
+    Vfs::set_xattr(&photo, b"user.slate.Image:Width", b"i:wide")?;
+    let camera = get_attr(&photo, "Image:Camera")?;
+    let raw = get_attr(&photo, "Image:Raw")?;
+    let width = get_attr(&photo, "Image:Width")?;
+    if camera != AttrValue::Text(String::from("Pentax K-1"))
+        || raw != AttrValue::Bytes(alloc::vec![0xFF, 0])
+        || width != AttrValue::Text(String::from("i:wide"))
     {
-        let results = query(
-            &[
-                Predicate::eq_text("Audio:Artist", "Beatles"),
-                Predicate::gt_int("Audio:Bitrate", 200),
-            ],
-            QueryMode::All,
-            None,
+        serial_println!(
+            "[qattr]     camera {:?}, raw {:?}, width {:?}",
+            camera,
+            raw,
+            width
         );
-        // Only song.mp3 has Beatles AND bitrate > 200.
-        assert_eq!(results.len(), 1);
-        // Compared on the file name rather than by substring: a substring
-        // test on a path is the wrong tool anyway (it cannot tell a name
-        // from a directory component), and `Path` deliberately offers no
-        // `contains`.
-        assert_eq!(
-            results[0].path.as_path().file_name(),
-            Some(Path::new("song.mp3"))
-        );
-        serial_println!("[queryable] test 5 passed: AND query");
+        return fail("a value without a fitting marker read as something other than untyped");
     }
+    serial_println!("[qattr]   2: unmarked values read as text or bytes: ok");
 
-    // Test 6: indexed query.
+    // 3: limits, removal, clearing.
+    let long_name = "N".repeat(MAX_ATTR_NAME_LEN.saturating_add(1));
+    let big = AttrValue::Text("v".repeat(MAX_VALUE_LEN.saturating_add(1)));
+    let refusals = [
+        set_attr(&song, "", AttrValue::Int(1)),
+        set_attr(&song, "has space", AttrValue::Int(1)),
+        set_attr(&song, &long_name, AttrValue::Int(1)),
+        set_attr(&song, "Big:Text", big),
+    ];
+    let absent = remove_attr(&song, "Never:There");
+    let cleared = clear_attrs(&song)?;
+    let after_clear = list_attrs(&song)?;
+    for i in 0..MAX_ATTRS_PER_FILE {
+        set_attr(&song, &alloc::format!("Many:{i}"), AttrValue::Int(1))?;
+    }
+    let one_more = set_attr(&song, "Many:extra", AttrValue::Int(1));
+    let overwrite = set_attr(&song, "Many:0", AttrValue::Int(2));
+    let cleared_many = clear_attrs(&song)?;
+    if refusals
+        .iter()
+        .any(|r| *r != Err(KernelError::InvalidArgument))
+        || absent != Err(KernelError::NoAttribute)
+        || cleared != typed.len()
+        || !after_clear.is_empty()
+        || one_more != Err(KernelError::ResourceExhausted)
+        || overwrite.is_err()
+        || cleared_many != MAX_ATTRS_PER_FILE
     {
-        create_index("Audio:Artist")?;
-        let paths = indexed_query("Audio:Artist", &AttrValue::Text(String::from("Beatles")));
-        assert_eq!(paths.len(), 2);
-        serial_println!("[queryable] test 6 passed: indexed query");
+        serial_println!(
+            "[qattr]     refusals {:?}, absent {:?}, cleared {} then {:?}, one more {:?}, overwrite {:?}, cleared {}",
+            refusals,
+            absent,
+            cleared,
+            after_clear,
+            one_more,
+            overwrite,
+            cleared_many
+        );
+        return fail("a limit, a removal or a clearing answered wrongly");
     }
+    serial_println!("[qattr]   3: limits, removal, clearing: ok");
 
-    // Test 7: remove and rename.
+    // 4: the file's, not a name's.
+    set_attr(&song, "Audio:Title", AttrValue::Text(String::from("Help!")))?;
+    Vfs::link(&song, &alias)?;
+    let through_link = get_attr(&alias, "Audio:Title");
+    Vfs::rename(&song, &moved)?;
+    let after_rename = get_attr(&moved, "Audio:Title");
+    Vfs::remove(&moved)?;
+    Vfs::remove(&alias)?;
+    Vfs::write_file(&song, b"new")?;
+    let newcomer = list_attrs(&song)?;
+    let title = Ok(AttrValue::Text(String::from("Help!")));
+    if through_link != title || after_rename != title || !newcomer.is_empty() {
+        serial_println!(
+            "[qattr]     link {:?}, renamed {:?}, a new file at the old name {:?}",
+            through_link,
+            after_rename,
+            newcomer
+        );
+        return fail("attributes did not follow their file");
+    }
+    serial_println!("[qattr]   4: through a link, across a rename, gone with the file: ok");
+
+    // 5: queries.
+    set_attr(
+        &song,
+        "Audio:Artist",
+        AttrValue::Text(String::from("The Beatles")),
+    )?;
+    set_attr(&song, "Audio:Year", AttrValue::Int(1965))?;
+    set_attr(
+        &odd,
+        "Audio:Artist",
+        AttrValue::Text(String::from("the beatles")),
+    )?;
+    set_attr(&odd, "Audio:Year", AttrValue::Int(1969))?;
+    set_attr(
+        &deep,
+        "Audio:Artist",
+        AttrValue::Text(String::from("Pink Floyd")),
+    )?;
+    set_attr(&deep, "Audio:Year", AttrValue::Int(1973))?;
+    set_attr(&sub, "Folder:Kind", AttrValue::Text(String::from("albums")))?;
+    let root = Path::new(dir);
+    let beatles = query(
+        &[Predicate::eq_text("Audio:Artist", "THE BEATLES")],
+        QueryMode::All,
+        root,
+    )?;
+    let sixties = query(
+        &[
+            Predicate::gt_int("Audio:Year", 1964),
+            Predicate::lt_int("Audio:Year", 1970),
+        ],
+        QueryMode::All,
+        root,
+    )?;
+    let either = query(
+        &[
+            Predicate::contains("Audio:Artist", "floyd"),
+            Predicate::eq_int("Audio:Year", 1965),
+        ],
+        QueryMode::Any,
+        root,
+    )?;
+    let starts = query(
+        &[Predicate::starts_with("Audio:Artist", "the ")],
+        QueryMode::All,
+        root,
+    )?;
+    let in_sub = query(&[Predicate::gt_int("Audio:Year", 0)], QueryMode::All, &sub)?;
+    let folder = query(
+        &[Predicate::eq_text("Folder:Kind", "Albums")],
+        QueryMode::All,
+        &sub,
+    )?;
+    let missing_root = query(
+        &[Predicate::gt_int("Audio:Year", 0)],
+        QueryMode::All,
+        "/tmp/_qattr/none",
+    );
+    let found_odd = beatles.results.iter().any(|r| r.path == odd);
+    if beatles.results.len() != 2
+        || !found_odd
+        || beatles.incomplete
+        || sixties.results.len() != 2
+        || either.results.len() != 2
+        || starts.results.len() != 2
+        || in_sub.results.len() != 1
+        || in_sub.results.first().map(|r| &r.path) != Some(&deep)
+        || folder.results.len() != 1
+        || missing_root.is_ok()
     {
-        remove_attr("/test/song3.mp3", "Audio:Artist")?;
-        let results = query(
-            &[Predicate::eq_text("Audio:Artist", "Stones")],
-            QueryMode::All,
-            None,
+        serial_println!(
+            "[qattr]     beatles {} (odd name found {}), sixties {}, either {}, starts {}, under sub {}, sub's own {}, a missing root {:?}",
+            beatles.results.len(),
+            found_odd,
+            sixties.results.len(),
+            either.results.len(),
+            starts.results.len(),
+            in_sub.results.len(),
+            folder.results.len(),
+            missing_root.map(|f| f.results.len())
         );
-        assert_eq!(results.len(), 0);
-
-        rename_path("/test/song.mp3", "/music/song.mp3")?;
-        let artist = get_attr("/music/song.mp3", "Audio:Artist")?;
-        assert_eq!(artist, AttrValue::Text(String::from("Beatles")));
-        // Old path should be gone.
-        assert!(get_attr("/test/song.mp3", "Audio:Artist").is_err());
-        serial_println!("[queryable] test 7 passed: remove/rename");
+        return fail("a query found the wrong files");
     }
-
-    // Test 8: non-UTF-8 paths key distinct attribute sets, and are carried
-    // correctly through the index, the query root filter and rename
-    // (design-decisions.md §261).
-    {
-        clear_all();
-
-        // `\xFF` and `\xFE` can begin no UTF-8 sequence, so under a
-        // `String` key these two files would have shared one attribute set.
-        let a = Path::new(&b"/q/\xFFf.mp3"[..]);
-        let b = Path::new(&b"/q/\xFEf.mp3"[..]);
-
-        create_index("Audio:Artist")?;
-        set_attr(a, "Audio:Artist", AttrValue::Text(String::from("A")))?;
-        set_attr(b, "Audio:Artist", AttrValue::Text(String::from("B")))?;
-
-        // Each file kept its own value.
-        assert_eq!(
-            get_attr(a, "Audio:Artist")?,
-            AttrValue::Text(String::from("A"))
-        );
-        assert_eq!(
-            get_attr(b, "Audio:Artist")?,
-            AttrValue::Text(String::from("B"))
-        );
-
-        // The reverse index resolves back to the exact bytes.
-        let hits = indexed_query("Audio:Artist", &AttrValue::Text(String::from("A")));
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].as_path(), a);
-
-        // A query rooted at a directory with no UTF-8 spelling finds only
-        // what is under it.
-        let root = Path::new(&b"/q"[..]);
-        let results = query(
-            &[Predicate::eq_text("Audio:Artist", "B")],
-            QueryMode::All,
-            Some(root),
-        );
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path.as_path(), b);
-
-        // Rename moves only the file named, index included.
-        let a2 = Path::new(&b"/q/\xFFf2.mp3"[..]);
-        rename_path(a, a2)?;
-        assert!(get_attr(a, "Audio:Artist").is_err());
-        assert_eq!(
-            get_attr(a2, "Audio:Artist")?,
-            AttrValue::Text(String::from("A"))
-        );
-        let hits = indexed_query("Audio:Artist", &AttrValue::Text(String::from("A")));
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].as_path(), a2);
-
-        // `b` was never touched by any of it.
-        assert_eq!(
-            get_attr(b, "Audio:Artist")?,
-            AttrValue::Text(String::from("B"))
-        );
-
-        serial_println!("[queryable] test 8 passed: non-UTF-8 paths");
-    }
-
-    // Cleanup.
-    clear_all();
-    reset_stats();
-
-    // --- 9: attributes follow the FILE, not the name ---
-    //
-    // The eight rungs above use paths that do not exist, so `file_identity`
-    // returns NotFound, `query_key` falls back to the path, and every one of
-    // them passes identically whether this table is keyed by identity or by
-    // name. They are no evidence for the conversion. This one creates a real
-    // file and gives it a second name.
-    {
-        const A: &[u8] = b"/tmp/queryable-id-a";
-        const B: &[u8] = b"/tmp/queryable-id-b";
-        const C: &[u8] = b"/tmp/queryable-id-c";
-        for p in [A, B, C] {
-            let _ = crate::fs::Vfs::remove(Path::new(p));
-        }
-        crate::fs::Vfs::write_file(Path::new(A), b"x")?;
-
-        // Classified, not guessed: `.is_err()` would announce "no hard links
-        // here" for a link refused with PermissionDenied, a cause never
-        // established, and return success.
-        match crate::fs::selftest::classify(crate::fs::Vfs::link(Path::new(A), Path::new(B))) {
-            crate::fs::selftest::Setup::Ready => {
-                // A third real file, deliberately NOT a link, for the control.
-                crate::fs::Vfs::write_file(Path::new(C), b"x")?;
-                set_attr(Path::new(A), "rung", AttrValue::Int(42))?;
-                let via_b = get_attr(Path::new(B), "rung");
-                let via_c = get_attr(Path::new(C), "rung");
-                let _ = remove_attr(Path::new(A), "rung");
-                for p in [A, B, C] {
-                    let _ = crate::fs::Vfs::remove(Path::new(p));
-                }
-
-                // NEGATIVE CONTROL first: a key that collapsed every path to one
-                // entry would answer for C too, and the assertion below would
-                // pass without identity keying existing (dd-954).
-                if via_c.is_ok() {
-                    serial_println!(
-                        "[queryable]   ERROR: control failed -- an UNRELATED file reports A's attr"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if via_b.is_err() {
-                    serial_println!(
-                        "[queryable]   FAIL: attr set on /tmp/queryable-id-a is invisible under"
-                    );
-                    serial_println!(
-                        "[queryable]         /tmp/queryable-id-b, a second name for one inode"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[queryable]   identity rung OK -- attributes follow the file, not the name"
-                );
-            }
-            crate::fs::selftest::Setup::Unsupported(e) => {
-                serial_println!(
-                    "[queryable]   identity rung SKIPPED -- link() unsupported here: {:?}",
-                    e
-                );
-                skips.record("identity rung", "link() unsupported on /tmp");
-                let _ = crate::fs::Vfs::remove(Path::new(A));
-            }
-            crate::fs::selftest::Setup::Failed(e) => {
-                serial_println!(
-                    "[queryable]   FAIL: link() refused with {:?}, which is not 'this",
-                    e
-                );
-                serial_println!("[queryable]         system cannot' -- it was asked and said no");
-                let _ = crate::fs::Vfs::remove(Path::new(A));
-                return Err(e);
-            }
-        }
-    }
-    skips.report("queryable");
-    serial_println!("[queryable] all 9 self-tests passed{}", skips.suffix());
+    serial_println!(
+        "[qattr]   5: queries -- case, ranges, substrings, all and any, within a root: ok"
+    );
     Ok(())
 }

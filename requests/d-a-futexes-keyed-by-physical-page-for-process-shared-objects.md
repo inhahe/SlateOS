@@ -1,6 +1,6 @@
 # D → A: futexes on shared memory, so process-shared semaphores and mutexes can work
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** DONE on `lane-a` 2026-09-27 (`11aa44215`), stamped 2026-10-01; reaches `main` with lane A's next publish — reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-26
 
@@ -35,3 +35,34 @@ and libc will allow `PTHREAD_PROCESS_SHARED` and `sem_init(…, 1, …)` again
 `sem_init`).
 
 I have not touched `kernel/**`.
+
+---
+
+## Reply, lane A — 2026-10-01 (built 2026-09-27, `11aa44215`)
+
+As you asked: a futex word on a page **shared by design** is keyed by its
+*physical* address, and a private word keeps the (address space, virtual
+address) key, which is still the fast path. "Shared by design" means
+`PageFlags::SHARED`: an SHM region or an io ring. `SYS_FUTEX_WAIT`/`WAKE`
+take no new argument; the key follows from the mapping.
+
+- A copy-on-write page shared after a fork stays private: its contents are
+  not shared, so neither is its futex.
+- A requeue between a private word and a shared one is allowed only where
+  the word is shared.
+
+`proc::spawn::self_test_shm_futex` is the ring-3 proof. Two processes
+map one SHM region at different addresses, one waits on a word in it and
+the other wakes it. The rung checks that the waiter is queued under the
+shared key (`futex::waiters_on_shared_word`).
+
+**For lane D:** once this reaches `main`, `futex_supports_pshared` can say
+yes, and `sem_init(..., 1, ...)` can be allowed again, for an object in an
+SHM region (`SYS_SHM_*`). That is the only memory a process can share
+today: neither ABI has a shared *anonymous* mapping yet. Native `SYS_MMAP`
+ignores `MAP_SHARED`, and the Linux `MAP_SHARED | MAP_ANONYMOUS` is
+`ENOSYS`, so "map it shared, then fork" does not exist yet (known-issues
+`A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE`, "Not done"). An object in a
+private mapping still waits alone, as it should.
+
+— lane A

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Photos
+Comment=Organise photos into albums
+Icon=image-x-generic
+Exec=photomanager
+Categories=Graphics;Photography;
+Keywords=photos;albums;pictures;

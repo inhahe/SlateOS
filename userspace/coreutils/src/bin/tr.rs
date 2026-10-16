@@ -368,8 +368,9 @@ fn run_main() -> ExitCode {
     match stream(&job, &mut input, &mut out) {
         Ok(()) => {}
         // Upstream dies of `SIGPIPE` when the reader goes away, printing
-        // nothing; Rust masks that signal, so it arrives as `EPIPE`, and the
-        // run so far had succeeded (design-decisions 377).
+        // nothing, and so does this since `stdfd::restore` put the signal
+        // back. Where it could not, the signal arrives as `EPIPE`, and the run
+        // so far had succeeded (design-decisions 377).
         Err(Trouble::Write(e)) if stdfd::reader_gone(&e) => return ExitCode::SUCCESS,
         Err(trouble) => return trouble.report(),
     }

@@ -127,7 +127,14 @@ PY
 python3 "$DIFF_TMP/ntpserver.py" "$DIFF_TMP/ntp.ready" 10 2>"$DIFF_TMP/ntp.err" & server=$!
 for _ in {1..100}; do [ -e "$DIFF_TMP/ntp.ready" ] && break; sleep 0.05; done
 [ -e "$DIFF_TMP/ntp.ready" ] || { echo "syslog-client-check: the NTP server never started"; exit 1; }
-trap 'kill "$listener" "$server" 2>/dev/null' EXIT
+# Stopped on every way out as part of the preamble's cleanup, which a second
+# `trap ... EXIT` would replace -- this one did until 2026-10-07, and left the
+# scratch directory behind on every run.
+diff_cleanup() {
+  kill "$listener" "$server" 2>/dev/null
+  chmod -R u+rwx "$DIFF_TMP" 2>/dev/null
+  rm -rf "$DIFF_TMP"
+}
 
 # `ntpdate` and `sntp` are personalities of `ntpd`, chosen by argv[0].
 mkdir -p "$DIFF_TMP/bin"

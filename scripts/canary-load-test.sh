@@ -192,17 +192,7 @@ if [ -z "$LOAD_AT" ] && [ -n "$LOAD_UNTIL" ]; then
     exit 2
 fi
 
-# Temporary files are created only after the arguments are known to be good.
-# Creating them first leaked one per rejected invocation, which is trivial in
-# itself and exactly the kind of thing that makes a /tmp full of stale logs
-# indistinguishable from a run in progress.
-LOG="$(mktemp -t canary-load-XXXXXX.log)"
-LOAD_DIR="$(mktemp -d -t canary-load-ctl-XXXXXX)"
-LOAD_READY="$LOAD_DIR/ready"
-LOAD_STOP="$LOAD_DIR/stop"
-
 HISTORY="$PROJECT_ROOT/bench/history.jsonl"
-HISTORY_BACKUP="$(mktemp -t bench-history-XXXXXX.jsonl)"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # A stable path rather than the temp dir: this record is the only account of
 # what the stimulus did, it is what explains an ungradeable run, and it must
@@ -288,11 +278,35 @@ cleanup() {
     # performance over time, and this run measures the load generator, not the
     # kernel.  The experiment's actual finding is the canary verdict, which is
     # printed below and written up in known-issues.md.
-    if [ -s "$HISTORY_BACKUP" ]; then
+    if [ -s "${HISTORY_BACKUP:-}" ]; then
         cp "$HISTORY_BACKUP" "$HISTORY"
+    fi
+    # Removed whether or not it held anything: a project with no history yet
+    # leaves the backup empty, and an empty backup was left behind on every
+    # run (88 of them, found 2026-10-02).
+    if [ -n "${HISTORY_BACKUP:-}" ]; then
         rm -f "$HISTORY_BACKUP"
     fi
+    HISTORY_BACKUP=""
+    # The boot log is the run's to keep -- it is printed as the place to look --
+    # but a dry run or an early stop writes nothing to it, and an empty one is
+    # only clutter: 1,940 of them had piled up by 2026-10-02.
+    if [ -n "${LOG:-}" ] && [ ! -s "$LOG" ]; then
+        rm -f "$LOG"
+    fi
 }
+
+# Temporary files are made only now, when nothing can refuse the invocation
+# any more -- the arguments parsed, the window's names checked -- and the trap
+# that removes them is set in the same breath. They were made before the names
+# check once, which exits 2 without the trap: one leaked log, control
+# directory and history backup per refused window, and every `--dry-run` left a
+# log too (`test-canary-load.py` runs several each boot, in every lane).
+LOG="$(mktemp -t canary-load-XXXXXX.log)"
+LOAD_DIR="$(mktemp -d -t canary-load-ctl-XXXXXX)"
+LOAD_READY="$LOAD_DIR/ready"
+LOAD_STOP="$LOAD_DIR/stop"
+HISTORY_BACKUP="$(mktemp -t bench-history-XXXXXX.jsonl)"
 trap cleanup EXIT INT TERM
 
 [ -f "$HISTORY" ] && cp "$HISTORY" "$HISTORY_BACKUP"

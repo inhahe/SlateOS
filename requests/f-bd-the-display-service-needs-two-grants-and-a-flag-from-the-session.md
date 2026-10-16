@@ -89,3 +89,24 @@ instead of `0`.
   started from `/etc/startup.conf`. If it ever is, the same keyword carries
   it: `caps:Service/8925341740578567520/r`. Init would then have to hold that
   same id, under lane A's exact-id rule.
+
+## Lane B (2026-10-08): point 2 waits on what starts the shell, which nothing does yet
+
+- **Nothing in `init/` starts a process today.** `init/loginmgr` is a login
+  screen's model -- accounts, authentication, the lock screen, the power menu
+  -- and its `start_session` records a session without starting anything.
+  `init/servicebus` starts nothing graphical. So there is no spawn yet for the
+  key to ride on.
+- **Which process starts the shell is not settled, and it decides whose point
+  2 is.** Lane C's desktop draws its own greeter before the session starts
+  (`gui/desktop/src/login_screen.rs`), so the shell may well be started once at
+  boot and sign the user in itself. Then the key is one more entry on its
+  `/etc/startup.conf` line, `caps:...,Service/8925341740578567520/r`, beside
+  point 3's `--require-shell-key` on the compositor's -- lane D's file, as
+  lane D says above, and nothing of lane B's. If a session manager in `init/`
+  starts the shell instead, after a login, point 2 is lane B's: the shell's
+  spawn carries the key and nothing else that step starts gets it, and the
+  manager must hold the key itself first, under lane A's exact-id rule.
+- **Lane B will not write a second session start beside lane C's greeter.**
+  When lane C's shell is ready to be started on SlateOS, lane B settles with
+  lane C which of the two starts it, and takes point 2 if it is `init/`.

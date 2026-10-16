@@ -630,7 +630,11 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
         let timer =
             next_remaining.map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
 
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
+        );
 
         // Woken (timer fired, settime re-armed, signal, or spurious) — cancel
         // any pending wakeup timer (harmless if it already fired) and

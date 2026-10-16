@@ -459,6 +459,71 @@ BACKEND = [
     ),
 ]
 
+# Pictures from the icon theme (2026-10-10, requests/c-e-draw-pictures-from-
+# the-icon-theme.md): each row of the file list is an icon -- a folder, a
+# locked file, a file -- handed to the loop, drawn again in other colours or
+# another theme; the folder pane draws no picture at all.
+AM_ICONS = "each_file_row_is_drawn_with_its_icon_from_the_theme"
+AM_KINDS = "a_folder_a_locked_file_and_a_file_have_icons_of_their_own"
+AM_AGAIN = "other_colours_or_another_theme_draw_the_icons_again"
+
+MAIN += [
+    (
+        "the frame's icons are never sent",
+        "        self.icons.frame_drawn(&tree.commands);\n",
+        "",
+        [AM_ICONS],
+    ),
+    (
+        "the icons are not handed to the loop",
+        "        self.icons.take_images()\n",
+        "        Vec::new()\n",
+        [AM_ICONS, AM_AGAIN],
+    ),
+    (
+        "other colours keep the old icons",
+        "        if self.palette != *palette {\n            self.icons.forget();\n        }\n",
+        "",
+        [AM_AGAIN],
+    ),
+    (
+        "the same colours drop the icons",
+        "        if self.palette != *palette {\n",
+        "        if self.palette == *palette || self.palette != *palette {\n",
+        [AM_AGAIN],
+    ),
+    (
+        "another icon theme is not followed",
+        "        self.icons.set_theme(settings.icon_theme.clone());\n",
+        "",
+        [AM_AGAIN],
+    ),
+    (
+        "a folder is drawn as a file",
+        "    if entry.is_dir {\n        \"folder\"\n",
+        "    if entry.is_dir {\n        \"text-x-generic\"\n",
+        [AM_KINDS],
+    ),
+    (
+        "a locked file is drawn as any file",
+        "    } else if entry.encrypted {\n        \"system-lock-screen\"\n",
+        "    } else if entry.encrypted {\n        \"text-x-generic\"\n",
+        [AM_KINDS],
+    ),
+    (
+        "a row draws no picture",
+        "    frame.push(RenderCommand::Image {\n        x: x + 4.0,\n",
+        "    drop(RenderCommand::Image {\n        x: x + 4.0,\n",
+        [AM_ICONS],
+    ),
+    (
+        "the folder pane draws an emoji again",
+        "    let label = node.name.clone();\n",
+        "    let label = format!(\"\\u{1F4C1} {}\", node.name);\n",
+        [AM_ICONS],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "backend.rs": BACKEND,

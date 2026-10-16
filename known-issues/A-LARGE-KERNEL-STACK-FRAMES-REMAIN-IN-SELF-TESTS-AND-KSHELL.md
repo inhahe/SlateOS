@@ -519,3 +519,41 @@ having (see the wrong prediction recorded above) but is no longer urgent:
 `cmd_sysinfo`, `cmd_focusassist`, `cmd_autostart`, `cmd_wallpaper`, `cmd_nc`,
 `cmd_appnotify`, `cmd_parental`.  On the `oci run` path specifically the
 dominant term is now `OciRunFlags::parse` at 6 088.
+
+### Progress - 2026-10-08: the "stdlib floor" was ours, and it overflowed
+
+The 2026-08-18 note called `alloc`'s B-tree frames a floor: "not ours to
+split ... no amount of work on kernel functions moves them". The second half
+was wrong, and lane-a's debug boot of 3c783dfc0 is how that showed. It died
+with a double fault, its stack pointer in the guard page, in
+`alloc::collections::btree::node::slice_insert`, the first time
+`ctest-coreutils-runs` forked.
+
+**A B-tree frame is sized by the value type, and the value type is ours.**
+`BTreeMap::insert` passes its value by value down `entry`,
+`VacantEntry::insert`, `insert_recursing`, `split` and `slice_insert`. At
+`opt-level = 0` every one of those frames holds its own copy. The 13 088-byte
+`insert_recursing` of August was the monomorphisation for `proc::signal`'s
+per-process `SignalState`, about 2 KiB then. The per-thread signal work
+doubled it to 4 240 bytes (two `PendingSet`s of a record per signal), and the
+chain doubled with it: `insert_recursing` 26 016, `slice_insert` 12 896,
+`bulk_steal_left` 22 400 on the removal side. Under `inherit_for_fork`'s
+17 KiB closure and a syscall's frames, one insert needed about 76 KiB of a
+64 KiB stack.
+
+**Fix (a35d7960c, on lane-a):** `SIGNAL_STATES` and each process's `threads`
+map hold `Box`es. An insert or a removal moves a pointer. The records are
+made on the heap and filled in there, so no 4 KiB value sits in any frame.
+`scripts/stack-frames.py --filter btree` on the debug kernel: the largest
+B-tree frame went from 26 000 to **8 528**, and 594 prologues claiming 4 KiB
+or more became 548.
+
+**The rule this leaves:** a map or a `Vec` whose element is more than a few
+hundred bytes should hold `Box`es. The B-tree code is generic, so the
+element's size multiplies through about six frames. The 8 528 that remains
+is the next instance: `PROCESS_TABLE`'s `Process`, about 1.3 KiB inline. It is
+the same fix, wider (every `table.get(&pid)` site sees `&Box<Process>`, which
+auto-derefs). `stack-frames.py` cannot name the type behind a monomorphisation.
+`slice_insert`'s `imul reg, reg, SIZE` gives the element size, and walking the
+callers up from it (`call rel32` targets) finds the kernel code that owns the
+map.

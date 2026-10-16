@@ -1,8 +1,12 @@
 # D → B: yescrypt and bcrypt entries verify now, and `burn` still spends a SHA-512 hash
 
-**Status:** OPEN · **Filed:** 2026-10-06 by lane D · **Priority:** medium --
-a timing difference that tells a remote client whether an account exists,
-on any system holding a yescrypt or bcrypt entry.
+**Status:** ✅ DONE 2026-10-07 by lane B -- item 1 decided and fixed: a
+check that verifies nothing now costs what the account database's most
+common entry costs (design-decisions §1061); item 2 decided by the operator
+2026-10-09 and done -- new passwords are yescrypt (§1070). See "Lane B's
+answer" at the end. · **Filed:** 2026-10-06 by lane D · **Priority:** medium -- a timing
+difference that tells a remote client whether an account exists, on any
+system holding a yescrypt or bcrypt entry.
 
 ## In short
 
@@ -43,3 +47,43 @@ through instead of locking the account out; and `stored_method` still
 returns `None` for every malformed entry it did before.
 
 No reply is needed for item 2; close this when item 1 is decided.
+
+## Lane B's answer (2026-10-07)
+
+**Item 1, done.** `authlib::CostProfile` (design-decisions §1061). A check
+that verifies nothing hashes the typed password under one of the account
+database's own entries, used whole as the setting, so it costs exactly what
+checking against that entry costs. The entry chosen is one of the most
+common cost class: method and parameters, without the salt. On a uniform
+system that is every account's cost. On a mixed one it is the cost of the
+most accounts.
+
+- `Authenticator::authenticate` takes the profile and the user's entry from
+  one read of the database, for every user. That covers `sshd`, `ftpd`,
+  `su`, `sudo`, `doas`, `polkit` and `logind`.
+- A locked account burns with its own hash.
+- A database with nothing that verifies falls back to
+  `userdb::PASSWORD_METHOD`. It is public now, so `authlib` follows it
+  rather than a copy.
+- **`login` had a second, larger hole of the same kind:** for an unknown
+  name it read the password and refused without hashing anything at all,
+  milliseconds sooner than for a real account, whatever the method. It now
+  burns with the profile there.
+
+**Item 2:** new passwords stay `$6$` for now. Whether to move them to
+yescrypt is the operator's call, as you said, and is now
+`open-questions/B-Q24.md`, recommending yescrypt.
+
+**Item 2, 2026-10-09:** the operator chose yescrypt (B-Q24: A,
+design-decisions §1070). A new password is `$y$j9T$` with 22 characters of
+salt, its setting made by `crypt_gensalt` through `libcall::crypt` --
+`libc.a`'s on SlateOS, so your `gensalt_yescrypt_rn` makes every one -- from
+16 bytes of `/dev/urandom` (`userdb::new_setting`). `authlib`'s burn for a
+store with nothing to imitate is a yescrypt check now. Nothing for lane D to
+do; this closes the request for lane B.
+
+**Found while answering:** `userdb::random_salt` and `chpasswd` read
+`/dev/urandom` to its end, which never comes, so setting any password hung
+(`f4f77d799`). And `chpasswd` writes `/etc/shadow` directly, which is
+generated from `/etc/users.yaml` (§353), so what it writes does not take
+effect. Lane B is porting it over `userdb`.

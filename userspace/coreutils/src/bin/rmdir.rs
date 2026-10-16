@@ -85,20 +85,29 @@
 //! `--pa` names `--path`, because `path` is declared first. That is why
 //! [`LONG_OPTIONS`] is in GNU's declaration order and not alphabetised.
 //!
-//! # Options this implementation does not have
+//! # `-v` and `--ignore-fail-on-non-empty`
 //!
-//! `-v`/`--verbose` and `--ignore-fail-on-non-empty`. They are recognised and
-//! rejected with a message saying they are not implemented, rather than ignored,
-//! and they are listed in [`LONG_OPTIONS`] anyway because the table — not the
-//! set of options handled — is what decides whether an abbreviation is
-//! ambiguous. Drop `--verbose` and `rmdir --v` prints a version banner instead
-//! of refusing.
+//! Both are upstream's, and both used to be refused as not implemented
+//! (2026-10-07: ported, with `scripts/rmdir-diff.sh` to hold them to GNU 9.4).
 //!
-//! `--ignore-fail-on-non-empty` is the one where ignoring would be actively
-//! wrong. It asks for a *non-empty* directory to be passed over quietly, exit 0
-//! and all; ignoring the flag turns that into a diagnostic and exit 1, so a
-//! script written to tolerate a non-empty directory would instead abort on one.
-//! Rejecting it says so; implementing it is a small change and a separate one.
+//! * **`-v`** names every directory *before* trying to remove it -- `rmdir:
+//!   removing directory, 'a'` on standard output, ancestors included -- so a
+//!   failure is reported after the line naming what failed.
+//! * **`--ignore-fail-on-non-empty`** passes over a directory that is not
+//!   empty, quietly and with no effect on the status. "Not empty" is upstream's
+//!   `ignorable_failure`: the `rmdir` said `ENOTEMPTY` or `EEXIST`, or it said
+//!   `EACCES`, `EPERM`, `EROFS` or `EBUSY` *and* the directory, opened without
+//!   following a link, has an entry -- a non-empty directory in a read-only
+//!   parent is still non-empty, where an empty one there is a real failure.
+//!   Under `-p` a non-empty ancestor ends the walk the same quiet way.
+//!
+//! # A symbolic link with a trailing slash
+//!
+//! Linux's `rmdir(2)` does not follow a link named `link/`; it answers
+//! `ENOTDIR`, which would say a directory is not one. Upstream checks for
+//! exactly that -- the name ends in `/`, it resolves to a directory, and
+//! without the slash it is a link -- and says `failed to remove 'link/':
+//! Symbolic link not followed` instead. So does this.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -107,7 +116,7 @@ use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -140,10 +149,15 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 /// resolves, as measured.
 const ALIASES: &[(&str, &str)] = &[("path", "parents")];
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct RmdirFlags {
+    /// `-p`: upstream's `remove_empty_parents`.
     parents: bool,
+    /// `-v`: a line on standard output before every removal attempted.
+    verbose: bool,
+    /// `--ignore-fail-on-non-empty`: see [`ignorable_failure`].
+    ignore_fail_on_non_empty: bool,
 }
 
 /// What the command line asked for.
@@ -184,7 +198,7 @@ fn run_main(out: &mut Stream) -> ExitCode {
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut err = Stream::stderr();
-            if remove_all(&flags, &dirs, &mut err) {
+            if remove_all(&flags, &dirs, out, &mut err) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -202,8 +216,12 @@ fn help_text() -> String {
 Usage: rmdir [OPTION]... DIRECTORY...
 Remove the DIRECTORY(ies), if they are empty.
 
+      --ignore-fail-on-non-empty
+                  ignore each failure to remove a non-empty directory
   -p, --parents   remove DIRECTORY and its ancestors;
                   e.g., 'rmdir -p a/b' is similar to 'rmdir a/b a'
+
+  -v, --verbose   output a diagnostic for every directory processed
       --help      display this help and exit
       --version   output version information and exit
 "
@@ -310,7 +328,16 @@ fn parse_long(
             flags.parents = true;
             Ok(None)
         }
-        other => Err(unimplemented_long(other)),
+        "verbose" => {
+            flags.verbose = true;
+            Ok(None)
+        }
+        "ignore-fail-on-non-empty" => {
+            flags.ignore_fail_on_non_empty = true;
+            Ok(None)
+        }
+        // Unreachable: every entry in the table is handled above.
+        _ => Err(RMDIR.unrecognized_option(whole)),
     }
 }
 
@@ -318,33 +345,15 @@ fn parse_long(
 ///
 /// # Errors
 ///
-/// A byte that is no option of `rmdir`'s, or one this implementation lacks.
+/// A byte that is no option of `rmdir`'s.
 fn apply_short(flag: u8, flags: &mut RmdirFlags) -> Result<(), getopt::Error> {
+    // GNU `rmdir`'s `getopt_long` string is exactly `"pv"`.
     match flag {
         b'p' => flags.parents = true,
-        // GNU `rmdir`'s `getopt_long` string is exactly `"pv"`.
-        b'v' => return Err(unimplemented_short(flag)),
+        b'v' => flags.verbose = true,
         other => return Err(RMDIR.invalid_option(other)),
     }
     Ok(())
-}
-
-/// The diagnostic for an option that GNU `rmdir` has and this one does not.
-///
-/// Deliberately not [`Program::invalid_option`](getoptlong::Program::invalid_option): `-v` is not a typo, and telling
-/// the user it is invalid sends them to check their spelling of a flag they
-/// spelled correctly.
-fn unimplemented_short(flag: u8) -> getopt::Error {
-    RMDIR.usage_referring(format!(
-        "option -{} is not implemented by this rmdir",
-        char::from(flag)
-    ))
-}
-
-fn unimplemented_long(name: &str) -> getopt::Error {
-    RMDIR.usage_referring(format!(
-        "option '--{name}' is not implemented by this rmdir"
-    ))
 }
 
 // --------------------------------------------------------------- removing ---
@@ -358,8 +367,14 @@ fn unimplemented_long(name: &str) -> getopt::Error {
 /// asserted on in tests. The old file had no test of this path at all.
 ///
 /// One failure does not abandon the rest: measured, `rmdir nosuch g` reports
-/// `nosuch`, still removes `g`, and exits 1.
-fn remove_all<W: Write>(flags: &RmdirFlags, dirs: &[OsString], err: &mut W) -> bool {
+/// `nosuch`, still removes `g`, and exits 1. Under `-v` each attempt is named
+/// on `out` first.
+fn remove_all(
+    flags: &RmdirFlags,
+    dirs: &[OsString],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> bool {
     if dirs.is_empty() {
         // Module docs, defect 5: GNU follows this with the referral, and
         // `usage_referring` is what adds it.
@@ -373,27 +388,48 @@ fn remove_all<W: Write>(flags: &RmdirFlags, dirs: &[OsString], err: &mut W) -> b
 
     let mut ok = true;
     for dir in dirs {
+        announce(flags, dir, out);
         if let Err(e) = fs::remove_dir(Path::new(dir)) {
-            // Straight marks. `mkdir`'s `cannot create directory ‘a’` is curly
-            // and is the odd one out among its neighbours; the table in
-            // `mkdir.rs`'s module docs is the measurement.
-            let _ = writeln!(
-                err,
-                "rmdir: failed to remove {}: {}",
-                quoteaf_os(dir),
-                strerror(&e)
-            );
+            if ignorable_failure(flags, &e, dir) {
+                continue;
+            }
+            if symlink_not_followed(&e, dir) {
+                let _ = writeln!(
+                    err,
+                    "rmdir: failed to remove {}: Symbolic link not followed",
+                    quoteaf_os(dir)
+                );
+            } else {
+                // Straight marks. `mkdir`'s `cannot create directory ‘a’` is
+                // curly and is the odd one out among its neighbours; the table
+                // in `mkdir.rs`'s module docs is the measurement.
+                let _ = writeln!(
+                    err,
+                    "rmdir: failed to remove {}: {}",
+                    quoteaf_os(dir),
+                    strerror(&e)
+                );
+            }
             ok = false;
             // GNU reaches the ancestor walk only when the operand itself went,
             // which is why this is `continue` and not a fallthrough: there is
             // no point walking up from a directory that is still there.
             continue;
         }
-        if flags.parents && !remove_parents(dir.as_os_str(), err) {
+        if flags.parents && !remove_parents(flags, dir.as_os_str(), out, err) {
             ok = false;
         }
     }
     ok
+}
+
+/// Upstream's `-v` line: `prog_fprintf (stdout, "removing directory, %s",
+/// quoteaf (dir))`, before the attempt. A failed write is the stream's to
+/// remember and `close_stdout`'s to report.
+fn announce(flags: &RmdirFlags, dir: &OsStr, out: &mut dyn Write) {
+    if flags.verbose {
+        let _ = writeln!(out, "rmdir: removing directory, {}", quoteaf_os(dir));
+    }
 }
 
 /// Remove the ancestors of `operand`, innermost first, stopping at the first one
@@ -402,24 +438,99 @@ fn remove_all<W: Write>(flags: &RmdirFlags, dirs: &[OsString], err: &mut W) -> b
 /// This is gnulib `rmdir.c`'s `remove_parents`, and the fidelity is the point —
 /// see module docs, defect 1. Returns `true` if the walk ran to the end without
 /// a failure, which includes the common case of there being no ancestors at all
-/// (`rmdir -p foo`).
-fn remove_parents<W: Write>(operand: &OsStr, err: &mut W) -> bool {
+/// (`rmdir -p foo`) and an ancestor `--ignore-fail-on-non-empty` passes over,
+/// which ends the walk as quietly as a success would have continued it.
+fn remove_parents(
+    flags: &RmdirFlags,
+    operand: &OsStr,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> bool {
     let mut dir = strip_trailing_slashes(&os_bytes(operand)).to_vec();
     while strip_last_component(&mut dir) {
         let path = os_from_bytes(&dir);
+        announce(flags, &path, out);
         if let Err(e) = fs::remove_dir(Path::new(&path)) {
-            // Module docs, defect 3: the ancestor message carries the extra word
-            // `directory`, and the operand's does not.
-            let _ = writeln!(
-                err,
-                "rmdir: failed to remove directory {}: {}",
-                quoteaf_os(&path),
-                strerror(&e)
-            );
+            if ignorable_failure(flags, &e, &path) {
+                return true;
+            }
+            // Module docs, defect 3: the ancestor message carries the extra
+            // word `directory` -- unless the error says it is not one, which a
+            // component that is a link to one can.
+            let what = if e.kind() == io::ErrorKind::NotADirectory {
+                "failed to remove"
+            } else {
+                "failed to remove directory"
+            };
+            let _ = writeln!(err, "rmdir: {what} {}: {}", quoteaf_os(&path), strerror(&e));
             return false;
         }
     }
     true
+}
+
+/// Upstream's `ignorable_failure`: whether `--ignore-fail-on-non-empty` covers
+/// this failure to remove `dir`.
+///
+/// `ENOTEMPTY` and `EEXIST` say so outright. `EACCES`, `EPERM`, `EROFS` and
+/// `EBUSY` *may* be about a non-empty directory -- the removal was refused
+/// before emptiness was looked at -- so for those the directory itself is
+/// asked ([`directory_has_entries`]).
+fn ignorable_failure(flags: &RmdirFlags, e: &io::Error, dir: &OsStr) -> bool {
+    if !flags.ignore_fail_on_non_empty {
+        return false;
+    }
+    match e.kind() {
+        io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists => true,
+        // `PermissionDenied` is both `EACCES` and `EPERM`.
+        io::ErrorKind::PermissionDenied
+        | io::ErrorKind::ReadOnlyFilesystem
+        | io::ErrorKind::ResourceBusy => directory_has_entries(dir),
+        _ => false,
+    }
+}
+
+/// Upstream's `directory_status (AT_FDCWD, dir) == DS_NONEMPTY`: the name,
+/// opened as a directory *without following a link*, holds an entry other
+/// than `.` and `..`. Anything that stops the question being answered --
+/// a link, not a directory, unreadable -- is not "non-empty".
+fn directory_has_entries(dir: &OsStr) -> bool {
+    let path = Path::new(dir);
+    // `O_NOFOLLOW`: a link to a non-empty directory is a link, not a
+    // non-empty directory. Asked first, because `read_dir` follows.
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {}
+        _ => return false,
+    }
+    match fs::read_dir(path) {
+        // `read_dir` already leaves out `.` and `..`.
+        Ok(mut entries) => matches!(entries.next(), Some(Ok(_))),
+        Err(_) => false,
+    }
+}
+
+/// Upstream's special case for `rmdir link/`: Linux's `rmdir(2)` does not
+/// follow a link named with a trailing slash and says `ENOTDIR`, which would
+/// call a directory not one. It is this case when the name ends in `/`, still
+/// resolves (or fails to for some reason other than `ENOTDIR`) or resolves to a
+/// directory, and without its trailing slashes is a symbolic link.
+fn symlink_not_followed(e: &io::Error, dir: &OsStr) -> bool {
+    if e.kind() != io::ErrorKind::NotADirectory {
+        return false;
+    }
+    let bytes = os_bytes(dir);
+    if !bytes.ends_with(b"/") {
+        return false;
+    }
+    let followed = match fs::metadata(Path::new(dir)) {
+        Ok(meta) => meta.is_dir(),
+        Err(stat_err) => stat_err.kind() != io::ErrorKind::NotADirectory,
+    };
+    if !followed {
+        return false;
+    }
+    let bare = os_from_bytes(strip_trailing_slashes(&bytes));
+    fs::symlink_metadata(Path::new(&bare)).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Drop a name's trailing `/`s, as gnulib's `strip_trailing_slashes` does.
@@ -638,19 +749,23 @@ mod tests {
         assert_eq!(e.status, 1);
     }
 
-    /// `--ignore-fail-on-non-empty` ignored would abort a script written to
-    /// tolerate a non-empty directory; `-v` ignored would drop output a caller
-    /// asked for.
+    /// Both options upstream has and this used to refuse, in every spelling
+    /// -- `--i` is the one-letter abbreviation of the long one, measured.
     #[test]
-    fn unimplemented_options_are_rejected_by_name() {
-        for typed in ["-v", "--verbose", "--ignore-fail-on-non-empty", "--i"] {
-            let e = fail(&[typed, "a"]);
+    fn verbose_and_ignore_fail_on_non_empty_are_options() {
+        for typed in ["-v", "--verbose", "--verb", "-pv", "-vp"] {
+            assert!(run_parse(&[typed, "a"]).0.verbose, "{typed}");
+        }
+        for typed in ["--ignore-fail-on-non-empty", "--i", "--ignore"] {
             assert!(
-                e.sentence.contains("not implemented"),
-                "{typed}: {:?}",
-                e.sentence
+                run_parse(&[typed, "a"]).0.ignore_fail_on_non_empty,
+                "{typed}"
             );
         }
+        assert_eq!(
+            fail(&["--ignore-fail-on-non-empty=1", "a"]).sentence,
+            "option '--ignore-fail-on-non-empty' doesn't allow an argument"
+        );
     }
 
     #[test]
@@ -822,11 +937,20 @@ mod tests {
         dir
     }
 
-    /// Run `remove_all`, returning `(ok, diagnostics)`.
+    fn flags(parents: bool) -> RmdirFlags {
+        RmdirFlags {
+            parents,
+            ..RmdirFlags::default()
+        }
+    }
+
+    /// Run `remove_all`, returning `(ok, diagnostics)`; nothing may reach
+    /// standard output without `-v`.
     fn run(parents: bool, dirs: &[&Path]) -> (bool, String) {
         let owned: Vec<OsString> = dirs.iter().map(|p| p.as_os_str().to_owned()).collect();
-        let mut err: Vec<u8> = Vec::new();
-        let ok = remove_all(&RmdirFlags { parents }, &owned, &mut err);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let ok = remove_all(&flags(parents), &owned, &mut out, &mut err);
+        assert!(out.is_empty(), "{:?}", String::from_utf8_lossy(&out));
         (ok, String::from_utf8_lossy(&err).into_owned())
     }
 
@@ -850,6 +974,13 @@ mod tests {
     /// against each other. A poisoned lock is taken anyway: it means an earlier
     /// test panicked, and the directory was restored before it did.
     fn run_in(dir: &Path, parents: bool, operands: &[&str]) -> (bool, String) {
+        let (ok, out, err) = run_in_with(dir, &flags(parents), operands);
+        assert!(out.is_empty(), "{out:?}");
+        (ok, err)
+    }
+
+    /// [`run_in`] with any flags, returning standard output too.
+    fn run_in_with(dir: &Path, flags: &RmdirFlags, operands: &[&str]) -> (bool, String, String) {
         use std::sync::{Mutex, PoisonError};
         static CWD: Mutex<()> = Mutex::new(());
         let _guard = CWD.lock().unwrap_or_else(PoisonError::into_inner);
@@ -857,12 +988,76 @@ mod tests {
         let saved = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir).unwrap();
         let owned: Vec<OsString> = operands.iter().map(OsString::from).collect();
-        let mut err: Vec<u8> = Vec::new();
-        let ok = remove_all(&RmdirFlags { parents }, &owned, &mut err);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let ok = remove_all(flags, &owned, &mut out, &mut err);
         // Before the caller's assertions, so a failing assertion cannot leave
         // the whole test binary in a scratch directory that is about to go.
         std::env::set_current_dir(saved).unwrap();
-        (ok, String::from_utf8_lossy(&err).into_owned())
+        (
+            ok,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
+    }
+
+    /// `-v` names every attempt before it is made, ancestors included, and a
+    /// failure after the line naming it. Measured: `rmdir -pv a/b/c` prints
+    /// `'a/b/c'`, `'a/b'`, `'a'`.
+    #[test]
+    fn verbose_names_each_attempt_first() {
+        let d = scratch("verbose");
+        fs::create_dir_all(d.join("a").join("b").join("c")).unwrap();
+        fs::write(d.join("a").join("keep"), b"x").unwrap();
+        let v = RmdirFlags {
+            parents: true,
+            verbose: true,
+            ..RmdirFlags::default()
+        };
+        let (ok, out, err) = run_in_with(&d, &v, &["a/b/c"]);
+        assert!(!ok, "`a` is not empty");
+        assert_eq!(
+            out,
+            "rmdir: removing directory, 'a/b/c'\n\
+             rmdir: removing directory, 'a/b'\n\
+             rmdir: removing directory, 'a'\n"
+        );
+        assert!(err.contains("failed to remove directory 'a'"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `--ignore-fail-on-non-empty`: a non-empty operand is passed over with no
+    /// message and no effect on the status, and under `-p` a non-empty
+    /// ancestor ends the walk the same way. Anything else still fails.
+    #[test]
+    fn ignore_fail_on_non_empty_passes_over_only_non_empty_directories() {
+        let d = scratch("ignore");
+        fs::create_dir_all(d.join("ne")).unwrap();
+        fs::write(d.join("ne").join("f"), b"x").unwrap();
+        fs::create_dir_all(d.join("a").join("b")).unwrap();
+        fs::write(d.join("a").join("keep"), b"x").unwrap();
+        let quiet = RmdirFlags {
+            ignore_fail_on_non_empty: true,
+            ..RmdirFlags::default()
+        };
+        let (ok, out, err) = run_in_with(&d, &quiet, &["ne"]);
+        assert!(ok, "{err}");
+        assert_eq!((out.as_str(), err.as_str()), ("", ""));
+        assert!(d.join("ne").is_dir());
+
+        let walk = RmdirFlags {
+            parents: true,
+            ..quiet
+        };
+        let (ok, _, err) = run_in_with(&d, &walk, &["a/b"]);
+        assert!(ok, "{err}");
+        assert!(err.is_empty(), "{err}");
+        assert!(!d.join("a").join("b").exists() && d.join("a").is_dir());
+
+        // Not a non-empty directory: still an error.
+        let (ok, _, err) = run_in_with(&d, &quiet, &["nosuch"]);
+        assert!(!ok);
+        assert!(err.contains("No such file or directory"), "{err}");
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Defect 5: the referral used to be missing.

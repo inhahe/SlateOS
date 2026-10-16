@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Archive Manager — browse, extract, create and verify archives"
 [dependencies]
+# The file list's pictures as icons from the user's icon theme rather than
+# emoji, which no font here draws: named while drawing, handed to the loop
+# through `App::take_images`.
+themeicons = { path = "../themeicons" }
 pathtext = { path = "../pathtext" }
 # A member's name that is not text is shown by its bytes, as escapes -- the
 # tree's one renderer for an untrusted name -- never as a lossy decode.

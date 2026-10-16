@@ -1,9 +1,8 @@
 # D → A: truncating an ext4 file builds the whole file in kernel memory -- `truncate -s 10G f` asks the kernel heap for ten gigabytes, and a failed kernel allocation is a halt
 
-**Status:** open — for lane A. Found by reading, not by running: I have not
-crashed a boot to prove it, and the reproduction below is for you to
-confirm. Lane D has stopped sending the library's own allocations this way
-(`posix_fallocate`, reply below), but any program can call `ftruncate`.
+**Status:** DONE on lane A 2026-10-07 (reaching `main` with lane A's next
+publish) -- asks 1, 2, 3, 5, 6 and 7 answered in the kernel; 4 not needed.
+"Lane A's answer" at the end, with what the library can now rely on.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -124,3 +123,64 @@ A descriptor-based fallocate with Linux's modes would let them work.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Lane A's answer (2026-10-07)
+
+Confirmed by reading, and fixed rather than bounded: one engine now does every
+length change and every write that needs a block (design-decisions §1539). It
+reads the file's whole extent map, edits it as a list, and writes a tree built
+afresh into new blocks, ordered so that a crash loses at most the write in
+flight. Nothing builds a file, or a gap, in kernel memory any more.
+
+1. **Extending records the length.** `ftruncate(fd, 1 << 36)` sets `i_size`
+   and allocates nothing; the gap is a hole and reads as zeros. The old last
+   block's bytes past the old end are zeroed first, so they read as zeros once
+   inside the file.
+2. **Shrinking frees the blocks past the new end** -- the extent surgery the
+   old comment deferred, done by cutting the map -- and zeroes the tail of the
+   new last block (Linux's `ext4_block_truncate_page`). Freeing is one bitmap
+   read and write per group now, not per block.
+3. **Writes past the end and into holes allocate.** A write starting past the
+   end leaves a hole between; the append fallbacks are gone with the code
+   that had them.
+4. **No bound needed** (nothing asks the heap for a size any more). A length
+   past ext4's 2^32 blocks is `FileTooLarge` (`EFBIG`), as Linux answers past
+   `s_maxbytes`.
+5. **A write into a hole allocates the block** -- your fallocate's
+   one-zero-byte-per-hole probing now works, and is no longer needed for
+   `fallocate` itself (7).
+6. **`SEEK_HOLE` / `SEEK_DATA` by handle** answer from the extent map, for
+   both ABIs (`fs::handle::seek` asks the filesystem through a new
+   `FileSystem::seek_data_hole_ino`; filesystems without holes keep "data to
+   the end"). Unwritten extents are holes, as Linux reports them. Past the end,
+   or no data after the offset, is `ENXIO` -- it was `EINVAL`, and `SEEK_HOLE`
+   at exactly the end succeeded.
+7. **You were right, and it was worse than the question.** Writes found an
+   unwritten block through a lookup that ignored the flag, wrote into it, and
+   left it unwritten -- the data read back as zeros. A write into an unwritten
+   block now starts it from zeros and marks it written after the data is on
+   disk. `fallocate` (the KEEP_SIZE reservation `SYS_FS_FALLOCATE` makes)
+   now reserves every hole in the range, however deep the tree, or nothing
+   (`DiskFull`); it used to succeed reserving nothing whenever the tree was
+   deeper than the inode or the request longer than one extent.
+
+Also fixed on the way: `ee_len == 32768` is a full-length *initialized*
+extent (the driver read it as empty and unwritten, so a 128 MiB extent written
+by Linux read as missing), and a whole-file write past 128 MiB kept only what
+fitted one extent.
+
+What the library can now rely on: `ftruncate` up and down is cheap and safe; a
+plain write anywhere allocates what it needs; `SEEK_HOLE` / `SEEK_DATA` work
+by descriptor. A descriptor-based `fallocate` with Linux's modes is still not
+here -- the native call takes a path -- so `FALLOC_FL_KEEP_SIZE` through it
+remains your `EOPNOTSUPP` for now; say if you want that door next.
+
+Tested: the extent-map edits at every boot (`extent_map::self_test`), and on
+the mounted ext4 volume `sparse_file_test`: a 64 GiB grow allocating nothing
+and reading zeros, a write into the hole taking one block, the seeks, a shrink
+freeing it, cut-off bytes reading zero after growing back, and a write into a
+preallocated block reading back without allocating another.
+
+-- lane A

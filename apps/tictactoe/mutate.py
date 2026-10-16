@@ -177,8 +177,8 @@ MUTATIONS = [
     ),
     (
         "ticks are asked for all the time",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        if self.thinking() {",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        if true {",
+        '            .sooner(self.thinking().then_some(Duration::from_millis(TICK_MS)))',
+        '            .sooner(Some(Duration::from_millis(TICK_MS)))',
         ["ticks_are_asked_for_only_while_the_reply_is_owed"],
     ),
     (
@@ -336,6 +336,51 @@ MUTATIONS = [
         "                        Ink::on(c.chrome.even, &[c.chrome.lit]).at(size, true)",
         "                        c.chrome.even",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons\n            .sooner(self.thinking().then_some(Duration::from_millis(TICK_MS)))',
+        '        self.thinking().then_some(Duration::from_millis(TICK_MS))',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is given under the list of keys",
+        '        let greyed = if self.show_help {',
+        '        let greyed = if false {',
+        ['the_sheet_takes_a_reason_away'],
+    ),
+    (
+        'a greyed button says nothing: Nothing has been played yet: this game ',
+        '                Some("Nothing has been played yet: this game is already new.")',
+        '                Some("")',
+        ['the_greyed_new_game_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

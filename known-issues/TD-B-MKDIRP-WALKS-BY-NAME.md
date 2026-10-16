@@ -8,6 +8,13 @@ made (`File name too long`), and if someone else replaces a directory with a
 symbolic link between two of those steps, the next directory is created
 wherever the link points.
 
+**Since 2026-10-07 `mkdir -p` walks this way too**, having dropped a walk of
+its own for this one (which went by name as well, so nothing was lost). And
+one thing the by-name walk got wrong is fixed in it: `step_into` now asks for
+search permission, as `chdir` would, so a directory that can be listed but not
+entered is where the walk stops and the name the diagnostic gives --
+`mkdir -p nox/x/y` is `cannot create directory ‘nox’`, as upstream's.
+
 **Where.** `userspace/coreutils/src/mkdirp.rs`: `mkancesdirs` and its
 `step_into`. The *last* step -- giving the directory its owner and mode -- is
 already done GNU's way, through a descriptor opened `O_NOFOLLOW` when this

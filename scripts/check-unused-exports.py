@@ -86,6 +86,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rustlex  # noqa: E402
+
 # `pub` items worth asking about. Methods are excluded deliberately -- see the
 # module docstring.
 # Bare `pub` only. `pub(crate)`, `pub(super)` and `pub(in path)` all restrict
@@ -93,8 +96,11 @@ from pathlib import Path
 # absent external caller says nothing about them. The first version of this
 # pattern treated the parenthesised form as optional and counted them all --
 # caught by this file's own self-test before the number was quoted anywhere.
+#
+# It reads `production` text, whose literals are blanked, so `extern "C"`
+# arrives as `extern` and spaces.
 ITEM_RE = re.compile(
-    r"^pub\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
+    r"^pub\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+(?:\"[^\"]*\"\s+)?)*"
     r"(fn|struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
@@ -164,35 +170,17 @@ def crate_of(path: Path, root: Path) -> Path | None:
     return None
 
 
-def strip_test_modules(text: str) -> str:
-    """Remove `#[cfg(test)]` blocks, so test-only exports are not reported.
+def production(text: str) -> str:
+    """The code in `text` that a build compiles outside its tests, with its
+    comments and literals blanked: `rustlex.live_code`'s masked view. So a
+    test-only export is not reported, a commented-out `pub fn` is not an
+    export, and a `pub mod` line inside a string is not followed.
 
-    Brace-matched from the `mod` that follows the attribute. A regex that cut
-    to the next `}` would stop at the first nested block and leave the rest of
-    the module looking like ordinary code.
-    """
-    out = []
-    i = 0
-    while True:
-        at = text.find("#[cfg(test)]", i)
-        if at == -1:
-            out.append(text[i:])
-            return "".join(out)
-        out.append(text[i:at])
-        brace = text.find("{", at)
-        if brace == -1:
-            return "".join(out)
-        depth = 0
-        j = brace
-        while j < len(text):
-            if text[j] == "{":
-                depth += 1
-            elif text[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        i = j + 1
+    One gap stays open until `rustlex` closes it
+    (`requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`): an
+    item under `#[cfg(test)]` that has no body of its own -- `pub mod x;`,
+    `pub struct X;` -- is read as production."""
+    return rustlex.live_code(text)[1]
 
 
 # Bare `pub mod` only, for ITEM_RE's reason: a `pub(crate) mod` is not a way
@@ -200,8 +188,9 @@ def strip_test_modules(text: str) -> str:
 PUB_MOD_RE = re.compile(r"^pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
 
 
-def reachable_sources(crate: Path) -> list[Path]:
-    """`lib.rs` and every file reachable from it through `pub mod`.
+def reachable_sources(crate: Path) -> dict[Path, str]:
+    """`lib.rs` and every file reachable from it through `pub mod`, each with
+    its `production` code, which is lexed once per file and read twice.
 
     Without this the report is half noise, and the noise is the same shape
     every time: an item marked `pub` inside a *private* module. It is `pub`
@@ -212,20 +201,22 @@ def reachable_sources(crate: Path) -> list[Path]:
     """
     lib = crate / "src" / "lib.rs"
     if not lib.is_file():
-        return []
-    seen: list[Path] = [lib]
+        return {}
+    seen: dict[Path, str] = {}
     queue = [lib]
     while queue:
         cur = queue.pop()
+        if cur in seen:
+            continue
         try:
-            text = strip_test_modules(cur.read_text(encoding="utf-8", errors="replace"))
+            text = production(cur.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
+        seen[cur] = text
         base = cur.parent if cur.name in ("lib.rs", "mod.rs") else cur.with_suffix("")
         for name in PUB_MOD_RE.findall(text):
             for cand in (base / f"{name}.rs", base / name / "mod.rs"):
                 if cand.is_file() and cand not in seen:
-                    seen.append(cand)
                     queue.append(cand)
     return seen
 
@@ -241,11 +232,7 @@ def exports(root: Path) -> tuple[dict[str, list[tuple[str, str]]], int]:
         libs += 1
         rel = crate.relative_to(root).as_posix()
         items: list[tuple[str, str]] = []
-        for src in reachable_sources(crate):
-            try:
-                text = strip_test_modules(src.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
+        for text in reachable_sources(crate).values():
             for kind, name in ITEM_RE.findall(text):
                 if name in TOO_COMMON or name.startswith("_"):
                     continue
@@ -270,6 +257,22 @@ mod tests {
     pub fn test_only_export() {}
     fn nested() { if true { } }
 }
+
+#[cfg(test)]
+mod out_of_line;
+pub fn after_out_of_line() {}
+pub struct Holder {
+    #[cfg(test)]
+    scratch: u8,
+}
+pub fn after_field() {}
+pub extern "C" fn c_entry() {}
+/*
+pub fn commented_out() {}
+*/
+const SAMPLE: &str = r#"
+pub mod in_a_literal;
+"#;
 """
 
 
@@ -281,7 +284,7 @@ def selftest() -> int:
         cases.append((name, ok))
         print(f"{'ok  ' if ok else 'FAIL'}  {name}")
 
-    stripped = strip_test_modules(SELFTEST_SOURCE)
+    stripped = production(SELFTEST_SOURCE)
     case("a cfg(test) module is removed", "test_only_export" not in stripped)
     case(
         "...and its nested braces do not end the cut early",
@@ -289,6 +292,16 @@ def selftest() -> int:
     )
 
     items = dict((name, kind) for kind, name in ITEM_RE.findall(stripped))
+    # A test item ends where it ends: what follows a test module's declaration
+    # or a test-only field is production code.
+    case(
+        "an export after `#[cfg(test)] mod x;` is still one",
+        items.get("after_out_of_line") == "fn",
+    )
+    case(
+        "an export after a test-only field is still one",
+        items.get("after_field") == "fn" and items.get("Holder") == "struct",
+    )
     case("a pub fn is an export", items.get("wanted") == "fn")
     case("a pub struct is an export", items.get("Kept") == "struct")
     case("a pub enum is an export", items.get("Shape") == "enum")
@@ -299,10 +312,13 @@ def selftest() -> int:
         "a test-only export is not reported",
         "test_only_export" not in items,
     )
+    case("an extern \"C\" fn is an export", items.get("c_entry") == "fn")
+    case("a pub fn in a comment is not", "commented_out" not in items)
 
-    mods = PUB_MOD_RE.findall(SELFTEST_SOURCE)
+    mods = PUB_MOD_RE.findall(stripped)
     case("pub mod is followed", mods == ["visible"])
     case("a private mod is not", "hidden" not in mods)
+    case("a pub mod line in a string literal is not", "in_a_literal" not in mods)
 
     case("the noise list is applied", "new" in TOO_COMMON and "parse" in TOO_COMMON)
 

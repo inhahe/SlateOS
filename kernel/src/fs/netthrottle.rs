@@ -17,7 +17,6 @@
 //! Integration:
 //!   → netsettings (interface configuration)
 //!   → datausage (usage tracking)
-//!   → appregistry (app identification)
 //!   → notifcenter (throttle alerts)
 //! ```
 

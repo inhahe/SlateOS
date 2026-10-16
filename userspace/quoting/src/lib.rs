@@ -351,14 +351,40 @@ pub fn next_mb(text: &[u8]) -> Option<Mb> {
     })
 }
 
+/// How the text being rendered is read: as the locale reads it.
+///
+/// [`Charset::Utf8`] is SlateOS's one locale (§351, resting on Q38), and what
+/// every program that calls `setlocale` sees. [`Charset::Ascii`] is the C
+/// locale, which is where a program that **never** calls `setlocale` stays
+/// whatever the environment says: one byte per character, and only the
+/// printable ASCII ones printable. GNU `patch` is such a program, so under it
+/// `café` renders as `caf\303\251` in the escaping styles where a program in
+/// the UTF-8 locale prints `café` -- measured, and the reason this exists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Charset {
+    /// UTF-8: a valid sequence is one character, which prints if it is
+    /// [`printable_char`].
+    Utf8,
+    /// The C locale's: each byte its own character, unprintable above 0177.
+    Ascii,
+}
+
 /// The piece beginning at byte `i`, or `None` at the end of the string.
 ///
 /// The escaping styles do not care *why* a byte failed to decode — both
 /// failures render as one escape per byte — so [`Mb`]'s two failures collapse
-/// back into one [`Piece::Byte`] here.
-fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
+/// back into one [`Piece::Byte`] here. Under [`Charset::Ascii`] every byte
+/// above 0177 is such a byte, which is all the C locale's rendering is.
+fn piece_at(s: &[u8], i: usize, cs: Charset) -> Option<Piece> {
     let rest = s.get(i..)?;
     let &first = rest.first()?;
+    if cs == Charset::Ascii {
+        return Some(if first.is_ascii() {
+            Piece::Char(char::from(first), 1)
+        } else {
+            Piece::Byte(first)
+        });
+    }
     Some(match next_mb(rest)? {
         Mb::Char(c, n) => Piece::Char(c, n),
         Mb::Invalid | Mb::Incomplete => Piece::Byte(first),
@@ -369,10 +395,10 @@ fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
 ///
 /// The offset is not decoration: [`bare_ok`] needs "is this the first?" and
 /// [`c_always`] needs to look at the byte after a NUL.
-fn pieces(s: &[u8]) -> impl Iterator<Item = (usize, Piece)> + '_ {
+fn pieces(s: &[u8], cs: Charset) -> impl Iterator<Item = (usize, Piece)> + '_ {
     let mut i = 0usize;
     std::iter::from_fn(move || {
-        let p = piece_at(s, i)?;
+        let p = piece_at(s, i, cs)?;
         let at = i;
         i = i.saturating_add(p.len());
         Some((at, p))
@@ -402,9 +428,9 @@ fn escape_piece(p: Piece, out: &mut String) {
 /// `None` says at least one piece was not, which is the signal to fall through
 /// to a quoted form. A `Piece::Byte` is never accepted, so a `Some` result is
 /// also a proof that `name` was valid UTF-8.
-fn all_bare(name: &[u8], ok: impl Fn(usize, Piece) -> bool) -> Option<String> {
+fn all_bare(name: &[u8], cs: Charset, ok: impl Fn(usize, Piece) -> bool) -> Option<String> {
     let mut out = String::with_capacity(name.len());
-    for (i, p) in pieces(name) {
+    for (i, p) in pieces(name, cs) {
         match p {
             Piece::Char(c, _) if ok(i, p) => out.push(c),
             _ => return None,
@@ -489,7 +515,7 @@ const RIGHT_QUOTE: char = '\u{2019}';
 /// ```
 #[must_use]
 pub fn first_char(text: &[u8]) -> Option<(char, usize)> {
-    match piece_at(text, 0)? {
+    match piece_at(text, 0, Charset::Utf8)? {
         Piece::Char(c, n) => Some((c, n)),
         Piece::Byte(_) => None,
     }
@@ -521,7 +547,7 @@ pub fn first_char(text: &[u8]) -> Option<(char, usize)> {
 #[must_use]
 pub fn escape_unprintable(text: &[u8]) -> String {
     let mut out = String::with_capacity(text.len());
-    for (_, p) in pieces(text) {
+    for (_, p) in pieces(text, Charset::Utf8) {
         match p {
             Piece::Char(c, _) if printable_char(c) => out.push(c),
             Piece::Byte(b) => octal_escape(b, &mut out),
@@ -604,28 +630,37 @@ pub fn escaped_in_quotes(text: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quote(arg: &[u8]) -> String {
-    locale_quote(arg, b"")
+    locale_quote(arg, b"", Charset::Utf8, false)
 }
 
 /// [`quote`], parameterised by gnulib's `quote_these_too` set — see
 /// [`Style::quote_with`]. The locale styles escape rather than elide, so a
 /// byte in `extra` comes back with a `\` in front of it.
-fn locale_quote(arg: &[u8], extra: &[u8]) -> String {
+///
+/// Under [`Charset::Ascii`] the marks are gnulib's for a locale whose
+/// character set has no curly ones: `'...'`, or `"..."` for `clocale`; the
+/// closing one is escaped inside, as the curly one is.
+fn locale_quote(arg: &[u8], extra: &[u8], cs: Charset, clocale: bool) -> String {
+    let (left, right) = match cs {
+        Charset::Utf8 => (LEFT_QUOTE, RIGHT_QUOTE),
+        Charset::Ascii if clocale => ('"', '"'),
+        Charset::Ascii => ('\'', '\''),
+    };
     // Six bytes of delimiter, not two: each curly mark is three bytes of UTF-8.
     let mut out = String::with_capacity(arg.len().saturating_add(6));
-    out.push(LEFT_QUOTE);
-    for (_, p) in pieces(arg) {
+    out.push(left);
+    for (_, p) in pieces(arg, cs) {
         match p {
             Piece::Char('\\', _) => out.push_str("\\\\"),
-            Piece::Char(RIGHT_QUOTE, _) => {
+            Piece::Char(c, _) if c == right => {
                 out.push('\\');
-                out.push(RIGHT_QUOTE);
+                out.push(right);
             }
             Piece::Char(c, _) if printable_char(c) => push_maybe_escaped(c, extra, &mut out),
             other => escape_piece(other, &mut out),
         }
     }
-    out.push(RIGHT_QUOTE);
+    out.push(right);
     out
 }
 
@@ -698,7 +733,7 @@ fn push_maybe_escaped(c: char, extra: &[u8], out: &mut String) {
 pub fn quote_glibc(arg: &[u8]) -> String {
     let mut out = String::with_capacity(arg.len().saturating_add(2));
     out.push('\'');
-    for (_, p) in pieces(arg) {
+    for (_, p) in pieces(arg, Charset::Utf8) {
         match p {
             Piece::Char(c @ ('\\' | '\''), _) => {
                 out.push('\\');
@@ -738,7 +773,7 @@ pub fn quote_glibc(arg: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quote_c_maybe(text: &[u8]) -> String {
-    c_maybe(text, b"")
+    c_maybe(text, b"", Charset::Utf8)
 }
 
 /// [`quote_c_maybe`], plus `:` in the set of bytes that force the quotes on.
@@ -758,7 +793,7 @@ pub fn quote_c_maybe(text: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quote_c_maybe_colon(text: &[u8]) -> String {
-    c_maybe(text, b":")
+    c_maybe(text, b":", Charset::Utf8)
 }
 
 /// The body of both, parameterised by gnulib's `quote_these_too` set.
@@ -768,7 +803,7 @@ pub fn quote_c_maybe_colon(text: &[u8]) -> String {
 /// force_outer_quoting_style`). [`all_bare`] is the same thing said forwards:
 /// it builds the optimistic rendering and hands back `None` instead of a
 /// half-built one, which it can because that rendering is just the text.
-fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
+fn c_maybe(text: &[u8], quote_these_too: &[u8], cs: Charset) -> String {
     let bare = |_i: usize, p: Piece| match p {
         // `quote_these_too` is a set of ASCII bytes, so a non-ASCII character
         // can never be in it -- and asking `c as u8` of one would be wrong,
@@ -778,7 +813,7 @@ fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
         }
         Piece::Byte(_) => false,
     };
-    all_bare(text, bare).unwrap_or_else(|| c_always(text, b""))
+    all_bare(text, cs, bare).unwrap_or_else(|| c_always(text, b"", cs))
 }
 
 /// The forced pass: gnulib's `c_quoting_style` with the outer quotes present.
@@ -789,10 +824,10 @@ fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
 /// the quotes on then appears inside them as a plain colon, not as an escape.
 /// That is why `c_maybe` passes an empty `extra` and [`Style::C`], which never
 /// elides and so never restarts, passes its own.
-fn c_always(text: &[u8], extra: &[u8]) -> String {
+fn c_always(text: &[u8], extra: &[u8], cs: Charset) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
-    for (i, p) in pieces(text) {
+    for (i, p) in pieces(text, cs) {
         match p {
             Piece::Char(c @ ('"' | '\\'), _) => {
                 out.push('\\');
@@ -837,7 +872,7 @@ pub fn quotef(name: &[u8]) -> String {
     // eliding style that set does exactly one thing -- force the quotes on --
     // so it is spelled here as the condition rather than as a rule inside the
     // renderer. See [`Style::quote_with`].
-    render(name, !name.contains(&b':'))
+    render(name, !name.contains(&b':'), Charset::Utf8)
 }
 
 /// Render `name` the way GNU's `quoteaf()` does: the same shell-pasteable form
@@ -871,7 +906,7 @@ pub fn quoteaf(name: &[u8]) -> String {
     // No colon set here, and gnulib does not pass one either: `quoteaf` is
     // plain `quotearg_style (shell_escape_always_quoting_style, …)`. It would
     // make no difference if it did -- the quotes are already on.
-    render(name, false)
+    render(name, false, Charset::Utf8)
 }
 
 /// Render `name` in gnulib's `escape` style: C escapes, no quotes at all.
@@ -917,7 +952,7 @@ pub fn quoteaf(name: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn escape(name: &[u8]) -> String {
-    escape_style(name, b"")
+    escape_style(name, b"", Charset::Utf8)
 }
 
 /// The body of both shell-escaping styles.
@@ -925,11 +960,11 @@ pub fn escape(name: &[u8]) -> String {
 /// `allow_bare` is the difference between them: gnulib calls it "elide outer
 /// quotes", and it is a property of the sentence the name is going into, not
 /// of the name.
-fn render(name: &[u8], allow_bare: bool) -> String {
+fn render(name: &[u8], allow_bare: bool, cs: Charset) -> String {
     if allow_bare && !name.is_empty() {
         // Safe as it stands. This is the overwhelmingly common case and the
         // reason `quotef` exists rather than everything using `quote`.
-        if let Some(bare) = all_bare(name, |i, p| bare_ok(name, i, p)) {
+        if let Some(bare) = all_bare(name, cs, |i, p| bare_ok(name, i, p)) {
             return bare;
         }
     }
@@ -937,7 +972,7 @@ fn render(name: &[u8], allow_bare: bool) -> String {
     // sequence, so looking for one bytewise is exact.
     if !name.is_empty()
         && name.contains(&b'\'')
-        && let Some(inner) = all_bare(name, dq_ok)
+        && let Some(inner) = all_bare(name, cs, dq_ok)
     {
         // A name holding a single quote reads far better wrapped in double
         // quotes than spliced with '\'' at every occurrence.
@@ -947,7 +982,7 @@ fn render(name: &[u8], allow_bare: bool) -> String {
         out.push('"');
         return out;
     }
-    shell_escape(name)
+    shell_escape(name, cs)
 }
 
 /// Whether a piece needs no shell quoting at all, at offset `i` of `name`.
@@ -979,7 +1014,7 @@ fn dq_ok(i: usize, p: Piece) -> bool {
 
 /// The general form: a run of literal text inside `'...'`, a `'` spliced as
 /// `'\''`, and a run of unprintable pieces inside `$'...'`.
-fn shell_escape(name: &[u8]) -> String {
+fn shell_escape(name: &[u8], cs: Charset) -> String {
     let mut out = String::with_capacity(name.len().saturating_mul(2).saturating_add(2));
 
     // gnulib emits two more quotes here than the rendering needs, for exactly
@@ -994,7 +1029,7 @@ fn shell_escape(name: &[u8]) -> String {
     // a name ending in `é` ends in a printable character whose final byte
     // (`0xa9`) is not one on its own.
     if name.contains(&b'\'')
-        && pieces(name).last().is_some_and(|(_, p)| !p.printable())
+        && pieces(name, cs).last().is_some_and(|(_, p)| !p.printable())
         && name.first() != Some(&b'\'')
     {
         out.push_str("''");
@@ -1002,7 +1037,7 @@ fn shell_escape(name: &[u8]) -> String {
 
     out.push('\'');
     let mut open = true;
-    let mut it = pieces(name).peekable();
+    let mut it = pieces(name, cs).peekable();
     while let Some((_, p)) = it.next() {
         match p {
             Piece::Char('\'', _) => {
@@ -1209,22 +1244,48 @@ impl Style {
     /// ```
     #[must_use]
     pub fn quote_with(self, text: &[u8], extra: &[u8]) -> Vec<u8> {
+        self.quote_with_in(text, extra, Charset::Utf8)
+    }
+
+    /// [`Style::quote`] as a program in the locale `cs` describes renders
+    /// it -- [`Charset::Ascii`] for one that never calls `setlocale`.
+    ///
+    /// ```
+    /// use quoting::{Charset, Style};
+    /// let cafe = "café".as_bytes();
+    /// assert_eq!(Style::Escape.quote_in(cafe, Charset::Utf8), cafe);
+    /// assert_eq!(Style::Escape.quote_in(cafe, Charset::Ascii), br"caf\303\251");
+    /// assert_eq!(Style::C.quote_in(cafe, Charset::Ascii), br#""caf\303\251""#);
+    /// assert_eq!(Style::Locale.quote_in(b"it's", Charset::Ascii), br"'it\'s'");
+    /// assert_eq!(Style::Clocale.quote_in(b"a\"b", Charset::Ascii), br#""a\"b""#);
+    /// // The unescaped styles print the bytes in either.
+    /// assert_eq!(Style::Shell.quote_in(cafe, Charset::Ascii), cafe);
+    /// ```
+    #[must_use]
+    pub fn quote_in(self, text: &[u8], cs: Charset) -> Vec<u8> {
+        self.quote_with_in(text, b"", cs)
+    }
+
+    /// [`Style::quote_with`] in the locale `cs` describes.
+    #[must_use]
+    pub fn quote_with_in(self, text: &[u8], extra: &[u8], cs: Charset) -> Vec<u8> {
         // An ASCII byte is a whole character wherever it appears in valid
         // UTF-8, and a standalone byte where the text is not UTF-8 at all, so
         // scanning bytewise for an ASCII set cannot match half a character.
         let forced = || text.iter().any(|b| extra.contains(b));
         match self {
             Self::Literal => text.to_vec(),
-            Self::Shell => shell_unescaped(text, !forced()),
-            Self::ShellAlways => shell_unescaped(text, false),
+            Self::Shell => shell_unescaped(text, !forced(), cs),
+            Self::ShellAlways => shell_unescaped(text, false, cs),
             // Forcing here restarts as `shell_escape_always`, which is what
             // `render` with the quotes on already is.
-            Self::ShellEscape => render(text, !forced()).into_bytes(),
-            Self::ShellEscapeAlways => render(text, false).into_bytes(),
-            Self::C => c_always(text, extra).into_bytes(),
-            Self::CMaybe => c_maybe(text, extra).into_bytes(),
-            Self::Escape => escape_style(text, extra).into_bytes(),
-            Self::Locale | Self::Clocale => locale_quote(text, extra).into_bytes(),
+            Self::ShellEscape => render(text, !forced(), cs).into_bytes(),
+            Self::ShellEscapeAlways => render(text, false, cs).into_bytes(),
+            Self::C => c_always(text, extra, cs).into_bytes(),
+            Self::CMaybe => c_maybe(text, extra, cs).into_bytes(),
+            Self::Escape => escape_style(text, extra, cs).into_bytes(),
+            Self::Locale => locale_quote(text, extra, cs, false).into_bytes(),
+            Self::Clocale => locale_quote(text, extra, cs, true).into_bytes(),
         }
     }
 }
@@ -1244,7 +1305,7 @@ impl Style {
 ///   [`shell_bare_ok`].
 /// * There is no `''` prefix. gnulib's stray-quote wart (see [`shell_escape`])
 ///   is emitted beside a `$'...'`, and this style never writes one.
-fn shell_unescaped(name: &[u8], allow_bare: bool) -> Vec<u8> {
+fn shell_unescaped(name: &[u8], allow_bare: bool, cs: Charset) -> Vec<u8> {
     if allow_bare
         && !name.is_empty()
         && name
@@ -1256,7 +1317,7 @@ fn shell_unescaped(name: &[u8], allow_bare: bool) -> Vec<u8> {
     }
     // `all_bare` accepts only characters, so a `Some` here also proves `name`
     // is valid UTF-8 and its bytes are the rendering.
-    if !name.is_empty() && name.contains(&b'\'') && all_bare(name, dq_ok).is_some() {
+    if !name.is_empty() && name.contains(&b'\'') && all_bare(name, cs, dq_ok).is_some() {
         let mut out = Vec::with_capacity(name.len().saturating_add(2));
         out.push(b'"');
         out.extend_from_slice(name);
@@ -1318,9 +1379,9 @@ fn shell_bare_ok(name: &[u8], i: usize, b: u8) -> bool {
 /// pedantic: `ls -b` gives the *directory header* its own options, with `:` in
 /// the set and no space, and prints a directory called `d e` as `d e:` while
 /// printing a file called `a b` as `a\ b`.
-fn escape_style(text: &[u8], extra: &[u8]) -> String {
+fn escape_style(text: &[u8], extra: &[u8], cs: Charset) -> String {
     let mut out = String::with_capacity(text.len());
-    for (at, p) in pieces(text) {
+    for (at, p) in pieces(text, cs) {
         match p {
             Piece::Char('\\', _) => out.push_str("\\\\"),
             Piece::Char('\0', _) => nul_escape(text, at, &mut out),

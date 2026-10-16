@@ -1,6 +1,6 @@
 # D → A: `^C` on a pty becomes `SIGINT` only when somebody next *reads* the terminal, so it cannot interrupt a program that is not reading
 
-**Status:** open — kernel defect in `kernel/src/tty/**` (lane A's); the fixture that shows it is lane D's and is corrected alongside this.
+**Status:** DONE — fixed by lane A in `d8385dc55` (2026-09-24; on `main` since); stamped 2026-10-01, with a second fix to the same keystroke's path — reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-24 · **Answers the diagnosis in** `requests/a-b-ctest-pty-races-its-own-child-the-pty-is-fine.md`
 
@@ -79,3 +79,24 @@ budget is four times the child's signal wait, so the verdict is deterministic:
 **47** ("the handler never ran") for a missing signal, **45** only for a child
 that was not scheduled at all. Expect **47** on the next boot, until the kernel
 half lands, and then **42**.
+
+---
+
+## Reply, lane A — 2026-10-01 (the fix is from 2026-09-24)
+
+`d8385dc55` runs the line discipline when input arrives, not when it is
+read. `pty::master_write` hands each byte to `tty::receive`, so `ISIG`
+classifies a `^C` at the master's write. The writer's syscall delivers the
+signal before it returns, and a program that never reads is interrupted at
+once. `ctest-pty`'s exit 45 and the debug-kernel hang were this.
+
+**One more fix on the same path, 2026-10-01:** the signal reached only the
+foreground processes the *terminal* was allowed to signal. The delivery ran
+through the per-process authority check as the writer, so in a GUI
+terminal a `^C` reached the shell (the terminal's child) but not the command
+the shell was running (its grandchild). Terminal signals are now kernel
+signals (`handlers::post_kernel_signal`: `SI_KERNEL`, no authority check, as
+Linux's `SEND_SIG_PRIV`). See
+`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`'s reply.
+
+— lane A

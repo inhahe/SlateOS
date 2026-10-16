@@ -168,13 +168,26 @@ struct Watcher {
 // State
 // ---------------------------------------------------------------------------
 
-/// Current clipboard content (most recent entry).
-static CURRENT: PreemptSpinMutex<Option<ClipboardEntry>> =
-    PreemptSpinMutex::named(None, b"CURRENT");
+/// The clipboard's content and its history, under one lock.
+struct Clip {
+    /// The current content (the most recent entry).
+    current: Option<ClipboardEntry>,
+    /// The entries it replaced, oldest first.
+    history: Vec<ClipboardEntry>,
+}
 
-/// Clipboard history.
-static HISTORY: PreemptSpinMutex<Vec<ClipboardEntry>> =
-    PreemptSpinMutex::named(Vec::new(), b"HISTORY");
+/// The clipboard. One lock for both halves: a copy moves the current entry
+/// into the history, and until 2026-10-02 the two were locks of their own,
+/// `HISTORY` taken while `CURRENT` was held -- a "leaf" with another lock
+/// under it, which design-decisions §975 rules out. One lock also makes a
+/// copy atomic, which two could only be by holding both.
+static CLIP: PreemptSpinMutex<Clip> = PreemptSpinMutex::named(
+    Clip {
+        current: None,
+        history: Vec::new(),
+    },
+    b"CLIPBOARD",
+);
 
 /// Registered watchers.
 static WATCHERS: PreemptSpinMutex<Vec<Watcher>> = PreemptSpinMutex::named(Vec::new(), b"WATCHERS");
@@ -252,19 +265,22 @@ fn set_single(
     };
 
     // Archive current to history before replacing.
-    {
-        let mut current = CURRENT.lock();
-        if let Some(old) = current.take() {
-            let mut history = HISTORY.lock();
-            if history.len() >= MAX_HISTORY {
-                history.remove(0);
-            }
-            history.push(old);
-        }
-        *current = Some(entry);
-    }
+    archive_and_set(entry);
 
     Ok(())
+}
+
+/// Make `entry` the current content, the one it replaces the history's
+/// newest (the oldest dropped past [`MAX_HISTORY`]), in one hold of the lock.
+fn archive_and_set(entry: ClipboardEntry) {
+    let mut clip = CLIP.lock();
+    if let Some(old) = clip.current.take() {
+        if clip.history.len() >= MAX_HISTORY {
+            clip.history.remove(0);
+        }
+        clip.history.push(old);
+    }
+    clip.current = Some(entry);
 }
 
 /// Set clipboard with multiple formats simultaneously.
@@ -295,15 +311,7 @@ pub fn set_multi(
         file_op,
     };
 
-    let mut current = CURRENT.lock();
-    if let Some(old) = current.take() {
-        let mut history = HISTORY.lock();
-        if history.len() >= MAX_HISTORY {
-            history.remove(0);
-        }
-        history.push(old);
-    }
-    *current = Some(entry);
+    archive_and_set(entry);
 
     Ok(())
 }
@@ -315,7 +323,8 @@ pub fn set_multi(
 /// Get clipboard as plain text.
 pub fn get_text() -> Option<String> {
     PASTE_COUNT.fetch_add(1, Ordering::Relaxed);
-    let current = CURRENT.lock();
+    let clip = CLIP.lock();
+    let current = &clip.current;
     let entry = current.as_ref()?;
 
     // Look for PlainText format first.
@@ -343,7 +352,8 @@ pub fn get_text() -> Option<String> {
 /// filesystem's byte-path contract.
 pub fn get_files() -> Option<(Vec<Vec<u8>>, FileOp)> {
     PASTE_COUNT.fetch_add(1, Ordering::Relaxed);
-    let current = CURRENT.lock();
+    let clip = CLIP.lock();
+    let current = &clip.current;
     let entry = current.as_ref()?;
     let op = entry.file_op.unwrap_or(FileOp::Copy);
 
@@ -368,7 +378,8 @@ pub fn get_files() -> Option<(Vec<Vec<u8>>, FileOp)> {
 /// Get clipboard data in a specific format.
 pub fn get_format(format: Format) -> Option<Vec<u8>> {
     PASTE_COUNT.fetch_add(1, Ordering::Relaxed);
-    let current = CURRENT.lock();
+    let clip = CLIP.lock();
+    let current = &clip.current;
     let entry = current.as_ref()?;
 
     entry
@@ -380,7 +391,8 @@ pub fn get_format(format: Format) -> Option<Vec<u8>> {
 
 /// Check which formats are available.
 pub fn available_formats() -> Vec<Format> {
-    let current = CURRENT.lock();
+    let clip = CLIP.lock();
+    let current = &clip.current;
     match current.as_ref() {
         Some(entry) => entry.formats.iter().map(|fd| fd.format).collect(),
         None => Vec::new(),
@@ -394,7 +406,7 @@ pub fn sequence() -> u64 {
 
 /// Check if clipboard has content.
 pub fn is_empty() -> bool {
-    CURRENT.lock().is_none()
+    CLIP.lock().current.is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -403,21 +415,17 @@ pub fn is_empty() -> bool {
 
 /// Get clipboard history (oldest first).
 pub fn history() -> Vec<ClipboardEntry> {
-    HISTORY.lock().clone()
+    CLIP.lock().history.clone()
 }
 
 /// Get history entry by index (0 = oldest).
 pub fn history_entry(index: usize) -> Option<ClipboardEntry> {
-    let hist = HISTORY.lock();
-    hist.get(index).cloned()
+    CLIP.lock().history.get(index).cloned()
 }
 
 /// Restore a history entry to current clipboard.
 pub fn restore_from_history(index: usize) -> KernelResult<()> {
-    let entry = {
-        let hist = HISTORY.lock();
-        hist.get(index).cloned()
-    };
+    let entry = { CLIP.lock().history.get(index).cloned() };
 
     match entry {
         Some(e) => {
@@ -430,12 +438,12 @@ pub fn restore_from_history(index: usize) -> KernelResult<()> {
 
 /// Get history depth.
 pub fn history_count() -> usize {
-    HISTORY.lock().len()
+    CLIP.lock().history.len()
 }
 
 /// Clear history.
 pub fn clear_history() {
-    HISTORY.lock().clear();
+    CLIP.lock().history.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -480,13 +488,14 @@ pub fn list_watchers() -> Vec<(WatcherId, String)> {
 
 /// Clear the clipboard.
 pub fn clear() {
-    *CURRENT.lock() = None;
+    CLIP.lock().current = None;
 }
 
 /// Clear everything (clipboard + history).
 pub fn clear_all() {
-    *CURRENT.lock() = None;
-    HISTORY.lock().clear();
+    let mut clip = CLIP.lock();
+    clip.current = None;
+    clip.history.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +504,7 @@ pub fn clear_all() {
 
 /// Get statistics.
 pub fn stats() -> (u64, u64, u64, u64, usize, usize) {
-    let hist_count = HISTORY.lock().len();
+    let hist_count = CLIP.lock().history.len();
     let watcher_count = WATCHERS.lock().len();
     (
         COPY_COUNT.load(Ordering::Relaxed),

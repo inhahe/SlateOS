@@ -122,7 +122,7 @@ class Repo:
         return self.git("rev-parse", "--short", "HEAD").strip()
 
     def close(self):
-        shutil.rmtree(self.root, ignore_errors=True)
+        gitenv.remove_tree(self.root)
 
 
 def base_repo():

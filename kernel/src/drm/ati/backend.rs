@@ -434,6 +434,27 @@ impl AtiBackend {
         Ok(())
     }
 
+    /// Whether [`Self::set_mode`] could program `mode`, touching nothing: its
+    /// refusals that depend on the mode alone. What depends on the buffer too
+    /// -- where it lives, whether it is the mode's size -- is checked when it
+    /// is programmed. An atomic commit asks this while it validates, so a
+    /// `TEST_ONLY` commit hears about an unknown timing without anything being
+    /// programmed.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` if this card holds the console (see
+    /// [`Self::owns_console`]); `NotFound` if `mode` matches no timing this
+    /// driver knows.
+    pub fn check_mode(&self, mode: &DrmMode) -> KernelResult<()> {
+        if self.owns_console {
+            return Err(KernelError::NotSupported);
+        }
+        timing::lookup(mode.hdisplay, mode.vdisplay, mode.vrefresh)
+            .map(|_| ())
+            .ok_or(KernelError::NotFound)
+    }
+
     /// Stop scanning out and blank the output.
     ///
     /// Clears [`Self::mode`] as well as the registers, so the next flip cannot

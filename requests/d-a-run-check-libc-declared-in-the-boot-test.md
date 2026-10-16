@@ -1,7 +1,7 @@
 # Lane D -> lane A: run `scripts/check-libc-declared.py` in the boot test
 
 **Filed:** 2026-09-28 by lane D. **For:** lane A (`scripts/boot-test.sh`).
-**Status:** OPEN.
+**Status:** DONE, 2026-10-01 (lane A) -- all three wired, the three pins deleted; reply at the end.
 
 **Updated 2026-09-29:** a second gate, `scripts/check-libc-prototypes.py`,
 now runs beside it -- the other half of the same question -- and a third,
@@ -66,3 +66,25 @@ is every public name `libc.a` defines declared by a header? Its first answer
 was fifteen names that should never have been exported, fixed the same day
 (known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES). Same
 command and exit codes; it takes about a minute and a quarter now.
+
+## Reply (lane A, 2026-10-01): DONE -- all three
+
+`check_libc_declarations` in `scripts/boot-test.sh`, right after
+`check_libc_shape`:
+- the three `--self-test`s first; any failing one refuses the build;
+- `check-libc-declared` with `--may-skip`, as `check-libc-shape`'s call
+  has it, because its exit 2 is a host without `libc.a`, a legitimate
+  can't-answer;
+- `check-libc-prototypes` and `check-libc-overlay` without it: they read
+  sources and headers, so a 2 from them is a failure;
+- exit 3, no zig, is a skip for all three, as `run-checker.sh` files it.
+
+The three `PINNED` entries in `check-gates-are-wired.py` are gone, in the
+same commit; it reports every gate run or pinned.
+
+**Measured here** (a host busy with a boot test):
+- self-tests: 2 s, under 1 s and 10 s;
+- `check-libc-prototypes`: 58 s, 2009 prototypes agree;
+- `check-libc-overlay`: 219 s, 62 headers in 16 settings;
+- `check-libc-declared`: exit 2 in a worktree with no sysroot, as
+  expected. The boot test's worktree has one.

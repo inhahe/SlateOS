@@ -110,7 +110,15 @@ MUTATOR_RE = re.compile(
 # The direction matters: the bug made the tool report FEWER problems than exist.
 # The first measurement of 2026-08-26, 520, was taken with it and is an
 # undercount too.
-CEILING = 503
+# 503 -> 501 on 2026-09-27: measured on lane A's tree (main at cde7df06d plus
+# lane A's batch), where the checker reported two mutators wired since the
+# ceiling was last pinned.  Lowered, as the message asks, so the next one
+# to become unreachable is caught rather than absorbed by the slack.
+# 501 -> 481 on 2026-10-08, measured on lane-a-wip's batch of that day (main
+# merged in at e3fbd8e7c): fifteen gone since the last pin by other work, and five by
+# fs::diskio becoming a projection of blkdev's per-device counts and
+# fs::diskstat going (diskio's four record_*, diskstat's record_merge).
+CEILING = 481
 
 
 def main() -> int:

@@ -185,7 +185,13 @@ pub fn mprotect(
         // SAFETY: We're changing flags on an existing mapping.
         // The caller guarantees pml4_phys is valid for this address space.
         // We don't flush TLB here (caller does it after batching).
-        let result = unsafe { page_table::change_flags(pml4_phys, virt, flags) };
+        //
+        // `change_user_protection`, not `change_flags`: a user leaf keeps its
+        // own non-permission bits (SHARED, the memory type), and a private
+        // frame that is copy-on-write or multiply referenced is made COW, not
+        // WRITABLE, so a write copies it instead of landing in a frame
+        // another address space maps (`page_table::user_protect_flags`).
+        let result = unsafe { page_table::change_user_protection(pml4_phys, virt, flags) };
 
         match result {
             Ok(()) => {
@@ -850,6 +856,113 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         serial_println!("[protect]   mprotect + W^X enforcement: OK");
+    }
+
+    // -- Test 6: a protection change keeps copy-on-write honest -----------
+    //
+    // `page_table::user_protect_flags` is what both ABIs' mprotect apply to
+    // a present user leaf.  Checked on one real frame, so that its reference
+    // count -- what decides "write in place" against "copy first" -- is the
+    // allocator's own.
+    {
+        use crate::mm::frame;
+        use crate::mm::page_table::{PageTableEntry, user_protect_flags};
+
+        let frame = frame::alloc_frame()?;
+        let phys = frame.addr();
+        let user = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+        let rw = user | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        let ro = user | PageFlags::NO_EXECUTE;
+
+        let check = |what: &str, got: PageFlags, want_writable: bool, want_cow: bool| {
+            if got.contains(PageFlags::WRITABLE) != want_writable
+                || got.contains(PageFlags::COW) != want_cow
+            {
+                serial_println!(
+                    "[protect]   FAIL: {}: writable={} cow={}, want writable={} cow={}",
+                    what,
+                    got.contains(PageFlags::WRITABLE),
+                    got.contains(PageFlags::COW),
+                    want_writable,
+                    want_cow
+                );
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        };
+
+        let private_ro = PageTableEntry::new(phys, ro);
+        let cow = PageTableEntry::new(phys, ro | PageFlags::COW);
+        let shared = PageTableEntry::new(phys, rw | PageFlags::SHARED | PageFlags::WRITE_COMBINING);
+
+        let outcome = (|| -> KernelResult<()> {
+            // Sole owner: made writable in place.
+            check(
+                "sole-owner page made RW",
+                user_protect_flags(private_ro, rw),
+                true,
+                false,
+            )?;
+            // A copy-on-write page made RW stays copy-on-write, and one made
+            // read-only loses COW, so the fault handler cannot grant a write.
+            check("COW page made RW", user_protect_flags(cow, rw), false, true)?;
+            check(
+                "COW page made RO",
+                user_protect_flags(cow, ro),
+                false,
+                false,
+            )?;
+
+            // SAFETY: frame is allocated and ours; the matching ref_dec below
+            // restores the count before the frame is freed.
+            unsafe { frame::ref_inc(frame)? };
+            // A second reference (a fork, the page cache): writable only
+            // after a copy, so COW instead of WRITABLE.
+            let multi = check(
+                "multiply referenced page made RW",
+                user_protect_flags(private_ro, rw),
+                false,
+                true,
+            );
+            // A shared-by-design page gets what was asked, however many
+            // references it has, and keeps its other bits.
+            let shared_rw = user_protect_flags(shared, rw);
+            let shared_ro = user_protect_flags(shared, ro);
+            // SAFETY: undoes the ref_inc above; the count stays >= 1.  The
+            // count it returns is the one the frame had before this test.
+            let _before = unsafe { frame::ref_dec(frame)? };
+            multi?;
+            check("shared page made RW", shared_rw, true, false)?;
+            check("shared page made RO", shared_ro, false, false)?;
+            if !shared_ro.contains(PageFlags::SHARED)
+                || !shared_ro.contains(PageFlags::WRITE_COMBINING)
+            {
+                serial_println!(
+                    "[protect]   FAIL: a protection change dropped SHARED or the memory type"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PROT_NONE: not user-accessible, and still not writable.
+            check(
+                "COW page made PROT_NONE",
+                user_protect_flags(cow, PageFlags::PRESENT),
+                false,
+                false,
+            )?;
+            if user_protect_flags(cow, PageFlags::PRESENT).contains(PageFlags::USER_ACCESSIBLE) {
+                serial_println!("[protect]   FAIL: PROT_NONE left the page user-accessible");
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        })();
+
+        // SAFETY: the frame was allocated above and never mapped.
+        unsafe { frame::free_frame(frame)? };
+        outcome?;
+        serial_println!(
+            "[protect]   protection changes keep copy-on-write honest (COW means \
+             writable-after-copy; RO clears it; SHARED and the memory type survive): OK"
+        );
     }
 
     serial_println!("[protect] Memory protection self-test PASSED");

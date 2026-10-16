@@ -1,0 +1,13 @@
+[package]
+name = "fieldmenu"
+version = "0.1.0"
+edition = "2024"
+description = "The right-click menu of a program's text fields: put up where the right-click landed, given the presses, keys, pointer and clock while it is up, and drawn over the window"
+
+[dependencies]
+# The menu (`guitk::menu::ContextMenu`), the rows a field offers
+# (`TextInput::edit_menu`, `TextArea::edit_menu`) and the events routed to it.
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

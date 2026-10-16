@@ -88,6 +88,7 @@ use coreutils::quote::{self, os_from_bytes, quote};
 use coreutils::stdfd;
 // `-ok`'s prompt lives on the `#[cfg(unix)]` executor, the only thing that can
 // run a child, so elsewhere this import is unused rather than merely unreached.
+use coreutils::stdfd::Stream;
 #[cfg(unix)]
 use coreutils::yesno;
 use coreutils::{cfmt, extfloat, fnmatch, pathname};
@@ -95,6 +96,11 @@ use coreutils::{cfmt, extfloat, fnmatch, pathname};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees the descriptors `find`
+// was given: a closed standard output is a write error, as it is upstream --
+// not the `/dev/null` Rust's runtime would put there.
+coreutils::guard_std_fds!();
 
 // ---------------------------------------------------------------------------
 // Primitive values
@@ -668,17 +674,24 @@ type Parsed<T> = Result<T, Fatal>;
 
 /// Where an action writes.
 ///
-/// Deduplicated by name at parse time — in `Parser::sink_names`, which is why
-/// the name is not carried here. GNU opens one `FILE *` per distinct filename,
-/// so `-fprint x -fprint x` interleaves through a single buffer; opening it
-/// twice here would produce two buffers writing over each other at different
-/// offsets.
+/// Each is a stream buffered as upstream's `FILE *` is -- standard output
+/// through the process's one [`Stream`] on descriptor 1, standard error
+/// unbuffered, a `-fprint`-family file with a buffer of its own -- because
+/// what findutils says about a full or closed output depends on where its
+/// buffer stands when a write fails: see [`Ctx::write`], [`Ctx::write_checked`]
+/// and `cleanup` in [`run_inner`].
+///
+/// Deduplicated at parse time as `sharefile_fopen` does: by name (in
+/// `Parser::sink_names`), and then by the device and inode of what was opened
+/// (`Parser::sink_ids`). GNU keeps one `FILE *` per file, so `-fprint x
+/// -fprint ./x` interleaves through a single buffer; two would write over
+/// each other at different offsets.
 enum Sink {
     Stdout,
     Stderr,
-    File(std::fs::File),
-    /// Test-only stand-in for [`Sink::Stdout`]: [`Ctx::flush`] leaves the bytes
-    /// in the buffer instead of writing them, so `run_capture` can read them
+    File(Box<OutFile>),
+    /// Test-only stand-in for [`Sink::Stdout`]: the bytes are kept in
+    /// [`Ctx::captured`] instead of written, so `run_capture` can read them
     /// afterwards.
     ///
     /// A sink rather than a wrapper around the whole of stdout because the
@@ -687,6 +700,38 @@ enum Sink {
     /// which is the half most likely to be wrong.
     #[cfg(test)]
     Capture,
+}
+
+/// A `-fprint`-family file: what the diagnostics call it, the stream that
+/// buffers it, and the file the stream writes through -- kept so that the
+/// close at the end can be checked, as `sharefile_destroy`'s `fclose` is.
+struct OutFile {
+    name: Vec<u8>,
+    stream: Stream,
+    file: std::fs::File,
+}
+
+impl OutFile {
+    /// `name`'s file, open, with a block buffer of its own.
+    fn new(name: &[u8], file: std::fs::File) -> OutFile {
+        OutFile {
+            name: name.to_vec(),
+            stream: Stream::on(raw_fd(&file)),
+            file,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn raw_fd(file: &std::fs::File) -> i32 {
+    std::os::fd::AsRawFd::as_raw_fd(file)
+}
+
+/// Elsewhere there are no output files to have descriptors ([`open_sink`]
+/// refuses), so this is never asked.
+#[cfg(not(unix))]
+fn raw_fd(_file: &std::fs::File) -> i32 {
+    -1
 }
 
 /// `-exec` and its three relatives.
@@ -1024,6 +1069,9 @@ struct Parser<'a> {
     nodes: Vec<Node>,
     sinks: Vec<Sink>,
     sink_names: Vec<Vec<u8>>,
+    /// Per sink, the device and inode of the file it writes, where there is
+    /// one and it could be asked: `sharefile`'s key.
+    sink_ids: Vec<Option<(u64, u64)>>,
     execs: Vec<ExecSpec>,
     tree: &'a dyn Tree,
 
@@ -1110,6 +1158,9 @@ impl<'a> Parser<'a> {
             nodes: Vec::new(),
             sinks: vec![Sink::Stdout, Sink::Stderr],
             sink_names: vec![b"/dev/stdout".to_vec(), b"/dev/stderr".to_vec()],
+            // Not in `sharefile`'s table upstream either: `-fprint
+            // /dev/stdout` is matched by name, and only by name.
+            sink_ids: vec![None, None],
             execs: Vec::new(),
             tree,
             follow,
@@ -1241,22 +1292,52 @@ impl<'a> Parser<'a> {
         });
     }
 
-    /// A named output stream, opened at most once per distinct name.
+    /// A named output stream, opened at most once per file: `sharefile_fopen`.
     fn sink(&mut self, path: &[u8]) -> Parsed<usize> {
         if let Some(idx) = self.sink_names.iter().position(|n| n == path) {
             return Ok(idx);
         }
-        let file = open_sink(path)
-            .map_err(|e| Fatal::new(format!("{}: {}", quote(path), strerror(&e))))?;
-        self.sinks.push(Sink::File(file));
+        let failed = |e: io::Error| Fatal::new(format!("{}: {}", quote(path), strerror(&e)));
+        let file = open_sink(path).map_err(failed)?;
+        // The file under another name is the same stream. Upstream's `fopen`
+        // has truncated it again by then, as this open has; at parse time
+        // nothing has been written to it, so that loses nothing.
+        let id = file_id(&file).map_err(failed)?;
+        if let Some(idx) = id.and_then(|id| self.sink_ids.iter().position(|o| *o == Some(id))) {
+            return Ok(idx);
+        }
+        self.sinks
+            .push(Sink::File(Box::new(OutFile::new(path, file))));
         self.sink_names.push(path.to_vec());
+        self.sink_ids.push(id);
         Ok(self.sinks.len().saturating_sub(1))
     }
 }
 
+/// A `-fprint` file, opened as `sharefile_fopen` opens it: `fopen (name,
+/// "w")` under `stdio--.h`, so `fopen_safer` -- never on descriptors 0-2,
+/// where it would *be* a standard stream that was closed.
 #[cfg(unix)]
 fn open_sink(path: &[u8]) -> io::Result<std::fs::File> {
-    std::fs::File::create(os_from_bytes(path))
+    stdfd::create_safer(os_from_bytes(path))
+}
+
+/// `sharefile`'s key for an open file: its device and inode.
+///
+/// # Errors
+///
+/// The `fstat`'s, which upstream turns into the open failing.
+#[cfg(unix)]
+fn file_id(file: &std::fs::File) -> io::Result<Option<(u64, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok(Some((meta.dev(), meta.ino())))
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // the unix one's signature
+fn file_id(_file: &std::fs::File) -> io::Result<Option<(u64, u64)>> {
+    Ok(None)
 }
 
 #[cfg(not(unix))]
@@ -3245,6 +3326,30 @@ struct Rendered {
     /// the assignment commented out, and a `-printf '%Y'` over a tree with one
     /// unreadable directory should still exit 0.
     errs: Vec<(String, bool)>,
+    /// Where each segment's output and diagnostics begin in `bytes` and
+    /// `errs`: upstream writes a segment at a time, each a call of its own
+    /// that can fail on its own, and makes a segment's diagnostics before
+    /// its write. See [`Rendered::pieces`].
+    marks: Vec<(usize, usize)>,
+}
+
+impl Rendered {
+    /// The segments, in order: each one's diagnostics, and the bytes of its
+    /// `checked_fprintf` (or `checked_fwrite`, or `checked_print_quoted`).
+    fn pieces(&self) -> impl Iterator<Item = (&[u8], &[(String, bool)])> {
+        let ends = self
+            .marks
+            .iter()
+            .skip(1)
+            .copied()
+            .chain(std::iter::once((self.bytes.len(), self.errs.len())));
+        self.marks.iter().zip(ends).map(|(&(b0, e0), (b1, e1))| {
+            (
+                self.bytes.get(b0..b1).unwrap_or_default(),
+                self.errs.get(e0..e1).unwrap_or_default(),
+            )
+        })
+    }
 }
 
 /// `%h`: the leading directories of a path.
@@ -3281,11 +3386,13 @@ fn render_printf(
         bytes: Vec::new(),
         stop: false,
         errs: Vec::new(),
+        marks: Vec::new(),
     };
     let meta = it.meta();
     let m = &meta;
 
     for seg in segs {
+        out.marks.push((out.bytes.len(), out.errs.len()));
         match seg {
             Seg::Plain(text) => out.bytes.extend_from_slice(text),
             Seg::Stop(text) => {
@@ -3604,7 +3711,11 @@ fn ls_quote(name: &[u8]) -> Vec<u8> {
 /// The slop into the future is upstream's and is for NFS, whose server and
 /// client clocks disagree often enough that a freshly written file would
 /// otherwise list with a year on it.
-fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
+///
+/// With the space after it, as upstream's `fprintf` writes it, and the
+/// `list_file` stage of that `fprintf`: 900, or 1000 or 1100 for the two
+/// fallbacks.
+fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> (u16, Vec<u8>) {
     const SIX_MONTHS: i64 = 6 * 30 * 24 * 60 * 60;
     let recent = start.sec.saturating_sub(SIX_MONTHS) <= mtime.sec
         && mtime.sec <= start.sec.saturating_add(3600);
@@ -3613,7 +3724,8 @@ fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
     let out = localtime::strftime(fmt, &tm);
     if out.is_empty() {
         // The instant has no local representation. Upstream falls back to a
-        // 12-column signed second count.
+        // 12-column signed second count -- through one of two `fprintf`s,
+        // and so one of two stages.
         let mut num = Vec::new();
         if mtime.sec < 0 {
             num.push(b'-');
@@ -3622,17 +3734,35 @@ fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut width = 12;
         pad_left(&mut buf, &num, &mut width);
-        return buf;
+        buf.push(b' ');
+        return (if mtime.sec < 0 { 1000 } else { 1100 }, buf);
     }
-    out
+    let mut buf = out;
+    buf.push(b' ');
+    (900, buf)
 }
 
-/// `list_file`: one `-ls` line, plus any diagnostic it produced.
+/// One piece of an `-ls` line, as `list_file` writes it: a write, with the
+/// stage its failure is reported at -- `Failed to write output (at stage
+/// N)` -- or the diagnostic a failed `readlink` makes between the name and
+/// the newline.
 ///
-/// The diagnostic — a `readlink` that failed on a symlink we are listing — is
-/// returned rather than printed, but note that upstream deliberately does
-/// *not* let it set the exit status: `list_file` has no way to tell its caller,
-/// and the comment in `lib/listfile.c` says so in as many words.
+/// The pieces are upstream's calls one for one, `putc` and `fprintf` alike,
+/// and not a whole line, because which of them meets a failure depends on
+/// where in the buffer each one lands: measured, `find big -ls >/dev/full`
+/// dies at stage 275, the mode, on GNU 4.9.0.
+enum LsPiece {
+    Out(u16, Vec<u8>),
+    Warn(String),
+}
+
+/// `list_file`: one `-ls` line, as the pieces upstream writes it in.
+///
+/// The diagnostic -- a `readlink` that failed on a symlink we are listing --
+/// is a piece of its own, made where upstream makes it, after the name and
+/// before the newline; note that upstream deliberately does *not* let it set
+/// the exit status: `list_file` has no way to tell its caller, and the
+/// comment in `lib/listfile.c` says so in as many words.
 fn render_ls(
     w: &mut LsWidths,
     it: &Item,
@@ -3641,31 +3771,38 @@ fn render_ls(
     start: Ts,
     block_size: u64,
     literal: bool,
-) -> (Vec<u8>, Option<String>) {
+) -> Vec<LsPiece> {
     let meta = it.meta();
     let m = &meta;
-    let mut out = Vec::new();
+    let mut pieces = Vec::new();
+    let mut put = |stage: u16, bytes: Vec<u8>| pieces.push(LsPiece::Out(stage, bytes));
 
-    pad_left(&mut out, m.ino.to_string().as_bytes(), &mut w.inode);
-    out.push(b' ');
+    let mut field = Vec::new();
+    pad_left(&mut field, m.ino.to_string().as_bytes(), &mut w.inode);
+    put(100, std::mem::take(&mut field));
+    put(150, b" ".to_vec());
     pad_left(
-        &mut out,
+        &mut field,
         scaled_ceil(m.blocks, 512, block_size)
             .to_string()
             .as_bytes(),
         &mut w.blocks,
     );
-    out.push(b' ');
+    put(200, std::mem::take(&mut field));
+    put(250, b" ".to_vec());
 
     // `strmode` writes eleven characters: the ten everybody knows plus a
     // trailing space, the POSIX "optional alternate access method flag".
     // `modechange::mode_string` stops at ten because every other caller
     // strips it; `-ls` is the one that wants it, so it is added back here.
-    out.extend_from_slice(modechange::mode_string(m.mode).as_bytes());
-    out.push(b' ');
+    let mut mode = modechange::mode_string(m.mode).into_bytes();
+    mode.push(b' ');
+    put(275, mode);
 
-    pad_left(&mut out, m.nlink.to_string().as_bytes(), &mut w.nlink);
-    out.push(b' ');
+    pad_left(&mut field, m.nlink.to_string().as_bytes(), &mut w.nlink);
+    put(300, std::mem::take(&mut field));
+    // 250 again, sic: upstream reuses the number.
+    put(250, b" ".to_vec());
 
     match tree.user_name(m.uid) {
         Some(name) => {
@@ -3674,8 +3811,9 @@ fn render_ls(
             {
                 w.owner = len;
             }
-            pad_right(&mut out, &name, w.owner);
-            out.push(b' ');
+            pad_right(&mut field, &name, w.owner);
+            field.push(b' ');
+            put(400, std::mem::take(&mut field));
         }
         None => {
             // The literal 8 is upstream's, and is not `owner_width`: an
@@ -3683,8 +3821,9 @@ fn render_ls(
             // has grown, and then widens it.
             let num = m.uid.to_string();
             let chars_out = num.len().max(8).saturating_add(1);
-            pad_right(&mut out, num.as_bytes(), 8);
-            out.push(b' ');
+            pad_right(&mut field, num.as_bytes(), 8);
+            field.push(b' ');
+            put(450, std::mem::take(&mut field));
             if chars_out > w.owner {
                 w.owner = chars_out;
             }
@@ -3698,64 +3837,67 @@ fn render_ls(
             {
                 w.group = len;
             }
-            pad_right(&mut out, &name, w.group);
-            out.push(b' ');
+            pad_right(&mut field, &name, w.group);
+            field.push(b' ');
+            put(500, std::mem::take(&mut field));
         }
         None => {
             let num = m.gid.to_string();
             let chars_out = num.len().max(w.group);
-            pad_right(&mut out, num.as_bytes(), w.group);
+            pad_right(&mut field, num.as_bytes(), w.group);
+            put(550, std::mem::take(&mut field));
             if chars_out > w.group {
                 w.group = chars_out;
             }
-            out.push(b' ');
+            put(525, b" ".to_vec());
         }
     }
 
     let kind = m.mode & modechange::S_IFMT;
     if kind == modechange::S_IFCHR || kind == modechange::S_IFBLK {
         let (major, minor) = dev_major_minor(m.rdev);
-        pad_left(&mut out, major.to_string().as_bytes(), &mut w.major);
-        out.extend_from_slice(b", ");
-        pad_left(&mut out, minor.to_string().as_bytes(), &mut w.minor);
+        pad_left(&mut field, major.to_string().as_bytes(), &mut w.major);
+        put(600, std::mem::take(&mut field));
+        put(625, b", ".to_vec());
+        pad_left(&mut field, minor.to_string().as_bytes(), &mut w.minor);
+        put(650, std::mem::take(&mut field));
     } else {
-        pad_left(&mut out, m.size.to_string().as_bytes(), &mut w.size);
+        pad_left(&mut field, m.size.to_string().as_bytes(), &mut w.size);
+        put(800, std::mem::take(&mut field));
     }
-    out.push(b' ');
+    put(850, b" ".to_vec());
 
-    out.extend_from_slice(&ls_time(m.mtime, start, zone));
-    out.push(b' ');
+    let (stage, time) = ls_time(m.mtime, start, zone);
+    put(stage, time);
 
     let name = if literal {
         it.path.clone()
     } else {
         ls_quote(&it.path)
     };
-    out.extend_from_slice(&name);
+    put(1200, name);
 
-    let mut err = None;
     if m.is_symlink() {
         match tree.readlink(&it.path) {
             Ok(target) => {
-                out.extend_from_slice(b" -> ");
-                let target = if literal { target } else { ls_quote(&target) };
-                out.extend_from_slice(&target);
+                put(1300, b" -> ".to_vec());
+                put(1350, if literal { target } else { ls_quote(&target) });
             }
             Err(e) => {
                 // Not quoted: upstream's `error (0, errno, "%s", name)` puts
                 // the name through a plain `%s`. Escaped rather than written
                 // raw, because this string is a `String` and the path need not
                 // be text — see the `escape_unprintable` note on `bad_arg`.
-                err = Some(format!(
+                pieces.push(LsPiece::Warn(format!(
                     "{}: {}",
                     quote::escape_unprintable(&it.path),
                     errmsg::strerror(&e)
-                ));
+                )));
             }
         }
     }
-    out.push(b'\n');
-    (out, err)
+    pieces.push(LsPiece::Out(1400, b"\n".to_vec()));
+    pieces
 }
 
 // ---------------------------------------------------------------------------
@@ -3822,9 +3964,14 @@ struct Ctx<'a> {
     /// Per sink: is the destination a terminal? Decides `-print`/`-printf`
     /// quoting, and nothing else.
     sink_tty: Vec<bool>,
-    /// Buffered output per sink. Stdout is flushed before any child runs so
-    /// that `find . -exec echo x \;` interleaves the way it does upstream.
-    sink_buf: Vec<Vec<u8>>,
+    /// Standard output: a handle onto the process's one stream on
+    /// descriptor 1, made once, so that whether it is a terminal is asked
+    /// once rather than at every write.
+    out: Stream,
+    /// What [`Sink::Capture`] sinks were given, in order: the tests' stand-in
+    /// for standard output.
+    #[cfg(test)]
+    captured: Vec<u8>,
     execs: Vec<ExecSpec>,
     tree: &'a dyn Tree,
     zone: localtime::Zone,
@@ -3840,6 +3987,11 @@ struct Ctx<'a> {
     stop_at_current_level: bool,
     /// `-quit` ran: unwind out of the walk and exit.
     quit: bool,
+    /// A fatal failure ended the run where it stood -- upstream's `die`,
+    /// which `exit`s without `cleanup`: no pending `-exec` batch is run, and
+    /// no output file's close is checked. [`Ctx::quit`] is set with it, to
+    /// unwind.
+    died: bool,
 }
 
 impl Ctx<'_> {
@@ -3853,17 +4005,27 @@ impl Ctx<'_> {
 
     /// A diagnostic that leaves the exit status alone.
     ///
-    /// It flushes first, and that is not tidiness: findutils reports through
-    /// gnulib's `error`, which begins `fflush (stdout)`. Without it the two
-    /// streams are ordered by their buffering rather than by the walk — every
-    /// diagnostic would surface *before* all of the output when stdout is a
-    /// pipe, and interleaved correctly only when it is a terminal. Measured
-    /// against GNU, this one line accounted for fifteen differing cases in
+    /// findutils reports through gnulib's `error`, which begins `fflush
+    /// (stdout)`, and so does `diag!`: without it the two streams are ordered
+    /// by their buffering rather than by the walk -- every diagnostic would
+    /// surface *before* all of the output when stdout is a pipe, and
+    /// interleaved correctly only when it is a terminal. Measured against
+    /// GNU, that one flush accounted for fifteen differing cases in
     /// `scripts/find-diff.sh`, including `find t nosuchfile`, where the
-    /// complaint belongs after the tree it managed to walk.
+    /// complaint belongs after the tree it managed to walk. (It flushes
+    /// standard output only, as `error` does: a `-fprint` file's buffer is
+    /// left where it is.)
     fn warn(&mut self, msg: &str) {
-        self.flush();
         diag!("find: {msg}");
+    }
+
+    /// The end of the run, now, as upstream's `die`: a fatal diagnostic,
+    /// status 1, and no `cleanup` -- see [`Ctx::died`].
+    fn die(&mut self, msg: &str) {
+        diag!("find: {msg}");
+        self.status = 1;
+        self.died = true;
+        self.quit = true;
     }
 
     /// `following_links()`: whether the walk dereferenced this item's own name.
@@ -3877,41 +4039,94 @@ impl Ctx<'_> {
         }
     }
 
-    fn write(&mut self, sink: usize, bytes: &[u8]) {
-        if let Some(buf) = self.sink_buf.get_mut(sink) {
-            buf.extend_from_slice(bytes);
+    /// What a diagnostic calls `sink`: `format_val.filename` -- `standard
+    /// output`, `standard error`, or a file's name as it was given.
+    fn sink_name(&self, sink: usize) -> Vec<u8> {
+        match self.sinks.get(sink) {
+            Some(Sink::File(f)) => f.name.clone(),
+            Some(Sink::Stderr) => b"standard error".to_vec(),
+            _ => b"standard output".to_vec(),
         }
     }
 
-    /// Push every buffer out. Called before running a child, and at the end.
-    fn flush(&mut self) {
-        for (i, buf) in self.sink_buf.iter_mut().enumerate() {
-            if buf.is_empty() {
-                continue;
+    /// An unchecked write, as `-print`, `-print0` and `-fprint` make theirs:
+    /// a failure sets the stream's error flag and nothing else, and is heard
+    /// of at the end -- `cleanup`'s flush, an `-fprint` file's close, or
+    /// `close_stdout`.
+    fn write(&mut self, sink: usize, bytes: &[u8]) {
+        // The stream keeps a failure for the end; this caller does not ask.
+        let _ = self.write_checked(sink, bytes);
+    }
+
+    /// A write that says whether it failed, for the callers upstream checks:
+    /// `checked_fprintf` and its kin for `-printf`, `list_file` for `-ls`.
+    /// The stream keeps the failure as well.
+    fn write_checked(&mut self, sink: usize, bytes: &[u8]) -> io::Result<()> {
+        match self.sinks.get_mut(sink) {
+            Some(Sink::Stdout) => self.out.write_checked(bytes),
+            Some(Sink::Stderr) => Stream::stderr().write_checked(bytes),
+            Some(Sink::File(f)) => f.stream.write_checked(bytes),
+            #[cfg(test)]
+            Some(Sink::Capture) => {
+                self.captured.extend_from_slice(bytes);
+                Ok(())
             }
-            let res = match self.sinks.get_mut(i) {
-                Some(Sink::Stdout) => io::stdout()
-                    .write_all(buf)
-                    .and_then(|()| io::stdout().flush()),
-                // The raw `write(2)` and not `io::stderr()`, whose `EBADF` the
-                // runtime turns into success: `-fprint /dev/stderr` would then
-                // report nothing and exit 0. The error is returned rather than
-                // recorded because the arm below already turns it into the
-                // status 1 that `find … -fprint /dev/stderr 2>/dev/full` gives.
-                Some(Sink::Stderr) => stdfd::write_all(2, buf),
-                Some(Sink::File(f)) => f.write_all(buf).and_then(|()| f.flush()),
-                // Accumulates rather than drains: the point of it is that the
-                // bytes are still there when the walk has finished.
-                #[cfg(test)]
-                Some(Sink::Capture) => continue,
-                None => Ok(()),
-            };
-            buf.clear();
-            if let Err(e) = res {
-                // Upstream dies here rather than carrying on: a `find` whose
-                // output is going nowhere has nothing useful left to do.
-                diag!("find: {}", errmsg::strerror(&e));
-                self.status = 1;
+            None => Ok(()),
+        }
+    }
+
+    /// `checked_fflush`: push `sink`'s buffer, and say whether that failed.
+    fn flush_checked(&mut self, sink: usize) -> io::Result<()> {
+        match self.sinks.get_mut(sink) {
+            Some(Sink::Stdout) => self.out.flush_now(),
+            Some(Sink::File(f)) => f.stream.flush_now(),
+            // Unbuffered, or a test's buffer: nothing waits.
+            _ => Ok(()),
+        }
+    }
+
+    /// `fflush (stdout)`, unchecked: before a child runs, so that its output
+    /// lands after ours, and before `-ok` asks. (The `fflush (stderr)` beside
+    /// it upstream has nothing to do: standard error is unbuffered.)
+    fn flush_stdout(&mut self) {
+        // The stream keeps a failure for the end, as glibc's error flag does.
+        let _ = self.out.flush();
+    }
+
+    /// `nonfatal_nontarget_file_error (errno, filename)`: a write to `sink`
+    /// that failed, reported under the sink's name, and the status 1.
+    fn sink_failed(&mut self, sink: usize, e: &io::Error) {
+        let name = self.sink_name(sink);
+        self.fail(&format!("{}: {}", quote(&name), strerror(e)));
+    }
+
+    /// `sharefile_destroy`: close each output file, its last buffer written
+    /// first. A close that fails -- that buffer, or the file's own `close`
+    /// -- is `fatal_nontarget_file_error`: `find: 'NAME': REASON`, status 1,
+    /// and nothing after it, not even the check on standard output. A write
+    /// that failed *earlier* is not this close's failure, as it is not
+    /// `fclose`'s: its buffer was dropped with it, and nothing is said.
+    ///
+    /// In the order the files were opened, where upstream's is its hash
+    /// table's; the two differ only when more than one close fails.
+    fn close_files(&mut self) {
+        for sink in std::mem::take(&mut self.sinks) {
+            let Sink::File(out) = sink else { continue };
+            let OutFile {
+                name,
+                mut stream,
+                file,
+            } = *out;
+            let closed = stream.flush_now().and_then(|()| {
+                // Empty now: dropping it writes nothing.
+                drop(stream);
+                stdfd::close(file)
+            });
+            if let Err(e) = closed {
+                // The files not reached are dropped with the iterator, their
+                // buffers written and their closes unasked, as `exit`'s are.
+                self.die(&format!("{}: {}", quote(&name), strerror(&e)));
+                break;
             }
         }
     }
@@ -3967,10 +4182,12 @@ fn substitute(arg: &[u8], prefix: &[u8], target: &[u8]) -> Vec<u8> {
 }
 
 impl Ctx<'_> {
-    /// Run one command, having first pushed everything buffered so that the
-    /// child's output lands after ours rather than in the middle of it.
+    /// Run one command, having first pushed standard output's buffer so that
+    /// the child's output lands after ours rather than in the middle of it --
+    /// standard output's only, as `launch` does: a `-fprint` file's buffer
+    /// stays where it is.
     fn spawn(&mut self, argv: &[Vec<u8>], cwd: Option<&[u8]>) -> bool {
-        self.flush();
+        self.flush_stdout();
         match self.tree.run(argv, cwd) {
             Ok(ok) => ok,
             Err(e) => {
@@ -4060,7 +4277,8 @@ impl Ctx<'_> {
         };
 
         if confirm {
-            self.flush();
+            // `is_ok`'s `fflush (stdout)`.
+            self.flush_stdout();
             // Written as bytes, not through `format!`. This is the one
             // diagnostic in the file whose sink is a byte stream with no
             // `String` in the way, so it can do what upstream's
@@ -4075,22 +4293,22 @@ impl Ctx<'_> {
             // five separate `write(2)` calls can have another process's output
             // land in the middle of the question being asked.
             //
-            // Nothing is done with the failure *here* — the answer to a failed
-            // write on stderr is not a second write to stderr, and the read
-            // that follows is what actually decides whether to run. It is not
-            // dropped either, though: `diag_bytes` records it, and a lost
-            // prompt does change the status upstream. Measured, `find f -ok
-            // true {} \; </dev/null 2>/dev/full` is 1 where the same run with a
-            // writable stderr is 0 — `close_stdout` runs from `atexit` and does
-            // not care that the unwritable bytes were a prompt rather than a
-            // complaint.
+            // A prompt that cannot be written ends the run: `is_ok` checks
+            // its `fprintf` and `die`s with `Failed to write prompt for -ok`,
+            // status 1, before anything is read or run. (Its message goes
+            // where the prompt could not, so all that is seen is the status:
+            // measured, `find f -ok true {} \; </dev/null 2>/dev/full` is 1
+            // where the same run with a writable stderr is 0.)
             let mut prompt = Vec::new();
             prompt.extend_from_slice(b"< ");
             prompt.extend_from_slice(&prog);
             prompt.extend_from_slice(b" ... ");
             prompt.extend_from_slice(&it.path);
             prompt.extend_from_slice(b" > ? ");
-            stdfd::diag_bytes(&prompt);
+            if let Err(e) = Stream::stderr().write_checked(&prompt) {
+                self.die(&format!("Failed to write prompt for -ok: {}", strerror(&e)));
+                return false;
+            }
             if !self.tree.confirm() {
                 return false;
             }
@@ -4258,21 +4476,34 @@ impl Ctx<'_> {
             Prim::Printf { sink, segs } => {
                 let tty = self.sink_tty.get(*sink).copied().unwrap_or(false);
                 let r = render_printf(segs, it, self.tree, &self.zone, tty);
-                self.write(*sink, &r.bytes);
-                if r.stop {
-                    self.flush();
-                }
-                for (msg, sets_status) in r.errs {
-                    if sets_status {
-                        self.fail(&msg);
-                    } else {
-                        self.warn(&msg);
+                // Upstream's calls one for one: each segment's diagnostics,
+                // then its checked write, whose failure is reported under the
+                // stream's name -- `find: 'standard output': No space left on
+                // device` -- and does not stop the walk. Measured, a large
+                // `-printf` onto `/dev/full` says it once for every buffer
+                // that could not be written.
+                for (bytes, errs) in r.pieces() {
+                    for (msg, sets_status) in errs {
+                        if *sets_status {
+                            self.fail(msg);
+                        } else {
+                            self.warn(msg);
+                        }
                     }
+                    if let Err(e) = self.write_checked(*sink, bytes) {
+                        self.sink_failed(*sink, &e);
+                    }
+                }
+                // `\c`: `checked_fflush`.
+                if r.stop
+                    && let Err(e) = self.flush_checked(*sink)
+                {
+                    self.sink_failed(*sink, &e);
                 }
                 true
             }
             Prim::Ls { sink } => {
-                let (line, err) = render_ls(
+                let pieces = render_ls(
                     &mut self.ls_widths,
                     it,
                     self.tree,
@@ -4283,11 +4514,23 @@ impl Ctx<'_> {
                     // 4.10.0 — see `ls_quote`.
                     false,
                 );
-                self.write(*sink, &line);
-                if let Some(msg) = err {
-                    // Not `fail`: `list_file` has no way to tell its caller,
-                    // so upstream leaves the exit status alone here.
-                    self.warn(&msg);
+                for piece in pieces {
+                    match piece {
+                        LsPiece::Out(stage, bytes) => {
+                            if let Err(e) = self.write_checked(*sink, &bytes) {
+                                // `die (EXIT_FAILURE, errno, ...)`: the run
+                                // ends here, without `cleanup`.
+                                self.die(&format!(
+                                    "Failed to write output (at stage {stage}): {}",
+                                    strerror(&e)
+                                ));
+                                break;
+                            }
+                        }
+                        // Not `fail`: `list_file` has no way to tell its
+                        // caller, so upstream leaves the exit status alone.
+                        LsPiece::Warn(msg) => self.warn(&msg),
+                    }
                 }
                 true
             }
@@ -4914,15 +5157,12 @@ fn divert_stdout(_sinks: &mut [Sink]) {}
 
 /// Collect what [`divert_stdout`]'s sinks kept. A no-op outside the tests.
 ///
-/// Every diverted sink is concatenated into the one buffer, for the reason the
-/// real ones share one `FILE *`: `-print -fprint /dev/stdout` interleaves.
+/// Every diverted sink wrote into the one buffer, in the order the writes
+/// were made, for the reason the real ones share one `FILE *`: `-print
+/// -fprint /dev/stdout` interleaves.
 #[cfg(test)]
 fn harvest(ctx: &Ctx<'_>, out: &mut Vec<u8>) {
-    for (i, buf) in ctx.sink_buf.iter().enumerate() {
-        if matches!(ctx.sinks.get(i), Some(Sink::Capture)) {
-            out.extend_from_slice(buf);
-        }
-    }
+    out.extend_from_slice(&ctx.captured);
 }
 
 #[cfg(not(test))]
@@ -4956,7 +5196,9 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
             return 1;
         }
         Err(Leading::DebugHelp) => {
-            print!("{}", debug_option_list(true));
+            // Into the stream `close_stdout` checks at the end, as upstream's
+            // `printf` is.
+            let _ = Stream::stdout().write_all(debug_option_list(true).as_bytes());
             return 0;
         }
     };
@@ -4986,11 +5228,13 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     match parsed {
         Ok(None) => {}
         Ok(Some(Halt::Help)) => {
-            print!("{}", help_text());
+            // Checked by `close_stdout` at the end, as upstream's is.
+            let _ = Stream::stdout().write_all(help_text().as_bytes());
             return 0;
         }
         Ok(Some(Halt::Version)) => {
-            print!("{VERSION}");
+            // Checked by `close_stdout` at the end, as upstream's is.
+            let _ = Stream::stdout().write_all(VERSION.as_bytes());
             return 0;
         }
         Err(f) => {
@@ -5014,12 +5258,12 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
     let sink_tty = sinks
         .iter()
         .map(|s| match s {
-            Sink::Stdout => std::io::IsTerminal::is_terminal(&io::stdout()),
-            Sink::Stderr => std::io::IsTerminal::is_terminal(&io::stderr()),
+            Sink::Stdout => stdfd::is_tty(1),
+            Sink::Stderr => stdfd::is_tty(2),
             // `stream_is_tty` would answer for a `-fprint /dev/tty` too. It is
             // answered false here because [`Parser::sink`] creates the file
-            // with `File::create`, and a port that opened `/dev/tty` for
-            // truncation would have bigger problems than its quoting.
+            // for writing and truncation, and a port that opened `/dev/tty`
+            // that way would have bigger problems than its quoting.
             Sink::File(_) => false,
             // The tests are not a terminal, and must not be: quoting that
             // depended on where the harness was run from would be untestable.
@@ -5027,12 +5271,13 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
             Sink::Capture => false,
         })
         .collect();
-    let sink_buf = vec![Vec::new(); sinks.len()];
     let start = parser.now;
     let ctx = Ctx {
         sinks,
         sink_tty,
-        sink_buf,
+        out: Stream::stdout(),
+        #[cfg(test)]
+        captured: Vec::new(),
         execs: parser.execs,
         tree,
         zone: localtime::Zone::from_env(),
@@ -5047,6 +5292,7 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
         status: 0,
         stop_at_current_level: false,
         quit: false,
+        died: false,
     };
 
     let mut walk = Walk {
@@ -5068,9 +5314,20 @@ fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -
         ok_prompt,
     );
 
-    // `cleanup()`: the outstanding `-exec … +` batches, then the buffers.
-    walk.ctx.flush_all_execs();
-    walk.ctx.flush();
+    // `cleanup()`, which a run that died never reaches: the outstanding
+    // `-exec … +` batches; then each output file closed, a failure there
+    // ending the run before standard output is asked; then `fflush (stdout)`,
+    // its failure reported -- `find: 'standard output': REASON` -- but not
+    // fatal. `close_stdout` has its say after, in `run_main`.
+    if !walk.ctx.died {
+        walk.ctx.flush_all_execs();
+        walk.ctx.close_files();
+    }
+    if !walk.ctx.died
+        && let Err(e) = walk.ctx.out.flush_now()
+    {
+        walk.ctx.sink_failed(0, &e);
+    }
     if let Some(out) = capture.as_mut() {
         harvest(&walk.ctx, out);
     }
@@ -5200,6 +5457,7 @@ fn split_nul(buf: &[u8]) -> Vec<Vec<u8>> {
 /// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -5223,7 +5481,13 @@ fn run_main() -> ExitCode {
     // the answers `-ok` read ahead -- measured, `{ find a b -ok true \; ; cat; }
     // < answers` leaves `cat` the rest.
     tree.answers.into_inner().into_stream().exit_sync();
-    ExitCode::from(u8::try_from(status).unwrap_or(1))
+    // `atexit (close_stdout)`: a reason when the last flush is what failed,
+    // a bare `write error` after `cleanup` has already said why.
+    stdfd::close_stdout(
+        "find",
+        Stream::stdout(),
+        ExitCode::from(u8::try_from(status).unwrap_or(1)),
+    )
 }
 
 // ---------------------------------------------------------------------------

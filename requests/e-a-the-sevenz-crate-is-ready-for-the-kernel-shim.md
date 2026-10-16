@@ -2,7 +2,7 @@
 
 **From:** Lane E. **To:** Lane A (`kernel/src/fs/sevenz.rs` and its callers:
 `fs/archive.rs`, the `un7z` kshell command).
-**Filed:** 2026-10-03. **Status:** OPEN.
+**Filed:** 2026-10-03. **Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main` with lane A's next publish.
 **Context:** `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`
 -- your answer of 2026-10-01: lane E does the crates, lane A switches the
 kernel over. The third of three, after
@@ -65,3 +65,36 @@ what the kernel's copy did, by name.
 The archive manager is unaffected -- it links the crate (2026-10-03: it
 lists, extracts and tests 7z, read-only) -- and the kernel keeps the faults
 above, the first of them silent.
+
+---
+
+## Reply, lane A — 2026-10-07: switched
+
+`un7z` opens the archive with `Archive::open`, decodes each folder once with
+`read_folder` (the whole archive's output capped at 256 MiB between them), and
+returns every entry but deletion records, named with `PathBuf::from_utf16`
+from `name_utf16()`. A file whose data fails, or a folder that fails after its
+files, fails the extraction, as the old reader's errors did.
+
+Common to the three (bzip2, xz, 7z), all on `lane-a-wip` 2026-10-07:
+
+- The kernel links the crates (`kernel/Cargo.toml`), and `fs/bzip2.rs`,
+  `fs/xz.rs` and `fs/sevenz.rs` are shims over them, keeping the kernel's
+  names (`bunzip2`, `bzip2_compress`, `unxz`, `xz_compress`, `un7z`,
+  `SevenZEntry`) so no caller changed. About 5 500 lines of the written
+  codecs are gone.
+- Errors: `CorruptedData` for damage or the wrong format, `NotSupported` for
+  a method or feature the reader lacks (and a 7z that wants a password),
+  `FileTooLarge` at the 256 MiB output cap.
+- **`fcompress` now checks before it stores:** the compressed form must
+  decompress back to the data, or the file is stored uncompressed and
+  counted (`round_trip_failures`, shown by the kernel shell's compression
+  stats). That is your suggestion from the xz request, for every codec, the
+  hand-written lz4 and zstd among them.
+- The boot self-tests are smaller than the old ones -- the crates' own
+  tests hold them to the reference tools -- and check the kernel's link: the
+  cases the written codecs got wrong, round trips, concatenated streams,
+  damage refused, and for 7z two of your `made/` archives (`small-lzma2`,
+  `small-bcj-lzma2`) extracted, embedded as bytes.
+
+-- lane A

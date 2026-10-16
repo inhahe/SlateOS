@@ -1,4 +1,15 @@
-## B-SIX-PROGRAMS-READ-ETC-GROUP-AS-TEXT-AND-ASK-THE-WRONG-MEMBERSHIP-QUESTION (lane B, 2026-09-12) -- `doas` FIXED, five open
+## B-SIX-PROGRAMS-READ-ETC-GROUP-AS-TEXT-AND-ASK-THE-WRONG-MEMBERSHIP-QUESTION (lane B, 2026-09-12) -- the group half FIXED; `getent`'s other databases open
+
+**Status:** OPEN, narrowed 2026-10-09. The group-membership defect is gone from
+every program that had it: the four live ones were fixed on 2026-09-12 (the
+table below), and the two unreachable copies no longer exist -- `loginctl`'s
+`userdbctl` personality was removed on 2026-10-01 (§1045), and
+`userspace/mktemp`, with its `id`/`groups` personalities, is deleted
+(`loginctl`'s two remaining `read_to_string`s read its own session and seat
+files). What is left is the first half of the defect in one program:
+`userspace/getent` still reads `hosts`, `services`, `protocols`, `networks` and
+`shadow` with `read_to_string`, so one byte that is not text in any of them
+makes that whole database empty. A port of glibc's `getent` would close it.
 
 **In short:** six programs parse `/etc/group` by hand instead of using the
 shared reader. Two things go wrong. First, they read it with `read_to_string`,

@@ -71,8 +71,9 @@ pub(crate) struct OggFile<R> {
     next: Vec<Option<i64>>,
 }
 
-/// A video track, as either container describes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A video track, as either container describes it. (`PartialEq` alone: its
+/// colour hint's HDR metadata is in floating point.)
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Track {
     /// Matroska's track number; MP4's track ID: what a caller names it by.
     pub number: u64,
@@ -451,6 +452,8 @@ impl<R: Read + Seek> Container<R> {
                             SubtitleFormat::MovText
                         } else if t.codec == mp4::Codec::Ttml {
                             SubtitleFormat::Ttml
+                        } else if t.codec == mp4::Codec::Cea608 {
+                            SubtitleFormat::Cea608
                         } else if t.codec_tag == *b"wvtt" {
                             SubtitleFormat::WebVtt
                         } else {
@@ -961,7 +964,7 @@ fn mp4_track(index: usize, t: &mp4::Track) -> Option<Track> {
             .matrix
             .map_or(Orientation::Upright, |m| Orientation::from_matrix(&m)),
         alpha: false,
-        hint: ColourHint::mp4(picture.colour.as_ref()),
+        hint: ColourHint::mp4(&picture),
         frame_duration: picture
             .frame_duration
             .filter(|&d| d > 0)

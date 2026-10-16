@@ -131,7 +131,7 @@ pub struct WindowEntry {
 /// A pinned app on the taskbar.
 #[derive(Debug, Clone)]
 pub struct PinnedApp {
-    /// Application ID (from appregistry).
+    /// Application ID: a desktop entry's id, from userspace's program list (`gui/programs`).
     pub app_id: String,
     /// Display name.
     pub name: String,

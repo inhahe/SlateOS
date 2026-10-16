@@ -1,0 +1,5 @@
+# hlg_av1.mp4: what its frames say of their light, as ffprobe reads them (generate_hdr_fixtures.py).
+frame 0 matrix=9 primaries=9 transfer=18 range=limited
+frame 1 matrix=9 primaries=9 transfer=18 range=limited
+frame 2 matrix=9 primaries=9 transfer=18 range=limited
+frame 3 matrix=9 primaries=9 transfer=18 range=limited

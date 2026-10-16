@@ -40,12 +40,15 @@ use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 
+use std::ops::Range;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -137,6 +140,20 @@ const PAGE_BAR_HEIGHT: f32 = 22.0;
 const TREE_ROW_HEIGHT: f32 = 22.0;
 /// Height of one line of the query history under the SQL editor.
 const HISTORY_ROW_HEIGHT: f32 = 18.0;
+/// The size the SQL editor's query is drawn at, which its caret keys and a
+/// press measure against as well.
+const SQL_TEXT_SIZE: f32 = 12.0;
+/// How far the query sits inside the editor box's left and right sides.
+const SQL_TEXT_INSET: f32 = 8.0;
+/// The size the filter builder's value is drawn at, with its label.
+const VALUE_TEXT_SIZE: f32 = 10.0;
+/// How far the value row's words sit inside its sides.
+const VALUE_TEXT_INSET: f32 = 6.0;
+/// What the value row says ahead of the value.
+const VALUE_LABEL: &str = "Value:";
+/// The most a box holds, in characters: a query of a page and more, and a
+/// paste of a book is not one.
+const BOX_CAPACITY: usize = 16 * 1024;
 
 /// The narrowest object-tree sidebar worth drawing.
 ///
@@ -571,26 +588,173 @@ fn cell_color(cell: &CellValue, pal: &Palette) -> Color {
     }
 }
 
-/// The text a SQL token is drawn as, and the colour and weight it is drawn in.
+/// The colour a SQL token is drawn in.
 ///
-/// The *text* is part of the answer, not just the colour: a string literal is
-/// tokenized without its quotes and drawn with them, so the caller cannot
-/// measure the token by looking at the token.
-fn token_ink(token: &SqlToken, pal: &Palette) -> (String, Color, FontWeightHint) {
+/// In one weight, whatever the token: the editor places its caret, a press
+/// and the selection by measuring the line, and a line drawn in two weights
+/// is not the line it measures. Keywords and `*` were bold.
+fn token_color(token: &SqlToken, pal: &Palette) -> Color {
     match token {
-        SqlToken::Keyword(k) => (k.clone(), pal.mauve, FontWeightHint::Bold),
-        SqlToken::Identifier(id) => (id.clone(), pal.text, FontWeightHint::Regular),
-        SqlToken::StringLiteral(s) => (format!("'{s}'"), pal.green, FontWeightHint::Regular),
-        SqlToken::NumberLiteral(n) => (n.clone(), pal.peach, FontWeightHint::Regular),
-        SqlToken::Operator(op) => (op.clone(), pal.red, FontWeightHint::Regular),
-        SqlToken::Comma => (",".to_owned(), pal.text, FontWeightHint::Regular),
-        SqlToken::Semicolon => (";".to_owned(), pal.text, FontWeightHint::Regular),
-        SqlToken::LeftParen => ("(".to_owned(), pal.yellow, FontWeightHint::Regular),
-        SqlToken::RightParen => (")".to_owned(), pal.yellow, FontWeightHint::Regular),
-        SqlToken::Star => ("*".to_owned(), pal.peach, FontWeightHint::Bold),
-        SqlToken::Dot => (".".to_owned(), pal.text, FontWeightHint::Regular),
-        SqlToken::Whitespace => (" ".to_owned(), pal.text, FontWeightHint::Regular),
+        SqlToken::Keyword(_) => pal.mauve,
+        SqlToken::StringLiteral(_) => pal.green,
+        SqlToken::NumberLiteral(_) | SqlToken::Star => pal.peach,
+        SqlToken::Operator(_) => pal.red,
+        SqlToken::LeftParen | SqlToken::RightParen => pal.yellow,
+        SqlToken::Identifier(_)
+        | SqlToken::Comma
+        | SqlToken::Semicolon
+        | SqlToken::Dot
+        | SqlToken::Whitespace => pal.text,
     }
+}
+
+/// A span of colour ending at byte `end`.
+fn span_to(end: usize, color: Color) -> TextSpan {
+    TextSpan {
+        end: u32::try_from(end).unwrap_or(u32::MAX),
+        color,
+    }
+}
+
+/// The colour each byte of `sql` is drawn in, as cumulative spans: each
+/// token's colour over the bytes it was read from, and the text's colour
+/// over what the lexer passes by -- a character SQL has no use for is still
+/// drawn, as typed.
+///
+/// The editor drew the tokens the lexer handed back rather than the text: a
+/// run of spaces as one, keywords in capitals, `''` in a string as `'`, and a
+/// character the lexer skips not at all -- so what was on the screen was not
+/// what had been typed, nor what Enter would run.
+fn sql_spans(sql: &str, pal: &Palette) -> Vec<TextSpan> {
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for (token, bytes) in tokenize_sql_spanned(sql) {
+        if bytes.start > at {
+            spans.push(span_to(bytes.start, pal.text));
+        }
+        spans.push(span_to(bytes.end, token_color(&token, pal)));
+        at = bytes.end;
+    }
+    spans
+}
+
+/// `spans` -- over text `len` bytes long, drawn in `base` past the last of
+/// them -- with the bytes `from..to` in `selected` instead.
+fn select_spans(
+    spans: &[TextSpan],
+    len: usize,
+    (from, to): (usize, usize),
+    base: Color,
+    selected: Color,
+) -> Vec<TextSpan> {
+    let mut out = Vec::with_capacity(spans.len().saturating_add(3));
+    let mut start = 0;
+    let runs = spans
+        .iter()
+        .map(|span| (usize::try_from(span.end).unwrap_or(usize::MAX), span.color))
+        .chain(std::iter::once((len, base)));
+    for (end, color) in runs {
+        let end = end.min(len);
+        for (a, b, ink) in [
+            (start, end.min(from), color),
+            (start.max(from), end.min(to), selected),
+            (start.max(to), end, color),
+        ] {
+            if b > a {
+                out.push(span_to(b, ink));
+            }
+        }
+        start = start.max(end);
+    }
+    out
+}
+
+/// Where the query is drawn in the SQL editor's box at `editor`: a line of
+/// the text's height, centred, inside its sides. One answer for the drawing
+/// and for a press.
+fn sql_text_area(editor: Rect) -> Rect {
+    let line = text::line_height(SQL_TEXT_SIZE, FontWeightHint::Regular).min(editor.h);
+    Rect::new(
+        editor.x + SQL_TEXT_INSET,
+        editor.y + (editor.h - line) / 2.0,
+        (editor.w - 2.0 * SQL_TEXT_INSET).max(0.0),
+        line,
+    )
+}
+
+/// Where the filter's value is drawn in its row at `row`: after the row's
+/// label and a space, to the row's inside edge. One answer for the drawing
+/// and for a press.
+fn value_text_area(row: Rect) -> Rect {
+    let weight = FontWeightHint::Regular;
+    let label = text::measure(VALUE_LABEL, VALUE_TEXT_SIZE, weight)
+        + text::measure(" ", VALUE_TEXT_SIZE, weight);
+    let line = text::line_height(VALUE_TEXT_SIZE, weight).min(row.h);
+    let x = row.x + VALUE_TEXT_INSET + label;
+    Rect::new(
+        x,
+        row.y + (row.h - line) / 2.0,
+        (row.right() - VALUE_TEXT_INSET - x).max(0.0),
+        line,
+    )
+}
+
+/// One line of SQL, drawn as `textedit::draw` draws a field -- clipped to
+/// `area`, scrolled so the caret stays in view, the selection behind it and
+/// the caret where it is -- with each token in its colour.
+fn draw_sql_line(
+    tree: &mut RenderTree,
+    sql: &str,
+    (cursor, anchor): (text::TextCursor, Option<usize>),
+    focused: bool,
+    area: Rect,
+    pal: &Palette,
+) {
+    let weight = FontWeightHint::Regular;
+    let caret_px = text::caret_x(sql, cursor, SQL_TEXT_SIZE, weight);
+    let width = text::measure(sql, SQL_TEXT_SIZE, weight);
+    let scroll = textedit::horizontal_scroll(width, area.w, caret_px);
+    tree.clip(area.x, area.y, area.w, area.h);
+    let origin = area.x - scroll;
+    let selected = textedit::selected_range(cursor, anchor);
+    let mut spans = sql_spans(sql, pal);
+    if let Some((from, to)) = selected {
+        for (left, w) in text::selection_boxes(sql, from, to, SQL_TEXT_SIZE, weight) {
+            tree.push(RenderCommand::FillRect {
+                x: origin + left,
+                y: area.y,
+                width: w,
+                height: area.h,
+                color: pal.accent,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        spans = select_spans(&spans, sql.len(), (from, to), pal.text, pal.crust);
+    }
+    tree.push(RenderCommand::RichText {
+        x: origin,
+        y: area.y,
+        text: sql.to_owned(),
+        spans,
+        color: pal.text,
+        font_size: SQL_TEXT_SIZE,
+        font_weight: weight,
+        // The clip bounds it; an ellipsis would mark a cut the scroll means
+        // is not one.
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    if focused {
+        textedit::push_caret(
+            tree,
+            origin + caret_px,
+            area.y,
+            area.h,
+            pal.text,
+            textedit::CARET_WIDTH,
+        );
+    }
+    tree.unclip();
 }
 
 /// Point size of the query-result message above the results table.
@@ -1604,20 +1768,34 @@ pub enum SqlToken {
 
 /// Tokenize a SQL string into tokens.
 fn tokenize_sql(input: &str) -> Vec<SqlToken> {
+    tokenize_sql_spanned(input)
+        .into_iter()
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// Tokenize a SQL string, each token with the bytes of `input` it was read
+/// from -- which the editor colours, over the text as it was typed
+/// (`sql_spans`). A character the lexer has no use for is in no token.
+fn tokenize_sql_spanned(input: &str) -> Vec<(SqlToken, Range<usize>)> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
+    // Where each character starts in `input`; past the last, its end.
+    let starts: Vec<usize> = input.char_indices().map(|(at, _)| at).collect();
+    let byte_at = |i: usize| starts.get(i).copied().unwrap_or(input.len());
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
         let ch = chars.get(i).copied().unwrap_or(' ');
+        let start = i;
 
         // Skip whitespace
         if ch.is_whitespace() {
-            tokens.push(SqlToken::Whitespace);
             while i < len && chars.get(i).is_some_and(|c| c.is_whitespace()) {
                 i = i.saturating_add(1);
             }
+            tokens.push((SqlToken::Whitespace, byte_at(start)..byte_at(i)));
             continue;
         }
 
@@ -1641,7 +1819,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                     i = i.saturating_add(1);
                 }
             }
-            tokens.push(SqlToken::StringLiteral(s));
+            tokens.push((SqlToken::StringLiteral(s), byte_at(start)..byte_at(i)));
             continue;
         }
 
@@ -1662,7 +1840,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                 num.push(chars.get(i).copied().unwrap_or('0'));
                 i = i.saturating_add(1);
             }
-            tokens.push(SqlToken::NumberLiteral(num));
+            tokens.push((SqlToken::NumberLiteral(num), byte_at(start)..byte_at(i)));
             continue;
         }
 
@@ -1678,71 +1856,38 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                 i = i.saturating_add(1);
             }
             let upper = ident.to_uppercase();
-            if SQL_KEYWORDS.contains(&upper.as_str()) {
-                tokens.push(SqlToken::Keyword(upper));
+            let token = if SQL_KEYWORDS.contains(&upper.as_str()) {
+                SqlToken::Keyword(upper)
             } else {
-                tokens.push(SqlToken::Identifier(ident));
-            }
+                SqlToken::Identifier(ident)
+            };
+            tokens.push((token, byte_at(start)..byte_at(i)));
             continue;
         }
 
-        // Operators
-        match ch {
-            '=' => {
-                tokens.push(SqlToken::Operator("=".to_owned()));
-                i = i.saturating_add(1);
-            }
-            '!' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'=') => {
-                tokens.push(SqlToken::Operator("!=".to_owned()));
-                i = i.saturating_add(2);
-            }
-            '<' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'=') => {
-                tokens.push(SqlToken::Operator("<=".to_owned()));
-                i = i.saturating_add(2);
-            }
-            '<' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'>') => {
-                tokens.push(SqlToken::Operator("<>".to_owned()));
-                i = i.saturating_add(2);
-            }
-            '<' => {
-                tokens.push(SqlToken::Operator("<".to_owned()));
-                i = i.saturating_add(1);
-            }
-            '>' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'=') => {
-                tokens.push(SqlToken::Operator(">=".to_owned()));
-                i = i.saturating_add(2);
-            }
-            '>' => {
-                tokens.push(SqlToken::Operator(">".to_owned()));
-                i = i.saturating_add(1);
-            }
-            '(' => {
-                tokens.push(SqlToken::LeftParen);
-                i = i.saturating_add(1);
-            }
-            ')' => {
-                tokens.push(SqlToken::RightParen);
-                i = i.saturating_add(1);
-            }
-            ',' => {
-                tokens.push(SqlToken::Comma);
-                i = i.saturating_add(1);
-            }
-            ';' => {
-                tokens.push(SqlToken::Semicolon);
-                i = i.saturating_add(1);
-            }
-            '*' => {
-                tokens.push(SqlToken::Star);
-                i = i.saturating_add(1);
-            }
-            '.' => {
-                tokens.push(SqlToken::Dot);
-                i = i.saturating_add(1);
-            }
-            _ => {
-                i = i.saturating_add(1);
-            } // Skip unknown chars
+        // Operators and punctuation: the token, and how many characters it
+        // takes.
+        let next = chars.get(i.saturating_add(1)).copied();
+        let (token, width) = match (ch, next) {
+            ('=', _) => (Some(SqlToken::Operator("=".to_owned())), 1),
+            ('!', Some('=')) => (Some(SqlToken::Operator("!=".to_owned())), 2),
+            ('<', Some('=')) => (Some(SqlToken::Operator("<=".to_owned())), 2),
+            ('<', Some('>')) => (Some(SqlToken::Operator("<>".to_owned())), 2),
+            ('<', _) => (Some(SqlToken::Operator("<".to_owned())), 1),
+            ('>', Some('=')) => (Some(SqlToken::Operator(">=".to_owned())), 2),
+            ('>', _) => (Some(SqlToken::Operator(">".to_owned())), 1),
+            ('(', _) => (Some(SqlToken::LeftParen), 1),
+            (')', _) => (Some(SqlToken::RightParen), 1),
+            (',', _) => (Some(SqlToken::Comma), 1),
+            (';', _) => (Some(SqlToken::Semicolon), 1),
+            ('*', _) => (Some(SqlToken::Star), 1),
+            ('.', _) => (Some(SqlToken::Dot), 1),
+            // Skip unknown chars
+            _ => (None, 1),
+        };
+        i = i.saturating_add(width);
+        if let Some(token) = token {
+            tokens.push((token, byte_at(start)..byte_at(i)));
         }
     }
 
@@ -3502,6 +3647,15 @@ pub struct DbViewerApp {
     /// The user's focus width, which the text boxes draw their focus mark
     /// at (`appearance_changed`).
     focus_ring_width: f32,
+    /// The editor of the box with the keyboard -- the SQL editor or the
+    /// filter's value: its caret and selection over that box's text,
+    /// reloaded when the keyboard moved to the other box or the text changed
+    /// under it (a query recalled from the history).
+    editor: TextInput,
+    /// Which box `editor` holds.
+    editor_for: Option<Focus>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
 }
 
 impl Default for DbViewerApp {
@@ -3537,6 +3691,9 @@ impl DbViewerApp {
             filter_op_idx: 0,
             filter_value: String::new(),
             focus: Focus::Editor,
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             status: String::from("Ready"),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
@@ -4173,11 +4330,7 @@ impl DbViewerApp {
             ),
             (format!("Where: {op}"), Target::FilterOp, self.palette.mauve),
             (
-                if self.filter_value.is_empty() {
-                    "Value: (type here)".to_owned()
-                } else {
-                    format!("Value: {}", self.filter_value)
-                },
+                VALUE_LABEL.to_owned(),
                 Target::FilterValue,
                 if self.focus == Focus::FilterValue {
                     self.palette.text
@@ -4215,12 +4368,15 @@ impl DbViewerApp {
             }
             put_text(
                 f,
-                inset_x(row, 6.0),
+                inset_x(row, VALUE_TEXT_INSET),
                 &label,
-                10.0,
+                VALUE_TEXT_SIZE,
                 color,
                 FontWeightHint::Regular,
             );
+            if target == Target::FilterValue {
+                self.draw_filter_value(f, row, color);
+            }
             f.hit(target, row);
             y += TREE_ROW_HEIGHT;
         }
@@ -4575,43 +4731,49 @@ impl DbViewerApp {
         );
         f.hit(Target::SqlEditor, editor);
 
-        let line = Rect::new(
-            editor.x + 8.0,
-            editor.y + 4.0,
-            (editor.w - 16.0).max(0.0),
-            line_h,
-        );
-        if self.sql_input.is_empty() {
-            put_text(
-                f,
-                line,
-                "Enter SQL query...",
-                12.0,
-                self.palette.overlay0,
-                FontWeightHint::Regular,
-            );
-        } else {
-            let mut tx = line.x;
-            for token in tokenize_sql(&self.sql_input) {
-                let (s, color, weight) = token_ink(&token, &self.palette);
-                // Measured in the token's *own* weight: keywords are drawn
-                // bold, so a fixed cell laid the next token on top of the tail
-                // of every SELECT and WHERE. And a quoted string literal is
-                // drawn with its quotes, which the byte count did include but
-                // only by accident of them being one byte each.
-                let w = text::measure(&s, 12.0, weight);
-                if tx + w > line.right() {
-                    break;
-                }
+        // The query as typed, its tokens in their colours, with the caret
+        // and the selection where they are while the editor has the keyboard,
+        // scrolled so the caret stays in view -- or, empty, what it is for.
+        // The tokens were drawn one by one, cut where the box ran out, with
+        // no caret: the keys could type only at the end, which might be past
+        // the cut.
+        let line = sql_text_area(editor);
+        let focused = self.field_state(Target::SqlEditor, Focus::Editor).focused;
+        if f.is_visible(line) {
+            let mut tree = RenderTree::new();
+            if self.sql_input.is_empty() {
                 put_text(
                     f,
-                    Rect::new(tx, line.y, w + 4.0, line.h),
-                    &s,
-                    12.0,
-                    color,
-                    weight,
+                    line,
+                    "Enter SQL query...",
+                    SQL_TEXT_SIZE,
+                    // What it is for, faint but readable: overlay0 is the
+                    // disabled grey, 2.30:1 on the base.
+                    self.palette.subtext0,
+                    FontWeightHint::Regular,
                 );
-                tx += w;
+                if focused {
+                    textedit::push_caret(
+                        &mut tree,
+                        line.x,
+                        line.y,
+                        line.h,
+                        self.palette.text,
+                        textedit::CARET_WIDTH,
+                    );
+                }
+            } else {
+                draw_sql_line(
+                    &mut tree,
+                    &self.sql_input,
+                    self.drawn_caret(Focus::Editor),
+                    focused,
+                    line,
+                    &self.palette,
+                );
+            }
+            for command in tree.commands {
+                f.push(command);
             }
         }
 
@@ -5340,7 +5502,22 @@ impl DbViewerApp {
         let Some(target) = frame.hit_test(event.x, event.y) else {
             return;
         };
+        // A box pressed: where its text is, and where its caret was drawn --
+        // asked before the press gives it the keyboard, which moves that.
+        let pressed = match target {
+            Target::SqlEditor => frame
+                .rect_of(|t| *t == target)
+                .map(|r| (Focus::Editor, sql_text_area(r), SQL_TEXT_SIZE)),
+            Target::FilterValue => frame
+                .rect_of(|t| *t == target)
+                .map(|r| (Focus::FilterValue, value_text_area(r), VALUE_TEXT_SIZE)),
+            _ => None,
+        }
+        .map(|(focus, area, size)| (focus, area, size, self.drawn_caret(focus).0));
         self.activate(target);
+        if let Some((focus, area, size, drawn)) = pressed {
+            self.press_box(focus, (area, size), drawn, event.x);
+        }
     }
 
     /// The columns of the table the sidebar has selected, if it has one.
@@ -5632,12 +5809,154 @@ impl DbViewerApp {
         }
     }
 
-    /// The text box that has the keyboard, if any.
-    fn focused_text(&mut self) -> Option<&mut String> {
-        match self.focus {
-            Focus::Editor => Some(&mut self.sql_input),
-            Focus::FilterValue => Some(&mut self.filter_value),
-            Focus::None => None,
+    /// What box `focus` holds: the query, or the filter's value.
+    fn box_text(&self, focus: Focus) -> &str {
+        match focus {
+            Focus::FilterValue => &self.filter_value,
+            _ => &self.sql_input,
+        }
+    }
+
+    /// Load box `focus` into the editor unless it holds it already, the
+    /// caret after its text.
+    fn load_editor(&mut self, focus: Focus) {
+        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {
+            let held = self.box_text(focus).to_owned();
+            self.editor.set_text(&held);
+            self.editor_for = Some(focus);
+        }
+    }
+
+    /// A key for box `focus`, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing.
+    /// Whether the box answered it.
+    fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> bool {
+        self.load_editor(focus);
+        let size = if focus == Focus::FilterValue {
+            VALUE_TEXT_SIZE
+        } else {
+            SQL_TEXT_SIZE
+        };
+        let edit =
+            textline::apply_key(&mut self.editor, event, BOX_CAPACITY, &self.clipboard, size);
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if self.editor.text() != self.box_text(focus) {
+            let typed = self.editor.text().to_owned();
+            match focus {
+                Focus::FilterValue => self.filter_value = typed,
+                _ => self.sql_input = typed,
+            }
+        }
+        edit.handled
+    }
+
+    /// Where box `focus`'s caret and selection anchor are: the editor's
+    /// while it holds the box's text, after the text and none otherwise.
+    fn box_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
+        let held = self.box_text(focus);
+        if self.editor_for == Some(focus) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (text::TextCursor::from(held.len()), None)
+        }
+    }
+
+    /// Where box `focus`'s caret and selection anchor are drawn: where they
+    /// are (`box_caret`) while the box has the keyboard, and at the start,
+    /// nothing selected, while it has not -- a box without the keyboard
+    /// reads from its beginning. One answer for the drawing and for a press.
+    fn drawn_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
+        if self.focus == focus && !self.covered() {
+            self.box_caret(focus)
+        } else {
+            (text::TextCursor::default(), None)
+        }
+    }
+
+    /// A press at `x` in box `focus`, its text drawn at `area` and `size`
+    /// with the caret at `drawn`: the caret under the pointer, measured
+    /// against the box as it was drawn.
+    fn press_box(
+        &mut self,
+        focus: Focus,
+        (area, size): (Rect, f32),
+        drawn: text::TextCursor,
+        x: f32,
+    ) {
+        self.load_editor(focus);
+        let cursor = textedit::cursor_at_click(
+            self.box_text(focus),
+            drawn,
+            area.w,
+            size,
+            FontWeightHint::Regular,
+            x - area.x,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// The filter's value in its row at `row`, after the row's label: with
+    /// its caret and selection where they are while it has the keyboard,
+    /// scrolled so the caret stays in view -- or, empty, `(type here)`. It
+    /// was typed onto the label, `Value: Alice`, cut with an ellipsis at the
+    /// letters being typed, with no caret.
+    fn draw_filter_value(&self, f: &mut Frame<Target>, row: Rect, color: Color) {
+        let area = value_text_area(row);
+        if area.is_empty() || !f.is_visible(area) {
+            return;
+        }
+        let focused = self
+            .field_state(Target::FilterValue, Focus::FilterValue)
+            .focused;
+        let mut tree = RenderTree::new();
+        if self.filter_value.is_empty() {
+            put_text(
+                f,
+                area,
+                "(type here)",
+                VALUE_TEXT_SIZE,
+                // What it is for, faint but readable: overlay0 is the
+                // disabled grey, 2.30:1 on the base.
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+            );
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    area.x,
+                    area.y,
+                    area.h,
+                    color,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let (cursor, selection_anchor) = self.drawn_caret(Focus::FilterValue);
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.filter_value,
+                    cursor,
+                    selection_anchor,
+                    focused,
+                    x: area.x,
+                    y: area.y,
+                    width: area.w,
+                    line_height: area.h,
+                    font_size: VALUE_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        for command in tree.commands {
+            f.push(command);
         }
     }
 
@@ -5681,12 +6000,6 @@ impl DbViewerApp {
                 };
                 return;
             }
-            Key::Backspace => {
-                if let Some(text) = self.focused_text() {
-                    text.pop();
-                    return;
-                }
-            }
             Key::Enter => match self.focus {
                 Focus::Editor => {
                     self.activate(Target::Execute);
@@ -5701,18 +6014,25 @@ impl DbViewerApp {
             _ => {}
         }
 
-        // Printable text. `KeyEvent::text` is what the platform's keyboard
-        // layout produced, shift and dead keys included; deriving a character
-        // from the key code instead is what makes a `*` impossible to type on
-        // any layout but the one the table was written for -- and `SELECT *` is
-        // the first query anybody types. Typed, not a command's letter, which
-        // a chord carries: Alt+S typed an `s` into the query. AltGr's
-        // characters are typed.
-        if textline::types_into_field(event)
-            && let Some(text) = self.focused_text()
-        {
-            text.push_str(&event.text);
-            return;
+        // The box with the keyboard: the caret keys, Backspace and Delete at
+        // the caret, Ctrl+A, C, X and V, and typing. `KeyEvent::text` is what
+        // the platform's keyboard layout produced, shift and dead keys
+        // included; deriving a character from the key code instead is what
+        // makes a `*` impossible to type on any layout but the one the table
+        // was written for -- and `SELECT *` is the first query anybody types.
+        // Typed, not a command's letter, which a chord carries: Alt+S typed an
+        // `s` into the query. AltGr's characters are typed. The boxes took
+        // typing at their end and Backspace from it, and nothing else.
+        if self.focus != Focus::None {
+            if self.box_key(self.focus, event) {
+                return;
+            }
+            // A key the box does not answer is still the box's -- a letter
+            // that typed nothing is no shortcut while a box has the keyboard
+            // -- but for the page keys, which page the grid behind it.
+            if !matches!(event.key, Key::PageUp | Key::PageDown) {
+                return;
+            }
         }
 
         // Nothing has the keyboard, so letters are shortcuts -- plain ones.
@@ -6275,6 +6595,10 @@ mod tests {
             "Escape did not close it"
         );
 
+        // With the keyboard let go of: the editor has it to start with, and N
+        // is a letter there, not a shortcut.
+        app.handle_key(&probe::press(Key::Escape));
+        assert_eq!(app.focus, Focus::None);
         app.handle_key(&probe::press(Key::N));
         assert_ne!(
             app.tabs.len(),
@@ -9109,7 +9433,7 @@ mod tests {
         app.show_filter_builder = true;
         click_text(&mut app, FULL, "Column: id");
 
-        click_text(&mut app, FULL, "Value: (type here)");
+        click_text(&mut app, FULL, "(type here)");
         assert_eq!(
             app.focus,
             Focus::FilterValue,
@@ -9118,7 +9442,7 @@ mod tests {
         probe::type_str(&mut app, "Alice");
         assert_eq!(app.filter_value, "Alice", "the typing went somewhere else");
         assert!(
-            shows(&app, FULL, "Value: Alice"),
+            shows(&app, FULL, VALUE_LABEL) && typed_run(&app, "Alice").is_some(),
             "the builder does not show what was typed"
         );
 
@@ -10095,5 +10419,270 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // -- The boxes edit at a caret -------------------------------------------------
+
+    /// The run of typed text the window draws reading `wanted`: its x and
+    /// its colour spans.
+    fn typed_run(app: &DbViewerApp, wanted: &str) -> Option<(f32, Vec<TextSpan>)> {
+        app.frame(FULL.0, FULL.1)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { x, text, spans, .. } if text == wanted => {
+                    Some((*x, spans.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    /// The colour byte `at` of a run drawn with `spans` is in, over a base
+    /// of `base`.
+    fn color_at(spans: &[TextSpan], at: usize, base: Color) -> Color {
+        spans
+            .iter()
+            .find(|s| usize::try_from(s.end).unwrap() > at)
+            .map_or(base, |s| s.color)
+    }
+
+    /// The x of every caret drawn inside `area`.
+    fn carets_in(app: &DbViewerApp, area: Rect) -> Vec<f32> {
+        app.frame(FULL.0, FULL.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the SQL editor's query is drawn.
+    fn sql_area(app: &DbViewerApp) -> Rect {
+        sql_text_area(
+            app.frame(FULL.0, FULL.1)
+                .rect_of(|t| *t == Target::SqlEditor)
+                .expect("the editor"),
+        )
+    }
+
+    /// **The SQL editor edits at a caret**: the arrows, Home and End move
+    /// it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are. The editor took typing at
+    /// its end and Backspace from it, and nothing else, and drew no caret.
+    #[test]
+    fn the_sql_editor_edits_at_a_caret() {
+        let mut app = wired();
+        click_target(&mut app, FULL, Target::SqlEditor);
+        probe::type_str(&mut app, "SELECT * FRM users");
+        for _ in 0..7 {
+            probe::key(&mut app, &probe::press(Key::Left));
+        }
+        probe::type_str(&mut app, "O");
+        assert_eq!(
+            app.sql_input, "SELECT * FROM users",
+            "the caret did not move"
+        );
+        let area = sql_area(&app);
+        let at = area.x
+            + text::caret_x(
+                "SELECT * FROM users",
+                text::TextCursor::from(12),
+                SQL_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, area);
+        assert_eq!(carets.len(), 1, "one caret in the editor");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `FRO` it follows at {at}"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(app.sql_input, "ELECT * FROM users", "Delete at the caret");
+        probe::type_str(&mut app, "S");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        let (_, spans) = typed_run(&app, "SELECT * FROM users").expect("the query");
+        assert!(
+            spans.iter().all(|s| s.color == app.palette.crust),
+            "the selection is not drawn: {spans:?}"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        probe::key(&mut app, &probe::ctrl(Key::X));
+        assert_eq!(app.sql_input, "", "Ctrl+A and Ctrl+X");
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(app.sql_input, "SELECT * FROM users", "Ctrl+C or Ctrl+V");
+
+        // A press at the start of the query puts the caret there, and one
+        // past its end at its end.
+        let mid = area.y + area.h / 2.0;
+        click(&mut app, (area.x + 0.5, mid), FULL);
+        probe::type_str(&mut app, " ");
+        click(&mut app, (area.right() - 1.0, mid), FULL);
+        probe::type_str(&mut app, ";");
+        assert_eq!(
+            app.sql_input, " SELECT * FROM users;",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **The SQL editor draws the query as it was typed**, each token in its
+    /// colour. It drew the tokens the lexer handed back instead: a run of
+    /// spaces as one, keywords in capitals, `''` in a string as `'`, and a
+    /// character the lexer has no use for not at all -- so what was on the
+    /// screen was not what Enter would run.
+    #[test]
+    fn the_sql_editor_draws_the_query_as_it_was_typed() {
+        let mut app = wired();
+        click_target(&mut app, FULL, Target::SqlEditor);
+        let typed = "select  name from users where name = 'O''Brien' or id >@5";
+        probe::type_str(&mut app, typed);
+        let (_, spans) = typed_run(&app, typed).expect("the query is not drawn as typed");
+        let pal = app.palette;
+        let at = |needle: &str| typed.find(needle).unwrap();
+        assert_eq!(color_at(&spans, 0, pal.text), pal.mauve, "a keyword");
+        assert_eq!(
+            color_at(&spans, at("'O"), pal.text),
+            pal.green,
+            "the string"
+        );
+        assert_eq!(
+            color_at(&spans, at("''B"), pal.text),
+            pal.green,
+            "the string's quote"
+        );
+        assert_eq!(color_at(&spans, at("= "), pal.text), pal.red, "an operator");
+        assert_eq!(
+            color_at(&spans, at("users"), pal.text),
+            pal.text,
+            "an identifier"
+        );
+        assert_eq!(color_at(&spans, at("5"), pal.text), pal.peach, "a number");
+        assert_eq!(
+            color_at(&spans, at("@"), pal.text),
+            pal.text,
+            "a character the lexer passes by took the next token's colour"
+        );
+    }
+
+    /// **The tokens are read from the text, every byte of them**: a token's
+    /// bytes are where the editor colours it, and the lexer's tokens are the
+    /// same whether or not anyone asks where they came from.
+    #[test]
+    fn the_lexer_says_where_each_token_came_from() {
+        let sql = "SELECT  a,'it''s' FROM t WHERE n<>2.5 é;";
+        let spanned = tokenize_sql_spanned(sql);
+        let read: Vec<&str> = spanned.iter().map(|(_, b)| &sql[b.clone()]).collect();
+        assert_eq!(
+            read,
+            [
+                "SELECT", "  ", "a", ",", "'it''s'", " ", "FROM", " ", "t", " ", "WHERE", " ", "n",
+                "<>", "2.5", " ", ";"
+            ],
+            "a token's bytes are not the text it was read from"
+        );
+        let tokens: Vec<SqlToken> = spanned.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(tokens, tokenize_sql(sql));
+    }
+
+    /// **The filter's value edits at a caret** as the query does, drawn after
+    /// its label: it was typed onto the label, `Value: Alice`, with no caret.
+    #[test]
+    fn the_filter_value_edits_at_a_caret() {
+        let mut app = wired();
+        app.show_filter_builder = true;
+        click_text(&mut app, FULL, "(type here)");
+        assert_eq!(app.focus, Focus::FilterValue);
+        probe::type_str(&mut app, "Alce");
+        probe::key(&mut app, &probe::press(Key::Left));
+        probe::key(&mut app, &probe::press(Key::Left));
+        probe::type_str(&mut app, "i");
+        assert_eq!(app.filter_value, "Alice", "the caret did not move");
+        let row = app
+            .frame(FULL.0, FULL.1)
+            .rect_of(|t| *t == Target::FilterValue)
+            .expect("the value's row");
+        let area = value_text_area(row);
+        let at = area.x
+            + text::caret_x(
+                "Alice",
+                text::TextCursor::from(3),
+                VALUE_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, area);
+        assert_eq!(carets.len(), 1, "one caret in the value");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Ali` it follows at {at}"
+        );
+        let (x, _) = typed_run(&app, "Alice").expect("the value");
+        let label = row.x
+            + VALUE_TEXT_INSET
+            + text::measure(VALUE_LABEL, VALUE_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(x >= label, "the value is drawn over its label");
+
+        // A press at the start of the value puts the caret there.
+        click(&mut app, (area.x + 0.5, area.y + area.h / 2.0), FULL);
+        probe::type_str(&mut app, "<");
+        assert_eq!(
+            app.filter_value, "<Alice",
+            "the press did not put the caret there"
+        );
+    }
+
+    /// **A key the box with the keyboard does not answer is still the box's**:
+    /// a letter that typed nothing opened a tab under the editor. The page
+    /// keys page the grid behind it all the same.
+    #[test]
+    fn a_key_the_box_does_not_answer_is_still_the_boxs() {
+        let mut app = wired();
+        click_target(&mut app, FULL, Target::SqlEditor);
+        let tabs = app.tabs.len();
+        probe::key(&mut app, &probe::press(Key::N));
+        assert_eq!(
+            app.tabs.len(),
+            tabs,
+            "a letter that typed nothing opened a tab"
+        );
+        app.status.clear();
+        probe::key(&mut app, &probe::press(Key::PageDown));
+        assert!(
+            app.status.starts_with("Page "),
+            "the page keys stopped at the editor"
+        );
+    }
+
+    /// **A box edits the text it shows**, however the text came to be in
+    /// it: its editor is loaded from the box whenever a key finds the two
+    /// apart, or finds it holding the other box's text.
+    #[test]
+    fn a_box_edits_the_text_it_shows() {
+        let mut app = wired();
+        app.show_filter_builder = true;
+        click_target(&mut app, FULL, Target::SqlEditor);
+        probe::type_str(&mut app, "ab");
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.focus, Focus::FilterValue);
+        app.filter_value = String::from("ab");
+        probe::type_str(&mut app, "!");
+        assert_eq!(
+            app.filter_value, "ab!",
+            "the value was typed at the query's caret"
+        );
+        app.filter_value = String::from("cd");
+        probe::type_str(&mut app, "?");
+        assert_eq!(app.filter_value, "cd?", "the key edited another text");
     }
 }

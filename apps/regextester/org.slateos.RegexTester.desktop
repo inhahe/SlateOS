@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Regex Tester
+Comment=Try regular expressions against text
+Icon=edit-find
+Exec=regextester
+Categories=Development;
+Keywords=regex;regular;expression;

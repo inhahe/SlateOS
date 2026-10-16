@@ -875,6 +875,13 @@ pub fn extract_layer(image_dir: &str, layer: &Descriptor, target_dir: &str) -> K
                 // Create symlink.
                 let _ = crate::fs::Vfs::symlink(&dest, &entry.link_target);
             }
+            crate::fs::tar::EntryKind::Fifo => {
+                // A named pipe in the image: made with its mode, as a layer
+                // an image built elsewhere carries it. One already there (a
+                // lower layer's) is kept, as a symlink is.
+                let mode = u16::try_from(entry.mode & 0o7777).unwrap_or(0o600);
+                let _ = crate::fs::Vfs::mknod_fifo(&dest, mode);
+            }
             crate::fs::tar::EntryKind::Other(_) => {
                 // Skip unsupported entry types (devices, etc.).
             }

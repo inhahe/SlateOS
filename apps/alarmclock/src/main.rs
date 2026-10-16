@@ -36,6 +36,9 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -164,6 +167,12 @@ const PRESETS_PER_ROW: usize = 4;
 /// a fixed-width card and is stored per alarm, so an unbounded field is an
 /// unbounded allocation driven straight from the keyboard.
 const MAX_LABEL_LEN: usize = 64;
+/// How far a label's text sits inside each side of its box.
+const LABEL_TEXT_INSET: f32 = 8.0;
+/// The size a label is drawn at in the editor at its natural height; a
+/// squeezed editor draws it smaller, by its box's height
+/// (`label_text_size`).
+const LABEL_TEXT_SIZE: f32 = 13.0;
 
 /// The smallest window this layout is drawn for. Below it rectangles start to
 /// overlap rather than merely crowd, so the size handed to [`AlarmClockApp::frame`]
@@ -345,6 +354,18 @@ fn fill(f: &mut Frame, rect: Rect, color: Color, radius: f32) {
 }
 
 /// Draw a run of text with its top-left corner at `(x, y)`.
+/// The size a label is drawn at in a label box drawn at `rect`: the natural
+/// size, squeezed as the box is -- one rule for the drawing and for a press.
+fn label_text_size(rect: Rect) -> f32 {
+    let s = rect.h / EDITOR_LABEL_H;
+    LABEL_TEXT_SIZE
+        * if s.is_finite() {
+            s.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+}
+
 fn text(
     f: &mut Frame,
     x: f32,
@@ -1885,6 +1906,11 @@ pub struct AlarmClockApp {
     pub editor: Option<AlarmEditor>,
     /// What has the keyboard.
     pub focus: Option<Focus>,
+    /// The label box's editor -- its caret and selection over the open
+    /// editor's label -- reloaded when the label changed under it.
+    label_editor: TextInput,
+    /// What the label box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    label_clipboard: String,
     /// The three custom-duration entry buffers, indexed by [`HmsField::index`].
     pub custom: [String; 3],
     /// Milliseconds banked toward the next whole second.
@@ -1932,6 +1958,8 @@ impl AlarmClockApp {
             lap_scroll: 0.0,
             editor: None,
             focus: None,
+            label_editor: TextInput::new(),
+            label_clipboard: String::new(),
             custom: [String::new(), String::new(), String::new()],
             tick_accum_ms: 0,
         }
@@ -2747,28 +2775,58 @@ impl AlarmClockApp {
             },
             self.focus_ring_width,
         );
-        let body = if editor.label.is_empty() && !focused {
-            "Label…".to_string()
-        } else if focused {
-            format!("{}\u{2502}", editor.label)
+        let label_size = label_text_size(label_rect);
+        if editor.label.is_empty() && !focused {
+            text(
+                f,
+                x + LABEL_TEXT_INSET,
+                row_y + (label_h - label_size) / 2.0,
+                "Label…",
+                self.palette.overlay0,
+                label_size,
+                FontWeightHint::Regular,
+                (w - 2.0 * LABEL_TEXT_INSET).max(0.0),
+            );
         } else {
-            editor.label.clone()
-        };
-        let label_size = 13.0 * s;
-        text(
-            f,
-            x + 8.0,
-            row_y + (label_h - label_size) / 2.0,
-            body,
-            if editor.label.is_empty() && !focused {
-                self.palette.overlay0
-            } else {
-                self.palette.text
-            },
-            label_size,
-            FontWeightHint::Regular,
-            (w - 16.0).max(0.0),
-        );
+            // The label, with its caret and selection where they are while
+            // the box has the keyboard. The caret was a `│` typed onto the
+            // label's end, the only place the keys could type. Refused, as
+            // `text` refuses a run, where the clip in force cannot show it.
+            let line = guitk::text::line_height(label_size, FontWeightHint::Regular);
+            let inner = Rect::new(
+                x + LABEL_TEXT_INSET,
+                row_y + (label_h - line) / 2.0,
+                (w - 2.0 * LABEL_TEXT_INSET).max(0.0),
+                line,
+            );
+            if f.is_visible(inner) {
+                let mut tree = RenderTree::new();
+                textedit::draw(
+                    &mut tree,
+                    &textedit::SingleLine {
+                        text: &editor.label,
+                        cursor: self.label_cursor(&editor.label),
+                        selection_anchor: if focused && self.label_editor.text() == editor.label {
+                            self.label_editor.selection_anchor()
+                        } else {
+                            None
+                        },
+                        focused,
+                        x: inner.x,
+                        y: inner.y,
+                        width: inner.w,
+                        line_height: line,
+                        font_size: label_size,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.accent,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
+                );
+                f.extend(tree.commands);
+            }
+        }
         f.hit(Target::EditLabel, label_rect);
 
         // Repeat-day chips.
@@ -2959,7 +3017,8 @@ impl AlarmClockApp {
         if button != MouseButton::Left {
             return Action::None;
         }
-        let Some(target) = self.frame(size.0, size.1).hit_test(x, y) else {
+        let frame = self.frame(size.0, size.1);
+        let Some(target) = frame.hit_test(x, y) else {
             // A click on nothing drops the keyboard, so clicking away from a
             // field commits nothing and stops swallowing shortcuts.
             return if self.focus.take().is_some() {
@@ -2968,7 +3027,50 @@ impl AlarmClockApp {
                 Action::None
             };
         };
+        // The label box, as drawn: the keyboard, and the caret under the
+        // pointer.
+        if target == Target::EditLabel
+            && let Some(rect) = frame.rect_of(|t| *t == Target::EditLabel)
+        {
+            self.press_label(rect, x);
+            return Action::Redraw;
+        }
         self.activate(target, size)
+    }
+
+    /// Where the label box's caret is: the editor's, or the end of the label
+    /// where the label changed under the editor. One answer for the drawing
+    /// and for a press.
+    fn label_cursor(&self, label: &str) -> TextCursor {
+        if self.label_editor.text() == label {
+            self.label_editor.cursor()
+        } else {
+            TextCursor::from(label.len())
+        }
+    }
+
+    /// A press in the label box, drawn at `rect`, at `x`: the keyboard, and
+    /// the caret under the pointer, measured against the box as it was drawn.
+    fn press_label(&mut self, rect: Rect, x: f32) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let label = editor.label.clone();
+        let drawn = self.label_cursor(&label);
+        self.focus = Some(Focus::Label);
+        if self.label_editor.text() != label {
+            self.label_editor.set_text(&label);
+        }
+        let cursor = textedit::cursor_at_click(
+            &label,
+            drawn,
+            (rect.w - 2.0 * LABEL_TEXT_INSET).max(0.0),
+            label_text_size(rect),
+            FontWeightHint::Regular,
+            x - rect.x - LABEL_TEXT_INSET,
+        );
+        self.label_editor.set_selection_anchor(None);
+        self.label_editor.set_cursor(cursor);
     }
 
     /// Apply whatever the named control does.
@@ -3131,8 +3233,10 @@ impl AlarmClockApp {
         }
 
         // Ctrl-Q closes, and is checked before anything else so it works even
-        // with a text field focused.
-        if m.ctrl && event.key == Key::Q {
+        // with a text field focused. A Ctrl chord, not Ctrl held: AltGr
+        // arrives as Ctrl+Alt, and AltGr+Q is how a German keyboard types `@`
+        // -- which closed the program from the middle of a label.
+        if textline::is_ctrl_chord(m) && event.key == Key::Q {
             return Action::Quit;
         }
 
@@ -3199,28 +3303,49 @@ impl AlarmClockApp {
                     self.focus = None;
                     return Action::Redraw;
                 };
-                match event.key {
-                    Key::Enter => {
-                        self.save_editor();
-                        return Action::Redraw;
-                    }
-                    Key::Backspace => {
-                        if editor.label.pop().is_none() {
-                            return Action::None;
-                        }
-                        return Action::Redraw;
-                    }
-                    _ => {}
+                if event.key == Key::Enter && textline::is_plain(event.modifiers) {
+                    self.save_editor();
+                    return Action::Redraw;
                 }
-                let mut typed = false;
-                for ch in event.typed() {
-                    if editor.label.chars().count() >= MAX_LABEL_LEN {
-                        break;
-                    }
-                    editor.label.push(ch);
-                    typed = true;
+                // Every other key is the box's editor's: the caret keys,
+                // Backspace and Delete at the caret, Ctrl+A, C, X and V, and
+                // typing -- every character a keystroke typed, and no
+                // command's letter, which a chord carries as text (Ctrl+S
+                // typed an `s` into the label). The box took typing at its end
+                // and Backspace from it, and nothing else.
+                if self.label_editor.text() != editor.label {
+                    self.label_editor.set_text(&editor.label);
                 }
-                if typed { Action::Redraw } else { Action::None }
+                let before = (
+                    self.label_editor.cursor(),
+                    self.label_editor.selection_anchor(),
+                );
+                let edit = textline::apply_key(
+                    &mut self.label_editor,
+                    event,
+                    MAX_LABEL_LEN,
+                    &self.label_clipboard,
+                    // The order the caret takes through text that runs both
+                    // ways does not change with the size it is drawn at.
+                    LABEL_TEXT_SIZE,
+                );
+                if let Some(copied) = edit.copied {
+                    self.label_clipboard = copied;
+                }
+                if self.label_editor.text() != editor.label {
+                    self.label_editor.text().clone_into(&mut editor.label);
+                    return Action::Redraw;
+                }
+                if before
+                    == (
+                        self.label_editor.cursor(),
+                        self.label_editor.selection_anchor(),
+                    )
+                {
+                    Action::None
+                } else {
+                    Action::Redraw
+                }
             }
             Focus::Custom(field) => {
                 match event.key {
@@ -3256,6 +3381,11 @@ impl AlarmClockApp {
                 let Some(entry) = self.custom.get_mut(field.index()) else {
                     return Action::None;
                 };
+                // What a key typed, and not a command's letter, which a chord
+                // carries as text: Ctrl+1 typed a `1`.
+                if !textline::types_into_field(event) {
+                    return Action::None;
+                }
                 let mut typed = false;
                 for ch in event.typed() {
                     // Digits only, two of them. A duration field that accepted
@@ -6372,5 +6502,193 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // -- The label box edits at a caret -----------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn label_of(app: &AlarmClockApp) -> String {
+        app.editor
+            .as_ref()
+            .map(|e| e.label.clone())
+            .unwrap_or_default()
+    }
+
+    fn held(k: Key, text: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// The x of every caret drawn in `rect`.
+    fn carets_in(app: &AlarmClockApp, rect: Rect) -> Vec<f32> {
+        let size = <AlarmClockApp as Probe>::SIZE;
+        app.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The label box edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are, a caret and not a `│`
+    /// typed onto the label's end. The box took typing at its end and
+    /// Backspace from it, and nothing else.
+    #[test]
+    fn the_label_box_edits_at_a_caret() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        let rect = probe::rect_of(&app, Target::EditLabel).expect("the label box");
+        probe::click(&mut app, Target::EditLabel);
+        assert_eq!(app.focus, Some(Focus::Label));
+        probe::type_str(&mut app, "Wak up");
+        for _ in 0..3 {
+            probe::key(&mut app, &probe::press(Key::Left));
+        }
+        probe::type_str(&mut app, "e");
+        assert_eq!(label_of(&app), "Wake up", "the caret did not move");
+        let size_px = label_text_size(rect);
+        let at = rect.x
+            + LABEL_TEXT_INSET
+            + guitk::text::caret_x(
+                "Wake up",
+                TextCursor::from(4),
+                size_px,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, rect);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Wake` it follows at {at}"
+        );
+        assert!(
+            !drawn(&app).contains('\u{2502}'),
+            "the caret is still a character"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(label_of(&app), "ake up", "Delete at the caret");
+        probe::key(&mut app, &probe::press(Key::End));
+        probe::key(&mut app, &probe::shift(Key::Home));
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        probe::type_str(&mut app, "W");
+        assert_eq!(label_of(&app), "W", "Shift+Home did not select");
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(label_of(&app), "Wake up", "Ctrl+C or Ctrl+V");
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::X));
+        assert_eq!(label_of(&app), "", "Ctrl+A and Ctrl+X");
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(label_of(&app), "Wake up", "Ctrl+X took nothing");
+
+        // A press at the start of the label puts the caret there, and one
+        // past its end at its end.
+        let size = <AlarmClockApp as Probe>::SIZE;
+        let mid = rect.y + rect.h / 2.0;
+        app.click_at(
+            rect.x + LABEL_TEXT_INSET + 0.5,
+            mid,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut app, "<");
+        assert_eq!(
+            label_of(&app),
+            "<Wake up",
+            "the press did not put the caret there"
+        );
+        app.click_at(rect.right() - 2.0, mid, MouseButton::Left, size);
+        probe::type_str(&mut app, ">");
+        assert_eq!(label_of(&app), "<Wake up>");
+    }
+
+    /// **A command's letter is not typed into the label or a duration, and
+    /// AltGr+Q types an `@` rather than closing the window**: Ctrl+S typed an
+    /// `s` into the label and Ctrl+1 a `1` into a duration, each chord
+    /// carrying its letter as text; and AltGr arrives as Ctrl+Alt, so a
+    /// German `@` -- AltGr+Q -- was Ctrl+Q, and closed the program from the
+    /// middle of a label. Ctrl+Q still closes it.
+    #[test]
+    fn a_command_is_not_typed_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        probe::click(&mut app, Target::EditLabel);
+        probe::key(&mut app, &held(Key::S, "s", Modifiers::ctrl()));
+        probe::key(&mut app, &held(Key::X, "x", Modifiers::alt()));
+        assert_eq!(label_of(&app), "", "a command's letter was typed");
+        assert_ne!(
+            probe::key(&mut app, &held(Key::Q, "@", altgr)),
+            Action::Quit,
+            "AltGr+Q closed the program"
+        );
+        assert_eq!(label_of(&app), "@", "AltGr+Q did not type its @");
+        probe::key(&mut app, &held(Key::Enter, "", Modifiers::alt()));
+        assert!(app.editor.is_some(), "Alt+Enter saved the alarm");
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::click(&mut app, Target::Tab(ActiveTab::Timer));
+        probe::click(&mut app, Target::CustomField(HmsField::Minutes));
+        probe::key(&mut app, &held(Key::Num1, "1", Modifiers::ctrl()));
+        assert_eq!(
+            app.custom
+                .get(HmsField::Minutes.index())
+                .map(String::as_str),
+            Some(""),
+            "Ctrl+1 typed a 1 into the duration"
+        );
+        probe::type_str(&mut app, "5");
+        assert_eq!(
+            app.custom
+                .get(HmsField::Minutes.index())
+                .map(String::as_str),
+            Some("5"),
+            "control: a digit types"
+        );
+    }
+
+    /// **The box edits the label it shows**, however the label came to be in
+    /// it: its editor is loaded from the label whenever a press or a key
+    /// finds the two apart.
+    #[test]
+    fn the_label_box_edits_the_label_it_shows() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        if let Some(editor) = app.editor.as_mut() {
+            editor.label = String::from("Gym");
+        }
+        let rect = probe::rect_of(&app, Target::EditLabel).expect("the label box");
+        let size = <AlarmClockApp as Probe>::SIZE;
+        app.click_at(
+            rect.x + LABEL_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut app, "<");
+        assert_eq!(label_of(&app), "<Gym", "the press missed the shown label");
+        if let Some(editor) = app.editor.as_mut() {
+            editor.label = String::from("Run");
+        }
+        probe::type_str(&mut app, "?");
+        assert_eq!(label_of(&app), "Run?", "the key edited another label");
     }
 }

@@ -43,6 +43,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use appearance::cursors::{CursorFrame, CursorImages};
 use osfont::raster::rasterize;
 use osfont::sfnt::{Outline, PathCmd, Point};
 
@@ -81,7 +82,7 @@ pub struct CursorStyle {
 /// A description rather than pixels, so the compositor stays free of artwork
 /// and the question "what pointer is up" can be answered and tested without
 /// rasterizing anything.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PointerState {
     /// The shape. Never [`CursorShape::Hidden`] — a hidden pointer is no
     /// pointer at all.
@@ -90,9 +91,30 @@ pub struct PointerState {
     pub x: i32,
     /// See [`x`](Self::x).
     pub y: i32,
-    /// How it looks.
+    /// How the built-in art looks.
     pub style: CursorStyle,
+    /// The user's cursor theme's picture, drawn instead of the built-in art
+    /// -- the frame showing now, for an animated pointer -- or `None` for the
+    /// art (lane C's cursor themes, design-decisions §1459). The style's
+    /// colours are the art's alone: a theme's picture is drawn in its own.
+    pub themed: Option<ThemedImage>,
 }
+
+/// One picture from a cursor theme, ready to lay over a frame.
+///
+/// Compared by identity rather than by pixels: two states showing the same
+/// cached picture are the same state, and comparing a few thousand pixels
+/// every time the server asks whether the pointer changed would be waste.
+#[derive(Clone, Debug)]
+pub struct ThemedImage(pub Arc<CursorImage>);
+
+impl PartialEq for ThemedImage {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ThemedImage {}
 
 /// A rasterized pointer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,20 +341,24 @@ impl CursorCache {
         Self::default()
     }
 
-    /// The sprite for `state`, rasterizing its image if this is the first time
-    /// that shape has been asked for in that style. `None` for a shape that
-    /// draws nothing.
+    /// The sprite for `state`: its theme's picture as it is, or the built-in
+    /// art, rasterized if this is the first time that shape has been asked
+    /// for in that style. `None` for a shape that draws nothing.
     pub fn sprite(&mut self, state: &PointerState) -> Option<PointerSprite> {
-        let key = (state.shape, state.style);
-        let image = match self.images.get(&key) {
-            Some(image) => Arc::clone(image),
-            None => {
-                let image = Arc::new(render(state.shape, &state.style)?);
-                if self.images.len() >= Self::CAPACITY {
-                    self.images.clear();
+        let image = if let Some(themed) = &state.themed {
+            Arc::clone(&themed.0)
+        } else {
+            let key = (state.shape, state.style);
+            match self.images.get(&key) {
+                Some(image) => Arc::clone(image),
+                None => {
+                    let image = Arc::new(render(state.shape, &state.style)?);
+                    if self.images.len() >= Self::CAPACITY {
+                        self.images.clear();
+                    }
+                    self.images.insert(key, Arc::clone(&image));
+                    image
                 }
-                self.images.insert(key, Arc::clone(&image));
-                image
             }
         };
         let hot_x = i32::try_from(image.hot_x).unwrap_or(0);
@@ -343,6 +369,138 @@ impl CursorCache {
             image,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor themes
+// ---------------------------------------------------------------------------
+
+/// The shortest a frame of an animated pointer shows, in milliseconds. A
+/// theme may say 0; taken at its word the compositor would redraw the pointer
+/// as fast as it could, for a change nobody could see.
+pub const MIN_FRAME_MS: u32 = 20;
+
+/// The largest side a theme's picture is scaled to. A theme's nominal size
+/// and its pictures' sides are the theme author's numbers: a 1024-pixel
+/// picture filed under nominal size 8 and asked for at 384 would otherwise
+/// be scaled to nearly fifty thousand pixels across.
+const MAX_THEMED_SIDE: u32 = 1024;
+
+/// The pictures a cursor theme gives one pointer at one size, ready to lay
+/// over a frame, each with how long it shows -- one frame for most pointers;
+/// the busy pointer of a common theme has sixty (lane C's cursor themes,
+/// design-decisions §1459).
+#[derive(Debug)]
+pub struct ThemedCursor {
+    frames: Vec<(Arc<CursorImage>, u32)>,
+    /// The whole animation, in milliseconds: the frames' delays summed.
+    cycle_ms: u64,
+}
+
+impl ThemedCursor {
+    /// A theme's pictures for a pointer of `size_px` pixels: each frame
+    /// scaled from the theme's nominal size to `size_px` where the two differ
+    /// -- area-averaged smaller, blended larger -- its hot spot with it; each
+    /// delay held to [`MIN_FRAME_MS`]. `None` for no frames, or a frame that
+    /// cannot be scaled, which leaves the built-in art to be drawn.
+    #[must_use]
+    pub fn new(images: &CursorImages, size_px: u32) -> Option<Self> {
+        if images.frames.is_empty() {
+            return None;
+        }
+        let mut frames = Vec::with_capacity(images.frames.len());
+        let mut cycle_ms = 0u64;
+        for frame in &images.frames {
+            let image = scaled_frame(frame, images.nominal, size_px)?;
+            let delay = frame.delay_ms.max(MIN_FRAME_MS);
+            cycle_ms = cycle_ms.saturating_add(u64::from(delay));
+            frames.push((Arc::new(image), delay));
+        }
+        Some(Self { frames, cycle_ms })
+    }
+
+    /// Whether it changes by itself.
+    #[must_use]
+    pub fn is_animated(&self) -> bool {
+        self.frames.len() > 1
+    }
+
+    /// The frame showing `elapsed_ms` after the animation began -- round and
+    /// round -- and how many milliseconds it has left; `u64::MAX` left for a
+    /// pointer of one frame, which never changes.
+    #[must_use]
+    pub fn frame_at(&self, elapsed_ms: u64) -> Option<(&Arc<CursorImage>, u64)> {
+        if !self.is_animated() {
+            return self.frames.first().map(|(image, _)| (image, u64::MAX));
+        }
+        let mut at = elapsed_ms.checked_rem(self.cycle_ms).unwrap_or(0);
+        for (image, delay) in &self.frames {
+            let delay = u64::from(*delay);
+            if at < delay {
+                return Some((image, delay.saturating_sub(at)));
+            }
+            at = at.saturating_sub(delay);
+        }
+        self.frames
+            .last()
+            .map(|(image, delay)| (image, u64::from(*delay)))
+    }
+}
+
+/// One frame of a theme's pointer as a [`CursorImage`] of a pointer
+/// `size_px` pixels across, scaled from the theme's `nominal` size when the
+/// two differ.
+fn scaled_frame(frame: &CursorFrame, nominal: u32, size_px: u32) -> Option<CursorImage> {
+    if nominal == 0 || size_px == 0 || nominal == size_px {
+        return Some(CursorImage {
+            width: frame.width,
+            height: frame.height,
+            hot_x: frame.hot_x,
+            hot_y: frame.hot_y,
+            pixels: frame.pixels.clone(),
+        });
+    }
+    let scale = |v: u32| -> Option<u32> {
+        let scaled = u64::from(v)
+            .checked_mul(u64::from(size_px))?
+            .checked_add(u64::from(nominal) / 2)?
+            .checked_div(u64::from(nominal))?;
+        u32::try_from(scaled).ok()
+    };
+    let (width, height) = (scale(frame.width)?.max(1), scale(frame.height)?.max(1));
+    if width > MAX_THEMED_SIDE || height > MAX_THEMED_SIDE {
+        return None;
+    }
+    let pixels = crate::picture::resample(&frame.pixels, frame.width, frame.height, width, height)?;
+    Some(CursorImage {
+        width,
+        height,
+        hot_x: scale(frame.hot_x)?.min(width.saturating_sub(1)),
+        hot_y: scale(frame.hot_y)?.min(height.saturating_sub(1)),
+        pixels,
+    })
+}
+
+/// The CSS cursor name a theme files `shape` under (`appearance::cursors`
+/// tries the older names itself); `None` for [`CursorShape::Hidden`], which
+/// draws nothing.
+#[must_use]
+pub const fn css_name(shape: CursorShape) -> Option<&'static str> {
+    Some(match shape {
+        CursorShape::Arrow => "default",
+        CursorShape::Text => "text",
+        CursorShape::Hand => "pointer",
+        CursorShape::ResizeNS => "ns-resize",
+        CursorShape::ResizeEW => "ew-resize",
+        CursorShape::ResizeNESW => "nesw-resize",
+        CursorShape::ResizeNWSE => "nwse-resize",
+        CursorShape::Move => "move",
+        CursorShape::Wait => "wait",
+        CursorShape::Help => "help",
+        CursorShape::Crosshair => "crosshair",
+        CursorShape::NotAllowed => "not-allowed",
+        CursorShape::Hidden => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1263,7 @@ mod tests {
             x: 40,
             y: 30,
             style: style(24),
+            themed: None,
         };
         let sprite = cache.sprite(&state).expect("arrow");
         let (w, h) = (100u32, 80u32);
@@ -1133,6 +1292,7 @@ mod tests {
                 x,
                 y,
                 style: style(32),
+                themed: None,
             };
             let sprite = cache.sprite(&state).expect("move");
             let mut frame = vec![0u32; 100 * 80];
@@ -1152,6 +1312,7 @@ mod tests {
             x: 70,
             y: 20,
             style: style(24),
+            themed: None,
         };
         let sprite = cache.sprite(&state).expect("hand");
         let (w, h) = (120u32, 60u32);
@@ -1188,10 +1349,14 @@ mod tests {
             x: 0,
             y: 0,
             style: style(24),
+            themed: None,
         };
         let a = cache.sprite(&state).expect("beam");
         let b = cache
-            .sprite(&PointerState { x: 50, ..state })
+            .sprite(&PointerState {
+                x: 50,
+                ..state.clone()
+            })
             .expect("beam");
         assert!(
             Arc::ptr_eq(&a.image, &b.image),
@@ -1228,5 +1393,148 @@ mod tests {
         let g = over(half_white, 0xFF00_0000);
         assert_eq!(g >> 24, 0xFF);
         assert!((0x7E..=0x81).contains(&(g & 0xFF)), "{g:#010x}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cursor themes
+    // -----------------------------------------------------------------------
+
+    /// A square frame of `side`, its pixels all `colour`, its hot spot at
+    /// (`hot`, `hot`), shown for `delay_ms`.
+    fn frame(side: u32, hot: u32, delay_ms: u32, colour: u32) -> CursorFrame {
+        CursorFrame {
+            width: side,
+            height: side,
+            hot_x: hot,
+            hot_y: hot,
+            delay_ms,
+            pixels: vec![colour; (side * side) as usize],
+        }
+    }
+
+    /// An animated pointer shows each frame for its delay, round and round,
+    /// and says how long the frame showing has left; a delay of nothing is
+    /// held to the floor rather than spun through.
+    #[test]
+    fn an_animated_theme_pointer_shows_each_frame_for_its_delay() {
+        let images = CursorImages {
+            nominal: 24,
+            frames: vec![
+                frame(24, 1, 100, 0xFF00_0001),
+                frame(24, 1, 0, 0xFF00_0002),
+                frame(24, 1, 50, 0xFF00_0003),
+            ],
+        };
+        let cursor = ThemedCursor::new(&images, 24).unwrap();
+        assert!(cursor.is_animated());
+        let shown = |ms| {
+            let (image, left) = cursor.frame_at(ms).unwrap();
+            (image.pixels[0], left)
+        };
+        assert_eq!(shown(0), (0xFF00_0001, 100));
+        assert_eq!(shown(99), (0xFF00_0001, 1));
+        assert_eq!(shown(100), (0xFF00_0002, u64::from(MIN_FRAME_MS)));
+        assert_eq!(shown(100 + u64::from(MIN_FRAME_MS)), (0xFF00_0003, 50));
+        let cycle = 150 + u64::from(MIN_FRAME_MS);
+        assert_eq!(shown(cycle), (0xFF00_0001, 100), "round again");
+        assert_eq!(shown(cycle * 1000 + 99), (0xFF00_0001, 1));
+    }
+
+    /// A still pointer never changes: one frame, no time left to count.
+    #[test]
+    fn a_still_theme_pointer_never_changes() {
+        let images = CursorImages {
+            nominal: 32,
+            frames: vec![frame(32, 4, 0, 0xFFFF_FFFF)],
+        };
+        let cursor = ThemedCursor::new(&images, 32).unwrap();
+        assert!(!cursor.is_animated());
+        assert_eq!(cursor.frame_at(12345).unwrap().1, u64::MAX);
+        assert!(
+            ThemedCursor::new(
+                &CursorImages {
+                    nominal: 32,
+                    frames: Vec::new()
+                },
+                32
+            )
+            .is_none()
+        );
+    }
+
+    /// A theme's picture drawn at another size than its own is scaled, hot
+    /// spot and all; at its own size it is taken as it is; and a scale the
+    /// theme's numbers would make absurd is refused, leaving the art.
+    #[test]
+    fn a_theme_picture_is_scaled_to_the_size_asked_for() {
+        let images = CursorImages {
+            nominal: 24,
+            frames: vec![frame(24, 6, 0, 0xFF80_4020)],
+        };
+        let same = ThemedCursor::new(&images, 24).unwrap();
+        let (image, _) = same.frame_at(0).unwrap();
+        assert_eq!((image.width, image.hot_x), (24, 6));
+
+        let doubled = ThemedCursor::new(&images, 48).unwrap();
+        let (image, _) = doubled.frame_at(0).unwrap();
+        assert_eq!(
+            (image.width, image.height, image.hot_x, image.hot_y),
+            (48, 48, 12, 12)
+        );
+        assert!(
+            image.pixels.iter().all(|&px| px == 0xFF80_4020),
+            "a flat picture stays flat"
+        );
+
+        let halved = ThemedCursor::new(&images, 12).unwrap();
+        assert_eq!(halved.frame_at(0).unwrap().0.width, 12);
+
+        let absurd = CursorImages {
+            nominal: 1,
+            frames: vec![frame(24, 0, 0, 0xFFFF_FFFF)],
+        };
+        assert!(ThemedCursor::new(&absurd, 384).is_none());
+    }
+
+    /// The cache draws a theme's picture as it is -- the very image, hot
+    /// spot on the pointer -- and never the art in its place.
+    #[test]
+    fn a_theme_picture_is_drawn_as_it_is() {
+        let picture = Arc::new(CursorImage {
+            width: 4,
+            height: 4,
+            hot_x: 3,
+            hot_y: 1,
+            pixels: vec![0xFF12_3456; 16],
+        });
+        let mut cache = CursorCache::new();
+        let sprite = cache
+            .sprite(&PointerState {
+                shape: CursorShape::Arrow,
+                x: 40,
+                y: 30,
+                style: style(24),
+                themed: Some(ThemedImage(Arc::clone(&picture))),
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&sprite.image, &picture));
+        assert_eq!((sprite.x, sprite.y), (37, 29));
+    }
+
+    /// Every shape that draws has a CSS name a theme files it under, and the
+    /// two tables agree with lane C's.
+    #[test]
+    fn every_drawn_shape_has_its_css_name() {
+        for shape in EVERY_SHAPE {
+            assert_eq!(
+                css_name(shape).is_none(),
+                shape == CursorShape::Hidden,
+                "{shape:?}"
+            );
+        }
+        assert_eq!(css_name(CursorShape::Arrow), Some("default"));
+        assert_eq!(css_name(CursorShape::Hand), Some("pointer"));
+        assert_eq!(css_name(CursorShape::ResizeNWSE), Some("nwse-resize"));
+        assert_eq!(css_name(CursorShape::NotAllowed), Some("not-allowed"));
     }
 }

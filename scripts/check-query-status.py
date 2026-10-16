@@ -62,7 +62,15 @@ which must report `cmd_fcompress` ("Current: {}") and `cmd_elog` ("Serial echo
 level: ..."), the two sites that shipped the bug.  A checker nobody has
 watched fail is a checker nobody knows works.
 
-Exit status: 0 clean, 1 sites found.
+``--self-test`` is the same idea without needing the history: it runs the scan
+over fixture functions -- one per clause above, each guard form, the negated
+form, a ``None`` arm on the user's words and on a lookup, a print in a nested
+arm, a status named only in a comment, the ``} else {`` sibling, a print
+rustfmt wrapped over several lines, ``set_exit(0)``, and a used and an unused
+ALLOWED entry -- and checks each verdict. The push hook and the boot test run
+it before trusting the real verdict (design-decisions §974).
+
+Exit status: 0 clean, 1 sites found, 2 bad arguments.
 """
 
 import pathlib
@@ -75,6 +83,7 @@ import sys
 # check-vfs-under-lock.py already use.
 _SIBLING = pathlib.Path(__file__).resolve().parent / "check-recursive-locks.py"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402
 import srcload  # noqa: E402
 
 # Loaded from source rather than through `importlib`: a `SourceFileLoader`
@@ -179,12 +188,9 @@ def block_end(struct, i):
     return end
 
 
-def main(argv):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    path = pathlib.Path(argv[1]) if len(argv) > 1 else PATH
-    text = path.read_text(encoding="utf-8", errors="surrogateescape")
-
+def scan(text, allowed):
+    """The whole rule, over one file's text: `(hits, stale)`. Separate from
+    `main` so the self-test runs exactly this over fixture text."""
     # Three views of the same file, all with identical line numbering because
     # `strip_noise` blanks in place rather than deleting.
     #
@@ -269,7 +275,7 @@ def main(argv):
             continue
 
         fn = fn_of(i)
-        used = {(f, frag) for (f, frag) in ALLOWED if fn == f and any(frag in a for a in answers)}
+        used = {(f, frag) for (f, frag) in allowed if fn == f and any(frag in a for a in answers)}
         if used:
             fired |= used
             continue
@@ -282,7 +288,21 @@ def main(argv):
     # has carried the equivalent guard on its ledger from the start; this is
     # that guard. Reported only when the run is otherwise clean, so a real
     # finding is never buried under bookkeeping.
-    stale = sorted(set(ALLOWED) - fired)
+    return hits, sorted(set(allowed) - fired)
+
+
+def main(argv):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    unknown = selftestflag.unknown_options(argv[1:])
+    if unknown:
+        print(f"check-query-status: unrecognised option {unknown[0]!r}", file=sys.stderr)
+        return 2
+    if selftestflag.wants_selftest(argv[1:]):
+        return self_test()
+    path = pathlib.Path(argv[1]) if len(argv) > 1 else PATH
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    hits, stale = scan(text, ALLOWED)
     if stale and not hits:
         print("", file=sys.stderr)
         print(
@@ -310,6 +330,166 @@ def main(argv):
         print(f"  {path}:{ln}  {fn}", file=sys.stderr)
         print(f"      {answer}", file=sys.stderr)
     return 1
+
+
+
+
+# --- Self-test ---------------------------------------------------------------
+#
+# One fixture function per clause of the rule. `_REPORTED` is the set that
+# must come back as hits; every other function in the fixture must not.
+
+_FIXTURE = r'''
+fn cmd_query_fails(parts: &[&str]) {
+    if parts.len() < 2 {
+        shell_println!("Level: {}", log::level());
+        shell_println!("Usage: q <level>  to change");
+        set_exit(1);
+        return;
+    }
+}
+
+fn cmd_query_ok(parts: &[&str]) {
+    if parts.len() < 2 {
+        shell_println!("Level: {}", log::level());
+        return;
+    }
+}
+
+fn cmd_complaint(parts: &[&str]) {
+    if parts.len() < 2 {
+        shell_println!("Usage: c <x>");
+        set_exit(1);
+        return;
+    }
+}
+
+fn cmd_negated(x: &str) {
+    if !x.is_empty() {
+        shell_println!("Bad value: {}", cfg.value());
+        set_exit(1);
+    }
+}
+
+fn cmd_none_arm_args(parts: &[&str]) {
+    match parts.get(1) {
+        None => {
+            shell_println!("Mode: {}", mode::current());
+            set_exit(1);
+        }
+        Some(m) => set(m),
+    }
+}
+
+fn cmd_none_arm_lookup(name: &str) {
+    match lookup(name) {
+        None => {
+            shell_println!("not found: {}", name.len());
+            set_exit(1);
+        }
+        Some(v) => take(v),
+    }
+}
+
+fn cmd_empty_string_arm(sub: &str) {
+    match sub {
+        "" => {
+            shell_println!("Status: {}", svc::status());
+            set_exit(1);
+        }
+        _ => {}
+    }
+}
+
+fn cmd_nested_arm(parts: &[&str]) {
+    if parts.is_empty() {
+        match mode {
+            X => shell_println!("x: {}", st.x()),
+            _ => {}
+        }
+        set_exit(1);
+    }
+}
+
+fn cmd_comment_fail(parts: &[&str]) {
+    if parts.is_empty() {
+        shell_println!("Current: {}", cfg.current());
+        // set_exit(1) would be wrong here: this is the answer.
+    }
+}
+
+fn cmd_else_branch(parts: &[&str]) {
+    if parts.is_empty() {
+        shell_println!("Current: {}", cfg.current());
+    } else {
+        shell_println!("Unknown: {}", parts.len());
+        set_exit(1);
+    }
+}
+
+fn cmd_wrapped_query(parts: &[&str]) {
+    if parts.len() < 2 {
+        shell_println!(
+            "Echo level: {} (and above)",
+            elog::echo_level().as_str()
+        );
+        set_exit(1);
+    }
+}
+
+fn cmd_exit_zero(parts: &[&str]) {
+    if parts.is_empty() {
+        shell_println!("Current: {}", cfg.current());
+        set_exit(0);
+    }
+}
+
+fn cmd_exempt(parts: &[&str]) {
+    if parts.is_empty() {
+        shell_println!("Exempt: {}", st.value());
+        set_exit(1);
+    }
+}
+'''
+
+_REPORTED = {
+    "cmd_query_fails",
+    "cmd_none_arm_args",
+    "cmd_empty_string_arm",
+    "cmd_wrapped_query",
+}
+
+_FIXTURE_ALLOWED = {
+    ("cmd_exempt", "Exempt:"): "the fixture's one used exemption",
+    ("cmd_gone", "Nothing:"): "matches nothing, so it must be reported stale",
+}
+
+
+def self_test():
+    """Run `scan` over the fixture; 0 if every verdict is right."""
+    failures = 0
+
+    def check(ok, what):
+        nonlocal failures
+        print(f"  {'ok  ' if ok else 'FAIL'}  {what}")
+        if not ok:
+            failures += 1
+
+    names = re.findall(r"^fn (\w+)", _FIXTURE, re.MULTILINE)
+    hits, stale = scan(_FIXTURE, _FIXTURE_ALLOWED)
+    got = {fn for _, fn, _ in hits}
+    for fn in names:
+        verdict = "reported" if fn in got else "passed"
+        check((fn in got) == (fn in _REPORTED), f"{fn}: {verdict}")
+    check(
+        stale == [("cmd_gone", "Nothing:")],
+        "a used ALLOWED entry exempts its site; an unused one is reported stale",
+    )
+    if failures:
+        print(f"[query-status] self-test: {failures} check(s) FAILED", file=sys.stderr)
+        return 1
+    print(f"[query-status] self-test passed ({len(names) + 1} checks)")
+    return 0
 
 
 if __name__ == "__main__":

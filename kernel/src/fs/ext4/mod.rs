@@ -30,6 +30,7 @@
 
 pub mod balloc;
 pub mod driver;
+pub mod extent_map;
 pub mod fsck;
 pub mod htree;
 pub mod io;
@@ -76,7 +77,8 @@ pub fn probe(device: &str) -> bool {
 /// diskless / non-FAT Path-Z boot where [`self_test`] is skipped. Guards the
 /// sparse-file extent-placement regression (BUG-EXT4-SPARSE-READ).
 pub fn self_test_pure() -> KernelResult<()> {
-    driver::self_test_pure()
+    driver::self_test_pure()?;
+    extent_map::self_test()
 }
 
 pub fn self_test() -> KernelResult<()> {
@@ -124,6 +126,8 @@ pub fn self_test() -> KernelResult<()> {
             crate::fs::EntryType::VolumeLabel => "VOL ",
             crate::fs::EntryType::CharDevice => "CHR ",
             crate::fs::EntryType::BlockDevice => "BLK ",
+            crate::fs::EntryType::Socket => "SOCK",
+            crate::fs::EntryType::Fifo => "FIFO",
         };
         serial_println!(
             "[ext4]     {} {:20} {} bytes",
@@ -150,11 +154,14 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file(path, b"one")?;
         crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::IMMUTABLE)?;
 
+        // `NotPermitted` (`EPERM`), as Linux answers -- not the
+        // `PermissionDenied` (`EACCES`) of a permission bit, which is what
+        // this answered until 2026-10-02.
         match crate::fs::Vfs::write_file(path, b"two") {
-            Err(crate::error::KernelError::PermissionDenied) => {}
+            Err(crate::error::KernelError::NotPermitted) => {}
             other => {
                 serial_println!(
-                    "[ext4]   FAIL: writing an immutable file returned {:?}, want PermissionDenied",
+                    "[ext4]   FAIL: writing an immutable file returned {:?}, want NotPermitted",
                     other.map(|()| "Ok")
                 );
                 let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
@@ -168,14 +175,26 @@ pub fn self_test() -> KernelResult<()> {
         // test that only covered `write_file` would have passed with both of
         // them missing, which is how the write path came to be the only one
         // enforced in the first place.
-        if crate::fs::Vfs::truncate(path, 0).is_ok() {
-            serial_println!("[ext4]   FAIL: truncating an immutable file succeeded");
+        let truncated = crate::fs::Vfs::truncate(path, 0);
+        if truncated != Err(crate::error::KernelError::NotPermitted) {
+            serial_println!(
+                "[ext4]   FAIL: truncating an immutable file returned {:?}, want NotPermitted",
+                truncated
+            );
             let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
             let _ = crate::fs::Vfs::remove(path);
             return Err(crate::error::KernelError::IoError);
         }
-        if crate::fs::Vfs::remove(path).is_ok() {
-            serial_println!("[ext4]   FAIL: removing an immutable file succeeded");
+        let removed = crate::fs::Vfs::remove(path);
+        if removed != Err(crate::error::KernelError::NotPermitted) {
+            serial_println!(
+                "[ext4]   FAIL: removing an immutable file returned {:?}, want NotPermitted",
+                removed
+            );
+            if removed.is_err() {
+                let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
+                let _ = crate::fs::Vfs::remove(path);
+            }
             return Err(crate::error::KernelError::IoError);
         }
 
@@ -190,7 +209,127 @@ pub fn self_test() -> KernelResult<()> {
         }
         crate::fs::Vfs::remove(path)?;
         serial_println!(
-            "[ext4]   immutable: write, truncate and unlink are all refused, and allowed again once cleared: OK"
+            "[ext4]   immutable: write, truncate and unlink are all refused (EPERM), and allowed again once cleared: OK"
+        );
+    }
+
+    // A file deleted while open stays the handle's, and is freed at the last
+    // close (known-issues A-AN-OPEN-FILE-FOLLOWS-ITS-NAME). Between the two
+    // its inode is still allocated -- on the orphan list, so a crash leaves it
+    // to the next mount -- and after the close it is not: the free-inode
+    // count says both, which is what tells "kept" from "leaked" and "freed"
+    // from "freed early".
+    {
+        use crate::fs::handle::{self, OpenFlags};
+        let owned = mount_path.join("held-selftest.tmp");
+        let path = owned.as_path();
+        let free_inodes =
+            |p: &crate::fs::path::Path| crate::fs::Vfs::statvfs(p).map(|i| i.free_inodes);
+
+        crate::fs::Vfs::write_file(path, b"ext4 held")?;
+        let with_file = free_inodes(&mount_path)?;
+        let h = handle::open(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        crate::fs::Vfs::remove(path)?;
+        let named = crate::fs::Vfs::stat(path).is_ok();
+        let wrote = handle::write_at(h, 9, b"!");
+        let mut buf = [0u8; 16];
+        let read_back = handle::read_at(h, 0, &mut buf);
+        let links = handle::fstat(h).map(|m| m.nlinks);
+        let while_held = free_inodes(&mount_path);
+        // Best effort on the failure paths below; on success, this close is
+        // the one being tested.
+        let closed = handle::close(h);
+        let after = free_inodes(&mount_path);
+        let ok = !named
+            && wrote == Ok(1)
+            && read_back == Ok(10)
+            && buf.get(..10) == Some(b"ext4 held!".as_slice())
+            && links == Ok(0)
+            && while_held == Ok(with_file)
+            && closed.is_ok()
+            && after == Ok(with_file.saturating_add(1));
+        if !ok {
+            serial_println!(
+                "[ext4]   FAIL: held file: named {}, write {:?}, read {:?}, links {:?}, \
+                 free inodes {} then {:?} then {:?} (close {:?})",
+                named,
+                wrote,
+                read_back,
+                links,
+                with_file,
+                while_held,
+                after,
+                closed
+            );
+            return Err(crate::error::KernelError::IoError);
+        }
+        serial_println!(
+            "[ext4]   held file: deleted while open, still the handle's, freed at the last close: OK"
+        );
+    }
+
+    // A file made with no name (`O_TMPFILE`, `handle::open_tmpfile`): its
+    // inode is allocated while held -- on the orphan list from the start, so
+    // a crash leaves it to the next mount -- and freed at the last close;
+    // named first (`link_handle`), it stays, with what was written.
+    {
+        use crate::fs::handle::{self, OpenFlags};
+        let free_inodes =
+            |p: &crate::fs::path::Path| crate::fs::Vfs::statvfs(p).map(|i| i.free_inodes);
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let named_owned = mount_path.join("tmpfile-named.tmp");
+        let named = named_owned.as_path();
+        // Best effort: a leftover from an earlier boot's failure.
+        let _ = crate::fs::Vfs::remove(named);
+        let before = free_inodes(&mount_path)?;
+
+        let h = handle::open_tmpfile(&mount_path, rw, 0o600)?;
+        let wrote = handle::write_at(h, 0, b"scratch");
+        let while_held = free_inodes(&mount_path);
+        let meta = handle::fstat(h).map(|m| (m.nlinks, m.permissions & 0o7777));
+        let closed = handle::close(h);
+        let after_close = free_inodes(&mount_path);
+
+        let h = handle::open_tmpfile(&mount_path, rw, 0o640)?;
+        let published =
+            handle::write_at(h, 0, b"published").and_then(|_| handle::link_handle(h, named));
+        let reclosed = handle::close(h);
+        let kept = crate::fs::Vfs::read_file(named);
+        let kept_meta = crate::fs::Vfs::metadata(named).map(|m| (m.nlinks, m.permissions & 0o7777));
+        let removed = crate::fs::Vfs::remove(named);
+        let after_all = free_inodes(&mount_path);
+        let ok = wrote == Ok(7)
+            && while_held == Ok(before.saturating_sub(1))
+            && meta == Ok((0, 0o600))
+            && closed.is_ok()
+            && after_close == Ok(before)
+            && published.is_ok()
+            && reclosed.is_ok()
+            && kept.as_deref() == Ok(b"published".as_slice())
+            && kept_meta == Ok((1, 0o640))
+            && removed.is_ok()
+            && after_all == Ok(before);
+        if !ok {
+            serial_println!(
+                "[ext4]   FAIL: unnamed file: write {:?}, free inodes {} then {:?} then {:?} \
+                 then {:?}, meta {:?}, close {:?}; named: {:?} {:?} {:?} (close {:?}, remove {:?})",
+                wrote,
+                before,
+                while_held,
+                after_close,
+                after_all,
+                meta,
+                closed,
+                published,
+                kept,
+                kept_meta,
+                reclosed,
+                removed
+            );
+            return Err(crate::error::KernelError::IoError);
+        }
+        serial_println!(
+            "[ext4]   unnamed file (O_TMPFILE): freed at its close, or named and kept: OK"
         );
     }
 
@@ -813,6 +952,10 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     fallocate test file cleaned up OK");
     }
 
+    // --- Holes, length changes and unwritten blocks ---
+    serial_println!("[ext4]   Testing holes, length changes and unwritten blocks...");
+    sparse_file_test(&root)?;
+
     // --- Write-at tests ---
     serial_println!("[ext4]   Testing write_at paths...");
     {
@@ -928,5 +1071,127 @@ pub fn self_test() -> KernelResult<()> {
     htree::self_test()?;
 
     serial_println!("[ext4] Self-test passed.");
+    Ok(())
+}
+
+/// Holes, length changes and unwritten blocks, on the mounted ext4 volume.
+///
+/// Lane D's report (requests/d-a-truncating-an-ext4-file-...): growing a file
+/// built it whole in kernel memory, so `truncate -s 64G` was a failed kernel
+/// allocation -- a halt; a write into a hole was `EIO`; a write into a
+/// preallocated block read back as zeros; `SEEK_DATA` / `SEEK_HOLE` saw no
+/// holes. Each step checks one of those. Block counts are the file's own
+/// (`st_blocks`) rather than the volume's free count, which another task
+/// writing to the volume during boot would move.
+#[allow(clippy::too_many_lines)]
+fn sparse_file_test(root: &crate::fs::path::Path) -> KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::Vfs;
+    use crate::fs::handle::{self, OpenFlags, SeekFrom};
+
+    const MIB: u64 = 1 << 20;
+    let p = root.join("_ext4_sparse_test");
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[ext4]   FAIL: sparse file: {}", what);
+        // Best effort: the file is this test's own scratch.
+        let _ = Vfs::remove(&p);
+        Err(KernelError::InternalError)
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(&p);
+    Vfs::write_file(&p, b"head")?;
+    let bs = Vfs::statvfs(&p)?.block_size;
+    if bs == 0 || bs % 512 != 0 {
+        return fail("the volume reports no block size");
+    }
+    let spb = bs / 512;
+    let blocks = |p: &crate::fs::path::PathBuf| Vfs::metadata(p).map(|m| m.blocks);
+    let blocks0 = blocks(&p)?;
+
+    // 1. Growing to 64 GiB records the length and allocates nothing.
+    Vfs::truncate(&p, 1 << 36)?;
+    if Vfs::stat(&p)?.size != 1 << 36 || blocks(&p)? != blocks0 {
+        return fail("growing to 64 GiB allocated blocks or did not set the length");
+    }
+    if Vfs::read_at(&p, 1 << 35, 16)? != [0u8; 16] {
+        return fail("the hole does not read as zeros");
+    }
+
+    // 2. A write into the hole lands, alone: one block, the bytes around it
+    //    zero.
+    Vfs::write_at(&p, 10 * MIB + 7, b"middle")?;
+    let mut want = [0u8; 16];
+    want[7..13].copy_from_slice(b"middle");
+    if Vfs::read_at(&p, 10 * MIB, 16)? != want {
+        return fail("a write into a hole did not read back");
+    }
+    if blocks(&p)? != blocks0 + spb {
+        return fail("a write into a hole took other than one block");
+    }
+
+    // 3. SEEK_DATA / SEEK_HOLE find the holes.
+    let h = handle::open(&p, OpenFlags::READ)?;
+    let seeks = [
+        handle::seek(h, SeekFrom::Data(0)),
+        handle::seek(h, SeekFrom::Hole(0)),
+        handle::seek(h, SeekFrom::Data(bs)),
+        handle::seek(h, SeekFrom::Hole(10 * MIB)),
+        handle::seek(h, SeekFrom::Data(10 * MIB + bs)),
+    ];
+    // Best effort: a read handle, closed whatever the seeks said.
+    let _ = handle::close(h);
+    let want_seeks = [
+        Ok(0),
+        Ok(bs),
+        Ok(10 * MIB),
+        Ok(10 * MIB + bs),
+        Err(KernelError::NoSuchDeviceOrAddress),
+    ];
+    if seeks != want_seeks {
+        serial_println!("[ext4]     seeks {:?}, want {:?}", seeks, want_seeks);
+        return fail("SEEK_DATA / SEEK_HOLE did not find the holes");
+    }
+
+    // 4. Shrinking past the written block frees it.
+    Vfs::truncate(&p, 5 * MIB)?;
+    if Vfs::stat(&p)?.size != 5 * MIB || blocks(&p)? != blocks0 {
+        return fail("shrinking did not free the block past the new end");
+    }
+
+    // 5. Bytes a shrink cut off read as zeros when the file grows back.
+    Vfs::write_at(&p, 0, b"ABCDEFGH")?;
+    Vfs::truncate(&p, 3)?;
+    Vfs::truncate(&p, 100)?;
+    if Vfs::read_at(&p, 0, 8)? != b"ABC\0\0\0\0\0" {
+        return fail("bytes cut off by a shrink came back after growing");
+    }
+
+    // 6. Preallocated blocks: reserved, reading as zeros, and a write into one
+    //    reads back -- the rest of its block zero, nothing more allocated.
+    let before = blocks(&p)?;
+    Vfs::fallocate(&p, 16 * bs)?;
+    if blocks(&p)? != before + 15 * spb {
+        return fail("fallocate did not reserve the 15 missing blocks");
+    }
+    Vfs::write_at(&p, 4 * bs + 10, b"xyz")?;
+    // The preallocation kept the length, so the write makes the file end at
+    // `4 * bs + 13`: a read of 16 bytes there answers the 13 before the end,
+    // as Linux's does. (It asked for 16 and failed the first release boot.)
+    let mut want = [0u8; 13];
+    want[10..13].copy_from_slice(b"xyz");
+    if Vfs::read_at(&p, 4 * bs, 16)? != want {
+        return fail("a write into a preallocated block did not read back");
+    }
+    if blocks(&p)? != before + 15 * spb {
+        return fail("a write into a preallocated block allocated another");
+    }
+    if Vfs::read_at(&p, 2 * bs, 8)? != [0u8; 8] {
+        return fail("a preallocated block reads other than zeros");
+    }
+
+    Vfs::remove(&p)?;
+    serial_println!(
+        "[ext4]     holes, length changes, SEEK_DATA/SEEK_HOLE and unwritten blocks: OK"
+    );
     Ok(())
 }

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Internet Radio
+Comment=Listen to radio stations over the internet
+Icon=audio-x-generic
+Exec=radio
+Categories=AudioVideo;Audio;Player;
+Keywords=radio;stations;streaming;

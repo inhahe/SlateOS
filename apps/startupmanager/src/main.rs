@@ -34,6 +34,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -74,6 +76,13 @@ const DETAILS_PANEL_HEIGHT: f32 = 120.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 12.0;
 const FONT_SIZE: f32 = 13.0;
+/// The most a box holds, in characters: a path with its arguments is the
+/// longest thing typed here, and a paste of a page is not one.
+const BOX_CAPACITY: usize = 4096;
+/// How far the search box's text sits inside each side of the box.
+const SEARCH_TEXT_INSET: f32 = 8.0;
+/// How far a dialog field's text sits inside each side of its box.
+const FIELD_TEXT_INSET: f32 = 6.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const BUTTON_WIDTH: f32 = 90.0;
@@ -1513,6 +1522,15 @@ pub struct StartupUI {
     /// a click anywhere else takes it away, so keystrokes meant for the table
     /// cannot silently filter it instead.
     pub search_focused: bool,
+    /// The editor of the box with the keyboard -- the search, or a field of
+    /// the add or edit dialog: its caret and selection, loaded whenever the
+    /// keyboard moves to another box or the box's text changed under it.
+    editor: TextInput,
+    /// Which box `editor` holds: `Target::Search` or a
+    /// `Target::DialogField`.
+    editor_for: Option<Target>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
     /// The last thing the app has to say — a validation refusal, or the result
     /// of an action. Drawn in the dialog footer while a dialog is open, and in
     /// the header otherwise.
@@ -1548,6 +1566,9 @@ impl StartupUI {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             search_focused: false,
+            editor: TextInput::new(),
+            editor_for: Option::None,
+            clipboard: String::new(),
             status: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: Option::None,
@@ -2000,6 +2021,8 @@ impl StartupUI {
         match target {
             Some(Target::Search) => {
                 self.search_focused = true;
+                let l = self.layout();
+                self.press_box(Target::Search, l.search, SEARCH_TEXT_INSET, x);
                 EventResult::Consumed
             }
             Some(Target::Toolbar(action)) => {
@@ -2022,6 +2045,9 @@ impl StartupUI {
             Some(Target::DialogField(i)) => {
                 if let DialogState::AddEdit(dlg) = &mut self.dialog {
                     dlg.focused_field = i.min(AddEditDialog::FIELD_COUNT.saturating_sub(1));
+                    let field = Target::DialogField(dlg.focused_field);
+                    let rect = self.layout().dialog_field(i);
+                    self.press_box(field, rect, FIELD_TEXT_INSET, x);
                 }
                 EventResult::Consumed
             }
@@ -2119,19 +2145,129 @@ impl StartupUI {
             Key::Tab if plain && key.modifiers.shift => dlg.focus_prev(),
             Key::Tab | Key::Down if plain => dlg.focus_next(),
             Key::Up if plain => dlg.focus_prev(),
-            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
-                dlg.focused_text_mut().pop();
-            }
+            // Every other key is the field's editor's: the caret keys,
+            // Backspace and Delete at the caret, Ctrl+A, C, X and V, and
+            // typing. The fields took typing at their end and Backspace from
+            // it, and nothing else.
             _ => {
-                if textline::types_into_field(key) {
-                    dlg.focused_text_mut().extend(key.typed());
-                }
+                let field = Target::DialogField(dlg.focused_field);
+                self.box_key(field, key);
             }
         }
         EventResult::Consumed
     }
 
+    /// What `target`'s box holds: the search, or a field of the open dialog.
+    fn box_text(&self, target: Target) -> &str {
+        match (target, &self.dialog) {
+            (Target::DialogField(i), DialogState::AddEdit(dlg)) => {
+                dlg.fields().get(i).map_or("", |(_, value)| value)
+            }
+            _ => &self.search_query,
+        }
+    }
+
+    /// Replace what `target`'s box holds.
+    fn set_box_text(&mut self, target: Target, text: &str) {
+        match (target, &mut self.dialog) {
+            (Target::DialogField(i), DialogState::AddEdit(dlg)) => {
+                let keep = dlg.focused_field;
+                dlg.focused_field = i;
+                text.clone_into(dlg.focused_text_mut());
+                dlg.focused_field = keep;
+            }
+            _ => text.clone_into(&mut self.search_query),
+        }
+    }
+
+    /// Load `target`'s box into the editor, unless it already holds it as it
+    /// is -- the caret after the text.
+    fn load_editor(&mut self, target: Target) {
+        if self.editor_for != Some(target) || self.editor.text() != self.box_text(target) {
+            let held = self.box_text(target).to_owned();
+            self.editor.set_text(&held);
+            self.editor_for = Some(target);
+        }
+    }
+
+    /// A key for `target`'s box, which has the keyboard: `None` for one the
+    /// box does not answer, else whether the text changed.
+    fn box_key(&mut self, target: Target, key: &KeyEvent) -> Option<bool> {
+        self.load_editor(target);
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            BOX_CAPACITY,
+            &self.clipboard,
+            FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        let changed = self.editor.text() != self.box_text(target);
+        if changed {
+            let typed = self.editor.text().to_owned();
+            self.set_box_text(target, &typed);
+        }
+        edit.handled.then_some(changed)
+    }
+
+    /// Where `target`'s box's caret and selection anchor are, while it has
+    /// the keyboard and the editor holds it as it is; the end, and none,
+    /// otherwise. One answer for the drawing and for a press.
+    fn box_caret(&self, target: Target) -> (text::TextCursor, Option<usize>) {
+        let held = self.box_text(target);
+        if self.editor_for == Some(target) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (text::TextCursor::from(held.len()), Option::None)
+        }
+    }
+
+    /// A press in `target`'s box, drawn at `rect` with its text `inset`
+    /// in, at `x`: the caret under the pointer, measured against the box as
+    /// it was drawn.
+    fn press_box(&mut self, target: Target, rect: Rect, inset: f32, x: f32) {
+        let (drawn, _) = self.box_caret(target);
+        self.load_editor(target);
+        let cursor = textedit::cursor_at_click(
+            self.box_text(target),
+            drawn,
+            (rect.w - 2.0 * inset).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - inset,
+        );
+        self.editor.set_selection_anchor(Option::None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// Ctrl+F: the search box takes the keyboard with what it holds selected,
+    /// so typing starts a new search and an arrow key keeps the old one.
+    fn focus_search(&mut self) {
+        self.search_focused = true;
+        let held = self.search_query.clone();
+        self.editor.set_text(&held);
+        self.editor.select_all();
+        self.editor_for = Some(Target::Search);
+    }
+
     fn handle_table_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The search box, while it has the keyboard, has the first say: the
+        // caret keys, Backspace and Delete at the caret, Ctrl+A, C, X and V,
+        // and typing -- what AltGr types among it, and no command's letter
+        // or the Windows key's. Home, End and Delete went to the table under
+        // it, and Delete there removes the selected entry. The box took
+        // typing at its end and Backspace from it, and nothing else. Up,
+        // Down, the page keys and Enter are still the table's.
+        if self.search_focused
+            && let Some(changed) = self.box_key(Target::Search, key)
+        {
+            if changed {
+                self.restart_table();
+            }
+            return EventResult::Consumed;
+        }
         // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types.
         if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
@@ -2140,29 +2276,13 @@ impl StartupUI {
                     EventResult::Consumed
                 }
                 Key::F => {
-                    self.search_focused = true;
+                    self.focus_search();
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
             };
         }
-        // The search types what was typed, AltGr's letters among it -- it
-        // refused them, and took the letter a Windows-key chord carries.
-        if self.search_focused && textline::types_into_field(key) {
-            self.search_query.extend(key.typed());
-            self.restart_table();
-            return EventResult::Consumed;
-        }
-        // Every other key is taken plain, nothing held but Shift; but
-        // Backspace in the search is refused only to Alt and the Windows key.
-        if self.search_focused
-            && key.key == Key::Backspace
-            && !textline::is_alt_or_windows_chord(key.modifiers)
-        {
-            self.search_query.pop();
-            self.restart_table();
-            return EventResult::Consumed;
-        }
+        // Every other key is taken plain, nothing held but Shift.
         if !textline::is_plain(key.modifiers) {
             return EventResult::Ignored;
         }
@@ -2451,26 +2571,16 @@ impl StartupUI {
             self.focus_ring_width,
         );
 
-        let empty = self.search_query.is_empty();
-        let display = if empty {
-            "Search by name, publisher, or path...  (Ctrl+F)"
-        } else {
-            &self.search_query
-        };
-        frame.push(RenderCommand::Text {
-            x: l.search.x + 8.0,
-            y: l.search.y + ((l.search.h - FONT_SIZE) / 2.0).max(0.0),
-            text: display.to_string(),
-            color: if empty {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((l.search.w - 16.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let state = self.field_state(Target::Search);
+        Self::draw_box_text(
+            frame,
+            &self.palette,
+            l.search,
+            SEARCH_TEXT_INSET,
+            &self.search_query,
+            "Search by name, publisher, or path...  (Ctrl+F)",
+            state.focused.then(|| self.box_caret(Target::Search)),
+        );
         frame.hit(Target::Search, l.search);
     }
 
@@ -2954,6 +3064,7 @@ impl StartupUI {
         }
 
         for (i, (label, value)) in dlg.fields().into_iter().enumerate() {
+            let state = self.field_state(Target::DialogField(i));
             Self::draw_form_field(
                 frame,
                 &self.palette,
@@ -2961,8 +3072,11 @@ impl StartupUI {
                 l.dialog_field(i),
                 l.dialog_field_top(i),
                 (label, value),
-                self.field_state(Target::DialogField(i)),
+                state,
                 self.focus_ring_width,
+                state
+                    .focused
+                    .then(|| self.box_caret(Target::DialogField(i))),
             );
         }
 
@@ -3026,6 +3140,7 @@ impl StartupUI {
         (label, value): (&str, &str),
         state: guitk::field::State,
         focus_ring_width: f32,
+        caret: Option<(text::TextCursor, Option<usize>)>,
     ) {
         if input.is_empty() {
             return;
@@ -3041,19 +3156,68 @@ impl StartupUI {
             overflow: TextOverflow::Ellipsis,
         });
         guitk::field::draw(frame, pal, input, state, focus_ring_width);
-
-        let empty = value.is_empty();
-        frame.push(RenderCommand::Text {
-            x: input.x + 6.0,
-            y: input.y + ((input.h - FONT_SIZE) / 2.0).max(0.0),
-            text: if empty { label } else { value }.to_string(),
-            color: if empty { pal.subtext0 } else { pal.text },
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((input.w - 12.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+        Self::draw_box_text(frame, pal, input, FIELD_TEXT_INSET, value, label, caret);
         frame.hit(target, input);
+    }
+
+    /// A box's text in `rect`, `inset` in: what it holds, with the caret and
+    /// the selection where they are while it has the keyboard (`caret`), and
+    /// scrolled so the caret stays in view -- or, empty, `placeholder`, with
+    /// the caret before it. The boxes drew their text cut with an ellipsis
+    /// and no caret: the end was the only place the keys could type.
+    fn draw_box_text(
+        frame: &mut Frame,
+        pal: &Palette,
+        rect: Rect,
+        inset: f32,
+        value: &str,
+        placeholder: &str,
+        caret: Option<(text::TextCursor, Option<usize>)>,
+    ) {
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, w) = (
+            rect.x + inset,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * inset).max(0.0),
+        );
+        let mut tree = RenderTree::new();
+        if value.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: placeholder.to_string(),
+                color: pal.subtext0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if caret.is_some() {
+                textedit::push_caret(&mut tree, x, y, line, pal.text, textedit::CARET_WIDTH);
+            }
+        } else {
+            let (cursor, anchor) = caret.unwrap_or((text::TextCursor::default(), Option::None));
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: value,
+                    cursor,
+                    selection_anchor: anchor,
+                    focused: caret.is_some(),
+                    x,
+                    y,
+                    width: w,
+                    line_height: line,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: pal.text,
+                    selection_bg: pal.accent,
+                    selection_fg: pal.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        frame.extend(tree.commands);
     }
 
     /// A "Label: Value" pair whose value cycles when clicked.
@@ -5909,5 +6073,215 @@ mod tests {
             });
             assert!(!crowded, "{piece:?} shares its row with other text");
         }
+    }
+
+    // -- The boxes edit at a caret ------------------------------------------------
+
+    /// The x of every caret drawn in `rect`.
+    fn carets_in(ui: &StartupUI, rect: Rect) -> Vec<f32> {
+        ui.render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The search box edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands, and it is
+    /// drawn where it is. Home, End and Delete went to the table under the
+    /// box -- Delete removed the selected entry while a search was being
+    /// typed. The box took typing at its end and Backspace from it, and
+    /// nothing else.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut ui = StartupUI::with_sample_entries();
+        let entries = ui.manager.entry_count();
+        ui.selected_id = ui.all_entries().first().map(|e| e.id);
+        probe::key(&mut ui, &probe::ctrl(Key::F));
+        assert!(ui.search_focused);
+        probe::type_str(&mut ui, "upate");
+        for _ in 0..3 {
+            probe::key(&mut ui, &probe::press(Key::Left));
+        }
+        probe::type_str(&mut ui, "d");
+        assert_eq!(ui.search_query, "update", "the caret did not move");
+        let rect = ui.layout().search;
+        let at = rect.x
+            + SEARCH_TEXT_INSET
+            + text::caret_x(
+                "update",
+                text::TextCursor::from(3),
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&ui, rect);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `upd` it follows at {at}"
+        );
+
+        probe::key(&mut ui, &probe::press(Key::Home));
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.search_query, "pdate", "Delete at the caret");
+        assert_eq!(
+            ui.manager.entry_count(),
+            entries,
+            "Delete in the search removed an entry"
+        );
+        probe::key(&mut ui, &probe::press(Key::End));
+        probe::key(&mut ui, &probe::shift(Key::Home));
+        probe::key(&mut ui, &probe::ctrl(Key::C));
+        probe::type_str(&mut ui, "u");
+        assert_eq!(ui.search_query, "u", "Shift+Home did not select");
+        probe::key(&mut ui, &probe::ctrl(Key::V));
+        assert_eq!(ui.search_query, "update", "Ctrl+C or Ctrl+V");
+        probe::key(&mut ui, &probe::ctrl(Key::A));
+        probe::key(&mut ui, &probe::ctrl(Key::X));
+        assert_eq!(ui.search_query, "", "Ctrl+A and Ctrl+X");
+        probe::key(&mut ui, &probe::ctrl(Key::V));
+        assert_eq!(ui.search_query, "update", "Ctrl+X took nothing");
+
+        // A press at the start of the box puts the caret there.
+        let size = <StartupUI as Probe>::SIZE;
+        ui.click_at(
+            rect.x + SEARCH_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut ui, "<");
+        assert_eq!(
+            ui.search_query, "<update",
+            "the press did not put the caret there"
+        );
+        // And one past its end at its end.
+        ui.click_at(
+            rect.right() - 1.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut ui, ">");
+        assert_eq!(
+            ui.search_query, "<update>",
+            "the press did not put the caret at the end"
+        );
+
+        // Ctrl+F selects what the box holds, so typing starts a new search.
+        probe::key(&mut ui, &probe::ctrl(Key::F));
+        probe::type_str(&mut ui, "x");
+        assert_eq!(ui.search_query, "x", "Ctrl+F did not select the search");
+    }
+
+    /// **The add dialog's fields edit at a caret, each its own**: the
+    /// keyboard moving to the next field types after what that field holds,
+    /// and a press in a field puts the caret where it lands.
+    #[test]
+    fn the_dialog_fields_edit_at_a_caret() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.open_add_dialog();
+        probe::type_str(&mut ui, "Bckup");
+        probe::key(&mut ui, &probe::press(Key::Home));
+        probe::key(&mut ui, &probe::press(Key::Right));
+        probe::type_str(&mut ui, "a");
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        probe::type_str(&mut ui, "/bin/backup");
+        let DialogState::AddEdit(dlg) = &ui.dialog else {
+            panic!("the dialog is not up");
+        };
+        assert_eq!(dlg.name, "Backup", "the caret did not move in the name");
+        assert_eq!(
+            dlg.path, "/bin/backup",
+            "Tab took the name's caret to the path"
+        );
+
+        // A press at the start of the name puts the caret there, and one past
+        // its end at its end.
+        let rect = ui.layout().dialog_field(0);
+        let size = <StartupUI as Probe>::SIZE;
+        ui.click_at(
+            rect.x + FIELD_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut ui, ">");
+        ui.click_at(
+            rect.right() - 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        probe::type_str(&mut ui, "s");
+        let DialogState::AddEdit(dlg) = &ui.dialog else {
+            panic!("the dialog is not up");
+        };
+        assert_eq!(
+            dlg.name, ">Backups",
+            "a press did not put the caret where it landed in the name"
+        );
+        assert_eq!(dlg.focused_field, 0);
+        assert_eq!(
+            carets_in(&ui, rect).len(),
+            1,
+            "no caret in the field pressed"
+        );
+    }
+
+    /// **An edit of the search shows its rows from the top**: a table
+    /// scrolled down would stay scrolled, and a search that still filled the
+    /// window would show its matches from partway down.
+    #[test]
+    fn an_edit_of_the_search_shows_its_rows_from_the_top() {
+        let mut ui = StartupUI::new();
+        for i in 0..60 {
+            ui.manager.add_entry(
+                &format!("updater {i}"),
+                "/bin/updater",
+                "",
+                StartupType::Login,
+                StartupImpact::Low,
+                "",
+                "",
+                0,
+            );
+        }
+        probe::key(&mut ui, &probe::ctrl(Key::F));
+        probe::type_str(&mut ui, "up");
+        ui.scroll_offset = 2;
+        probe::type_str(&mut ui, "d");
+        assert_eq!(ui.search_query, "upd");
+        assert_eq!(ui.scroll_offset, 0, "the search left the table scrolled");
+    }
+
+    /// **A field moved to is edited from its end**, even where it holds what
+    /// the field left holds, caret and all.
+    #[test]
+    fn a_dialog_field_moved_to_is_edited_from_its_end() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.open_add_dialog();
+        probe::type_str(&mut ui, "ab");
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        probe::type_str(&mut ui, "ab");
+        probe::key(&mut ui, &probe::press(Key::Home));
+        probe::key(&mut ui, &probe::shift(Key::Tab));
+        probe::type_str(&mut ui, "!");
+        let DialogState::AddEdit(dlg) = &ui.dialog else {
+            panic!("the dialog is not up");
+        };
+        assert_eq!(
+            (dlg.name.as_str(), dlg.path.as_str()),
+            ("ab!", "ab"),
+            "the name was typed at the path's caret"
+        );
     }
 }

@@ -16,6 +16,10 @@ settingsfile = { path = "../../gui/settingsfile" }
 yamldoc = { path = "../../yamldoc" }
 # `is_plain`: a key held with Ctrl, Alt or the Windows key is not the window's.
 textline = { path = "../textline" }
+# Forecasts from Open-Meteo, once the user turns them on (design-decisions
+# §1236): its replies are JSON, and they travel over HTTP.
+jsonvalue = { path = "../jsonvalue" }
+httpclient = { path = "../../net/httpclient" }
 
 [dev-dependencies]
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }

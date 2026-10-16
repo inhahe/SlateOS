@@ -1,0 +1,3 @@
+yes, for b-q23, i want claude's recommendation. for b-q24, A.
+
+lanes c and d are currenly rate limited and will be for a few days. that happens a lot. but when i go back to check on my open-questions, i'd rather not see all the ones i've already answered. could there be an alternative way of managing them without much less efficiency, such as when they're answered to any lane they're each moved to an answers directory under the lane they belong to, or something?

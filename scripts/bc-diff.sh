@@ -483,6 +483,63 @@ ENVV=()
 prog_trailing 'a -q after the file is an option'     '1+1\n' -q
 prog_trailing 'a -- after the file ends the options' '1+1\n' -- -q
 
+# --- the descriptors, as the program was given them ---------------------------
+# Ubuntu's bc carries Debian's 05_notice_read_write_errors.diff: each value and
+# string printed is flushed and checked, each diagnostic checked, each
+# character `read()` takes checked, and the first failure ends the run --
+# `dc: could not write output file: REASON` (sic), status 1. `--help`,
+# `--version` and the usage are not checked. A closed standard input is the
+# scanner's `(standard_in) 1: read() in flex scanner failed`, status 1. Until
+# 2026-10-08 ours printed with `println!` (a panic on a full disk), saw
+# neither a closed output nor a closed input (Rust's runtime puts /dev/null
+# on each), and went on past a diagnostic that could not be written.
+#
+# `desc LABEL TEXT REDIRECTIONS` -- TEXT on standard input and bc run under
+# REDIRECTIONS, which are applied after the harness's own, so they win.
+desc() {
+  local label="$1" text="$2" redir="$3"
+  local o_out g_out o_err g_err o_rc g_rc
+  printf '%b' "$text" > desc.in
+  printf '1+1\n' > prog.bc
+  ( eval "timeout -k 2 30 env PATH=\"\$bindir/ours\" bc -q $redir" ) \
+    <desc.in >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  ( eval "timeout -k 2 30 env PATH=\"\$bindir/gnu\" bc -q $redir" ) \
+    <desc.in >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  o_out=$(od -An -c <"$DIFF_TMP/o.out"); g_out=$(od -An -c <"$DIFF_TMP/g.out")
+  o_err=$(od -An -c <"$DIFF_TMP/o.err"); g_err=$(od -An -c <"$DIFF_TMP/g.err")
+  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_err" = "$g_err" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
+    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
+            "$(printf '%s' "$o_err" | tr -s ' \n' ' ')" \
+    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" \
+            "$(printf '%s' "$g_err" | tr -s ' \n' ' ')")
+  report "[desc]  $label ($redir)"
+}
+desc 'a result to a full disk'           '1+1\n'          '>/dev/full'
+desc 'a result to a closed output'       '1+1\n'          '>&-'
+desc 'a string to a full disk'           'print "a"\n'    '>/dev/full'
+desc 'a string to a closed output'       'print "a"\n'    '>&-'
+desc 'two results, the first lost'       '1+1\n2+2\n'     '>/dev/full'
+desc 'nothing printed, output closed'    'quit\n'         '>&-'
+desc 'nothing printed, output full'      'x=1\n'          '>/dev/full'
+desc 'the version, to a full disk'       ''               '--version >/dev/full'
+desc 'the version, to a closed output'   ''               '--version >&-'
+desc 'the help, to a full disk'          ''               '--help >/dev/full'
+desc 'the usage, to a closed output'     ''               '--bogus >&-'
+desc 'a runtime error, stderr full'      '1/0\n'          '2>/dev/full'
+desc 'a lost error ends the run'         '1/0\n2+2\n'     '2>/dev/full'
+desc 'a lost syntax error ends the run'  '1+\n2+2\n'      '2>/dev/full'
+desc 'a runtime error, stderr closed'    '1/0\n2+2\n'     '2>&-'
+desc 'a result, stderr full'             '2+2\n'          '2>/dev/full'
+desc 'input closed'                      ''               '<&-'
+desc 'a file, then input closed'         ''               'prog.bc <&-'
+desc 'a missing file, output closed'     ''               'nosuch >&-'
+desc 'output and stderr both full'       '1/0\n3\n'       '>/dev/full 2>/dev/full'
+
 # ==============================================================================
 # Differences on purpose
 # ==============================================================================

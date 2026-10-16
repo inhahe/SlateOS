@@ -59,13 +59,16 @@
 //! is entitled to the one its author measured. The same reasoning appears in
 //! `mkdir`'s docs about quoting style.
 //!
-//! # Options this implementation does not have
+//! # `-Z` and `--context`
 //!
-//! `-Z` and `--context`, which set an SELinux/SMACK security context. They are
-//! recognised and refused by name rather than ignored — silently dropping a
-//! security context is the same class of defect as defect 1 above — and they
-//! stay in [`LONG_OPTIONS`] because the table is what decides whether an
-//! abbreviation is ambiguous.
+//! They set an SELinux/SMACK security context, and are taken as upstream takes
+//! them on a kernel with neither, which SlateOS is (design-decisions §1064):
+//! `-Z`, or `--context` without a value, is accepted in silence -- there is no
+//! default context to set -- and `--context=CTX` is `mkfifo: warning: ignoring
+//! --context; it requires an SELinux/SMACK-enabled kernel`, printed from inside
+//! the option loop, after which the FIFOs are made. They used to be refused by
+//! name, which broke scripts that pass `-Z` portably and work on every Linux
+//! without SELinux.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -78,13 +81,13 @@ use std::process::ExitCode;
 
 coreutils::guard_std_fds!();
 
-// The file-mode creation mask. POSIX offers no way to read it without writing
-// it, which is why there is no read-only spelling and why `take_umask` has to
-// zero it to find out what it was.
+// The two calls upstream's loop makes per name: the FIFO, then -- under `-m`
+// -- its mode set exactly, through a call that will not follow a symbolic link
+// someone put in its place meanwhile.
 #[cfg(unix)]
 unsafe extern "C" {
-    fn umask(mask: u32) -> u32;
     fn mkfifo(path: *const u8, mode: u32) -> i32;
+    fn lchmod(path: *const u8, mode: u32) -> i32;
 }
 
 /// `mkfifo`'s usage status is 1 — measured: `mkfifo -q x; echo $?` prints 1.
@@ -155,7 +158,14 @@ fn main() -> ExitCode {
 
 fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
+    let mut warnings = Vec::new();
+    let parsed = parse_args(&args, &mut warnings);
+    // In the order they arose and before whatever ended the parse: upstream
+    // prints each from inside its option loop.
+    for w in &warnings {
+        diag!("mkfifo: {w}");
+    }
+    match parsed {
         Ok(Request::Help) => {
             // Never an error: the stream records it for the funnel.
             let _ = out.write_all(help_text().as_bytes());
@@ -188,6 +198,8 @@ Usage: mkfifo [OPTION]... NAME...
 Create named pipes (FIFOs) with the given NAMEs.
 
   -m, --mode=MODE set file permission bits to MODE, not a=rw - umask
+  -Z              accepted and ignored: SlateOS has no security contexts
+      --context[=CTX]  accepted; a CTX is warned about and ignored
       --help      display this help and exit
       --version   output version information and exit
 
@@ -201,16 +213,22 @@ use one of these commands:
 
 // ---------------------------------------------------------------- parsing ---
 
-/// Parse `mkfifo`'s argv into `(flags, operands)`.
+/// Upstream's warning for a context *named* on a kernel with neither SELinux
+/// nor SMACK -- the sentence `mkdir.c`, `mkfifo.c` and `mknod.c` share.
+const IGNORING_CONTEXT: &str =
+    "warning: ignoring --context; it requires an SELinux/SMACK-enabled kernel";
+
+/// Parse `mkfifo`'s argv into `(flags, operands)`, appending to `warnings`,
+/// in order, what upstream's option loop would have printed on the way.
 ///
 /// Options and operands may be interleaved — `mkfifo a -m 600 b` is
 /// `mkfifo -m 600 a b` — which is `getopt_long`'s default permuting behaviour.
 ///
 /// # Errors
 ///
-/// An unknown option, a recognised option this implementation does not have, a
-/// long option given a value it does not take, or `-m` with no value.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+/// An unknown option, a long option given a value it does not take, or `-m`
+/// with no value.
+fn parse_args(args: &[OsString], warnings: &mut Vec<String>) -> Result<Request, getopt::Error> {
     let mut flags = MkfifoFlags::default();
     let mut names: Vec<OsString> = Vec::new();
 
@@ -219,11 +237,20 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             Opt::Short(b'm', value) | Opt::Long("mode", value) => flags.mode = value,
-            // Refused rather than ignored: see the module docs.
-            Opt::Short(b'Z', _) => return Err(unimplemented_short(b'Z')),
-            Opt::Long(name @ "context", _) => return Err(unimplemented_long(name)),
+            // The default context, on a kernel that has none: nothing to set,
+            // and upstream says nothing. See the module docs.
+            Opt::Short(b'Z', _) => {}
+            Opt::Long("context", value) => {
+                // `--context=` names one too: an empty `optarg` is not null.
+                if value.is_some() {
+                    warnings.push(IGNORING_CONTEXT.to_string());
+                }
+            }
+            // Unreachable: every option in the two tables is handled above.
             Opt::Short(other, _) => return Err(MKFIFO.invalid_option(other)),
-            Opt::Long(other, _) => return Err(unimplemented_long(other)),
+            Opt::Long(other, _) => {
+                return Err(MKFIFO.unrecognized_option(format!("--{other}").as_bytes()));
+            }
             // A lone `-` arrives here, not as an option: `mkfifo` has no
             // standard-input operand for it to mean anything else, so it is a
             // FIFO called `-`.
@@ -232,24 +259,6 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     }
 
     Ok(Request::Run(flags, names))
-}
-
-/// The diagnostic for an option that GNU `mkfifo` has and this one does not.
-///
-/// Deliberately not [`Program::invalid_option`](getoptlong::Program::invalid_option): `-Z` is not a typo, and telling
-/// the user it is invalid sends them to check the spelling of a flag they
-/// spelled correctly.
-fn unimplemented_short(flag: u8) -> getopt::Error {
-    MKFIFO.usage_referring(format!(
-        "option -{} is not implemented by this mkfifo",
-        char::from(flag)
-    ))
-}
-
-fn unimplemented_long(name: &str) -> getopt::Error {
-    MKFIFO.usage_referring(format!(
-        "option '--{name}' is not implemented by this mkfifo"
-    ))
 }
 
 // -------------------------------------------------------------------- mode --
@@ -280,46 +289,17 @@ impl ModeError {
     }
 }
 
-/// Read the file-mode creation mask **and zero it**, once per process.
-///
-/// Zeroing is GNU's, and it only happens when `-m` was given: having applied the
-/// mask itself in [`mode_for`], `mkfifo` must stop the kernel applying it a
-/// second time to the same mode. Without `-m` the mask is left alone and the
-/// kernel is the only thing that applies it — which is why `mkfifo q` is `0644`
-/// under `umask 022` while `mkfifo -m 666 q` is `0666`.
-///
-/// Doing it exactly once is this implementation's. A second call would read the
-/// zero the first one wrote; the real binary calls [`make_all`] once, so only a
-/// test could make that happen, and a cached value makes it impossible either
-/// way.
-#[cfg(unix)]
-fn take_umask() -> u32 {
-    use std::sync::OnceLock;
-    static UMASK: OnceLock<u32> = OnceLock::new();
-    // SAFETY: `umask` is a POSIX call that cannot fail and touches only this
-    // process's file-mode creation mask. Reading it requires setting it, which
-    // is why there is no read-only spelling; we want it zeroed anyway.
-    *UMASK.get_or_init(|| unsafe { umask(0) })
-}
-
-/// [`take_umask`] on the target; `0` on a host that has no such thing.
-///
-/// A Windows host still runs every parsing and diagnostic test in this file, and
-/// the arithmetic in [`mode_for`] is pure, so it can be checked there against
-/// every umask by passing one in.
-#[cfg(unix)]
-fn current_umask() -> u32 {
-    take_umask()
-}
-
-#[cfg(not(unix))]
-fn current_umask() -> u32 {
-    0
-}
-
 /// Resolve `-m`'s argument against the umask in force.
+///
+/// Upstream reads the mask as `umask (0)` then `umask (old)` -- putting it
+/// back -- and the FIFO is then made under it and `lchmod`ed to exactly the
+/// mode `-m` asked for (see [`make_all`]). This reads it without the write
+/// ([`coreutils::umask::current`] asks `/proc`), which is the same answer with
+/// no window in which the mask is wrong. It used to zero the mask for the rest
+/// of the process instead and skip the `lchmod`: the same final mode, but
+/// under `cargo test` a zeroed mask is every other test's mask too.
 fn resolve_mode(spec: &OsStr) -> Result<u32, ModeError> {
-    mode_for(spec, current_umask())
+    mode_for(spec, coreutils::umask::current())
 }
 
 /// The mode arithmetic, with the umask passed in rather than read.
@@ -358,6 +338,29 @@ fn mode_for(spec: &OsStr, umask_value: u32) -> Result<u32, ModeError> {
 /// rather than the kernel's to see a truncated version of.
 #[cfg(unix)]
 fn make_one(name: &OsStr, mode: u32) -> io::Result<()> {
+    // SAFETY: `mkfifo` is POSIX, takes a borrowed C string it does not retain,
+    // and reports failure through `errno`, which `with_c_path` reads at once.
+    with_c_path(name, |p| unsafe { mkfifo(p, mode) })
+}
+
+/// `lchmod (name, mode)`: the FIFO just made, given exactly `-m`'s mode -- the
+/// kernel narrowed what `mkfifo(2)` was asked for by the umask.
+#[cfg(unix)]
+fn set_mode(name: &OsStr, mode: u32) -> io::Result<()> {
+    // SAFETY: as in `make_one`; `lchmod` reads the path and keeps nothing.
+    with_c_path(name, |p| unsafe { lchmod(p, mode) })
+}
+
+/// Call `f` with `name` as a NUL-terminated C string, mapping its `-1` to the
+/// `errno` it left.
+///
+/// # Errors
+///
+/// What `f` reported, or `InvalidInput` for a name containing a NUL -- which
+/// no C string can carry, and which is therefore this layer's to refuse rather
+/// than the kernel's to see a truncated version of.
+#[cfg(unix)]
+fn with_c_path(name: &OsStr, f: impl FnOnce(*const u8) -> i32) -> io::Result<()> {
     let bytes = os_bytes(name);
     if bytes.contains(&0) {
         return Err(io::Error::new(
@@ -368,13 +371,7 @@ fn make_one(name: &OsStr, mode: u32) -> io::Result<()> {
     let mut c_path: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(1));
     c_path.extend_from_slice(&bytes);
     c_path.push(0);
-
-    // SAFETY: `c_path` is NUL-terminated, holds no interior NUL, and outlives
-    // the call. `mkfifo` is POSIX, takes a borrowed C string it does not retain,
-    // and reports failure through `errno` — which is what `last_os_error` reads
-    // immediately below, before anything else can overwrite it.
-    let ret = unsafe { mkfifo(c_path.as_ptr(), mode) };
-    if ret == 0 {
+    if f(c_path.as_ptr()) == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -389,6 +386,13 @@ fn make_one(_name: &OsStr, _mode: u32) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "mkfifo is not supported on this platform",
     ))
+}
+
+/// No modes on the host: there is nothing to set.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // the unix arm's signature, which `make_all` relies on
+fn set_mode(_name: &OsStr, _mode: u32) -> io::Result<()> {
+    Ok(())
 }
 
 /// Create every FIFO the command line asked for, reporting failures to `err`.
@@ -445,6 +449,17 @@ fn make_all<W: Write>(flags: &MkfifoFlags, names: &[OsString], err: &mut W) -> b
                 quoteaf_os(name)
             );
             ok = false;
+        } else if flags.mode.is_some()
+            && let Err(e) = set_mode(name, mode)
+        {
+            // Upstream's `else if (specified_mode && lchmod (...) != 0)`.
+            let _ = writeln!(
+                err,
+                "mkfifo: cannot set permissions of {}: {}",
+                quoteaf_os(name),
+                strerror(&e)
+            );
+            ok = false;
         }
     }
     ok
@@ -464,9 +479,21 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
+    /// [`parse_args`] for a test that has no warning to look at.
+    fn parse_args_quiet(argv: &[OsString]) -> Result<Request, getopt::Error> {
+        parse_args(argv, &mut Vec::new())
+    }
+
+    /// [`parse_args`], and the warnings it made on the way.
+    fn parse_with_warnings(items: &[&str]) -> (Result<Request, getopt::Error>, Vec<String>) {
+        let mut warnings = Vec::new();
+        let parsed = parse_args(&args(items), &mut warnings);
+        (parsed, warnings)
+    }
+
     /// `(flags, operands)` from a successful parse, or a panic naming the error.
     fn run_parse(items: &[&str]) -> (MkfifoFlags, Vec<String>) {
-        match parse_args(&args(items)).unwrap() {
+        match parse_args_quiet(&args(items)).unwrap() {
             Request::Run(f, n) => (
                 f,
                 n.iter().map(|o| o.to_string_lossy().into_owned()).collect(),
@@ -476,7 +503,7 @@ mod tests {
     }
 
     fn fail(items: &[&str]) -> getopt::Error {
-        parse_args(&args(items)).unwrap_err()
+        parse_args_quiet(&args(items)).unwrap_err()
     }
 
     // ------------------------------------------------------------ parsing --
@@ -556,8 +583,11 @@ mod tests {
     /// Also defect 5: there were no long options, so `--help` was a file name.
     #[test]
     fn help_and_version_are_requests() {
-        assert_eq!(parse_args(&args(&["--help"])).unwrap(), Request::Help);
-        assert_eq!(parse_args(&args(&["--version"])).unwrap(), Request::Version);
+        assert_eq!(parse_args_quiet(&args(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(
+            parse_args_quiet(&args(&["--version"])).unwrap(),
+            Request::Version
+        );
     }
 
     /// The whole table, in GNU's declaration order, as `mkfifo --=x` prints it.
@@ -580,9 +610,11 @@ mod tests {
             run_parse(&["--m", "700", "c1"]).0.mode,
             Some(OsString::from("700"))
         );
-        // `--c` prefixes only `--context`, so it resolves — and is then refused
-        // as unimplemented rather than as unrecognised.
-        assert!(fail(&["--c"]).sentence.contains("not implemented"));
+        // `--c` prefixes only `--context`: it resolves, and with no value it
+        // is accepted in silence.
+        let (parsed, warnings) = parse_with_warnings(&["--c", "p"]);
+        assert!(matches!(parsed, Ok(Request::Run(..))), "{parsed:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -599,21 +631,31 @@ mod tests {
         assert_eq!(e.status, 1);
     }
 
-    /// Ignored, `-Z` would silently drop a security context — the same class of
-    /// defect as `-m` silently falling back to `0666`.
+    /// Design-decisions §1064: the default context is accepted in silence, a
+    /// named one -- `--context=` included -- warned about once per naming, and
+    /// the run goes on. Measured against GNU 9.4 by `mkfifo-diff.sh`.
     #[test]
-    fn the_security_context_options_are_refused_by_name() {
-        assert!(fail(&["-Z", "p"]).sentence.contains("not implemented"));
-        assert!(
-            fail(&["--context", "p"])
-                .sentence
-                .contains("not implemented")
-        );
-        assert!(
-            fail(&["--context=x", "p"])
-                .sentence
-                .contains("not implemented")
-        );
+    fn the_security_context_options_are_taken_as_upstream_takes_them_without_selinux() {
+        for spelling in [&["-Z", "p"][..], &["--context", "p"][..]] {
+            let (parsed, warnings) = parse_with_warnings(spelling);
+            assert!(
+                matches!(parsed, Ok(Request::Run(..))),
+                "{spelling:?}: {parsed:?}"
+            );
+            assert!(warnings.is_empty(), "{spelling:?}: {warnings:?}");
+        }
+        for spelling in [&["--context=x", "p"][..], &["--context=", "p"][..]] {
+            let (parsed, warnings) = parse_with_warnings(spelling);
+            assert!(
+                matches!(parsed, Ok(Request::Run(..))),
+                "{spelling:?}: {parsed:?}"
+            );
+            assert_eq!(warnings, vec![IGNORING_CONTEXT.to_string()], "{spelling:?}");
+        }
+        // Printed as it is met, so a later bad option still finds it there.
+        let (parsed, warnings) = parse_with_warnings(&["--context=x", "-q"]);
+        assert!(parsed.is_err());
+        assert_eq!(warnings.len(), 1);
     }
 
     /// Defect 1's regression test at the parser level: the spec comes out
@@ -640,7 +682,8 @@ mod tests {
             bad.to_str().is_none(),
             "the fixture must be un-representable as String, or it tests nothing"
         );
-        match parse_args(&[OsString::from("-m"), OsString::from("600"), bad.clone()]).unwrap() {
+        match parse_args_quiet(&[OsString::from("-m"), OsString::from("600"), bad.clone()]).unwrap()
+        {
             Request::Run(f, n) => {
                 assert_eq!(f.mode, Some(OsString::from("600")));
                 assert_eq!(n, vec![bad]);
@@ -663,7 +706,8 @@ mod tests {
             bad.to_str().is_none(),
             "the fixture must be un-representable as String, or it tests nothing"
         );
-        match parse_args(&[OsString::from("-m"), OsString::from("600"), bad.clone()]).unwrap() {
+        match parse_args_quiet(&[OsString::from("-m"), OsString::from("600"), bad.clone()]).unwrap()
+        {
             Request::Run(f, n) => {
                 assert_eq!(f.mode, Some(OsString::from("600")));
                 assert_eq!(n, vec![bad]);

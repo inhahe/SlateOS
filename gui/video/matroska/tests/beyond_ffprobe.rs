@@ -602,3 +602,103 @@ fn film_read_track_by_track() {
         }
     }
 }
+
+// --- A SeekHead FFmpeg reads past ---------------------------------------
+
+/// Lane E's files (`requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`):
+/// a SeekHead whose two entries point at an Info (12 000 ticks) and a Tracks
+/// (one `V_AV1` track, 3840 by 2160), each `SeekID` written in
+/// `seek_id_bytes`; then the Info and Tracks and a Cluster, or -- `behind`
+/// -- a Cluster of unknown size first, so that only the SeekHead reaches
+/// them.
+fn seekhead_case(seek_id_bytes: usize, behind: bool) -> Vec<u8> {
+    let info = el(
+        &[0x15, 0x49, 0xA9, 0x66],
+        &el(&[0x44, 0x89], &12000.0f64.to_be_bytes()),
+    );
+    let video = [uint(&[0xB0], 3840), uint(&[0xBA], 2160)].concat();
+    let entry = [
+        uint(&[0xD7], 1),
+        uint(&[0x83], 1),
+        el(&[0x86], b"V_AV1"),
+        uint(&[0x23, 0xE3, 0x83], 16_666_666),
+        el(&[0xE0], &video),
+    ]
+    .concat();
+    let tracks = el(&[0x16, 0x54, 0xAE, 0x6B], &el(&[0xAE], &entry));
+    let cluster = if behind {
+        [
+            &[0x1F, 0x43, 0xB6, 0x75, 0x01][..],
+            &[0xFF; 7],
+            &uint(&[0xE7], 0),
+        ]
+        .concat()
+    } else {
+        el(CLUSTER, &uint(&[0xE7], 0))
+    };
+    let seek = |id: u64, pos: u64| {
+        let id = id.to_be_bytes();
+        let id: Vec<u8> = if seek_id_bytes > 8 {
+            [vec![0; seek_id_bytes - 8], id.to_vec()].concat()
+        } else {
+            id[8 - seek_id_bytes..].to_vec()
+        };
+        el(
+            &[0x4D, 0xBB],
+            &[el(&[0x53, 0xAB], &id), uint(&[0x53, 0xAC], pos)].concat(),
+        )
+    };
+    let head_len = el(
+        &[0x11, 0x4D, 0x9B, 0x74],
+        &[seek(0, 0), seek(0, 0)].concat(),
+    )
+    .len();
+    let info_at = (head_len + if behind { cluster.len() } else { 0 }) as u64;
+    let head = el(
+        &[0x11, 0x4D, 0x9B, 0x74],
+        &[
+            seek(0x1549_A966, info_at),
+            seek(0x1654_AE6B, info_at + info.len() as u64),
+        ]
+        .concat(),
+    );
+    let body = if behind {
+        [head, cluster, info, tracks].concat()
+    } else {
+        [head, info, tracks, cluster].concat()
+    };
+    let header = el(&[0x1A, 0x45, 0xDF, 0xA3], &el(&[0x42, 0x82], b"webm"));
+    [header, el(SEGMENT, &body)].concat()
+}
+
+/// As ffprobe reads lane E's four files: a `SeekID` of eight bytes is a
+/// number like any other (FFmpeg's `EBML_UINT`), so the SeekHead reaches the
+/// Info and Tracks even behind a Cluster; one of nine bytes damages the
+/// SeekHead, which is passed over -- reading goes on from the next top-level
+/// element, the Info and Tracks after it, and where those stand behind a
+/// Cluster only the damaged SeekHead reached them: the file opens with
+/// nothing in it, as FFmpeg's does.
+#[test]
+fn a_seekhead_ffmpeg_reads_past_does_not_refuse_the_file() {
+    let read = |seek_id_bytes, behind| {
+        let d = Demuxer::open(Cursor::new(seekhead_case(seek_id_bytes, behind)))
+            .unwrap_or_else(|e| panic!("{seek_id_bytes}-byte SeekID, behind {behind}: {e}"));
+        let tracks: Vec<_> = d
+            .tracks()
+            .iter()
+            .map(|t| {
+                let v = t.video.as_ref().unwrap();
+                (t.codec_id.clone(), v.pixel_width, v.pixel_height)
+            })
+            .collect();
+        (d.info().duration, tracks)
+    };
+    let whole = (Some(12000.0), vec![(b"V_AV1".to_vec(), 3840, 2160)]);
+    // The four-byte control, then lane E's files 1 to 3.
+    assert_eq!(read(4, true), whole);
+    assert_eq!(read(8, false), whole);
+    assert_eq!(read(9, false), whole);
+    assert_eq!(read(8, true), whole);
+    // File 4: nothing reachable but through the damaged SeekHead.
+    assert_eq!(read(9, true), (None, vec![]));
+}

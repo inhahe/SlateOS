@@ -378,6 +378,7 @@ pub fn init(hhdm_offset: u64) {
         mmio_phys,
         STAGE_MS
     );
+    pci::bind_driver(dev.address, "i6300esb");
 }
 
 /// Arm the watchdog: enable the hardware counter and begin requiring kicks.

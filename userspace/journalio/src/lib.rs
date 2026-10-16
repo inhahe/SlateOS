@@ -34,6 +34,17 @@
 //! a writer appends without it, as before -- a record that is written beats
 //! one refused -- while a rewrite refuses, since rewriting unlocked is the
 //! loss this exists to prevent.
+//!
+//! # Following the journal
+//!
+//! A reader that follows the journal as it grows -- `journalctl -f`,
+//! `syslogd follow` -- has to survive the same rotations and rewrites, and
+//! [`Follow`] is how: what it has read of each file goes with the file, not
+//! with the file's name. See the `follow` module.
+
+mod follow;
+
+pub use follow::{Follow, lines};
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};

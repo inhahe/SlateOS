@@ -42,7 +42,7 @@ use osfont::system::{Family, FontCache, Weight};
 use crate::canvas::Canvas;
 use crate::color::Color;
 use crate::fontdb::FontDb;
-use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
+use crate::render::{FamilyName, FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 
 /// The families tried, in order, when nothing has chosen one.
 ///
@@ -341,6 +341,81 @@ pub fn install_family_as(cache: &mut FontCache, family: FontFamily, name: &str) 
     true
 }
 
+/// The most family names [`ensure_family`] remembers as having no font here.
+pub const MAX_MISSING_FAMILIES: usize = 64;
+
+/// Make text in the family `name` drawable from `cache`
+/// ([`FontFamily::Named`]): its regular and bold faces loaded the first time,
+/// and nothing done after that. Returns whether the faces are in `cache`.
+///
+/// What every process that measures or draws a named run calls first -- the
+/// toolkit on its own cache before measuring, the compositor on its cache
+/// before drawing -- so the two load the same face by the same rule and agree
+/// about it, as [`install_ui_faces`] makes them agree about the UI face.
+///
+/// Cheap on repeat, because measuring calls it for every run: a face the
+/// cache holds is not loaded again, and a name that did not load -- a
+/// document's font this machine lacks -- is remembered, so the font index is
+/// not searched again for it. The memory is the process's, not the cache's:
+/// the index is scanned once per process, so a name missing from it stays
+/// missing for every cache in the process. It holds the last
+/// [`MAX_MISSING_FAMILIES`] names, so a document naming hundreds of fonts
+/// costs a bounded list rather than a growing one.
+///
+/// When this returns `false` the run is drawn in the UI face -- `osfont`'s
+/// cache answers a named family with no face that way -- so a caller has
+/// nothing to do about it; the answer is for one that wants to say so.
+pub fn ensure_family(cache: &mut FontCache, name: FamilyName) -> bool {
+    if cache.has_face(Family::Named(name), Weight::Regular) {
+        return true;
+    }
+    // Held across the load, so two threads asking for one family load it
+    // once and agree about the answer. Poisoning is ignored as the font
+    // cache's is: the list is a memo, and a lost entry costs one more search.
+    let mut missing = missing_families()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if missing.contains(name) {
+        return false;
+    }
+    if install_family_as(cache, FontFamily::Named(name), name.as_str()) {
+        true
+    } else {
+        missing.note(name);
+        false
+    }
+}
+
+/// The family names [`ensure_family`] found no font for, earliest first.
+#[derive(Debug, Default)]
+struct MissingFamilies {
+    names: std::collections::VecDeque<FamilyName>,
+}
+
+impl MissingFamilies {
+    fn contains(&self, name: FamilyName) -> bool {
+        self.names.contains(&name)
+    }
+
+    /// Remember `name`, forgetting the earliest once
+    /// [`MAX_MISSING_FAMILIES`] are held. A forgotten name is searched for
+    /// once more the next time it is asked about, and remembered again.
+    fn note(&mut self, name: FamilyName) {
+        if self.contains(name) {
+            return;
+        }
+        // Stops when nothing is left to forget, whatever the bound.
+        while self.names.len() >= MAX_MISSING_FAMILIES && self.names.pop_front().is_some() {}
+        self.names.push_back(name);
+    }
+}
+
+/// The process's [`MissingFamilies`].
+fn missing_families() -> &'static Mutex<MissingFamilies> {
+    static MISSING: OnceLock<Mutex<MissingFamilies>> = OnceLock::new();
+    MISSING.get_or_init(Mutex::default)
+}
+
 /// Draw all UI text in `family` from now on.
 ///
 /// Returns `false` and changes nothing if the family is not installed or its
@@ -540,6 +615,11 @@ fn with_font<R>(
     f: impl FnOnce(&mut osfont::system::SystemFont) -> R,
 ) -> R {
     let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if let FontFamily::Named(name) = family {
+        // Whether or not it loads: a named family with no face is drawn in
+        // the UI face, and measured in it here by the same cache rule.
+        let _loaded = ensure_family(&mut fonts.cache, name);
+    }
     f(fonts.cache.get(size, weight_of(weight), family_of(family)))
 }
 
@@ -559,6 +639,7 @@ fn family_of(family: FontFamily) -> Family {
     match family {
         FontFamily::Ui => Family::Ui,
         FontFamily::Mono => Family::Mono,
+        FontFamily::Named(name) => Family::Named(name),
     }
 }
 
@@ -2321,6 +2402,119 @@ mod tests {
     )]
 
     use super::*;
+
+    /// What the named-family tests measure: Latin every face has, wide
+    /// enough that two families' advances differ.
+    const NAMED_SAMPLE: &str = "Hamburgefonstiv 0123 WMQ";
+
+    /// `text` at 20 px in `name`, measured through a cache of the test's own
+    /// with that family installed as its UI face -- what measuring in the
+    /// named family must agree with -- or `None` if the family does not load.
+    fn measured_as_ui(name: &str, text: &str) -> Option<f32> {
+        let mut cache = FontCache::new();
+        cache.set_rendering(rendering());
+        install_family_as(&mut cache, FontFamily::Ui, name)
+            .then(|| cache.get(20.0, Weight::Regular, Family::Ui).measure(text))
+    }
+
+    /// **Text in a family the drawing names is measured in that family's
+    /// face** -- the face that family is installed as, not the UI face. The
+    /// first installed family whose advances differ from the UI face's, so
+    /// that measuring in the UI face instead could not pass; a host with
+    /// one family has nothing to compare and passes vacuously.
+    #[test]
+    fn a_named_family_measures_in_its_own_face() {
+        let ui = measure_in(NAMED_SAMPLE, 20.0, FontWeightHint::Regular, FontFamily::Ui);
+        let found = available_families().into_iter().find_map(|family| {
+            let name = FamilyName::new(&family)?;
+            let width = measured_as_ui(&family, NAMED_SAMPLE)?;
+            (width != ui).then_some((name, width))
+        });
+        let Some((name, expected)) = found else {
+            return;
+        };
+        let family = FontFamily::Named(name);
+        assert_eq!(
+            measure_in(NAMED_SAMPLE, 20.0, FontWeightHint::Regular, family),
+            expected,
+            "{family:?}"
+        );
+        // And the line it sits on is that face's too: the cache built an
+        // entry for the family rather than lending it the UI face's.
+        let mut cache = FontCache::new();
+        assert!(install_family_as(&mut cache, FontFamily::Ui, name.as_str()));
+        assert_eq!(
+            line_height_in(20.0, FontWeightHint::Regular, family),
+            cache.get(20.0, Weight::Regular, Family::Ui).line_height()
+        );
+    }
+
+    /// **A family this machine lacks is measured as the UI face** -- what
+    /// `osfont`'s cache draws it in, so measuring and drawing still agree --
+    /// **and is remembered**, so measuring the next run in it does not
+    /// search the font index again.
+    #[test]
+    fn a_family_this_machine_lacks_measures_as_the_ui_face() {
+        let missing = "Slate Test Family That No Machine Has 7f3a";
+        let family = FontFamily::named(missing).unwrap();
+        for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+            assert_eq!(
+                measure_in(NAMED_SAMPLE, 20.0, weight, family),
+                measure_in(NAMED_SAMPLE, 20.0, weight, FontFamily::Ui),
+                "{weight:?}"
+            );
+        }
+        let name = FamilyName::new(missing).unwrap();
+        assert!(
+            missing_families()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(name)
+        );
+        let mut cache = FontCache::new();
+        assert!(!ensure_family(&mut cache, name));
+        assert!(!cache.has_face(Family::Named(name), Weight::Regular));
+    }
+
+    /// **Ensuring a family a second time loads nothing**: the fonts already
+    /// built from it are kept, where installing its faces again would have
+    /// dropped them (`FontCache::set_face`) and rasterized every glyph anew
+    /// on the next measure -- for every run, since measuring ensures first.
+    #[test]
+    fn ensuring_a_family_again_keeps_what_was_built() {
+        let Some(name) = available_families()
+            .iter()
+            .find_map(|family| FamilyName::new(family))
+        else {
+            return;
+        };
+        let mut cache = FontCache::new();
+        assert!(ensure_family(&mut cache, name));
+        assert!(cache.has_face(Family::Named(name), Weight::Regular));
+        assert!(cache.has_face(Family::Named(name), Weight::Bold));
+        let _ = cache.get(20.0, Weight::Regular, Family::Named(name));
+        assert_eq!(cache.len(), 1);
+        assert!(ensure_family(&mut cache, name));
+        assert_eq!(cache.len(), 1, "the family's fonts were dropped");
+    }
+
+    /// **The names remembered as missing are bounded**, earliest forgotten
+    /// first, and a name is held once however often it is noted.
+    #[test]
+    fn the_families_remembered_as_missing_are_bounded() {
+        let name = |i: usize| FamilyName::new(&format!("missing {i}")).unwrap();
+        let mut missing = MissingFamilies::default();
+        for i in 0..=MAX_MISSING_FAMILIES {
+            missing.note(name(i));
+        }
+        assert_eq!(missing.names.len(), MAX_MISSING_FAMILIES);
+        assert!(!missing.contains(name(0)), "the earliest is forgotten");
+        assert!(missing.contains(name(1)));
+        assert!(missing.contains(name(MAX_MISSING_FAMILIES)));
+        missing.note(name(5));
+        assert_eq!(missing.names.len(), MAX_MISSING_FAMILIES, "noted twice");
+        assert!(missing.contains(name(1)), "a repeat forgot another name");
+    }
 
     /// **A family is installed, and fixed-pitch, as this system's font list
     /// says** -- the picker's lists and these answers come from one index,

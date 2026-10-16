@@ -146,6 +146,8 @@ const TRB_TYPE_CONFIGURE_EP: u32 = 12;
 const TRB_TYPE_EVALUATE_CTX: u32 = 13;
 /// Reset Endpoint Command.
 const TRB_TYPE_RESET_EP: u32 = 14;
+/// Set TR Dequeue Pointer Command.
+const TRB_TYPE_SET_TR_DEQUEUE: u32 = 16;
 /// Transfer Event TRB (posted by controller).
 const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 /// Command Completion Event TRB.
@@ -158,6 +160,12 @@ const TRB_TYPE_PORT_STATUS: u32 = 34;
 const TRB_CC_SUCCESS: u8 = 1;
 /// Short Packet (less data than expected, not always an error).
 const TRB_CC_SHORT_PACKET: u8 = 13;
+/// Stall: the device refused the transfer, and its endpoint is halted until
+/// told otherwise (CLEAR_FEATURE(ENDPOINT_HALT)).
+const TRB_CC_STALL: u8 = 6;
+/// Context State Error: a command found the endpoint in a state it does not
+/// apply to -- for the recovery commands, an endpoint that was not halted.
+const TRB_CC_CONTEXT_STATE_ERROR: u8 = 19;
 
 // TRB flags (in control dword)
 /// Cycle bit (toggles on ring wrap).
@@ -274,6 +282,23 @@ impl Trb {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub fn slot_id(&self) -> u8 {
         (self.control >> 24) as u8
+    }
+
+    /// A Transfer Event's endpoint: the Device Context Index of the endpoint
+    /// whose TRB completed (control bits 20:16) -- 1 for the control
+    /// endpoint, `2 * n + 1` for IN endpoint `n`.
+    #[must_use]
+    pub fn endpoint_id(&self) -> u8 {
+        // Five bits, so the cast cannot truncate anything that is there.
+        u8::try_from((self.control >> 16) & 0x1F).unwrap_or(0)
+    }
+
+    /// A Transfer Event's TRB Transfer Length (status bits 23:0). For a
+    /// Normal, Data or Status TRB this is the *residual* -- the bytes asked
+    /// for and not transferred -- not the bytes that were (xHCI 6.4.2.1).
+    #[must_use]
+    pub fn residual(&self) -> u32 {
+        self.status & 0x00FF_FFFF
     }
 }
 
@@ -420,6 +445,15 @@ impl TrbRing {
         self.frame.addr()
     }
 
+    /// Where the next TRB will be written, and the cycle bit it will carry:
+    /// what a Set TR Dequeue Pointer command points the controller at to
+    /// skip every TRB already on the ring.
+    fn enqueue_pointer(&self) -> (u64, bool) {
+        // At most 63 * 16 bytes into a frame-sized ring.
+        let offset = u64::try_from(self.enqueue_idx.saturating_mul(16)).unwrap_or(0);
+        (self.frame.addr().wrapping_add(offset), self.cycle)
+    }
+
     /// Enqueue a TRB to the ring, returning its physical address.
     ///
     /// Sets the cycle bit appropriately and advances the enqueue pointer.
@@ -530,10 +564,22 @@ struct XhciController {
     ports: Vec<UsbPort>,
     /// Configured HID interfaces.
     hid_interfaces: Vec<UsbHidInterface>,
+    /// The keyboard's answer to GET_REPORT at configuration -- the keys
+    /// already down -- until the first poll hands it out, ahead of any
+    /// interrupt report ([`XhciController::hid_get_keyboard_report`]).
+    keyboard_baseline: Option<HidKeyboardReport>,
+    /// Each slot's HID interrupt-IN endpoint: what is posted, what has
+    /// completed and not been taken, whether it needs recovery.
+    slot_int: [IntIn; MAX_SLOTS],
+    /// Transfer Events that named no endpoint this driver is waiting on --
+    /// counted, and the first few logged, rather than dropped unseen.
+    stray_transfer_events: u64,
 }
 
-// SAFETY: The controller is only accessed from the BSP during init.
-// No concurrent access occurs.
+// SAFETY: The controller is reached only through the `XHCI` mutex -- from
+// init, the HID poller in the timer interrupt (`try_lock`), thread-context
+// polls and the workqueue's endpoint recovery -- so no two contexts touch it
+// at once. Its raw pointers are MMIO and HHDM addresses, valid on every CPU.
 unsafe impl Send for XhciController {}
 unsafe impl Sync for XhciController {}
 
@@ -937,11 +983,17 @@ impl XhciController {
             devices: Vec::new(),
             ports: Vec::new(),
             hid_interfaces: Vec::new(),
+            keyboard_baseline: None,
+            slot_int: [IntIn::default(); MAX_SLOTS],
+            stray_transfer_events: 0,
         });
 
         // Scan ports for connected devices.
         ctrl.scan_ports();
 
+        // Reset, its rings set up, its ports scanned: the controller is this
+        // driver's.
+        pci::bind_driver(pci_dev.address, "xhci");
         Ok(ctrl)
     }
 
@@ -1060,12 +1112,25 @@ impl XhciController {
     }
 
     /// Poll the event ring for a specific event type.
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn wait_for_event(&mut self, expected_type: u32, max_polls: u32) -> KernelResult<Trb> {
+        self.wait_for(max_polls, |trb| trb.trb_type() == expected_type)
+    }
+
+    /// Poll the event ring until an event `wanted` accepts arrives.
+    ///
+    /// Every event on the way is dealt with rather than dropped: a HID
+    /// endpoint's completion is kept for its poll ([`Self::route_event`]),
+    /// anything else goes to [`Self::handle_event`]. There is one event ring
+    /// for everything, so a control transfer waiting here sees the keyboard's
+    /// reports go by; before 2026-10-02 they were discarded, and a report that
+    /// arrived during one was lost -- and with it the keyboard, since its
+    /// next receive was only posted when a report was taken.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn wait_for(&mut self, max_polls: u32, wanted: impl Fn(&Trb) -> bool) -> KernelResult<Trb> {
         let mut polls = 0u32;
         loop {
-            if let Some(trb) = self.poll_event() {
-                if trb.trb_type() == expected_type {
+            if let Some(trb) = self.poll_event().and_then(|t| self.route_event(t)) {
+                if wanted(&trb) {
                     return Ok(trb);
                 }
                 // Handle other event types (port status changes, etc.)
@@ -1077,6 +1142,38 @@ impl XhciController {
                 return Err(KernelError::TimedOut);
             }
             core::hint::spin_loop();
+        }
+    }
+
+    /// Keep a HID endpoint's Transfer Event for that endpoint's poll, or give
+    /// the event back if it is anything else.
+    fn route_event(&mut self, trb: Trb) -> Option<Trb> {
+        if trb.trb_type() != TRB_TYPE_TRANSFER_EVENT {
+            return Some(trb);
+        }
+        let slot_idx = usize::from(trb.slot_id()).wrapping_sub(1);
+        match self.slot_int.get_mut(slot_idx) {
+            Some(ep) if ep.owns(trb.endpoint_id()) => {
+                ep.complete(trb.completion_code(), trb.residual());
+                None
+            }
+            _ => Some(trb),
+        }
+    }
+
+    /// Take every event the controller has posted, keeping HID completions
+    /// for their polls ([`Self::route_event`]).
+    fn drain_events(&mut self) {
+        // The ring holds EVENT_RING_SIZE events; more polls than that in one
+        // drain would mean the controller is posting as fast as this reads,
+        // and the next drain will take the rest.
+        for _ in 0..EVENT_RING_SIZE {
+            let Some(trb) = self.poll_event() else {
+                return;
+            };
+            if let Some(other) = self.route_event(trb) {
+                self.handle_event(&other);
+            }
         }
     }
 
@@ -1126,7 +1223,19 @@ impl XhciController {
                 let _port_id = (trb.parameter >> 24) as u8;
             }
             TRB_TYPE_TRANSFER_EVENT => {
-                // Transfer completion — handled by caller.
+                // A completion nobody is waiting for: a HID endpoint's is kept
+                // by `route_event` before this, and a control transfer's is
+                // taken by the `wait_for` that issued it. Counted, and the
+                // first few logged, so a stray is seen rather than lost.
+                self.stray_transfer_events = self.stray_transfer_events.saturating_add(1);
+                if self.stray_transfer_events <= 8 {
+                    crate::serial_println!(
+                        "[xhci] Transfer event for no waiter: slot {}, endpoint {}, cc={}",
+                        trb.slot_id(),
+                        trb.endpoint_id(),
+                        trb.completion_code()
+                    );
+                }
             }
             _ => {
                 // Unknown event type — log it.
@@ -1370,8 +1479,14 @@ impl XhciController {
         // Ring the doorbell for this slot, target = 1 (EP0 = DCI 1).
         self.ring_doorbell(slot_id, 1);
 
-        // Wait for transfer event.
-        let event = self.wait_for_event(TRB_TYPE_TRANSFER_EVENT, 2_000_000)?;
+        // Wait for this transfer's event: this slot's control endpoint (DCI
+        // 1). Taking the first Transfer Event of any kind, as this did, would
+        // read another device's report as this transfer's completion.
+        let event = self.wait_for(2_000_000, |e| {
+            e.trb_type() == TRB_TYPE_TRANSFER_EVENT
+                && e.slot_id() == slot_id
+                && e.endpoint_id() == 1
+        })?;
         let cc = event.completion_code();
         if cc != TRB_CC_SUCCESS && cc != TRB_CC_SHORT_PACKET {
             crate::serial_println!("[xhci] Control transfer failed: cc={}", cc);
@@ -1528,10 +1643,64 @@ const USB_HID_PROTOCOL_MOUSE: u8 = 0x02;
 const USB_REQ_TYPE_HOST_TO_DEVICE: u8 = 0x00;
 /// Class-specific interface request (host to device).
 const USB_REQ_TYPE_CLASS_IFACE_OUT: u8 = 0x21;
+/// Class-specific interface request (device to host).
+const USB_REQ_TYPE_CLASS_IFACE_IN: u8 = 0xA1;
+/// Standard request to an endpoint (host to device).
+const USB_REQ_TYPE_STANDARD_EP_OUT: u8 = 0x02;
+/// CLEAR_FEATURE request code.
+const USB_REQ_CLEAR_FEATURE: u8 = 0x01;
+/// The ENDPOINT_HALT feature selector, which CLEAR_FEATURE clears.
+const USB_FEATURE_ENDPOINT_HALT: u16 = 0;
+/// HID GET_REPORT request code.
+const USB_HID_GET_REPORT: u8 = 0x01;
+/// GET_REPORT's report type for an input report, the high byte of `wValue`.
+const USB_HID_REPORT_TYPE_INPUT: u16 = 1;
+/// A boot keyboard's input report: modifiers, a reserved byte, six key slots.
+const BOOT_KEYBOARD_REPORT_LEN: u16 = 8;
 /// HID SET_IDLE request code.
 const USB_HID_SET_IDLE: u8 = 0x0A;
 /// HID SET_PROTOCOL request code.
 const USB_HID_SET_PROTOCOL: u8 = 0x0B;
+
+/// What became of asking the USB keyboard which keys were already down when
+/// it was configured ([`XhciController::hid_get_keyboard_report`]): one of
+/// the `BASELINE_*` values. Read by the keyboard self-test, which holds the
+/// boot test's USB keyboard to having answered.
+static KEYBOARD_BASELINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// No USB boot keyboard has been configured.
+pub const BASELINE_NO_KEYBOARD: u8 = 0;
+/// The keyboard answered GET_REPORT, and its answer is the first report the
+/// poller hands out.
+pub const BASELINE_TAKEN: u8 = 1;
+/// The keyboard refused GET_REPORT, or the transfer failed: a key held since
+/// before configuration is not seen until it is released and pressed again.
+pub const BASELINE_FAILED: u8 = 2;
+
+/// The keyboard [`KEYBOARD_BASELINE`] is about: its vendor id in the high
+/// half, its product id in the low.
+static KEYBOARD_BASELINE_DEVICE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// QEMU's `usb-kbd`, the boot test's USB keyboard: vendor and product id.
+pub const QEMU_USB_KBD: (u16, u16) = (0x0627, 0x0001);
+
+/// What became of asking the USB keyboard for its keys already down: one of
+/// [`BASELINE_NO_KEYBOARD`], [`BASELINE_TAKEN`], [`BASELINE_FAILED`].
+#[must_use]
+pub fn keyboard_baseline() -> u8 {
+    KEYBOARD_BASELINE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The vendor and product id of the keyboard [`keyboard_baseline`] is about,
+/// or `(0, 0)` before one has been configured.
+#[must_use]
+pub fn keyboard_baseline_device() -> (u16, u16) {
+    let both = KEYBOARD_BASELINE_DEVICE.load(core::sync::atomic::Ordering::Acquire);
+    // The two halves of the word, each 16 bits by construction.
+    let vendor = u16::try_from(both >> 16).unwrap_or(0);
+    let product = u16::try_from(both & 0xFFFF).unwrap_or(0);
+    (vendor, product)
+}
 
 /// Describes a HID interface found on a USB device.
 #[derive(Debug, Clone)]
@@ -1604,6 +1773,21 @@ pub struct HidKeyboardReport {
     pub keycodes: [u8; 6],
 }
 
+impl HidKeyboardReport {
+    /// The report in a boot keyboard's eight bytes, or `None` for fewer.
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let &[modifiers, reserved, k0, k1, k2, k3, k4, k5, ..] = data else {
+            return None;
+        };
+        Some(Self {
+            modifiers,
+            reserved,
+            keycodes: [k0, k1, k2, k3, k4, k5],
+        })
+    }
+}
+
 /// Boot protocol mouse input report (3-4 bytes).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HidMouseReport {
@@ -1615,6 +1799,119 @@ pub struct HidMouseReport {
     pub y: i8,
     /// Scroll wheel (signed 8-bit, optional).
     pub wheel: i8,
+}
+
+/// The most an interrupt-IN transfer here asks for: the slot's receive
+/// buffer is read no further. Boot keyboards and mice send 8 and 3-4 bytes.
+const HID_PACKET_MAX: usize = 64;
+
+/// One interrupt-IN transfer's bytes, copied out of the slot's receive
+/// buffer -- which the next posted TRB points the controller at again, so a
+/// reference into it would be overwritten by the next report while still
+/// being read.
+#[derive(Debug, Clone, Copy)]
+struct HidPacket {
+    bytes: [u8; HID_PACKET_MAX],
+    len: usize,
+}
+
+impl HidPacket {
+    /// The bytes the device sent.
+    fn data(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// The bytes a transfer moved, from what it asked for and the residual its
+/// Transfer Event reports ([`Trb::residual`]), capped at what the receive
+/// buffer is read for.
+fn transferred_len(asked: u16, residual: u32) -> usize {
+    let residual = usize::try_from(residual).unwrap_or(usize::MAX);
+    usize::from(asked)
+        .saturating_sub(residual)
+        .min(HID_PACKET_MAX)
+}
+
+/// A HID device's interrupt-IN endpoint, as the driver tracks it between
+/// itself and the controller.
+///
+/// At most one receive is ever on the ring. Every posted TRB points at the
+/// slot's one buffer, so a second would let the next report overwrite the
+/// first before it was read -- and posting one per poll, as this driver did
+/// until 2026-10-02, put a TRB on the 63-entry ring every 8 ms whether or not
+/// the keyboard had sent anything, until the producer lapped the TRB the
+/// controller was waiting on and flipped its cycle bit out from under it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct IntIn {
+    /// The endpoint's Device Context Index (`2 * n + 1` for IN endpoint
+    /// `n`); 0 while the slot has no interrupt endpoint.
+    dci: u8,
+    /// What each posted TRB asks for: the endpoint's max packet size.
+    asked: u16,
+    /// A receive is on the ring, owned by the controller.
+    outstanding: bool,
+    /// A completed transfer the poll has not taken yet: its completion code
+    /// and the bytes the device sent.
+    completed: Option<(u8, usize)>,
+    /// A transfer failed, so the endpoint is presumed halted: nothing is
+    /// posted until [`XhciController::recover_interrupt_endpoint`] has run.
+    needs_recovery: bool,
+    /// The completion code that called for recovery -- a stall also needs
+    /// the device told to clear its halt.
+    failed_cc: u8,
+    /// Recovery has been handed to the workqueue and not yet run.
+    recovery_queued: bool,
+    /// Recoveries since the endpoint last delivered a report. A device that
+    /// fails every transfer would otherwise be reset every 8 ms for ever;
+    /// after [`MAX_RECOVERIES`] the endpoint is left halted, and said so.
+    recoveries: u8,
+}
+
+/// Recoveries in a row, with no report between them, before a HID endpoint
+/// is given up on ([`IntIn::recoveries`]).
+const MAX_RECOVERIES: u8 = 8;
+
+impl IntIn {
+    /// A freshly configured endpoint with nothing posted.
+    fn new(dci: u8, asked: u16) -> Self {
+        Self {
+            dci,
+            asked,
+            ..Self::default()
+        }
+    }
+
+    /// The controller's Transfer Event for this endpoint.
+    fn complete(&mut self, cc: u8, residual: u32) {
+        self.outstanding = false;
+        self.completed = Some((cc, transferred_len(self.asked, residual)));
+    }
+
+    /// What the poll takes: the completed transfer's length if it carried
+    /// data, after which a receive may be posted again. A failed transfer
+    /// gives nothing and marks the endpoint for recovery.
+    fn take(&mut self) -> Option<usize> {
+        let (cc, len) = self.completed.take()?;
+        if cc == TRB_CC_SUCCESS || cc == TRB_CC_SHORT_PACKET {
+            self.recoveries = 0;
+            Some(len)
+        } else {
+            self.needs_recovery = true;
+            self.failed_cc = cc;
+            None
+        }
+    }
+
+    /// Whether the poll should post a receive now.
+    fn should_post(&self) -> bool {
+        self.dci != 0 && !self.outstanding && self.completed.is_none() && !self.needs_recovery
+    }
+
+    /// Whether a Transfer Event for this slot, naming endpoint `endpoint_id`
+    /// ([`Trb::endpoint_id`]), is this endpoint's.
+    fn owns(&self, endpoint_id: u8) -> bool {
+        self.dci != 0 && self.dci == endpoint_id
+    }
 }
 
 impl XhciController {
@@ -1787,6 +2084,64 @@ impl XhciController {
         Ok(())
     }
 
+    /// Ask a boot keyboard which keys are down right now (GET_REPORT, input).
+    ///
+    /// With the idle rate at 0 a keyboard reports only changes, and whether it
+    /// sends one report straight after configuration is up to the device. A
+    /// key held since before then -- Shift, held from power-on to choose an
+    /// account rather than be signed in automatically (design-decisions
+    /// §1427) -- then has no change to report until it is let go, and the
+    /// driver, and `EVIOCGKEY` after it, would call it up. GET_REPORT is
+    /// mandatory for every HID device (HID 1.11 §7.2.1) and answers with the
+    /// state now, whatever has or has not been sent.
+    fn hid_get_keyboard_report(
+        &mut self,
+        slot_id: u8,
+        interface: u8,
+    ) -> KernelResult<HidKeyboardReport> {
+        let buf_frame = frame::alloc_frame()?;
+        let buf_phys = buf_frame.addr();
+        let buf_virt = buf_phys.wrapping_add(self.hhdm_offset) as *mut u8;
+        let len = usize::from(BOOT_KEYBOARD_REPORT_LEN);
+        // SAFETY: the frame was just allocated, is ours alone, and is far
+        // larger than `len`; the HHDM maps all of physical memory.
+        unsafe {
+            core::ptr::write_bytes(buf_virt, 0, len);
+        }
+        let transferred = self.control_transfer(
+            slot_id,
+            USB_REQ_TYPE_CLASS_IFACE_IN,
+            USB_HID_GET_REPORT,
+            USB_HID_REPORT_TYPE_INPUT << 8, // report id 0: boot reports have none
+            u16::from(interface),
+            buf_phys,
+            BOOT_KEYBOARD_REPORT_LEN,
+            true,
+        );
+        if matches!(transferred, Err(KernelError::TimedOut)) {
+            // No completion event came, so the transfer may still be on the
+            // ring and the controller may yet write the buffer: freeing the
+            // frame could hand memory it is about to DMA into to someone
+            // else. One frame is the price of a keyboard that never answered.
+            return Err(KernelError::TimedOut);
+        }
+        let mut data = [0u8; 8];
+        // SAFETY: as above -- `len` bytes at `buf_virt` are ours and were
+        // zeroed, so reading them is defined whatever the device wrote.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf_virt, data.as_mut_ptr(), len);
+        }
+        // SAFETY: the frame is ours and nothing reads it after this; the
+        // transfer completed -- successfully or with a failure code -- so the
+        // controller is done with it. The result is discarded because there
+        // is nothing to do about a frame that would not go back.
+        let _ = unsafe { frame::free_frame(buf_frame) };
+        if transferred? < len {
+            return Err(KernelError::IoError);
+        }
+        HidKeyboardReport::from_bytes(&data).ok_or(KernelError::IoError)
+    }
+
     /// Configure all detected HID devices for boot protocol.
     ///
     /// This sets the configuration, switches to boot protocol, and
@@ -1836,19 +2191,65 @@ impl XhciController {
                 };
 
                 // Set boot protocol (simpler fixed-format reports).
+                let mut boot_protocol = false;
                 if hid.subclass == USB_HID_SUBCLASS_BOOT {
-                    if let Err(e) = self.hid_set_boot_protocol(slot_id, hid.interface_num) {
-                        crate::serial_println!(
+                    match self.hid_set_boot_protocol(slot_id, hid.interface_num) {
+                        Ok(()) => boot_protocol = true,
+                        Err(e) => crate::serial_println!(
                             "[xhci] SET_PROTOCOL failed for slot {} {}: {:?}",
                             slot_id,
                             protocol_name,
                             e
-                        );
+                        ),
                     }
                 }
 
                 // Set idle rate to 0 (report only on change).
                 let _ = self.hid_set_idle(slot_id, hid.interface_num);
+
+                // The keys already down, for the keyboard the poller reads --
+                // the first one configured (`poll_keyboard_locked`). Only in
+                // boot protocol, whose eight-byte report is the one the poller
+                // reads; see `hid_get_keyboard_report` for why it is asked.
+                let first_keyboard = hid.protocol == USB_HID_PROTOCOL_KEYBOARD
+                    && !configured
+                        .iter()
+                        .any(|h: &UsbHidInterface| h.protocol == USB_HID_PROTOCOL_KEYBOARD);
+                if first_keyboard && boot_protocol {
+                    let (vendor, product) = self
+                        .devices
+                        .iter()
+                        .find(|d| d.slot_id == slot_id)
+                        .map_or((0, 0), |d| (d.vendor_id, d.product_id));
+                    KEYBOARD_BASELINE_DEVICE.store(
+                        (u32::from(vendor) << 16) | u32::from(product),
+                        core::sync::atomic::Ordering::Release,
+                    );
+                    let outcome = match self.hid_get_keyboard_report(slot_id, hid.interface_num) {
+                        Ok(report) => {
+                            crate::serial_println!(
+                                "[xhci] Keyboard on slot {}: modifiers {:#04x} and keys {:02x?} \
+                                 already down",
+                                slot_id,
+                                report.modifiers,
+                                report.keycodes
+                            );
+                            self.keyboard_baseline = Some(report);
+                            BASELINE_TAKEN
+                        }
+                        Err(e) => {
+                            crate::serial_println!(
+                                "[xhci] GET_REPORT failed for slot {} keyboard: {:?} -- a key \
+                                 held since before now is not seen until it is let go",
+                                slot_id,
+                                e
+                            );
+                            self.keyboard_baseline = None;
+                            BASELINE_FAILED
+                        }
+                    };
+                    KEYBOARD_BASELINE.store(outcome, core::sync::atomic::Ordering::Release);
+                }
 
                 // Configure the interrupt endpoint for receiving reports.
                 let dev_speed = self
@@ -1870,12 +2271,14 @@ impl XhciController {
                         protocol_name,
                         e
                     );
-                } else {
-                    // Post initial receive buffer.
-                    let _ = self.post_interrupt_receive(
+                } else if let Err(e) = self.post_interrupt_receive(slot_id) {
+                    // The poll posts it again; said here because at
+                    // configuration a failure is news, not a retry.
+                    crate::serial_println!(
+                        "[xhci] First receive for slot {} {} not posted: {:?}",
                         slot_id,
-                        hid.interrupt_ep,
-                        hid.interrupt_max_packet,
+                        protocol_name,
+                        e
                     );
                 }
 
@@ -2024,8 +2427,12 @@ impl XhciController {
             return Err(KernelError::IoError);
         }
 
-        // Store the interrupt ring for this slot.
+        // Store the interrupt ring for this slot, and start its bookkeeping
+        // afresh: nothing is posted on a new ring.
         self.slot_int_rings[slot_idx] = Some(int_ring);
+        if let (Some(ep), Ok(dci)) = (self.slot_int.get_mut(slot_idx), u8::try_from(dci)) {
+            *ep = IntIn::new(dci, max_packet);
+        }
 
         crate::serial_println!(
             "[xhci] Interrupt EP{} IN configured for slot {} (max_pkt={}, interval={})",
@@ -2038,96 +2445,248 @@ impl XhciController {
         Ok(())
     }
 
-    /// Post a Normal TRB on the interrupt endpoint's transfer ring for
-    /// receiving a HID input report.
+    /// Post the receive for a slot's HID interrupt-IN endpoint: one Normal
+    /// TRB pointing the controller at the slot's receive buffer, and the
+    /// doorbell.
     ///
-    /// Allocates a receive buffer if not already allocated, enqueues a
-    /// Normal TRB pointing to it, and rings the doorbell.
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn post_interrupt_receive(
-        &mut self,
-        slot_id: u8,
-        ep_num: u8,
-        max_packet: u16,
-    ) -> KernelResult<()> {
-        let slot_idx = (slot_id as usize).wrapping_sub(1);
-        if slot_idx >= MAX_SLOTS {
-            return Err(KernelError::InvalidArgument);
+    /// Does nothing when [`IntIn::should_post`] says not to -- one is already
+    /// posted, a completion is waiting to be taken, or the endpoint is
+    /// waiting for recovery -- so it is safe to call on every poll.
+    fn post_interrupt_receive(&mut self, slot_id: u8) -> KernelResult<()> {
+        let slot_idx = usize::from(slot_id).wrapping_sub(1);
+        let ep = *self
+            .slot_int
+            .get(slot_idx)
+            .ok_or(KernelError::InvalidArgument)?;
+        if !ep.should_post() {
+            return Ok(());
         }
 
-        // Ensure we have a receive buffer for this slot.
-        if self.slot_int_bufs[slot_idx].is_none() {
-            let buf_frame = frame::alloc_frame()?;
-            let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *mut u8;
-            // SAFETY: Just allocated.
-            unsafe {
-                core::ptr::write_bytes(buf_virt, 0, 64);
+        // The slot's receive buffer, allocated on first use.
+        let buf_phys = match self.slot_int_bufs.get(slot_idx) {
+            Some(Some(buf)) => buf.addr(),
+            Some(None) => {
+                let buf_frame = frame::alloc_frame()?;
+                let phys = buf_frame.addr();
+                let buf_virt = phys.wrapping_add(self.hhdm_offset) as *mut u8;
+                // SAFETY: the frame was just allocated, is ours alone and is
+                // far larger than HID_PACKET_MAX; the HHDM maps it.
+                unsafe {
+                    core::ptr::write_bytes(buf_virt, 0, HID_PACKET_MAX);
+                }
+                if let Some(slot) = self.slot_int_bufs.get_mut(slot_idx) {
+                    *slot = Some(buf_frame);
+                }
+                phys
             }
-            self.slot_int_bufs[slot_idx] = Some(buf_frame);
-        }
-
-        let buf_phys = self.slot_int_bufs[slot_idx]
-            .as_ref()
-            .ok_or(KernelError::InternalError)?
-            .addr();
-
-        // Get the interrupt ring.
-        let ring = self.slot_int_rings[slot_idx]
-            .as_mut()
-            .ok_or(KernelError::NoSuchDevice)?;
-
-        // Enqueue a Normal TRB (device writes data to our buffer).
-        let normal_trb = Trb {
-            parameter: buf_phys,
-            status: u32::from(max_packet), // Transfer length
-            control: (TRB_TYPE_NORMAL << 10) | TRB_IOC, // IOC = Interrupt On Completion
+            None => return Err(KernelError::InvalidArgument),
         };
-        ring.enqueue(normal_trb);
 
+        let ring = self
+            .slot_int_rings
+            .get_mut(slot_idx)
+            .and_then(Option::as_mut)
+            .ok_or(KernelError::NoSuchDevice)?;
+        // The device writes up to `asked` bytes to the buffer; IOC asks for a
+        // Transfer Event when it has.
+        ring.enqueue(Trb {
+            parameter: buf_phys,
+            status: u32::from(ep.asked),
+            control: (TRB_TYPE_NORMAL << 10) | TRB_IOC,
+        });
         fence(Ordering::SeqCst);
-
-        // DCI for IN endpoint = 2*ep_num + 1
-        let dci = (ep_num as u32) * 2 + 1;
-        self.ring_doorbell(slot_id, dci);
-
+        if let Some(posted) = self.slot_int.get_mut(slot_idx) {
+            posted.outstanding = true;
+        }
+        self.ring_doorbell(slot_id, u32::from(ep.dci));
         Ok(())
     }
 
-    /// Poll for a completed HID input report on a device.
+    /// Take a slot's HID report, if one has arrived, and keep a receive
+    /// posted for the next.
     ///
-    /// Returns the raw report bytes if one is available.  The buffer
-    /// is only valid until the next call.
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn poll_hid_report(&mut self, slot_id: u8) -> Option<&[u8]> {
-        let slot_idx = (slot_id as usize).wrapping_sub(1);
-        if slot_idx >= MAX_SLOTS {
-            return None;
+    /// Drains the event ring first, so a report that came for another slot is
+    /// kept for that slot's poll rather than lost. A failed transfer marks
+    /// the endpoint for recovery, which takes commands and a control transfer
+    /// that each wait for completion, so it runs on the workqueue
+    /// ([`recover_halted_endpoints`]) and never in the timer interrupt this is
+    /// usually called from.
+    fn take_interrupt_packet(&mut self, slot_id: u8) -> Option<HidPacket> {
+        let slot_idx = usize::from(slot_id).wrapping_sub(1);
+        self.drain_events();
+
+        let taken = self.slot_int.get_mut(slot_idx)?.take();
+        let packet = match (taken, self.slot_int_bufs.get(slot_idx)) {
+            (Some(len), Some(Some(buf))) => {
+                let buf_virt = buf.addr().wrapping_add(self.hhdm_offset) as *const u8;
+                let mut bytes = [0u8; HID_PACKET_MAX];
+                // SAFETY: the buffer is a frame of ours, far larger than
+                // HID_PACKET_MAX, mapped by the HHDM. The controller is done
+                // with it: its transfer completed, and no receive is posted
+                // over it until this has copied it out (`IntIn::should_post`
+                // held the next one back while the completion was untaken).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf_virt, bytes.as_mut_ptr(), HID_PACKET_MAX);
+                }
+                Some(HidPacket { bytes, len })
+            }
+            _ => None,
+        };
+
+        let ep = *self.slot_int.get(slot_idx)?;
+        if ep.needs_recovery && !ep.recovery_queued {
+            self.queue_recovery(slot_id, ep);
+        }
+        // A failure here is the device gone (no ring) or no frame for the
+        // buffer; the next poll tries again, and logging it every 8 ms would
+        // bury everything else.
+        let _ = self.post_interrupt_receive(slot_id);
+        packet
+    }
+
+    /// Hand a failed HID endpoint's recovery to the workqueue, or give up on
+    /// it after [`MAX_RECOVERIES`] in a row.
+    fn queue_recovery(&mut self, slot_id: u8, ep: IntIn) {
+        let slot_idx = usize::from(slot_id).wrapping_sub(1);
+        if ep.recoveries >= MAX_RECOVERIES {
+            if ep.recoveries == MAX_RECOVERIES {
+                crate::serial_println!(
+                    "[xhci] Slot {} endpoint {} failed again (cc={}) after {} recoveries with no \
+                     report between them: left halted -- its device is silent until re-plugged",
+                    slot_id,
+                    ep.dci,
+                    ep.failed_cc,
+                    MAX_RECOVERIES
+                );
+                if let Some(e) = self.slot_int.get_mut(slot_idx) {
+                    e.recoveries = MAX_RECOVERIES.saturating_add(1);
+                }
+            }
+            return;
+        }
+        crate::serial_println!(
+            "[xhci] Slot {} endpoint {} transfer failed (cc={}): recovering it",
+            slot_id,
+            ep.dci,
+            ep.failed_cc
+        );
+        if crate::workqueue::submit(recover_halted_endpoints, 0)
+            && let Some(e) = self.slot_int.get_mut(slot_idx)
+        {
+            e.recovery_queued = true;
+            e.recoveries = e.recoveries.saturating_add(1);
+        }
+        // A full workqueue leaves `recovery_queued` false, so the next poll
+        // asks again.
+    }
+
+    /// Bring a failed HID interrupt endpoint back.
+    ///
+    /// Reset Endpoint takes it from Halted to Stopped; Set TR Dequeue Pointer
+    /// moves the controller past every TRB already on its ring; a device that
+    /// stalled is told to clear its own halt (CLEAR_FEATURE(ENDPOINT_HALT));
+    /// then a receive is posted. Either command answering Context State Error
+    /// means the endpoint was not halted after all, and recovery carries on.
+    ///
+    /// Thread context only: every step waits for its completion.
+    fn recover_interrupt_endpoint(&mut self, slot_id: u8) -> KernelResult<()> {
+        let slot_idx = usize::from(slot_id).wrapping_sub(1);
+        let ep = *self
+            .slot_int
+            .get(slot_idx)
+            .ok_or(KernelError::InvalidArgument)?;
+        let target = (u32::from(ep.dci) << 16) | (u32::from(slot_id) << 24);
+        let accept = |cc: u8| cc == TRB_CC_SUCCESS || cc == TRB_CC_CONTEXT_STATE_ERROR;
+
+        let reset = self.submit_command(Trb {
+            parameter: 0,
+            status: 0,
+            control: (TRB_TYPE_RESET_EP << 10) | target,
+        })?;
+        if !accept(reset.completion_code()) {
+            return Err(KernelError::IoError);
         }
 
-        // Check event ring for a Transfer Event targeting this slot.
-        if let Some(trb) = self.poll_event() {
-            if trb.trb_type() == TRB_TYPE_TRANSFER_EVENT {
-                let cc = trb.completion_code();
-                if cc == TRB_CC_SUCCESS || cc == TRB_CC_SHORT_PACKET {
-                    let transfer_len = trb.status & 0x00FF_FFFF;
-                    let _event_slot = trb.slot_id();
+        let (dequeue, cycle) = self
+            .slot_int_rings
+            .get(slot_idx)
+            .and_then(Option::as_ref)
+            .ok_or(KernelError::NoSuchDevice)?
+            .enqueue_pointer();
+        let moved = self.submit_command(Trb {
+            // Bit 0 is the Dequeue Cycle State: the cycle bit the next TRB
+            // written at the new dequeue pointer will carry.
+            parameter: dequeue | u64::from(cycle),
+            status: 0,
+            control: (TRB_TYPE_SET_TR_DEQUEUE << 10) | target,
+        })?;
+        if !accept(moved.completion_code()) {
+            return Err(KernelError::IoError);
+        }
 
-                    // Get the buffer virtual address.
-                    if let Some(buf_frame) = &self.slot_int_bufs[slot_idx] {
-                        let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *const u8;
-                        let len = transfer_len.min(64) as usize;
-                        // SAFETY: buf_virt is valid, len is bounded.
-                        let data = unsafe { core::slice::from_raw_parts(buf_virt, len) };
-                        return Some(data);
-                    }
+        if ep.failed_cc == TRB_CC_STALL {
+            // IN endpoint n has DCI 2n + 1, and address 0x80 | n.
+            let address = 0x80 | (ep.dci >> 1);
+            self.control_transfer(
+                slot_id,
+                USB_REQ_TYPE_STANDARD_EP_OUT,
+                USB_REQ_CLEAR_FEATURE,
+                USB_FEATURE_ENDPOINT_HALT,
+                u16::from(address),
+                0,
+                0,
+                false,
+            )?;
+        }
+
+        if let Some(e) = self.slot_int.get_mut(slot_idx) {
+            e.needs_recovery = false;
+            e.recovery_queued = false;
+            e.outstanding = false;
+            e.completed = None;
+            e.failed_cc = 0;
+        }
+        self.post_interrupt_receive(slot_id)
+    }
+}
+
+/// Recover every HID endpoint waiting for it (workqueue context).
+///
+/// Queued by [`XhciController::queue_recovery`] from the poll, which runs
+/// in the timer interrupt and must not wait for commands to complete.
+fn recover_halted_endpoints(_arg: u64) {
+    let mut guard = XHCI.lock();
+    let Some(ctrl) = guard.as_mut() else {
+        return;
+    };
+    for slot_id in 1..=u8::try_from(MAX_SLOTS).unwrap_or(u8::MAX) {
+        let slot_idx = usize::from(slot_id).wrapping_sub(1);
+        let Some(ep) = ctrl.slot_int.get(slot_idx).copied() else {
+            break;
+        };
+        if !ep.needs_recovery {
+            continue;
+        }
+        match ctrl.recover_interrupt_endpoint(slot_id) {
+            Ok(()) => crate::serial_println!(
+                "[xhci] Slot {} endpoint {} recovered after cc={}",
+                slot_id,
+                ep.dci,
+                ep.failed_cc
+            ),
+            Err(e) => {
+                crate::serial_println!(
+                    "[xhci] Slot {} endpoint {} could not be recovered: {:?}",
+                    slot_id,
+                    ep.dci,
+                    e
+                );
+                // Let the next poll queue another attempt, within the limit.
+                if let Some(s) = ctrl.slot_int.get_mut(slot_idx) {
+                    s.recovery_queued = false;
                 }
-            } else {
-                // Handle other events.
-                self.handle_event(&trb);
             }
         }
-
-        None
     }
 }
 
@@ -2294,53 +2853,16 @@ fn poll_keyboard_locked(ctrl: &mut XhciController) -> Option<HidKeyboardReport> 
         .iter()
         .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)?;
     let slot_id = kb_iface.slot_id;
-    let slot_idx = (slot_id as usize).wrapping_sub(1);
 
-    // Poll for a report.
-    if let Some(data) = ctrl.poll_hid_report(slot_id) {
-        if data.len() >= 8 {
-            let report = HidKeyboardReport {
-                modifiers: data[0],
-                reserved: data[1],
-                keycodes: [data[2], data[3], data[4], data[5], data[6], data[7]],
-            };
-            // Re-post receive buffer for next report.
-            let max_pkt = ctrl
-                .hid_interfaces
-                .iter()
-                .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
-                .map(|h| h.interrupt_max_packet)
-                .unwrap_or(8);
-            let ep_num = ctrl
-                .hid_interfaces
-                .iter()
-                .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
-                .map(|h| h.interrupt_ep)
-                .unwrap_or(1);
-            let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
-            return Some(report);
-        }
+    // The keys that were already down when the keyboard was configured come
+    // first, before any change the device reports after them.
+    if let Some(report) = ctrl.keyboard_baseline.take() {
+        return Some(report);
     }
 
-    // Re-post if the buffer was consumed but no valid report.
-    if ctrl.slot_int_rings[slot_idx].is_some() {
-        let max_pkt = ctrl
-            .hid_interfaces
-            .iter()
-            .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
-            .map(|h| h.interrupt_max_packet)
-            .unwrap_or(8);
-        let ep_num = ctrl
-            .hid_interfaces
-            .iter()
-            .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
-            .map(|h| h.interrupt_ep)
-            .unwrap_or(1);
-        // Only post if the ring has space.
-        let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
-    }
-
-    None
+    // A packet too short to be a boot report is passed over; the receive for
+    // the next one is posted either way.
+    HidKeyboardReport::from_bytes(ctrl.take_interrupt_packet(slot_id)?.data())
 }
 
 /// Poll for USB mouse input.
@@ -2357,53 +2879,19 @@ pub fn poll_mouse() -> Option<HidMouseReport> {
         .iter()
         .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)?;
     let slot_id = mouse_iface.slot_id;
-    let slot_idx = (slot_id as usize).wrapping_sub(1);
 
-    // Poll for a report.
-    if let Some(data) = ctrl.poll_hid_report(slot_id) {
-        if data.len() >= 3 {
-            let report = HidMouseReport {
-                buttons: data[0],
-                x: data[1] as i8,
-                y: data[2] as i8,
-                wheel: if data.len() >= 4 { data[3] as i8 } else { 0 },
-            };
-            // Re-post receive buffer.
-            let max_pkt = ctrl
-                .hid_interfaces
-                .iter()
-                .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
-                .map(|h| h.interrupt_max_packet)
-                .unwrap_or(4);
-            let ep_num = ctrl
-                .hid_interfaces
-                .iter()
-                .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
-                .map(|h| h.interrupt_ep)
-                .unwrap_or(1);
-            let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
-            return Some(report);
-        }
-    }
-
-    // Re-post if needed.
-    if ctrl.slot_int_rings[slot_idx].is_some() {
-        let max_pkt = ctrl
-            .hid_interfaces
-            .iter()
-            .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
-            .map(|h| h.interrupt_max_packet)
-            .unwrap_or(4);
-        let ep_num = ctrl
-            .hid_interfaces
-            .iter()
-            .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
-            .map(|h| h.interrupt_ep)
-            .unwrap_or(1);
-        let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
-    }
-
-    None
+    let packet = ctrl.take_interrupt_packet(slot_id)?;
+    // Boot protocol: buttons, X, Y, and a wheel byte if the device sends one.
+    // The movement bytes are two's-complement deltas, read as signed.
+    let &[buttons, x, y, ref rest @ ..] = packet.data() else {
+        return None;
+    };
+    Some(HidMouseReport {
+        buttons,
+        x: i8::from_ne_bytes([x]),
+        y: i8::from_ne_bytes([y]),
+        wheel: rest.first().map_or(0, |&w| i8::from_ne_bytes([w])),
+    })
 }
 
 /// USB HID keycode to PS/2 scan code conversion table.
@@ -2543,6 +3031,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(core::mem::size_of::<HidKeyboardReport>(), 8);
     assert_eq!(core::mem::size_of::<HidMouseReport>(), 4);
 
+    // Test 7: a boot keyboard's eight bytes, as the poller and GET_REPORT
+    // read them: left Shift held with `a`; seven bytes are not a report; a
+    // longer packet is read for its first eight.
+    let shift_a = [0x02, 0, 0x04, 0, 0, 0, 0, 0];
+    let report = HidKeyboardReport::from_bytes(&shift_a);
+    if report.map(|r| (r.modifiers, r.keycodes)) != Some((0x02, [0x04, 0, 0, 0, 0, 0])) {
+        crate::serial_println!("[xhci]   FAIL: from_bytes read {:?}", report);
+        return Err(KernelError::InternalError);
+    }
+    let short = shift_a.get(..7).unwrap_or(&[]);
+    let long = [0x20, 0, 0x05, 0x06, 0, 0, 0, 0x07, 0xFF];
+    if HidKeyboardReport::from_bytes(short).is_some()
+        || HidKeyboardReport::from_bytes(&long).map(|r| (r.modifiers, r.keycodes))
+            != Some((0x20, [0x05, 0x06, 0, 0, 0, 0x07]))
+    {
+        crate::serial_println!("[xhci]   FAIL: from_bytes on seven or nine bytes");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[xhci]   Boot keyboard report from bytes: OK");
+
+    // Test 8: what the poll path keeps for each HID endpoint.
+    if let Err(why) = int_in_self_test() {
+        crate::serial_println!("[xhci]   FAIL: HID endpoint bookkeeping: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[xhci]   HID endpoint: one receive at a time, lengths from the residual, a failure \
+         held for recovery: OK"
+    );
+
     crate::serial_println!("[xhci] Self-test PASSED");
+    Ok(())
+}
+
+/// [`IntIn`], [`transferred_len`] and the Transfer Event fields they are
+/// fed from, without a controller.
+fn int_in_self_test() -> Result<(), &'static str> {
+    // A Transfer Event: slot 2, endpoint 3 (EP1 IN), a short packet, 5 bytes
+    // not transferred.
+    let event = Trb {
+        parameter: 0,
+        status: (u32::from(TRB_CC_SHORT_PACKET) << 24) | 5,
+        control: (TRB_TYPE_TRANSFER_EVENT << 10) | (3 << 16) | (2 << 24),
+    };
+    if (
+        event.slot_id(),
+        event.endpoint_id(),
+        event.residual(),
+        event.completion_code(),
+    ) != (2, 3, 5, TRB_CC_SHORT_PACKET)
+    {
+        return Err("a Transfer Event's fields decode wrongly");
+    }
+
+    // The residual is what was NOT transferred: an 8-byte report into an
+    // 8-byte TRB leaves 0, which this driver read as an empty packet until
+    // 2026-10-02 -- every full-size keyboard report was dropped.
+    if transferred_len(8, 0) != 8
+        || transferred_len(8, 5) != 3
+        || transferred_len(8, 9) != 0
+        || transferred_len(512, 0) != HID_PACKET_MAX
+    {
+        return Err("transferred_len does not subtract the residual");
+    }
+
+    let mut ep = IntIn::new(3, 8);
+    if !ep.owns(3) || ep.owns(1) || IntIn::default().owns(0) {
+        return Err("an endpoint claims another's events");
+    }
+    if !ep.should_post() {
+        return Err("a new endpoint does not want its first receive");
+    }
+    ep.outstanding = true; // as post_interrupt_receive leaves it
+    if ep.should_post() {
+        return Err("a second receive would be posted over the first");
+    }
+    if ep.take().is_some() {
+        return Err("a report was taken before one completed");
+    }
+    ep.complete(TRB_CC_SUCCESS, 0);
+    if ep.outstanding || ep.should_post() {
+        return Err("a completion is not held until the poll takes it");
+    }
+    if ep.take() != Some(8) || !ep.should_post() {
+        return Err("a completed report is not taken whole, or the next receive is held back");
+    }
+    ep.outstanding = true;
+    ep.complete(event.completion_code(), event.residual());
+    if ep.take() != Some(3) {
+        return Err("a short packet is not taken as data");
+    }
+    ep.outstanding = true;
+    ep.complete(TRB_CC_STALL, 8);
+    if ep.take().is_some() || !ep.needs_recovery || ep.failed_cc != TRB_CC_STALL || ep.should_post()
+    {
+        return Err("a failed transfer is not held for recovery");
+    }
+    if IntIn::default().should_post() {
+        return Err("a slot with no endpoint wants a receive");
+    }
     Ok(())
 }

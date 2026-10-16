@@ -369,6 +369,28 @@ impl Outline {
         self.commands.is_empty()
     }
 
+    /// This outline with every point -- on the curve and off it -- moved by
+    /// `t`: scaled from font units to pixels, say, placed at a pen position,
+    /// or turned. An affine map keeps a Bézier curve the same curve, so
+    /// moving its control points moves it exactly.
+    #[must_use]
+    pub fn transformed(&self, t: &Transform) -> Self {
+        let at = |p: Point| t.apply(p);
+        Self {
+            commands: self
+                .commands
+                .iter()
+                .map(|cmd| match *cmd {
+                    PathCmd::MoveTo(p) => PathCmd::MoveTo(at(p)),
+                    PathCmd::LineTo(p) => PathCmd::LineTo(at(p)),
+                    PathCmd::QuadTo(c, p) => PathCmd::QuadTo(at(c), at(p)),
+                    PathCmd::CurveTo(c1, c2, p) => PathCmd::CurveTo(at(c1), at(c2), at(p)),
+                    PathCmd::Close => PathCmd::Close,
+                })
+                .collect(),
+        }
+    }
+
     /// The tight bounding box of every point the path touches, or `None`
     /// for an empty outline.
     ///
@@ -3993,6 +4015,48 @@ pub(crate) mod tests {
         let mut os2 = vec![0_u8; 78];
         os2[35] = proportion;
         os2
+    }
+
+    /// **An outline is moved point for point**: every command's every point,
+    /// the curves' control points with their ends, by the one transform; a
+    /// close stays a close.
+    #[test]
+    fn an_outline_is_moved_point_for_point() {
+        let p = Point::new;
+        let outline = Outline {
+            commands: vec![
+                PathCmd::MoveTo(p(1.0, 2.0)),
+                PathCmd::LineTo(p(3.0, 4.0)),
+                PathCmd::QuadTo(p(5.0, 6.0), p(7.0, 8.0)),
+                PathCmd::CurveTo(p(9.0, 10.0), p(11.0, 12.0), p(13.0, 14.0)),
+                PathCmd::Close,
+            ],
+        };
+        // Doubled across and three times up, then moved 100 right and 1 down.
+        let t = Transform {
+            a: 2.0,
+            d: 3.0,
+            e: 100.0,
+            f: -1.0,
+            ..Transform::IDENTITY
+        };
+        let q = |x: f32, y: f32| p(2.0 * x + 100.0, 3.0 * y - 1.0);
+        assert_eq!(
+            outline.transformed(&t).commands,
+            vec![
+                PathCmd::MoveTo(q(1.0, 2.0)),
+                PathCmd::LineTo(q(3.0, 4.0)),
+                PathCmd::QuadTo(q(5.0, 6.0), q(7.0, 8.0)),
+                PathCmd::CurveTo(q(9.0, 10.0), q(11.0, 12.0), q(13.0, 14.0)),
+                PathCmd::Close,
+            ]
+        );
+        // The identity changes nothing, an empty outline stays empty.
+        assert_eq!(
+            outline.transformed(&Transform::IDENTITY).commands,
+            outline.commands
+        );
+        assert!(Outline::default().transformed(&t).is_empty());
     }
 
     /// `post.isFixedPitch` set is the whole answer.

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=JSON Viewer
+Comment=Browse and edit JSON documents
+Icon=text-x-generic
+Exec=jsonviewer
+Categories=Development;
+Keywords=json;data;

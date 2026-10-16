@@ -49,9 +49,11 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
@@ -88,6 +90,14 @@ const LETTER_DIVIDER_HEIGHT: f32 = 28.0;
 const DETAIL_PADDING: f32 = 24.0;
 const AVATAR_SIZE: f32 = 72.0;
 const FIELD_HEIGHT: f32 = 36.0;
+/// The most a box holds, in characters: a line of an address book, and a
+/// paste of a page is not one.
+const BOX_CAPACITY: usize = 4096;
+/// The size a box's text is drawn at, which the caret keys and a press
+/// measure against as well.
+const BOX_TEXT_SIZE: f32 = 13.0;
+/// How far a box's text sits inside each side of the box.
+const BOX_TEXT_INSET: f32 = 10.0;
 const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const GROUP_CHIP_HEIGHT: f32 = 28.0;
 const MAX_RECENT: usize = 10;
@@ -1347,16 +1357,27 @@ pub fn merge_contacts(primary: &Contact, secondary: &Contact, merged_id: u64) ->
     merged
 }
 
+impl recordfile::Record for Contact {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl recordfile::Record for ContactGroup {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 // ============================================================================
 // Contact store
 // ============================================================================
 
 /// In-memory contact store with CRUD, search, sort, filter, and group management.
+#[derive(Clone)]
 pub struct ContactStore {
     contacts: Vec<Contact>,
     groups: Vec<ContactGroup>,
-    next_contact_id: u64,
-    next_group_id: u64,
     recently_viewed: VecDeque<u64>,
     /// How many changes the store has had. Every method that can change it
     /// counts one -- the ones that hand out `&mut` included, whether or not
@@ -1371,8 +1392,6 @@ impl ContactStore {
         Self {
             contacts: Vec::new(),
             groups: Vec::new(),
-            next_contact_id: 1,
-            next_group_id: 1,
             recently_viewed: VecDeque::new(),
             revision: 0,
         }
@@ -1389,12 +1408,61 @@ impl ContactStore {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// A number for a new contact that no contact here has -- and, being
+    /// random, that no other window will give out ([`recordfile::fresh_id`]).
+    fn fresh_contact_id(&self) -> u64 {
+        recordfile::fresh_id(|id| self.contacts.iter().any(|c| c.id == id))
+    }
+
+    /// `mine`'s changes since `base`, put into `theirs` -- what the file
+    /// holds now (design-decisions §1239).
+    ///
+    /// Contacts and groups are merged one by one ([`recordfile::merge`]), and
+    /// then what a merge can break is mended, since a book that names a group
+    /// it does not have is not read back at all: a group a kept contact is
+    /// in, deleted by another window, comes back from this window's copy;
+    /// a membership of a group nobody has any more goes. Recently viewed is
+    /// this window's list if it changed it, the file's otherwise, less anyone
+    /// no longer in the book. `revision` stays `mine`'s, so what this window
+    /// has not saved is still unsaved.
+    fn merged(base: &Self, mine: &Self, theirs: &Self) -> Self {
+        let mut groups = recordfile::merge(&base.groups, &mine.groups, &theirs.groups);
+        let mut contacts = recordfile::merge(&base.contacts, &mine.contacts, &theirs.contacts);
+        let present: HashSet<u64> = groups.iter().map(|g| g.id).collect();
+        let needed: HashSet<u64> = contacts
+            .iter()
+            .flat_map(|c| c.groups.iter().copied())
+            .filter(|id| !present.contains(id))
+            .collect();
+        groups.extend(
+            mine.groups
+                .iter()
+                .filter(|g| needed.contains(&g.id))
+                .cloned(),
+        );
+        let present: HashSet<u64> = groups.iter().map(|g| g.id).collect();
+        for contact in &mut contacts {
+            contact.groups.retain(|id| present.contains(id));
+        }
+        let mut recently_viewed = if mine.recently_viewed == base.recently_viewed {
+            theirs.recently_viewed.clone()
+        } else {
+            mine.recently_viewed.clone()
+        };
+        recently_viewed.retain(|id| contacts.iter().any(|c| c.id == *id));
+        Self {
+            contacts,
+            groups,
+            recently_viewed,
+            revision: mine.revision,
+        }
+    }
+
     // ----- Contact CRUD -----
 
     /// Add a new contact, returning its assigned ID.
     pub fn add_contact(&mut self, mut contact: Contact) -> u64 {
-        let id = self.next_contact_id;
-        self.next_contact_id = self.next_contact_id.saturating_add(1);
+        let id = self.fresh_contact_id();
         contact.id = id;
         self.contacts.push(contact);
         self.changed();
@@ -1451,8 +1519,7 @@ impl ContactStore {
 
     /// Add a new group, returning its assigned ID.
     pub fn add_group(&mut self, mut group: ContactGroup) -> u64 {
-        let id = self.next_group_id;
-        self.next_group_id = self.next_group_id.saturating_add(1);
+        let id = recordfile::fresh_id(|id| self.groups.iter().any(|g| g.id == id));
         group.id = id;
         self.groups.push(group);
         self.changed();
@@ -1674,8 +1741,7 @@ impl ContactStore {
         let a = self.contacts.iter().find(|c| c.id == id_a)?.clone();
         let b = self.contacts.iter().find(|c| c.id == id_b)?.clone();
 
-        let merged_id = self.next_contact_id;
-        self.next_contact_id = self.next_contact_id.saturating_add(1);
+        let merged_id = self.fresh_contact_id();
 
         let merged = merge_contacts(&a, &b, merged_id);
         self.contacts.retain(|c| c.id != id_a && c.id != id_b);
@@ -1700,7 +1766,8 @@ impl ContactStore {
     /// 1970), so "recently added" puts them first. Returns number of contacts
     /// imported.
     pub fn import_vcards(&mut self, data: &str, now: u64) -> usize {
-        let imported = import_vcards(data, self.next_contact_id);
+        // The ids the cards are read with are replaced as each is added.
+        let imported = import_vcards(data, 0);
         let count = imported.len();
         for mut contact in imported {
             contact.created_at = now;
@@ -2020,6 +2087,28 @@ fn book_text(store: &ContactStore) -> String {
 /// would lose, without a word, whoever was not read. So is one that puts a
 /// contact in a group it does not have, holds two things with one number, or
 /// names a contact it does not have among the recently viewed.
+/// The book the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a book -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only whoever was understood.
+fn read_book_file(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Option<ContactStore>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_book(&read.text).map(Some)
+}
+
 fn parse_book(text: &str) -> Result<ContactStore, String> {
     let mut lines = text.lines().enumerate();
     let first = lines.next().map_or("", |(_, line)| line);
@@ -2246,15 +2335,7 @@ fn parse_book(text: &str) -> Result<ContactStore, String> {
         ));
     }
     store.recently_viewed = viewed;
-    store.next_contact_id = next_id_after(store.contacts.iter().map(|c| c.id));
-    store.next_group_id = next_id_after(store.groups.iter().map(|g| g.id));
     Ok(store)
-}
-
-/// The first number after `ids`, for the next thing made: past every one
-/// read, so nothing made later takes the number of something kept.
-fn next_id_after(ids: impl Iterator<Item = u64>) -> u64 {
-    ids.max().map_or(1, |highest| highest.saturating_add(1))
 }
 
 // ============================================================================
@@ -2670,6 +2751,14 @@ pub struct ContactsApp {
     pub store: ContactStore,
     pub view: DetailView,
     pub search_query: String,
+    /// The editor of the box with the keyboard -- the search, or a line of
+    /// the form: its caret and selection, loaded whenever the keyboard
+    /// moves to another box or the box's text changed under it.
+    editor: TextInput,
+    /// Which box `editor` holds.
+    editor_for: Option<Focus>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
     pub sort_order: SortOrder,
     pub filter: ContactFilter,
     pub scroll_offset: f32,
@@ -2714,6 +2803,16 @@ pub struct ContactsApp {
     persist: bool,
     /// The store's revision when the book was last written or read.
     kept_revision: u64,
+    /// The book as this window last read or wrote it: what a save merges
+    /// this window's changes against, so another window's, saved since, are
+    /// kept rather than written over (design-decisions §1239).
+    base: ContactStore,
+    /// The book's file as this window last read or wrote it, to tell another
+    /// window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the book's file, which wakes the window when another one
+    /// saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// Why the book is not being kept, drawn for as long as it is true: it
     /// could not be read (and so is left exactly as it is), there is nowhere
     /// to keep it, or the last save failed.
@@ -2757,6 +2856,9 @@ impl ContactsApp {
             store: ContactStore::new(),
             view: DetailView::Empty,
             search_query: String::new(),
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             sort_order: SortOrder::Name,
             filter: ContactFilter::All,
             scroll_offset: 0.0,
@@ -2787,6 +2889,9 @@ impl ContactsApp {
             last_stamp: 0,
             persist: false,
             kept_revision: 0,
+            base: ContactStore::new(),
+            file_stamp: None,
+            watch: None,
             store_error: None,
             question: None,
             quit: false,
@@ -3088,38 +3193,8 @@ impl ContactsApp {
         // c-e-a-theme-can-shape-the-controls).
         let state = self.field_state(Target::Search, Focus::Search);
         guitk::field::draw(f, &self.palette, l.search, state, self.focus_ring_width);
-        let focused = state.focused;
-        let inner = inset(l.search, 10.0);
-        let placeholder = self.search_query.is_empty() && !focused;
-        let shown = if placeholder {
-            "Search contacts..."
-        } else {
-            &self.search_query
-        };
-        put_text(
-            f,
-            inner,
-            shown,
-            13.0,
-            if placeholder {
-                self.palette.overlay0
-            } else {
-                self.palette.text
-            },
-            FontWeightHint::Regular,
-        );
-        if focused {
-            // A caret rather than a character appended to the text: a box
-            // whose contents change when it is focused cannot be searched for
-            // by the words it shows.
-            let used = text::measure(&self.search_query, 13.0, FontWeightHint::Regular);
-            let caret_x = (inner.x + used).min(inner.right() - 2.0);
-            f.push(fill(
-                Rect::new(caret_x, inner.y + 4.0, 2.0, (inner.h - 8.0).max(0.0)),
-                self.palette.blue,
-                0.0,
-            ));
-        }
+        let inner = inset(l.search, BOX_TEXT_INSET);
+        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", state.focused);
         f.hit(Target::Search, l.search);
     }
 
@@ -3841,38 +3916,9 @@ impl ContactsApp {
                 let box_r = Rect::new(form.x, fy, form.w, h);
                 let state = self.field_state(Target::Field(field), Focus::Field(field));
                 guitk::field::draw(f, &self.palette, box_r, state, self.focus_ring_width);
-                let focused = state.focused;
-                let value = self.field_value(field);
-                let inner = inset(box_r, 10.0);
+                let inner = inset(box_r, BOX_TEXT_INSET);
                 let inner = Rect::new(inner.x, inner.y, inner.w, 20.0_f32.min(inner.h));
-                if value.is_empty() {
-                    put_text(
-                        f,
-                        inner,
-                        field.label(),
-                        13.0,
-                        self.palette.overlay0,
-                        FontWeightHint::Regular,
-                    );
-                } else {
-                    put_text(
-                        f,
-                        inner,
-                        value,
-                        13.0,
-                        self.palette.text,
-                        FontWeightHint::Regular,
-                    );
-                }
-                if focused {
-                    let used = text::measure(value, 13.0, FontWeightHint::Regular);
-                    let caret_x = (inner.x + used).min(inner.right() - 2.0);
-                    f.push(fill(
-                        Rect::new(caret_x, inner.y + 2.0, 2.0, (inner.h - 4.0).max(0.0)),
-                        self.palette.blue,
-                        0.0,
-                    ));
-                }
+                self.draw_box_text(f, inner, Focus::Field(field), field.label(), state.focused);
                 f.hit(Target::Field(field), box_r);
                 fy += h + 6.0;
             }
@@ -4450,6 +4496,16 @@ impl ContactsApp {
             return;
         };
         self.activate(target);
+        // A box: the caret under the pointer, measured against the box as
+        // drawn.
+        let focus = match target {
+            Target::Search => Focus::Search,
+            Target::Field(field) => Focus::Field(field),
+            _ => return,
+        };
+        if let Some(rect) = frame.rect_of(|t| *t == target) {
+            self.press_box(focus, rect, event.x);
+        }
     }
 
     /// Do what pressing `target` means.
@@ -4888,6 +4944,156 @@ impl ContactsApp {
 
     /// A keystroke: text into whatever has the keyboard, otherwise a
     /// shortcut.
+    /// What the box `focus` names holds.
+    fn box_text(&self, focus: Focus) -> &str {
+        match focus {
+            Focus::Field(field) => self.field_value(field),
+            _ => &self.search_query,
+        }
+    }
+
+    /// Load the box `focus` names into the editor, unless it already holds
+    /// it as it is -- the caret after the text.
+    fn load_editor(&mut self, focus: Focus) {
+        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {
+            let held = self.box_text(focus).to_owned();
+            self.editor.set_text(&held);
+            self.editor_for = Some(focus);
+        }
+    }
+
+    /// A key for the box `focus` names, which has the keyboard: `None` for
+    /// one it does not answer, else whether its text changed.
+    fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> Option<bool> {
+        self.load_editor(focus);
+        let edit = textline::apply_key(
+            &mut self.editor,
+            event,
+            BOX_CAPACITY,
+            &self.clipboard,
+            BOX_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        let changed = self.editor.text() != self.box_text(focus);
+        if changed {
+            let typed = self.editor.text().to_owned();
+            match focus {
+                Focus::Field(field) => *self.field_mut(field) = typed,
+                _ => self.search_query = typed,
+            }
+        }
+        edit.handled.then_some(changed)
+    }
+
+    /// Where the caret and the selection anchor of the box `focus` names
+    /// are, while the editor holds it as it is; the end, and none,
+    /// otherwise. One answer for the drawing and for a press.
+    fn box_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
+        let held = self.box_text(focus);
+        if self.editor_for == Some(focus) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (text::TextCursor::from(held.len()), None)
+        }
+    }
+
+    /// A press in the box `focus` names, drawn at `rect`, at `x`: the
+    /// keyboard, and the caret under the pointer, measured against the box
+    /// as it was drawn.
+    fn press_box(&mut self, focus: Focus, rect: Rect, x: f32) {
+        let (drawn, _) = self.box_caret(focus);
+        self.load_editor(focus);
+        let inner = inset(rect, BOX_TEXT_INSET);
+        let cursor = textedit::cursor_at_click(
+            self.box_text(focus),
+            drawn,
+            inner.w,
+            BOX_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - inner.x,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// A box's text in `inner`: what it holds -- with its caret and
+    /// selection where they are while it has the keyboard, scrolled so the
+    /// caret stays in view -- or, empty, `placeholder`, with the caret before
+    /// it while it has the keyboard. Refused, as `put_text` refuses a run,
+    /// where the clip in force cannot show it. The boxes drew their text cut
+    /// with an ellipsis and a caret after its end -- the only place the keys
+    /// could type -- or at the box's edge, past it.
+    fn draw_box_text(
+        &self,
+        f: &mut Frame<Target>,
+        inner: Rect,
+        focus: Focus,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        if !f.is_visible(inner) {
+            return;
+        }
+        let held = self.box_text(focus);
+        let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
+        let y = inner.y + ((inner.h - line) / 2.0).max(0.0);
+        let mut tree = RenderTree::new();
+        if held.is_empty() {
+            tree.push(RenderCommand::Text {
+                x: inner.x,
+                y,
+                text: placeholder.to_string(),
+                // What the box is for, faint but readable: overlay0 is the
+                // disabled grey, 2.30:1 on the base.
+                color: self.palette.subtext0,
+                font_size: BOX_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(inner.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    inner.x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let (cursor, anchor) = if focused {
+                self.box_caret(focus)
+            } else {
+                (text::TextCursor::default(), None)
+            };
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: held,
+                    cursor,
+                    selection_anchor: anchor,
+                    focused,
+                    x: inner.x,
+                    y,
+                    width: inner.w,
+                    line_height: line,
+                    font_size: BOX_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        for command in tree.commands {
+            f.push(command);
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
         if !event.pressed {
             return;
@@ -4936,19 +5142,6 @@ impl ContactsApp {
                 };
                 return;
             }
-            Key::Backspace => {
-                match self.focus {
-                    Focus::Search => {
-                        self.search_query.pop();
-                        self.scroll_offset = 0.0;
-                    }
-                    Focus::Field(field) => {
-                        self.field_mut(field).pop();
-                    }
-                    Focus::None => {}
-                }
-                return;
-            }
             Key::Enter => {
                 match self.focus {
                     Focus::Field(_) => self.save_form(),
@@ -4959,26 +5152,27 @@ impl ContactsApp {
             _ => {}
         }
 
-        // Printable text. `KeyEvent::text` is what the platform's keyboard
-        // layout produced, shift and dead keys included; deriving a character
-        // from the key code instead is what made a `+` impossible to type on
-        // any layout but the one the table was written for. Typed, not a
-        // command's letter -- a chord carries its letter as text, and Ctrl+S
-        // in a field typed an `s` instead of keeping the book -- and AltGr's
-        // characters among it.
-        if textline::types_into_field(event) {
-            let typed = event.text.clone();
-            match self.focus {
-                Focus::Search => {
-                    self.search_query.push_str(&typed);
+        // A box with the keyboard -- the search, or a line of the form --
+        // has every other key it answers: the caret keys, Backspace and
+        // Delete at the caret, Ctrl+A, C, X and V, and typing, what the
+        // keyboard layout produced (a `+` on any layout, dead keys composed)
+        // and AltGr's characters among it, and no command's letter -- Ctrl+S
+        // in a field typed an `s` instead of keeping the book. A plain key it
+        // does not answer stops here: the letters below are shortcuts only
+        // with nothing to type into, and Delete under a box with the keyboard
+        // deleted the selected contact. A Ctrl chord goes on: Ctrl+S keeps
+        // the book from a field. The boxes took typing at their end and
+        // Backspace from it, and nothing else.
+        if self.focus != Focus::None {
+            let focus = self.focus;
+            if let Some(changed) = self.box_key(focus, event) {
+                if changed && focus == Focus::Search {
                     self.scroll_offset = 0.0;
-                    return;
                 }
-                Focus::Field(field) => {
-                    self.field_mut(field).push_str(&typed);
-                    return;
-                }
-                Focus::None => {}
+                return;
+            }
+            if !textline::is_ctrl_chord(event.modifiers) {
+                return;
             }
         }
 
@@ -5051,6 +5245,27 @@ impl App for ContactsApp {
     fn tick_interval(&self) -> Option<Duration> {
         // An address book changes when someone edits it and at no other time.
         None
+    }
+
+    /// Watch the book's file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps the book.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = book_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the book written: read it again if another window
+    /// wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5183,40 +5398,35 @@ impl ContactsApp {
     /// [`load_book`](Self::load_book) with the size limit given, so a test
     /// can reach the limit without writing sixty-four megabytes.
     fn load_book_within(&mut self, path: &std::path::Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
+        match read_book_file(path, max_bytes) {
+            // None there yet: a first run.
+            Ok(None) => {}
+            Ok(Some(store)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = store.clone();
+                self.take_store(store);
             }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_book(&read.text) {
-            Ok(store) => self.take_store(store),
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
     }
 
-    /// Make `store` this window's address book.
+    /// Make `store` this window's address book, nothing shown.
     fn take_store(&mut self, store: ContactStore) {
+        self.view = DetailView::Empty;
+        self.adopt(store, true);
+    }
+
+    /// Show `store`: what this window and the file hold together, after a
+    /// save or another window's. `kept` says whether it is what the file now
+    /// holds; a store with this window's unsaved changes in it is not. A
+    /// contact shown stays shown while it is there.
+    fn adopt(&mut self, store: ContactStore, kept: bool) {
         // Every time in the file, so that a change made now is later than all
         // of them even if the clock has since been set back.
         let latest = store
@@ -5227,8 +5437,56 @@ impl ContactsApp {
             .unwrap_or(0);
         self.last_stamp = self.last_stamp.max(latest);
         self.store = store;
-        self.kept_revision = self.store.revision();
-        self.view = DetailView::Empty;
+        if kept {
+            self.kept_revision = self.store.revision();
+        } else if self.store.revision() == self.kept_revision {
+            // Still unsaved, whatever the count says.
+            self.kept_revision = self.kept_revision.wrapping_sub(1);
+        }
+        if let DetailView::ViewContact(id) | DetailView::EditContact(id) = self.view
+            && self.store.get_contact(id).is_none()
+        {
+            self.view = DetailView::Empty;
+        }
+    }
+
+    /// Read the book again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's unsaved changes put into it. Whether what
+    /// is shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case.
+    pub fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = book_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(theirs) = read_book_file(&path, MAX_BOOK_BYTES) else {
+            return false;
+        };
+        let theirs = theirs.unwrap_or_else(ContactStore::new);
+        let unsaved = self.unkept();
+        let shown = if unsaved {
+            ContactStore::merged(&self.base, &self.store, &theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown.contacts != self.store.contacts
+            || shown.groups != self.store.groups
+            || shown.recently_viewed != self.store.recently_viewed;
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown, !unsaved);
+        changed
     }
 
     /// Write the address book, if it has changed and this window keeps
@@ -5245,15 +5503,41 @@ impl ContactsApp {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = book_text(&self.store);
+        // Into what the file holds now, not over it: another window may have
+        // saved since this one read it (design-decisions §1239). The file as
+        // this window last wrote or read it needs no reading -- it is `base`
+        // -- and a save follows every change, so the read is kept for when
+        // something else has written.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_book_file(&path, MAX_BOOK_BYTES)
+        };
+        let theirs = match read {
+            Ok(theirs) => theirs.unwrap_or_else(ContactStore::new),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Not saved: {} could not be read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = ContactStore::merged(&self.base, &self.store, &theirs);
+        let text = book_text(&merged);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| safeio::write_str_atomically(&path, &text));
         match written {
             Ok(()) => {
-                self.kept_revision = self.store.revision();
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known for
+                // its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged, true);
             }
             Err(err) => {
                 self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
@@ -5620,8 +5904,8 @@ mod tests {
             app.frame(size.0, size.1).commands().iter().any(|c| {
                 matches!(
                     c,
-                    RenderCommand::FillRect { x, y, width, .. }
-                        if (*width - 2.0).abs() < f32::EPSILON && rect.contains(*x, *y)
+                    RenderCommand::Line { x1, x2, y1, .. }
+                        if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0)
                 )
             })
         };
@@ -6673,7 +6957,9 @@ mod tests {
         let mut store = ContactStore::new();
         let c = make_contact("Alice", "Anderson");
         let id = store.add_contact(c);
-        assert_eq!(id, 1);
+        // Random, so two windows do not give out one number (§1239).
+        assert!((1..=recordfile::MAX_ID).contains(&id));
+        assert_eq!(store.get_contact(id).unwrap().first_name, "Alice");
         assert_eq!(store.contact_count(), 1);
     }
 
@@ -6749,7 +7035,8 @@ mod tests {
     fn test_store_add_group() {
         let mut store = ContactStore::new();
         let gid = store.add_group(ContactGroup::new(0, "Friends"));
-        assert_eq!(gid, 1);
+        assert!((1..=recordfile::MAX_ID).contains(&gid));
+        assert_eq!(store.get_group(gid).unwrap().name, "Friends");
         assert_eq!(store.all_groups().len(), 1);
     }
 
@@ -6946,8 +7233,17 @@ mod tests {
     #[test]
     fn test_store_sort_by_recently_contacted() {
         let mut store = make_store_with_contacts();
-        store.mark_contacted(2, 5000); // Bob contacted most recently
-        store.mark_contacted(1, 3000); // Alice contacted earlier
+        let id_of = |store: &ContactStore, name: &str| {
+            store
+                .all_contacts()
+                .iter()
+                .find(|c| c.first_name == name)
+                .unwrap()
+                .id
+        };
+        let (alice, bob) = (id_of(&store, "Alice"), id_of(&store, "Bob"));
+        store.mark_contacted(bob, 5000); // Bob contacted most recently
+        store.mark_contacted(alice, 3000); // Alice contacted earlier
         let sorted = store.sorted_contacts(SortOrder::RecentlyContacted);
         assert_eq!(sorted[0].first_name, "Bob");
         assert_eq!(sorted[1].first_name, "Alice");
@@ -7694,16 +7990,23 @@ mod tests {
     /// The `(y, text)` of every notes line drawn in the detail panel.
     fn notes_lines_drawn(app: &ContactsApp) -> Vec<(f32, String)> {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        // Not the search box's placeholder, which is drawn at the same size
+        // and in the same colour.
+        let search = probe::rect_of(app, Target::Search);
         app.render()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
+                    x,
                     y,
                     text,
                     font_size,
                     color,
                     ..
-                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01 && color == pal.subtext0 => {
+                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01
+                    && color == pal.subtext0
+                    && !search.is_some_and(|r| r.contains(x, y)) =>
+                {
                     Some((y, text))
                 }
                 _ => None,
@@ -10048,8 +10351,6 @@ mod tests {
         assert_eq!(back.contacts, store.contacts);
         assert_eq!(back.groups, store.groups);
         assert_eq!(back.recently_viewed, store.recently_viewed);
-        assert_eq!(back.next_contact_id, store.next_contact_id);
-        assert_eq!(back.next_group_id, store.next_group_id);
         // No text broke a line: every line is one of the records.
         for line in text.lines().skip(1) {
             let kind = line.split('\t').next().unwrap();
@@ -10188,6 +10489,139 @@ mod tests {
         });
     }
 
+    /// **Two windows each add someone, and both are kept.** Each wrote its
+    /// own copy of the book whole, so the last to save threw away the other's
+    /// (design-decisions §1239).
+    #[test]
+    fn two_windows_each_add_someone_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("contacts-two-windows", |_| {
+            let mut first = ContactsApp::from_settings();
+            let mut second = ContactsApp::from_settings();
+            let ada = first.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            first.keep();
+            let alan = second.store.add_contact(Contact::new(0, "Alan", "Turing"));
+            second.keep();
+            assert_ne!(ada, alan, "two windows gave out one number");
+            assert_eq!(
+                second.store.contacts.len(),
+                2,
+                "the save did not show the other's"
+            );
+
+            // A change in each, to different people: both stand.
+            first.store.toggle_favorite(ada);
+            first.keep();
+            second.store.get_contact_mut(alan).unwrap().notes = String::from("computable");
+            second.keep();
+            let again = ContactsApp::from_settings();
+            assert!(again.store.get_contact(ada).unwrap().favorite);
+            assert_eq!(again.store.get_contact(alan).unwrap().notes, "computable");
+        });
+    }
+
+    /// **A window reads the book again when another saves**, keeping what it
+    /// has not saved; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("contacts-hear", |_| {
+            let mut first = ContactsApp::from_settings();
+            let mut second = ContactsApp::from_settings();
+            first.store.add_contact(Contact::new(0, "Grace", "Hopper"));
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert_eq!(second.store.contacts.len(), 1);
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+
+            let mine = second.store.add_contact(Contact::new(0, "Not", "Saved"));
+            first.store.add_contact(Contact::new(0, "Saved", "There"));
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.store.get_contact(mine).is_some(),
+                "an unsaved contact went"
+            );
+            assert_eq!(second.store.contacts.len(), 3);
+            assert!(second.unkept(), "the unsaved contact is taken for saved");
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            assert_eq!(ContactsApp::from_settings().store.contacts.len(), 3);
+        });
+    }
+
+    /// **A merged book names nobody and no group it does not have** -- the
+    /// reader refuses a book that does, whole. Recently viewed is the file's
+    /// unless this window changed it, less anyone deleted; a membership of a
+    /// group nobody has goes.
+    #[test]
+    fn a_merged_book_names_nothing_it_does_not_have() {
+        let mut base = ContactStore::new();
+        let ada = base.add_contact(make_contact("Ada", "Lovelace"));
+        let bob = base.add_contact(make_contact("Bob", "Baker"));
+        let cy = base.add_contact(make_contact("Cy", "Young"));
+        let work = base.add_group(ContactGroup::new(0, "Work"));
+        base.add_contact_to_group(ada, work);
+        base.record_view(cy);
+
+        // Another window viewed Ada; this one changed nothing in the list.
+        let mut theirs = base.clone();
+        theirs.record_view(ada);
+        let mut mine = base.clone();
+        mine.get_contact_mut(ada).unwrap().groups.push(77); // no such group
+        let merged = ContactStore::merged(&base, &mine, &theirs);
+        assert_eq!(merged.recently_viewed, theirs.recently_viewed);
+        assert_eq!(merged.get_contact(ada).unwrap().groups, vec![work]);
+        assert!(parse_book(&book_text(&merged)).is_ok());
+
+        // This window viewed Bob, whom the other deleted.
+        let mut theirs = base.clone();
+        theirs.delete_contact(bob);
+        let mut mine = base.clone();
+        mine.record_view(bob);
+        let merged = ContactStore::merged(&base, &mine, &theirs);
+        assert!(merged.get_contact(bob).is_none());
+        assert_eq!(
+            merged.recently_viewed,
+            [cy],
+            "a viewed contact who is gone is named"
+        );
+        assert!(parse_book(&book_text(&merged)).is_ok());
+    }
+
+    /// **A group another window deleted comes back for someone this window
+    /// put in it**, and a book never names a group it does not have -- which
+    /// would make it unreadable, whole.
+    #[test]
+    fn a_group_deleted_while_another_window_used_it_comes_back() {
+        settingsfile::testing::with_scratch_config("contacts-groups", |_| {
+            let mut first = ContactsApp::from_settings();
+            let work = first.store.add_group(ContactGroup::new(0, "Work"));
+            let ada = first.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            first.keep();
+            let mut second = ContactsApp::from_settings();
+            first.store.delete_group(work);
+            first.keep();
+            second.store.add_contact_to_group(ada, work);
+            second.keep();
+            let again = ContactsApp::from_settings();
+            assert!(
+                again.store_error.is_none(),
+                "the book is no longer readable: {:?}",
+                again.store_error
+            );
+            assert!(
+                again.store.get_group(work).is_some(),
+                "the group did not come back"
+            );
+            assert!(again.store.get_contact(ada).unwrap().groups.contains(&work));
+        });
+    }
+
     #[test]
     fn a_window_made_by_new_keeps_nothing() {
         settingsfile::testing::with_scratch_config("contacts-quiet", |dir| {
@@ -10281,7 +10715,10 @@ mod tests {
             typed_in(&mut app, "First");
             press(&mut app, Key::Enter);
             let error = app.store_error.clone().expect("a failed save said nothing");
-            assert!(error.starts_with("Not saved to "), "{error}");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239), and a folder in
+            // its place fails there.
+            assert!(error.starts_with("Not saved"), "{error}");
             assert!(drawn(&app).contains(&error), "the failure is not on screen");
             assert!(app.unkept());
 
@@ -10298,6 +10735,34 @@ mod tests {
                 ContactsApp::from_settings().store.contacts,
                 app.store.contacts
             );
+        });
+    }
+
+    /// A save whose write fails -- the book reads, and cannot be replaced --
+    /// says so, and the next change tries again. A folder where the file goes
+    /// (the test above) now fails at the read, which a save does first
+    /// (design-decisions §1239), so the write's failure needs a file that
+    /// reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("contacts-unwritable", |_| {
+            let mut app = ContactsApp::from_settings();
+            app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            app.keep();
+            let path = book_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.store.add_contact(Contact::new(0, "Alan", "Turing"));
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(app.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
         });
     }
 
@@ -10597,5 +11062,191 @@ mod tests {
         // Export moved to Ctrl+E.
         app.handle_event(&key_event(Key::E, true, ""), SIZE);
         assert!(app.picker.is_open() && app.picker.is_saving());
+    }
+
+    // -- The boxes edit at a caret ------------------------------------------------
+
+    use guitk::probe;
+
+    fn chord_in(app: &mut ContactsApp, key: Key, modifiers: guitk::event::Modifiers) {
+        app.handle_event(
+            &Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            }),
+            SIZE,
+        );
+    }
+
+    /// The x of every caret drawn in `rect`.
+    fn carets_in(app: &ContactsApp, rect: Rect) -> Vec<f32> {
+        app.frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A form's line edits at a caret, and Delete there deletes there**:
+    /// the arrows, Home and End move it, typing goes where it is, Ctrl+A, C,
+    /// X and V select, copy, cut and paste, a press puts it where it lands,
+    /// and it is drawn where it is. Delete with a box holding the keyboard
+    /// deleted the selected contact -- it fell through to the window's keys.
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn a_forms_line_edits_at_a_caret_and_delete_stays_in_it() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        let id = app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.select_contact(id);
+        app.start_editing();
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        assert_eq!(app.edit_first_name, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        chord_in(&mut app, Key::Delete, Modifiers::NONE);
+        assert_eq!(app.edit_first_name, "da", "Delete at the caret");
+        assert_eq!(
+            app.store.contact_count(),
+            1,
+            "Delete in a box deleted the contact"
+        );
+        // Nor is a letter that typed nothing -- a dead key's first press --
+        // a shortcut under a box: N started a new contact over this one.
+        chord_in(&mut app, Key::N, Modifiers::NONE);
+        assert_eq!(
+            (app.focus, app.edit_first_name.as_str()),
+            (Focus::Field(FormField::FirstName), "da"),
+            "a letter that typed nothing reached the shortcuts"
+        );
+        typed_in(&mut app, "A");
+        chord_in(&mut app, Key::End, Modifiers::NONE);
+        chord_in(&mut app, Key::Left, Modifiers::NONE);
+        typed_in(&mut app, "!");
+        assert_eq!(app.edit_first_name, "Ad!a", "the caret did not move");
+        let rect = probe::rect_of(&app, Target::Field(FormField::FirstName)).expect("the box");
+        let inner = inset(rect, BOX_TEXT_INSET);
+        let at = inner.x
+            + text::caret_x(
+                "Ad!a",
+                text::TextCursor::from(3),
+                BOX_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, rect);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Ad!` it follows at {at}"
+        );
+
+        chord_in(&mut app, Key::A, Modifiers::ctrl());
+        chord_in(&mut app, Key::X, Modifiers::ctrl());
+        assert_eq!(app.edit_first_name, "", "Ctrl+A and Ctrl+X");
+        chord_in(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(app.focus, Focus::Field(FormField::LastName));
+        chord_in(&mut app, Key::V, Modifiers::ctrl());
+        assert_eq!(app.edit_last_name, "LovelaceAd!a", "Ctrl+V");
+
+        // A press at the start of the last name, whose caret the paste left
+        // at its end, puts it there.
+        let size = SIZE;
+        let last = probe::rect_of(&app, Target::Field(FormField::LastName)).expect("the box");
+        app.click_at(
+            last.x + BOX_TEXT_INSET + 0.5,
+            last.y + last.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        typed_in(&mut app, "<");
+        assert_eq!(
+            app.edit_last_name, "<LovelaceAd!a",
+            "the press did not put the caret at the start"
+        );
+
+        // A press at the start of the first name puts the keyboard and the
+        // caret there.
+        app.click_at(
+            rect.x + BOX_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        typed_in(&mut app, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        typed_in(&mut app, "<");
+        assert_eq!(app.edit_first_name, "<Ada");
+    }
+
+    /// **The search box edits at a caret**, and every edit searches.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.store.add_contact(Contact::new(0, "Alan", "Turing"));
+        probe::click(&mut app, Target::Search);
+        typed_in(&mut app, "Tring");
+        for _ in 0..4 {
+            chord_in(&mut app, Key::Left, Modifiers::NONE);
+        }
+        typed_in(&mut app, "u");
+        assert_eq!(app.search_query, "Turing", "the caret did not move");
+        assert_eq!(
+            app.store
+                .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+                .len(),
+            1
+        );
+        chord_in(&mut app, Key::End, Modifiers::NONE);
+        chord_in(&mut app, Key::Home, Modifiers::shift());
+        typed_in(&mut app, "Ada");
+        assert_eq!(app.search_query, "Ada", "Shift+Home did not select");
+        // From the start, so a press past the end has somewhere to move it.
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        let rect = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.click_at(
+            rect.right() - 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            SIZE,
+        );
+        typed_in(&mut app, "!");
+        assert_eq!(
+            app.search_query, "Ada!",
+            "the press did not put the caret at the end"
+        );
+    }
+
+    /// **A box edits the text it shows**, however that text came to be in
+    /// it: its editor is loaded from the box whenever a key finds the two
+    /// apart -- and a box the keyboard moves to types after what it holds.
+    #[test]
+    fn a_box_edits_the_text_it_shows() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        app.start_new_contact();
+        typed_in(&mut app, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        app.edit_last_name = String::from("Ada");
+        chord_in(&mut app, Key::Tab, Modifiers::NONE);
+        typed_in(&mut app, "!");
+        assert_eq!(
+            app.edit_last_name, "Ada!",
+            "Tab kept the first name's caret"
+        );
+        app.edit_last_name = String::from("Byron");
+        typed_in(&mut app, "?");
+        assert_eq!(app.edit_last_name, "Byron?", "the key edited another text");
     }
 }

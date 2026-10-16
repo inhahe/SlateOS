@@ -41,7 +41,8 @@
 //! A text track is subtitles where FFmpeg's `mov_codec_id` makes it so --
 //! its handler (`subp`, `clcp`), or a data track's sample entry (`tx3g`,
 //! `text`: 3GPP timed text, [`Codec::MovText`]; `stpp`: TTML,
-//! [`Codec::Ttml`]) -- and the rest of its sample entry is its setup
+//! [`Codec::Ttml`]; `c608`: CEA-608 captions, [`Codec::Cea608`]) -- and the
+//! rest of its sample entry is its setup
 //! ([`Track::config`]), as `mov_parse_stsd_subtitle` keeps it: timed text's
 //! default style, justification and font table; TTML's namespace and
 //! schemas. WebVTT's `wvtt` is not in FFmpeg's table, and its track stays
@@ -64,9 +65,9 @@
 //! the reading order and the picture's description follow `mov.c`'s
 //! functions closely, each named where it is ported, with `libavutil`'s
 //! rationals beneath them. FFmpeg is LGPL version 2.1 or later, and so is
-//! this crate, its licence in `licenses/`. Whether SlateOS keeps an LGPL
-//! demuxer or has one written again from the specification and these tests
-//! is `open-questions/F-Q7.md`.
+//! this crate, its licence in `licenses/`. The operator decided to keep it
+//! so rather than have it written again from the specification
+//! (design-decisions §1375).
 //!
 //! # A hostile file
 //!
@@ -96,7 +97,7 @@ mod reader;
 mod track;
 
 pub use demux::{Demuxer, Packet};
-pub use track::{Audio, Codec, Colour, Track, TrackKind, Video};
+pub use track::{Audio, Codec, Colour, ContentLight, Mastering, Track, TrackKind, Video};
 
 /// Whether a file whose first bytes are `head` is one FFmpeg would take for
 /// MP4 (or QuickTime, its parent): its probe (`mov_probe`) walks the boxes

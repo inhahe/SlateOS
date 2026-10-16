@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Chess
+Comment=Play chess against the computer
+Icon=applications-games
+Exec=chess
+Categories=Game;BoardGame;
+Keywords=board;strategy;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Archive Manager
+Comment=Open, extract and make zip, tar, 7z and other archives
+Icon=package-x-generic
+Exec=archivemanager %f
+Categories=Utility;Archiving;Compression;
+Keywords=zip;tar;7z;extract;compress;
+MimeType=application/zip;application/x-tar;application/x-7z-compressed;application/gzip;application/x-bzip2;application/x-xz;

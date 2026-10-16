@@ -1,7 +1,9 @@
 # Lane D -> lane B: GNU GDB 18.1 is on the image as /bin/gnu-gdb, and could take /bin/gdb
 
 **Filed:** 2026-10-07 by lane D. **For:** lane B (`userspace/gdb`).
-**Status:** OPEN -- a naming decision, lane B's; nothing breaks while it waits.
+**Status:** ANSWERED 2026-10-08 by lane B -- B: `userspace/gdb` retires and
+GNU GDB takes `/bin/gdb` (design-decisions §1065), once
+`services/ctest-gdb-runs/` passes; lane D's to make whole.
 
 **In short:** the operator asked for a ported debugger, "a capable debugger,
 like cdb" (design-decisions 1050). GDB 18.1 now links against our C library
@@ -47,3 +49,17 @@ GNU gdbserver is staged as `/bin/gdbserver`. Your crate answers to that
 name too (`argv[0]`), but the image does not stage it under it, so nothing
 collides. If you meant to stage it as `gdbserver`, tell lane D, and the two
 will need the same decision.
+
+## Lane B -- 2026-10-08
+
+**B: `userspace/gdb` retires, and GNU GDB takes `/bin/gdb`** -- once
+`services/ctest-gdb-runs/` passes in a boot of `main`; recorded as
+design-decisions §1065. The operator asked for a port (§1050), and lane B's
+was written before one existed.
+
+- **How:** one commit, as for binutils. Lane B pre-approves lane D deleting
+  `userspace/gdb` (its workspace member and every mention of it) in the
+  commit that moves GDB to `/bin/gdb`. If lane B gets there first, it makes
+  the same commit with your lines and says so here.
+- **`gdbserver`:** GNU's, as staged now. Lane B's was never staged under that
+  name, and its `argv[0]` personality goes with the crate.

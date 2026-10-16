@@ -154,6 +154,36 @@ pub fn print_from(start_rbp: u64) {
     }
 }
 
+/// Print a captured backtrace with each return address resolved to
+/// `symbol+0xoffset` where the kernel symbol table can.
+///
+/// For reports made from inside the scheduler or a lock path, such as a
+/// spinlock carried across a context switch: it neither allocates nor takes a
+/// lock, because [`crate::ksyms::resolve_static`] does neither, which
+/// [`crate::ksyms::format_addr`] cannot promise. An address with no symbol
+/// prints bare, for resolving offline against the kernel image.
+pub fn print_symbolized(bt: &BacktraceResult) {
+    if bt.count == 0 {
+        serial_println!("  <no backtrace available (frame pointers missing?)>");
+        return;
+    }
+    serial_println!("  Backtrace ({} frames):", bt.count);
+    for (i, f) in bt.frames.iter().take(bt.count).enumerate() {
+        match crate::ksyms::resolve_static(f.return_addr) {
+            Some((name, offset)) => {
+                serial_println!(
+                    "    #{:2}: {:#018x} {}+{:#x}",
+                    i,
+                    f.return_addr,
+                    name,
+                    offset
+                );
+            }
+            None => serial_println!("    #{:2}: {:#018x}", i, f.return_addr),
+        }
+    }
+}
+
 /// Print the current backtrace (from the call site).
 ///
 /// The same "do not put a branch above the `asm!`" constraint as [`capture`]

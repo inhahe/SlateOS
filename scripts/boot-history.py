@@ -1390,6 +1390,10 @@ def build_record(serial: Serial | None, verdict: str, args,
         "marker": args.marker,
         "label": args.label,
         "profile": args.profile,
+        # Written unconditionally, `null` included, by `accel`'s rule: absent
+        # means the row predates the field, `null` that the recorder was not
+        # told, a number what QEMU was given.
+        "cpus": args.cpus,
     }
     # Why this run is not a normal boot, or absent when it is one. Set for a
     # deliberate probe -- non-default emulator flags, a hand-patched kernel --
@@ -1706,11 +1710,28 @@ def profile_of(rec: dict) -> str:
     return _PROFILE_UNKNOWN if val is None else str(val)
 
 
+def cpus_of(rec: dict) -> int | None:
+    """How many CPUs a record's boot ran on, `None` when it cannot say.
+
+    A row without the field predates it, and for an ordinary boot that is
+    not a guess but a fact of the harness: until `--smp` existed
+    (2026-10-09) boot-test.sh started QEMU with no `-smp`, which is one CPU.
+    An *experiment* row is the exception -- its `QEMU_EXTRA` could have
+    named any count -- so one without the field cannot say. A row with the
+    field carries what QEMU was given, or `null` when the recorder was not
+    told.
+    """
+    if "cpus" not in rec:
+        return None if rec.get("experiment") else 1
+    val = rec["cpus"]
+    return val if isinstance(val, int) and not isinstance(val, bool) else None
+
+
 def population_of(rec: dict) -> str:
     """The full label of the population a boot's duration belongs to.
 
     A wall time is a property of the *triple* (profile, sanitizer,
-    accelerator). Measured on this host: release boots ~2.7x faster than debug
+    accelerator) -- and, since 2026-10-09, of the CPU count (`cpus_of`). Measured on this host: release boots ~2.7x faster than debug
     (395s vs 144s median on QEMU TCG), KASAN costs ~3.4x, and the accelerator
     ~1.4x. No one of those makes the others irrelevant, so the population is
     the triple and not any subset. Kept as one function rather than composed at
@@ -1733,7 +1754,14 @@ def population_of(rec: dict) -> str:
     the lesson is that naming a partition is not the same as checking it covers
     every factor that moves the number.
     """
-    return f"{profile_of(rec)}/{sanitizer_of(rec)} on {accel_of(rec)}"
+    base = f"{profile_of(rec)}/{sanitizer_of(rec)} on {accel_of(rec)}"
+    # The CPU count, a fourth axis (2026-10-09), named only when it is not
+    # one: every population before it was a one-CPU one, and its label stays
+    # what it was.
+    cpus = cpus_of(rec)
+    if cpus is None:
+        return f"{base}, unknown CPU count"
+    return base if cpus == 1 else f"{base}, {cpus} CPUs"
 
 
 def _median(values: list[float]) -> float:
@@ -2243,6 +2271,14 @@ def main(argv=None) -> int:
                              "boot-test.sh sets this automatically whenever "
                              "QEMU_EXTRA or BENCH_EXPERIMENT is set.")
     parser.add_argument("--profile", default="debug")
+    parser.add_argument("--cpus", type=int, default=None,
+                        help="how many CPUs QEMU was given (boot-test.sh's "
+                             "--smp). A boot on two CPUs is a different "
+                             "population from one on one: different timings, "
+                             "and different bugs -- the first two-CPU boots "
+                             "with the self-tests on found five. Absent from "
+                             "rows written before 2026-10-09, when every "
+                             "boot-test.sh boot ran on one (see `cpus_of`).")
     parser.add_argument("--commit", default="",
                         help="commit the tested kernel was built from; pass "
                              "the value read BEFORE the build, since HEAD can "

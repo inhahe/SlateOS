@@ -232,6 +232,21 @@ ptx t1 - < t2
 ptx <&-
 ptx - <&-
 
+# --- standard descriptors closed ---
+# `-G`'s OUTPUT is `freopen (OUTPUT, "w", stdout)`: the file goes onto
+# descriptor 1 and is written as standard output is, and a failed `freopen`
+# reports the `errno` of glibc closing that descriptor -- `Bad file descriptor`
+# when it was closed already.
+rm -f out4; ptx -G t1 out4 >&-; echo "ptx=$?"; cat out4
+rm -f out4; ptx -G t1 out4 <&- >&-; echo "ptx=$?"; cat out4
+rm -f out4; ptx -G t1 out4 >&- 2>&-; echo "ptx=$?"; cat out4
+rm -f out4; ptx -G t1 out4 2>&-; echo "ptx=$?"; cat out4
+ptx -G t1 /nonexistent/dir/out >&-
+ptx -G t1 /nonexistent/dir/out <&- >&-
+ptx -G t1 dir >&-
+ptx -G t1 dir
+ptx t1 >&-
+
 # --- errors ---
 ptx nosuch
 ptx t1 nosuch

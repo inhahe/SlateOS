@@ -1,0 +1,82 @@
+What's recorded
+Your file is copied word for word into operator-answers/, with a section in the ledger.
+My five answers (A-Q22 to A-Q26) are now design decisions §1564–§1568. That includes the extra choice you asked for on A-Q26: Allow lasts until the program closes, and Always allow is remembered for that exact program.
+The C-Q31 paragraph is in CLAUDE.md, and the check that looks for new answer files now also looks in open-questions/.
+B-Q23 has no answer. The file has two lines for B-Q24. If the first one ("Claude's recommendation") was meant for B-Q23, tell me.
+D-Q8 — swap
+The design files agree with you: design.txt says "Use a swap file as default", with a swap partition as an install option and the file's size changeable in Settings. The kernel does neither.
+It only swaps to compressed memory, plus the first 16 MiB of any spare virtual disk that has no ext4 filesystem at its start. That is also a data-loss bug: a disk with partitions, or with a FAT filesystem, gets overwritten.
+swapon (the command that turns swap on) refuses everything, and the roadmap wrongly said swap files were done.
+
+I've logged the problem and am building swap files, swap partitions, swapon/swapoff, and a rule never to touch a disk that isn't marked as swap.
+
+D-Q8's premise is also out of date: the kernel has been able to lock memory since Oct 7. "Say it can't lock until the kernel can" no longer applies; lane D only needs to switch the library over to the kernel's call.
+D-Q3 — shared memory, queues, semaphores
+Speed: option C is the fastest, not slower. The file is used only once, when a program opens the object. After that every send, receive, wait and signal happens directly in shared memory, and the kernel is involved only to put a program to sleep or wake it. A costs a kernel call per operation; B costs a round trip through another program per operation.
+"Files that aren't files": a fair objection. Nothing reads or writes them as files, but they would show up in /dev/shm. design.txt takes your side ("Don't use file descriptors for sockets … use channels").
+Capabilities: native SlateOS programs keep sharing memory through the kernel's shared-memory capabilities, under every option. These named objects exist only so programs ported from Linux run, and Linux's rules define them as names anyone with permission can open. So every option must decide "may this program open this name?": C uses the file's permission, A would need a new kernel permission scheme, B the service's own.
+A fourth option that meets all three concerns: a small service that holds the names and, after a permission check, hands the program one of the kernel's shared-memory capabilities. Everything after that works as in C. That means no files, native capabilities, and C's speed, at the cost of one small service. I've suggested to lane D that they offer it to you.
+C-Q34 — scaling
+Even setting the 200 programs aside, A is the better long-term choice, as long as it has the per-element control you describe.
+Why A: layout doesn't depend on the screen's resolution, mouse positions are converted in one place, and a window moved to a screen with a different scale just redraws.
+Why not B: B is how old Windows programs work, and it caused Windows' long run of blurry, half-scaled apps and slightly-off clicks.
+Sharpness: the usual argument for B doesn't apply here. SlateOS programs send drawing instructions rather than pictures, so text and shapes are drawn sharp at the screen's real resolution.
+What other systems do: macOS and iOS lay out in "points" and draw at 2× or 3×, with images supplied in 1×/2×/3× versions. Android uses "dp" units. Browsers use CSS pixels, with srcset for sharper images and a canvas that can use real pixels. Windows' newer toolkits (WPF, WinUI) moved to this approach too.
+Per element: yes. Text and shapes scale automatically. An image can come with its own density (a 2× image is drawn pixel for pixel at 200%). A game, a video or a photo at 100% can declare that it uses real pixels.
+C-Q33 — startup programs
+Yes, they do depend on each other and on services:
+Tray icons need the tray.
+Many programs need the input-method service.
+Sync tools need the network and the password store.
+
+That's why Linux moved startup programs into its per-user service manager (systemd), and macOS starts per-user programs with the same mechanism as its system services (launchd). So by your rule it's C. I've told lane C to record C unless you say otherwise.
+C-Q29 — clipboard
+Option A needs a connection to the window system, not a window. Wayland solved the same problem with an extension used by clipboard managers and command-line tools. Writing to the clipboard can be open to every program. Reading it, if you aren't the window the user is in, should need a permission; that is what blocks programs spying on the clipboard in the background. History is planned (design.txt: "clipboard with history view and select"), and the clipboard program already keeps one. What's missing is the connection that lets other programs reach it.
+E-Q4 — deleting by age
+Yes. roadmap-detailed has a per-drive policy: maximum age ("older than N days"), maximum size and maximum count, stored on the drive and applied when it's connected.
+F-Q7 / F-Q8 / F-Q9 — FFmpeg
+Speed:
+The MP4 reader barely affects speed, so rewriting it gains nothing.
+FFmpeg's decoders are fast because of hand-written processor-specific code and multi-threading, and a translation doesn't carry those over by itself. Since you allowed newer processor instructions (F-Q5: A), that work can be done for either a rewrite or a translation, so they end up equally fast.
+OpenH264 (F-Q8's option C) decodes on one thread, so it is the slowest.
+Reliability: correct output can be checked under every option, because both formats are defined exactly and have official test files. FFmpeg's real lead is 20 years of handling broken and unusual files, which a translation inherits and a rewrite doesn't.
+Time: lane F's port of Google's VP9 decoder matched all 314 official test files and ran multi-threaded within one afternoon. Translating H.264 would take roughly a day. Writing it fresh from the roughly 800-page specification, by a session that has never read FFmpeg, would take a few times that. AAC takes hours either way.
+What the LGPL (FFmpeg's licence) would limit:
+The translated code stays under the LGPL; it can't be merged into MIT-licensed code.
+Anyone who gets a program containing it must be able to rebuild that program with a modified copy. That is automatically true for SlateOS's own programs, because all the source is public.
+A closed-source program from someone else can't build it in. It would use a system decoding service instead, which is also the safer design, since decoders are a favourite target for attacks.
+FFmpeg's licence allows version 2.1, so LGPLv3's extra rules for locked-down devices don't apply.
+
+  So yes, living with the LGPL is easier than rewriting, and it needn't follow D-Q6: the C library is inside every program, a decoder only inside video programs.
+Patents are the same under every option. They cover what a decoder does, not who wrote the code. FFmpeg's licence gives no patent rights, writing from the specification doesn't avoid them, and Cisco's patent coverage applies only to the OpenH264 build Cisco itself distributes. For H.264, the first 100,000 copies a year cost nothing and most of the patents have expired. AAC-LC's core patents have expired; HE-AAC's last a few more years. Debian, Ubuntu and Arch include these decoders; Fedora doesn't.
+How likely you'd need what OpenH264 lacks:
+Almost everything from phones, the web and downloads is the ordinary kind.
+Interlaced video comes from TV recordings and older camcorders (around 2006–2012), so anyone with old home videos will have some.
+10-bit video is mostly anime releases from about 2011–2018.
+4:2:2 video comes from professional and semi-professional cameras.
+HE-AAC (left out by F-Q9's option C) is used by low-bitrate radio and podcasts. Even without it those files can play muffled rather than being refused.
+My view, given your priorities: keep the MP4 translation (F-Q7: A). For H.264 and AAC, translate FFmpeg (option B), with decoding run as a system service. That reverses lane F's recommendation, which was based on avoiding the LGPL.
+F-Q10 — printer colours
+Printing is in the spec: roadmap-detailed lists CUPS or an equivalent, drivers such as Epson's, and turning pages into each printer's own format.
+Most modern printers (IPP Everywhere, AirPrint) take ordinary colours and convert them themselves.
+Driver-based printing does need printer colour profiles, which is what Little CMS (option B's library) does in Linux's printing system.
+
+So: A for screens now, and add Little CMS when printing is built; it can then cross-check A as well. Firefox can't serve as the reference here, because as far as I know it leaves printer colour to the operating system.
+F-Q6 — reaching home computers
+Most of this is already built, by lane D: a dynamic-DNS service supports Dynu, DuckDNS, No-IP and FreeDNS, and asks the router to open ports. Turning on remote desktop can set both up in the same step. Two things to know:
+A browser client needs HTTPS, which a dynamic-DNS name can get free from Let's Encrypt.
+If no port can be opened (a router without UPnP, or an ISP that puts customers behind a shared address, which is increasingly common), IPv6 often still works. Otherwise nothing will without a relay server, and Settings should say which case you're in.
+Others
+F-Q5: when the whole system is built for x86-64-v3, Rust's processor check becomes a constant "yes", so the run-time choice disappears by itself; only deleting the old copies would remain. I've asked lane F to note it with that trigger.
+F-Q3: your three choices match A-Q26's, so I've asked lane F to use the same stored permissions rather than build a second store.
+B-Q22: it is in roadmap-detailed ("Structured shutdown via IPC message", §1.6). It was listed but never built. Your three levels map cleanly:
+Ask to close (the program may ask about saving).
+Exit now without asking, but cleanly (Linux's SIGTERM).
+Force (the kernel ends it).
+
+  I've offered lane B the kernel half, which lets kill and the task manager tell which programs can answer natively.
+
+Other notes
+There's an MIT LICENSE file in the os folder that isn't committed anywhere. Tell me if you want it committed. The FFmpeg-derived code would keep its own LGPL notice inside the MIT project.
+The final test boot of the freezer and the two-CPU hang fix is running. When it passes, those fixes and today's records go to main.
+The Gmail, Google Calendar and Google Drive connectors need authorising in your claude.ai connector settings before they can be used.

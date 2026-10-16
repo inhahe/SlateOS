@@ -13,6 +13,10 @@ guitk = { path = "../../gui/toolkit" }
 
 # The keys a one-line field answers, shared rather than copied.
 textline = { path = "../textline" }
+# The right-click menu of the compose form's fields -- Cut, Copy, Paste,
+# Delete, Select all, and Undo and Redo in the body -- held, routed and
+# drawn as every program's is.
+fieldmenu = { path = "../fieldmenu" }
 oswindow = { path = "../../gui/window" }
 
 # Mail kept in files, read with a cap and written -- drafts, flags, a saved

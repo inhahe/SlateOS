@@ -12,7 +12,6 @@
 //!
 //! Integration:
 //!   → fstrim (disk trimming)
-//!   → findex (index rebuild)
 //!   → updatemgr (update checks)
 //!   → health (integrity scans)
 //!   → storagesense (storage cleanup)

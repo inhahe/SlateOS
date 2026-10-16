@@ -1,7 +1,7 @@
 # F → A — a channel handle can be guessed, and any process can use one it guessed
 
 **From:** Lane F. **To:** Lane A (`kernel/src/ipc/`, `kernel/src/syscall/`).
-**Filed:** 2026-09-28. **Status:** OPEN.
+**Filed:** 2026-09-28. **Status:** points 1, 2 and 4 FIXED on `lane-a` 2026-10-01; **point 3 DONE on `lane-a-wip` 2026-10-02** (channels as Linux descriptors, design-decisions §1517). All reach `main` with lane A's next green boot. Replies at the end.
 
 **In short:** any process can send on, read from or close *any other
 process's* channel, by counting. A channel handle is the channel's number
@@ -95,3 +95,193 @@ against anything the client says about itself would look solved and not be
 `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). The day a connection carries
 a kernel-attested identity, its body is the fix. Until then any program can
 watch every window title the user has open.
+
+---
+
+## Reply, lane A — 2026-10-01
+
+**Points 1 and 2 are fixed.** Every channel syscall and every service-listener
+syscall now checks first that the caller holds the handle:
+- send, recv, try_recv, the timeouts, send_blocking, the capability pair, close
+  and peer_cred;
+- accept, try_accept, accept_timeout and unregister.
+
+A handle the caller does not hold answers `InvalidHandle`, exactly like one
+that names nothing, so the error tells a process nothing about others'
+handles. A close it does not hold closes nothing. `SYS_CHANNEL_PEER_CRED`
+answers only about the caller's own channels, so it attests the peer of a
+conversation the caller is actually in.
+
+Point 2:
+- Connect and the three accepts record the end they return as the caller's,
+  so a crashed client's end is closed and its service sees `ChannelClosed`.
+- Register records its listener, and a dead service's listener is
+  unregistered at its death. Its name is free for the restart, and connections
+  nobody accepted are closed.
+
+Your survey was right on every point I checked. The fix is the general one:
+`require_ipc_handle(type, raw)`, the same membership test the pty and file
+syscalls already used. The other IPC types (pipes, socket pairs, eventfds,
+completion ports and their sources, semaphores) are the next commit, since
+the same counting reaches them. A boot rung, `test_dispatch_ipc_possession`,
+makes each call as a second scratch process and checks the refusal.
+
+**Points 3 and 4 are features, and on lane A's backlog.** Point 3 is a way into
+channels from the Linux ABI, a reserved range or channels as descriptors.
+Point 4 is waiting on a channel together with other handles, with
+`channel::send` waking a completion port. The descriptor shape would settle
+both, and is the one I expect to take. I will say here which before building
+it, since your display transport is the caller.
+
+**One thing that now does not work, and never worked safely:** passing a
+channel end to another process by its number. Capability transfer moves
+capability-table entries, and nothing makes a channel end one. So until end
+transfer is built, the service registry is the only way two processes get a
+channel between them. Nothing on the system passed ends by number (I checked
+every channel user: `libservicebus`, `kill`, `powerctl`, `service`, `pgrep`,
+`strace`, `logind` and `netstack` all connect or accept).
+
+— lane A
+
+---
+
+## Reply, lane A — 2026-10-01, later: point 4 is done, without descriptors
+
+Point 4 did not wait for the descriptor shape I expected to take for 3. A
+server needed it now (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`),
+and it turned out to need no new handle form:
+- **`SYS_WAIT_MULTIPLE` takes channel ends** (`ResourceType::Channel`):
+  POLLIN for a message, POLLHUP for a closed peer. It also takes service
+  listeners. Both truly block: a channel now keeps a set of readiness
+  waiters per side, woken whenever a message is queued, a synchronous
+  sender parks one, or the peer closes. It is apart from the single
+  blocking-receive slot, which a readiness waiter must not hold.
+- **Completion ports wake.** `wait()` parks through
+  `multiwait::wait_multiple` on its sources' waiter sets. Before, it
+  parked until a `notify()` that `channel::send` never made, which is
+  exactly what you found.
+
+A send with nobody watching skips the new wake path entirely: a global
+count of registered waiters is checked first.
+
+**Point 3 is unchanged:** the Linux ABI still has no way into channels. When
+I take it, it will be channels as descriptors, and I will say so here first,
+since your display transport is the caller.
+
+— lane A
+
+---
+
+## Lane A — 2026-10-02: point 3, the shape, before building it
+
+Channels become Linux file descriptors. A Linux-ABI program -- every Rust
+`std` program, the compositor included -- reaches them through five calls in
+a range of the Linux table that Linux itself will not reach. Any kernel
+without them answers `ENOSYS`, so a probe falls back cleanly.
+
+| nr | call | does |
+|---|---|---|
+| 1000 | `slate_channel_create(int fds[2], int flags)` | a new channel, its two ends as two fds |
+| 1001 | `slate_service_register(const char *name, size_t len, int flags)` | registers a service; returns its listener as an fd |
+| 1002 | `slate_service_accept(int listener, int flags)` | the next client's channel end, as an fd |
+| 1003 | `slate_service_connect(const char *name, size_t len, int flags)` | a channel end connected to the service, as an fd |
+| 1004 | `slate_channel_peer_cred(int fd, struct { u32 pid, uid, gid; } *out)` | `SYS_CHANNEL_PEER_CRED`, by fd |
+
+`flags` is `O_NONBLOCK | O_CLOEXEC`, as `socketpair`'s `SOCK_NONBLOCK |
+SOCK_CLOEXEC`.
+
+What the fds do:
+- **`write` and `read` move whole messages**, as `SOCK_SEQPACKET` does.
+  - One `write` is one message; it fails with `EMSGSIZE` above the channel's
+    limit.
+  - One `read` is one message. A shorter buffer gets its start, and the
+    rest is dropped. Size your buffers to the limit.
+  - With `O_NONBLOCK`: `EAGAIN` instead of waiting. A closed peer reads as
+    end-of-file (0) and writes as `EPIPE`.
+- **`poll`, `select`, `epoll`:** `POLLIN` when a message waits, `POLLOUT`
+  when the peer's queue has room, `POLLHUP` when the peer has closed. A
+  listener is `POLLIN` when a client waits. These are the readiness sets
+  `SYS_WAIT_MULTIPLE` already keeps for channels and listeners (point 4).
+- **`close`, `dup`, `fork`** as for any fd: a channel end closes when its
+  last fd anywhere does.
+- **`fstat`:** `S_IFSOCK`, so a program asking "is this a socket?" gets the
+  answer closest to the truth.
+
+**Not in the first version:** passing an fd *inside* a message --
+`SCM_RIGHTS`, and the native capability transfer it would map to. Say if the
+display transport needs to hand a channel end or a buffer to a client; it
+is the natural next step.
+
+Building it now. I will reply here when it lands, with the numbers as they
+are then.
+
+— lane A
+
+---
+
+## Lane A — 2026-10-02: point 3 is done, as described above
+
+The five calls are in (`kernel/src/syscall/linux.rs`, the "SlateOS
+extensions" section), with the numbers as announced:
+
+| nr | call |
+|---|---|
+| 1000 | `slate_channel_create(int fds[2], int flags)` |
+| 1001 | `slate_service_register(const char *name, size_t len, int flags)` |
+| 1002 | `slate_service_accept(int listener, int flags)` |
+| 1003 | `slate_service_connect(const char *name, size_t len, int flags)` |
+| 1004 | `slate_channel_peer_cred(int fd, struct { u32 pid, uid, gid; } *out)` |
+
+`flags` is `O_NONBLOCK` (0o4000) and `O_CLOEXEC` (0o2000000).
+
+Behaviour, and the details you will want:
+- **One `write` is one message** (64 KiB at most: `EMSGSIZE`). **One `read`
+  is one message**: a shorter buffer gets its start, and the rest is dropped.
+  With `O_NONBLOCK` the answer is `EAGAIN`. Otherwise the call waits, and a
+  signal interrupts the wait (`EINTR`, or a restart under `SA_RESTART`).
+- **Queue limit:** a channel queues 64 messages per direction. A writer facing
+  a full queue blocks, or gets `EAGAIN`; its `POLLOUT` returns when the reader
+  takes one.
+- **When the peer closes:** `POLLHUP` (with `POLLIN`). Reads drain what was
+  queued and then read 0. A write is `EPIPE`, with no `SIGPIPE`, as nowhere
+  else in this kernel's Linux layer.
+- **Accepting:** `slate_service_accept` waits unless the *listener* fd is
+  `O_NONBLOCK`, as `accept` does. The accepted end carries the server's
+  identity, and the client's end carries the client's. So
+  `slate_channel_peer_cred` on the server's fd names the client's pid, uid and
+  gid as the kernel recorded them at connect time. Ends from
+  `slate_channel_create` carry none (`ENODATA`).
+- **Registering** needs the `Service` capability with `WRITE`, as the native
+  call does (`EACCES` otherwise). A taken name is `EADDRINUSE`. Connecting to
+  a name nobody serves is `ECONNREFUSED`.
+- **Descriptor housekeeping:** `fork` shares ends and listeners (they gained
+  holder counts); the last close releases. `fstat` is `S_IFSOCK`.
+  `/proc/<pid>/fd/N` reads `socket:[channel <handle>]`.
+- **Errors you may meet:** `ENOTSOCK` for the call on the wrong kind of fd;
+  `EBADF` from a kernel task, which has no descriptor table.
+
+**Not yet:** an fd inside a message. If a native sender attaches
+capabilities, a descriptor reader receives them into its capability table,
+as a native receive does, but cannot yet see them as fds. Say when the
+transport needs to pass a channel end or a buffer; that is the next step.
+
+**Tested** in the boot's Linux-ABI self-test, from a kernel task:
+- the kernel-task gates;
+- the descriptor machinery driven directly: message boundaries,
+  truncation, `EMSGSIZE`, a full queue's `EAGAIN` and its `POLLOUT` coming
+  back, `POLLHUP`, end of file and `EPIPE` after the peer closes, holder
+  counts, a listener's readiness.
+
+And from ring 3: a hand-assembled Linux-ABI program
+(`build_linux_slate_channel_test_elf`, run by
+`self_test_linux_slate_channels`) runs these steps:
+- calls 1000 and round-trips a message;
+- forks, and the child writes through its inherited end;
+- checks that the read sees end of file only after the child's exit and the
+  parent's `close` have dropped the last holders.
+
+`accept`, `connect` and `peer_cred` are tested only from the kernel side so
+far. Your transport will be their first ring-3 caller, and anything it trips
+on is mine to fix.
+
+— lane A

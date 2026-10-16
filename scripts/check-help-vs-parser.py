@@ -11,8 +11,9 @@ the program supplies both halves of the comparison itself. Two thirds of
 the unknown-option findings are blocked on a reference environment this
 session cannot install into; none of these are.
 
-The rule: an option named in a help string is RECOGNISED if the crate's
-source also holds it as a bare string literal (`"--priority"`), as a
+The rule: an option named in a help string is RECOGNISED if the program's
+source -- every file of it (`program_of`), not only the one holding the
+help -- also holds it as a bare string literal (`"--priority"`), as a
 valued prefix (`"--priority="`), or inside a `starts_with`/`strip_prefix`.
 If the only place the text `--priority` occurs is the help itself, nothing
 parses it.
@@ -117,6 +118,12 @@ def advertised(text):
         if any(re.fullmatch(r"[a-z][a-z0-9_-]*", tok) for tok in body.split()):
             continue
         for opt in LONG.findall(body):
+            # An option's name never ends in a dash; a word that does is a
+            # banner's: `vmstat -w` prints `--procs-- ------memory------`,
+            # whose first word the guard above cannot see, because nothing
+            # comes before it. Eleventh false positive.
+            if opt.endswith("-"):
+                continue
             found.setdefault(opt, lit.strip())
         for c in SHORT.findall(body):
             found.setdefault("-" + c, lit.strip())
@@ -188,6 +195,7 @@ fn help() {
     println!("Usage: demo [options]");
     println!("  -r, --real       an option the parser reads");
     println!("  -g, --ghost      an option nothing reads");
+    println!("--banner-- ----columns---- --cpu--");
 }
 fn parse(a: &str) {
     match a {
@@ -222,6 +230,12 @@ def selftest():
         print("  ok    an option named only in a comment is not an advertisement")
     else:
         print("  FAIL  a comment was read as help text")
+        failures += 1
+
+    if not any(o.startswith(("--banner", "--cpu")) for o in ads):
+        print("  ok    a banner's dashed words are not options")
+    else:
+        print("  FAIL  a banner was read as options: %r" % sorted(ads))
         failures += 1
 
     if recognised(text, "--real"):
@@ -267,24 +281,61 @@ def selftest():
             print("  FAIL  test_module_files gave %r" % sorted(got))
             failures += 1
 
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src")
+        os.makedirs(os.path.join(src, "bin", "prog"))
+        help_line = 'fn help() { println!("  -r, --real       an option the parser reads"); }\n'
+        parts = {
+            # A program of several files: the help in one, the parser in another.
+            "bin/prog/nls.rs": help_line,
+            "bin/prog/config.rs": 'fn parse(a: &str) { if a == "--real" || a == "-r" {} }\n',
+            # A one-file program with the same help and no parser: its
+            # neighbour's parser is not its own.
+            "bin/alone.rs": help_line,
+        }
+        for rel, body in parts.items():
+            with io.open(os.path.join(src, rel), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+        _total, found = sweep(sorted(os.path.join(src, r) for r in parts))
+        flagged = {os.path.relpath(f, src).replace(os.sep, "/") for f, _m in found}
+        if flagged == {"bin/alone.rs"}:
+            print("  ok    a parser in another file of the same program counts,")
+            print("        and one in another program does not")
+        else:
+            print("  FAIL  programs of several files: flagged %r" % sorted(flagged))
+            failures += 1
+
     print("selftest: %d failure(s)" % failures)
     return 1 if failures else 0
 
 
-def main():
-    if any(a in ("--selftest", "--self-test", "--self_test") for a in sys.argv[1:]):
-        return selftest()
-    roots = [a for a in sys.argv[1:] if not a.startswith("-")] or ["userspace"]
-    files = []
-    for root in roots:
-        for base, _dirs, names in os.walk(root):
-            for n in names:
-                if n.endswith(".rs"):
-                    files.append(os.path.join(base, n))
-    files.sort()
-    test_files = test_module_files(files)
+def program_of(path):
+    """The program `path` is a source file of, as a key: the directory of a
+    binary kept in several files (`src/bin/top/`), the file itself for a
+    one-file binary (`src/bin/free.rs`), else the crate's `src/`.
 
-    total, liars = 0, []
+    A program's help text and its parser need not share a file. `top` keeps
+    its messages in `nls.rs` and parses its command line in `config.rs`,
+    as upstream keeps them in `top_nls.c` and `top.c`; read one file at a
+    time, every one of its long options was "never parsed"."""
+    parts = os.path.normpath(path).split(os.sep)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == "src":
+            rest = parts[i + 1:]
+            if len(rest) >= 2 and rest[0] == "bin":
+                if len(rest) == 2:
+                    return os.path.normpath(path)
+                return os.sep.join(parts[: i + 3])
+            return os.sep.join(parts[: i + 1])
+    return os.path.normpath(path)
+
+
+def sweep(files):
+    """(how many of `files` hold help text, [(file, [(option, help line,
+    where)])] for the options a file's help names that nothing in its
+    program parses)."""
+    test_files = test_module_files(files)
+    texts, raws, order = {}, {}, []
     for f in files:
         if os.path.normpath(f) in test_files:
             continue
@@ -299,22 +350,44 @@ def main():
         # string documents the fixture, not the program.
         live, _tests = rustlex.live_code(raw)
         text = rustlex.strip_noise(live, keep_literals=True)
+        key = program_of(f)
+        texts[key] = texts.get(key, "") + "\n" + text
+        raws[key] = raws.get(key, "") + "\n" + raw
+        order.append((f, key, text))
+
+    total, liars = 0, []
+    for f, key, text in order:
         ads = advertised(text)
         if not ads:
             continue
         total += 1
         missing = []
         for o, line in sorted(ads.items()):
-            if recognised(text, o):
+            if recognised(texts[key], o):
                 continue
             # Distinguish "nothing anywhere parses this" from "only the
             # tests or a comment mention it". The second is still a defect
             # -- the binary does not have the option -- but it is a
             # different story about how it got that way.
-            where = "only in tests/comments" if recognised(raw, o) else "nowhere"
+            where = "only in tests/comments" if recognised(raws[key], o) else "nowhere"
             missing.append((o, line, where))
         if missing:
             liars.append((f, missing))
+    return total, liars
+
+
+def main():
+    if any(a in ("--selftest", "--self-test", "--self_test") for a in sys.argv[1:]):
+        return selftest()
+    roots = [a for a in sys.argv[1:] if not a.startswith("-")] or ["userspace"]
+    files = []
+    for root in roots:
+        for base, _dirs, names in os.walk(root):
+            for n in names:
+                if n.endswith(".rs"):
+                    files.append(os.path.join(base, n))
+    files.sort()
+    total, liars = sweep(files)
 
     print("help-vs-parser sweep")
     print("  files with help text: %d" % total)

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Calendar
+Comment=Keep appointments and see them by day, week or month
+Icon=office-calendar
+Exec=calendar
+Categories=Office;Calendar;
+Keywords=events;appointments;schedule;

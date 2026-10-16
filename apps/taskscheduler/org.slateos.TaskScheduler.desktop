@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Task Scheduler
+Comment=Run programs at set times
+Icon=appointment-new
+Exec=taskscheduler
+Categories=System;
+Keywords=schedule;cron;tasks;

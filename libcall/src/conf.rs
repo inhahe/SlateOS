@@ -29,6 +29,42 @@ mod sys {
     }
 }
 
+/// `_SC_HOST_NAME_MAX`: 180 in glibc and SlateOS's library alike. What it
+/// answers is not alike -- 64 on Linux, 255 on SlateOS -- which is why a
+/// program sizing a buffer for `gethostname` asks rather than assumes.
+pub const SC_HOST_NAME_MAX: i32 = 180;
+
+/// `_SC_CLK_TCK`: 2 in glibc and SlateOS's library alike -- the clock ticks
+/// a second that `/proc/PID/stat`'s times count in (100 on both).
+pub const SC_CLK_TCK: i32 = 2;
+
+/// `_SC_PAGESIZE`: 30 in glibc and SlateOS's library alike. The answers
+/// differ -- 4096 on x86-64 Linux, 16384 on SlateOS, whose pages are 16 KiB.
+pub const SC_PAGESIZE: i32 = 30;
+
+/// `getpagesize`: `sysconf (_SC_PAGESIZE)`, or 4096 where the library has
+/// nothing to say (a host that is not Unix).
+#[must_use]
+pub fn page_size() -> i64 {
+    let p = sysconf(SC_PAGESIZE);
+    if p > 0 { p } else { 4096 }
+}
+
+/// `MAXHOSTNAMELEN` in glibc's `<sys/param.h>`: util-linux's fallback.
+const MAXHOSTNAMELEN: usize = 64;
+
+/// util-linux's `get_hostname_max` (`include/c.h`): the longest host name,
+/// as `sysconf (_SC_HOST_NAME_MAX)` says -- 64 on Linux, 255 on SlateOS --
+/// or `MAXHOSTNAMELEN`, 64, when it says nothing positive. Its
+/// `xgethostname` reads the name into one byte more than this.
+#[must_use]
+pub fn hostname_max() -> usize {
+    usize::try_from(sysconf(SC_HOST_NAME_MAX))
+        .ok()
+        .filter(|&n| n > 0)
+        .unwrap_or(MAXHOSTNAMELEN)
+}
+
 /// `sysconf(name)`, as the C library returns it: the value, or `-1` for a
 /// name without a limit or one the library does not know.
 ///
@@ -106,5 +142,50 @@ pub fn confstr(name: i32, buf: Option<&mut [u8]>) -> usize {
     {
         let _ = (name, buf);
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_names_are_the_librarys() {
+        assert_eq!(SC_HOST_NAME_MAX, posix::unistd::_SC_HOST_NAME_MAX);
+        assert_eq!(SC_CLK_TCK, posix::unistd::_SC_CLK_TCK);
+        assert_eq!(SC_PAGESIZE, posix::unistd::_SC_PAGESIZE);
+    }
+
+    /// A page is a power of two of at least a kibibyte, whatever the host.
+    #[test]
+    fn a_page_is_a_power_of_two_kibibytes_or_more() {
+        let p = page_size();
+        assert!(p >= 1024 && p.count_ones() == 1, "{p}");
+    }
+
+    /// The real library counts 100 ticks a second, as Linux and SlateOS do.
+    #[cfg(unix)]
+    #[test]
+    fn the_library_ticks_a_hundred_times_a_second() {
+        assert_eq!(sysconf(SC_CLK_TCK), 100);
+    }
+
+    /// The real library has a limit for host names, and util-linux's
+    /// helper answers it.
+    #[cfg(unix)]
+    #[test]
+    fn the_library_has_a_host_name_limit() {
+        let limit = sysconf(SC_HOST_NAME_MAX);
+        assert!(limit > 0);
+        assert_eq!(i64::try_from(hostname_max()).ok(), Some(limit));
+    }
+
+    /// No library to ask: nothing is defined, and util-linux falls back to
+    /// `MAXHOSTNAMELEN`.
+    #[cfg(not(unix))]
+    #[test]
+    fn off_unix_nothing_is_defined() {
+        assert_eq!(sysconf(SC_HOST_NAME_MAX), -1);
+        assert_eq!(hostname_max(), 64);
     }
 }

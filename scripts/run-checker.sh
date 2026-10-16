@@ -229,8 +229,61 @@
 # One sample point here answers it for all of them, which is the same argument
 # that put the crash/finding distinction in this file rather than in each gate.
 
+# ## A gate must not change the repository it judges
+#
+# Git exports GIT_DIR into a hook's environment, and GIT_DIR outranks the `cwd`
+# or `-C` a checker gives its scratch repository. Twice a self-test's fixture
+# has therefore been built in the repository being pushed: on 2026-08-29
+# (check-requests-not-deleted: core.bare=true on the shared config, the index
+# replaced, two commits whose tree was one directory -- published, because the
+# gate passed) and on 2026-09-26 (check-release-staleness: seven fixture
+# commits on the branch). scripts/gitenv.py is the cure at each call site. This
+# is the net under all of them: a gate is judged by what it did as well as by
+# what it said.
+#
+# Opt-in (CHECKER_REPO_GUARD=1), because the fingerprint costs two git
+# processes per gate, and the danger lives where git exports GIT_DIR: the push
+# hook sets it; boot-test.sh, which no hook runs, does not.
+#
+# What is watched is what a gate escaping through this worktree's GIT_DIR
+# writes, and nothing another lane writes:
+#
+#   * this worktree's HEAD -- the branch it is on and the commit it names. A
+#     fixture's `git commit` or `git checkout -b` lands here.
+#   * this worktree's index, by content (`ls-files -s`), not by the file's
+#     mtime: `git status` and `git diff` rewrite the index to refresh stat
+#     data without changing a byte of what it records, and a guard that fired
+#     on that would be switched off within a day.
+#   * the config every worktree shares (`--git-common-dir`), where a fixture's
+#     `git init` sets core.bare -- less `branch.*`, the tracking entries other
+#     lanes write with `push -u`.
+#
+# NOT the rest of the refs. Six worktrees share one refs namespace, and the
+# other five move their own branches while a push's gates run: the first
+# version fingerprinted every ref (`show-ref --head`), and on its first push
+# (2026-09-26) it stopped a clean one because lane E's branch moved during the
+# ten minutes test-boot-test.py took. The price of the narrower net is that a
+# fixture creating a stray branch or tag elsewhere in the namespace is not
+# caught -- junk refs, where the damage this exists for is a rewritten branch.
+
 # run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
+    # Defined in here so that anything cutting run_checker out of this file
+    # (test-pre-push-run-checker.py does, by brace matching) gets it too.
+    _rc_repo_state() {
+        # This worktree's HEAD: the branch it is on, and the commit.
+        git symbolic-ref -q HEAD 2>/dev/null
+        git rev-parse -q --verify HEAD 2>/dev/null
+        # This worktree's index, by content.
+        git ls-files -s 2>/dev/null | cksum
+        # The config every worktree shares, less the branch.* tracking
+        # entries other lanes write as a matter of course (`push -u`).
+        _rc_cfg=$(git rev-parse --git-common-dir 2>/dev/null)/config
+        if [ -f "$_rc_cfg" ]; then
+            git config --file "$_rc_cfg" --list 2>/dev/null | grep -v '^branch\.' | sort | cksum
+        fi
+        return 0
+    }
     # Cleared on every call, flagged or not — see the header on stale state.
     # Both are the *outward* channel: this file only ever writes them, and the
     # caller reads them, which is why shellcheck cannot see a use.
@@ -303,8 +356,50 @@ run_checker() {
     _rc_t0=
     [ -n "${CHECKER_TIMING_LOG:-}" ] && _rc_t0=$(date +%s 2>/dev/null)
 
+    _rc_before=
+    if [ -n "${CHECKER_REPO_GUARD:-}" ]; then _rc_before=$(_rc_repo_state); fi
+    # The gate cache (design-decisions 979; scripts/gate-cache.py), when the
+    # caller turned it on with GATE_CACHE=1 and GATE_CACHE_DRIVER -- the boot
+    # test does, the push hook does not.  Only `<python> [-u] <script.py> ...`
+    # is routed through it; anything else runs exactly as before.  After
+    # `_rc_cmd` above on purpose: the "re-run it directly" advice names the
+    # checker, not the cache.  A hit replays the checker's last passing output
+    # and exit status, and ends it with a `gate-cache: HIT` line.
+    if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_DRIVER:-}" ] &&
+       [ -f "$GATE_CACHE_DRIVER" ]; then
+        case "$(basename -- "$1")" in
+        python|python3|python.exe|python3.exe|py|py.exe)
+            _rc_script=$2
+            [ "$_rc_script" = "-u" ] && _rc_script=${3:-}
+            case $_rc_script in
+            *.py) set -- "$1" "$GATE_CACHE_DRIVER" --label "$_rc_label" -- "$@" ;;
+            esac
+            ;;
+        esac
+    fi
     PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
+    if [ -n "${CHECKER_REPO_GUARD:-}" ]; then
+        _rc_after=$(_rc_repo_state)
+        if [ "$_rc_before" != "$_rc_after" ]; then
+            cat "$_rc_log" >&2
+            echo "" >&2
+            echo "$_rc_prog: STOPPING -- gate '$_rc_label' CHANGED THE REPOSITORY it was judging." >&2
+            echo "$_rc_prog: this worktree's HEAD, its index content or the shared config differ from before it ran." >&2
+            echo "--- before ---" >&2
+            printf '%s\n' "$_rc_before" | head -n 40 >&2
+            echo "--- after ---" >&2
+            printf '%s\n' "$_rc_after" | head -n 40 >&2
+            echo "" >&2
+            echo "Its verdict, whatever it was, is worthless: it judged a fixture that was" >&2
+            echo "the repository. Look for git run with cwd=<tempdir> and no" >&2
+            echo "env=gitenv.clean_env() (scripts/gitenv.py), and repair the branch" >&2
+            echo "(\`git reflog\` shows where it was) before pushing anything." >&2
+            echo "Command: $_rc_cmd" >&2
+            echo "Output kept at $_rc_log" >&2
+            exit 1
+        fi
+    fi
 
     # Record this gate's cost NOW, before the outcome is classified.
     #

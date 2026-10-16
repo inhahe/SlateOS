@@ -29,6 +29,7 @@
 //! Ctrl+A ?     Show help
 //! ```
 
+use libcall::termios::RawInput;
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
@@ -38,13 +39,6 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-// Native Slate OS console syscalls (kernel syscall/number.rs).  These were
-// previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
-// actually terminated the process.  The render loop polls for input (it must
-// keep refreshing the status bar while idle), so it uses the *non-blocking*
-// try-read variant (103); the blocking variant (101) would freeze the loop.
-const SYS_CONSOLE_WRITE: u64 = 100;
-const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 // Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
@@ -84,20 +78,32 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
 
+/// `s`, written to the terminal on standard output: every byte, a write a
+/// signal interrupted retried, and the rest dropped at any other failure --
+/// there is nowhere else to say that the terminal has gone.
 fn console_write(s: &str) {
-    unsafe {
-        syscall3(SYS_CONSOLE_WRITE, s.as_ptr() as u64, s.len() as u64, 0);
-    }
+    // The terminal that would have shown the failure is the one that failed.
+    let _ = libcall::fd::write_all(1, s.as_bytes(), false);
 }
 
+/// The next byte typed, or `None` when none is waiting.
+///
+/// A read of the terminal on standard input, through its line discipline as
+/// every program's is, which [`run_session`] puts in raw mode with `VMIN`
+/// and `VTIME` both 0: a read then returns at once, a byte or nothing, so the
+/// render loop keeps the status bar moving between keys. With `ISIG` off,
+/// `^C` is the byte 0x03 -- the session's "clear the input" key -- and
+/// `^A`, the command key, is 0x01. (This read the keyboard's raw ring with
+/// `SYS_CONSOLE_TRY_READ_CHAR` until 2026-10-09, past the terminal, which
+/// kept the console from delivering `^C` to a program that was not reading:
+/// lane A's `requests/a-bd-read-the-console-through-the-terminal-so-ctrl-c-
+/// can-stop-a-program-that-is-not-reading.md`.)
 fn console_read_char() -> Option<u8> {
-    // SYS_CONSOLE_TRY_READ_CHAR requires a non-null, writable 1-byte buffer:
-    // it writes the key there and returns 1, or returns WouldBlock (negative)
-    // when no key is buffered.  (Passing a null pointer returns InvalidArgument,
-    // which is why the previous null-arg form never read any input.)
-    let mut ch: u8 = 0;
-    let ret = unsafe { syscall3(SYS_CONSOLE_TRY_READ_CHAR, &raw mut ch as u64, 0, 0) };
-    if ret < 0 { None } else { Some(ch) }
+    let mut ch = [0u8; 1];
+    match libcall::fd::read(0, &mut ch) {
+        Ok(1) => ch.first().copied(),
+        _ => None,
+    }
 }
 
 fn clock_ns() -> u64 {
@@ -443,11 +449,22 @@ fn full_render(session: &Session) {
 // ============================================================================
 
 /// The caller's login name, or `None` if this build cannot determine it.
+///
+/// Looked up as `getpwuid` looks it up, in `/etc/passwd`: the file every
+/// user may read, which userdb generates from its own (design-decisions
+/// §353). The database itself is the owner's alone, so reading it answered
+/// `None` for everyone but root -- and `screen` refused every other user.
 fn current_username() -> Option<String> {
     let uid = authlib::identity::caller_uid()?;
-    userdb::UserDb::load(userdb::DEFAULT_PATH)
-        .ok()
-        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+    name_of(&pwdb::Db::load(), uid)
+}
+
+/// The login name `db` gives `uid`, if it is one a directory can be named
+/// after.
+fn name_of(db: &pwdb::Db, uid: u32) -> Option<String> {
+    db.user_by_uid(uid)
+        .and_then(|u| String::from_utf8(u.name.clone()).ok())
+        .filter(|n| !n.is_empty() && !n.contains('/'))
 }
 
 /// Where this user's sessions live.
@@ -490,9 +507,9 @@ fn require_session_dir() -> String {
     }
 }
 
-fn save_session_info(session: &Session) {
-    let dir = require_session_dir();
-    let _ = fs::create_dir_all(&dir);
+/// The session's description, in `dir` -- the caller's session directory.
+fn save_session_info(session: &Session, dir: &str) {
+    let _ = fs::create_dir_all(dir);
 
     let info_path = format!("{}/{}.session", dir, session.name);
     let mut info = format!("name={}\n", session.name);
@@ -754,13 +771,23 @@ fn process_command(session: &mut Session, input: &str) {
 // ============================================================================
 
 fn run_session(session: &mut Session) {
+    // Who the user is, settled while the terminal is still as they left it:
+    // the refusal exits, and an exit skips `RawInput`'s restoring drop.
+    let dir = require_session_dir();
+    // Raw input for as long as the session holds the terminal, and the
+    // terminal's own settings back however the session ends. Without a
+    // terminal there are no keys to read, as GNU screen says.
+    let Ok(_raw) = RawInput::enter(0, 0, 0) else {
+        eprintln!("Must be connected to a terminal.");
+        process::exit(1);
+    };
     term_alt_screen_on();
     term_clear();
     term_set_scroll_region(2, TERM_ROWS - 2);
 
     let mut ctrl_a_pending = false;
 
-    save_session_info(session);
+    save_session_info(session, &dir);
 
     loop {
         if !session.running {
@@ -1197,6 +1224,25 @@ mod tests {
         assert_ne!(dir.as_deref(), Some("/tmp/screen-attacker-chosen"));
         // ...and never the old default, which was the worst of the three.
         assert_ne!(dir.as_deref(), Some("/tmp/screen-root"));
+    }
+
+    /// A user is named from the world-readable `/etc/passwd`, so a user
+    /// other than root has a name -- and a session directory -- at all.
+    #[test]
+    fn an_ordinary_user_has_a_name() {
+        let db = pwdb::Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n",
+            b"",
+        );
+        assert_eq!(name_of(&db, 1000).as_deref(), Some("alice"));
+        assert_eq!(name_of(&db, 4242), None, "a uid with no entry");
+        let odd = pwdb::Db::from_bytes(b"a/b:x:7:7::/:/bin/sh\n:x:8:8::/:/bin/sh\n", b"");
+        assert_eq!(
+            name_of(&odd, 7),
+            None,
+            "a name with a slash names no directory"
+        );
+        assert_eq!(name_of(&odd, 8), None, "nor does an empty one");
     }
 
     /// Two users do not share a directory, which is the whole basis for the

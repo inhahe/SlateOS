@@ -60,6 +60,9 @@ mod sys {
         // Variadic, as it is in C; see `pty.rs` on why one declaration serves
         // both our library and glibc.
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        pub fn ttyname_r(fd: i32, buf: *mut u8, buflen: usize) -> i32;
+        pub fn tcgetpgrp(fd: i32) -> i32;
+        pub fn tcflush(fd: i32, queue_selector: i32) -> i32;
     }
 
     /// `fcntl`: read the file status flags.
@@ -118,6 +121,59 @@ pub fn set_attr(fd: i32, when: i32, t: &Termios) -> Result<(), i32> {
     #[cfg(not(unix))]
     {
         let _ = (fd, when, t);
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `tcgetpgrp(fd)`: the foreground process group of the terminal on `fd` --
+/// what a job-control-aware program compares with its own group to learn
+/// whether it is in the foreground.
+///
+/// # Errors
+///
+/// `EBADF`, or `ENOTTY` when `fd` is not this process's controlling
+/// terminal; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn foreground_group(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `tcgetpgrp` takes a number and touches no memory of ours.
+        let pgrp = unsafe { sys::tcgetpgrp(fd) };
+        if pgrp >= 0 {
+            Ok(pgrp)
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `tcflush`'s selector for "the input received and not yet read".
+const TCIFLUSH: i32 = 0;
+
+/// `tcflush(fd, TCIFLUSH)`: throw away what has been typed at the terminal on
+/// `fd` and not yet read.
+///
+/// # Errors
+///
+/// `EBADF`, `ENOTTY`; [`ENOSYS`](crate::ENOSYS) on a host with no C library
+/// of ours.
+pub fn flush_input(fd: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `tcflush` takes two numbers and touches no memory of ours.
+        if unsafe { sys::tcflush(fd, TCIFLUSH) } == 0 {
+            Ok(())
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, TCIFLUSH);
         Err(crate::ENOSYS)
     }
 }
@@ -202,6 +258,161 @@ pub fn set_output_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
 /// the speeds above 38400 -- among them.
 pub const CBAUD: u32 = 0o010_017;
 
+// The control characters' slots in `c_cc`.
+
+/// `VINTR`: interrupt (`^C`).
+pub const VINTR: usize = 0;
+/// `VQUIT`: quit (`^\`).
+pub const VQUIT: usize = 1;
+/// `VERASE`: erase a character.
+pub const VERASE: usize = 2;
+/// `VKILL`: erase the line.
+pub const VKILL: usize = 3;
+/// `VEOF`: end of file (`^D`).
+pub const VEOF: usize = 4;
+/// `VTIME`: the non-canonical read timeout.
+pub const VTIME: usize = 5;
+/// `VMIN`: the non-canonical read minimum.
+pub const VMIN: usize = 6;
+/// `VSWTC`: switch (unused on Linux).
+pub const VSWTC: usize = 7;
+/// `VSTART`: resume output (`^Q`).
+pub const VSTART: usize = 8;
+/// `VSTOP`: stop output (`^S`).
+pub const VSTOP: usize = 9;
+/// `VSUSP`: suspend (`^Z`).
+pub const VSUSP: usize = 10;
+/// `VEOL`: an extra end of line.
+pub const VEOL: usize = 11;
+/// `VREPRINT`: reprint the line (`^R`).
+pub const VREPRINT: usize = 12;
+/// `VDISCARD`: discard output (`^O`).
+pub const VDISCARD: usize = 13;
+/// `VWERASE`: erase a word (`^W`).
+pub const VWERASE: usize = 14;
+/// `VLNEXT`: take the next character literally (`^V`).
+pub const VLNEXT: usize = 15;
+/// `VEOL2`: a second extra end of line.
+pub const VEOL2: usize = 16;
+
+// `c_iflag`.
+
+/// `IGNBRK`.
+pub const IGNBRK: u32 = 0o1;
+/// `BRKINT`.
+pub const BRKINT: u32 = 0o2;
+/// `IGNPAR`.
+pub const IGNPAR: u32 = 0o4;
+/// `PARMRK`.
+pub const PARMRK: u32 = 0o10;
+/// `INPCK`.
+pub const INPCK: u32 = 0o20;
+/// `ISTRIP`.
+pub const ISTRIP: u32 = 0o40;
+/// `INLCR`.
+pub const INLCR: u32 = 0o100;
+/// `IGNCR`.
+pub const IGNCR: u32 = 0o200;
+/// `ICRNL`.
+pub const ICRNL: u32 = 0o400;
+/// `IUCLC`.
+pub const IUCLC: u32 = 0o1000;
+/// `IXON`.
+pub const IXON: u32 = 0o2000;
+/// `IXANY`.
+pub const IXANY: u32 = 0o4000;
+/// `IXOFF`.
+pub const IXOFF: u32 = 0o10000;
+/// `IMAXBEL`.
+pub const IMAXBEL: u32 = 0o20000;
+/// `IUTF8`.
+pub const IUTF8: u32 = 0o40000;
+
+// `c_oflag`.
+
+/// `OPOST`.
+pub const OPOST: u32 = 0o1;
+/// `OLCUC`.
+pub const OLCUC: u32 = 0o2;
+/// `ONLCR`.
+pub const ONLCR: u32 = 0o4;
+/// `OCRNL`.
+pub const OCRNL: u32 = 0o10;
+/// `ONOCR`.
+pub const ONOCR: u32 = 0o20;
+/// `ONLRET`.
+pub const ONLRET: u32 = 0o40;
+/// `OFILL`.
+pub const OFILL: u32 = 0o100;
+/// `OFDEL`.
+pub const OFDEL: u32 = 0o200;
+/// `NLDLY`.
+pub const NLDLY: u32 = 0o400;
+/// `CRDLY`.
+pub const CRDLY: u32 = 0o3000;
+/// `TABDLY`.
+pub const TABDLY: u32 = 0o14000;
+/// `TAB3`: tabs expanded to spaces (`XTABS`).
+pub const TAB3: u32 = 0o14000;
+/// `BSDLY`.
+pub const BSDLY: u32 = 0o20000;
+/// `VTDLY`.
+pub const VTDLY: u32 = 0o40000;
+/// `FFDLY`.
+pub const FFDLY: u32 = 0o100_000;
+
+// `c_cflag`.
+
+/// `CSIZE`: the character-size bits.
+pub const CSIZE: u32 = 0o60;
+/// `CS8`.
+pub const CS8: u32 = 0o60;
+/// `CSTOPB`.
+pub const CSTOPB: u32 = 0o100;
+/// `CREAD`.
+pub const CREAD: u32 = 0o200;
+/// `PARENB`.
+pub const PARENB: u32 = 0o400;
+/// `PARODD`.
+pub const PARODD: u32 = 0o1000;
+/// `HUPCL`.
+pub const HUPCL: u32 = 0o2000;
+/// `CLOCAL`.
+pub const CLOCAL: u32 = 0o4000;
+
+// `c_lflag`.
+
+/// `ISIG`.
+pub const ISIG: u32 = 0o1;
+/// `ICANON`.
+pub const ICANON: u32 = 0o2;
+/// `XCASE`.
+pub const XCASE: u32 = 0o4;
+/// `ECHO`.
+pub const ECHO: u32 = 0o10;
+/// `ECHOE`.
+pub const ECHOE: u32 = 0o20;
+/// `ECHOK`.
+pub const ECHOK: u32 = 0o40;
+/// `ECHONL`.
+pub const ECHONL: u32 = 0o100;
+/// `NOFLSH`.
+pub const NOFLSH: u32 = 0o200;
+/// `TOSTOP`.
+pub const TOSTOP: u32 = 0o400;
+/// `ECHOCTL`.
+pub const ECHOCTL: u32 = 0o1000;
+/// `ECHOPRT`.
+pub const ECHOPRT: u32 = 0o2000;
+/// `ECHOKE`.
+pub const ECHOKE: u32 = 0o4000;
+/// `FLUSHO`.
+pub const FLUSHO: u32 = 0o10000;
+/// `PENDIN`.
+pub const PENDIN: u32 = 0o40000;
+/// `IEXTEN`.
+pub const IEXTEN: u32 = 0o100_000;
+
 /// `O_NONBLOCK`, on Linux and in SlateOS's C library.
 pub const O_NONBLOCK: i32 = 0o4000;
 
@@ -236,6 +447,143 @@ pub fn clear_nonblocking(fd: i32) -> Result<(), i32> {
     }
 }
 
+/// `fcntl (fd, F_GETFL)`: the file status flags of `fd`, `O_NONBLOCK` among
+/// them.
+///
+/// # Errors
+///
+/// `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn status_flags(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `F_GETFL` takes no third argument and reads no memory.
+        let flags = unsafe { sys::fcntl(fd, sys::F_GETFL) };
+        if flags < 0 {
+            return Err(crate::last_errno());
+        }
+        Ok(flags)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `fcntl (fd, F_SETFL, flags)`: set `fd`'s file status flags.
+///
+/// Separate from [`clear_nonblocking`] for the caller that must make the
+/// call exactly as written somewhere else -- `wall`'s `ttymsg`, which asks
+/// the flags of one descriptor and sets them on another.
+///
+/// # Errors
+///
+/// `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn set_status_flags(fd: i32, flags: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `F_SETFL` takes an `int` and reads no memory.
+        if unsafe { sys::fcntl(fd, sys::F_SETFL, flags) } < 0 {
+            return Err(crate::last_errno());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, flags);
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `ttyname_r (fd, buf, buf.len ())`: the path of the terminal on `fd`,
+/// written into `buf` with its terminator, and its length without it.
+///
+/// # Errors
+///
+/// `ENOTTY` when `fd` is not a terminal, `EBADF`, and `ERANGE` when `buf`
+/// is too short for the path; [`ENOSYS`](crate::ENOSYS) on a host with no C
+/// library of ours.
+pub fn ttyname_into(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `buf` is ours, writable for its whole length, which is
+        // what the call is told; it writes the path and a NUL within it or
+        // fails with `ERANGE`.
+        let rc = unsafe { sys::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) };
+        if rc != 0 {
+            return Err(rc);
+        }
+        Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, buf);
+        Err(crate::ENOSYS)
+    }
+}
+
+/// What glibc's `cfmakeraw` does to the input, local and control modes --
+/// every byte typed delivered as it is, with no echo, no line editing, no
+/// signal or flow control from the keyboard, and eight data bits -- with
+/// `VMIN` and `VTIME` as given rather than `cfmakeraw`'s 1 and 0.
+///
+/// The output modes are left alone, where `cfmakeraw` also clears `OPOST`:
+/// a program that keeps it, as BSD `telnet` does outside binary mode, still
+/// has the terminal turn the `\n` it writes into `\r\n` wherever the
+/// terminal would.
+pub fn make_raw_input(t: &mut Termios, vmin: u8, vtime: u8) {
+    t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+    t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    t.c_cflag &= !(CSIZE | PARENB);
+    t.c_cflag |= CS8;
+    if let Some(c) = t.c_cc.get_mut(VMIN) {
+        *c = vmin;
+    }
+    if let Some(c) = t.c_cc.get_mut(VTIME) {
+        *c = vtime;
+    }
+}
+
+/// A terminal whose input is raw until this is dropped: [`make_raw_input`]
+/// installed over what `tcgetattr` read, and what it read put back by the
+/// drop -- on a return, an early return or an unwinding panic alike.
+///
+/// With `ISIG` off, `^C`, `^\` and `^Z` arrive as the bytes 0x03, 0x1c and
+/// 0x1a and raise no signal: what a program that sends them on (`telnet`)
+/// or binds them itself (`screen`'s command key) wants.
+#[derive(Debug)]
+pub struct RawInput {
+    fd: i32,
+    saved: Termios,
+}
+
+impl RawInput {
+    /// The terminal on `fd` given raw input, `VMIN` and `VTIME` being
+    /// `vmin` and `vtime`: 1 and 0 for a read that waits for a byte and
+    /// returns what has come, 0 and 0 for one that returns at once.
+    ///
+    /// # Errors
+    ///
+    /// `tcgetattr`'s -- `ENOTTY` when `fd` is no terminal, which leaves
+    /// nothing to make raw -- and `tcsetattr`'s; [`ENOSYS`](crate::ENOSYS)
+    /// on a host with no C library of ours.
+    pub fn enter(fd: i32, vmin: u8, vtime: u8) -> Result<Self, i32> {
+        let saved = get_attr(fd)?;
+        let mut raw = saved;
+        make_raw_input(&mut raw, vmin, vtime);
+        set_attr(fd, TCSANOW, &raw)?;
+        Ok(Self { fd, saved })
+    }
+}
+
+impl Drop for RawInput {
+    fn drop(&mut self) {
+        // Nothing can be done about a failure here: the program is giving
+        // the terminal up, and has no other way to put it back.
+        let _ = set_attr(self.fd, TCSANOW, &self.saved);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the
@@ -265,10 +613,51 @@ mod tests {
 
     #[test]
     fn the_constants_are_the_c_librarys() {
-        assert_eq!(NCCS, posix::ioctl::NCCS);
-        assert_eq!(TCSANOW, posix::ioctl::TCSANOW);
-        assert_eq!(TCSADRAIN, posix::ioctl::TCSADRAIN);
-        assert_eq!(TCSAFLUSH, posix::ioctl::TCSAFLUSH);
+        use posix::ioctl as p;
+        assert_eq!(NCCS, p::NCCS);
+        assert_eq!(TCSANOW, p::TCSANOW);
+        assert_eq!(TCSADRAIN, p::TCSADRAIN);
+        assert_eq!(TCSAFLUSH, p::TCSAFLUSH);
+        // Every flag and slot the C library defines too.
+        for (ours, theirs) in [
+            (BRKINT, p::BRKINT),
+            (INPCK, p::INPCK),
+            (ISTRIP, p::ISTRIP),
+            (INLCR, p::INLCR),
+            (IGNCR, p::IGNCR),
+            (ICRNL, p::ICRNL),
+            (IXON, p::IXON),
+            (OPOST, p::OPOST),
+            (ONLCR, p::ONLCR),
+            (CSIZE, p::CSIZE),
+            (CS8, p::CS8),
+            (CREAD, p::CREAD),
+            (PARENB, p::PARENB),
+            (HUPCL, p::HUPCL),
+            (CLOCAL, p::CLOCAL),
+            (ISIG, p::ISIG),
+            (ICANON, p::ICANON),
+            (ECHO, p::ECHO),
+            (ECHONL, p::ECHONL),
+            (IEXTEN, p::IEXTEN),
+        ] {
+            assert_eq!(ours, theirs);
+        }
+        for (ours, theirs) in [
+            (VINTR, p::VINTR),
+            (VQUIT, p::VQUIT),
+            (VERASE, p::VERASE),
+            (VKILL, p::VKILL),
+            (VEOF, p::VEOF),
+            (VTIME, p::VTIME),
+            (VMIN, p::VMIN),
+            (VSTART, p::VSTART),
+            (VSTOP, p::VSTOP),
+            (VSUSP, p::VSUSP),
+            (VEOL, p::VEOL),
+        ] {
+            assert_eq!(ours, theirs);
+        }
     }
 
     #[cfg(not(unix))]
@@ -333,6 +722,39 @@ mod tests {
             }
         }
 
+        /// Raw input while the guard lives -- no line editing, echo or
+        /// signals, `VMIN` and `VTIME` as asked, the output modes untouched
+        /// -- and the terminal exactly as it was once it is dropped.
+        #[test]
+        fn raw_input_is_undone_by_the_drop() {
+            let pty = Pty::new();
+            let before = get_attr(pty.slave).expect("tcgetattr");
+            assert_ne!(before.c_lflag & (ICANON | ECHO | ISIG), 0);
+            {
+                let _raw = RawInput::enter(pty.slave, 0, 0).expect("raw");
+                let now = get_attr(pty.slave).expect("tcgetattr, raw");
+                assert_eq!(now.c_lflag & (ICANON | ECHO | ISIG | IEXTEN), 0);
+                assert_eq!(now.c_iflag & (ICRNL | IXON), 0);
+                assert_eq!((now.c_cc[VMIN], now.c_cc[VTIME]), (0, 0));
+                assert_eq!(now.c_oflag, before.c_oflag);
+            }
+            assert_eq!(get_attr(pty.slave).expect("tcgetattr, after"), before);
+        }
+
+        /// What is not a terminal cannot be made raw, and says why.
+        #[test]
+        fn raw_input_needs_a_terminal() {
+            let mut fds = [-1i32; 2];
+            // SAFETY: `fds` holds the two descriptors `pipe` writes.
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            assert_eq!(RawInput::enter(fds[0], 1, 0).err(), Some(25));
+            // SAFETY: descriptors this test owns, closed once.
+            unsafe {
+                close(fds[0]);
+                close(fds[1]);
+            }
+        }
+
         /// What a change writes is what a read gives back.
         #[test]
         fn attributes_round_trip() {
@@ -377,11 +799,107 @@ mod tests {
             assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
             assert_eq!(get_attr(fds[0]), Err(25));
             assert_eq!(set_attr(fds[1], TCSANOW, &Termios::default()), Err(25));
+            // ...and has no name as one: `ENOTTY`.
+            let mut buf = [0u8; 64];
+            assert_eq!(ttyname_into(fds[0], &mut buf), Err(25));
             // SAFETY: descriptors this test owns, closed once.
             unsafe {
                 close(fds[0]);
                 close(fds[1]);
             }
         }
+
+        /// A pseudo-terminal has no modem lines, and a pipe is no terminal:
+        /// both are errors, which is all `reset` asks.
+        #[test]
+        fn a_pty_has_no_modem_lines() {
+            let pty = Pty::new();
+            assert!(crate::pty::modem_bits(pty.slave).is_err());
+            let mut fds = [-1i32; 2];
+            // SAFETY: `fds` holds the two descriptors `pipe` writes.
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            assert_eq!(crate::pty::modem_bits(fds[0]), Err(25));
+            // SAFETY: descriptors this test owns, closed once.
+            unsafe {
+                close(fds[0]);
+                close(fds[1]);
+            }
+        }
+
+        /// A terminal is named by its path under `/dev/pts`, and a buffer too
+        /// short for it is `ERANGE`.
+        #[test]
+        fn a_terminal_has_a_name() {
+            let pty = Pty::new();
+            let mut buf = [0u8; 4096];
+            let n = ttyname_into(pty.slave, &mut buf).expect("ttyname_r");
+            assert!(buf[..n].starts_with(b"/dev/pts/"), "{:?}", &buf[..n]);
+            assert_eq!(buf[n], 0, "the name is NUL-terminated");
+            let mut short = [0u8; 4];
+            assert_eq!(ttyname_into(pty.slave, &mut short), Err(34));
+        }
+
+        /// The status flags read back as set, `O_NONBLOCK` among them; a
+        /// descriptor that is not open is `EBADF` both ways.
+        #[test]
+        fn status_flags_round_trip() {
+            let mut fds = [-1i32; 2];
+            // SAFETY: `fds` holds the two descriptors `pipe` writes.
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            let flags = status_flags(fds[0]).expect("F_GETFL");
+            assert_eq!(flags & O_NONBLOCK, 0);
+            set_status_flags(fds[0], flags | O_NONBLOCK).expect("F_SETFL");
+            assert_eq!(
+                status_flags(fds[0]).expect("F_GETFL") & O_NONBLOCK,
+                O_NONBLOCK
+            );
+            clear_nonblocking(fds[0]).expect("clear");
+            assert_eq!(status_flags(fds[0]).expect("F_GETFL") & O_NONBLOCK, 0);
+            // SAFETY: descriptors this test owns, closed once.
+            unsafe {
+                close(fds[0]);
+                close(fds[1]);
+            }
+            assert_eq!(status_flags(fds[0]), Err(9));
+            assert_eq!(set_status_flags(fds[0], 0), Err(9));
+        }
+    }
+
+    /// `cfmakeraw`'s input, local and control changes, `VMIN` and `VTIME`
+    /// as given, and nothing else touched.
+    #[test]
+    fn raw_input_is_cfmakeraw_but_for_output() {
+        let mut t = Termios {
+            c_iflag: ICRNL | IXON | BRKINT | IUTF8,
+            c_oflag: OPOST | ONLCR,
+            c_cflag: CS8 | PARENB | 0o017,
+            c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN | ECHOCTL,
+            c_line: 0,
+            c_cc: [3; NCCS],
+            c_ispeed: 15,
+            c_ospeed: 15,
+        };
+        make_raw_input(&mut t, 0, 5);
+        assert_eq!(t.c_iflag, IUTF8);
+        assert_eq!(t.c_oflag, OPOST | ONLCR);
+        assert_eq!(t.c_cflag, CS8 | 0o017);
+        assert_eq!(t.c_lflag, ECHOE | ECHOK | ECHOCTL);
+        assert_eq!((t.c_cc[VMIN], t.c_cc[VTIME], t.c_cc[VINTR]), (0, 5, 3));
+        assert_eq!((t.c_ispeed, t.c_ospeed), (15, 15));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_terminal_to_make_raw() {
+        assert_eq!(RawInput::enter(0, 1, 0).err(), Some(crate::ENOSYS));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_flags_and_no_names() {
+        assert_eq!(status_flags(0), Err(crate::ENOSYS));
+        assert_eq!(set_status_flags(0, 0), Err(crate::ENOSYS));
+        let mut buf = [0u8; 16];
+        assert_eq!(ttyname_into(0, &mut buf), Err(crate::ENOSYS));
     }
 }

@@ -709,6 +709,14 @@ LOAD_RECORD_PROBLEMS = {
     "load-not-applied":
         "the spinners consumed almost no CPU across the window, so whatever "
         "the benchmarks felt it was not the intended stimulus",
+    # A confession of an empty window by a third route: the controller's read
+    # of the log returned the trigger and every line of the window together,
+    # so each of those benchmarks had finished before the load went on. The
+    # edges were both seen; nothing ran between them.
+    "window-missed":
+        "every benchmark in the window had already finished when the load "
+        "went on -- the controller read the trigger and the whole window in "
+        "one read of the log, so the load covered none of it",
 }
 
 #: Mirrors `OCCUPANCY_FLOOR` in `canary-load.py`. Duplicated rather than
@@ -802,6 +810,11 @@ def record_problem(record):
     A missing `until` is not a fault: an open-ended window is a legitimate
     thing to ask for, and only a *labelled* right-hand edge that never
     arrived makes the applied window differ from the label.
+
+    A window that arrived whole in the trigger's read is derived the same way,
+    from the completion stamps (`window_arrived_with_trigger`), for the same
+    reason: the controller only began saying so on 2026-09-26, and the stamps
+    that show it were in every record before that.
     """
     stated = record.get("problem")
     if stated in LOAD_RECORD_PROBLEMS:
@@ -810,11 +823,40 @@ def record_problem(record):
         return "at-never-matched"
     if record.get("until") and record.get("released") is False:
         return "until-never-matched"
+    if window_arrived_with_trigger(record):
+        return "window-missed"
     occupancy = record.get("host_occupancy") or {}
     if occupancy.get("occupancy") is not None \
             and occupancy["occupancy"] < OCCUPANCY_FLOOR:
         return "load-not-applied"
     return None
+
+
+def window_arrived_with_trigger(record):
+    """Did the trigger's read of the log already hold every window line?
+
+    Derived from the completions themselves rather than from the controller's
+    `during_seen_with_trigger`, so that it convicts records written before
+    that count existed -- and a controller that stopped counting.  It rests on
+    one property both stamping schemes share: lines returned by one read carry
+    one stamp, and distinct reads are a poll's sleep apart, so they never do.
+    The window is the `completions_during` lines after the first `at`, which
+    is how the controller builds `during_names`.
+    """
+    at = record.get("at")
+    count = record.get("completions_during")
+    completions = record.get("completions")
+    if not at or not count or not isinstance(completions, list):
+        return False
+    for index, entry in enumerate(completions):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            return False
+        if entry[0] == at:
+            window = completions[index + 1:index + 1 + count]
+            return (len(window) == count
+                    and all(isinstance(line, (list, tuple)) and len(line) == 2
+                            and line[1] == entry[1] for line in window))
+    return False
 
 
 def load_record_problem(path):

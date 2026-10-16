@@ -38,9 +38,11 @@
 //! constructions were a single unsalted-iteration `sha256(salt ‖ password)`:
 //! no work factor, so an attacker holding the file tries candidate passwords
 //! as fast as the hardware can hash. Passwords now go through
-//! `posix::crypt` — SHA-512-crypt, 5000 rounds — which is the same code
-//! `/etc/shadow` uses, so the system contains one password-hash
-//! implementation rather than three.
+//! `posix::crypt` — the same code `/etc/shadow` uses, so the system contains
+//! one password-hash implementation rather than three. A new password is
+//! hashed with yescrypt, as Ubuntu, Debian and Fedora hash theirs
+//! ([`PASSWORD_METHOD`]; SHA-512-crypt until 2026-10-09); an entry of any
+//! method `crypt` knows keeps verifying, because an entry names its own.
 //!
 //! # Reading both dialects, writing one
 //!
@@ -96,8 +98,26 @@ pub const PASSWD_NAME: &str = "passwd";
 /// directory. See [`UserDb::to_shadow_text`].
 pub const SHADOW_NAME: &str = "shadow";
 
-/// The method new passwords are hashed with.
-const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
+/// The method new passwords are hashed with: yescrypt, at the cost
+/// `crypt_gensalt` gives it by default -- `$y$j9T$`, 16 MiB of memory and
+/// about 16 ms for each check -- which is what a new password gets on Ubuntu
+/// (since 22.04), Debian (11) and Fedora (35).
+///
+/// Until 2026-10-09 it was SHA-512-crypt (`$6$`), which a graphics card tries
+/// billions of times a second against a stolen account file; yescrypt needs
+/// the 16 MiB for every guess, which is what makes guessing in bulk
+/// expensive. The operator chose it (design-decisions §1070, B-Q24). Entries
+/// already stored keep their own method until their password next changes.
+///
+/// Public so that `authlib`, which must spend what checking a password costs
+/// on paths that check none, imitates this method rather than a copy of it.
+pub const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Yescrypt;
+
+/// How many random bytes salt a new password: libxcrypt's own count for
+/// yescrypt, the number `crypt_gensalt` draws for itself when it is given
+/// none (Ubuntu's `passwd` gives it none, through PAM). They are written as
+/// the 22 characters after `$y$j9T$`.
+pub const SALT_BYTES: usize = 16;
 
 /// Canonical field names, and the aliases accepted when reading.
 pub mod field {
@@ -801,13 +821,20 @@ impl Record {
         }
     }
 
-    /// Store `password`, hashed, using `salt`.
+    /// Store `password`, hashed with [`PASSWORD_METHOD`] at its default cost,
+    /// using `salt`.
     ///
     /// The salt is a parameter rather than drawn inside, so that a caller's
     /// tests can pin a known answer. A hash function that supplies its own
     /// randomness can only be tested against itself — which is the test that
     /// let all three of the constructions this replaces pass while being
     /// wrong. Most callers want [`Record::set_password`].
+    ///
+    /// `salt` is the characters a setting carries after `$y$j9T$`. A yescrypt
+    /// salt is the bytes those characters decode to, so they must decode
+    /// whole: crypt base-64, in groups of four, or a last group of two or
+    /// three whose spare bits are zero -- the shape `crypt_gensalt` writes.
+    /// `abcdefgh` and `0123456789abcdef` are salts; `abcdefghi` is not.
     ///
     /// # Errors
     ///
@@ -822,11 +849,17 @@ impl Record {
         let setting =
             posix::crypt::setting_into(PASSWORD_METHOD, salt.as_bytes(), &mut setting_buf)
                 .ok_or(PasswordError::Salt)?;
+        self.set_password_under(password, setting.as_bytes())
+    }
+
+    /// Store `password`, hashed under `setting`, and drop what a new password
+    /// makes stale. What [`Record::set_password`] and
+    /// [`Record::set_password_with_salt`] share once each has its setting.
+    fn set_password_under(&mut self, password: &str, setting: &[u8]) -> Result<(), PasswordError> {
         let mut hash_buf = posix::crypt::buf();
-        let hashed =
-            posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
-                .ok_or(PasswordError::Hash)?
-                .to_string();
+        let hashed = posix::crypt::hash_into(password.as_bytes(), setting, &mut hash_buf)
+            .ok_or(PasswordError::Hash)?
+            .to_string();
         self.set(field::PASSWORD_HASH, &hashed);
         // A `crypt` entry carries its own salt. A salt stored beside it is a
         // second copy of the same fact, and the two disagreeing is how the
@@ -848,7 +881,8 @@ impl Record {
         Ok(())
     }
 
-    /// Store `password`, hashed with a salt read from `/dev/urandom`.
+    /// Store `password`, hashed under a fresh setting: [`new_setting`]'s,
+    /// [`PASSWORD_METHOD`] at its default cost, salted from `/dev/urandom`.
     ///
     /// # Errors
     ///
@@ -856,10 +890,13 @@ impl Record {
     /// There is deliberately no fallback: a generated-from-the-clock salt is a
     /// salt in shape only — whatever seeds it is public, so one precomputed
     /// table covers every account salted alongside it, which is the exact
-    /// property a salt exists to deny.
+    /// property a salt exists to deny. [`PasswordError::Salt`] if the C
+    /// library makes no setting, which on SlateOS and Linux it always does,
+    /// and on a host with no such library (the Windows development host) it
+    /// never does; [`PasswordError::Hash`] if hashing fails.
     pub fn set_password(&mut self, password: &str) -> Result<(), PasswordError> {
-        let salt = random_salt().ok_or(PasswordError::NoRandomness)?;
-        self.set_password_with_salt(password, &salt)
+        let setting = new_setting()?;
+        self.set_password_under(password, setting.as_bytes())
     }
 
     /// Whether the stored entry is one of the two formats this crate
@@ -1043,6 +1080,60 @@ impl UserDb {
             record.write_to(&mut out);
         }
         out
+    }
+
+    /// Take the exclusive hold on the database at `path` that a load, a change
+    /// and a save must happen under. See [`Lock`].
+    ///
+    /// While another program holds it this tries [`LOCK_TRIES`] times, a second
+    /// apart, as shadow-utils' `commonio_lock` does. Any other failure -- the
+    /// directory is not writable, the caller is not privileged -- is returned
+    /// at once, since waiting cannot change it. (Upstream retries those too,
+    /// so an unprivileged `chpasswd` takes fifteen seconds to say it cannot
+    /// lock `/etc/passwd`.)
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::WouldBlock`] if another program still holds the
+    /// database after the last try; otherwise the error from creating or
+    /// locking `<path>.lock`.
+    pub fn lock(path: impl AsRef<std::path::Path>) -> std::io::Result<Lock> {
+        Self::lock_trying(path.as_ref(), LOCK_TRIES, std::time::Duration::from_secs(1))
+    }
+
+    /// [`UserDb::lock`] with the number of tries and the pause between them
+    /// given, so that a test of a held lock does not take fifteen seconds.
+    fn lock_trying(
+        path: &std::path::Path,
+        tries: u32,
+        pause: std::time::Duration,
+    ) -> std::io::Result<Lock> {
+        let lock_path = lock_path_for(path);
+        let mut open = std::fs::OpenOptions::new();
+        open.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // Owner-only, as the database itself is: the file holds nothing,
+            // but nobody else has a reason to open it, and a world-writable
+            // lock is one anybody could hold to keep the administrator out.
+            open.mode(0o600);
+        }
+        let file = open.open(&lock_path)?;
+        let mut tried: u32 = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Lock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tried = tried.saturating_add(1);
+                    if tried >= tries {
+                        return Err(std::io::ErrorKind::WouldBlock.into());
+                    }
+                    std::thread::sleep(pause);
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
+        }
     }
 
     /// Read the database from `path`.
@@ -1551,22 +1642,86 @@ impl Staged {
     }
 }
 
-/// Draw a salt from `/dev/urandom`, or `None` if it cannot be read.
+/// How many times [`UserDb::lock`] tries a database another program holds,
+/// one second apart: shadow-utils' `LOCK_TRIES` and `LOCK_SLEEP`
+/// (`lib/commonio.c`).
+pub const LOCK_TRIES: u32 = 15;
+
+/// An exclusive hold on an account database, released when it is dropped.
 ///
-/// `& 0x3f` is an unbiased reduction and not the usual modulo mistake: 256 is
-/// exactly four times 64, so every alphabet character is the image of exactly
-/// four byte values.
-#[must_use]
-pub fn random_salt() -> Option<String> {
-    const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let len = PASSWORD_METHOD.salt_max();
-    let data = std::fs::read("/dev/urandom").ok()?;
-    Some(
-        data.get(..len)?
-            .iter()
-            .map(|b| char::from(*ALPHABET.get(usize::from(*b & 0x3f)).unwrap_or(&b'.')))
-            .collect(),
-    )
+/// A program that loads the database, changes it and saves it holds this from
+/// before the load until after the save. Without it two such programs running
+/// at once both load the same state, and the second save silently erases the
+/// first one's change: the lost update shadow-utils' `/etc/passwd.lock`
+/// exists to prevent, and one this database had no defence against until
+/// 2026-10-07.
+///
+/// The hold is an advisory `flock` on `<database>.lock` beside the database
+/// ([`std::fs::File::try_lock`]). Advisory is enough because every writer of
+/// the database takes it, and a lock the kernel holds dies with its holder,
+/// so a crash leaves nothing behind to clear by hand. shadow-utils' lock
+/// *files* do, and have to carry a pid to tell a stale one from a live one.
+/// The file itself stays, empty: removing it on release would let a third
+/// program lock a fresh file while a second still waits on the old one.
+#[derive(Debug)]
+pub struct Lock {
+    _file: std::fs::File,
+}
+
+/// `<path>.lock`: the database's whole file name with `.lock` after it, so
+/// `/etc/users.yaml` is held through `/etc/users.yaml.lock`.
+fn lock_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    std::path::PathBuf::from(name)
+}
+
+/// A fresh setting for a new password: [`PASSWORD_METHOD`] at its default
+/// cost, salted with [`SALT_BYTES`] bytes of `/dev/urandom` --
+/// `$y$j9T$` and 22 characters of salt.
+///
+/// The setting is the C library's `crypt_gensalt`'s (`libcall::crypt`: on
+/// SlateOS `libc.a`'s, on a Linux host libxcrypt's), asked as PAM asks it for
+/// Ubuntu's `passwd` -- the method's prefix, cost 0 for its default -- so a
+/// password set here is stored in exactly the shape `chpasswd`'s and
+/// Ubuntu's are. A yescrypt salt has rules a SHA-512 one did not (the
+/// characters must decode to whole bytes), and the library is the one place
+/// that writes them.
+///
+/// # Errors
+///
+/// [`PasswordError::NoRandomness`] if `/dev/urandom` cannot be read, and
+/// [`PasswordError::Salt`] if the library makes no setting -- on a host with
+/// no such library, always.
+pub fn new_setting() -> Result<String, PasswordError> {
+    let mut random = [0u8; SALT_BYTES];
+    read_random(&mut random).ok_or(PasswordError::NoRandomness)?;
+    // A method's prefix is `$`, letters and digits: never a NUL.
+    let prefix =
+        std::ffi::CString::new(PASSWORD_METHOD.prefix()).map_err(|_| PasswordError::Salt)?;
+    let mut out = [0u8; libcall::crypt::GENSALT_OUTPUT_SIZE];
+    // The refusal's `errno` is not wanted: every refusal is "no setting",
+    // and on SlateOS or Linux, given these bytes, there is none.
+    let len =
+        libcall::crypt::gensalt(&prefix, 0, &random, &mut out).map_err(|_| PasswordError::Salt)?;
+    let setting = out.get(..len).ok_or(PasswordError::Salt)?;
+    String::from_utf8(setting.to_vec()).map_err(|_| PasswordError::Salt)
+}
+
+/// Fill `out` from `/dev/urandom`, or `None` if it cannot be read.
+///
+/// Exactly `out.len()` bytes are read. `/dev/urandom` has no end: on Linux,
+/// and on SlateOS (`kernel/src/fs/devfs.rs`), a read at any offset returns
+/// fresh bytes. So a read to end of file, which is what `std::fs::read` does,
+/// never returns: it grows its buffer until the allocation fails. That is
+/// what this did until 2026-10-07, and every `passwd` and `useradm` that set
+/// a password hung there.
+fn read_random(out: &mut [u8]) -> Option<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(out)
+        .ok()
 }
 
 /// Split `key: value`, leaving the value's quoting alone.
@@ -1761,19 +1916,45 @@ users:
 
     /// A known answer, not merely a self-consistent one. The three
     /// constructions this replaces all passed determinism and difference
-    /// tests, which are true of any function written by accident.
+    /// tests, which are true of any function written by accident. The answer
+    /// is libxcrypt's on Ubuntu for the same password and salt (`posix`'s
+    /// `a_new_yescrypt_setting_is_ubuntus` pins the same one).
     #[test]
-    fn the_stored_entry_matches_a_published_vector() {
+    fn the_stored_entry_matches_libxcrypts() {
         let mut record = Record::new();
         record
-            .set_password_with_salt("Hello world!", "saltstring")
+            .set_password_with_salt("pleaseletmein", "PKXc3hCOSyMqdaEQArI62/")
             .expect("set");
         assert_eq!(
             record.get(field::PASSWORD_HASH).as_deref(),
-            Some(
-                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJu\
-                 esI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
-            )
+            Some("$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7")
+        );
+        assert_eq!(record.check_password("pleaseletmein"), Auth::Accepted);
+    }
+
+    /// An entry stored before new passwords moved to yescrypt keeps
+    /// verifying: an entry names its own method, so a `$6$` one -- here the
+    /// published SHA-512-crypt vector -- is checked as SHA-512-crypt until its
+    /// password next changes.
+    #[test]
+    fn an_entry_of_the_old_method_still_verifies() {
+        let mut record = Record::new();
+        record.set(
+            field::PASSWORD_HASH,
+            "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJu\
+             esI68u4OTLiBFdcbYEdFCoEOfaS35inz1",
+        );
+        assert_eq!(record.check_password("Hello world!"), Auth::Accepted);
+        assert_eq!(record.check_password("Hello world"), Auth::Rejected);
+        record
+            .set_password_with_salt("Hello world!", "saltsalt")
+            .expect("set");
+        assert!(
+            record
+                .get(field::PASSWORD_HASH)
+                .is_some_and(|h| h.starts_with("$y$j9T$saltsalt$")),
+            "{:?}",
+            record.get(field::PASSWORD_HASH)
         );
     }
 
@@ -1866,12 +2047,101 @@ users:
             record.set_password_with_salt("pw", ""),
             Err(PasswordError::Salt)
         );
-        // 17 characters, one past SHA-crypt's maximum.
+        // Characters that do not decode to whole bytes: the last of nine
+        // holds six bits no byte does, and the last two of "saltstring" leave
+        // bits set past their one byte.
+        for salt in ["abcdefghi", "saltstring"] {
+            assert_eq!(
+                record.set_password_with_salt("pw", salt),
+                Err(PasswordError::Salt),
+                "{salt}"
+            );
+        }
+        // 87 characters, one past the 64 bytes libxcrypt's salt holds.
         assert_eq!(
-            record.set_password_with_salt("pw", "abcdefghijklmnopq"),
+            record.set_password_with_salt("pw", &".".repeat(87)),
             Err(PasswordError::Salt)
         );
         assert!(!record.contains(field::PASSWORD_HASH));
+    }
+
+    /// A new setting is the library's, at the default cost, salted afresh:
+    /// `$y$j9T$` and the 22 characters 16 random bytes are written as. Where
+    /// there is no `/dev/urandom` (the Windows development host) it must say
+    /// so rather than invent a salt.
+    ///
+    /// `/dev/urandom` never ends, so the bytes read from it must stop at the
+    /// number needed. This read to end of file until 2026-10-07 and never
+    /// returned: a `passwd` that set a password hung there.
+    #[test]
+    fn a_new_setting_is_drawn_once_and_never_reads_to_the_end() {
+        let setting = match new_setting() {
+            Ok(setting) => setting,
+            Err(PasswordError::NoRandomness) => {
+                assert!(
+                    std::fs::File::open("/dev/urandom").is_err(),
+                    "`/dev/urandom` opens, but nothing was drawn from it"
+                );
+                return;
+            }
+            Err(e) => panic!("no setting: {e:?}"),
+        };
+        let salt = setting
+            .strip_prefix("$y$j9T$")
+            .unwrap_or_else(|| panic!("{setting}"));
+        assert_eq!(salt.len(), 22, "{setting}");
+        assert!(
+            salt.bytes()
+                .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
+            "{setting}"
+        );
+        assert_ne!(new_setting(), Ok(setting), "two draws gave the same salt");
+        // And the whole password path that reaches it, which is what hung.
+        let mut record = Record::new();
+        assert_eq!(record.set_password("pw"), Ok(()));
+        assert_eq!(record.check_password("pw"), Auth::Accepted);
+        assert!(
+            record
+                .get(field::PASSWORD_HASH)
+                .is_some_and(|h| h.starts_with("$y$j9T$")),
+            "{:?}",
+            record.get(field::PASSWORD_HASH)
+        );
+    }
+
+    /// One holder at a time, and the hold ends with the [`Lock`]. A second
+    /// open of the lock file is a second holder even within one process --
+    /// `flock` belongs to the open, not the process -- which is what lets
+    /// this be tested here.
+    #[test]
+    fn a_held_database_cannot_be_held_again_until_it_is_released() {
+        let scratch = ScratchDir::new("userdb-lock");
+        let path = scratch.path("users.yaml");
+        let held = UserDb::lock(&path).expect("the first hold");
+        let second = UserDb::lock_trying(&path, 2, std::time::Duration::from_millis(10));
+        assert_eq!(
+            second.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert!(UserDb::lock_trying(&path, 1, std::time::Duration::ZERO).is_ok());
+        // The file stays: see `Lock`.
+        assert!(scratch.path("users.yaml.lock").exists());
+    }
+
+    /// A lock that cannot even be created is not one another program holds,
+    /// so it is refused at once rather than after fifteen seconds of waiting.
+    #[test]
+    fn a_lock_that_cannot_be_made_is_refused_without_waiting() {
+        let scratch = ScratchDir::new("userdb-lock-nodir");
+        let path = scratch.path("no-such-dir/users.yaml");
+        let started = std::time::Instant::now();
+        let refused = UserDb::lock_trying(&path, LOCK_TRIES, std::time::Duration::from_secs(1));
+        assert_eq!(
+            refused.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     /// A quotation mark in a display name used to end the value early and

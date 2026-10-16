@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Word Search
+Comment=Find the hidden words in a grid of letters
+Icon=applications-games
+Exec=wordsearch
+Categories=Game;
+Keywords=words;puzzle;

@@ -569,6 +569,13 @@ static HEAP: KernelHeap = KernelHeap {
     }),
 };
 
+/// [`HeapInner::hhdm_offset`] and [`HeapInner::initialized`], readable with
+/// no lock: what the paths that run outside the heap lock -- large blocks and
+/// refilling a slab class -- need of the heap's state. Written once, by
+/// [`init`].
+static HEAP_HHDM: AtomicU64 = AtomicU64::new(0);
+static HEAP_READY: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Heap-lock owner instrumentation (deadlock diagnosis)
 // ---------------------------------------------------------------------------
@@ -602,6 +609,9 @@ struct TrackedGuard<'a> {
     // preempt_enable() in our Drop (see the Drop impl for why the order
     // matters). Never dropped except in `Drop::drop`.
     guard: core::mem::ManuallyDrop<MutexGuard<'a, HeapInner>>,
+    /// Interrupts were enabled when the lock was taken: they are turned back
+    /// on when it is released (`lock_tracked`).
+    irqs_were_on: bool,
 }
 
 impl Deref for TrackedGuard<'_> {
@@ -638,6 +648,19 @@ impl Drop for TrackedGuard<'_> {
         unsafe {
             core::mem::ManuallyDrop::drop(&mut self.guard);
         }
+        // Interrupts back on, then preemption -- Linux's
+        // `spin_unlock_irqrestore` order: an interrupt taken in between finds
+        // no lock held, and a reschedule it asks for waits for the
+        // `preempt_enable` just below.
+        if self.irqs_were_on {
+            crate::cpu::irqoff_tracker::record_enable();
+            // SAFETY: interrupts were enabled when `lock_tracked` turned them
+            // off, so the IDT is installed and enabling them restores the
+            // state the caller had.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
         crate::sched::preempt_enable();
     }
 }
@@ -664,6 +687,32 @@ impl KernelHeap {
         // TrackedGuard::drop) defers the timer's context switch until the lock is
         // released — mirroring crate::sync::Mutex. Disabled BEFORE spinning to
         // acquire, so a contended waiter can't be preempted mid-spin either.
+        //
+        // Interrupts are turned off for the hold too, first of all (Linux's
+        // `spin_lock_irqsave` order). Code in interrupt context allocates --
+        // a timer's wake grows a run queue's `VecDeque` (`sched::try_wake` ->
+        // `PerCpuScheduler::enqueue`) -- and an interrupt taken on this CPU
+        // while it held this lock would spin on it for ever, with the holder
+        // it interrupted never to run again. That was the two-CPU hang at the
+        // device-door self-test (known-issues
+        // A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU,
+        // design-decisions §1563): seen only on two CPUs because a wake onto
+        // the second CPU's queues, which had never held a task, was the one
+        // that had to grow them. With interrupts off, an interrupt's
+        // allocation can only wait for another CPU's holder, which finishes.
+        // Nothing done under this lock waits for another CPU -- vmalloc,
+        // whose unmapping shoots down TLBs, runs without it
+        // (`alloc_virtual`) -- so no holder can be stuck waiting on a CPU
+        // that is spinning here with interrupts off.
+        let irqs_were_on = crate::cpu::interrupts_enabled();
+        if irqs_were_on {
+            // SAFETY: disabling interrupts is always sound; `TrackedGuard`'s
+            // drop turns them back on.
+            unsafe {
+                crate::cpu::cli();
+            }
+            crate::cpu::irqoff_tracker::record_disable();
+        }
         crate::sched::preempt_disable();
         let guard = self.inner.lock();
         // Reading current_task_id() is lock-free (a per-CPU atomic load), so it
@@ -676,6 +725,51 @@ impl KernelHeap {
         );
         TrackedGuard {
             guard: core::mem::ManuallyDrop::new(guard),
+            irqs_were_on,
+        }
+    }
+
+    /// Add a fresh slab to size class `class_idx`: a frame from the frame
+    /// allocator, taken with the heap lock *not* held -- its slow path
+    /// reclaims, compacts and may kill, and it shoots down TLBs, none of which
+    /// may run under a lock held with interrupts off
+    /// ([`HeapInner::install_slab`]) -- then divided into slots under the
+    /// lock. `false` if the frame allocator has nothing left.
+    ///
+    /// Two CPUs that find a class empty at once may both refill it; the extra
+    /// slots stay on the free list for later allocations.
+    fn refill_class(&self, class_idx: usize) -> bool {
+        // Attribute the frame to the slab heap in the owner census -- the
+        // allocator cannot tell who is asking.
+        let Ok(frame) = ({
+            let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
+            frame::alloc_frame()
+        }) else {
+            return false;
+        };
+        super::memtype::charge(super::memtype::MemType::SlabHeap, 1);
+        self.lock_tracked().install_slab(class_idx, frame);
+        true
+    }
+
+    /// Take a slot of size class `class_idx` from the global free lists,
+    /// refilling the class outside the lock when it is empty; null when the
+    /// frame allocator has nothing left, or before [`init`].
+    fn slab_alloc_global(&self, class_idx: usize) -> *mut u8 {
+        loop {
+            {
+                let mut inner = self.lock_tracked();
+                if !inner.initialized {
+                    return ptr::null_mut();
+                }
+                let ptr = inner.slab_alloc(class_idx);
+                if !ptr.is_null() {
+                    return ptr;
+                }
+            }
+            if !self.refill_class(class_idx) {
+                return ptr::null_mut();
+            }
         }
     }
 
@@ -834,11 +928,15 @@ impl HeapInner {
         Some(needed.next_power_of_two().trailing_zeros() as usize - 3)
     }
 
-    /// Allocate a new frame, divide it into slots for the given class,
-    /// and prepend all slots to the class's free list.
+    /// Divide `frame` into slots for size class `class_idx` and prepend them
+    /// all to the class's free list.
     ///
-    /// Returns `true` on success, `false` if the frame allocator is
-    /// out of memory.
+    /// Allocates nothing: the frame was allocated by the caller without this
+    /// lock held ([`KernelHeap::refill_class`]). The frame allocator's slow
+    /// path reclaims, compacts and kills -- swapping pages out of programs,
+    /// which shoots down TLBs on every CPU -- and none of that may happen
+    /// under a lock held with interrupts off, which another CPU may be
+    /// spinning on with interrupts off too, unable to answer the shootdown.
     // cast_ptr_alignment: slot addresses are aligned to class_size (power of 2
     // >= 8 bytes), which meets FreeSlot's 8-byte alignment requirement.
     #[allow(
@@ -846,19 +944,8 @@ impl HeapInner {
         clippy::indexing_slicing,
         clippy::cast_ptr_alignment
     )]
-    fn refill(&mut self, class_idx: usize) -> bool {
+    fn install_slab(&mut self, class_idx: usize, frame: PhysFrame) {
         let class_size = SIZE_CLASSES[class_idx];
-
-        // Allocate a physical frame.  Attribute it to the slab heap in the
-        // owner census — the allocator cannot tell who is asking.
-        let Ok(frame) = ({
-            let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
-            frame::alloc_frame()
-        }) else {
-            return false;
-        };
-        super::memtype::charge(super::memtype::MemType::SlabHeap, 1);
-
         let virt_base = frame.to_virt(self.hhdm_offset) as *mut u8;
         let slots = FRAME_SIZE / class_size;
 
@@ -879,14 +966,14 @@ impl HeapInner {
         }
 
         SLAB_REFILLS.fetch_add(1, Ordering::Relaxed);
-        true
     }
 
-    /// Allocate from a slab size class.
+    /// Take a slot from a slab size class's free list; null when it is empty
+    /// -- the caller then refills it outside the lock
+    /// ([`KernelHeap::refill_class`]) and asks again.
     #[allow(clippy::indexing_slicing)]
     fn slab_alloc(&mut self, class_idx: usize) -> *mut u8 {
-        // Refill if the free list is empty.
-        if self.free_lists[class_idx].is_null() && !self.refill(class_idx) {
+        if self.free_lists[class_idx].is_null() {
             return ptr::null_mut();
         }
 
@@ -995,31 +1082,36 @@ impl HeapInner {
     /// Allocate directly from the buddy allocator (for large requests that
     /// fit one buddy block; larger ones never reach here — see
     /// [`Self::exceeds_buddy`] and `KernelHeap::alloc_virtual`).
-    fn large_alloc(&self, layout: &Layout) -> *mut u8 {
+    ///
+    /// Takes no heap lock, and must be called without it: the buddy
+    /// allocator's slow path reclaims (see [`Self::install_slab`]). It needs
+    /// nothing the lock protects, only the direct map's offset.
+    fn large_alloc(layout: &Layout) -> *mut u8 {
         let order = Self::large_order(layout);
         // Large kernel allocations are still heap storage for census purposes.
         let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
         match frame::alloc_order(order) {
             Ok(f) => {
                 super::memtype::charge(super::memtype::MemType::LargeHeap, 1u64 << order);
-                f.to_virt(self.hhdm_offset) as *mut u8
+                f.to_virt(HEAP_HHDM.load(Ordering::Acquire)) as *mut u8
             }
             Err(_) => ptr::null_mut(),
         }
     }
 
-    /// Free a large allocation back to the buddy allocator.
+    /// Free a large allocation back to the buddy allocator. Without the heap
+    /// lock, as [`Self::large_alloc`].
     ///
     /// # Safety
     ///
     /// `ptr` must have been returned by `large_alloc` with the same layout.
     #[allow(clippy::arithmetic_side_effects)]
-    unsafe fn large_dealloc(&self, ptr: *mut u8, layout: &Layout) {
+    unsafe fn large_dealloc(ptr: *mut u8, layout: &Layout) {
         let order = Self::large_order(layout);
 
         // Convert HHDM virtual address back to physical.
         let virt = ptr as u64;
-        let phys = virt - self.hhdm_offset;
+        let phys = virt - HEAP_HHDM.load(Ordering::Acquire);
 
         if let Some(frame) = PhysFrame::from_addr(phys) {
             // SAFETY: The caller guarantees ptr was allocated by large_alloc
@@ -1219,32 +1311,36 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         return ptr;
     }
 
-    // Slow path: batch refill from global allocator.
-    let mut inner = HEAP.lock_tracked();
+    // Slow path: batch refill from the global free lists -- and, when they
+    // are empty, refill those from the frame allocator once, outside the heap
+    // lock (`KernelHeap::refill_class`), then take the batch.
     let mut transferred = 0u16;
-
-    for _ in 0..PCPU_SLAB_BATCH {
-        let head = inner.free_lists[class_idx];
-        if head.is_null() {
-            // Global free list empty — try to refill it.
-            if !inner.refill(class_idx) {
-                break; // OOM — stop refilling.
+    let mut refilled = false;
+    loop {
+        let mut inner = HEAP.lock_tracked();
+        while usize::from(transferred) < PCPU_SLAB_BATCH {
+            let head = inner.free_lists[class_idx];
+            if head.is_null() {
+                break;
             }
-            continue; // Retry after refill added new slots.
+            // Pop from global, push to local.
+            // SAFETY: head is non-null, points to valid HHDM memory.
+            inner.free_lists[class_idx] = unsafe { (*head).next };
+            // SAFETY: head is a valid FreeSlot (just read from global list).
+            // Writing .next to re-link it into the per-CPU list is safe.
+            unsafe {
+                (*head).next = cache.heads[class_idx] as *mut FreeSlot;
+            }
+            cache.heads[class_idx] = head as usize;
+            transferred = transferred.saturating_add(1);
         }
-        // Pop from global, push to local.
-        // SAFETY: head is non-null, points to valid HHDM memory.
-        inner.free_lists[class_idx] = unsafe { (*head).next };
-        // SAFETY: head is a valid FreeSlot (just read from global list).
-        // Writing .next to re-link it into the per-CPU list is safe.
-        unsafe {
-            (*head).next = cache.heads[class_idx] as *mut FreeSlot;
+        // Release global lock.
+        drop(inner);
+        if transferred > 0 || refilled || !HEAP.refill_class(class_idx) {
+            break;
         }
-        cache.heads[class_idx] = head as usize;
-        transferred += 1;
+        refilled = true;
     }
-    // Release global lock.
-    drop(inner);
 
     cache.counts[class_idx] += transferred;
 
@@ -1442,15 +1538,12 @@ unsafe impl GlobalAlloc for KernelHeap {
             return self.alloc_virtual(&layout);
         }
 
-        // Global locked path.
-        let mut inner = self.lock_tracked();
-        if !inner.initialized {
-            return ptr::null_mut();
-        }
-
+        // Global path: the free lists under the heap lock, a refill or a
+        // large block outside it (`refill_class`, `large_alloc`).
         let ptr = match class_idx {
-            Some(idx) => inner.slab_alloc(idx),
-            None => inner.large_alloc(&layout),
+            Some(idx) => self.slab_alloc_global(idx),
+            None if HEAP_READY.load(Ordering::Acquire) => HeapInner::large_alloc(&layout),
+            None => ptr::null_mut(),
         };
 
         if ptr.is_null() {
@@ -1481,9 +1574,8 @@ unsafe impl GlobalAlloc for KernelHeap {
                 if current > peak { Some(current) } else { None }
             });
         }
-        // Release the heap lock before touching KASAN shadow (lazy shadow-page
-        // mapping uses the frame allocator + page tables, never the heap lock).
-        drop(inner);
+        // KASAN shadow outside the heap lock, which is not held here (lazy
+        // shadow-page mapping uses the frame allocator + page tables).
         if crate::mm::kasan::is_enabled() && !ptr.is_null() {
             crate::mm::kasan::on_alloc(ptr, layout.size(), kasan_slot_size(class_idx, &layout));
         }
@@ -1577,24 +1669,26 @@ unsafe impl GlobalAlloc for KernelHeap {
             }
         }
 
-        // Global locked path.
-        let mut inner = self.lock_tracked();
-        if !inner.initialized {
+        if !HEAP_READY.load(Ordering::Acquire) {
             return;
         }
-
         match class_idx {
+            // Global locked path: back on the class's free list.
             Some(idx) => {
+                let mut inner = self.lock_tracked();
                 inner.slab_dealloc(ptr, idx);
+                drop(inner);
                 SLAB_FREES.fetch_add(1, Ordering::Relaxed);
                 if let Some(counter) = CLASS_FREES.get(idx) {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
             }
-            // SAFETY: Caller guarantees ptr was allocated with this layout.
+            // A large block goes back to the buddy allocator, outside the
+            // heap lock as its allocation was (`HeapInner::large_alloc`).
             None => {
-                unsafe { inner.large_dealloc(ptr, &layout) };
+                // SAFETY: Caller guarantees ptr was allocated with this layout.
+                unsafe { HeapInner::large_dealloc(ptr, &layout) };
                 LARGE_FREES.fetch_add(1, Ordering::Relaxed);
                 BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
             }
@@ -2142,7 +2236,70 @@ pub fn init(hhdm_offset: u64) {
     let mut inner = HEAP.lock_tracked();
     inner.hhdm_offset = hhdm_offset;
     inner.initialized = true;
+    HEAP_HHDM.store(hhdm_offset, Ordering::Release);
+    HEAP_READY.store(true, Ordering::Release);
+    drop(inner);
     serial_println!("[mm] Kernel heap allocator initialized");
+}
+
+/// The heap lock is held with interrupts off, and gives them back as they
+/// were: an interrupt that allocates -- a timer's wake grows a run queue --
+/// must never find its own CPU holding the lock, where it would spin for
+/// ever over the holder it interrupted (the two-CPU hang of 2026-10-09,
+/// design-decisions §1563). Run once interrupts are enabled -- the main
+/// [`self_test`] runs before, when there is no "on" to keep -- both ways in:
+/// interrupts on, and already off.
+///
+/// # Errors
+///
+/// `InternalError` on a failed check, after printing it.
+pub fn self_test_lock_irqs() -> KernelResult<()> {
+    serial_println!("[heap] Running heap lock interrupt-state self-test...");
+    if !crate::cpu::interrupts_enabled() {
+        serial_println!("[heap]   FAIL: run with interrupts off: nothing would be tested");
+        return Err(KernelError::InternalError);
+    }
+    // Code in interrupt context allocates (a timer's wake grows a run queue),
+    // so an interrupt must never find its own CPU holding this lock: it would
+    // spin on it for ever, over the holder it interrupted -- the two-CPU hang
+    // of 2026-10-09 (design-decisions §1563). Both ways in: interrupts on, and
+    // already off (the state must be given back as it was).
+    for start_on in [true, false] {
+        let was_on = crate::cpu::interrupts_enabled();
+        if !start_on && was_on {
+            // SAFETY: turned back on just below, before anything else.
+            unsafe {
+                crate::cpu::cli();
+            }
+        }
+        let before = crate::cpu::interrupts_enabled();
+        let off_inside = {
+            let _held = HEAP.lock_tracked();
+            !crate::cpu::interrupts_enabled()
+        };
+        let after = crate::cpu::interrupts_enabled();
+        if !start_on && was_on {
+            // SAFETY: interrupts were on when this test began.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
+        if !off_inside {
+            serial_println!("[heap]   FAIL: the heap lock was held with interrupts on");
+            return Err(KernelError::InternalError);
+        }
+        if after != before {
+            serial_println!(
+                "[heap]   FAIL: releasing the heap lock left interrupts {} (they were {})",
+                if after { "on" } else { "off" },
+                if before { "on" } else { "off" }
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[heap]   heap lock held with interrupts off, their state given back: OK");
+
+    Ok(())
 }
 
 /// Run a boot-time self-test of the heap allocator.

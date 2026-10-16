@@ -447,8 +447,8 @@ MUTATIONS = [
     ),
     (
         "a file too big to read whole is read in part",
-        "        if read.truncated {\n            self.persist = false;\n",
-        "        if false {\n            self.persist = false;\n",
+        "    if read.truncated {\n        return Err(format!(",
+        "    if false {\n        return Err(format!(",
         ["a_book_too_big_to_read_whole_is_refused"],
     ),
     (
@@ -467,7 +467,9 @@ MUTATIONS = [
         "a failed save is not said",
         '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
-        [FAILING],
+        # Not FAILING since 2026-10-09: its folder in the file's place fails
+        # the read a save now does first (§1239), before any write.
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         "the failure is drawn nowhere",
@@ -589,12 +591,11 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
     ),
-    (
-        "a command's letter is typed",
-        '        if textline::types_into_field(event) {',
-        '        if event.types_text() {',
-        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
-    ),
+    # No row for "a command's letter is typed": since 2026-10-04 the boxes'
+    # typing is textline::apply_key's, which tells a command from AltGr
+    # itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types still
+    # holds the boxes to it.
     (
         'AltGr is taken for Ctrl',
         '        if textline::is_ctrl_chord(event.modifiers) {',
@@ -723,18 +724,8 @@ MUTATIONS = [
     ),
     (
         'the search box shows a caret under a cover',
-        '        let focused = state.focused;\n'
-        '        let inner = inset(l.search, 10.0);\n',
-        '        let focused = self.focus == Focus::Search;\n'
-        '        let inner = inset(l.search, 10.0);\n',
-        [FIELDS],
-    ),
-    (
-        "a form's box shows a caret under a cover",
-        '                let focused = state.focused;\n'
-        '                let value = self.field_value(field);\n',
-        '                let focused = self.focus == Focus::Field(field);\n'
-        '                let value = self.field_value(field);\n',
+        '        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", state.focused);\n',
+        '        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", self.focus == Focus::Search);\n',
         [FIELDS],
     ),
     (
@@ -742,6 +733,125 @@ MUTATIONS = [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [FIELDS],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else; and Delete
+# under a box with the keyboard deleted the selected contact.
+LINE = "a_forms_line_edits_at_a_caret_and_delete_stays_in_it"
+SEARCH = "the_search_box_edits_at_a_caret"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MUTATIONS += [
+    (
+        "a plain key a box does not answer reaches the window's keys",
+        "            if !textline::is_ctrl_chord(event.modifiers) {\n                return;\n            }\n        }\n",
+        "        }\n",
+        [LINE],
+    ),
+    (
+        "a box's keys come after the window's",
+        "        if self.focus != Focus::None {\n            let focus = self.focus;\n",
+        "        if false {\n            let focus = self.focus;\n",
+        [LINE, SEARCH],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [LINE],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor.text() != self.box_text(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor_for != Some(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - inner.x,\n",
+        "            0.0,\n",
+        [SEARCH],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "        if let Some(rect) = frame.rect_of(|t| *t == target) {\n            self.press_box(focus, rect, event.x);\n        }\n",
+        "",
+        [LINE, SEARCH],
+    ),
+    (
+        "the caret is drawn at the start",
+        "            let (cursor, anchor) = if focused {\n                self.box_caret(focus)\n",
+        "            let (cursor, anchor) = if false {\n                self.box_caret(focus)\n",
+        [LINE],
+    ),
+]
+
+# 2026-10-09: two windows of Contacts save into one book (design-decisions
+# §1239) -- each its own changes, into what the file holds.
+TWO = "two_windows_each_add_someone_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+GROUP_BACK = "a_group_deleted_while_another_window_used_it_comes_back"
+NAMES = "a_merged_book_names_nothing_it_does_not_have"
+MUTATIONS += [
+    (
+        "a save writes this window's copy over the file",
+        "        let merged = ContactStore::merged(&self.base, &self.store, &theirs);\n",
+        "        let _ = &theirs;\n        let merged = self.store.clone();\n",
+        # Not the hearing test: a window that has heard the other's save has
+        # it in its own copy, so writing that copy whole loses nothing there.
+        [TWO],
+    ),
+    (
+        "a new contact takes the next number",
+        "        recordfile::fresh_id(|id| self.contacts.iter().any(|c| c.id == id))\n",
+        "        self.contacts.iter().map(|c| c.id).max().map_or(1, |m| m.saturating_add(1))\n",
+        [TWO],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {\n",
+        "        if true || now == self.file_stamp {\n",
+        [HEAR],
+    ),
+    (
+        "hearing another window's save drops what is unsaved",
+        "        let shown = if unsaved {\n",
+        "        let shown = if false {\n",
+        [HEAR],
+    ),
+    (
+        "a group another window deleted is not brought back",
+        "        groups.extend(\n            mine.groups\n                .iter()\n"
+        "                .filter(|g| needed.contains(&g.id))\n                .cloned(),\n        );\n",
+        "",
+        [GROUP_BACK],
+    ),
+    (
+        "a membership of a group nobody has is kept",
+        "            contact.groups.retain(|id| present.contains(id));\n",
+        "",
+        [NAMES],
+    ),
+    (
+        "recently viewed is this window's though it did not change it",
+        "        let mut recently_viewed = if mine.recently_viewed == base.recently_viewed {\n",
+        "        let mut recently_viewed = if false {\n",
+        [NAMES],
+    ),
+    (
+        "recently viewed names someone who is gone",
+        "        recently_viewed.retain(|id| contacts.iter().any(|c| c.id == *id));\n",
+        "",
+        [NAMES],
     ),
 ]
 

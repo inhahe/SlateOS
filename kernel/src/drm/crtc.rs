@@ -15,6 +15,7 @@ use super::mode::DrmMode;
 // ---------------------------------------------------------------------------
 
 /// A DRM CRTC — one scanout engine.
+#[derive(Clone)]
 pub struct DrmCrtc {
     /// Unique object ID.
     pub id: DrmObjectId,

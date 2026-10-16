@@ -1,457 +1,413 @@
-//! File comments and annotations.
+//! File comments: free-form text a person attaches to a file or directory,
+//! which the file explorer shows in its Properties dialog. Unlike tags (short
+//! labels) or queryable attributes (typed key-value metadata), a comment is
+//! for a human to read.
 //!
-//! Attaches user-visible text comments to files and directories.
-//! Comments appear in the file explorer Properties dialog and can
-//! be searched.  Unlike tags (short labels) or queryable attributes
-//! (typed key-value metadata), comments are free-form text meant
-//! for human consumption.
+//! **A comment is the file's `user.xdg.comment` extended attribute** -- where
+//! `design.txt` puts it ("Arbitrary string/comment ... Stored in extended
+//! attributes", lines 377 and 391-392), under the name freedesktop.org's
+//! shared file metadata gives it, so KDE's Dolphin, `getfattr -n
+//! user.xdg.comment` and `setfattr` read and write the same one. The file's
+//! filesystem keeps it, which settles everything a table of comments here
+//! could not:
 //!
-//! ## Design Reference
+//! - it is the file's, not a name's: every hard link shows the one comment,
+//!   and a rename carries it;
+//! - it goes with the file, so a file that later reuses the inode does not
+//!   begin with a stranger's comment;
+//! - on ext4 it is on disk, and survives a reboot;
+//! - `cp -a`, `tar --xattrs` and `rsync -X` carry it to and from Linux.
 //!
-//! design.txt lines 377, 391-392: "Arbitrary string/comment? ... max
-//! size maybe 64 KiB? Stored in extended attributes."
+//! Programs reach it with the extended-attribute calls they already have
+//! (`getxattr(2)` and its family, through either ABI), under the `user.`
+//! namespace's rules (`fs::xattr_policy`): regular files and directories
+//! only, read as the file's read permission allows and written as its write
+//! permission does. What this module adds is for the kernel shell: [`search`]
+//! and [`list`], which walk a subtree reading the attribute -- bounded, since
+//! nothing indexes comments (`design.txt`: "user-facing tagging is better done
+//! at the GUI/search-index level, not in filesystem metadata").
 //!
-//! ## Architecture
-//!
-//! ```text
-//! User types comment in Properties dialog
-//!   → fcomment::set("/docs/report.pdf", "Q3 quarterly report, needs review")
-//!   → stored in COMMENT_STORE
-//!
-//! File explorer shows comment in tooltip or detail column
-//!   → fcomment::get("/docs/report.pdf")
-//!   → "Q3 quarterly report, needs review"
-//!
-//! Search for files by comment content
-//!   → fcomment::search("quarterly", "/docs")
-//!   → [("/docs/report.pdf", "Q3 quarterly report, needs review")]
-//! ```
+//! Until 2026-10-02 the comments lived in a table here, in memory and keyed by
+//! name: two names of one file had two comments, a rename lost one, a reboot
+//! lost them all, and no program could reach any of it (design-decisions
+//! §1533). `/proc/fcomment` listed every one of them to any reader, whether or
+//! not it could read the files; it now counts operations only.
 //!
 //! ## Limits
 //!
-//! - Max 65536 bytes per comment (design says 64 KiB)
-//! - Max 65536 files with comments
-//! - Comments are stored as plain UTF-8 text
+//! - A comment is at most [`MAX_COMMENT_SIZE`] bytes (64 KiB, Linux's
+//!   `XATTR_SIZE_MAX` and the figure `design.txt` gives). A filesystem may keep
+//!   less, and says so when asked to keep more: ext4 keeps a file's attributes
+//!   in one block.
+//! - A comment is bytes. Text is what a person writes, but the attribute is
+//!   anyone's to set, so nothing here assumes UTF-8.
 
-#![allow(dead_code)]
-
-use crate::sync::Mutex;
-use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::fswalk::{self, WalkAction, WalkOptions};
 use super::path::{Path, PathBuf};
+use super::{EntryType, Vfs};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum comment size in bytes (64 KiB).
-const MAX_COMMENT_SIZE: usize = 65536;
+/// The extended attribute a comment is kept in.
+pub const XATTR: &[u8] = b"user.xdg.comment";
 
-/// Maximum files with comments.
-const MAX_FILES: usize = 65536;
+/// The longest comment, in bytes: Linux's `XATTR_SIZE_MAX`.
+pub const MAX_COMMENT_SIZE: usize = 65536;
 
-/// Maximum search results.
-const MAX_SEARCH_RESULTS: usize = 4096;
+/// The most entries one [`search`] or [`list`] visits: each visit is a path
+/// lookup and a read of the attribute, under the filesystem's lock, in the
+/// caller's time.
+const MAX_VISITED: u64 = 65536;
+
+/// The most comments one [`search`] or [`list`] returns.
+const MAX_RESULTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
-// Storage
+// Statistics
 // ---------------------------------------------------------------------------
 
-struct CommentStore {
-    /// Path → comment text.
-    /// Keyed by `PathBuf`, not `String`: the key is a filesystem name,
-    /// which may hold any byte but `/` and NUL, while the value is a
-    /// human-written comment and so is genuinely text. See
-    /// `design-decisions.md` §261.
-    comments: BTreeMap<PathBuf, String>,
-}
-
-impl CommentStore {
-    const fn new() -> Self {
-        Self {
-            comments: BTreeMap::new(),
-        }
-    }
-}
-
-static STORE: Mutex<CommentStore> = Mutex::new(CommentStore::new());
 static SET_COUNT: AtomicU64 = AtomicU64::new(0);
 static GET_COUNT: AtomicU64 = AtomicU64::new(0);
 static SEARCH_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
-// Helpers
+// One file's comment
 // ---------------------------------------------------------------------------
 
-/// ASCII-lowercase for case-insensitive search.
-fn to_ascii_lower(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            out.push((c as u8 + 32) as char);
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Core API
-// ---------------------------------------------------------------------------
-
-/// Set a comment on a file (replaces any existing comment).
-pub fn set(path: impl AsRef<Path>, comment: &str) -> KernelResult<()> {
-    let path = path.as_ref();
-    if path.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
+/// Give the file at `path` the comment `comment`, replacing any it has; an
+/// empty one removes it, and removing none is not an error. Asked as the
+/// caller: `setxattr`'s rules decide who may.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a comment over [`MAX_COMMENT_SIZE`]; the path's, the
+/// `user.` namespace's (`PermissionDenied`, and `PermissionDenied` again for
+/// anything but a regular file or a directory) and the filesystem's -- one
+/// that keeps no attributes (FAT) answers `NotSupported`, one with no room
+/// left for this one says so.
+pub fn set(path: &Path, comment: &[u8]) -> KernelResult<()> {
     if comment.len() > MAX_COMMENT_SIZE {
         return Err(KernelError::InvalidArgument);
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let mut store = STORE.lock();
-    if !store.comments.contains_key(path) && store.comments.len() >= MAX_FILES {
-        return Err(KernelError::ResourceExhausted);
-    }
-
     if comment.is_empty() {
-        // Empty comment = remove.
-        store.comments.remove(path);
-    } else {
-        store
-            .comments
-            .insert(path.to_path_buf(), String::from(comment));
+        return match Vfs::remove_xattr(path, XATTR) {
+            Ok(()) | Err(KernelError::NoAttribute) => Ok(()),
+            Err(e) => Err(e),
+        };
     }
-    Ok(())
+    Vfs::set_xattr(path, XATTR, comment)
 }
 
-/// Get the comment on a file (None if no comment).
-pub fn get(path: impl AsRef<Path>) -> Option<String> {
-    let path = path.as_ref();
+/// The comment on the file at `path`, or `None` when it has none. Asked as the
+/// caller, through a trailing symlink, as `getxattr` asks.
+///
+/// # Errors
+///
+/// The path's, the `user.` namespace's and the filesystem's.
+pub fn get(path: &Path) -> KernelResult<Option<Vec<u8>>> {
     GET_COUNT.fetch_add(1, Ordering::Relaxed);
-    let store = STORE.lock();
-    store.comments.get(path).cloned()
-}
-
-/// Remove the comment from a file.
-pub fn remove(path: impl AsRef<Path>) -> KernelResult<()> {
-    let path = path.as_ref();
-    let mut store = STORE.lock();
-    store.comments.remove(path).ok_or(KernelError::NotFound)?;
-    Ok(())
-}
-
-/// Append text to an existing comment (or create a new one).
-pub fn append(path: impl AsRef<Path>, text: &str) -> KernelResult<()> {
-    let path = path.as_ref();
-    if text.is_empty() {
-        return Ok(());
+    match Vfs::get_xattr(path, XATTR) {
+        Ok(comment) => Ok(Some(comment)),
+        Err(KernelError::NoAttribute) => Ok(None),
+        Err(e) => Err(e),
     }
+}
+
+/// Remove the comment from the file at `path`.
+///
+/// # Errors
+///
+/// `NoAttribute` when it has none; otherwise as [`set`].
+pub fn remove(path: &Path) -> KernelResult<()> {
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let mut store = STORE.lock();
-    if let Some(existing) = store.comments.get_mut(path) {
-        if existing.len() + text.len() + 1 > MAX_COMMENT_SIZE {
-            return Err(KernelError::InvalidArgument);
-        }
-        existing.push('\n');
-        existing.push_str(text);
-    } else {
-        if store.comments.len() >= MAX_FILES {
-            return Err(KernelError::ResourceExhausted);
-        }
-        if text.len() > MAX_COMMENT_SIZE {
-            return Err(KernelError::InvalidArgument);
-        }
-        store
-            .comments
-            .insert(path.to_path_buf(), String::from(text));
-    }
-    Ok(())
-}
-
-/// Check if a file has a comment.
-pub fn has_comment(path: impl AsRef<Path>) -> bool {
-    let path = path.as_ref();
-    let store = STORE.lock();
-    store.comments.contains_key(path)
-}
-
-/// Get the comment length in bytes.
-pub fn comment_len(path: impl AsRef<Path>) -> usize {
-    let path = path.as_ref();
-    let store = STORE.lock();
-    store.comments.get(path).map(|c| c.len()).unwrap_or(0)
+    Vfs::remove_xattr(path, XATTR)
 }
 
 // ---------------------------------------------------------------------------
-// Search
+// Many files' comments
 // ---------------------------------------------------------------------------
 
-/// Search for files whose comments contain the given substring
-/// (case-insensitive).  Optionally restrict to paths under `root`.
-pub fn search(needle: &str, root: Option<&Path>) -> Vec<(PathBuf, String)> {
+/// What a [`search`] or a [`list`] found under its root.
+#[derive(Debug)]
+pub struct Found {
+    /// Each commented file's path and comment, in the order the walk met them.
+    pub comments: Vec<(PathBuf, Vec<u8>)>,
+    /// Whether it stopped short of seeing everything under the root:
+    /// `MAX_VISITED` entries or `MAX_RESULTS` comments reached, a
+    /// directory or an attribute that could not be read, or a directory the
+    /// walk left unread (`fswalk::WalkStats::unwalked`). Without it, "nothing
+    /// found" and "not all looked at" would read the same.
+    pub incomplete: bool,
+}
+
+/// The files and directories under `root`, `root` included, whose comment
+/// contains `needle` with ASCII letters' case ignored; an empty `needle`
+/// matches every comment. `/proc`, `/sys` and `/dev` are not walked (their
+/// files keep no attributes), and symlinks are not followed.
+///
+/// # Errors
+///
+/// `root`'s: `NotFound`, `NotADirectory`.
+pub fn search(needle: &[u8], root: &Path) -> KernelResult<Found> {
     SEARCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    collect(root, |comment| {
+        contains_ignoring_ascii_case(comment, needle)
+    })
+}
 
-    if needle.is_empty() {
-        return Vec::new();
-    }
+/// Every commented file and directory under `root`, `root` included, walked
+/// as [`search`] walks.
+///
+/// # Errors
+///
+/// As [`search`].
+pub fn list(root: &Path) -> KernelResult<Found> {
+    collect(root, |_| true)
+}
 
-    let needle_lower = to_ascii_lower(needle);
-    let store = STORE.lock();
-    let mut results = Vec::new();
-
-    for (path, comment) in &store.comments {
-        if let Some(root_path) = root {
-            // Canonical subtree predicate; see fs::pathutil.
-            if !crate::fs::pathutil::path_in_subtree(path, root_path) {
-                continue;
-            }
+/// Walk `root` reading each regular file's and directory's comment, keeping
+/// those `wanted` takes.
+fn collect(root: &Path, wanted: impl Fn(&[u8]) -> bool) -> KernelResult<Found> {
+    let opts = WalkOptions {
+        show_hidden: true,
+        include_root: true,
+        ..WalkOptions::default()
+    };
+    let mut found = Found {
+        comments: Vec::new(),
+        incomplete: false,
+    };
+    let mut visited: u64 = 0;
+    let stats = fswalk::walk_visit(root, &opts, |entry| {
+        visited = visited.saturating_add(1);
+        if visited > MAX_VISITED {
+            found.incomplete = true;
+            return WalkAction::Stop;
         }
-        let comment_lower = to_ascii_lower(comment);
-        if comment_lower.contains(needle_lower.as_str()) {
-            results.push((path.clone(), comment.clone()));
-            if results.len() >= MAX_SEARCH_RESULTS {
-                break;
-            }
+        // Only these two carry `user.` attributes.
+        if !matches!(entry.entry_type, EntryType::File | EntryType::Directory) {
+            return WalkAction::Continue;
         }
+        match Vfs::get_xattr_no_follow(&entry.path, XATTR) {
+            Ok(comment) if wanted(comment.as_slice()) => {
+                if found.comments.len() >= MAX_RESULTS {
+                    found.incomplete = true;
+                    return WalkAction::Stop;
+                }
+                found.comments.push((entry.path.clone(), comment));
+            }
+            // No comment, or a filesystem that keeps no attributes and so no
+            // comments: nothing missed.
+            Ok(_) | Err(KernelError::NoAttribute | KernelError::NotSupported) => {}
+            // Anything else -- the entry gone mid-walk, a read that failed --
+            // is a comment that may exist and was not seen.
+            Err(_) => found.incomplete = true,
+        }
+        WalkAction::Continue
+    })?;
+    if stats.errors > 0 || stats.unwalked > 0 {
+        found.incomplete = true;
     }
-
-    results
+    Ok(found)
 }
 
-/// List all files with comments (optionally under a root path).
-pub fn list(root: Option<&Path>) -> Vec<(PathBuf, String)> {
-    let store = STORE.lock();
-    store
-        .comments
-        .iter()
-        .filter(|(path, _)| {
-            root.is_none_or(|r| crate::fs::pathutil::path_in_subtree(path.as_path(), r))
-        })
-        .map(|(p, c)| (p.clone(), c.clone()))
-        .collect()
-}
-
-/// Count files with comments.
-pub fn count() -> usize {
-    let store = STORE.lock();
-    store.comments.len()
-}
-
-// ---------------------------------------------------------------------------
-// Rename / bulk operations
-// ---------------------------------------------------------------------------
-
-/// Update comment when a file is renamed.
-pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
-    let mut store = STORE.lock();
-    if let Some(comment) = store.comments.remove(old_path.as_ref()) {
-        store
-            .comments
-            .insert(new_path.as_ref().to_path_buf(), comment);
-        Ok(())
-    } else {
-        Ok(()) // No comment to move — that's fine.
-    }
-}
-
-/// Remove comments for all files under a path prefix (e.g., when
-/// deleting a directory).
-pub fn remove_under(path_prefix: impl AsRef<Path>) -> usize {
-    let path_prefix = path_prefix.as_ref();
-    let mut store = STORE.lock();
-    let to_remove: Vec<PathBuf> = store
-        .comments
-        .keys()
-        .filter(|p| crate::fs::pathutil::path_in_subtree(p.as_path(), path_prefix))
-        .cloned()
-        .collect();
-    let count = to_remove.len();
-    for path in to_remove {
-        store.comments.remove(&path);
-    }
-    count
+/// Whether `needle` occurs in `haystack`, ASCII letters' case ignored.
+fn contains_ignoring_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
 
-/// Returns (comment_count, set_ops, get_ops, search_ops).
-pub fn stats() -> (usize, u64, u64, u64) {
+/// How many comments were set or removed, read, and searched for, since boot
+/// or [`reset_stats`].
+#[must_use]
+pub fn stats() -> (u64, u64, u64) {
     (
-        count(),
         SET_COUNT.load(Ordering::Relaxed),
         GET_COUNT.load(Ordering::Relaxed),
         SEARCH_COUNT.load(Ordering::Relaxed),
     )
 }
 
-/// Reset statistics.
+/// Zero the counters.
 pub fn reset_stats() {
     SET_COUNT.store(0, Ordering::Relaxed);
     GET_COUNT.store(0, Ordering::Relaxed);
     SEARCH_COUNT.store(0, Ordering::Relaxed);
 }
 
-/// Clear all comment data.
-pub fn clear_all() {
-    let mut store = STORE.lock();
-    store.comments.clear();
-}
-
 // ---------------------------------------------------------------------------
-// Self-tests
+// Self-test
 // ---------------------------------------------------------------------------
 
-/// Run self-tests for the file comment module.
+/// Comments as the file's attribute, on a scratch tree in `/tmp` (memfs):
 ///
-/// The suite asserts exact table contents, so it needs a table of its own.
-/// It used to get one by calling `clear_all()`, which — since this suite is
-/// reachable from the shell — deleted whatever the user had stored here and
-/// then reported success.  The live state is moved aside for the duration and
-/// put back afterwards; `crate::fs::selftest` records why this shape rather
-/// than the alternatives.
+/// 1. set and read back, and what a program's `getxattr` sees is the same
+///    comment, listed under its name;
+/// 2. bytes, not text: a comment that is not UTF-8 and a name that is not
+///    either;
+/// 3. the file's, not a name's: a hard link shows the comment, a rename
+///    carries it, and a file made at the name of a deleted one has none;
+/// 4. an empty comment removes it, removing none is `NoAttribute`, and one
+///    over the limit is refused with nothing changed;
+/// 5. search ignores ASCII case and keeps to its root, which must exist; a
+///    listing finds every comment, the root's own included, and says it saw
+///    everything.
+///
+/// The counters are put back as they were: this is reachable from the shell,
+/// and a test run is not the user's activity.
+///
+/// # Errors
+///
+/// `InternalError` naming the first step that answered wrongly; the setup's.
 pub fn self_test() -> KernelResult<()> {
-    // These counters live outside the table, so `with_pristine` cannot
-    // see them; save and restore them here so a run leaves no trace.
-    let saved_set_count = SET_COUNT.load(Ordering::Relaxed);
-    let saved_get_count = GET_COUNT.load(Ordering::Relaxed);
-    let saved_search_count = SEARCH_COUNT.load(Ordering::Relaxed);
-    let result = crate::fs::selftest::with_pristine(&STORE, CommentStore::new(), self_test_inner);
-    SET_COUNT.store(saved_set_count, Ordering::Relaxed);
-    GET_COUNT.store(saved_get_count, Ordering::Relaxed);
-    SEARCH_COUNT.store(saved_search_count, Ordering::Relaxed);
-    result
+    const DIR: &str = "/tmp/_fcomment";
+    let saved = stats();
+    // Best effort, both ends: this test's own scratch tree.
+    let _ = Vfs::remove_recursive(DIR);
+    let result = self_test_on(DIR);
+    let _ = Vfs::remove_recursive(DIR);
+    SET_COUNT.store(saved.0, Ordering::Relaxed);
+    GET_COUNT.store(saved.1, Ordering::Relaxed);
+    SEARCH_COUNT.store(saved.2, Ordering::Relaxed);
+    result?;
+    crate::serial_println!(
+        "[fcomment] Self-test passed (5 tests): the file's attribute, bytes, links and renames, \
+         removal and limits, search"
+    );
+    Ok(())
 }
 
-fn self_test_inner() -> KernelResult<()> {
+fn self_test_on(dir: &str) -> KernelResult<()> {
     use crate::serial_println;
 
-    clear_all();
-    reset_stats();
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[fcomment]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let at = |name: &[u8]| {
+        let mut p = PathBuf::from(dir);
+        p.push(Path::new(name));
+        p
+    };
+    let report = at(b"report.pdf");
+    let alias = at(b"alias.pdf");
+    let moved = at(b"moved.pdf");
+    let odd = at(b"\xFFnote.txt");
+    let sub = at(b"sub");
+    let deep = at(b"sub/deep.txt");
 
-    // Test 1: set and get.
+    Vfs::mkdir(dir)?;
+    Vfs::mkdir(&sub)?;
+    Vfs::write_file(&report, b"pdf")?;
+    Vfs::write_file(&odd, b"odd")?;
+    Vfs::write_file(&deep, b"deep")?;
+
+    // 1: set, read back, and the attribute a program reads.
+    set(&report, b"Q3 Quarterly report, needs review")?;
+    let read = get(&report)?;
+    let program = Vfs::get_xattr(&report, XATTR)?;
+    let listed = Vfs::list_xattrs(&report)?;
+    if read.as_deref() != Some(&b"Q3 Quarterly report, needs review"[..])
+        || program != b"Q3 Quarterly report, needs review"
+        || !listed.iter().any(|n| n.as_slice() == XATTR)
     {
-        set("/test/file.txt", "This is a test file")?;
-        let comment = get("/test/file.txt");
-        assert!(comment.is_some());
-        assert_eq!(comment.unwrap(), "This is a test file");
-        serial_println!("[fcomment] test 1 passed: set/get");
+        return fail("a comment did not read back as the file's user.xdg.comment");
     }
+    serial_println!("[fcomment]   1: set and read back, as the file's attribute: ok");
 
-    // Test 2: has_comment and comment_len.
-    {
-        assert!(has_comment("/test/file.txt"));
-        assert_eq!(comment_len("/test/file.txt"), 19);
-        assert!(!has_comment("/nonexistent"));
-        serial_println!("[fcomment] test 2 passed: has_comment/comment_len");
+    // 2: bytes, not text.
+    set(&odd, b"caf\xE9 \xFF")?;
+    if get(&odd)?.as_deref() != Some(&b"caf\xE9 \xFF"[..]) {
+        return fail("a comment that is not UTF-8, on a name that is not either, changed");
     }
+    serial_println!("[fcomment]   2: bytes in the comment and the name: ok");
 
-    // Test 3: append.
-    {
-        append("/test/file.txt", "Additional note")?;
-        let comment = get("/test/file.txt").unwrap();
-        assert!(comment.contains("This is a test file"));
-        assert!(comment.contains("Additional note"));
-        serial_println!("[fcomment] test 3 passed: append");
-    }
-
-    // Test 4: search.
-    {
-        set("/test/report.pdf", "Q3 quarterly report for review")?;
-        set("/docs/memo.txt", "Internal memo about Q4 planning")?;
-        let results = search("quarterly", None);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.as_path(), Path::new("/test/report.pdf"));
-
-        // Case-insensitive.
-        let results = search("INTERNAL", None);
-        assert_eq!(results.len(), 1);
-        serial_println!("[fcomment] test 4 passed: search");
-    }
-
-    // Test 5: search with root filter.
-    {
-        let results = search("report", Some(Path::new("/test")));
-        assert_eq!(results.len(), 1);
-        let results = search("report", Some(Path::new("/docs")));
-        assert_eq!(results.len(), 0);
-        serial_println!("[fcomment] test 5 passed: search with root filter");
-    }
-
-    // Test 6: remove and rename.
-    {
-        remove("/docs/memo.txt")?;
-        assert!(!has_comment("/docs/memo.txt"));
-
-        rename_path("/test/report.pdf", "/archive/report.pdf")?;
-        assert!(!has_comment("/test/report.pdf"));
-        assert!(has_comment("/archive/report.pdf"));
-        serial_println!("[fcomment] test 6 passed: remove/rename");
-    }
-
-    // Test 7: remove_under and list.
-    {
-        set("/test/a.txt", "Comment A")?;
-        set("/test/b.txt", "Comment B")?;
-        let all = list(Some(Path::new("/test")));
-        assert!(all.len() >= 2); // file.txt, a.txt, b.txt
-        let removed = remove_under("/test");
-        assert!(removed >= 2);
-        assert!(!has_comment("/test/a.txt"));
-        serial_println!("[fcomment] test 7 passed: remove_under/list");
-    }
-
-    // Test 8: a path that is not valid UTF-8 keys, reads back, and is
-    // distinguished from its neighbours.
-    //
-    // Every test above uses an ASCII name, which a `String` key handled
-    // perfectly well -- so none of them could see the defect this change
-    // fixes. The two names below differ only in a byte that cannot appear in
-    // UTF-8; a lossy key folds both to U+FFFD, which would make the second
-    // `set` overwrite the first and `get` answer for the wrong file.
-    {
-        clear_all();
-        let a = Path::new(&b"/test/\xFFnote.txt"[..]);
-        let b = Path::new(&b"/test/\xFEnote.txt"[..]);
-
-        set(a, "comment on A")?;
-        set(b, "comment on B")?;
-        assert_eq!(get(a).as_deref(), Some("comment on A"));
-        assert_eq!(get(b).as_deref(), Some("comment on B"));
-        assert_eq!(count(), 2);
-
-        // Subtree filtering and search must be byte-exact as well.
-        let listed = list(Some(Path::new("/test")));
-        assert_eq!(listed.len(), 2);
-        let found = search("comment on A", None);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].0.as_path(), a);
-
-        // Rename must move the comment to the new bytes, not to a mangled
-        // approximation of them.
-        rename_path(a, &b"/test/\xFFrenamed.txt"[..])?;
-        assert!(!has_comment(a));
-        assert_eq!(
-            get(Path::new(&b"/test/\xFFrenamed.txt"[..])).as_deref(),
-            Some("comment on A")
+    // 3: the file's, not a name's.
+    Vfs::link(&report, &alias)?;
+    let through_link = get(&alias)?;
+    Vfs::rename(&report, &moved)?;
+    let after_rename = get(&moved)?;
+    Vfs::remove(&moved)?;
+    Vfs::remove(&alias)?;
+    Vfs::write_file(&report, b"new")?;
+    let newcomer = get(&report)?;
+    if through_link != read || after_rename != read || newcomer.is_some() {
+        serial_println!(
+            "[fcomment]     link {:?}, renamed {:?}, a new file at the old name {:?}",
+            through_link,
+            after_rename,
+            newcomer
         );
-
-        assert_eq!(remove_under("/test"), 2);
-        serial_println!("[fcomment] test 8 passed: non-UTF-8 paths");
+        return fail("a comment did not follow its file");
     }
+    serial_println!("[fcomment]   3: through a link, across a rename, gone with the file: ok");
 
-    clear_all();
-    reset_stats();
+    // 4: removal and limits.
+    set(&report, b"temporary")?;
+    set(&report, b"")?;
+    let emptied = get(&report)?;
+    let absent = remove(&report);
+    let quiet = set(&report, b"");
+    set(&report, b"kept")?;
+    let oversized = alloc::vec![b'x'; MAX_COMMENT_SIZE.saturating_add(1)];
+    let refused = set(&report, &oversized);
+    let survivor = get(&report)?;
+    if emptied.is_some()
+        || absent != Err(KernelError::NoAttribute)
+        || quiet.is_err()
+        || refused != Err(KernelError::InvalidArgument)
+        || survivor.as_deref() != Some(&b"kept"[..])
+    {
+        serial_println!(
+            "[fcomment]     emptied {:?}, removed none {:?}, emptied none {:?}, oversized {:?}, after {:?}",
+            emptied,
+            absent,
+            quiet,
+            refused,
+            survivor
+        );
+        return fail("removing or refusing a comment went wrong");
+    }
+    serial_println!("[fcomment]   4: removal, removing none, the size limit: ok");
 
-    serial_println!("[fcomment] all 8 self-tests passed");
+    // 5: search and list.
+    set(&deep, b"Internal memo about Q4 PLANNING")?;
+    set(&sub, b"a directory's own comment")?;
+    let planning = search(b"planning", Path::new(dir))?;
+    let outside = search(b"planning", Path::new("/tmp/_fcomment/sub/none"));
+    let in_sub = list(&sub)?;
+    let everything = list(Path::new(dir))?;
+    let planning_ok = planning.comments.len() == 1
+        && planning.comments.first().is_some_and(|(p, _)| *p == deep)
+        && !planning.incomplete;
+    if !planning_ok
+        || outside.is_ok()
+        || in_sub.comments.len() != 2
+        || everything.comments.len() != 4
+        || everything.incomplete
+    {
+        serial_println!(
+            "[fcomment]     planning {:?}, a missing root {:?}, under sub {}, everything {}",
+            planning,
+            outside.map(|f| f.comments.len()),
+            in_sub.comments.len(),
+            everything.comments.len()
+        );
+        return fail("a search or a listing found the wrong files");
+    }
+    serial_println!("[fcomment]   5: search ignoring case, within its root, and list: ok");
     Ok(())
 }

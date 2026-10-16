@@ -305,6 +305,13 @@ def build(h: History) -> None:
     h.commit("merge", merged, ("main", "side"))
     h.commit("after", {**merged, "we ird/f.rs": entry(Y)}, ("merge",))
     h.commit("leading", {**BASE, "a.md/b.txt": entry(Y)}, ("base",))
+    # A merge that writes what neither side has: a conflict resolved to a
+    # third text, and a file of its own -- an evil merge. Only the merge
+    # touches `evil.rs`.
+    h.commit("left", {**BASE, "conflict.txt": entry(X)}, ("base",))
+    h.commit("right", {**BASE, "conflict.txt": entry(Y)}, ("left",))
+    h.commit("resolved", {**BASE, "conflict.txt": entry("z\n"),
+                          "evil.rs": entry()}, ("left", "right"))
     for i, name in enumerate(ODD_NAMES.values()):
         h.commit(f"odd{i}", {**BASE, name: entry(), "gui/app.rs": entry(Y)},
                  ("base",))
@@ -436,6 +443,14 @@ def scenarios(scopes: list[list[str]]) -> list[Scenario]:
             ("*.md",): False, ("*.txt",): True, ("a.md",): True,
             ("a.md/",): True, ("docs/",): False,
         }),
+        # Both parents published, the merge not: what the push publishes is
+        # the resolution alone. `pushed_paths` must name `evil.rs` and the
+        # conflict (it did not, before --diff-merges), and git, asked of the
+        # merge's paths, must count it.
+        Scenario("a merge's own resolution", ("resolved",), "right", "git", {
+            ("evil.rs",): True, ("*.rs",): True, ("conflict.txt",): True,
+            ("docs/",): False, ("gui/",): False,
+        }),
         Scenario("no sha pushed", (), "base", "none", {
             ("*.md",): False, ("docs/",): False,
         }),
@@ -527,16 +542,19 @@ def run_git_side(h: History, all_: list[Scenario]) -> None:
         """Each unpublished commit of the push diffed alone -- `diff-tree`
         one commit at a time, which is what the hook's
         `rev-list | xargs git diff-tree` meant and, handed three commits,
-        did not do."""
+        did not do. A merge is diffed densely (`--cc`): the paths its own
+        resolution wrote, which differ from every parent."""
         shas = [h.sha[name] for name in sc.pushed]
         if not shas:
             return sc, set()
-        commits = git(h.root, "rev-list", "--no-merges", *shas, "--not",
-                      f"--remotes={sc.remote}").decode("ascii").split()
+        lines = git(h.root, "rev-list", "--parents", *shas, "--not",
+                    f"--remotes={sc.remote}").decode("ascii").splitlines()
         found: set[str] = set()
-        for commit in commits:
+        for line in lines:
+            commit, *parents = line.split()
+            how = ["--cc"] if len(parents) > 1 else ["--root"]
             out = git(h.root, "-c", "core.quotePath=false", "diff-tree",
-                      "--root", "--no-renames", "--no-commit-id",
+                      *how, "--no-renames", "--no-commit-id",
                       "--name-only", "-r", commit)
             found |= {p for p in out.decode("utf-8").split("\n") if p}
         return sc, found
@@ -567,6 +585,11 @@ def judge(all_: list[Scenario], scopes: list[list[str]]) -> None:
           sorted(multi.paths),
           sorted({"docs/x.md", "x.RS", "gui/app.rs", "apps/app.rs",
                   "scripts/check-text-ink.py"}))
+    # Non-vacuous where it failed: before --diff-merges the list held
+    # nothing of the merge, and `evil.rs` nowhere.
+    resolved = next(sc for sc in all_ if sc.label == "a merge's own resolution")
+    check("a merge's own resolution: pushed_paths names what it wrote",
+          sorted(resolved.paths), ["conflict.txt", "evil.rs"])
     root = all_[0]
     for specs in UNANSWERABLE:
         check(f"root commit: `{' '.join(specs)}` is left to git",

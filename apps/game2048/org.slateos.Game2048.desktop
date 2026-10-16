@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=2048
+Comment=Slide the tiles together to make 2048
+Icon=applications-games
+Exec=game2048
+Categories=Game;LogicGame;
+Keywords=tiles;numbers;puzzle;

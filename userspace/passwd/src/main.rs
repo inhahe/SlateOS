@@ -18,8 +18,9 @@
 //!
 //! Two duplications went with that change. The hashing — a private
 //! `hash_password`/`generate_salt` pair — is now `userdb`'s
-//! [`userdb::Record::set_password`], which does the same thing (SHA-512-crypt,
-//! a `/dev/urandom` salt, and no fallback to a guessable one) in the one place
+//! [`userdb::Record::set_password`], which does the same thing (the method new
+//! passwords get -- yescrypt since 2026-10-09, SHA-512-crypt before -- a
+//! `/dev/urandom` salt, and no fallback to a guessable one) in the one place
 //! that also stores the result. And the aging fields, which this program used
 //! to define its own `ShadowEntry` for, are [`userdb::Aging`].
 //!
@@ -97,6 +98,9 @@ const MIN_PASSWORD_LEN: usize = 8;
 struct Accounts {
     db: UserDb,
     path: std::path::PathBuf,
+    /// Held from before the read until this is dropped, after the save, for a
+    /// command that changes the database: see [`Accounts::load_held`].
+    _lock: Option<userdb::Lock>,
 }
 
 impl Accounts {
@@ -106,12 +110,36 @@ impl Accounts {
     /// empty would make `passwd alice` report "user does not exist" for every
     /// account on the machine, and -- worse -- a subsequent save would write
     /// that empty database out over the real one.
+    ///
+    /// For a command that only reads (`-S`). One that changes the database
+    /// uses [`Accounts::load_held`].
     fn load(path: &std::path::Path) -> Result<Self, String> {
-        let db =
-            UserDb::load(path).map_err(|e| format!("cannot read `{}': {e}", path.display()))?;
         Ok(Self {
-            db,
+            db: Self::read(path)?,
             path: path.to_path_buf(),
+            _lock: None,
+        })
+    }
+
+    /// The read itself, worded for the person running the command.
+    fn read(path: &std::path::Path) -> Result<UserDb, String> {
+        UserDb::load(path).map_err(|e| format!("cannot read `{}': {e}", path.display()))
+    }
+
+    /// [`Accounts::load`], holding the database (`userdb::Lock`) from before
+    /// the read until the [`Accounts`] is dropped.
+    ///
+    /// Without the hold, a `passwd` and any other account tool run at once
+    /// both read the same database, and the second save erases the first's
+    /// change. shadow-utils' `passwd` locks `/etc/passwd` for the same reason,
+    /// and says so in the same words when it cannot.
+    fn load_held(path: &std::path::Path) -> Result<Self, String> {
+        let lock = UserDb::lock(path)
+            .map_err(|_| format!("cannot lock {}; try again later.", path.display()))?;
+        Ok(Self {
+            db: Self::read(path)?,
+            path: path.to_path_buf(),
+            _lock: Some(lock),
         })
     }
 
@@ -228,7 +256,8 @@ fn has_password(record: &Record) -> bool {
 // `userdb::Record::set_password` already does -- the same SHA-512-crypt, the
 // same crypt base-64 salt at the method's own maximum length, the same
 // refusal to fall back to a guessable salt when `/dev/urandom` cannot be
-// read.
+// read. (`userdb` has since moved new passwords to yescrypt, design-decisions
+// §1070 -- a change made once, for every tool, which is the point.)
 //
 // A second correct copy is still a place for the two to drift apart, and this
 // program is the one that proved it: the reason it has a `posix::crypt`
@@ -990,8 +1019,15 @@ fn main() {
     // The database is read once, here, and handed to whichever command runs.
     // Reading it inside each command would mean a `-S` that reports one file
     // and a `-x` that writes another, and — worse — the read-modify-write
-    // sequence that made `find_or_create_shadow` necessary.
-    let mut accounts = match Accounts::load(std::path::Path::new(userdb::DEFAULT_PATH)) {
+    // sequence that made `find_or_create_shadow` necessary. Every command
+    // but `-S` changes it, and holds it while it does.
+    let db_path = std::path::Path::new(userdb::DEFAULT_PATH);
+    let loaded = if matches!(parsed.action, Action::ShowStatus) {
+        Accounts::load(db_path)
+    } else {
+        Accounts::load_held(db_path)
+    };
+    let mut accounts = match loaded {
         Ok(accounts) => accounts,
         Err(e) => {
             eprintln!("passwd: {e}");
@@ -1194,10 +1230,11 @@ mod tests {
         assert!(!verify_password("wrong horse", &stored), "{stored}");
     }
 
-    /// The entry reaching `/etc/shadow` is a standard one: the `$6$`
-    /// identifier and the salt as given. The format this file used to invent,
-    /// `$sha256$<salt>$<64 hex>`, satisfied neither, which is why `login`
-    /// could not read what `passwd` wrote.
+    /// The entry reaching `/etc/shadow` is a standard one: yescrypt's `$y$`
+    /// identifier, libxcrypt's default cost (`j9T`) and the salt as given --
+    /// what Ubuntu's `passwd` writes (design-decisions §1070). The format this
+    /// file used to invent, `$sha256$<salt>$<64 hex>`, satisfied none of it,
+    /// which is why `login` could not read what `passwd` wrote.
     #[test]
     fn the_generated_entry_is_in_the_format_a_standard_reader_expects() {
         let scratch = scratchdir::ScratchDir::new("passwd-format");
@@ -1206,10 +1243,10 @@ mod tests {
             .expect("save");
 
         let stored = generated_shadow_entry(scratch.dir(), "dave");
-        assert!(stored.starts_with(&format!("$6${SALT}$")), "{stored}");
+        assert!(stored.starts_with(&format!("$y$j9T${SALT}$")), "{stored}");
         assert_eq!(
             posix::crypt::stored_method(stored.as_bytes()),
-            Some(posix::crypt::Method::Sha512),
+            Some(posix::crypt::Method::Yescrypt),
             "{stored}"
         );
         assert!(!stored.contains("$sha256$"), "{stored}");
@@ -1791,6 +1828,23 @@ mod tests {
     /// Reread the database from disk, as the next program to run would.
     fn reread(accounts: &Accounts) -> Accounts {
         Accounts::load(&accounts.path).expect("reload")
+    }
+
+    /// A command that changes the database holds it until it is done, and a
+    /// read (`-S`) does not wait for the hold. If the hold outlived its
+    /// `Accounts`, the second `load_held` would wait out `userdb::LOCK_TRIES`
+    /// and fail.
+    #[test]
+    fn a_change_holds_the_database_and_lets_go_when_done() {
+        let scratch = scratchdir::ScratchDir::new("passwd-held");
+        let path = accounts_with(&scratch, "correct horse").path;
+        {
+            let mut held = Accounts::load_held(&path).expect("the first hold");
+            assert!(Accounts::load(&path).is_ok(), "a read waits for no one");
+            assert_eq!(cmd_lock(&mut held, "dave"), 0);
+        }
+        let again = Accounts::load_held(&path).expect("held again, once released");
+        assert!(again.find("dave").is_some_and(Record::is_locked));
     }
 
     #[test]

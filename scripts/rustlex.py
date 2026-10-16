@@ -46,7 +46,10 @@ to fix it once.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
+from typing import NamedTuple
 
 
 # A complete char literal: `'x'`, `'\n'`, `'\''`, `'\u{1F600}'`. Deliberately
@@ -186,7 +189,6 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
 #: rather than resolved.
 _ITEM_KEYWORDS = frozenset(
     {
-        "pub",
         "fn",
         "mod",
         "impl",
@@ -237,11 +239,28 @@ def _decorated_item_kind(masked: str, at: int) -> str:
             i = j
             continue
         break
-    word = ""
-    while i < len(masked) and (masked[i].isalnum() or masked[i] == "_"):
-        word += masked[i]
-        i += 1
+    word, i = _word_at(masked, i)
+    if word == "pub":
+        # A visibility, which an item and a field may both have: `pub fn`,
+        # `pub(crate) struct`, and the field `pub y_coded: bool,`. What
+        # follows it decides.
+        while i < len(masked) and masked[i].isspace():
+            i += 1
+        if i < len(masked) and masked[i] == "(":
+            close = masked.find(")", i)
+            i = len(masked) if close < 0 else close + 1
+        while i < len(masked) and masked[i].isspace():
+            i += 1
+        word, i = _word_at(masked, i)
     return "item" if word in _ITEM_KEYWORDS else "field"
+
+
+def _word_at(masked: str, i: int) -> tuple[str, int]:
+    """The identifier-like word starting at `i`, and where it ends."""
+    start = i
+    while i < len(masked) and (masked[i].isalnum() or masked[i] == "_"):
+        i += 1
+    return masked[start:i], i
 
 
 def _field_end(masked: str, at: int) -> int:
@@ -281,6 +300,34 @@ def _field_end(masked: str, at: int) -> int:
             return i + 1
         i += 1
     return len(masked)
+
+
+def _item_opening(masked: str, at: int) -> tuple[str, int]:
+    """How the item beginning at `at` is shaped: `("block", i)` when its first
+    `{` outside `(..)` and `[..]` comes first -- `i` is that brace -- or
+    `("semi", i)` when its first `;` there does -- an item without a body, `i`
+    just past the semicolon -- or `("none", len)` when neither comes.
+
+    Only `(..)` and `[..]` are counted: a `;` inside `[T; N]` belongs to a type,
+    whether in a signature (`fn f(a: [u8; 2]) {`, `-> [T; 11] {`) or a
+    `const`'s value. `<..>` is not counted: `->` and `=>` hold a `>` that
+    closes nothing, a `<` in an expression opens nothing, and no `;` sits in
+    angle brackets except inside a `[..]` that is counted anyway.
+    """
+    depth = 0
+    i = at
+    while i < len(masked):
+        c = masked[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and c == "{":
+            return "block", i
+        elif depth == 0 and c == ";":
+            return "semi", i + 1
+        i += 1
+    return "none", len(masked)
 
 
 def live_code(src: str) -> tuple[str, str]:
@@ -385,15 +432,17 @@ def live_code(src: str) -> tuple[str, str]:
                     mout[k] = " "
             i = end
             continue
-        brace = masked.find("{", i)
-        semi = masked.find(";", i)
-        if brace < 0 or (0 <= semi < brace):
-            # The attribute decorates a non-block item -- `#[cfg(test)] use
-            # std::cell::RefCell;`. There is no block to match, and searching
-            # on for a `{` would find one belonging to the NEXT item and blank
-            # everything between. Drop the attribute and carry on.
-            end = i + len("#[cfg(test)]")
-            for k in range(i, end):
+        shape, brace = _item_opening(masked, i + len("#[cfg(test)]"))
+        if shape != "block":
+            # The attribute decorates an item without a block -- `#[cfg(test)]
+            # use std::cell::RefCell;`, `mod x;`, a `const`, a unit struct --
+            # which ends at its own `;` and goes with the attribute (lane E's
+            # `requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`:
+            # only the attribute went, and `#[cfg(test)] pub mod draw_check;`
+            # stayed a live module). Searching on for a `{` would find the NEXT
+            # item's and blank everything between.
+            end = brace if shape == "semi" else i + len("#[cfg(test)]")
+            for k in range(i, min(end, len(out))):
                 if out[k] != "\n":
                     out[k] = " "
                     mout[k] = " "
@@ -416,6 +465,154 @@ def live_code(src: str) -> tuple[str, str]:
                 mout[k] = " "
         i = j
     return "".join(out), "".join(mout)
+
+
+# ---------------------------------------------------------------------------
+# Which files are test code: `live_code`'s other half
+# ---------------------------------------------------------------------------
+#
+# `#[cfg(test)] mod tests;` makes a whole file test code, and only the file
+# that declares it says so: `live_code`, reading one file at a time, cannot see
+# it. Seven scripts in four lanes each found those files for themselves, in
+# five ways that disagreed (lane E's
+# `requests/e-abc-one-answer-to-which-files-are-test-modules.md`); this is the
+# one answer, lane E's from `key-survey.py`. Test modules are found from the
+# declarations, resolved as cargo resolves them -- not by name: test code is
+# not always called `tests`, and a `tests.rs` nothing gates is production.
+#
+# One `mod` declaration: its attributes (any number, in any order, each one
+# spanning lines where rustfmt broke it), a visibility, its name, and `;` for a
+# module in a file of its own or `{` for one written inline.
+_MOD_DECL = re.compile(
+    r"(?<![\w#])(?P<attrs>(?:#\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_]\w*)\s*(?P<end>[;{])"
+)
+_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# A file or an inline module can say it itself instead: an inner
+# `#![cfg(test)]` among the attributes before its first item.
+_INNER_CFG_TEST = re.compile(r"(?:\s*#!\[[^\]]*\])*?\s*#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_SAYS_INNER_CFG_TEST = re.compile(r"#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_PATH_ATTR = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+# Every file that declares a module file has this in it, comments and all;
+# the rest are not lexed.
+_DECLARES_A_FILE = re.compile(r"\bmod\s+(?:r#)?\w+\s*;")
+
+
+class _ModDecl(NamedTuple):
+    """A `mod name;` -- a module in a file of its own."""
+
+    name: str
+    #: Under `#[cfg(test)]`, itself or through an inline module around it.
+    gated: bool
+    #: Its `#[path = "..."]`, if it has one.
+    path: str | None
+    #: The inline modules around it, outermost first.
+    inline: tuple[str, ...]
+
+
+def _matching_brace(code: str, at: int) -> int:
+    """Where the block that opens at `code[at]` closes (the text's end if it
+    never does). `code` has its comments and literals blanked."""
+    depth = 0
+    for i in range(at, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(code)
+
+
+def _module_file_decls(text: str) -> list[_ModDecl]:
+    """Every declaration of a module file in one source file's `text`."""
+    # Matched with comments and literals blanked, so a declaration in either
+    # is not one; `#[path]`'s value is read from the same offsets of a copy
+    # that keeps the literals.
+    code = strip_noise(text)
+    kept = strip_noise(text, keep_literals=True)
+    files: list[tuple[int, str, bool, str | None]] = []
+    blocks: list[tuple[int, int, str, bool]] = []
+    for m in _MOD_DECL.finditer(code):
+        gated = bool(_CFG_TEST.search(m["attrs"]))
+        if m["end"] == "{":
+            gated = gated or bool(_INNER_CFG_TEST.match(code, m.end()))
+            blocks.append((m.end() - 1, _matching_brace(code, m.end() - 1), m["name"], gated))
+            continue
+        attr = _PATH_ATTR.search(kept, m.start("attrs"), m.end("attrs"))
+        files.append((m.start(), m["name"], gated, attr["path"] if attr else None))
+    decls = []
+    for at, name, gated, path in files:
+        around = [b for b in blocks if b[0] < at < b[1]]
+        decls.append(_ModDecl(
+            name,
+            gated or any(b[3] for b in around),
+            path,
+            tuple(b[2] for b in around),
+        ))
+    return decls
+
+
+def _module_dir(path: Path, owners: set[Path]) -> Path:
+    """Where `mod x;` in the file `path` looks for `x`. That is beside a crate
+    root -- `lib.rs`, `main.rs`, a file directly in `src/bin` -- or beside a
+    `mod.rs` or a file loaded through `#[path]` (`owners`). For any other file,
+    it is the directory named for that file."""
+    in_bin = path.parent.name == "bin" and path.parent.parent.name == "src"
+    if path.name in ("lib.rs", "main.rs", "mod.rs") or in_bin or path in owners:
+        return path.parent
+    return path.parent / path.stem
+
+
+def _declared_files(path: Path, decl: _ModDecl, owners: set[Path]) -> list[Path]:
+    """The files `decl`, made in the file `path`, may load."""
+    if decl.path is not None:
+        # Beside the declaring file -- or, from inside an inline module, under
+        # that module's directory.
+        base = (
+            _module_dir(path, owners).joinpath(*decl.inline)
+            if decl.inline
+            else path.parent
+        )
+        return [Path(os.path.normpath(base / decl.path))]
+    base = _module_dir(path, owners).joinpath(*decl.inline, decl.name)
+    return [base.with_name(f"{decl.name}.rs"), base / "mod.rs"]
+
+
+def test_module_files(texts: dict[Path, str]) -> set[Path]:
+    """Which of a crate's source files -- `texts` maps each one's path to its
+    contents -- a build compiles only for its tests: those a `#[cfg(test)]`
+    declaration loads, those whose own `#![cfg(test)]` says so, and those any
+    declaration in such a file loads, all the way down.
+
+    A gate reading "production code only" reads `live_code` of every file
+    this does not return."""
+    if len(texts) < 2:
+        return set()
+    decls = {
+        path: _module_file_decls(text)
+        for path, text in texts.items()
+        if _DECLARES_A_FILE.search(text)
+    }
+    owners: set[Path] = set()
+    for path, found in decls.items():
+        for decl in found:
+            if decl.path is not None:
+                owners.update(_declared_files(path, decl, owners))
+    tests: set[Path] = {
+        path
+        for path, text in texts.items()
+        if _SAYS_INNER_CFG_TEST.search(text)
+        and _INNER_CFG_TEST.match(strip_noise(text))
+    }
+    while True:
+        before = len(tests)
+        for path, found in decls.items():
+            for decl in found:
+                if decl.gated or path in tests:
+                    tests.update(p for p in _declared_files(path, decl, owners) if p in texts)
+        if len(tests) == before:
+            return tests
 
 
 def string_literals(src: str) -> list[str]:
@@ -687,6 +884,51 @@ fn kept() { read_to_string(p); }
 """
     live, _ = live_code(use_plain)
     expect("a cfg(test) use does not swallow the next item", "kept" in live, True)
+    expect("...and the use itself goes, not just its attribute", "RefCell" in live, False)
+
+    # A field with a visibility is a field, not an item: it goes through its
+    # comma, and the struct's `}` and the items after it stay (the review of
+    # 2026-10-14: `gui/video/vp9/src/block.rs`'s `#[cfg(test)] pub y_coded:
+    # bool,` took the whole `impl ModeInfo` after it with it).
+    for label, field_src, gone, kept, braces_gone in (
+        ('a cfg(test) `pub` field before an impl',
+         'struct S {\n    a: u8,\n    #[cfg(test)]\n    pub y_coded: bool,\n}\nimpl S {\n    fn is_inter(&self) -> bool { live_body() }\n}\n',
+         'y_coded', 'is_inter', 0),
+        ('a cfg(test) `pub(crate)` field before a const',
+         'struct S {\n    #[cfg(test)]\n    pub(crate) x: u8,\n}\nconst C: u8 = 1;\n',
+         'x: u8', 'const C', 0),
+        ('a cfg(test) `pub(crate) fn` is still an item',
+         '#[cfg(test)]\npub(crate) fn helper() { test_body(); }\nfn live() {}\n',
+         'test_body', 'fn live', 1),
+    ):
+        live, _ = live_code(field_src)
+        expect(f"{label}: it goes", gone in live, False)
+        expect(f"{label}: what follows stays", kept in live, True)
+        expect(f"{label}: only its own braces go",
+               field_src.count("}") - live.count("}"), braces_gone)
+
+    # Items without a body go whole, through their own `;` (lane E's
+    # `requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`:
+    # about 230 of them stayed live tree-wide, `pub mod draw_check;` among
+    # them, whose exports then read as unused).
+    for label, test_item, gone, kept in (
+        ("a cfg(test) `pub mod x;`", "pub mod draw_check;", "draw_check", "after_mod"),
+        ("a cfg(test) unit struct", "pub struct StubProvider;", "StubProvider", "after_struct"),
+        ("a cfg(test) const with `[T; N]`", "const TABLE: [u8; 2] = [1; 2];", "TABLE",
+         "after_const"),
+        # A `;` inside brackets in a signature is the type's, not the item's:
+        # these are functions with bodies, and the bodies go.
+        ("a cfg(test) fn with `[u8; 2]` in its arguments",
+         "fn f(a: [u8; 2]) { arg_body(); }", "arg_body", "after_arg_fn"),
+        ("a cfg(test) fn returning `[T; N]` (the arrow's `>` opens nothing)",
+         "fn roles(&self) -> [(&'static str, u8); 11] { ret_body() }", "ret_body",
+         "after_ret_fn"),
+    ):
+        src = f"#[cfg(test)]\n{test_item}\nfn {kept}() {{ read_to_string(p); }}\n"
+        live, _ = live_code(src)
+        expect(f"{label} goes whole", gone in live, False)
+        expect(f"...and the item after it stays", kept in live, True)
+        expect(f"...and the length is kept", len(live), len(src))
 
     # ...but a *braced* use has braces that are its own, and only its own.
     use_braced = """#[cfg(test)]
@@ -735,6 +977,72 @@ fn tail() { read_to_string(p); }
     expect("escapes come back as source, not decoded",
            string_literals(r'let s = "a\nb";'),
            [r"a\nb"])
+
+    # `test_module_files`: one crate's tree, each declaration shape in it, and
+    # which of its files are its tests'. Paths only; nothing is read. Lane E's
+    # cases from `key-survey.py`, where the function was first written.
+    nl = chr(10)
+    src_dir = Path("probe") / "src"
+    tree = {
+        src_dir / "lib.rs": nl.join([
+            "mod real;", "mod other;", "#[cfg(test)]", "mod tests;",
+            "#[cfg(test)]", '#[path = "oracle_cases.rs"]', "mod oracle;",
+            "#[cfg(test)]", "mod inline {", "    mod deeper;", "}",
+            "/*", "#[cfg(test)]", "mod commented_out;", "*/",
+            "#[cfg(test)]", "#[allow(", "    clippy::unwrap_used,", "    clippy::panic,", ")]",
+            "mod multi;",
+            '#[path = "renamed_cases.rs"]', "#[cfg(test)]", "mod renamed;",
+            "mod outer {", "    #[cfg(test)]", "    mod util;", "}", "mod util;",
+            'const SAMPLE: &str = r#"', "#[cfg(test)]", "mod widgets;", '"#;',
+            "mod self_gated;", "mod inner_gated {", "    #![cfg(test)]", "    mod deep2;", "}",
+        ]),
+        src_dir / "self_gated.rs": nl.join(["//! The root's tests.", "#![cfg(test)]", "mod helper2;"]),
+        src_dir / "self_gated" / "helper2.rs": "",
+        src_dir / "inner_gated" / "deep2.rs": "",
+        src_dir / "tests.rs": "mod helper;",
+        src_dir / "tests" / "helper.rs": "",
+        src_dir / "oracle_cases.rs": "mod fixtures;",
+        src_dir / "fixtures.rs": "",
+        src_dir / "inline" / "deeper.rs": "",
+        src_dir / "commented_out.rs": "",
+        src_dir / "multi.rs": "",
+        src_dir / "renamed_cases.rs": "",
+        src_dir / "renamed.rs": "",
+        src_dir / "outer" / "util.rs": "",
+        src_dir / "util.rs": "",
+        src_dir / "widgets.rs": "",
+        src_dir / "real.rs": nl.join(["#[cfg(test)]", "pub(crate) mod tests;"]),
+        src_dir / "real" / "tests.rs": "",
+        src_dir / "other.rs": "mod tests;",
+        src_dir / "other" / "tests.rs": "",
+        src_dir / "bin" / "tool.rs": nl.join(["#[cfg(test)]", "mod checks;"]),
+        src_dir / "bin" / "checks.rs": "",
+    }
+    test_files = test_module_files(tree)
+    for path, want_test, why in (
+        (src_dir / "tests.rs", True, "a module declared under cfg(test) is a test file"),
+        (src_dir / "tests" / "helper.rs", True, "and so is every module beneath it"),
+        (src_dir / "oracle_cases.rs", True, "a path attribute names the test file"),
+        (src_dir / "inline" / "deeper.rs", True, "a file beneath an inline test module"),
+        (src_dir / "real" / "tests.rs", True, "a pub(crate) one, beside a non-root file"),
+        (src_dir / "bin" / "checks.rs", True, "a binary's root resolves beside itself"),
+        (src_dir / "multi.rs", True, "a declaration under an attribute spanning lines"),
+        (src_dir / "renamed_cases.rs", True, "a path attribute written before cfg(test)"),
+        (src_dir / "outer" / "util.rs", True, "a declaration inside a live inline module"),
+        (src_dir / "fixtures.rs", True, "a module of a path-loaded test file sits beside it"),
+        (src_dir / "self_gated.rs", True, "a file whose own #![cfg(test)] says so"),
+        (src_dir / "self_gated" / "helper2.rs", True, "and the modules it declares"),
+        (src_dir / "inner_gated" / "deep2.rs", True, "a file in an inline module that says so"),
+        (src_dir / "lib.rs", False, "control: the crate root"),
+        (src_dir / "other" / "tests.rs", False, "control: called `tests`, never gated"),
+        (src_dir / "commented_out.rs", False, "control: a declaration commented out"),
+        (src_dir / "renamed.rs", False, "control: the name a path attribute replaced"),
+        (src_dir / "util.rs", False, "control: the live module of the nested one's name"),
+        (src_dir / "widgets.rs", False, "control: a declaration inside a string literal"),
+    ):
+        expect(f"test_module_files: {why}", path in test_files, want_test)
+    expect("test_module_files: a crate of one file has no test files",
+           test_module_files({src_dir / "lib.rs": "#[cfg(test)] mod tests;"}), set())
 
     print(f"rustlex: self-test {'FAILED' if failures else 'passed'} "
           f"({failures} failure(s))")

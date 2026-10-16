@@ -16,10 +16,12 @@
 #
 # ## The reference
 #
-# `/usr/bin/cal` from util-linux (Debian ships it in the `ncal` package, which
-# is why `dpkg -S` names `ncal`). §726's caveat about heavily patched coreutils
-# does not apply -- this is not coreutils -- but the general form does: a green
-# run certifies agreement with Ubuntu's util-linux.
+# util-linux 2.39.3's `cal`, built from the release by util-linux-ref.sh with
+# configure's defaults -- libtinfo included, as Ubuntu builds the util-linux
+# programs it does ship. Ubuntu ships no util-linux `cal`: `/usr/bin/cal` is
+# BSD's, from the `ncal` package. Until 2026-10-08 this compared against a
+# `/usr/local/bin/cal` built by hand without libtinfo, which never coloured a
+# terminal on its own, so no case here could see that decision.
 #
 # Its option set is read from the program rather than assumed: `--reform`,
 # `--iso`, `-1`/`-3`, `--months`, `--span`, `--vertical`, `--columns` and
@@ -43,19 +45,118 @@ set -u
 DIFF_PROG='cal'
 # Every invocation is bounded, both sides. `cal 12 9999` and `-n 1000` ask for a
 # lot of output from a loop over months, which is the shape that runs away.
-DIFF_NEED=timeout
+DIFF_NEED='timeout python3'
+# util-linux's own `cal`, built from the release -- Ubuntu's /usr/bin/cal is
+# BSD's. See util-linux-ref.sh, which also says why the build that was here
+# before it could not tell a colour terminal from any other.
+# shellcheck source=util-linux-ref.sh
+. "$(dirname "$0")/util-linux-ref.sh"
+DIFF_REF=$UL_REF_CAL
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
+# ---------------------------------------------------------------------------
+# Colour fixtures: terminal-colors.d trees, each under a directory that is
+# then XDG_CONFIG_HOME. Whether `cal` colours at all is util-linux's
+# lib/colors.c -- standard output a terminal, TERM's terminfo entry having
+# colours, these files -- and with what is a scheme file's sequences for the
+# five names cal.c asks for. Both sides read the same reference terminfo.
+# ---------------------------------------------------------------------------
+fix=$DIFF_TMP/fix
+mkdir -p "$fix/none"
+python3 - "$fix" <<'PY'
+import os, sys
+d = sys.argv[1]
+trees = {
+    # every name cal asks for, as escape sequences
+    "scheme-all": {"cal.scheme": b"header 1;34\nworkday 32\nweekend 31\ntoday 4\nweeknumber 35\n"},
+    # colour names -- `white` and `lightgray` are not found by upstream's
+    # bsearch of its unsorted table, and are written out as text
+    "scheme-names": {"cal.scheme": b"today red\nheader bold\nweekend lightgray\nworkday white\nweeknumber lightgray,\n"},
+    # backslash escapes, a comment, blank lines and indentation
+    "scheme-escapes": {"cal.scheme": b"# comment\n\n   today 1;\\_5\nheader \\e[7m\\x\nweekend 3\\#1\n"},
+    # a disable file counts only once a scheme exists somewhere
+    "disable": {"cal.disable": b"", "scheme": b""},
+    "disable-noscheme": {"cal.disable": b""},
+    "enable-beats-disable": {"disable": b"", "cal.enable": b"", "scheme": b""},
+    # the best match wins: a terminal-specific file over a plain one
+    "term-specific": {"cal.scheme": b"today 33\n", "cal@xterm-256color.scheme": b"today 32\n"},
+    "other-util": {"dmesg.scheme": b"today 32\n"},
+    "global": {"scheme": b"weekend 33\nheader 4\n"},
+    # under HOME, for when XDG_CONFIG_HOME is unset
+    "home/.config": {"cal.scheme": b"today 36\nworkday 32\n"},
+}
+for tree, files in trees.items():
+    base = os.path.join(d, tree, "terminal-colors.d")
+    os.makedirs(base)
+    for name, data in files.items():
+        with open(os.path.join(base, name), "wb") as f:
+            f.write(data)
+PY
+
+# ptyrun.py: COMMAND with standard output on a terminal; what it wrote comes
+# out on our standard output.
+ptyrun=$DIFF_TMP/ptyrun.py
+cat >"$ptyrun" <<'PY'
+import os, subprocess, sys
+
+master, slave = os.openpty()
+p = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=slave)
+os.close(slave)
+out = b""
+while True:
+    try:
+        chunk = os.read(master, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+sys.stdout.buffer.write(out.replace(b"\r\n", b"\n"))
+sys.exit(p.wait())
+PY
+
+# --- knobs: PTY puts standard output on a terminal; ENVS adds to (and, coming
+# later, overrides) the pinned environment; UNSET names variables the case
+# runs without, pinned ones included; CWD is the directory it runs in. Reset
+# after every case.
+PTY=
+ENVS=()
+UNSET=()
+CWD=
+reset_knobs() { PTY=; ENVS=(); UNSET=(); CWD=; }
+
 run_side() {
   local side=$1; shift
   # TERM and the absence of a tty both matter: `cal` highlights today, and it
   # must not do so when its output is a pipe. Pinned so neither side can be
-  # colouring on the strength of the harness's own environment.
-  diff_run timeout -k 2 15 env TZ=UTC LC_ALL=C.UTF-8 TERM=dumb \
-    PATH="$bindir/$side" cal "$@"
+  # colouring on the strength of the harness's own environment -- HOME and
+  # XDG_CONFIG_HOME too, so no terminal-colors.d of the host's is read.
+  local -a pinned=(TZ=UTC LC_ALL=C.UTF-8 TERM=dumb "HOME=$fix/none" "XDG_CONFIG_HOME=$fix/none")
+  local -a unset=() keep=()
+  local p u skip
+  for u in "${UNSET[@]}"; do unset+=(-u "$u"); done
+  for p in "${pinned[@]}"; do
+    skip=
+    for u in "${UNSET[@]}"; do [ "${p%%=*}" = "$u" ] && skip=1; done
+    [ -n "$skip" ] || keep+=("$p")
+  done
+  local -a cmd=(timeout -k 2 15 env "${unset[@]}" "${keep[@]}" "${ENVS[@]}"
+    PATH="$bindir/$side")
+  if [ -n "$CWD" ]; then
+    # /bin/sh by its path: PATH is already only the side's binaries.
+    # shellcheck disable=SC2016  # expanded by that shell, not this one
+    cmd+=(/bin/sh -c 'cd "$1" && shift && exec cal "$@"' sh "$CWD" "$@")
+  else
+    cmd+=(cal "$@")
+  fi
+  if [ -n "$PTY" ]; then
+    diff_run python3 "$ptyrun" "${cmd[@]}"
+  else
+    diff_run "${cmd[@]}"
+  fi
 }
 
 compare() {
@@ -90,11 +191,25 @@ report() {
   return 0
 }
 
-run_case() { compare "$@"; report "cal $*"; }
+# The case's label: its arguments, and the knobs, a fixture tree by its name.
+label_of() {
+  local l="cal $*"
+  [ -n "$PTY" ] && l="$l [pty]"
+  [ "${#ENVS[@]}" -gt 0 ] && l="$l [${ENVS[*]##*/}]"
+  [ "${#UNSET[@]}" -gt 0 ] && l="$l [-u ${UNSET[*]}]"
+  [ -n "$CWD" ] && l="$l [in ${CWD##*/}]"
+  printf '%s' "$l"
+}
+
+run_case() {
+  local label; label=$(label_of "$@")
+  compare "$@"; reset_knobs
+  report "$label"
+}
 
 xfail_case() {
   local why=$1; shift
-  compare "$@"
+  compare "$@"; reset_knobs
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1))
     printf 'XPASS cal %s -- expected to differ (%s) and did not\n' "$*" "$why"
@@ -206,6 +321,53 @@ run_case --color=never 6 2021
 run_case --color=always 6 2021
 run_case --color=auto 6 2021
 run_case --color=nosuch 6 2021
+run_case --color==never 6 2021
+run_case --color==always 6 2021
+run_case --color===never 6 2021
+run_case --color==x 6 2021
+run_case --color= 6 2021
+run_case --color=ALWAYS 6 2021
+run_case --color 6 2021
+
+# --- colour on a terminal: lib/colors.c's decision, and a scheme's sequences -----
+# Each tree under each layout that colours differently: the plain month (header,
+# workdays, weekends), Monday first (the workdays move), day-of-year, vertical
+# (no header or workday colour at all), week numbers with one asked for, three
+# months, a year, and the current month, where today is marked.
+for tc in none scheme-all scheme-names scheme-escapes disable disable-noscheme \
+          enable-beats-disable term-specific other-util global; do
+  for args in '6 2021' '-m 6 2021' '-j 6 2021' '-v 6 2021' '--week=25 6 2021' \
+              '-v --week=25 6 2021' '-3 6 2021' '-y 2021' '15 6 2021' ''; do
+    PTY=1; ENVS=(TERM=xterm-256color "XDG_CONFIG_HOME=$fix/$tc")
+    # shellcheck disable=SC2086  # the arguments are words, on purpose
+    run_case $args
+  done
+done
+# The scheme through HOME when XDG_CONFIG_HOME is unset; and each set but
+# empty, which upstream reads as the absolute /terminal-colors.d and
+# /.config/terminal-colors.d, not as paths relative to where cal runs.
+PTY=1; UNSET=(XDG_CONFIG_HOME); ENVS=(TERM=xterm-256color "HOME=$fix/home"); run_case 6 2021
+PTY=1; UNSET=(XDG_CONFIG_HOME HOME); ENVS=(TERM=xterm-256color); run_case 6 2021
+PTY=1; ENVS=(TERM=xterm-256color XDG_CONFIG_HOME=); run_case 6 2021
+PTY=1; UNSET=(XDG_CONFIG_HOME); ENVS=(TERM=xterm-256color HOME=); run_case 6 2021
+# ... run from a directory that has a terminal-colors.d (and a .config/ with
+# one), which a relative reading would have found.
+PTY=1; CWD=$fix/scheme-all; ENVS=(TERM=xterm-256color XDG_CONFIG_HOME=); run_case 6 2021
+PTY=1; CWD=$fix/home; UNSET=(XDG_CONFIG_HOME); ENVS=(TERM=xterm-256color HOME=); run_case 6 2021
+# Terminals without colours, and none at all.
+for term in dumb vt100 no-such-terminal ''; do
+  PTY=1; ENVS=("TERM=$term" "XDG_CONFIG_HOME=$fix/scheme-all"); run_case 15 6 2021
+  PTY=1; ENVS=("TERM=$term" "XDG_CONFIG_HOME=$fix/scheme-all"); run_case --color=always 15 6 2021
+done
+# The mode beats the files and the terminal, in both directions.
+PTY=1; ENVS=(TERM=xterm-256color "XDG_CONFIG_HOME=$fix/scheme-all"); run_case --color=never 15 6 2021
+PTY=1; ENVS=(TERM=xterm-256color "XDG_CONFIG_HOME=$fix/disable"); run_case --color=auto 15 6 2021
+PTY=1; ENVS=(TERM=xterm-256color "XDG_CONFIG_HOME=$fix/disable"); run_case --color=always 15 6 2021
+PTY=1; ENVS=(TERM=xterm-256color "XDG_CONFIG_HOME=$fix/scheme-all"); run_case --color==never 15 6 2021
+# Into a pipe, only --color=always colours -- with the scheme's sequences.
+ENVS=("XDG_CONFIG_HOME=$fix/scheme-all"); run_case --color=always 15 6 2021
+ENVS=("XDG_CONFIG_HOME=$fix/scheme-all"); run_case --color=always -v --week=25 15 6 2021
+ENVS=("XDG_CONFIG_HOME=$fix/scheme-all"); run_case 15 6 2021
 
 # --- the day/month/year form and names ------------------------------------------------------------
 run_case 15 9 1752

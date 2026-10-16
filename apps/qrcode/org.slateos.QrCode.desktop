@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=QR Code Generator
+Comment=Make QR codes from text and links
+Icon=applications-graphics
+Exec=qrcode
+Categories=Utility;
+Keywords=qr;barcode;

@@ -255,33 +255,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HELPER_DONE.store(true, Ordering::Release);
             }
 
-            let tid = crate::sched::spawn(
+            let Ok(tid) = crate::sched::spawn(
                 b"test-event",
                 crate::sched::task::DEFAULT_PRIORITY,
                 event_waiter,
                 0,
                 0,
-            );
-            assert!(tid.is_ok());
+            ) else {
+                serial_println!("[once_event]   FAIL: could not spawn the waiter");
+                return Err(crate::error::KernelError::InternalError);
+            };
 
-            // Yield to let helper run and block.
-            for _ in 0..5 {
-                crate::sched::yield_now();
+            // Wait, by the clock, until the helper is parked on the event --
+            // not a fixed number of yields, which wait for another task only
+            // on one CPU, where a yield runs it (selftest::wait_until). Then
+            // the signal below wakes a blocked waiter, which is what this
+            // step is for; "wait after signal" is step 3's.
+            let parked = crate::selftest::wait_until(5_000, || {
+                matches!(
+                    crate::sched::task_state(tid),
+                    Some(crate::sched::task::TaskState::Blocked)
+                )
+            });
+            if !parked || HELPER_DONE.load(Ordering::Acquire) {
+                serial_println!(
+                    "[once_event]   FAIL: the waiter did not block on an unset event (parked {}, done {})",
+                    parked,
+                    HELPER_DONE.load(Ordering::Acquire)
+                );
+                return Err(crate::error::KernelError::InternalError);
             }
 
-            // Helper should be blocked.
-            assert!(!HELPER_DONE.load(Ordering::Acquire));
-
-            // Signal the event.
             SIGNAL_EVENT.signal();
 
-            // Yield to let helper wake and complete.
-            for _ in 0..10 {
-                crate::sched::yield_now();
+            if !crate::selftest::wait_until(5_000, || HELPER_DONE.load(Ordering::Acquire)) {
+                serial_println!("[once_event]   FAIL: the signal did not wake the blocked waiter");
+                return Err(crate::error::KernelError::InternalError);
             }
-
-            // Helper should have woken.
-            assert!(HELPER_DONE.load(Ordering::Acquire));
         }
     }
     serial_println!("[once_event]   Multi-task signal: OK");

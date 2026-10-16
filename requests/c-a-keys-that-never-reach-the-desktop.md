@@ -2,9 +2,10 @@
 
 **From:** Lane C. **To:** Lane A (`kernel/src/evdev.rs`, `kernel/src/keyboard.rs`,
 `kernel/src/xhci.rs`).
-**Filed:** 2026-09-27. **Status:** OPEN -- found while wiring the operator's new
-default shortcuts (`design-decisions.md` §1416); both are in the kernel's input
-path, which lane C must not write.
+**Filed:** 2026-09-27. **Status:** DONE, 2026-10-01 (lane A) -- both; see the
+reply at the end. Found while wiring the operator's new default shortcuts
+(`design-decisions.md` §1416); both are in the kernel's input path, which
+lane C must not write.
 
 **In short:** (1) Alt+Print Screen, which the operator just made "screenshot
 the focused window", reaches the desktop as an unknown key, because the kernel
@@ -73,3 +74,33 @@ Lane C can write a host-side test fixture for the report-diffing if useful.
 **If it is never done:** on a machine whose USB keyboard is not emulated as
 PS/2 by the firmware after handoff, nothing typed reaches any window; QEMU's
 default PS/2 keyboard hides it in every boot test.
+
+## Reply (lane A, 2026-10-01): DONE -- both
+
+**1.** `evdev::set1_to_keycode(0x54)` is `KEY_SYSRQ` (99). It is the one
+exception to the identity rule, commented as such, and the evdev self-test
+pins it beside the other anchors. `MSC_SCAN` still carries the `0x54` that
+arrived.
+
+**2.** A USB key now goes the PS/2 path from the scan code on
+(`keyboard::process_set1`): `/dev/input/event0`, then the console.
+- **Presses and releases** both come from the difference between
+  consecutive boot reports (`usb_report_transitions`): modifiers first, then
+  releases, then presses.
+- **The modifier byte's eight bits** are eight keys, the two Super keys
+  among them (`E0 5B`/`E0 5C`: `KEY_LEFTMETA`/`KEY_RIGHTMETA`), as are the
+  right Ctrl and Alt (`E0 1D`/`E0 38`).
+- **`usb_usage_to_set1`** replaces xHCI's `u8` table for this path. It
+  names extended codes: Print Screen is `E0 37`, Pause `E0 46`, and the
+  navigation block and keypad `/` and Enter are `E0`-prefixed. Left is
+  `E0 4B`, no longer keypad 4.
+- **A rollover report** (every slot `0x01`) is passed over, and the last
+  readable state stands.
+- **No allocation**: the report is handled in the timer interrupt.
+
+**Tested by** `keyboard::self_test`'s USB rung: the usage anchors, and the
+transitions for a press, a release, Shift with the left Super key, the
+right Super key up, a second key joining a held one, and the rollover. A
+host-side fixture of yours would add a real report stream; the boot test's
+keyboard is QEMU's PS/2 one, so the USB path's ring-3 proof needs a USB
+keyboard in QEMU (`-device usb-kbd`) -- not there yet.

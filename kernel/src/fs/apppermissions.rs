@@ -12,7 +12,6 @@
 //!   → apppermissions::grant/revoke(app, permission)
 //!
 //! Integration:
-//!   → appregistry (registered apps)
 //!   → appsandbox (sandbox enforcement)
 //!   → webcam (camera permission)
 //!   → location (location permission)

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Breakout
+Comment=Break the bricks with a bouncing ball
+Icon=applications-games
+Exec=breakout
+Categories=Game;ArcadeGame;
+Keywords=bricks;paddle;arcade;

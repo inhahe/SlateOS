@@ -728,6 +728,19 @@ pub fn attach_user_mapping(ring_handle: u64, base: u64, bytes: u64) -> KernelRes
     Ok(())
 }
 
+/// Whether `ring_handle` names a ring the calling process owns.
+///
+/// For a check made outside this module -- a completion port asked to watch a
+/// ring -- with the same rule [`set_cp`] and [`attach_user_mapping`] apply. A
+/// ring that does not exist is not owned.
+#[must_use]
+pub fn owned_by_caller(ring_handle: u64) -> bool {
+    RING_TABLE
+        .lock()
+        .get(&ring_handle)
+        .is_some_and(|ring| ring.owner_process == current_owner_process())
+}
+
 /// Associate an io_ring with a completion port.
 ///
 /// When CQEs are posted via `enter()`, the completion port is notified.

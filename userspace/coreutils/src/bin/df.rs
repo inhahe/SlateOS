@@ -84,6 +84,11 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees the descriptors `df` was
+// given: a closed standard output is `write error`, as it is upstream -- not
+// the `/dev/null` Rust's runtime would put there.
+coreutils::guard_std_fds!();
+
 const DF: Program = Program::new("df", 1);
 
 /// GNU's own short-option string, in GNU's own order.
@@ -2796,6 +2801,7 @@ fn main() -> ExitCode {
 /// exit path at once. See [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -2819,26 +2825,29 @@ fn run_main() -> ExitCode {
         }
     };
 
+    // Standard output as stdio's: written through a buffer, its failures kept
+    // for `close_stdout` to report at the end, as upstream's `atexit` does.
+    // Until 2026-10-08 the help and the version went out by `print!`, which
+    // panics when the write fails, and the table through Rust's `Stdout`,
+    // whose failure ended `df` with status 1 and no word of why.
+    let mut out = Stream::stdout();
     let cfg = match request {
+        // A `Stream` write cannot fail: a failure is kept in the stream for
+        // `close_stdout` to report, so the `Result` carries nothing.
         Request::Help => {
-            print!("{}", help_text());
-            return ExitCode::SUCCESS;
+            let _ = out.write_all(help_text().as_bytes());
+            return stdfd::close_stdout("df", out, ExitCode::SUCCESS);
         }
         Request::Version => {
-            println!("df (SlateOS coreutils) 0.1.0");
-            return ExitCode::SUCCESS;
+            let _ = out.write_all(b"df (SlateOS coreutils) 0.1.0\n");
+            return stdfd::close_stdout("df", out, ExitCode::SUCCESS);
         }
         Request::Run(cfg) => cfg,
     };
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut err = Stream::stderr();
     let status = run(&cfg, &RealSystem, &mut out, &mut err);
-    if out.flush().is_err() {
-        return ExitCode::from(1);
-    }
-    ExitCode::from(u8::try_from(status).unwrap_or(1))
+    stdfd::close_stdout("df", out, ExitCode::from(u8::try_from(status).unwrap_or(1)))
 }
 
 // ------------------------------------------------------------------ tests ---

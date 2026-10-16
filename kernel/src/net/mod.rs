@@ -41,9 +41,11 @@ pub mod iperf;
 pub mod ipv4;
 pub mod ipv6;
 pub mod lldp;
+pub mod mcast_filter;
 pub mod mdns;
 pub mod mld;
 pub mod nat;
+pub mod native_socket;
 pub mod ndisc;
 pub mod netcat;
 pub mod netstack_client;
@@ -52,6 +54,7 @@ pub mod ntp;
 pub mod pcap;
 pub mod qos;
 pub mod raw;
+pub mod ring_bench;
 pub mod smtp;
 pub mod snmp;
 pub mod socket;
@@ -89,6 +92,10 @@ static LAST_KEEPALIVE_TICK: AtomicU64 = AtomicU64::new(0);
 /// and starts DHCP to obtain an IP address.
 pub fn init() {
     interface::init();
+    // The drivers start with no multicast passing; the stack's own groups
+    // (all-hosts, all-nodes, its solicited-node group) go in now that the
+    // interface's MAC is known.
+    mcast_filter::refresh_kernel();
 }
 
 /// Process any pending network events (poll-based).
@@ -103,6 +110,9 @@ pub fn poll() {
     // drain but keep servicing container-internal veth/bridge traffic and
     // periodic maintenance below.  See net::raw / design-decisions.md §63.
     if !raw::is_claimed() {
+        // A raw owner that died without releasing leaves its multicast
+        // filter behind; the stack's own comes back with the NIC.
+        mcast_filter::restore_if_raw_left();
         // Read all pending packets from the active NIC.
         loop {
             let frame = recv_frame();
@@ -387,6 +397,7 @@ pub fn self_test() -> KernelResult<()> {
     icmpv6::self_test()?;
     arp::self_test()?;
     udp::self_test()?;
+    native_socket::self_test()?;
     dns::self_test()?;
     dhcp::self_test()?;
     frag::self_test()?;

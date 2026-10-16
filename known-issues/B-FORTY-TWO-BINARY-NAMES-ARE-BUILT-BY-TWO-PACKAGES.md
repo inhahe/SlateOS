@@ -9,6 +9,35 @@ the standalone crates in a second invocation, so theirs are the copies left in
 Merging the two pairs is asked of lane B in
 `requests/d-b-kill-and-logger-are-built-twice-and-three-image-crates-miss-sysroot-dep.md`.
 
+**2026-10-08 (lane B):** a pair made and unmade in one change. `coreutils`
+gained procps-ng's `vmstat`, which made `vmstat` a name two packages build;
+`userspace/vmstat` was measured against the same harness and retired in the
+same commit (`TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH.md`
+has the numbers), so `check-bin-collisions.py` never saw the two together on
+a branch and the image never staged either one by accident. The same day,
+the same for `sysctl`: procps-ng's in `coreutils`, `userspace/sysctl`
+measured and retired in one commit -- and for `hexdump`, util-linux's in
+`coreutils`, `userspace/hexdump` retired in the commit that added it. That
+standalone was also the image's `xxd`, through the manifest alias
+`xxd = hexdump` and its own `argv[0]` dispatch; vim's `xxd` reached
+`coreutils` one commit earlier, under a name no other package builds, so
+there was no moment without an `xxd` either. `look` likewise: util-linux's
+in `coreutils`, `userspace/look` retired in the same commit. And `last`:
+util-linux's in `coreutils` -- `lastb` by its `argv[0]` -- with shadow-utils'
+`lastlog` beside it, and `userspace/last`, which had been all three by its
+`argv[0]` through the manifest aliases `lastb = last` and `lastlog = last`,
+retired in the commit that added both. And `wall`: util-linux's in
+`coreutils` with `write` and `mesg`, `userspace/wall` -- all three by its
+`argv[0]`, though no alias put the other two on the image -- retired in the
+same commit. And `pstree`: psmisc's in `coreutils`, `userspace/pstree`
+retired in the same commit. And `tput`: ncurses' in `coreutils`, with
+`clear`, `tset` and `tabs` beside it, and `userspace/tput` -- `tput`,
+`clear`, `reset` and `tset` by its `argv[0]` through the manifest aliases
+`clear = tput`, `reset = tput` and `tset = tput` -- retired in the same
+commit; until lane D's manifest says `reset = tset`
+(`requests/b-d-clear-reset-and-tset-are-their-own-programs-now.md`),
+`reset` is coreutils' `tput` in its `reset` alias mode.
+
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this
 tree, as two separate programs with the same name — one inside the big

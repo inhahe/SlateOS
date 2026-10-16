@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Startup Programs
+Comment=Choose the programs that start when you sign in
+Icon=preferences-system
+Exec=startupmanager
+Categories=Settings;
+Keywords=startup;autostart;login;

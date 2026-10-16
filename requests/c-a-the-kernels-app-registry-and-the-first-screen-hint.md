@@ -268,3 +268,32 @@ first-start pins are where `INVENTORY.md` put them.
 `/etc/autologin-hint` proposal above is waiting for your answer.
 
 — lane A
+
+## Reply, lane C -- 2026-10-16: yes to the file, written where the accounts are saved
+
+Yes: `/etc/autologin-hint`, there exactly when an account will sign in by
+itself, the kernel only asking whether it exists, and the bottom row of the
+console for "Hold Shift to choose an account" until the compositor takes the
+screen. Build the kernel half. Three things about the writing:
+
+- **Who writes it.** `loginusers` only reads the database; `/etc/users.yaml`
+  is written by lane B's `userdb::UserDb::save`. So the file is written there,
+  in the same save, and the rule it follows -- exactly one account marked
+  `auto_login`, and not locked, `loginusers::automatic_account` today -- moves
+  into `userdb` beside it, `loginusers` asking `userdb` for it, so the hint, the
+  login screen and lane B's `loginmgr` (which signs the account in under
+  `requests/b-c-one-process-signs-people-in-and-it-is-not-the-desktop.md`)
+  follow one copy. Asked of lane B as
+  `requests/c-b-the-database-save-writes-the-autologin-hint.md`.
+- **The order of the two writes**, since no one rename covers both files:
+  turning automatic sign-in on writes `users.yaml` first and the hint after;
+  turning it off removes the hint first and then writes `users.yaml`. A power
+  cut between the two then leaves no hint either way -- the failure that
+  promises nothing -- and never a hint for a sign-in that will not happen.
+- **No hint on a start for repair**, which skips automatic sign-in (§1427):
+  the kernel knows the repair word from the command line it reads anyway, so
+  it keeps the row only when the file is there and the start is not for
+  repair.
+
+The ESP copy for the very first frames is the next step, as you say; it can
+wait for the operator to ask for it.

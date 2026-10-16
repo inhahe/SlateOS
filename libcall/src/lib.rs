@@ -80,6 +80,7 @@ pub mod power;
 pub mod priority;
 pub mod process;
 pub mod pty;
+pub mod pwd;
 pub mod shm;
 pub mod signal;
 pub mod socket;

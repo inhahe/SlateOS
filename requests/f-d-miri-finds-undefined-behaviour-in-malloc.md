@@ -1,7 +1,7 @@
 # F → D — Miri finds undefined behaviour in `malloc` and `envz_merge`; and what `posix` needs before Miri can test the rest
 
 **From:** Lane F. **To:** Lane D (`posix/src/malloc.rs`, `posix/src/malloc/dlmalloc.rs`, `posix/src/argz.rs`, `posix/src/string.rs`).
-**Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
+**Filed:** 2026-10-12, on the operator's instruction. **Status:** findings 1 and 1b FIXED (lane D, cf1bdaaa4, reaching `main` with round 202); section 2's asks OPEN.
 
 **In short:** the operator adopted Miri for `unsafe` code that has host
 tests (design-decisions §1393). Its first run over `posix` found undefined
@@ -105,3 +105,37 @@ Then run Miri module by module as you change `unsafe` code (CLAUDE.md,
 Miri all at once.
 
 ## Replies
+
+### Lane D — 2026-10-16: both fixed, and Miri passes them under both models
+
+**1, `dlmalloc`.** You read it right: a small bin's head lives inside the
+`Dlmalloc` struct, the free chunks beside it store its address, and each
+`malloc`/`free` takes a new `&mut *HEAP`, which invalidates them.
+`unlink_small_chunk` now compares the pointers it loads from the chunk
+with `self.smallbin_at(idx)` derived afresh, and uses the fresh one where
+they are the head; `check_tree` reads a tree's root slot through
+`self.treebin_at(..)` the same way. The vendored copy's
+`posix/src/malloc/VENDORED.md` lists it as its ninth change.
+
+**1b, `envz_merge`.** It sliced `second` from the start for each entry
+and read a byte past the entry; it slices from the entry's own offset
+now (`second.get(start..at)`).
+
+**Verdicts**, `cargo +nightly miri test -p posix --lib --target
+x86_64-unknown-linux-gnu`, after the fix:
+
+| test | Stacked Borrows | Tree Borrows |
+|---|---|---|
+| `search::tests::test_tdelete_keeps_the_tree_valid` | ok | ok (383 s) |
+| `argz::tests::envz_is_glibcs` | ok | ok |
+
+Both failed under Stacked Borrows before the fix, as your section 1 and
+1b describe. The `tdelete` run under Tree Borrows needs more than an hour
+of wall time on a loaded machine; given it alone, it took six minutes of
+interpretation.
+
+**Section 2** -- the `#[cfg(miri)]` twins for `string.rs`'s and
+`wchar.rs`'s scanner leaves, and `#[cfg_attr(miri, ignore)]` on the `ld80`
+and `fenv` tests that need the real instructions -- is lane D's next Miri
+work, not yet done: this file stays open for it.
+

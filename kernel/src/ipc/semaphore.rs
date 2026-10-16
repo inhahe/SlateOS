@@ -38,7 +38,9 @@
 //!
 //! ## Lock Ordering
 //!
-//! `SEM_TABLE` → `SCHED` (signal may call `sched::wake()`).
+//! `SEM_TABLE` is a `PreemptSpinMutex`, and so a leaf (dd-70): nothing is
+//! taken under it. Waiters are woken, and timers armed and cancelled, after
+//! it is let go.
 
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
@@ -56,6 +58,10 @@ const DEFAULT_MAX_COUNT: u64 = u64::MAX >> 1;
 
 /// Maximum number of waiters queued on a single semaphore.
 const MAX_WAITERS: usize = 256;
+
+/// Waiters [`signal`] grants a unit to under one hold of `SEM_TABLE`; it
+/// wakes them once the lock is let go, and takes it again for the next.
+const WAKE_BATCH: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -127,7 +133,7 @@ impl Semaphore {
 
 /// Global table of all live semaphores.
 ///
-/// Lock ordering: `SEM_TABLE` → `SCHED`.
+/// A leaf: see the module's lock ordering.
 static SEM_TABLE: Mutex<BTreeMap<SemId, Semaphore>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
@@ -178,36 +184,53 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
         return Ok(());
     }
 
-    {
-        let mut table = SEM_TABLE.lock();
-        let sem = table
-            .get_mut(&handle.id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        if sem.closed {
-            return Err(KernelError::ChannelClosed);
-        }
-
-        // Check overflow.
-        let remaining_capacity = sem.max_count.saturating_sub(sem.count);
-        if count > remaining_capacity {
-            return Err(KernelError::Overflow);
-        }
-
-        // A unit goes to each waiter, in order, while both last: taking a
-        // waiter off the queue is its grant. Only units no waiter takes are
-        // counted, so the count is never above zero while a task waits.
-        // Woken under the lock (`SEM_TABLE` -> `SCHED`, the module's order),
-        // so that no number of waiters needs a buffer to be woken from.
-        let mut units_left = count;
-        while units_left > 0 {
-            let Some(task_id) = sem.waiters.pop_front() else {
-                break;
+    // The units are counted, then granted to waiters in queue order, one
+    // each -- taking a waiter off the queue is its grant -- a batch at a
+    // time: `SEM_TABLE` is a leaf, so the batch is woken after it is let go,
+    // and the next batch taken under it again. A waiter queued meanwhile is
+    // granted in order behind the rest; one that finds a unit free when it
+    // parks takes it itself (`holds_unit_after_park`).
+    let mut counted = false;
+    loop {
+        let mut to_wake: [Option<TaskId>; WAKE_BATCH] = [None; WAKE_BATCH];
+        let more = {
+            let mut table = SEM_TABLE.lock();
+            let Some(sem) = table.get_mut(&handle.id()) else {
+                if counted {
+                    // Closed since: the close woke every waiter left.
+                    break;
+                }
+                return Err(KernelError::InvalidHandle);
             };
-            sched::wake(task_id);
-            units_left = units_left.saturating_sub(1);
+            if !counted {
+                if sem.closed {
+                    return Err(KernelError::ChannelClosed);
+                }
+                let remaining_capacity = sem.max_count.saturating_sub(sem.count);
+                if count > remaining_capacity {
+                    return Err(KernelError::Overflow);
+                }
+                sem.count = sem.count.saturating_add(count);
+                counted = true;
+            }
+            for slot in &mut to_wake {
+                if sem.count == 0 {
+                    break;
+                }
+                let Some(task_id) = sem.waiters.pop_front() else {
+                    break;
+                };
+                sem.count = sem.count.saturating_sub(1);
+                *slot = Some(task_id);
+            }
+            sem.count > 0 && !sem.waiters.is_empty()
+        };
+        for task_id in to_wake.iter().flatten() {
+            sched::wake(*task_id);
         }
-        sem.count = sem.count.saturating_add(units_left);
+        if !more {
+            break;
+        }
     }
 
     crate::ktrace::record(
@@ -287,9 +310,9 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
 
 /// After a park, for waiter `me` of `sem`: whether it holds a unit now. Off
 /// the queue, `signal` granted it one. Still queued, it takes a free unit if
-/// there is one, leaving the queue as it does -- `signal` counts units only
-/// when no waiter is left to take them, so this is a guard, not the usual
-/// path -- and otherwise holds none.
+/// there is one, leaving the queue as it does -- `signal` grants units to
+/// the queue in turn, so this is for a unit it has not reached yet -- and
+/// otherwise holds none.
 fn holds_unit_after_park(sem: &mut Semaphore, me: TaskId) -> bool {
     let Some(pos) = sem.waiters.iter().position(|&id| id == me) else {
         return true;
@@ -375,20 +398,22 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task_id);
 
     // Queue, then park until granted a unit, closed, or timed out. Each pass
-    // decides under the lock. The timeout has come when the timer has fired
-    // (`hrtimer::has_expired`), whatever this CPU's clock reads, or when the
-    // clock is past the deadline.
+    // decides under the lock; the timer is asked about before it and
+    // cancelled after it, `SEM_TABLE` being a leaf. The timeout has come when
+    // the timer has fired (`hrtimer::has_expired`), whatever this CPU's clock
+    // reads, or when the clock is past the deadline. A timer that fires
+    // between the question and the park leaves its wake recorded, so that
+    // park ends at once and the next pass sees it.
     let mut queued = false;
-    loop {
+    let outcome = loop {
+        let fired = crate::hrtimer::has_expired(timer_handle);
         {
             let mut table = SEM_TABLE.lock();
             let Some(sem) = table.get_mut(&handle.id()) else {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             };
             if sem.closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             }
             let holds_unit = if queued {
                 holds_unit_after_park(sem, task_id)
@@ -399,21 +424,17 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
                 false
             };
             if holds_unit {
-                crate::hrtimer::cancel(timer_handle);
-                return Ok(());
+                break Ok(());
             }
-            if crate::hrtimer::has_expired(timer_handle) || crate::hrtimer::now_ns() >= deadline_ns
-            {
+            if fired || crate::hrtimer::now_ns() >= deadline_ns {
                 if let Some(pos) = sem.waiters.iter().position(|&id| id == task_id) {
                     sem.waiters.remove(pos);
                 }
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
+                break Err(KernelError::TimedOut);
             }
             if !queued {
                 if sem.waiters.len() >= MAX_WAITERS {
-                    crate::hrtimer::cancel(timer_handle);
-                    return Err(KernelError::WouldBlock);
+                    break Err(KernelError::WouldBlock);
                 }
                 sem.waiters.push_back(task_id);
                 queued = true;
@@ -424,7 +445,9 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
             crate::wchan::WaitChannel::Semaphore,
             handle.raw(),
         ));
-    }
+    };
+    crate::hrtimer::cancel(timer_handle);
+    outcome
 }
 
 /// Get the current count (non-consuming peek).

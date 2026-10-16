@@ -2798,6 +2798,10 @@ pub fn futex_wait_requeue_pi(
             pi_addr,
         ));
 
+        // Asked before the table is locked, not under it. A timer that fires
+        // after the question leaves its wake recorded, so the next park ends
+        // at once and the next pass sees it.
+        let fired = timer_handle.is_some_and(crate::hrtimer::has_expired);
         let mut table = PI_FUTEX_TABLE.lock();
         let pidx = pi_key.bucket();
         let cidx = cond_key.bucket();
@@ -2819,8 +2823,7 @@ pub fn futex_wait_requeue_pi(
         // is spurious: re-block. The timeout has come when the timer has fired
         // (`hrtimer::has_expired`), whatever this CPU's clock reads, or when
         // the clock is past the deadline.
-        let timed_out = timer_handle.is_some_and(crate::hrtimer::has_expired)
-            || deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d);
+        let timed_out = fired || deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d);
         if !timed_out {
             drop(table);
             continue;

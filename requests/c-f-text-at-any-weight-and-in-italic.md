@@ -3,7 +3,8 @@
 **From:** Lane C (`gui/toolkit`: `render.rs`, `text.rs`, `fontdb.rs`,
 `fontpicker.rs`). **To:** Lane F (`gui/font`, `gui/remote`,
 `gui/compositor`). **Filed:** 2026-10-05. **Status:** OPEN -- a shape to
-choose first; nothing is built on either side yet.
+choose first; nothing is built on either side yet. (Written 2026-10-05 and held on lane C's branch with the font picker until
+lane F's named families reached `main`; sent 2026-10-16.)
 
 **In short:** a program can ask for text in two weights, regular and bold,
 and upright only. That is the whole of what a font picker can offer, a

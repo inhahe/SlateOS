@@ -2,7 +2,8 @@
 
 **From:** Lane C (`gui/toolkit`). **To:** Lane E (`apps/**`).
 **Filed:** 2026-10-05. **Status:** OPEN -- for lane E to adopt where it
-fits; nothing of lane E's breaks.
+fits; nothing of lane E's breaks. (Written 2026-10-05 and held on lane C's branch with the font picker until
+lane F's named families reached `main`; sent 2026-10-16.)
 
 **In short:** `guitk::fontpicker::FontPickerDialog` is a font dialog for any
 program: the families installed, each name drawn in its own face, with a

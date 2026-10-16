@@ -362,14 +362,18 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
     let task = sched::current_task_id();
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
-    // Block loop.
-    loop {
+    // Block loop. Each pass decides under `EVENTFD_TABLE`, a leaf: the timer
+    // is asked about before it and cancelled once, after the loop. Its
+    // having fired is the timeout as much as the clock is, and a timer that
+    // fires between the question and the park leaves its wake recorded, so
+    // that park ends at once and the next pass sees it.
+    let outcome = loop {
+        let fired = crate::hrtimer::has_expired(timer_handle);
         {
             let mut table = EVENTFD_TABLE.lock();
-            let efd = table.get_mut(&handle.id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
+            let Some(efd) = table.get_mut(&handle.id()) else {
+                break Err(KernelError::InvalidHandle);
+            };
 
             // Deregister first: neither a timer wake nor a signal wake clears
             // the entry, and every path below either returns or re-registers.
@@ -378,8 +382,7 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             efd.writer_waiters.remove(task);
 
             if efd.closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             }
 
             if let Some(new_val) = efd.counter.checked_add(value)
@@ -387,27 +390,23 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             {
                 efd.counter = new_val;
                 let readers = efd.reader_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
                 drop(table);
                 super::stats::eventfd_signal();
                 for _ in &readers {
                     super::stats::eventfd_wakeup();
                 }
                 wake_all(readers);
-                return Ok(());
+                break Ok(());
             }
 
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
+            if fired || crate::hrtimer::now_ns() >= deadline_ns {
+                break Err(KernelError::TimedOut);
             }
 
             // Honour a deliverable signal before parking.  A timed wait maps
             // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
+                break Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
@@ -419,7 +418,9 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             task,
             crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
         );
-    }
+    };
+    crate::hrtimer::cancel(timer_handle);
+    outcome
 }
 
 /// Read (wait) — consume the counter value.
@@ -592,14 +593,18 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
     let task = sched::current_task_id();
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
-    // Block loop.
-    loop {
+    // Block loop. Each pass decides under `EVENTFD_TABLE`, a leaf: the timer
+    // is asked about before it and cancelled once, after the loop. Its
+    // having fired is the timeout as much as the clock is, and a timer that
+    // fires between the question and the park leaves its wake recorded, so
+    // that park ends at once and the next pass sees it.
+    let outcome = loop {
+        let fired = crate::hrtimer::has_expired(timer_handle);
         {
             let mut table = EVENTFD_TABLE.lock();
-            let efd = table.get_mut(&handle.id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
+            let Some(efd) = table.get_mut(&handle.id()) else {
+                break Err(KernelError::InvalidHandle);
+            };
 
             // Deregister first: neither a timer wake nor a signal wake clears
             // the entry, and every path below either returns or re-registers.
@@ -617,29 +622,24 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                     v
                 };
                 let writers = efd.writer_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
                 drop(table);
                 super::stats::eventfd_read();
                 wake_all(writers);
-                return Ok(val);
+                break Ok(val);
             }
 
             if efd.closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             }
 
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
+            if fired || crate::hrtimer::now_ns() >= deadline_ns {
+                break Err(KernelError::TimedOut);
             }
 
             // Honour a deliverable signal before parking.  A timed wait maps
             // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
+                break Err(KernelError::Interrupted);
             }
 
             // Register as waiter.
@@ -651,7 +651,9 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
             task,
             crate::wchan::Wait::new(crate::wchan::WaitChannel::Event, handle.raw()),
         );
-    }
+    };
+    crate::hrtimer::cancel(timer_handle);
+    outcome
 }
 
 /// Duplicate an eventfd handle reference.

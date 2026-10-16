@@ -863,13 +863,19 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
     // Wrap in Option for retry without clone.
     let mut pending = Some(msg);
 
-    loop {
+    // Each pass decides under `CHANNELS`, a leaf (`PreemptSpinMutex`): the
+    // timer is asked about before it and cancelled once, after the loop. The
+    // timeout has come when the timer has fired (`hrtimer::has_expired`),
+    // whatever this CPU's clock reads, or when the clock is past the
+    // deadline; a timer that fires between the question and the park leaves
+    // its wake recorded, so that park ends at once and the next pass sees it.
+    let outcome = loop {
+        let fired = crate::hrtimer::has_expired(timer_handle);
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels.get_mut(&handle.channel_id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
+            let Some(ch) = channels.get_mut(&handle.channel_id()) else {
+                break Err(KernelError::InvalidHandle);
+            };
 
             let our_side = handle.side();
             if ch.closed[our_side] || ch.closed[handle.peer_side()] {
@@ -877,8 +883,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if ch.sync {
                     ch.rendezvous_slots[our_side] = None;
                 }
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             }
 
             let peer = handle.peer_side();
@@ -887,9 +892,8 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 // Sync: check if our slot was taken (receiver came).
                 if ch.rendezvous_slots[our_side].is_none() && pending.is_none() {
                     // Message was taken — success.
-                    crate::hrtimer::cancel(timer_handle);
                     super::stats::channel_send(msg_len);
-                    return Ok(());
+                    break Ok(());
                 }
                 // Try to place message if receiver is now waiting.
                 if ch.waiters[peer].is_some() {
@@ -897,14 +901,13 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                         ch.rendezvous_slots[our_side] = Some(m);
                     }
                     let wake_task = ch.waiters[peer].take();
-                    crate::hrtimer::cancel(timer_handle);
                     drop(channels);
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
                     wake_ready(handle);
                     super::stats::channel_send(msg_len);
-                    return Ok(());
+                    break Ok(());
                 }
                 // Park message and block.
                 if pending.is_some() && ch.rendezvous_slots[our_side].is_none() {
@@ -920,26 +923,23 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                         ch.queues[peer].push_back(m);
                     }
                     let wake_task = ch.waiters[peer].take();
-                    crate::hrtimer::cancel(timer_handle);
                     drop(channels);
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
                     wake_ready(handle);
                     super::stats::channel_send(msg_len);
-                    return Ok(());
+                    break Ok(());
                 }
                 ch.sender_waiters[our_side] = Some(sched::current_task_id());
             }
 
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
+            if fired || crate::hrtimer::now_ns() >= deadline_ns {
                 // Clean up any parked message.
                 if ch.sync {
                     ch.rendezvous_slots[our_side] = None;
                 }
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
+                break Err(KernelError::TimedOut);
             }
         }
 
@@ -949,7 +949,9 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
             crate::wchan::WaitChannel::Channel,
             handle.raw(),
         ));
-    }
+    };
+    crate::hrtimer::cancel(timer_handle);
+    outcome
 }
 
 /// Send a message with capability transfer.
@@ -1529,13 +1531,17 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
 
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task_id);
 
-    // Block loop: try to receive, block if empty, re-check on wake.
-    loop {
+    // Block loop: try to receive, block if empty, re-check on wake. As in
+    // `send_timeout`: the timer is asked about before `CHANNELS` is taken
+    // and cancelled once after the loop, and its having fired is the
+    // timeout as much as the clock is.
+    let outcome = loop {
+        let fired = crate::hrtimer::has_expired(timer_handle);
         {
             let mut channels = CHANNELS.lock();
-            let ch = channels
-                .get_mut(&handle.channel_id())
-                .ok_or(KernelError::InvalidHandle)?;
+            let Some(ch) = channels.get_mut(&handle.channel_id()) else {
+                break Err(KernelError::InvalidHandle);
+            };
 
             let our_side = handle.side();
             let peer = handle.peer_side();
@@ -1553,8 +1559,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
             };
 
             if let Some(msg) = got_msg {
-                // Got a message — cancel timer, wake blocked sender.
-                crate::hrtimer::cancel(timer_handle);
+                // Got a message — wake blocked sender.
                 let wake_sender = ch.sender_waiters[peer].take();
                 let room = room_waiters(ch, peer, was_full);
                 drop(channels);
@@ -1563,19 +1568,16 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
                 }
                 wake_all(room);
                 super::stats::channel_recv();
-                return Ok(msg);
+                break Ok(msg);
             }
 
             // No message — check if peer is closed.
             if ch.closed[peer] {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
+                break Err(KernelError::ChannelClosed);
             }
 
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
+            if fired || crate::hrtimer::now_ns() >= deadline_ns {
+                break Err(KernelError::TimedOut);
             }
 
             // Register ourselves as a waiter.
@@ -1590,7 +1592,9 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
 
         // We woke up — either from send/close or from the timer.
         // Loop back to check which.
-    }
+    };
+    crate::hrtimer::cancel(timer_handle);
+    outcome
 }
 
 /// Give a channel endpoint one more holder: the endpoint copied into a forked

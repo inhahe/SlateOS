@@ -38,9 +38,12 @@
 //!
 //! ## Lock Ordering
 //!
-//! `SEM_TABLE` is a `PreemptSpinMutex`, and so a leaf (dd-70): nothing is
+//! `SEM_TABLE` is a `PreemptSpinMutex`, and so a leaf (dd-70): no lock is
 //! taken under it. Waiters are woken, and timers armed and cancelled, after
-//! it is let go.
+//! it is let go. The table and a semaphore's waiter queue do grow under it,
+//! as every `PreemptSpinMutex`'s contents do; that an allocation there can
+//! reach the frame allocator's slow path is the kernel-wide known-issues
+//! `A-AN-ALLOCATION-UNDER-A-SPINLOCK-CAN-ENTER-DIRECT-RECLAIM`.
 
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
@@ -105,9 +108,18 @@ impl SemHandle {
 // ---------------------------------------------------------------------------
 
 /// A kernel IPC semaphore.
+///
+/// A unit is either counted, free to whoever asks first, or granted to a
+/// waiter by taking it off the queue. It is counted only while no one waits,
+/// and a task queues only while none is counted, so `count > 0` means the
+/// queue is empty: no newcomer takes a unit ahead of the queue.
 struct Semaphore {
-    /// Current count (resources available).
+    /// Units available to the next `wait`.
     count: u64,
+    /// Units a [`signal`] has accepted and neither granted nor counted yet:
+    /// it holds them while it wakes the queue a batch at a time. They count
+    /// against `max_count` meanwhile.
+    granting: u64,
     /// Maximum count (capacity).
     max_count: u64,
     /// Tasks blocked waiting for count > 0, in FIFO order.
@@ -120,6 +132,7 @@ impl Semaphore {
     fn new(initial: u64, max_count: u64) -> Self {
         Self {
             count: initial.min(max_count),
+            granting: 0,
             max_count,
             waiters: VecDeque::new(),
             closed: false,
@@ -184,51 +197,41 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
         return Ok(());
     }
 
-    // The units are counted, then granted to waiters in queue order, one
-    // each -- taking a waiter off the queue is its grant -- a batch at a
-    // time: `SEM_TABLE` is a leaf, so the batch is woken after it is let go,
-    // and the next batch taken under it again. A waiter queued meanwhile is
-    // granted in order behind the rest; one that finds a unit free when it
-    // parks takes it itself (`holds_unit_after_park`).
-    let mut counted = false;
+    // The units are granted to waiters in queue order, a batch at a time
+    // (`grant_batch`): `SEM_TABLE` is a leaf, so each batch is woken after it
+    // is let go, and the next taken under it again. Until then the units not
+    // yet granted are held in `granting`, not counted, so no `wait` arriving
+    // between batches takes one ahead of the queue.
+    let mut left = count;
+    let mut accepted = false;
     loop {
         let mut to_wake: [Option<TaskId>; WAKE_BATCH] = [None; WAKE_BATCH];
-        let more = {
+        {
             let mut table = SEM_TABLE.lock();
             let Some(sem) = table.get_mut(&handle.id()) else {
-                if counted {
+                if accepted {
                     // Closed since: the close woke every waiter left.
                     break;
                 }
                 return Err(KernelError::InvalidHandle);
             };
-            if !counted {
+            if !accepted {
                 if sem.closed {
                     return Err(KernelError::ChannelClosed);
                 }
-                let remaining_capacity = sem.max_count.saturating_sub(sem.count);
-                if count > remaining_capacity {
+                let held = sem.count.saturating_add(sem.granting);
+                if count > sem.max_count.saturating_sub(held) {
                     return Err(KernelError::Overflow);
                 }
-                sem.count = sem.count.saturating_add(count);
-                counted = true;
+                sem.granting = sem.granting.saturating_add(count);
+                accepted = true;
             }
-            for slot in &mut to_wake {
-                if sem.count == 0 {
-                    break;
-                }
-                let Some(task_id) = sem.waiters.pop_front() else {
-                    break;
-                };
-                sem.count = sem.count.saturating_sub(1);
-                *slot = Some(task_id);
-            }
-            sem.count > 0 && !sem.waiters.is_empty()
-        };
+            grant_batch(sem, &mut left, &mut to_wake);
+        }
         for task_id in to_wake.iter().flatten() {
             sched::wake(*task_id);
         }
-        if !more {
+        if left == 0 {
             break;
         }
     }
@@ -241,6 +244,30 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
     );
 
     Ok(())
+}
+
+/// One batch of a [`signal`]'s grants, under `SEM_TABLE`: up to
+/// [`WAKE_BATCH`] of its `left` units -- the units it holds in
+/// `sem.granting` -- go to the waiters at the head of the queue, each taken
+/// off it into `to_wake`; once the queue is empty, the units still left are
+/// counted. `left` is 0 afterwards unless waiters remain for the next batch.
+fn grant_batch(sem: &mut Semaphore, left: &mut u64, to_wake: &mut [Option<TaskId>; WAKE_BATCH]) {
+    for slot in to_wake.iter_mut() {
+        if *left == 0 {
+            break;
+        }
+        let Some(task_id) = sem.waiters.pop_front() else {
+            break;
+        };
+        *left = left.saturating_sub(1);
+        sem.granting = sem.granting.saturating_sub(1);
+        *slot = Some(task_id);
+    }
+    if sem.waiters.is_empty() {
+        sem.granting = sem.granting.saturating_sub(*left);
+        sem.count = sem.count.saturating_add(*left);
+        *left = 0;
+    }
 }
 
 /// Wait (acquire) — decrement the semaphore by 1.
@@ -294,7 +321,7 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
         // it: off the queue is the grant. close() removes the semaphore. A
         // park can also end for neither -- a wake recorded for an earlier wait
         // ends the next park (`sched::Task::mark_ready`) -- and then this task
-        // is still queued, and waits again unless a unit is free.
+        // is still queued, and waits again.
         let mut table = SEM_TABLE.lock();
         let Some(sem) = table.get_mut(&handle.id()) else {
             return Err(KernelError::ChannelClosed);
@@ -308,21 +335,16 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
     }
 }
 
-/// After a park, for waiter `me` of `sem`: whether it holds a unit now. Off
-/// the queue, `signal` granted it one. Still queued, it takes a free unit if
-/// there is one, leaving the queue as it does -- `signal` grants units to
-/// the queue in turn, so this is for a unit it has not reached yet -- and
-/// otherwise holds none.
-fn holds_unit_after_park(sem: &mut Semaphore, me: TaskId) -> bool {
-    let Some(pos) = sem.waiters.iter().position(|&id| id == me) else {
-        return true;
-    };
-    if sem.count == 0 {
-        return false;
-    }
-    sem.waiters.remove(pos);
-    sem.count = sem.count.saturating_sub(1);
-    true
+/// After a park, for waiter `me` of `sem`: whether it holds a unit now --
+/// whether it is off the queue, which is `signal`'s grant. Still queued, it
+/// holds none, and none is counted (see [`Semaphore`]) for it to take.
+fn holds_unit_after_park(sem: &Semaphore, me: TaskId) -> bool {
+    let queued = sem.waiters.contains(&me);
+    debug_assert!(
+        !queued || sem.count == 0,
+        "a semaphore unit counted while a task waits"
+    );
+    !queued
 }
 
 /// Non-blocking wait (try-acquire) — decrement if count > 0.
@@ -740,27 +762,61 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[sem]   One signal wakes {} waiters: OK", SEM_MANY_WAITERS);
     }
 
-    // Test 7: after a park, a waiter off the queue holds the unit `signal`
-    // granted; one still queued takes a free unit and leaves the queue, or
-    // holds none.
+    // Test 7: a signal to more waiters than one batch grants them in queue
+    // order and counts nothing while any is still queued, so a `wait`
+    // arriving between batches cannot take a unit ahead of them; the units
+    // the queue does not use are counted once it is empty. After a park, a
+    // waiter holds a unit exactly when it is off the queue.
     {
+        let waiters = WAKE_BATCH.saturating_add(1);
+        let mut sem = Semaphore::new(0, 100);
+        for id in 1..=waiters {
+            sem.waiters.push_back(id as TaskId);
+        }
+        let mut left = (waiters as u64).saturating_add(2);
+        sem.granting = left;
+        let mut to_wake = [None; WAKE_BATCH];
+        grant_batch(&mut sem, &mut left, &mut to_wake);
+        let in_order = to_wake
+            .iter()
+            .enumerate()
+            .all(|(i, w)| *w == Some((i as TaskId).saturating_add(1)));
+        if !in_order || sem.count != 0 || left != 3 || sem.granting != 3 {
+            serial_println!(
+                "[sem]   FAIL: a first batch left count {}, {} held, {} granting, order kept {}",
+                sem.count,
+                left,
+                sem.granting,
+                in_order
+            );
+            return Err(KernelError::InternalError);
+        }
+        let mut to_wake = [None; WAKE_BATCH];
+        grant_batch(&mut sem, &mut left, &mut to_wake);
+        let last = to_wake.first() == Some(&Some(waiters as TaskId))
+            && to_wake.get(1).is_some_and(Option::is_none);
+        if !last || sem.count != 2 || left != 0 || sem.granting != 0 {
+            serial_println!(
+                "[sem]   FAIL: a last batch left count {}, {} held, {} granting, last granted {}",
+                sem.count,
+                left,
+                sem.granting,
+                last
+            );
+            return Err(KernelError::InternalError);
+        }
         let me: TaskId = 0xC0FFEE;
         let mut sem = Semaphore::new(0, 10);
-        if !holds_unit_after_park(&mut sem, me) {
+        if !holds_unit_after_park(&sem, me) {
             serial_println!("[sem]   FAIL: a waiter off the queue was not granted");
             return Err(KernelError::InternalError);
         }
         sem.waiters.push_back(me);
-        if holds_unit_after_park(&mut sem, me) || sem.waiters.len() != 1 {
-            serial_println!("[sem]   FAIL: a queued waiter with no unit free was granted");
+        if holds_unit_after_park(&sem, me) {
+            serial_println!("[sem]   FAIL: a waiter still queued was granted");
             return Err(KernelError::InternalError);
         }
-        sem.count = 1;
-        if !holds_unit_after_park(&mut sem, me) || !sem.waiters.is_empty() || sem.count != 0 {
-            serial_println!("[sem]   FAIL: a queued waiter did not take the free unit and leave");
-            return Err(KernelError::InternalError);
-        }
-        serial_println!("[sem]   A unit after a park: OK");
+        serial_println!("[sem]   Grants in batches, none counted while a task waits: OK");
     }
 
     // Test 8: a timed wait that times out leaves no entry behind, which a

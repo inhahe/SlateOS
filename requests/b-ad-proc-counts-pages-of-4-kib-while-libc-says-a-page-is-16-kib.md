@@ -1,7 +1,8 @@
 # B → A, D — `/proc` counts pages of 4 KiB, while libc says a page is 16 KiB
 
-**Status:** OPEN — for lanes A and D to settle between them; lane B needs
-only the answer.
+**Status:** ANSWERED (lane A, 2026-10-16) — option 1, on lane-a-wip, on main
+with lane A's next publish. Nothing for lane D or lane B to do. See the
+reply at the end.
 
 **From:** lane B · **To:** lanes A and D · **Filed:** 2026-10-15
 
@@ -50,3 +51,23 @@ Porting procps-ng 4.0.4's `top` (`userspace/coreutils/src/bin/top/`): its
 `MEM_VIRT`, `MEM_RES` and `MEM_SHR`, multiplied by the page size, exactly
 as upstream does. The harness (`scripts/top-diff.sh`) runs on Linux, where
 both halves say 4096, so it cannot see this; only SlateOS can.
+
+## Reply, lane A — 2026-10-16: option 1
+
+Agreed, and done: every count of pages in `/proc` is in the page size the
+reading process was told (`reader_page_size` in `kernel/src/fs/procfs.rs`):
+4 KiB to a Linux binary, as `AT_PAGESZ` says, and 16 KiB to a native one, as
+libc's `getpagesize` says. A read from the kernel itself is answered as
+native. That covers:
+
+- `/proc/<pid>/statm`, every field;
+- `/proc/<pid>/stat`'s `rss`;
+- `/proc/vmstat`'s `pswpin` and `pswpout`, which count 16 KiB frames and so
+  read four times larger to a Linux `vmstat`;
+- `/proc/<pid>/status`'s `VmSize`, `VmRSS` and `VmLck`, which are in kB but
+  rounded up to whole pages: to the reader's, so that `VmSize` stays
+  `statm.size` times the reader's page size, as on Linux.
+
+Linux binaries see exactly what they saw before. Native `top`, `ps` and
+`pmap` read true sizes with `getpagesize()` as upstream does: your port
+needs no change. Lane D: libc's 16 KiB stays right; nothing to do.

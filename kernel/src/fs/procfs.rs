@@ -1770,8 +1770,9 @@ fn gen_vmstat() -> Vec<u8> {
 ///   per-device counts (`blkdev::device_stats`). A device unregistered since
 ///   takes its counts with it.
 /// - `pswpin`, `pswpout`: pages read back from swap and written to it
-///   (`mm::swap::swap_traffic`), in this system's 16 KiB pages, the size
-///   `sysconf(_SC_PAGESIZE)` reports and `vmstat` converts these by.
+///   (`mm::swap::swap_traffic`, which counts 16 KiB frames), in the
+///   reader's page size ([`reader_page_size`]), which `vmstat` converts
+///   them by.
 fn vmstat_paging_lines() -> String {
     let (read_sectors, write_sectors) =
         crate::blkdev::device_stats()
@@ -1783,12 +1784,16 @@ fn vmstat_paging_lines() -> String {
                 )
             });
     let (swapped_in, swapped_out) = crate::mm::swap::swap_traffic();
+    // Reader pages per frame: 1 for a native reader, 4 for a Linux one.
+    let per_frame = (crate::mm::frame::FRAME_SIZE as u64)
+        .checked_div(reader_page_size())
+        .unwrap_or(1);
     format!(
         "pgpgin {}\npgpgout {}\npswpin {}\npswpout {}\n",
         read_sectors / 2,
         write_sectors / 2,
-        swapped_in,
-        swapped_out
+        swapped_in.saturating_mul(per_frame),
+        swapped_out.saturating_mul(per_frame)
     )
 }
 
@@ -2587,22 +2592,25 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // for tasks with no mm. Until 2026-10-08 they waited for the first
     // charged mapping, and a program that read `VmLck` before its first mmap
     // found none (the mlock ring-3 test, 0x31). Derive the size from the SAME
-    // 4 KiB ABI-page accounting as /proc/<pid>/statm so the two files agree
-    // exactly (Linux keeps VmSize == statm.size * pagesize): pages =
-    // ceil(bytes / 4096), VmSize_kB = pages * 4.  VmRSS mirrors VmSize
-    // because we do not track resident pages separately — an upper bound,
-    // which is the safe direction for callers (see gen_pid_statm).  Threads
-    // share the owning process's address space, so this is process-wide.
+    // page accounting as /proc/<pid>/statm, in the reader's page size
+    // (`reader_page_size`), so the two files agree exactly for whoever reads
+    // them (Linux keeps VmSize == statm.size * pagesize): pages =
+    // ceil(bytes / page), VmSize_kB = pages * page / 1024.  VmRSS mirrors
+    // VmSize because we do not track resident pages separately — an upper
+    // bound, which is the safe direction for callers (see gen_pid_statm).
+    // Threads share the owning process's address space, so this is
+    // process-wide.
     if crate::proc::pcb::get_pml4(proc_id).is_some_and(|pml4| pml4 != 0) {
-        const ABI_PAGE_SIZE: u64 = 4096;
+        let page = reader_page_size();
+        let page_kb = page / 1024;
         let as_bytes = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
-        let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
+        let kb = as_bytes.div_ceil(page).saturating_mul(page_kb);
         let _ = writeln!(s, "VmSize:\t{kb} kB");
         // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
         // `mm->locked_vm`. Absent until 2026-10-07.
         let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
-            .div_ceil(ABI_PAGE_SIZE)
-            .saturating_mul(4);
+            .div_ceil(page)
+            .saturating_mul(page_kb);
         let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
         let _ = writeln!(s, "VmRSS:\t{kb} kB");
     }
@@ -2863,9 +2871,8 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
 ///
 /// Time fields (`utime`) are in clock ticks at `USER_HZ = 100`; the native
 /// timer runs at [`crate::apic::TICK_RATE_HZ`] `= 100`, so `total_ticks`
-/// already matches the ABI unit one-to-one (no rescale needed).  Memory
-/// sizes use the Linux ABI page size of 4096 bytes (see [`gen_pid_statm`]),
-/// not the native 16 KiB frame size.
+/// already matches the ABI unit one-to-one (no rescale needed).  `rss` is
+/// in the reader's page size, as statm is ([`reader_page_size`]).
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
     // The process-wide fields are the owning process's. For a process's own
@@ -3080,13 +3087,12 @@ fn build_pid_stat(
     let majflt = task.maj_flt;
     let (cminflt, cmajflt) = crate::proc::pcb::process_child_faults(proc_id);
 
-    // Virtual size (bytes) and resident pages, in Linux ABI page units.
+    // Virtual size (bytes) and resident pages, in the reader's page size.
     // Bare scheduler tasks (no process / address-space charge) report 0,
     // exactly as Linux does for kernel threads.  Threads share the owning
     // process's address space, so this is a process-wide charge.
-    const ABI_PAGE_SIZE: u64 = 4096;
     let vsize = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
-    let rss_pages = vsize / ABI_PAGE_SIZE;
+    let rss_pages = vsize.checked_div(reader_page_size()).unwrap_or(0);
 
     // rsslim: RLIMIT_RSS hard limit (resource index 5).  Default unlimited.
     let rsslim = crate::proc::pcb::get_rlimit(proc_id, 5)
@@ -4126,21 +4132,16 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
 /// `getpagesize()` bytes:
 ///   `size resident shared text lib data dt`
 ///
-/// CRITICAL — page-size unit: statm counts are in units of the page
-/// size *visible to userspace* via `sysconf(_SC_PAGESIZE)`.  Our Linux
-/// ABI advertises **4096** (4 KiB) to Linux programs even though the
-/// native kernel uses 16 KiB frames — see
-/// `kernel/src/syscall/linux.rs`'s `ABI_PAGE_SIZE` (the same 4 KiB unit
-/// `mmap`/`mprotect`/`msync`/`mremap` already use at the boundary).
-/// We MUST report statm in that same 4 KiB unit: a Linux app reading
-/// statm multiplies each count by `getpagesize()` (4096) to recover
-/// bytes, so dividing by the 16 KiB frame size here would make every
-/// process appear to use a quarter of its true address space.
+/// Page-size unit: statm counts are in the page size the *reader* was told
+/// ([`reader_page_size`]): 4 KiB to a Linux binary, 16 KiB to a native one.
+/// Each multiplies the counts by its own `getpagesize()` to recover bytes,
+/// so a single unit would make one of them see every process at four times,
+/// or a quarter of, its true size.
 ///
 /// We track a single Linux address-space charge per process
 /// (`linux_as_used`, the sum of Linux-ABI `mmap` sizes) rather than a
 /// full VMA breakdown, so we report:
-/// - `size` = total address-space charge / 4 KiB
+/// - `size` = total address-space charge / the reader's page size
 /// - `resident` = same value (we do not track RSS separately; this is an
 ///   upper bound, which is the safe direction for callers that read
 ///   statm — they treat it as "at most this much")
@@ -4154,13 +4155,8 @@ fn gen_pid_statm(task_id: u64) -> KernelResult<Vec<u8>> {
     // statm only applies to processes (which carry the AS charge), not
     // bare scheduler tasks.
     let as_bytes = crate::proc::pcb::linux_as_used(task_id).ok_or(KernelError::NotFound)?;
-    // Linux ABI page size (sysconf(_SC_PAGESIZE)), NOT the kernel's
-    // 16 KiB frame size — see the doc comment above.
-    const ABI_PAGE_SIZE: u64 = 4096;
-    // ABI_PAGE_SIZE is a non-zero compile-time constant, so this
-    // division is always safe; round up so a partial page still counts
-    // as one.
-    let pages = as_bytes.div_ceil(ABI_PAGE_SIZE);
+    // Rounded up, so that a partial page still counts as one.
+    let pages = as_bytes.div_ceil(reader_page_size());
     // size resident shared text lib data dt
     let text = format!("{pages} {pages} 0 0 0 0 0\n");
     Ok(text.into_bytes())
@@ -14195,6 +14191,24 @@ fn self_dir_id() -> u64 {
     crate::proc::thread::owner_process(task).unwrap_or(task)
 }
 
+/// The page size a Linux binary is told (`AT_PAGESZ`), and the unit its
+/// `mmap` works in.
+const LINUX_PAGE_SIZE: u64 = 4096;
+
+/// The page size the process reading `/proc` was told, which is the unit it
+/// turns counts of pages into bytes by: 4 KiB to a Linux binary
+/// ([`LINUX_PAGE_SIZE`]), the 16 KiB frame to a native one, whose C library's
+/// `getpagesize` says so. Every count of pages in `/proc` is in it -- one
+/// unit for everybody is right for one kind of reader only, and makes the
+/// other's `top` and `ps` four times out. A read from the kernel itself (the
+/// kernel shell, a self-test) is answered as native.
+fn reader_page_size() -> u64 {
+    match crate::proc::pcb::get_abi_mode(self_dir_id()) {
+        Some(crate::proc::pcb::AbiMode::Linux) => LINUX_PAGE_SIZE,
+        _ => crate::mm::frame::FRAME_SIZE as u64,
+    }
+}
+
 /// Whether task `task_id` has a directory in the `/proc` listing: a process's
 /// main thread (whose id is the process's) and a kernel task (no process).
 fn is_listed_at_root(task_id: u64) -> bool {
@@ -18092,6 +18106,19 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+
+    // Counts of pages are in the reader's page size: a native one's -- the
+    // kernel reading for itself is answered as native -- is the frame. (A
+    // Linux reader's 4 KiB is pinned by the mlock ring-3 test, which reads
+    // VmLck in 4 KiB pages.)
+    if reader_page_size() != crate::mm::frame::FRAME_SIZE as u64 {
+        serial_println!(
+            "[procfs]   FAIL: a native reader is answered in {}-byte pages",
+            reader_page_size()
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   page counts in the reader's page size (native: 16 KiB) OK");
 
     // /proc/<pid>/mountinfo — process-only (like statm), so a bare
     // scheduler task legitimately returns NotFound.  When it succeeds,

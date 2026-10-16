@@ -7579,6 +7579,10 @@ pub fn reap_dead_tasks() -> usize {
             // SCHED).
             drop(state);
 
+            // A task killed while marked not to reclaim never ran its mark's
+            // drop; give its place back.
+            crate::mm::swap::forget_task(id);
+
             // Decrement the task's cgroup count on the definitive teardown
             // path.  cgroup accounting is otherwise only decremented by an
             // explicit `set_task_cgroup`/`remove_process_task` while the task

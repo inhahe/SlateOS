@@ -31,12 +31,12 @@
 //! - **All-zero page**: encoded as a single magic byte `0xFF` (1 byte).
 //!   Very common for freshly mapped BSS and stack pages.
 //! - **Incompressible page**: if the compressed form would not be smaller
-//!   than the original -- or, for [`compress_into`], would not fit the
-//!   caller's buffer -- the answer is `None`, and the caller decides: the
-//!   compressed swap tier refuses the page, a disk area stores it raw.
+//!   than the original, or would not fit the caller's buffer, the answer is
+//!   `None`, and the caller decides: the compressed swap tier refuses the
+//!   page, a disk area stores it raw.
 //! - **Allocation**: [`compress_into`] and [`decompress_into`] work in the
-//!   caller's buffers and allocate nothing; [`compress`] and [`decompress`]
-//!   allocate fallibly, a failure an answer rather than a panic.
+//!   caller's buffers and allocate nothing: swap compresses under its lock,
+//!   during reclaim, when an allocation may fail.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -155,21 +155,6 @@ pub fn compress_into(input: &[u8], output: &mut [u8], table: &mut [u32]) -> Opti
     Some(out.len)
 }
 
-/// Compress a page into a new buffer of exactly its compressed size.
-///
-/// `None` if the data is incompressible ([`compress_into`]), or if the
-/// buffers it needs cannot be allocated: a failed allocation is an answer
-/// here, never a panic.
-pub fn compress(input: &[u8]) -> Option<Vec<u8>> {
-    let mut output = zeroed(input.len())?;
-    let mut table = Vec::new();
-    table.try_reserve_exact(HASH_TABLE_SIZE).ok()?;
-    table.resize(HASH_TABLE_SIZE, 0u32);
-    let len = compress_into(input, &mut output, &mut table)?;
-    output.truncate(len);
-    Some(output)
-}
-
 /// Decompress data produced by [`compress_into`] into `output`, whose length
 /// is the size the data decompresses to. Allocates nothing.
 ///
@@ -273,7 +258,7 @@ pub fn decompress_into(input: &[u8], output: &mut [u8]) -> Result<(), CompressEr
                 .copied()
                 .ok_or(CompressError::InvalidOffset)?;
             *output.get_mut(pos).ok_or_else(|| overflow(out_end))? = b;
-            pos += 1;
+            pos = pos.saturating_add(1);
         }
     }
 
@@ -283,33 +268,11 @@ pub fn decompress_into(input: &[u8], output: &mut [u8]) -> Result<(), CompressEr
     Ok(())
 }
 
-/// Decompress data produced by [`compress`] into a new buffer of
-/// `output_len` bytes.
-///
-/// # Errors
-///
-/// [`CompressError`] if the data is malformed or does not decompress to
-/// `output_len` bytes; [`CompressError::OutOfMemory`] if the buffer cannot
-/// be allocated.
-pub fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressError> {
-    let mut output = zeroed(output_len).ok_or(CompressError::OutOfMemory)?;
-    decompress_into(input, &mut output)?;
-    Ok(output)
-}
-
 /// Whether `compressed`, from [`compress_into`], is an all-zero page's
 /// encoding: what a caller may store as "zeros" without keeping any bytes.
 #[must_use]
 pub fn is_zero_encoding(compressed: &[u8]) -> bool {
     compressed == [ZERO_PAGE_MARKER]
-}
-
-/// A zeroed buffer of `len` bytes, or `None` if it cannot be allocated.
-fn zeroed(len: usize) -> Option<Vec<u8>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(len).ok()?;
-    v.resize(len, 0);
-    Some(v)
 }
 
 /// Compression error types.
@@ -321,8 +284,6 @@ pub enum CompressError {
     InvalidOffset,
     /// Decompressed size doesn't match the expected output length.
     SizeMismatch { expected: usize, got: usize },
-    /// The output buffer could not be allocated ([`decompress`]).
-    OutOfMemory,
 }
 
 /// A slice being filled from the front: what [`compress_into`] writes its
@@ -336,7 +297,7 @@ impl Out<'_> {
     /// Append `b`; `None` if the slice is full.
     fn push(&mut self, b: u8) -> Option<()> {
         *self.buf.get_mut(self.len)? = b;
-        self.len += 1;
+        self.len = self.len.saturating_add(1);
         Some(())
     }
 
@@ -490,6 +451,23 @@ fn write_extra_len(out: &mut Out<'_>, mut remaining: usize) -> Option<()> {
 /// Run self-test for the compression module.
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
+
+    /// `input` compressed into a buffer its own size, as the swap path does.
+    fn compress(input: &[u8]) -> Option<Vec<u8>> {
+        let mut output = vec![0u8; input.len()];
+        let mut table = vec![0u32; HASH_TABLE_ENTRIES];
+        let len = compress_into(input, &mut output, &mut table)?;
+        output.truncate(len);
+        Some(output)
+    }
+
+    /// `input` decompressed to `output_len` bytes.
+    fn decompress(input: &[u8], output_len: usize) -> Result<Vec<u8>, CompressError> {
+        let mut output = vec![0u8; output_len];
+        decompress_into(input, &mut output)?;
+        Ok(output)
+    }
+
     serial_println!("[compress] Running self-test...");
 
     // --- All-zero page ---

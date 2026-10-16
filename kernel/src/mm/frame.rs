@@ -2409,6 +2409,15 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     // Allocator lock released before reclamation (lock ordering:
     // SWAP → RECLAIM → page table → frame allocator).
 
+    // A task marked not to reclaim -- reclaiming already, or holding the
+    // locks reclaim takes -- fails here, before shrinkers, reclaim,
+    // compaction or the OOM killer, every one of which can reach those locks
+    // again (`swap::NO_RECLAIM`). kswapd may still free memory for the retry.
+    if super::swap::reclaim_forbidden() {
+        super::kswapd::wake_kswapd();
+        return Err(KernelError::OutOfMemory);
+    }
+
     // Notify shrinkers of medium pressure — direct reclaim is happening.
     // This gives caches a chance to free memory before we resort to
     // swapping user pages.
@@ -2541,6 +2550,12 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
     });
     if let Some(addr) = first? {
         return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+    }
+
+    // As `alloc_order_inner`: no slow path for a task marked not to reclaim.
+    if super::swap::reclaim_forbidden() {
+        super::kswapd::wake_kswapd();
+        return Err(KernelError::OutOfMemory);
     }
 
     // Medium pressure notification for direct reclaim.

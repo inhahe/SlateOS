@@ -514,7 +514,7 @@ const NUM_CLASSES: usize = SIZE_CLASSES.len();
 
 /// Maximum allocation size served by the slab path.  Larger requests
 /// go directly to the buddy allocator.
-const MAX_SLAB_SIZE: usize = 8192;
+pub(crate) const MAX_SLAB_SIZE: usize = 8192;
 
 /// How many bytes an allocation of `size` bytes, aligned to at most 8, takes
 /// from the heap: its size class when the slab path serves it, otherwise the
@@ -2327,6 +2327,49 @@ pub fn self_test_lock_irqs() -> KernelResult<()> {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[heap] Running heap allocator self-test...");
+
+    // -- Test 0: allocation_cost is what the allocator takes -----------------
+    // At each boundary of both paths, the cost is the slab class the
+    // allocator picks or the buddy block it asks for: a change to either that
+    // the other does not follow shows here.
+    for size in [
+        0,
+        1,
+        8,
+        9,
+        16,
+        17,
+        4096,
+        4097,
+        MAX_SLAB_SIZE - 1,
+        MAX_SLAB_SIZE,
+        MAX_SLAB_SIZE + 1,
+        FRAME_SIZE,
+        FRAME_SIZE + 1,
+        2 * FRAME_SIZE,
+        2 * FRAME_SIZE + 1,
+        1 << 20,
+    ] {
+        let layout = Layout::from_size_align(size, 8).map_err(|_| KernelError::InvalidArgument)?;
+        let taken = match HeapInner::size_class_index(&layout) {
+            Some(class) => SIZE_CLASSES.get(class).copied(),
+            None => Some(FRAME_SIZE << HeapInner::large_order(&layout)),
+        };
+        if taken != Some(allocation_cost(size)) {
+            serial_println!(
+                "[heap]   FAIL: allocation_cost({}) = {}, but the allocator takes {:?}",
+                size,
+                allocation_cost(size),
+                taken
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if allocation_cost(usize::MAX) != usize::MAX {
+        serial_println!("[heap]   FAIL: allocation_cost(usize::MAX) wrapped");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[heap]   allocation_cost matches the allocator at each boundary: OK");
 
     // -- Test 1: Small slab allocations across size classes -------------------
     let test_sizes: [usize; 6] = [8, 32, 64, 256, 1024, 8192];

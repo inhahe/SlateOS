@@ -3967,8 +3967,11 @@ pub fn run_all() {
         use crate::mm::compress;
         use alloc::vec;
         let data = vec![0u8; 16384];
+        // Into buffers made once, as the swap path compresses.
+        let mut out = vec![0u8; 16384];
+        let mut table = vec![0u32; compress::HASH_TABLE_ENTRIES];
         let bench = run("compress_zero_page", 200, || {
-            let result = compress::compress(&data);
+            let result = compress::compress_into(&data, &mut out, &mut table);
             core::hint::black_box(&result);
         });
         // The all-zero page is the compressor's best case and the one the swap
@@ -3989,8 +3992,10 @@ pub fn run_all() {
                 *b = (i & 0xFF) as u8;
             }
         }
+        let mut out = vec![0u8; 16384];
+        let mut table = vec![0u32; compress::HASH_TABLE_ENTRIES];
         let bench = run("compress_repeating", 200, || {
-            let result = compress::compress(&data);
+            let result = compress::compress_into(&data, &mut out, &mut table);
             core::hint::black_box(&result);
         });
         // The realistic case, paired with the zero page above. Recording only

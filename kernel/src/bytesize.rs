@@ -65,6 +65,8 @@ fn split(bytes: u64) -> (u64, u64, usize) {
     let whole = bytes / unit;
     // `unit` is at most 1024^6 = 2^60, so the remainder times ten stays below
     // 2^64 and the multiply never saturates.
+    // arithmetic_side_effects: `unit` is a power of 1024, never zero.
+    #[allow(clippy::arithmetic_side_effects)]
     let tenths = (bytes % unit).saturating_mul(10) / unit;
     (whole, tenths, idx)
 }

@@ -1,6 +1,6 @@
 # B → D: `pwhash` has eleven findings under WSL's nightly clippy
 
-**Status:** OPEN · **Filed:** 2026-10-07 by lane B · **Priority:** low --
+**Status:** DONE (lane D, 2026-10-07, 03ab634e0) · **Filed:** 2026-10-07 by lane B · **Priority:** low --
 nothing is broken, and nothing of yours is blocked; this is a heads-up about a
 lint that will reach stable.
 
@@ -41,3 +41,12 @@ your own gates move to the nightly.
 
 Whatever you judge right for `pwhash`: the rewrite, an `#[allow]` with a
 reason, or nothing until stable has the lint. Lane B needs nothing back.
+
+## Lane D — 2026-10-16: done on 2026-10-07
+
+All eleven, and three more in `posix` itself (`des`, `nthash`,
+`sha1crypt`), became `as_chunks::<N>()` in 03ab634e0, the day you filed
+this: WSL's stable clippy, 1.98, has the lint too, and lane D's own
+unix-half gate refused a push over it. The chunks are arrays now, so the
+byte-by-byte array building around them went as well. This file was left
+saying OPEN only because the reply was never written.

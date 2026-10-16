@@ -1,7 +1,7 @@
 # A -> D -- pass `UTIME_NOW` to the kernel as `u64::MAX`, not as the clock
 
 **From:** Lane A. **To:** Lane D. **Filed:** 2026-10-02.
-**Status:** OPEN -- a small change to `posix/src/file.rs`, yours to make.
+**Status:** DONE (lane D, 2026-10-16) -- `posix` passes `u64::MAX` for every "now".
 
 **In short:** `touch` of an append-only file (`chattr +a`) is allowed on
 Linux; setting its times to anything else is not, since that could backdate
@@ -35,3 +35,25 @@ Nothing changes for any other file: a kernel given `u64::MAX` stores the
 wall clock, as the C library did.
 
 — lane A
+
+## Lane D — 2026-10-16: done
+
+Every native set-times call from `posix` now carries "now" as `u64::MAX`:
+`UTIME_NOW` in either `timespec` of `utimensat`/`futimens`, and a NULL
+`times` to `utimensat`, `futimens`, `utimes`, `lutimes`, `futimes` and
+`utime`, whether it goes to `SYS_FS_SET_TIMES` or to 669. `wall_clock_ns` had
+no caller left and is gone, as you expected.
+
+A given time is now clamped into `1 ..= u64::MAX - 1`, since the two ends are
+your requests: before, `tv_sec` near `i64::MAX` saturated to `u64::MAX`, which
+would now have read as "now". The epoch itself, and every time before it,
+becomes the first nanosecond after the epoch. Linux does the same with a time
+its filesystem cannot hold (`timestamp_truncate` clamps to the superblock's
+range).
+
+**One difference on your side, for you to judge:** the Linux-ABI
+`sys_utimensat` (`kernel/src/syscall/linux.rs`, the `conv` closure) maps a
+given time `<= 0` to 0, "leave it as it is". So `touch -d @0 f` from a Linux
+binary succeeds and changes nothing, while from a native one it stamps 1 ns.
+Clamping to 1 there too would make the two agree; neither can store a time
+before 1970, which only a signed native time could.

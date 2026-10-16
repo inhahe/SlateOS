@@ -4151,11 +4151,11 @@ unsafe fn try_pinned_linkat(
 /// `None` means the fast path did not apply and the caller must fall back;
 /// errno is untouched in that case.
 ///
-/// The two nanosecond values are already in the kernel's zero-means-unchanged
-/// form — [`utimens_pair_to_kernel`] has expanded `UTIME_NOW` into a real
-/// timestamp and `UTIME_OMIT` into zero — so this takes them as-is and does not
-/// re-derive them. 669 and the path-based `SYS_FS_SET_TIMES` share that
-/// convention precisely so one expansion serves both.
+/// The two nanosecond values are already in the native form —
+/// [`utimens_pair_to_kernel`] has made `UTIME_OMIT` zero and `UTIME_NOW` the
+/// kernel's own "now" — so this takes them as-is and does not re-derive them.
+/// 669 and the path-based `SYS_FS_SET_TIMES` share that convention precisely so
+/// one conversion serves both.
 ///
 /// This is the busiest member of the family. `fchmodat` and `mkdirat` run once
 /// per directory; restoring mtime is the last thing done to *every* file a
@@ -6990,84 +6990,94 @@ fn timespec_nsec_valid(nsec: i64) -> bool {
     (0..=NSEC_MAX).contains(&nsec) || nsec == UTIME_NOW || nsec == UTIME_OMIT
 }
 
-/// Combine a `Timespec`'s seconds + nanoseconds into nanoseconds since the
-/// Unix epoch, mapping the `utimensat` sentinels to the kernel convention.
+/// The native set-times calls' "now" (the kernel's `fs::vfs::TIME_NOW`).
 ///
-/// `now_ns` is the current wall-clock time (passed in so this stays pure and
-/// host-testable).  The kernel `SYS_FS_SET_TIMES` ABI uses 0 to mean "leave
-/// this timestamp unchanged", so:
-///   * `UTIME_OMIT` → 0 (unchanged)
-///   * `UTIME_NOW`  → `now_ns` (current wall clock)
-///   * otherwise    → `tv_sec * 1e9 + tv_nsec`
+/// It is a request, not a time: the kernel reads its own clock, and only
+/// because it can see that "now" was asked for does it let `touch` stamp an
+/// append-only file, which may not be set to any *given* time — that could
+/// backdate a log (Linux's `ATTR_TOUCH`). A clock read here would arrive as a
+/// given time and be refused.
+const KERNEL_TIME_NOW: u64 = u64::MAX;
+
+/// The native set-times calls' "leave this time as it is".
+const KERNEL_TIME_UNCHANGED: u64 = 0;
+
+/// A given time, `sec` seconds and `sub_ns` nanoseconds after the epoch, as
+/// the native calls take it.
+///
+/// The value is clamped into what they can store as a time, `1 ..=
+/// u64::MAX - 1`: their two ends mean "unchanged" and "now", so a time that
+/// reached either would be read as a request. That is what Linux does with a
+/// time its filesystem cannot hold (`timestamp_truncate` clamps to the
+/// superblock's range); here the range starts one nanosecond after the epoch,
+/// so the epoch itself and every earlier time become that nanosecond.
 #[cfg(any(target_os = "none", test))]
-fn timespec_to_kernel_ns(ts: &crate::stat::Timespec, now_ns: u64) -> u64 {
+fn given_time_ns(sec: i64, sub_ns: i64) -> u64 {
+    // Cannot overflow an i128 from two i64s; saturating only to say so.
+    let ns = i128::from(sec)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(i128::from(sub_ns));
+    let stored = ns.clamp(1, i128::from(KERNEL_TIME_NOW - 1));
+    // In range by the clamp, so the conversion cannot fail.
+    u64::try_from(stored).unwrap_or(KERNEL_TIME_NOW - 1)
+}
+
+/// One `utimensat`/`futimens` `timespec` as the native set-times calls take
+/// it: `UTIME_OMIT` is [`KERNEL_TIME_UNCHANGED`], `UTIME_NOW` is
+/// [`KERNEL_TIME_NOW`], anything else is a given time ([`given_time_ns`]).
+/// The caller has already refused a `tv_nsec` that is neither a sentinel nor
+/// in `0..=999_999_999`.
+#[cfg(any(target_os = "none", test))]
+fn timespec_to_kernel_ns(ts: &crate::stat::Timespec) -> u64 {
     match ts.tv_nsec {
-        UTIME_OMIT => 0,
-        UTIME_NOW => now_ns,
-        _ => {
-            let sec = u64::try_from(ts.tv_sec).unwrap_or(0);
-            let nsec = u64::try_from(ts.tv_nsec).unwrap_or(0);
-            sec.saturating_mul(1_000_000_000).saturating_add(nsec)
-        }
+        UTIME_OMIT => KERNEL_TIME_UNCHANGED,
+        UTIME_NOW => KERNEL_TIME_NOW,
+        nsec => given_time_ns(ts.tv_sec, nsec),
     }
 }
 
-/// Combine a `Timeval`'s seconds + microseconds into nanoseconds since the
-/// Unix epoch.  `utimes`/`futimes` have no per-field `UTIME_NOW`/`UTIME_OMIT`
-/// sentinels, so every value is a literal time.
+/// One `utimes`/`futimes` `timeval` as the native set-times calls take it.
+/// A `timeval` has no sentinels, so it is always a given time; the caller has
+/// already refused a `tv_usec` outside `0..=999_999`.
 #[cfg(any(target_os = "none", test))]
 fn timeval_to_kernel_ns(tv: &Timeval) -> u64 {
-    let sec = u64::try_from(tv.tv_sec).unwrap_or(0);
-    let usec = u64::try_from(tv.tv_usec).unwrap_or(0);
-    sec.saturating_mul(1_000_000_000)
-        .saturating_add(usec.saturating_mul(1_000))
+    given_time_ns(tv.tv_sec, tv.tv_usec.saturating_mul(1_000))
 }
 
-/// Map a `utimensat`/`futimens` `times` array to the kernel's
-/// `(accessed_ns, modified_ns)` pair.  A NULL `times` means "set both to the
-/// current time" (POSIX).  Pure given `now_ns`, so host-testable.
+/// A `utimensat`/`futimens` `times` array as the native calls'
+/// `(accessed_ns, modified_ns)` pair. A NULL `times` means "both now"
+/// (POSIX), which is the request that may touch an append-only file.
 ///
 /// # Safety
 /// When `times` is non-null it must point to two readable `Timespec`s.
 #[cfg(any(target_os = "none", test))]
-unsafe fn utimens_pair_to_kernel(times: *const crate::stat::Timespec, now_ns: u64) -> (u64, u64) {
+unsafe fn utimens_pair_to_kernel(times: *const crate::stat::Timespec) -> (u64, u64) {
     if times.is_null() {
-        return (now_ns, now_ns);
+        return (KERNEL_TIME_NOW, KERNEL_TIME_NOW);
     }
     // SAFETY: caller contract — `times` points to two valid Timespecs.
     let a = unsafe { times.read() };
     // SAFETY: as above; the second element is at offset 1.
     let m = unsafe { times.add(1).read() };
-    (
-        timespec_to_kernel_ns(&a, now_ns),
-        timespec_to_kernel_ns(&m, now_ns),
-    )
+    (timespec_to_kernel_ns(&a), timespec_to_kernel_ns(&m))
 }
 
-/// Map a `utimes`/`futimes` `times` array to the kernel's
-/// `(accessed_ns, modified_ns)` pair.  A NULL `times` means "set both to the
-/// current time" (POSIX).  Pure given `now_ns`, so host-testable.
+/// A `utimes`/`futimes` `times` array as the native calls'
+/// `(accessed_ns, modified_ns)` pair. A NULL `times` means "both now"
+/// (POSIX), as for [`utimens_pair_to_kernel`].
 ///
 /// # Safety
 /// When `times` is non-null it must point to two readable `Timeval`s.
 #[cfg(any(target_os = "none", test))]
-unsafe fn utimes_pair_to_kernel(times: *const Timeval, now_ns: u64) -> (u64, u64) {
+unsafe fn utimes_pair_to_kernel(times: *const Timeval) -> (u64, u64) {
     if times.is_null() {
-        return (now_ns, now_ns);
+        return (KERNEL_TIME_NOW, KERNEL_TIME_NOW);
     }
     // SAFETY: caller contract — `times` points to two valid Timevals.
     let a = unsafe { times.read() };
     // SAFETY: as above; the second element is at offset 1.
     let m = unsafe { times.add(1).read() };
     (timeval_to_kernel_ns(&a), timeval_to_kernel_ns(&m))
-}
-
-/// Current wall-clock time in nanoseconds since the Unix epoch, used to
-/// resolve `UTIME_NOW` and NULL-`times` requests.  Bare metal only.
-#[cfg(target_os = "none")]
-fn wall_clock_ns() -> u64 {
-    // SYS_CLOCK_REALTIME returns ns since the Unix epoch (0 before RTC init).
-    syscall0(SYS_CLOCK_REALTIME) as u64
 }
 
 /// Resolve `path` and issue `SYS_FS_SET_TIMES` with the kernel ns pair.
@@ -7191,10 +7201,9 @@ pub extern "C" fn utimes(path: *const u8, times: *const Timeval) -> i32 {
     }
     #[cfg(target_os = "none")]
     {
-        let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timevals.
-        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times, now) };
+        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times) };
         set_times_path(path, a_ns, m_ns)
     }
     #[cfg(not(target_os = "none"))]
@@ -7235,10 +7244,9 @@ pub extern "C" fn lutimes(path: *const u8, times: *const Timeval) -> i32 {
     }
     #[cfg(target_os = "none")]
     {
-        let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timevals.
-        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times, now) };
+        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times) };
         set_times_path_ex(path, a_ns, m_ns, true)
     }
     #[cfg(not(target_os = "none"))]
@@ -7286,10 +7294,9 @@ pub extern "C" fn futimes(fd: Fd, times: *const Timeval) -> i32 {
             // No stored path (pipe/socket/etc.) — nothing to persist.
             return 0;
         }
-        let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timevals.
-        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times, now) };
+        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times) };
         set_times_path(path.as_ptr(), a_ns, m_ns)
     }
     #[cfg(not(target_os = "none"))]
@@ -7363,10 +7370,9 @@ pub extern "C" fn utimensat(
         // AT_SYMLINK_NOFOLLOW → NO_FOLLOW flag: the kernel stamps the link
         // inode itself rather than its target.
         let no_follow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
-        let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timespecs.
-        let (a_ns, m_ns) = unsafe { utimens_pair_to_kernel(times, now) };
+        let (a_ns, m_ns) = unsafe { utimens_pair_to_kernel(times) };
         if dirfd == AT_FDCWD || is_absolute_path(path) {
             set_times_path_ex(path, a_ns, m_ns, no_follow)
         } else {
@@ -7423,10 +7429,9 @@ pub extern "C" fn futimens(fd: Fd, times: *const crate::stat::Timespec) -> i32 {
             // No stored path (pipe/socket/etc.) — nothing to persist.
             return 0;
         }
-        let now = wall_clock_ns();
         // SAFETY: `times` was validated above; non-null implies two valid
         // Timespecs.
-        let (a_ns, m_ns) = unsafe { utimens_pair_to_kernel(times, now) };
+        let (a_ns, m_ns) = unsafe { utimens_pair_to_kernel(times) };
         set_times_path(path.as_ptr(), a_ns, m_ns)
     }
     #[cfg(not(target_os = "none"))]
@@ -16805,15 +16810,13 @@ mod tests {
 
     // ---- timestamp → kernel-ns conversion (pure, host-testable) ----
 
-    const NOW_NS: u64 = 1_700_000_000_500_000_000; // 2023-11-14, .5s
-
     #[test]
     fn test_timespec_to_kernel_ns_normal_value() {
         let ts = crate::stat::Timespec {
             tv_sec: 5,
             tv_nsec: 123,
         };
-        assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), 5_000_000_123);
+        assert_eq!(timespec_to_kernel_ns(&ts), 5_000_000_123);
     }
 
     #[test]
@@ -16823,17 +16826,19 @@ mod tests {
             tv_sec: 999,
             tv_nsec: UTIME_OMIT,
         };
-        assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), 0);
+        assert_eq!(timespec_to_kernel_ns(&ts), 0);
     }
 
     #[test]
-    fn test_timespec_to_kernel_ns_now_uses_wall_clock() {
-        // UTIME_NOW ignores tv_sec and uses the supplied wall clock.
+    fn test_timespec_to_kernel_ns_now_is_the_kernels_request() {
+        // UTIME_NOW ignores tv_sec and reaches the kernel as its own "now",
+        // not as a clock reading: only the request lets `touch` stamp an
+        // append-only file.
         let ts = crate::stat::Timespec {
             tv_sec: 999,
             tv_nsec: UTIME_NOW,
         };
-        assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), NOW_NS);
+        assert_eq!(timespec_to_kernel_ns(&ts), u64::MAX);
     }
 
     #[test]
@@ -16847,15 +16852,46 @@ mod tests {
     }
 
     #[test]
+    fn a_given_time_never_reads_as_unchanged_or_now() {
+        // The two ends of the native range are requests, so a given time is
+        // clamped inside them: the epoch and everything before it become the
+        // first nanosecond after it, and a time past 2554 the last one before
+        // "now".
+        assert_eq!(given_time_ns(0, 0), 1);
+        assert_eq!(given_time_ns(-86_400, 0), 1);
+        assert_eq!(given_time_ns(i64::MIN, 0), 1);
+        assert_eq!(given_time_ns(0, 1), 1);
+        assert_eq!(given_time_ns(0, 2), 2);
+        assert_eq!(given_time_ns(i64::MAX, 999_999_999), u64::MAX - 1);
+        assert_eq!(given_time_ns(18_446_744_073, 709_551_615), u64::MAX - 1);
+        assert_eq!(
+            given_time_ns(18_446_744_073, 709_551_614),
+            u64::MAX - 1,
+            "the largest storable time is itself"
+        );
+        assert_eq!(given_time_ns(18_446_744_073, 709_551_613), u64::MAX - 2);
+        let max_timeval = Timeval {
+            tv_sec: i64::MAX,
+            tv_usec: 999_999,
+        };
+        assert_eq!(timeval_to_kernel_ns(&max_timeval), u64::MAX - 1);
+        let epoch = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(timespec_to_kernel_ns(&epoch), 1);
+    }
+
+    #[test]
     fn test_utimens_pair_null_is_now_now() {
         // SAFETY: null pointer is the documented "set both to now" case.
-        let pair = unsafe { utimens_pair_to_kernel(core::ptr::null(), NOW_NS) };
-        assert_eq!(pair, (NOW_NS, NOW_NS));
+        let pair = unsafe { utimens_pair_to_kernel(core::ptr::null()) };
+        assert_eq!(pair, (u64::MAX, u64::MAX));
     }
 
     #[test]
     fn test_utimens_pair_omit_now_mix() {
-        // atime=UTIME_OMIT (unchanged → 0), mtime=UTIME_NOW (→ wall clock).
+        // atime=UTIME_OMIT (unchanged → 0), mtime=UTIME_NOW (→ the request).
         let ts = [
             crate::stat::Timespec {
                 tv_sec: 0,
@@ -16867,8 +16903,8 @@ mod tests {
             },
         ];
         // SAFETY: `ts` is a valid two-element array.
-        let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr(), NOW_NS) };
-        assert_eq!(pair, (0, NOW_NS));
+        let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr()) };
+        assert_eq!(pair, (0, u64::MAX));
     }
 
     #[test]
@@ -16884,15 +16920,15 @@ mod tests {
             },
         ];
         // SAFETY: `ts` is a valid two-element array.
-        let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr(), NOW_NS) };
+        let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr()) };
         assert_eq!(pair, (10_000_000_000, 20_000_000_500));
     }
 
     #[test]
     fn test_utimes_pair_null_is_now_now() {
         // SAFETY: null pointer is the documented "set both to now" case.
-        let pair = unsafe { utimes_pair_to_kernel(core::ptr::null(), NOW_NS) };
-        assert_eq!(pair, (NOW_NS, NOW_NS));
+        let pair = unsafe { utimes_pair_to_kernel(core::ptr::null()) };
+        assert_eq!(pair, (u64::MAX, u64::MAX));
     }
 
     #[test]
@@ -16908,7 +16944,7 @@ mod tests {
             },
         ];
         // SAFETY: `tv` is a valid two-element array.
-        let pair = unsafe { utimes_pair_to_kernel(tv.as_ptr(), NOW_NS) };
+        let pair = unsafe { utimes_pair_to_kernel(tv.as_ptr()) };
         // 1s = 1e9 ns; 3s + 1us = 3_000_001_000 ns.
         assert_eq!(pair, (1_000_000_000, 3_000_001_000));
     }

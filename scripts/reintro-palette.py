@@ -418,14 +418,17 @@ DEFECTS = [
         ],
     ),
     (
-        # Only drawn while the pointer is over Allow: a state the sweep has to
-        # set up deliberately, and the reason it iterates `hovers` at all.
+        # Only drawn while the pointer is over Allow and the prompt is no
+        # longer holding its answers back: states the sweep has to set up
+        # deliberately, and the reason it iterates `hovers` and `held` at all.
+        # Re-derived 2026-10-16, when the hover became `lit` (no hover while
+        # held, design-decisions 1242).
         "X: the hovered Allow button keeps its own Mocha green",
         SEC,
-        [("        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
-          "            p.green",
-          "        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
-          "            guitk::Color::from_hex(0xA6E3A1)")],
+        [("        let (allow_bg, allow_fg) = if lit(ButtonId::Allow) {\n"
+          "            (p.green, readable_on(p.green))",
+          "        let (allow_bg, allow_fg) = if lit(ButtonId::Allow) {\n"
+          "            (guitk::Color::from_hex(0xA6E3A1), readable_on(p.green))")],
         ["desktop"],
         ["every_colour_the_dialog_draws_comes_from_its_palette"],
     ),

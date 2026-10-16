@@ -1681,7 +1681,8 @@ mod tests {
     fn every_colour_the_dialog_draws_comes_from_its_palette() {
         // One entry per branch of `render` that can pick a different colour:
         // the four risk hues, the details panel, the checkbox's checked arm,
-        // each hover highlight, and the "Deny All" button that only exists
+        // each hover highlight -- drawn only once the prompt's hold is over,
+        // so both are rendered -- and the "Deny All" button that only exists
         // when more than one request is queued.
         let resources = [
             ResourceType::Timer,  // Low    -> green
@@ -1701,13 +1702,17 @@ mod tests {
             for resource in resources {
                 for expanded in [false, true] {
                     for remember in [false, true] {
-                        for queued in [1_usize, 2] {
+                        for (queued, held) in [(1_usize, true), (1, false), (2, true), (2, false)] {
                             for hovered in hovers {
                                 let mut dialog = SecurityDialog::new();
                                 for i in 0..queued {
                                     let mut req = sample_request(i as u64 + 1);
                                     req.resource_type = resource;
                                     dialog.push_request(req);
+                                }
+                                if !held {
+                                    dialog.set_current_time(0);
+                                    dialog.set_current_time(HOLD_MS);
                                 }
                                 dialog.details_expanded = expanded;
                                 dialog.remember = remember;

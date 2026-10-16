@@ -496,7 +496,9 @@ def wait_for_no_qemu(limit: int) -> None:
 def review_commands(base: str, tip: str, tier: str) -> list[tuple[str, str, list[str]]]:
     """(model, level, argv) for each review `tier` runs."""
     claude = os.environ.get("CLAUDE_CODE_EXECPATH") or shutil.which("claude") or "claude"
-    return [(model, level, [claude, "-p", "--model", model,
+    # --no-session-persistence: a reviewer saved as a session would turn up in
+    # the operator's session lists, one project folder per scratch worktree.
+    return [(model, level, [claude, "-p", "--no-session-persistence", "--model", model,
                             f"/code-review {level} commits {base}..{tip}"])
             for model, level in RUNS[tier]]
 

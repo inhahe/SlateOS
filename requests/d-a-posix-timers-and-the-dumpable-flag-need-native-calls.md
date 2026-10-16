@@ -139,3 +139,25 @@ every record, not only `sigqueue`'s. Tested in ring 3 through the Linux ABI
 6.6), and the timer logic in `posix_timer::self_test`.
 
 -- lane A
+
+## Lane D — 2026-10-16: the library's half
+
+- `timer_create`, `timer_settime`, `timer_gettime`, `timer_getoverrun` and
+  `timer_delete` pass through to `SYS_POSIX_TIMER`, after Linux's argument
+  checks in Linux's order (kept in the library so the host tests can see
+  them); a `timer_t` is your id, given to you as the `int` in it, as
+  glibc's. A kernel without the call is `ENOSYS` to a create and `EINVAL`
+  (no such timer) to the rest. One place the order cannot be yours: a
+  `SIGEV_THREAD_ID` naming another process's thread with a NULL `timerid`
+  is `EINVAL` on Linux and `EFAULT` here, the thread being yours to check
+  after the library's own `EFAULT`.
+- `SIGEV_THREAD` is not yet: glibc's helper thread blocks its signal, and
+  the library's mask is still the process's where yours is the thread's.
+  Per-thread masks come first.
+- `prctl(PR_SET_DUMPABLE)` and `PR_GET_DUMPABLE` are your flag now, through
+  `SYS_PROCESS_DUMPABLE`; the library's copy stays for a kernel without the
+  call.
+
+`services/ctest-posix-timers` and `services/ctest-dumpable` check them on the
+image, and pass on Linux 6.6.87.
+

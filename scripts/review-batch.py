@@ -1335,6 +1335,8 @@ def self_test() -> int:
     cmds = review_commands("a" * 40, "b" * 40, "max")
     expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
     expect("max prompt", cmds[0][2][-1], f"/code-review max commits {'a' * 40}..{'b' * 40}")
+    expect("no reviewer saved as a session", all("--no-session-persistence" in argv for _, _, argv in cmds),
+           True)
 
     for f in failures:
         print(f"FAIL {f}")

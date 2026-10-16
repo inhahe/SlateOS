@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -55,13 +56,41 @@ sys.path.insert(0, str(HERE))
 import gitenv  # noqa: E402
 import selftestflag  # noqa: E402
 
-#: The operator's usage analyzer: `python -m cua report` there. `CUA_DIR`, else
-#: beside the projects (where it is on a one-drive machine), else where it was
-#: first kept.
-CUA_DIR = Path(os.environ.get("CUA_DIR") or next(
-    (str(p) for p in (REPO.parent / "claude-usage-analysis",
-                      Path("D:/visual studio projects/claude-usage-analysis")) if p.is_dir()),
-    str(REPO.parent / "claude-usage-analysis")))
+
+def _load(name: str, file: str):
+    """A sibling script, as a module."""
+    spec = importlib.util.spec_from_file_location(name, HERE / file)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"process-review: scripts/{file} cannot be loaded")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+#: For `integration_tree()`: the repository's main worktree, found and checked
+#: the one way every script here finds it.
+SIGNALS = _load("check_lane_signals", "check-lane-signals.py")
+
+
+def cua_dir(places: list[Path] | None = None) -> Path:
+    """The operator's usage analyzer (`python -m cua report` there): `CUA_DIR`
+    if set, else the first of `places` that holds it -- by default beside this
+    worktree, beside the integration tree (where it is on a one-drive machine),
+    then where it was first kept. A folder counts only if it holds the `cua`
+    package: an empty or stray one of that name is not the analyzer. None
+    holding it: the first place, which the report names as missing."""
+    if os.environ.get("CUA_DIR"):
+        return Path(os.environ["CUA_DIR"])
+    if places is None:
+        tree = SIGNALS.integration_tree(REPO)
+        places = [REPO.parent / "claude-usage-analysis"]
+        if tree is not None:
+            places.append(tree.parent / "claude-usage-analysis")
+        places.append(Path("D:/visual studio projects/claude-usage-analysis"))
+    return next((p for p in places if (p / "cua").is_dir()), places[0])
+
+
 #: Seconds of usage summed per fitted window: long enough that the whole
 #: points the meter reports in mean something, short enough to give many.
 FIT_WINDOW = 2 * 3600
@@ -207,7 +236,8 @@ def meter_fit(cua: Path) -> str:
 
 def usage_section(cua: Path) -> str:
     if not (cua / "cua").is_dir():
-        return "## Usage\n\nThe usage analyzer is not at `CUA_DIR`; no usage numbers.\n"
+        return (f"## Usage\n\nThe usage analyzer is not at `{cua.as_posix()}` (set `CUA_DIR` to "
+                f"where it is); no usage numbers.\n")
     r = subprocess.run([sys.executable, "-m", "cua", "report"], cwd=cua, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
     m = re.search(r"report: (.+\.md)", r.stdout + r.stderr)
@@ -439,8 +469,10 @@ def context_section(cua: Path, since: float) -> str:
         return "## Context per lane\n\nThe usage analyzer could not be imported.\n"
     db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     rows = context_rows(db, since, config.price_for)
-    logs = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()) \
-        / "logs" / "refs" / "heads"
+    tree = SIGNALS.integration_tree(REPO)
+    if tree is None:
+        return "## Context per lane\n\nThe repository's shared .git could not be found.\n"
+    logs = tree / ".git" / "logs" / "refs" / "heads"
     lines = ["## Context per lane",
              "",
              "What the context trial compares (`os/go.bat`: account c's lanes, E and F, "
@@ -516,8 +548,11 @@ def propose(text: str) -> str:
     import proctree  # the timeout that kills the whole tree before draining
     head = "## Three changes to make first (Claude, from the numbers above)\n\n"
     try:
-        r = proctree.run_captured([newest_claude(), "-p", "--model", "opus", "--effort",
-                                   "medium"], input=(PROPOSE + text).encode("utf-8"),
+        # --no-session-persistence: the weekly run starts in System32, and a
+        # saved session would turn up in the operator's session lists each week.
+        r = proctree.run_captured([newest_claude(), "-p", "--no-session-persistence", "--model",
+                                   "opus", "--effort", "medium"],
+                                  input=(PROPOSE + text).encode("utf-8"),
                                   timeout=1800, env=gitenv.clean_env())
     except OSError as e:
         return head + f"The proposal run could not start: {e}\n"
@@ -530,13 +565,32 @@ def propose(text: str) -> str:
     return head + out + "\n"
 
 
+def task_script(tree: Path | None) -> Path:
+    """The copy of this script the weekly task runs: the integration tree's
+    (*tree*, `integration_tree()`), which is kept at main. Refused, rather than
+    registered to fail every week unseen, when there is no such tree, it has
+    another branch checked out (a stale copy, a scratch clone), or the script
+    is not in it."""
+    if tree is None:
+        raise SystemExit("process-review: this repository's main worktree cannot be found; "
+                         "run --register from a worktree of the SlateOS repository")
+    branch = subprocess.run(["git", "-C", str(tree), "symbolic-ref", "--short", "HEAD"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            env=gitenv.clean_env(), stdin=subprocess.DEVNULL).stdout.strip()
+    if branch != "main":
+        raise SystemExit(f"process-review: {tree} has {branch or 'no branch'} checked out, not "
+                         "main: it is not the integration tree")
+    script = tree / "scripts" / "process-review.py"
+    if not script.is_file():
+        raise SystemExit(f"process-review: {script} is not there")
+    return script
+
+
 def register(out: str) -> int:
     """Register the weekly Task Scheduler entry: Mondays 06:30, after the
-    curator, from the integration tree, which is kept at main. The task
-    starts in System32, so `out` is made absolute here."""
-    # The integration tree's copy: the main worktree, beside the shared .git.
-    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
-    script = Path(common).parent / "scripts" / "process-review.py"
+    curator, from the integration tree. The task starts in System32, so
+    `out` is made absolute here."""
+    script = task_script(SIGNALS.integration_tree(REPO))
     pyw = Path(sys.executable).with_name("pythonw.exe")
     cmd = f'"{pyw}" "{script}" --out "{Path(out).resolve()}" --propose'
     r = subprocess.run(["schtasks", "/create", "/f", "/tn", TASK, "/sc", "weekly", "/d", "MON",
@@ -656,6 +710,33 @@ def self_test() -> int:
         (logs / "lane-ex").write_text(entry.format(z=z, ts=70, msg="commit: not E's"),
                                       encoding="utf-8", newline="\n")
         expect("a lane's own commits", lane_commits(logs, "E", 50), 3)
+        # The usage analyzer: a folder of its name counts only if it holds it.
+        stray, real = root / "stray" / "claude-usage-analysis", root / "real" / "claude-usage-analysis"
+        stray.mkdir(parents=True)
+        (real / "cua").mkdir(parents=True)
+        saved_env = os.environ.pop("CUA_DIR", None)
+        try:
+            expect("the analyzer, not a stray folder of its name", cua_dir([stray, real]), real)
+            expect("none: the first place, named as missing", cua_dir([stray]), stray)
+        finally:
+            if saved_env is not None:
+                os.environ["CUA_DIR"] = saved_env
+        # The weekly task runs the integration tree's copy, which has main
+        # checked out; anything else is refused, not registered to fail.
+        tree = root / "tree"
+        (tree / "scripts").mkdir(parents=True)
+        (tree / "scripts" / "process-review.py").write_text("", encoding="utf-8", newline="\n")
+        genv = {**gitenv.clean_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(tree)], env=genv, check=True)
+        expect("the integration tree's script", task_script(tree), tree / "scripts" / "process-review.py")
+        subprocess.run(["git", "-C", str(tree), "checkout", "-q", "-b", "other"], env=genv, check=True)
+        for label, arg in (("another branch is refused", tree), ("no tree is refused", None)):
+            try:
+                task_script(arg)
+                expect(label, "registered", "refused")
+            except SystemExit:
+                pass
         # A proposal that cannot run still leaves the numbers written.
         global newest_claude
         saved = newest_claude
@@ -689,12 +770,12 @@ def main(argv: list[str]) -> int:
         return register(a.register)
     today = dt.date.today()
     if not a.out:
-        text = report(today, CUA_DIR)
+        text = report(today, cua_dir())
         print(text + ("\n" + propose(text) if a.propose else ""))
         return 0
     out = Path(a.out)
     try:
-        text = report(today, CUA_DIR)
+        text = report(today, cua_dir())
         # The numbers are written before the proposal is asked for, so a
         # failed or slow proposal cannot lose them.
         dated = write_report(out, today, text)

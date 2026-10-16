@@ -1093,6 +1093,19 @@ impl Daemon {
         Ok(id)
     }
 
+    /// Name `pid` the leader of session `session_id` -- the process
+    /// `KillSession` signals. A display manager registers a session before
+    /// it starts the desktop, so that the desktop can be told its session's
+    /// id, and names the leader once the desktop has a pid.
+    fn set_session_leader(&mut self, session_id: &str, pid: u32) -> Result<(), &'static str> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
+        session.leader_pid = pid;
+        Ok(())
+    }
+
     /// Terminate a session by ID.
     fn terminate_session(&mut self, session_id: &str) -> Result<(), &'static str> {
         let session = self
@@ -2021,18 +2034,18 @@ fn serve_client(daemon: &std::sync::Mutex<Daemon>, mut conn: libservicebus::Conn
         // Only a method call asks for anything. A signal expects no answer
         // and a reply answers nothing this daemon asked.
         if msg.msg_type != MessageType::MethodCall {
-            bus::wipe(&mut msg.payload);
+            libservicebus::wipe(&mut msg.payload);
             continue;
         }
         let reply = match daemon.lock() {
             Ok(mut d) => bus::handle_message(&mut d, &msg, caller),
             Err(_) => {
                 // Poisoned: see `serve`, which exits on it.
-                bus::wipe(&mut msg.payload);
+                libservicebus::wipe(&mut msg.payload);
                 return;
             }
         };
-        bus::wipe(&mut msg.payload);
+        libservicebus::wipe(&mut msg.payload);
         // Blocking: a client slow to read holds only its own thread.
         if conn.send_blocking(&reply).is_err() {
             return;

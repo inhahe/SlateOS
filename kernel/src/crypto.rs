@@ -546,10 +546,21 @@ pub fn chacha20_xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [
 // Self-tests for HMAC-SHA256 and ChaCha20
 // ===========================================================================
 
+/// One test vector's verdict, `ok`, reported under `what`: an error, which
+/// the self-test returns, rather than a panic, which would halt the boot.
+fn vector(ok: bool, what: &str) -> crate::error::KernelResult<()> {
+    if ok {
+        crate::serial_println!("[crypto]   {}: PASSED", what);
+        Ok(())
+    } else {
+        crate::serial_println!("[crypto]   FAIL: {}", what);
+        Err(crate::error::KernelError::InternalError)
+    }
+}
+
 /// Run the HMAC-SHA256 and ChaCha20 self-tests: their RFC test vectors.
 pub fn self_test_hmac_chacha20() -> crate::error::KernelResult<()> {
     crate::serial_println!("[crypto] Running HMAC-SHA256 and ChaCha20 self-tests...");
-    let mut passed = 0u32;
 
     // --- HMAC-SHA256 test vector (RFC 4231 §4.2, test case 1) ---
     {
@@ -560,10 +571,10 @@ pub fn self_test_hmac_chacha20() -> crate::error::KernelResult<()> {
             0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
             0x2e, 0x32, 0xcf, 0xf7,
         ];
-        let result = hmac_sha256(&key, data);
-        assert!(result == expected, "HMAC-SHA256 test case 1");
-        passed = passed.saturating_add(1);
-        crate::serial_println!("[crypto]   HMAC-SHA256 test 1 (RFC 4231): PASSED");
+        vector(
+            hmac_sha256(&key, data) == expected,
+            "HMAC-SHA256 test 1 (RFC 4231)",
+        )?;
     }
 
     // --- HMAC-SHA256 test vector (RFC 4231 §4.3, test case 2) ---
@@ -575,10 +586,10 @@ pub fn self_test_hmac_chacha20() -> crate::error::KernelResult<()> {
             0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
             0x64, 0xec, 0x38, 0x43,
         ];
-        let result = hmac_sha256(key, data);
-        assert!(result == expected, "HMAC-SHA256 test case 2");
-        passed = passed.saturating_add(1);
-        crate::serial_println!("[crypto]   HMAC-SHA256 test 2 (RFC 4231): PASSED");
+        vector(
+            hmac_sha256(key, data) == expected,
+            "HMAC-SHA256 test 2 (RFC 4231)",
+        )?;
     }
 
     // --- ChaCha20 test vector (RFC 8439 §2.4.2) ---
@@ -601,21 +612,19 @@ pub fn self_test_hmac_chacha20() -> crate::error::KernelResult<()> {
             0x6e, 0x2e, 0x35, 0x9a, 0x25, 0x68, 0xf9, 0x80, 0x41, 0xba, 0x07, 0x28, 0xdd, 0x0d,
             0x69, 0x81,
         ];
-        assert!(
-            data[..16] == expected_start[..],
-            "ChaCha20 ciphertext start"
-        );
+        vector(
+            data.get(..16) == Some(&expected_start[..]),
+            "ChaCha20 ciphertext (RFC 8439 §2.4.2)",
+        )?;
 
         // Decrypt and verify round-trip.
         chacha20_xor(&key, &nonce, 1, &mut data);
-        assert!(data[..] == plaintext[..], "ChaCha20 round-trip");
-        passed = passed.saturating_add(1);
-        crate::serial_println!("[crypto]   ChaCha20 (RFC 8439 §2.4.2): PASSED");
+        vector(
+            data.as_slice() == plaintext.as_slice(),
+            "ChaCha20 round-trip",
+        )?;
     }
 
-    crate::serial_println!(
-        "[crypto] All {} HMAC-SHA256 and ChaCha20 self-tests PASSED",
-        passed
-    );
+    crate::serial_println!("[crypto] All HMAC-SHA256 and ChaCha20 self-tests PASSED");
     Ok(())
 }

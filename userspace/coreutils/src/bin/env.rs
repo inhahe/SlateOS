@@ -121,25 +121,14 @@ struct Config {
 // Byte views of an `OsStr`
 // ---------------------------------------------------------------------------
 
-/// Rebuild an `OsString` from bytes.
-///
-/// The inverse of [`os_bytes`], and it carries the same caveat for the same
-/// reason: on the target an `OsStr` *is* bytes and this round-trips exactly,
-/// while on a Windows development host there is no byte view that round-trips
-/// at all. That only affects the machine the tests run on, never a running
-/// SlateOS — and the alternative, refusing to split an argument into a name
-/// and a value without valid UTF-8, would make the program wrong on the target
-/// in order to be tidy on the host.
-#[cfg(unix)]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStrExt;
-    OsStr::from_bytes(b).to_os_string()
-}
-
-#[cfg(not(unix))]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(b).into_owned())
-}
+// The inverse of `os_bytes` is `quoting::os_from_bytes`, with the same
+// caveat for the same reason: on the target an `OsStr` *is* bytes and the
+// pair round-trips exactly, while on a Windows development host there is no
+// byte view that round-trips at all. That only affects the machine the tests
+// run on, never a running SlateOS -- and the alternative, refusing to split
+// an argument into a name and a value without valid UTF-8, would make the
+// program wrong on the target in order to be tidy on the host.
+use quoting::os_from_bytes;
 
 /// Split `NAME=VALUE` at its first `=`.
 ///

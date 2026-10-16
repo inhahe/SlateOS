@@ -1431,14 +1431,95 @@ list moved to lane D on 2026-09-22):
       and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
-    reassign, not an assignment: Mono, .NET on Linux (D, as a language
-    runtime, like CPython); Xonsh (B, a shell -- needs CPython); Nushell *on
-    SlateOS* (B -- the `[x]` below it measured a Windows build); the
-    operator's WinDirStat fork, `D:/visual studio projects/dirsize/windirstat`,
-    or QDirStat (E); a real debugger, GDB and/or LLDB (D, with the toolchain --
-    the `gdb` crate here is hand-written); and a reimplementation of
-    `D:/visual studio projects/backup` in a supported language, or that
-    program run on Mono once Mono runs (E).
+    reassign, not an assignment: .NET as `dotnet/runtime`, not Mono (D, as a
+    language runtime, like CPython -- the operator's change of 2026-10-10,
+    §1246); Xonsh (B, a shell -- needs CPython); Nushell *on SlateOS* (B --
+    the `[x]` below it measured a Windows build); and a real debugger, GDB
+    and/or LLDB (D, with the toolchain -- the `gdb` crate here is
+    hand-written). The operator's WinDirStat fork and the operator's backup
+    program are lane E's own items now. The whole list, YSH included, is
+    `roadmap-detailed.md` §6.13.
+
+- **The operator's answers of 2026-10-09 (B-Q22, B-Q24, B-Q25), as work.**
+  B-Q23 was answered on 2026-10-10 and B-Q26 on 2026-10-11 (below).
+  - `[x]` `[B]` **New passwords are yescrypt** (§1070, B-Q24). Done 2026-10-09:
+    `userdb::PASSWORD_METHOD`, a setting from `crypt_gensalt` through
+    `libcall::crypt`, `authlib`'s burn to match.
+  - `[x]` `[B]` **Lost output is reported** (§1071, B-Q25) in `which` (already),
+    `ed`, `hostname` and `patch`, each with full-disk and closed-output cases
+    in its harness as differences on purpose. Done 2026-10-09.
+  - **One `kill`, three requests** (§1072, B-Q22: close, terminate, force,
+    sent as SlateOS's message to a program that answers it and as a Linux
+    signal to one that does not):
+    - `[x]` `[B]` procps-ng 4.0.4's `kill`, ported, replacing coreutils'
+      `kill.rs` and deleting `userspace/kill` -- `kill PID` is `SIGTERM`
+      everywhere from then on, never the forced end it was whenever the build
+      linked `userspace/kill` last. Done 2026-10-09: `scripts/kill-diff.sh`
+      runs every case in a PID namespace of its own, which is what let it
+      measure upstream's `kill -9 -12` signalling -1 (a deliberate difference
+      here: a negative PID is its group). `killall` leaves the image with
+      `userspace/kill` (`requests/b-d-killall-is-not-kill-under-another-name-any-more.md`)
+      until the next item.
+    - `[x]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
+      Done 2026-10-09: `userspace/coreutils/src/bin/killall.rs`, held to
+      Ubuntu's by `scripts/killall-diff.sh`, each case in a PID namespace of
+      its own with four named victims. On SlateOS it signals with `kill(2)`:
+      no pidfds there, the case upstream falls back for.
+    - `[-]` `[A]` The kernel half: a lifecycle endpoint each process registers
+      at start, found by PID under a signal's permission rule -- offered by
+      lane A 2026-10-09 and accepted. Built 2026-10-11 on lane-a-wip
+      (`SYS_LIFECYCLE_REGISTER` 1172, `SYS_LIFECYCLE_REQUEST` 1173 answering
+      `NotSupported` for a program with no endpoint, `SYS_LIFECYCLE_QUERY`
+      1174; §1569, `requests/a-b-the-lifecycle-endpoint.md`), reaching main
+      with lane A's next publish.
+    - `[x]` `[B]` The userspace half: a library a program answers *close* (may
+      decline) and *terminate* (may not) with; `kill`, `pkill` and `killall`
+      sending them -- `--close`, `--via=message|signal`, `--force`,
+      `--timeout MS REQUEST` -- and falling back to the signal for a program
+      that does not answer. Done 2026-10-15: `libservicebus::lifecycle`
+      (register, receive, ask, query); `coreutils::procps::requests`, the
+      three programs' one implementation of the options and the routes. The
+      options are matched only when spelled in full (`getoptlong`'s
+      `whole_only`), so every upstream abbreviation keeps its meaning -- `pkill
+      --term` is still `--terminal` -- and the harnesses take the usage
+      paragraph out before comparing.
+    - `[ ]` `[B]` Services stopped with *terminate*, then *force* after their
+      stop timeout (`init`, the service manager). The stop is
+      `services/init`'s, which is lane D's tree: requested 2026-10-15
+      (`requests/b-d-init-stops-a-service-with-terminate-then-force.md`);
+      the `service` command only asks `init`.
+    - `[ ]` `[C]` The GUI toolkit answers *close* as a window's close button
+      does and *terminate* as session end does, for every program built on it
+      (requested).
+    - `[ ]` `[E]` The task manager (`apps/sysmonitor`) offers close, "end
+      without asking" and force, where it sends `SIGKILL` today (requested).
+    - `[ ]` `[F]` *close* for a Linux program's windows, as the compositor's
+      close request -- asked when the toolkit half exists.
+  - **What is installed is the installer's question** (§1073, B-Q23: E, with
+    "desktop" meaning everything but the six network servers):
+    - `[ ]` `[B]` Package groups in `pkg/`, one per answer -- desktop,
+      development and gaming the same set (everything but `sshd`, `ftpd`,
+      `telnet`, `inetd`, `ntpd`, `finger`), server without the desktop
+      applications and games -- each installable later from the others.
+    - `[ ]` The installer's "what is this machine for" answer selects a group
+      (no owner yet; the image keeps everything until then, §1053).
+  - **A program's remembered settings grow by three** (§1074, B-Q26: A) --
+    the processors it may use, a cap on its processor use, a profile while it
+    runs -- with the remembered priority they join (`roadmap-detailed.md`
+    §1.3, no lane yet: the kernel applies them at process creation, Settings
+    and the task manager set them).
+
+- **Requests to lane B, taken 2026-10-11:**
+  - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
+    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`, on
+    lane-a-wip until lane A's next publish: the kernel turns on only a whole
+    disk with a swap header by itself).
+  - `[ ]` `[B]` `pkg` packages say which font families they carry, so
+    Settings can offer a theme's recommended fonts
+    (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
+  - `[ ]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
+    test-module finder from `rustlex` once lane A puts one there
+    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`).
 
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**
@@ -5979,6 +6060,60 @@ _Port ext4 first. Don't write a custom filesystem._
   over `/dev/log` -- and with a terminal, every run in a PID namespace of its
   own whose init starts the same fixtures in the same order on both sides,
   so that killall5 can reach nothing else);
+  `slabtop` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  first full-screen procps program, drawn through `userspace/curses`; the
+  library's `slabinfo.c` arithmetic in its own types -- `float` use, wrapping
+  `unsigned int` totals, the smallest object starting at `INT_MAX` -- the
+  totals from a second read of the file, the caches in `qsort_r`'s stable
+  order with names by `strcoll`, keys read one at a time between frames,
+  `SIGINT` and `SIGWINCH` as upstream handles them and `SIGTERM` left to
+  curses; an empty `/proc/slabinfo` is the library's null info, refused by
+  every read after with `EINVAL`, which vmstat's `-m` now also says; the new
+  `libcall::fd::read` and `wait_readable` and `libcall::locale`'s `strcoll`,
+  `tolower` and `radix`; `scripts/slabtop-diff.sh`: 218 cases agree and 3
+  differ on purpose, `-o` reports over pinned fixtures and the screen on
+  pseudo-terminals -- keys, resizes, `SIGINT`, `SIGTERM`, `SIGHUP`, `^Z`, a
+  file changing between frames);
+  `watch` (2026-10-09, procps-ng 4.0.4's as Debian builds it, with
+  `--enable-watch8bit` and `--enable-colorwatch`, drawn through
+  `userspace/curses`; `userspace/watch`, written from the manual, is retired:
+  the command run by the C library's `system` -- or with `-x` by `execvp` --
+  in a child whose output and errors are one pipe, read a character at a time
+  as `my_getwc` reads it: 0xFF taken for the end, sixteen bytes that make no
+  character given back but the first, a NUL taking what follows it into the
+  character looked for; tabs, bells, wide characters at the edge and
+  characters of no width placed as upstream places them; SGR colour drawn
+  unless `-C`; the title's `%.1f` in the locale's decimal point, `ctime`'s
+  date in the zone and the host's name in `sysconf`'s length, cut to fit as
+  upstream cuts it; `COLUMNS` and `LINES` read once by `strtol` into an
+  `int`, else the terminal on standard error measured; `-d` and
+  `=permanent`, `-g`, `-q`, `-e`, `-b`, `-x`, `-p`, `-r`, `-w`; `SIGINT`,
+  `SIGTERM` and `SIGHUP` end it through curses and `SIGWINCH` resizes; the new
+  `libcall::process::system`, `libcall::clock::nanosleep`,
+  `libcall::fd::pipe` and `libcall::conf::SC_HOST_NAME_MAX`, and curses'
+  `attr_set`; `scripts/watch-diff.sh`: 148 cases agree and 2 differ on
+  purpose, on pseudo-terminals with standard error on the terminal and off
+  it, the clock pinned by a preloaded shim);
+  `top` (2026-10-15, procps-ng 4.0.4's as Ubuntu builds it,
+  `--disable-modern-top`; `userspace/top`, written from the manual, is
+  retired: the summary and the task table from the library's `pids`, `stat`
+  and `meminfo` layers that `ps`, `free` and `vmstat` already read through;
+  the four windows and their field groups, sorting, the forest view, the
+  user and other filters, the inspect screens, the bottom windows, the
+  colour mapping, scrolling, the Fields screen, every prompt, and the
+  rcfile read in all its old forms and written back; the terminal through
+  `userspace/terminfo` with upstream's own `Pseudo_screen` row sparing;
+  `float` arithmetic, `snprintf` truncation and the locale's radix as C has
+  them; standard error reopened on `/dev/null` and so buffered, which is
+  why getopt's complaint still reaches the terminal and a fatal signal's
+  note never does; signals acted on where the program waits rather than in
+  their handlers (deliberate difference 1), and no NUMA (4);
+  `scripts/top-diff.sh`: 344 cases agree and 1 differs on purpose, `-b`
+  over a fixture `/proc` and the screen on pseudo-terminals -- keys,
+  prompts, rcfiles, resizes, signals, `^Z`, `/proc` changing between
+  frames -- each run in a PID namespace with the clock frozen;
+  `requests/b-ad-proc-counts-pages-of-4-kib-while-libc-says-a-page-is-16-kib.md`
+  for what only SlateOS can show: its memory columns four times too large);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5988,7 +6123,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] `[B]` System administration utilities — Rust userspace binaries: -- 150 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locale`, `mesg`, `dbus`, `perf`, `capsh`, `resolvectl`, `socat`, `parted`, `getfattr`, `auditctl`, `grub-install`, `upower`, `mkinitramfs`, `plymouth`, `udisksctl`, `numactl`, `btrfs`, `flatpak`, `firejail`, `apparmor`, `selinux`, `snapper`, `tuned`, `cpupower`, `thermald`, `fwupdmgr`, `podman`, `resolvectl`, `mcelog`, `rasdaemon`, `kexec`, `nvme`, `tpm2`, `avahi-daemon`, `cups`, `powertop`, `tlp`, `fscrypt`, `pipewire`, `xz`, `zstd`, `bzip2`, `lz4`, `age`, `openssl`, `certbot`, `gpg`, `borg`, `restic`, `rclone`, `git`, `sqlite3`, `cmake`, `meson`, `ninja`, `python3`, `node`, `docker`, `ffmpeg`, `valgrind`, `pkgconf`, `sensors`, `tmux`, `ruby`, `java`, `go`, `rustup`, `terraform`, `ansible`, `kubectl`, `gradle`, `maven`, `helm`, `prometheus`, `memcached`, `elasticsearch`, `consul`, `vault`, `etcd`, `minio`, `nginx`, `haproxy`, `traefik`, `caddy`, `envoy`, `openvpn`, `pgbouncer`, `neo4j`, `cassandra`, `iperf3`, `squid`, `postfix`, `dovecot`, `unbound`, `gitea`, `keycloak`, `mattermost`, `nextcloud`, `jellyfin`, `syncthing`, `borgmatic`, `pandoc`, `tesseract`, `exiftool`, `doxygen`, `ccache`, `distcc`, `sccache`, `mold`, `loki`, `tempo`, `jaeger`, `vegeta`, `k6`, `wrk`, `ab`, `cfssl`, `hashcat`, `john`, `lynis`, `trivy`, `cosign`, `buildah`, `cni-plugins`, `flux`, `argocd`, `pulumi`, `packer`, `mpv`, `sox`, `cmus`, `ncmpcpp`, `remmina`, `xrdp`, `borg`, `duplicity`, `timeshift`, `snapper2`, `lua`, `perl`, `php`, `julia`, `deno`, `bun`, `zig`, `micro`, `lazygit`, `lazydocker`, `bat`, `eza`.
   - [x] sysinfo: system information reader (/proc, /sys), CPU/mem/disk/net/OS summary, JSON output
   - [x] sanitize: filename sanitizer (4 modes: conservative/strict/windows/minimal, dry-run, recursive)
-  - [x] top: interactive process monitor (CPU/mem per-process, sort fields, batch mode, PID filter)
+  - [x] top: procps-ng 4.0.4's, a coreutils program since 2026-10-15 (see the coreutils item; `scripts/top-diff.sh`, 345 cases)
   - [x] mount/umount: filesystem mounting with fstab support, bind mounts, option parsing
   - [x] dmesg: kernel message buffer viewer (level filter, follow, JSON output, colored severity)
   - [x] lspci: PCI device lister (vendor/device database, tree view, BAR info, verbosity levels)
@@ -6121,6 +6256,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
   - [x] tic/captoinfo/infotocap/infocmp/toe: ncurses 6.4's terminfo compiler and its tools, coreutils programs since 2026-10-09 (see the coreutils item) -- compiling terminfo and termcap sources, translating between them, `tic -v`'s checks, `infocmp`'s dumps and comparisons, `toe`'s tables, through `userspace/terminfo`'s `compile` (`scripts/tic-diff.sh`). The image has no terminfo database to use them on yet: `requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md`
+  - [x] curses: ncursesw 6.4's screen library, ported as Ubuntu builds it, for procps' `slabtop` and `watch` (2026-10-09, `userspace/curses`) -- the screen and `stdscr`, adding bytes and wide characters, attributes and colours, the cursor-movement optimiser and the hash-map scroll optimiser, `doupdate`, `endwin` and coming back, resizing, line drawing, and the `SIGTSTP`/`SIGINT`/`SIGTERM`/`SIGWINCH` handlers -- which here wait for a curses call in progress rather than running inside it (§1069); `scripts/curses-diff.sh`: 990 cases agree with Ubuntu's libncursesw, scripts of curses calls run under 17 terminal types, to a file and to a pseudo-terminal, suspended, interrupted and resized. No input (`getch`): nothing here reads keys through curses. `slabtop` and `watch` draw through it (2026-10-09). The work its signal handlers do -- `endwin`, and the repaint after `SIGTSTP` -- allocates nothing once a screen is drawn (2026-10-09, `TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER`): `tparm` expands into a buffer it keeps, capabilities are written straight from the entry, and a counting allocator in the tests measures it
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)

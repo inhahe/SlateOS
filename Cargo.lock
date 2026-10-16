@@ -678,6 +678,7 @@ dependencies = [
  "charwidth",
  "cprintf",
  "cstrtol",
+ "curses",
  "embed-manifest",
  "ere",
  "errmsg",
@@ -694,6 +695,7 @@ dependencies = [
  "modechange",
  "optionalfile",
  "procinfo",
+ "procstop",
  "pwdb",
  "quoting",
  "randrange",
@@ -869,6 +871,15 @@ name = "curl"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "curses"
+version = "0.1.0"
+dependencies = [
+ "cstrtol",
+ "libcall",
+ "terminfo",
 ]
 
 [[package]]
@@ -2053,16 +2064,6 @@ name = "keylayout"
 version = "0.1.0"
 
 [[package]]
-name = "kill"
-version = "0.1.0"
-dependencies = [
- "killconv",
- "procinfo",
- "quoting",
- "sysroot-dep",
-]
-
-[[package]]
 name = "killconv"
 version = "0.1.0"
 
@@ -2249,6 +2250,7 @@ dependencies = [
  "getoptlong",
  "journalio",
  "journalrec",
+ "libcall",
  "localtime",
  "quoting",
  "stdfdguard",
@@ -3296,6 +3298,14 @@ name = "procinfo"
 version = "0.1.0"
 
 [[package]]
+name = "procstop"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "libservicebus",
+]
+
+[[package]]
 name = "programs"
 version = "0.1.0"
 dependencies = [
@@ -3648,8 +3658,9 @@ name = "screen"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libcall",
+ "pwdb",
  "quoting",
- "userdb",
 ]
 
 [[package]]
@@ -4400,6 +4411,7 @@ version = "0.1.0"
 name = "telnet"
 version = "0.1.0"
 dependencies = [
+ "libcall",
  "quoting",
 ]
 
@@ -4514,14 +4526,6 @@ name = "to_method"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7c4ceeeca15c8384bbc3e011dbd8fccb7f068a440b752b7d9b32ceb0ca0e2e8"
-
-[[package]]
-name = "top"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
 
 [[package]]
 name = "torrent"
@@ -4765,6 +4769,7 @@ dependencies = [
 name = "userdb"
 version = "0.1.0"
 dependencies = [
+ "libcall",
  "posix",
  "pwdb",
  "scratchdir",
@@ -4882,14 +4887,6 @@ dependencies = [
  "safeio",
  "scratchdir",
  "textline",
-]
-
-[[package]]
-name = "watch"
-version = "0.1.0"
-dependencies = [
- "libcall",
- "quoting",
 ]
 
 [[package]]

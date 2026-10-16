@@ -1,0 +1,17 @@
+[package]
+name = "curses"
+version = "0.1.0"
+edition = "2024"
+description = "ncursesw 6.4's screen library, as procps' watch and slabtop drive it: the screen and its windows, adding characters, attributes and colours, refresh and endwin"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The C library's locale (mbrtowc, wcwidth, iswprint, ...), terminal modes,
+# window size and the output descriptor.
+libcall = { path = "../../libcall" }
+# The terminal's description, tparm and tputs.
+terminfo = { path = "../terminfo" }
+# `strtol`, as `_nc_getenv_num` reads `LINES`, `COLUMNS` and the like.
+cstrtol = { path = "../cstrtol" }

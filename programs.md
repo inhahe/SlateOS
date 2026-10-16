@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**500 programs; 341 on the image, 6 carried inside the kernel.**
+**501 programs; 342 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 315
+## Userland utilities and services (`userspace/`, lane B) -- 316
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -135,8 +135,8 @@ two disagree.
 | `join` | Pair up the lines of two sorted files that share a field. | yes | `coreutils` |  |
 | `journalctl` | Journal Log Viewer (`journalctl`) | yes |  |  |
 | `jq` | Slate OS JSON processor | yes |  |  |
-| `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
-| `kill` | Process Termination Utility | yes |  | `killall` |
+| `kill` | Send a signal to a process: procps-ng 4.0.4's `kill.c`, ported, as Ubuntu ships it at `/usr/bin/kill`. | yes | `coreutils` | `killall` |
+| `killall` | Send a signal to processes by name: psmisc 23.7's, ported. | yes | `coreutils` |  |
 | `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
 | `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
@@ -252,6 +252,7 @@ two disagree.
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. | yes | `coreutils` |  |
 | `shuf` | Write a random permutation of the input lines. | yes | `coreutils` |  |
 | `skill` | Send a signal to the processes an expression picks. | yes | `coreutils` |  |
+| `slabtop` | Display the kernel's slab caches, a screen at a time: procps-ng 4.0.4's `slabtop`, ported. | yes | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `snice` | Set the nice value of the processes an expression picks. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
@@ -288,7 +289,7 @@ two disagree.
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
 | `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
-| `top` | Interactive Process Monitor | yes |  |  |
+| `top` | Display the system's tasks, a screen at a time, below a summary of the system: procps-ng 4.0.4's `top`, ported. | yes | `coreutils` |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |
 | `tr` | Translate, squeeze, and/or delete bytes. | yes | `coreutils` |  |
@@ -318,7 +319,7 @@ two disagree.
 | `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
 | `wall` | Write a message to all users: util-linux 2.39.3's, ported, with Ubuntu's fix for CVE-2024-28085. | yes | `coreutils` |  |
-| `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
+| `watch` | Run a command again and again, its output shown full screen: procps-ng 4.0.4's `watch`, ported -- built as Debian builds it, with `--enable-watch8bit`, so th... | yes | `coreutils` |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility | yes |  |  |
 | `which` | Locate a command, the way GNU which 2.21 does. | yes | `coreutils` |  |

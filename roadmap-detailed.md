@@ -614,6 +614,10 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
   - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
   - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
   - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
+  - [ ] **Three more remembered settings, beside the priority** _(the operator's answer to B-Q26, 2026-10-11: design-decisions §1074)_ -- kept, shown, ordered by the same precedence and set in the same two places:
+    - [ ] **The processors a program may use** (CPU affinity), including "the fast cores" / "the power-saving cores" on a chip with both kinds; applied at process creation through the per-process processor mask (`SYS_SCHED_SET_AFFINITY`).
+    - [ ] **A cap on a program's processor use** -- a percentage, or a number of cores -- applied as a launch-time limit the kernel enforces.
+    - [ ] **A workload profile while the program runs** -- switched to when it starts, back when the last such program ends; raising priority for everything else needs the grant a priority raise needs.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG

@@ -1600,13 +1600,13 @@ mod tests {
         assert!(lookup_account(&path, "alice").is_none());
     }
 
-    /// Hash `password` the way `passwd` and `chpasswd` now do, so the tests
-    /// below check the entry those tools actually write rather than one
-    /// hand-assembled here.
+    /// Hash `password` the way `passwd` and `chpasswd` now do -- the method
+    /// new passwords get, yescrypt -- so the tests below check the entry those
+    /// tools actually write rather than one hand-assembled here.
     fn shadow_entry_for(password: &str) -> String {
         let mut sb = posix::crypt::buf();
         let setting =
-            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"0123456789abcdef", &mut sb)
+            posix::crypt::setting_into(userdb::PASSWORD_METHOD, b"0123456789abcdef", &mut sb)
                 .expect("setting");
         let mut hb = posix::crypt::buf();
         posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hb)
@@ -1679,7 +1679,7 @@ mod tests {
     #[test]
     fn test_a_password_set_by_passwd_is_accepted_by_login() {
         let stored = shadow_entry_for("correct horse");
-        assert!(stored.starts_with("$6$"));
+        assert!(stored.starts_with("$y$j9T$"), "{stored}");
         assert_eq!(
             check_password("correct horse", &stored, &authlib::CostProfile::default()),
             PasswordCheck::Accepted
@@ -2054,6 +2054,12 @@ mod tests {
         authlib::Authenticator::with_stores(missing)
     }
 
+    /// A clock that never moves, for a test about a delay: any fixed value,
+    /// since only differences matter, and there are none.
+    fn frozen_clock() -> u64 {
+        1_700_000_000
+    }
+
     /// A database path that does not exist, for the tests about *refusal*:
     /// every one of them is about a user who is not there.
     fn missing_db() -> PathBuf {
@@ -2066,7 +2072,13 @@ mod tests {
     /// hammering it.
     #[test]
     fn a_delayed_user_is_refused_at_the_console_and_not_counted_again() {
-        let mut auth = scratch_authenticator();
+        // A frozen clock: the first delay is one second, and between the last
+        // failure noted here and the check `do_login` makes after spending a
+        // password's cost, the real clock could cross into the next second --
+        // a few times in a hundred once that cost was yescrypt's
+        // (design-decisions §1070), when the delay has already run out and
+        // the answer is `Login incorrect`.
+        let mut auth = scratch_authenticator().with_clock(frozen_clock);
         // Spend the free attempts, then one more to start the delay.
         let mut expected = 0;
         while auth.rate_limited("someone").is_none() {

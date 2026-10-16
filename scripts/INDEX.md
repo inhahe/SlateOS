@@ -170,6 +170,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/create-ext4-rootfs.sh` | Build a real ext4 root-filesystem image for the SlateOS Linux-ABI layer. |
 | `scripts/csplit-diff.sh` | Differential test: our csplit against GNU csplit. |
 | `scripts/ctest-fixtures.py` | Build the 70 ring-3 fixture ELFs on demand, and verify what the image ships. |
+| `scripts/curses-diff.sh` | Differential test: the curses crate against Ubuntu's libncursesw 6.4. |
+| `scripts/curses-ptyrun.py` | Run a program on a pseudo-terminal of its own, for curses-diff.sh. |
 | `scripts/cut-diff.sh` | Differential test: our cut against GNU cut. |
 | `scripts/date-diff.sh` | Differential test: our `date` against GNU date. |
 | `scripts/dd-diff.sh` | Differential test: our dd against GNU dd. |
@@ -270,6 +272,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/kasan-check-preshadow.py` | kasan-check-preshadow.py — prove the pre-shadow window is uninstrumented. |
 | `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
+| `scripts/kill-diff.sh` | Differential test: our `kill` against procps-ng 4.0.4's, which is Ubuntu's |
+| `scripts/killall-diff.sh` | Differential test: our `killall` against psmisc 23.7's, Ubuntu's |
 | `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/last-diff.sh` | Differential test: our `last` and `lastb` against util-linux 2.39.3's. |
@@ -306,6 +310,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mountpoint-diff.sh` | Differential test: our `mountpoint` against util-linux 2.39.3's. |
 | `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
 | `scripts/multicall-aliases.py` | Find command names that a program answers to but that nothing can invoke. |
+| `scripts/mutants-replay.py` | Replay the mutants `cargo test` could not kill through differential harnesses. |
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
 | `scripts/mv-diff.sh` | Differential test: our `mv` against GNU coreutils'. |
@@ -371,7 +376,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
 | `scripts/process-review.py` | The week's numbers on how SlateOS is being built, and what to change first. |
 | `scripts/procps-close-diff.sh` | procps-close-diff.sh -- how each procps program here closes its standard |
-| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat`, |
 | `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
@@ -444,6 +449,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/skill-diff.sh` | skill-diff.sh -- run our `skill` and `snice` and procps-ng's side by side and |
+| `scripts/slabtop-diff.sh` | Differential test: our slabtop against procps-ng 4.0.4's. |
 | `scripts/sleep-diff.sh` | Differential test: our `sleep` against GNU coreutils 9.4's. |
 | `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
 | `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
@@ -542,6 +548,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/tload-diff.sh` | tload-diff.sh -- run our `tload` and procps-ng's side by side and report every |
 | `scripts/tload-frames.py` | Run tload and capture the frames it draws, for scripts/tload-diff.sh. |
+| `scripts/top-diff.sh` | Differential test: our top against procps-ng 4.0.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tput-diff.sh` | Differential test: ncurses 6.4's `tput`, `clear`, `tset` and `tabs`, ours against Ubuntu's. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
@@ -566,6 +573,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/vmstat-diff.sh` | Differential test: our `vmstat` against procps-ng 4.0.4's, built from the |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wall-diff.sh` | Differential test: our `wall`, `write` and `mesg` against util-linux |
+| `scripts/watch-diff.sh` | Differential test: our watch against procps-ng 4.0.4's. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
@@ -582,4 +590,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_572 scripts._
+_580 scripts._

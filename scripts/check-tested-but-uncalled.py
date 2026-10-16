@@ -51,6 +51,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import lanec_scan  # noqa: E402  (needs the path above)
 import selftestflag  # noqa: E402  (needs the path above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -157,35 +158,19 @@ def strip_comments(line, in_block):
     return "".join(out), in_block
 
 
-EXT_TEST_MOD = re.compile(r"^\s*mod\s+([a-z_][a-z0-9_]*)\s*;")
-
-
 def external_test_files():
-    """Files that are wholly test code because their *parent* declared them so.
+    """Files that are wholly test code because another file declared them so.
 
     `#[cfg(test)] mod tests;` puts the whole of `tests.rs` under that
     attribute, but the attribute is in the parent file. `test_spans` looks for
     it inside the file it is reading, finds nothing, and concludes the file is
     production code -- so every test in `gui/desktop/src/session/tests.rs`
     counted as a production caller. That is exactly backwards: those are the
-    callers this script exists to see past.
+    callers this script exists to see past. `lanec_scan` asks
+    `rustlex.test_module_files`, the answer every gate shares, over this
+    run's scope.
     """
-    found = set()
-    for path in rust_files():
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        block = False
-        for n, raw in enumerate(lines):
-            code, block = strip_comments(raw, block)
-            if not TEST_ATTR.match(code):
-                continue
-            nxt = lines[n + 1] if n + 1 < len(lines) else ""
-            m = EXT_TEST_MOD.match(nxt)
-            if not m:
-                continue
-            stem = path.parent / m.group(1)
-            found.add(stem.with_suffix(".rs"))
-            found.add(stem / "mod.rs")
-    return found
+    return lanec_scan.external_test_files(ROOTS, ROOT)
 
 
 def every_root():

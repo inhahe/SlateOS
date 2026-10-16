@@ -4,7 +4,7 @@
 `check-config-turn-guards.py`), lane B (`quote-names.py`,
 `check-help-vs-parser.py`), lane C (`lanec_scan.py`,
 `check-tested-but-uncalled.py`) · **Filed:** 2026-10-10
-**Status:** lane A's half DONE on `lane-a-wip` 2026-10-12 -- `rustlex.test_module_files`, and `check-config-turn-guards.py` uses it; lanes B, C and E replace their copies. When filed: Nothing is blocked; each copy works for the tree as it is
+**Status:** lane A's half DONE on `lane-a-wip` 2026-10-12 -- `rustlex.test_module_files`, and `check-config-turn-guards.py` uses it; lane C's half DONE 2026-10-16 (below); lanes B and E replace their copies. When filed: Nothing is blocked; each copy works for the tree as it is
 today.
 
 ## In short
@@ -62,3 +62,16 @@ instead of going by name, and keeps a crate's `tests/` directory as test code
 to lanes B, C and E for `quote-names.py`, `check-help-vs-parser.py`,
 `lanec_scan.py`, `check-tested-but-uncalled.py`, `lossy-decode.py` and
 `key-survey.py`.
+
+### Lane C, 2026-10-16
+
+`lanec_scan.py`'s `external_test_files` now asks `rustlex.test_module_files`,
+crate by crate, and `check-tested-but-uncalled.py`'s is a call to it over the
+run's scope, so lane C has one copy left, which is the shared one. The first
+thing it changed was real: `gui/syntax/src/corpus.rs` is `#[cfg(test)]` with
+an `#[allow(...)]` between the attribute and `mod corpus;`, which the
+next-line rule never saw, so the field gate had been reading the corpus as
+production and holding eight of `gui/syntax/src/ffi.rs`'s fields in its
+baseline on the strength of it; the gate now says they are no longer found,
+and their lines are gone. Both gates' self-tests pass, and both pass on the
+tree.

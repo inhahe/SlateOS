@@ -39,8 +39,13 @@ Duplicating that into a second gate would mean a second chance to get each one
 wrong, and a fix that lands in one copy.
 """
 
+import collections
 import pathlib
 import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import rustlex  # noqa: E402  (needs the path above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -65,7 +70,6 @@ LANE_C_ROOTS = (
 NOT_SOURCE = {"target", "build", "scripts", "requests", "toolchain", "limine"}
 
 TEST_ATTR = re.compile(r"^\s*#\[(?:cfg\(test\)|test|tokio::test)\]")
-EXT_TEST_MOD = re.compile(r"^\s*mod\s+([a-z_][a-z0-9_]*)\s*;")
 
 
 def every_root(root=None):
@@ -366,20 +370,18 @@ def _self_test():
 
 
 def external_test_files(roots=LANE_C_ROOTS, root=None):
-    """Files that are wholly test code because their *parent* declared them so."""
-    found = set()
+    """Files that are wholly test code though `test_spans` cannot see it:
+    those a `#[cfg(test)]` declaration in another file loads, those whose own
+    `#![cfg(test)]` says so, and whatever those declare in turn.
+
+    `rustlex.test_module_files` answers it, crate by crate -- the one answer
+    every gate shares (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`)."""
+    crates = collections.defaultdict(dict)
     for path in rust_files(roots, root):
-        lines = code_lines(path)
-        for n, line in enumerate(lines):
-            if not TEST_ATTR.match(line):
-                continue
-            nxt = lines[n + 1] if n + 1 < len(lines) else ""
-            m = EXT_TEST_MOD.match(nxt)
-            if not m:
-                continue
-            stem = path.parent / m.group(1)
-            found.add(stem.with_suffix(".rs"))
-            found.add(stem / "mod.rs")
+        crates[crate_of(path.as_posix())][path] = path.read_text(encoding="utf-8", errors="replace")
+    found = set()
+    for texts in crates.values():
+        found |= rustlex.test_module_files(texts)
     return found
 
 

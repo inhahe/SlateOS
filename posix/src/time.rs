@@ -490,10 +490,10 @@ fn cpu_clock(op: u64, clk_id: ClockidT) -> Result<u64, i32> {
 /// [`cpu_clock`]'s reading of the kernel's answer `ret`: nanoseconds, a
 /// negated Linux errno, or the native "no such call".
 fn cpu_clock_answer(ret: i64) -> Result<u64, i32> {
-    if ret == errno::native::NO_SUCH_SYSCALL {
+    if crate::syscall::lacks_call(ret) {
         return Err(errno::EINVAL);
     }
-    u64::try_from(ret).map_err(|_| i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EINVAL))
+    u64::try_from(ret).map_err(|_| errno::door_errno(ret))
 }
 
 /// Nanoseconds as a `timespec`.
@@ -2842,7 +2842,7 @@ fn posix_timer(op: u64, a: u64, b: u64, c: u64, d: u64) -> Result<i64, i32> {
 
 /// [`posix_timer`]'s reading of the kernel's answer `ret` to `op`.
 fn posix_timer_answer(op: u64, ret: i64) -> Result<i64, i32> {
-    if ret == errno::native::NO_SUCH_SYSCALL {
+    if crate::syscall::lacks_call(ret) {
         return Err(if op == POSIX_TIMER_CREATE {
             errno::ENOSYS
         } else {
@@ -2852,7 +2852,7 @@ fn posix_timer_answer(op: u64, ret: i64) -> Result<i64, i32> {
     if ret >= 0 {
         Ok(ret)
     } else {
-        Err(i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EINVAL))
+        Err(errno::door_errno(ret))
     }
 }
 

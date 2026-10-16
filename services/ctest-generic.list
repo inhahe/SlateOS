@@ -20,3 +20,41 @@
 # another lane's boots should meet one of these failing for the first time.
 #
 # name           grants   seconds
+ctest-obstack    -        30
+ctest-argp       file     120
+ctest-aio        file     30
+ctest-cxx-throw  -        30
+ctest-eintr      -        120
+ctest-fortify-abort -        60
+ctest-printf-streams -        30
+ctest-pthread    -        120
+ctest-stdio      file     60
+ctest-sysvipc    -        30
+ctest-ucontext   -        30
+ctest-llvm-tools file     600
+ctest-sigpipe    -        30
+ctest-rusage     -        60
+ctest-pi-mutex   -        60
+ctest-system     file     60
+ctest-mmap-file  file     30
+ctest-resuid     creds    30
+ctest-groups     file,creds 30
+ctest-fallocate  file     30
+ctest-string     -        60
+ctest-gdb-runs   file     300
+ctest-mono-runs  file     300
+ctest-binutils-runs file     300
+ctest-gcc-runs   file     600
+ctest-unix-socket file     60
+ctest-shared-anon -        30
+ctest-cloexec-exec file     30
+ctest-record-locks file     30
+ctest-fsetfl-append file     60
+ctest-positional-io file     60
+ctest-timed-join -        30
+ctest-sigign-exec file     30
+ctest-renice     -        30
+ctest-affinity   -        30
+ctest-siginfo    -        30
+ctest-tmpfile    file     30
+ctest-seals      file     30

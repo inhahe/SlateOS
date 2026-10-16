@@ -206,18 +206,41 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("\\/") + os.sep)
 
 
-#: The Python installation, and the directories in it that are not its own.
-_INSTALL = sorted({p for p in (norm(sys.base_prefix), norm(sys.base_exec_prefix)) if p})
-_SITE = sorted({p for p in (norm(sysconfig.get_path(k)) for k in ("purelib", "platlib")) if p})
+def _stdlib_roots() -> list[str]:
+    """The directories of this interpreter's standard library: `stdlib` and
+    `platstdlib`, and on Windows the extension modules' `DLLs` beside them."""
+    paths = sysconfig.get_paths()
+    roots = {norm(paths.get("stdlib")), norm(paths.get("platstdlib"))}
+    if os.name == "nt":
+        roots.add(norm(os.path.join(sys.base_exec_prefix, "DLLs")))
+    return sorted(r for r in roots if r)
+
+
+#: This interpreter as a cache key names one (`gate-cache.py`'s
+#: `cache_key`): its version and its executable.
+INTERPRETER = f"{sys.version}|{norm(sys.executable)}"
+#: The interpreter the driver keys the run by (`GATE_CACHE_KEY_PYTHON`, read
+#: before tracing begins); a traced child under another one has it differ.
+_KEYED = os.environ.get("GATE_CACHE_KEY_PYTHON") == INTERPRETER
+_STDLIB = _stdlib_roots()
+#: Directories of packages, which change while the interpreter does not.
+_PACKAGE_DIRS = ("site-packages", "dist-packages")
 
 
 def is_installed_module(path: str) -> bool:
-    """Whether `path` is a file of the Python installation itself, which every
-    cache key pins already (`sys.version`, `sys.executable`): under its prefix
-    and not in site-packages, whose packages change while neither does. A
-    gate's run reads hundreds of them, and digesting each one at every miss
-    and stating it at every hit would be most of the cache's own cost."""
-    return any(_under(path, r) for r in _INSTALL) and not any(_under(path, s) for s in _SITE)
+    """Whether `path` is a file of the standard library of the interpreter the
+    cache key names (`sys.version`, `sys.executable`), which the key pins
+    already: under the stdlib's directories, in no `site-packages` or
+    `dist-packages` there (a package changes while the interpreter does not),
+    and read by that interpreter -- a traced child running another has its
+    library recorded. A gate's run reads hundreds of these, and digesting each
+    at every miss and stating it at every hit would be most of the cache's own
+    cost; anything else under the installation's prefix -- `/usr/share` on a
+    Linux system Python -- is an input like any file."""
+    if not _KEYED or not any(_under(path, r) for r in _STDLIB):
+        return False
+    folded = {part.casefold() for part in path.replace("\\", "/").split("/")}
+    return not any(d in folded for d in _PACKAGE_DIRS)
 
 
 def module_digest(entries: list | None, name: str) -> str | None:

@@ -281,6 +281,7 @@ def cases(fx: Fixture) -> None:
     reads = [os.path.basename(p).lower() for p in entry_for(fx, stdlib_user)["inputs"]["reads"]]
     check("a gate's own module is an input, an installed one (colorsys) is not",
           ("own_mod.py" in reads, "colorsys.py" in reads), (True, False))
+    installed_rule()
 
     probe = fx.path("data", "maybe.txt")
     asker = fx.checker(f"""
@@ -594,6 +595,40 @@ def cases(fx: Fixture) -> None:
         json.dump(e, fh)
     check("an entry from another UTC day is not trusted",
           "entries last one UTC day" in _lookup_reason(fx, e), True)
+
+
+def installed_rule() -> None:
+    """What is left out of a run's inputs as the installation's own: the
+    standard library of the interpreter the cache key names, and nothing else
+    -- not a package in a site-packages inside it, not a file elsewhere under
+    its prefix, not another interpreter's library. Asked of the tracer in a
+    child, as a traced process asks it, with and without the driver's word on
+    which interpreter the key names."""
+    import sysconfig
+    stdlib = sysconfig.get_paths()["stdlib"]
+    probe = textwrap.dedent(f"""
+        import os, sys, json
+        sys.path.insert(0, {HERE!r})
+        import gatecache_trace as gt
+        paths = [os.path.join({stdlib!r}, "colorsys.py"),
+                 os.path.join({stdlib!r}, "site-packages", "pkg", "__init__.py"),
+                 os.path.join(sys.base_prefix, "share", "x.txt")]
+        print(json.dumps([gt.is_installed_module(gt.norm(p)) for p in paths]))
+    """)
+
+    def ask(keyed: bool) -> list:
+        import gatecache_trace as gt
+        env = {k: v for k, v in os.environ.items() if k != "GATE_CACHE_KEY_PYTHON"}
+        if keyed:
+            env["GATE_CACHE_KEY_PYTHON"] = gt.INTERPRETER
+        p = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                           env=env)
+        return json.loads(p.stdout or "null")
+
+    check("only the keyed interpreter's stdlib is left out (not site-packages, not "
+          "elsewhere under its prefix)", ask(True), [True, False, False])
+    check("...and nothing is, for an interpreter the key does not name", ask(False),
+          [False, False, False])
 
 
 def entry_for(fx: Fixture, script: str) -> dict:

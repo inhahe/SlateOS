@@ -1702,20 +1702,17 @@ def pick_window():
 
     The names file is rewritten by every run, so any hardcoded pair is a
     standing bet on the suite's composition that this section has no reason to
-    be making. P23's registered pair is preferred when it is still valid --
-    it keeps the assertions legible and is the pair the section most wants to
-    protect -- and otherwise a valid pair is derived.
+    be making: the pair is derived from it. Without one the guard checks
+    nothing, and two names the suite has are used.
     """
-    preferred = ("io_ring_nop", "crypto_poly1305_1KiB")
-    if all(usable_bound(name) for name in preferred):
-        return preferred
+    fallback = ("io_ring_nop", "crypto_crc32c_4KiB")
     if NAMES is None:
-        return preferred
+        return fallback
     _, _, scored = NAMES
     usable = sorted(name for name in scored if usable_bound(name))
     if len(usable) >= 2:
         return usable[0], usable[-1]
-    return preferred
+    return fallback
 
 
 WINDOW_AT, WINDOW_UNTIL = pick_window()
@@ -1847,13 +1844,6 @@ if NAMES is not None:
         live_check_true("a window the names guard refuses leaves nothing either",
                         rc == 2 and left == [], f"rc={rc} left={left}; out={out[-300:]}")
 
-# PREDICTION P23's registered command (`--at io_ring_nop --until
-# crypto_poly1305_1KiB`) was checked here, verbatim, so that a pre-registered
-# experiment could not become unrunnable as published. P23 has run (RESULT P23,
-# 2026-08-19), and on 2026-10-16 its window's end went with the kernel's TLS
-# and SSH cryptography (decision 934): the command now ends on a benchmark the
-# kernel no longer has, and the names guard refuses it, rightly. The guard's
-# own checks above cover what this one did.
 
 # The two-namespace trap, from both sides, on names taken from the current file
 # rather than assumed. Both of these are *real benchmarks* that a reader could

@@ -204,7 +204,11 @@ def run_traced(argv: list[str], trace_dir: str) -> tuple[int, bytes]:
     # booted. Traced runs compile in memory instead; untraced ones keep the
     # bytecode cache warm.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["GATE_CACHE_INTERNAL_ENV"] = json.dumps(["PYTHONPATH", "PYTHONDONTWRITEBYTECODE"])
+    # The interpreter the key names (`cache_key`): the tracer leaves only its
+    # standard library out of the inputs (`gatecache_trace.is_installed_module`).
+    env["GATE_CACHE_KEY_PYTHON"] = gt.INTERPRETER
+    env["GATE_CACHE_INTERNAL_ENV"] = json.dumps(
+        ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "GATE_CACHE_KEY_PYTHON"])
     env["GATE_CACHE_INTERNAL_ROOTS"] = "[]"
     site = os.path.join(HERE, "gatecache_site")
     env["PYTHONPATH"] = site + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")

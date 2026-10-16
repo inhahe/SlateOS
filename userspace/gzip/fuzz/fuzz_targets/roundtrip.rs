@@ -11,5 +11,10 @@ fuzz_target!(|data: &[u8]| {
     let compressed = gzip::compress(input, level).expect("levels 1-9 cannot fail in memory");
     let (out, err, status) = gzip::zcat(&compressed, 0);
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&err));
-    assert!(out == input, "level {level}: {} bytes came back as {}", input.len(), out.len());
+    assert!(
+        out == input,
+        "level {level}: {} bytes came back as {}",
+        input.len(),
+        out.len()
+    );
 });

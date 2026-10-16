@@ -621,6 +621,62 @@ MUTATIONS += [
     ),
 ]
 
+# Three ways to end a program -- close, end without asking, force -- through
+# apps/processctl, as lane B's request asks (2026-10-16).
+ASKED = "a_program_is_closed_ended_or_forced_as_asked"
+CANNOT = "a_program_that_cannot_be_asked_says_how_to_end_it"
+
+MUTATIONS += [
+    (
+        "Delete forces rather than asks",
+        "                self.end_selected(Ending::Close);\n                EventResult::Consumed\n            }\n            Key::Delete if key.modifiers == Modifiers::shift() => {\n",
+        "                self.end_selected(Ending::Force);\n                EventResult::Consumed\n            }\n            Key::Delete if key.modifiers == Modifiers::shift() => {\n",
+        [ASKED],
+    ),
+    (
+        "Shift+Delete ends nothing",
+        "            Key::Delete if key.modifiers == Modifiers::shift() => {\n                self.end_selected(Ending::End);\n                EventResult::Consumed\n            }\n",
+        "",
+        [ASKED],
+    ),
+    (
+        "every ending in the menu forces",
+        "            ContextAction::End(ending) => self.end_pid(target_pid, ending),\n",
+        "            ContextAction::End(_) => self.end_pid(target_pid, Ending::Force),\n",
+        [ASKED],
+    ),
+    (
+        "a process is ended through the real system, whatever was given",
+        "        let sent = processctl::end(self.stopper, pid, ending);\n",
+        "        let sent = processctl::end(&SYSTEM, pid, ending);\n",
+        [ASKED, CANNOT],
+    ),
+    (
+        "an ending says nothing of what was done",
+        "        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);\n",
+        "        drop(sent);\n",
+        [CANNOT],
+    ),
+    (
+        "a signal goes through the real system, whatever was given",
+        "        let sent = processctl::signal(self.stopper, pid, sig);\n",
+        "        let sent = processctl::signal(&SYSTEM, pid, sig);\n",
+        [ASKED],
+    ),
+    (
+        "End Task forces",
+        "                ToolbarAction::EndProcess => self.end_selected(Ending::Close),\n",
+        "                ToolbarAction::EndProcess => self.end_selected(Ending::Force),\n",
+        [ASKED],
+    ),
+    (
+        "the menu's pause resumes",
+        "            ContextAction::Pause => self.signal_pid(target_pid, processctl::SIGSTOP, \"pause\"),\n",
+        "            ContextAction::Pause => self.signal_pid(target_pid, processctl::SIGCONT, \"pause\"),\n",
+        [ASKED],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "procexplorer", timeout=600, only=only))

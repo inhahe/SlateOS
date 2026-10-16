@@ -47,10 +47,12 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use processctl::Ending;
+use procstop::Asker;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -111,11 +113,14 @@ const ALERT_MAX_ROWS: usize = 5;
 /// Why a priority cannot be changed, in the words the status bar uses.
 const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
 
+/// The system processes are closed, ended and signalled through.
+static SYSTEM: procstop::System = procstop::System::SINGLE;
+
 /// The keys this window answers, as the F1 list shows them.
 ///
 /// The window had no list at all -- the one application in the tree that
-/// answered F1 with nothing -- so Delete, which ends the selected process, was
-/// a key a reader could only find by pressing it.
+/// answered F1 with nothing -- so Delete, which closes the selected program,
+/// was a key a reader could only find by pressing it.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1 / ?", "This list"),
     ("1-6", "Overview, Processes, CPU, Memory, Disk or Network"),
@@ -123,7 +128,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the processes"),
     ("PageUp / PageDown", "Move ten processes at a time"),
     ("Home / End", "First or last process"),
-    ("Delete", "End the selected process"),
+    ("Delete", "Ask the selected program to close"),
+    ("Shift+Delete", "End it without asking"),
     ("F5", "Refresh now"),
     ("Ctrl+F", "Jump to the filter box"),
     ("Ctrl+R", "Change how often it refreshes"),
@@ -510,7 +516,8 @@ impl RefreshInterval {
 /// Context menu action for a process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextAction {
-    Kill,
+    /// Close it, end it without asking, or force it to end.
+    End(Ending),
     Stop,
     Continue,
     SetHighPriority,
@@ -521,7 +528,7 @@ pub enum ContextAction {
 impl ContextAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Kill => "Kill Process",
+            Self::End(ending) => ending.label(),
             Self::Stop => "Stop Process",
             Self::Continue => "Continue Process",
             Self::SetHighPriority => "Set High Priority",
@@ -530,8 +537,10 @@ impl ContextAction {
         }
     }
 
-    pub const ALL: [ContextAction; 6] = [
-        ContextAction::Kill,
+    pub const ALL: [ContextAction; 8] = [
+        ContextAction::End(Ending::Close),
+        ContextAction::End(Ending::End),
+        ContextAction::End(Ending::Force),
         ContextAction::Stop,
         ContextAction::Continue,
         ContextAction::SetHighPriority,
@@ -619,7 +628,8 @@ pub struct SysMonitorState {
     /// stays the truth: reloaded whenever the text changes under it.
     filter_editor: TextInput,
     /// What Ctrl+C or Ctrl+X last took from the filter box, for Ctrl+V.
-    filter_clipboard: String,
+    /// The filter box's right-click menu, while it is up.
+    field_menu: fieldmenu::FieldMenu<()>,
     /// How wide the mark is round the box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -636,6 +646,10 @@ pub struct SysMonitorState {
     // -- Refresh --
     pub refresh_interval: RefreshInterval,
     pub ms_since_refresh: u64,
+
+    /// What processes are closed, ended and signalled through: the system,
+    /// or in a test a fake that records what it was asked.
+    stopper: &'static dyn Asker,
 
     // -- Status --
     pub status_message: String,
@@ -699,7 +713,7 @@ impl SysMonitorState {
             filter_text: String::new(),
             filter_focused: false,
             filter_editor: textline::field_holding("", FILTER_CAPACITY),
-            filter_clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             context_menu: None,
             show_help: false,
@@ -707,6 +721,7 @@ impl SysMonitorState {
             active_alerts: Vec::new(),
             refresh_interval: RefreshInterval::TwoSeconds,
             ms_since_refresh: 0,
+            stopper: &SYSTEM,
             status_message: String::new(),
             proc_unreadable: false,
         }
@@ -1008,36 +1023,55 @@ impl SysMonitorState {
     // Actions
     // ========================================================================
 
-    /// Kill the selected process.
-    pub fn kill_selected(&mut self) {
-        self.signal_selected(libcall::SIGKILL, "kill");
+    /// End the selected process the way `ending` says: ask it to close,
+    /// end it without asking, or force it.
+    pub fn end_selected(&mut self, ending: Ending) {
+        if let Some(pid) = self.selected_pid() {
+            self.end_pid(pid, ending);
+        }
     }
 
     /// Stop (pause) the selected process.
     pub fn stop_selected(&mut self) {
-        self.signal_selected(libcall::SIGSTOP, "stop");
+        if let Some(pid) = self.selected_pid() {
+            self.signal_pid(pid, processctl::SIGSTOP, "stop");
+        }
     }
 
     /// Continue (resume) the selected process.
     pub fn continue_selected(&mut self) {
-        self.signal_selected(libcall::SIGCONT, "continue");
+        if let Some(pid) = self.selected_pid() {
+            self.signal_pid(pid, processctl::SIGCONT, "continue");
+        }
     }
 
-    /// Signal whatever row is selected.
-    fn signal_selected(&mut self, sig: i32, verb: &str) {
-        let Some(sel) = self.selected_index else {
-            return;
-        };
-        let Some(&proc_idx) = self.visible_indices.get(sel) else {
-            return;
-        };
-        let Some(pid) = self.processes.get(proc_idx).map(|p| p.pid) else {
-            return;
-        };
-        self.signal_pid(pid, sig, verb);
+    /// The PID of the row selected, if one is.
+    fn selected_pid(&self) -> Option<u32> {
+        let proc_idx = *self.visible_indices.get(self.selected_index?)?;
+        self.processes.get(proc_idx).map(|p| p.pid)
     }
 
-    /// Signal a process named by pid, from the toolbar or the right-click menu.
+    /// End process `pid` the way `ending` says, from a key or the
+    /// right-click menu, and say what was done (`processctl`).
+    ///
+    /// The row is not touched, for the reason [`Self::signal_pid`] gives.
+    fn end_pid(&mut self, pid: u32, ending: Ending) {
+        let Some(name) = self.process_name(pid) else {
+            return;
+        };
+        let sent = processctl::end(self.stopper, pid, ending);
+        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);
+    }
+
+    /// The name of process `pid`, as the list shows it.
+    fn process_name(&self, pid: u32) -> Option<String> {
+        self.processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
+    }
+
+    /// Signal a process named by pid, from a key or the right-click menu.
     ///
     /// **The row is not touched, and that is the whole point of this
     /// function.** These three controls used to report the act and then make
@@ -1049,7 +1083,8 @@ impl SysMonitorState {
     ///
     /// Now that a real signal is sent the temptation is stronger and the rule
     /// is unchanged: a signal that was accepted is not a process that has
-    /// exited. `SIGTERM` is catchable, `SIGSTOP` takes effect when the kernel
+    /// exited, and a program asked to close may decline. `SIGTERM` is
+    /// catchable, `SIGSTOP` takes effect when the kernel
     /// schedules it, and even `SIGKILL` leaves the task in the table until it
     /// is reaped. The list is rebuilt from `/proc` and shows the kernel's
     /// answer rather than ours.
@@ -1061,60 +1096,11 @@ impl SysMonitorState {
     /// repair on its own siblings. Two call sites of one function cannot
     /// drift; three copies of one behaviour did.
     fn signal_pid(&mut self, pid: u32, sig: i32, verb: &str) {
-        let Some(name) = self
-            .processes
-            .iter()
-            .find(|p| p.pid == pid)
-            .map(|p| p.name.clone())
-        else {
+        let Some(name) = self.process_name(pid) else {
             return;
         };
-        self.status_message = Self::signal_outcome(&name, pid, verb, Self::send(pid, sig));
-    }
-
-    /// `libcall::kill` with the pid widened, or `EINVAL` if it does not fit.
-    ///
-    /// `i32::try_from` rather than `as`: a `u32` above `i32::MAX` wraps to a
-    /// negative, which `libcall::kill` refuses as a broadcast -- so the
-    /// failure would be reported correctly by luck rather than by intent.
-    fn send(pid: u32, sig: i32) -> Result<(), i32> {
-        let Ok(pid) = i32::try_from(pid) else {
-            return Err(libcall::EINVAL);
-        };
-        libcall::kill(pid, sig)
-    }
-
-    /// What to show the operator for a signal that was or was not delivered.
-    ///
-    /// Separated from the call so the mapping is testable: on this host the
-    /// signalling arm is `cfg(unix)` and every call answers `ENOSYS`, so a
-    /// test going through `send` could exercise one branch and report coverage
-    /// of a mapping it had never run.
-    ///
-    /// `ESRCH` and `EPERM` are told apart on purpose -- it is already gone,
-    /// you are not allowed -- because the operator's next action differs
-    /// completely between them.
-    ///
-    /// `apps/procexplorer` carries the same pair of functions for the same
-    /// reason: two windows onto one syscall, not one shared helper, because
-    /// they share no crate.
-    fn signal_outcome(name: &str, pid: u32, verb: &str, r: Result<(), i32>) -> String {
-        match r {
-            // Not "Killed X". The signal was accepted; whether the process
-            // exits is the kernel's business and the next refresh's news.
-            Ok(()) => format!("Sent {verb} to {name} (PID {pid})"),
-            Err(libcall::ESRCH) => {
-                format!("{name} (PID {pid}) is already gone -- nothing to {verb}")
-            }
-            Err(libcall::EPERM) => format!("Not permitted to {verb} {name} (PID {pid})"),
-            Err(libcall::ENOSYS) => format!(
-                "{name} (PID {pid}) was not sent {verb}: this system cannot signal processes"
-            ),
-            Err(libcall::EINVAL) => {
-                format!("{name} (PID {pid}) is not a process this can signal")
-            }
-            Err(e) => format!("{name} (PID {pid}) was not sent {verb}: error {e}"),
-        }
+        let sent = processctl::signal(self.stopper, pid, sig);
+        self.status_message = processctl::signal_outcome(&name, pid, verb, sent);
     }
 
     /// May this process be signalled right now?
@@ -1124,7 +1110,7 @@ impl SysMonitorState {
     /// alternative is an enabled button that fails, and a button that fails is
     /// how the operator finds out.
     pub fn can_signal(&self, pid: u32) -> bool {
-        Self::send(pid, 0).is_ok()
+        processctl::signal(self.stopper, pid, 0).is_ok()
     }
 
     /// Set sort column; toggle direction if same column clicked again.
@@ -1160,6 +1146,19 @@ impl SysMonitorState {
 
     /// Handle an input event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The filter box's right-click menu takes the presses, the keys, the
+        // pointer and the wheel while it is up, as any menu does -- a row
+        // chosen, a press outside putting it away and reaching nothing
+        // under it. Ticks go on to the refresh.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -1169,6 +1168,9 @@ impl SysMonitorState {
                 EventResult::Consumed
             }
             Event::Tick { elapsed_ms } => {
+                // The menu's dimmed rows say why while the pointer rests on
+                // one; every tick is a frame anyway.
+                self.field_menu.tick(*elapsed_ms);
                 self.ms_since_refresh = self.ms_since_refresh.saturating_add(*elapsed_ms);
                 if self.ms_since_refresh >= self.refresh_interval.ms() {
                     self.ms_since_refresh = 0;
@@ -1266,8 +1268,15 @@ impl SysMonitorState {
                 EventResult::Consumed
             }
             // Process actions
+            // Close is the gentle default, as Windows' "End task" is; a
+            // program that cannot be asked is ended without asking, and
+            // forcing one is the menu's.
             Key::Delete if key.modifiers == Modifiers::NONE => {
-                self.kill_selected();
+                self.end_selected(Ending::Close);
+                EventResult::Consumed
+            }
+            Key::Delete if key.modifiers == Modifiers::shift() => {
+                self.end_selected(Ending::End);
                 EventResult::Consumed
             }
             Key::F5 => {
@@ -1326,9 +1335,9 @@ impl SysMonitorState {
     /// key, so Delete never reaches the process list behind it.
     ///
     /// Escape and Enter, plain, give the keyboard back; every other key is
-    /// the box's editor's (`textline::apply_key`) -- the caret keys,
-    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, which knows a
-    /// command from AltGr. The box typed only ASCII -- `ü` and `ż` were
+    /// the box's editor's (`textline::apply_key_on_clipboard`) -- the caret
+    /// keys, Backspace and Delete, Ctrl+A, C, X and V on the program's
+    /// clipboard, and typing, which knows a command from AltGr. The box typed only ASCII -- `ü` and `ż` were
     /// refused, though process names hold them -- and had no caret:
     /// Backspace from the end was its only edit.
     fn handle_filter_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -1336,21 +1345,52 @@ impl SysMonitorState {
             self.filter_focused = false;
             return EventResult::Consumed;
         }
+        self.sync_filter_editor();
+        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);
+        self.take_filter_edit();
+        EventResult::Consumed
+    }
+
+    /// Load the filter box's editor from `filter_text` when that changed
+    /// underneath it.
+    fn sync_filter_editor(&mut self) {
         if self.filter_editor.text() != self.filter_text {
             self.filter_editor.set_text(&self.filter_text);
         }
-        let edit = textline::apply_key(
-            &mut self.filter_editor,
-            key,
-            &self.filter_clipboard,
-            FILTER_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.filter_clipboard = copied;
-        }
+    }
+
+    /// What the editor holds is the filter: the list follows a change.
+    fn take_filter_edit(&mut self) {
         if self.filter_editor.text() != self.filter_text {
             self.filter_text = self.filter_editor.text().to_owned();
             self.rebuild_visible_list();
+        }
+    }
+
+    /// A right press at `(x, y)`: over the filter box, its menu where the
+    /// press landed, the box given the keyboard, its caret and selection
+    /// left as they are, so Cut and Copy act on what the user selected
+    /// (design-decisions 1454). Anywhere else, `false`.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> bool {
+        if self.show_help || self.active_tab != Tab::Processes || !self.filter_rect().contains(x, y)
+        {
+            return false;
+        }
+        self.context_menu = None;
+        self.filter_focused = true;
+        self.sync_filter_editor();
+        let viewport = (self.window_width as f32, self.window_height as f32);
+        self.field_menu
+            .open((), self.filter_editor.edit_menu(), x, y, viewport);
+        true
+    }
+
+    /// The menu's row `id`, chosen: done to the filter box as its key
+    /// would be, the list following a change.
+    fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
+        self.sync_filter_editor();
+        if self.filter_editor.edit_command(id) == KeyEdit::Changed {
+            self.take_filter_edit();
         }
         EventResult::Consumed
     }
@@ -1516,6 +1556,9 @@ impl SysMonitorState {
             }
 
             MouseEventKind::Press(MouseButton::Right) => {
+                if self.open_field_menu(mx, my) {
+                    return EventResult::Consumed;
+                }
                 if self.active_tab == Tab::Processes {
                     // The status bar used to reach this: it is drawn over the
                     // foot of the panel, the hit test ran to the bottom of the
@@ -1590,10 +1633,10 @@ impl SysMonitorState {
         // The lookup moved into `signal_pid`, the only arm that needed it.
         // Left here it was a write with no reader.
         match action {
-            ContextAction::Kill => self.signal_pid(target_pid, libcall::SIGKILL, "kill"),
-            ContextAction::Stop => self.signal_pid(target_pid, libcall::SIGSTOP, "stop"),
+            ContextAction::End(ending) => self.end_pid(target_pid, ending),
+            ContextAction::Stop => self.signal_pid(target_pid, processctl::SIGSTOP, "stop"),
             ContextAction::Continue => {
-                self.signal_pid(target_pid, libcall::SIGCONT, "continue");
+                self.signal_pid(target_pid, processctl::SIGCONT, "continue");
             }
             ContextAction::SetHighPriority
             | ContextAction::SetNormalPriority
@@ -1744,6 +1787,7 @@ impl SysMonitorState {
 
         // Context menu overlay
         self.render_context_menu(&mut tree);
+        tree.commands.extend(self.field_menu.render(&self.palette));
 
         // The list of keys over everything, the menu included: it is the one
         // thing on screen a reader asked for explicitly.
@@ -3118,7 +3162,7 @@ impl SysMonitorState {
                 );
             }
 
-            let text_color = if *action == ContextAction::Kill {
+            let text_color = if *action == ContextAction::End(Ending::Force) {
                 self.palette.red
             } else {
                 self.palette.text
@@ -3733,7 +3777,12 @@ impl App for SysMonitorState {
     /// It reads the *current* setting, so cycling the refresh rate in the app
     /// changes the clock it is given.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(self.refresh_interval.ms()))
+        let refresh = Duration::from_millis(self.refresh_interval.ms());
+        Some(
+            self.field_menu
+                .due_in()
+                .map_or(refresh, |ms| refresh.min(Duration::from_millis(ms))),
+        )
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4221,7 +4270,7 @@ mod tests {
             "Ctrl+F left the caret where it was"
         );
 
-        m.filter_clipboard = "x".repeat(FILTER_CAPACITY + 5);
+        guitk::clipboard::set_text(&"x".repeat(FILTER_CAPACITY + 5));
         m.handle_event(&filter_key(Key::A, "", Modifiers::ctrl()));
         m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
         assert_eq!(
@@ -4494,14 +4543,19 @@ mod tests {
 
     #[test]
     fn test_context_action_labels() {
-        assert_eq!(ContextAction::Kill.label(), "Kill Process");
+        assert_eq!(ContextAction::End(Ending::Close).label(), "Close");
+        assert_eq!(
+            ContextAction::End(Ending::End).label(),
+            "End Without Asking"
+        );
+        assert_eq!(ContextAction::End(Ending::Force).label(), "Force End");
         assert_eq!(ContextAction::Stop.label(), "Stop Process");
         assert_eq!(ContextAction::Continue.label(), "Continue Process");
     }
 
     #[test]
     fn test_context_action_all_count() {
-        assert_eq!(ContextAction::ALL.len(), 6);
+        assert_eq!(ContextAction::ALL.len(), 8);
     }
 
     // -- AlertSeverity tests --
@@ -4576,7 +4630,9 @@ mod tests {
         );
 
         for act in [
-            SysMonitorState::kill_selected,
+            (|s: &mut SysMonitorState| s.end_selected(Ending::Close)) as fn(&mut SysMonitorState),
+            |s| s.end_selected(Ending::End),
+            |s| s.end_selected(Ending::Force),
             SysMonitorState::stop_selected,
             SysMonitorState::continue_selected,
         ] {
@@ -4596,7 +4652,9 @@ mod tests {
         }
 
         for action in [
-            ContextAction::Kill,
+            ContextAction::End(Ending::Close),
+            ContextAction::End(Ending::End),
+            ContextAction::End(Ending::Force),
             ContextAction::Stop,
             ContextAction::Continue,
         ] {
@@ -4610,54 +4668,108 @@ mod tests {
         }
     }
 
-    /// The message is what the kernel said, and the failures are told apart.
-    ///
-    /// Through `signal_outcome` rather than a real `kill`: on this host the
-    /// signalling arm is `cfg(unix)` and every call answers ENOSYS, so a test
-    /// going through `send` would exercise one branch and report coverage of a
-    /// mapping it had never run.
-    #[test]
-    fn a_signal_is_reported_as_what_the_kernel_said() {
-        let cases: [(Result<(), i32>, &str, &str); 6] = [
-            (Ok(()), "Sent kill to bash (PID 77)", "an accepted signal"),
-            (
-                Err(libcall::ESRCH),
-                "already gone",
-                "a process that exited first",
-            ),
-            (
-                Err(libcall::EPERM),
-                "Not permitted",
-                "a process not ours to signal",
-            ),
-            (
-                Err(libcall::ENOSYS),
-                "cannot signal processes",
-                "a system without signals",
-            ),
-            (
-                Err(libcall::EINVAL),
-                "not a process this can signal",
-                "a pid that is not one",
-            ),
-            (Err(4242), "error 4242", "an errno with no name here"),
-        ];
-        for (result, expected, what) in cases {
-            let msg = SysMonitorState::signal_outcome("bash", 77, "kill", result);
-            assert!(
-                msg.contains(expected),
-                "{what}: expected {expected:?} in {msg:?}"
-            );
-            assert!(
-                msg.contains("bash") && msg.contains("77"),
-                "{what}: the message does not name the process: {msg:?}"
-            );
-        }
+    /// A monitor whose processes are closed, ended and signalled through a
+    /// system that records what it was asked and does nothing, with the row
+    /// at the top selected; that row's PID answers requests when `answers`.
+    fn on_a_fake_system(answers: bool) -> (SysMonitorState, &'static procstop::fake::Fake, u32) {
+        let mut s = SysMonitorState::new();
+        s.load_demo_data();
+        s.selected_index = Some(0);
+        let row = s.visible_indices.first().copied().unwrap_or(0);
+        let pid = s.processes.get(row).map_or(0, |p| p.pid);
+        let answering: Vec<i32> = if answers {
+            vec![i32::try_from(pid).unwrap()]
+        } else {
+            Vec::new()
+        };
+        let sys: &'static procstop::fake::Fake =
+            Box::leak(Box::new(procstop::fake::fake(&answering, &[])));
+        s.stopper = sys;
+        (s, sys, pid)
+    }
 
-        let ok = SysMonitorState::signal_outcome("bash", 77, "continue", Ok(()));
+    /// **Three ways to end a program, as the operator decided** (B-Q22,
+    /// design-decisions 1072): Delete asks it to close -- it may ask to save
+    /// first -- Shift+Delete ends it without asking, and the menu's Force End
+    /// sends `SIGKILL`. Delete sent `SIGKILL`, the only way it had, so a
+    /// program it stopped never got to save anything.
+    #[test]
+    fn a_program_is_closed_ended_or_forced_as_asked() {
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let (mut s, sys, pid) = on_a_fake_system(true);
+        let p = i32::try_from(pid).unwrap();
+        s.handle_event(&key(Key::Delete, Modifiers::NONE));
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("close", p, 0)),
+            "Delete did not ask it to close"
+        );
         assert!(
-            !ok.starts_with("Resumed") && !ok.starts_with("Killed"),
-            "claimed the act, when all that happened was a signal: {ok}"
+            s.status_message.starts_with("Asked ") && s.status_message.contains("to close"),
+            "{}",
+            s.status_message
+        );
+        s.handle_event(&key(Key::Delete, Modifiers::shift()));
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("terminate", p, 0)),
+            "Shift+Delete did not ask it to end"
+        );
+        s.execute_context_action(ContextAction::End(Ending::Force), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, procstop::SIGKILL)),
+            "Force End did not send SIGKILL"
+        );
+        s.execute_context_action(ContextAction::Stop, pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, processctl::SIGSTOP))
+        );
+        s.execute_context_action(ContextAction::Continue, pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, processctl::SIGCONT))
+        );
+    }
+
+    /// **A program that cannot be asked to close says how to end it**, and is
+    /// sent nothing; ended without asking, it is sent `SIGTERM`.
+    #[test]
+    fn a_program_that_cannot_be_asked_says_how_to_end_it() {
+        let (mut s, sys, pid) = on_a_fake_system(false);
+        let p = i32::try_from(pid).unwrap();
+        s.end_selected(Ending::Close);
+        assert!(
+            s.status_message
+                .ends_with("cannot be asked to close -- End Without Asking stops it"),
+            "{}",
+            s.status_message
+        );
+        assert!(
+            !sys.did
+                .borrow()
+                .iter()
+                .any(|&(_, _, sig)| sig == procstop::SIGTERM || sig == procstop::SIGKILL),
+            "a close sent a signal: {:?}",
+            sys.did.borrow()
+        );
+        s.end_selected(Ending::End);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, procstop::SIGTERM))
+        );
+        assert!(
+            s.status_message.starts_with("Sent end to "),
+            "{}",
+            s.status_message
         );
     }
 
@@ -4679,8 +4791,17 @@ mod tests {
 
         for (act, action) in [
             (
-                SysMonitorState::kill_selected as fn(&mut SysMonitorState),
-                ContextAction::Kill,
+                (|s: &mut SysMonitorState| s.end_selected(Ending::Close))
+                    as fn(&mut SysMonitorState),
+                ContextAction::End(Ending::Close),
+            ),
+            (
+                |s| s.end_selected(Ending::End),
+                ContextAction::End(Ending::End),
+            ),
+            (
+                |s| s.end_selected(Ending::Force),
+                ContextAction::End(Ending::Force),
             ),
             (SysMonitorState::stop_selected, ContextAction::Stop),
             (SysMonitorState::continue_selected, ContextAction::Continue),
@@ -6044,6 +6165,66 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    /// **The filter box has a right-click menu** -- Cut, Copy, Paste, Delete
+    /// and Select all, on the program's clipboard, which its keys use too --
+    /// that gives the box the keyboard and takes the keys while it is up;
+    /// the list follows a paste.
+    #[test]
+    fn the_filter_boxs_right_click_menu_edits_the_filter() {
+        use guitk::editmenu::EditCommand;
+        let press = |m: &mut SysMonitorState, x: f32, y: f32, button: MouseButton| {
+            m.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        };
+        let mut m = SysMonitorState::new();
+        m.load_demo_data();
+        m.active_tab = Tab::Processes;
+        let r = m.filter_rect();
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(
+            press(&mut m, x, y, MouseButton::Right),
+            EventResult::Consumed
+        );
+        assert!(
+            m.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        assert!(m.filter_focused, "the box was not given the keyboard");
+        assert!(m.context_menu.is_none(), "the process menu came up too");
+        m.handle_event(&Event::Key(KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("x"),
+        }));
+        assert_eq!(m.filter_text, "", "a key reached the box through the menu");
+
+        // Put away, by Escape or by the key, and asked for again.
+        m.handle_event(&Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        guitk::clipboard::set_text("init");
+        press(&mut m, x, y, MouseButton::Right);
+        assert!(m.field_menu.is_up(), "control: the menu is up again");
+        assert!(
+            m.field_menu.row_lit(EditCommand::Paste) == Some(true),
+            "control: Paste is offered"
+        );
+        let (px, py) = m.field_menu.row_middle(EditCommand::Paste).expect("Paste");
+        press(&mut m, px, py, MouseButton::Left);
+        assert_eq!(m.filter_text, "init", "Paste did not paste");
+        assert!(
+            !m.visible_indices.is_empty() && m.visible_indices.len() < m.processes.len(),
+            "the list did not follow the paste"
         );
     }
 }

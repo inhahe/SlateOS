@@ -30,6 +30,8 @@ use guitk::wheel;
 use oswindow::app::{self, App, PickRefused, PickRequest, Response};
 use oswindow::{PickOutcome, PickedWindow};
 use pathtext::ShowPath;
+use processctl::Ending;
+use procstop::Asker;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -488,7 +490,8 @@ pub enum ViewMode {
 /// Context menu action for right-click on a process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextAction {
-    Kill,
+    /// Close it, end it without asking, or force it to end.
+    End(Ending),
     Pause,
     Resume,
     ChangePriority,
@@ -499,7 +502,7 @@ impl ContextAction {
     /// Display label.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Kill => "Kill Process",
+            Self::End(ending) => ending.label(),
             Self::Pause => "Pause",
             Self::Resume => "Resume",
             Self::ChangePriority => "Change Priority...",
@@ -508,8 +511,10 @@ impl ContextAction {
     }
 
     /// All menu items in order.
-    pub const ALL: [ContextAction; 5] = [
-        ContextAction::Kill,
+    pub const ALL: [ContextAction; 7] = [
+        ContextAction::End(Ending::Close),
+        ContextAction::End(Ending::End),
+        ContextAction::End(Ending::Force),
         ContextAction::Pause,
         ContextAction::Resume,
         ContextAction::ChangePriority,
@@ -574,9 +579,12 @@ pub struct ContextMenu {
 // Application state
 // ============================================================================
 
+/// The system processes are closed, ended and signalled through.
+static SYSTEM: procstop::System = procstop::System::SINGLE;
+
 /// The keys this window answers, as a reader sees them.
 ///
-/// `Delete` is why this card exists: it kills the selected process, with no
+/// `Delete` is why this card exists: it ends the selected program, with no
 /// dialog and nothing to undo it, and the window said so nowhere.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
@@ -586,7 +594,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("V", "Switch between the flat list and the tree"),
     ("F5", "Refresh now"),
     ("Ctrl+F", "Jump to the filter box"),
-    ("Delete", "Kill the selected process"),
+    ("Delete", "Ask the selected program to close"),
+    ("Shift+Delete", "End it without asking"),
     ("Ctrl+N", "Run a new task"),
     ("Ctrl+I", "Pick a window to find its program"),
 ];
@@ -919,6 +928,9 @@ pub struct ProcessExplorerState {
 
     // -- Status bar ----------------------------------------------------------
     /// Status bar message.
+    /// What processes are closed, ended and signalled through: the system,
+    /// or in a test a fake that records what it was asked.
+    stopper: &'static dyn Asker,
     pub status_message: String,
     /// Whether the last refresh could not read `/proc` at all.
     ///
@@ -986,6 +998,7 @@ impl ProcessExplorerState {
             net_out_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             refresh_interval: RefreshInterval::TwoSeconds,
             ms_since_refresh: 0,
+            stopper: &SYSTEM,
             status_message: String::new(),
             proc_unreadable: false,
         }
@@ -1300,9 +1313,37 @@ impl ProcessExplorerState {
     // Actions
     // ========================================================================
 
-    /// Kill the selected process.
-    pub fn kill_selected(&mut self) {
-        self.signal_selected(libcall::SIGKILL, "kill");
+    /// End the selected process the way `ending` says: ask it to close,
+    /// end it without asking, or force it.
+    pub fn end_selected(&mut self, ending: Ending) {
+        if let Some(pid) = self.selected_pid() {
+            self.end_pid(pid, ending);
+        }
+    }
+
+    /// The PID of the row selected, if one is.
+    fn selected_pid(&self) -> Option<u32> {
+        let proc_idx = *self.visible_indices.get(self.selected_index?)?;
+        self.processes.get(proc_idx).map(|p| p.pid)
+    }
+
+    /// End process `pid` the way `ending` says, from the toolbar, a key or
+    /// the right-click menu, and say what was done (`processctl`). The row
+    /// is not touched, for the reason [`Self::signal_selected`] gives.
+    fn end_pid(&mut self, pid: u32, ending: Ending) {
+        let Some(name) = self.process_name(pid) else {
+            return;
+        };
+        let sent = processctl::end(self.stopper, pid, ending);
+        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);
+    }
+
+    /// The name of process `pid`, as the list shows it.
+    fn process_name(&self, pid: u32) -> Option<String> {
+        self.processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
     }
 
     /// Send `sig` to the selected process and report what the kernel said.
@@ -1313,84 +1354,27 @@ impl ProcessExplorerState {
     /// that a real signal is sent, the temptation is stronger and the rule is
     /// the same: the list is rebuilt from `/proc` on the next refresh, and
     /// what it shows then is the kernel's answer rather than ours. A signal
-    /// that was accepted is not a process that has exited -- `SIGTERM` is
-    /// catchable, and even `SIGKILL` leaves the task visible until it is
-    /// reaped.
+    /// that was accepted is not a process that has exited, and a program
+    /// asked to close may decline -- `SIGTERM` is catchable, and even
+    /// `SIGKILL` leaves the task visible until it is reaped.
     fn signal_selected(&mut self, sig: i32, verb: &str) {
-        let Some(sel) = self.selected_index else {
-            return;
-        };
-        let Some(&proc_idx) = self.visible_indices.get(sel) else {
-            return;
-        };
-        let Some(pid) = self.processes.get(proc_idx).map(|p| p.pid) else {
-            return;
-        };
-        self.signal_pid(pid, sig, verb);
-    }
-
-    /// Signal a process named by pid, from the toolbar or the right-click menu.
-    ///
-    /// **One function, because there are two doors to it.** The toolbar and the
-    /// menu are the same three controls, and when they were repaired the first
-    /// time only the toolbar was: `kill_selected` stopped claiming a kill while
-    /// the menu two lines away went on claiming one, and it took a scanner to
-    /// notice. Two call sites of one function cannot drift; two copies of one
-    /// behaviour did, within the hour.
-    fn signal_pid(&mut self, pid: u32, sig: i32, verb: &str) {
-        let Some(name) = self
-            .processes
-            .iter()
-            .find(|p| p.pid == pid)
-            .map(|p| p.name.clone())
-        else {
-            return;
-        };
-        self.status_message = Self::signal_outcome(&name, pid, verb, Self::send(pid, sig));
-    }
-
-    /// `libcall::kill` with the pid widened, or `EINVAL` if it does not fit.
-    ///
-    /// `ProcessInfo::pid` is a `u32` and `kill` takes an `i32`. A value above
-    /// `i32::MAX` is not a pid this system can name, and `as` would wrap it
-    /// into a negative -- which `libcall::kill` refuses as a broadcast, so the
-    /// failure would be reported correctly by luck rather than by intent.
-    fn send(pid: u32, sig: i32) -> Result<(), i32> {
-        let Ok(pid) = i32::try_from(pid) else {
-            return Err(libcall::EINVAL);
-        };
-        libcall::kill(pid, sig)
-    }
-
-    /// What to show the operator for a signal that was or was not delivered.
-    ///
-    /// Separated from the call so the mapping is testable: on this host the
-    /// `kill` arm is `cfg(unix)` and every call answers `ENOSYS`, so a test
-    /// that went through `send` could only ever exercise one branch.
-    ///
-    /// The errors are told apart on purpose. A manager that folds them into
-    /// one "could not signal" makes the two most useful facts -- it is already
-    /// gone, you are not allowed -- indistinguishable, and the operator's next
-    /// action differs completely between them.
-    fn signal_outcome(name: &str, pid: u32, verb: &str, r: Result<(), i32>) -> String {
-        match r {
-            // Not "Killed X". The signal was accepted; whether the process
-            // exits is the kernel's business and the next refresh's news.
-            Ok(()) => format!("Sent {verb} to {name} (PID {pid})"),
-            Err(libcall::ESRCH) => {
-                format!("{name} (PID {pid}) is already gone -- nothing to {verb}")
-            }
-            Err(libcall::EPERM) => {
-                format!("Not permitted to {verb} {name} (PID {pid})")
-            }
-            Err(libcall::ENOSYS) => format!(
-                "{name} (PID {pid}) was not sent {verb}: this system cannot signal processes"
-            ),
-            Err(libcall::EINVAL) => {
-                format!("{name} (PID {pid}) is not a process this can signal")
-            }
-            Err(e) => format!("{name} (PID {pid}) was not sent {verb}: error {e}"),
+        if let Some(pid) = self.selected_pid() {
+            self.signal_pid(pid, sig, verb);
         }
+    }
+
+    /// Signal a process named by pid, from a key or the right-click menu.
+    ///
+    /// **One function, because there are two doors to it**, as [`Self::end_pid`]
+    /// is for ending one: the keys and the menu are the same controls, and two
+    /// call sites of one function cannot drift where two copies of one
+    /// behaviour did.
+    fn signal_pid(&mut self, pid: u32, sig: i32, verb: &str) {
+        let Some(name) = self.process_name(pid) else {
+            return;
+        };
+        let sent = processctl::signal(self.stopper, pid, sig);
+        self.status_message = processctl::signal_outcome(&name, pid, verb, sent);
     }
 
     /// May this process be signalled right now?
@@ -1400,17 +1384,17 @@ impl ProcessExplorerState {
     /// alternative is an enabled button that fails, and a button that fails is
     /// how the operator finds out.
     pub fn can_signal(&self, pid: u32) -> bool {
-        Self::send(pid, 0).is_ok()
+        processctl::signal(self.stopper, pid, 0).is_ok()
     }
 
     /// Pause (stop) the selected process.
     pub fn pause_selected(&mut self) {
-        self.signal_selected(libcall::SIGSTOP, "pause");
+        self.signal_selected(processctl::SIGSTOP, "pause");
     }
 
     /// Resume the selected process.
     pub fn resume_selected(&mut self) {
-        self.signal_selected(libcall::SIGCONT, "resume");
+        self.signal_selected(processctl::SIGCONT, "resume");
     }
 
     /// Set sort column. If the same column is clicked again, toggle direction.
@@ -1555,9 +1539,15 @@ impl ProcessExplorerState {
             return EventResult::Ignored;
         }
         match key.key {
-            // Delete = kill selected process
+            // Close is the gentle default, as Windows' "End task" is; a
+            // program that cannot be asked is ended without asking, and
+            // forcing one is the menu's.
             Key::Delete if key.modifiers == Modifiers::NONE => {
-                self.kill_selected();
+                self.end_selected(Ending::Close);
+                EventResult::Consumed
+            }
+            Key::Delete if key.modifiers == Modifiers::shift() => {
+                self.end_selected(Ending::End);
                 EventResult::Consumed
             }
             // F5 = refresh
@@ -1942,7 +1932,7 @@ impl ProcessExplorerState {
     fn handle_toolbar_click(&mut self, mx: f32, my: f32) -> EventResult {
         if let Some(action) = toolbar_action_at(mx, my) {
             match action {
-                ToolbarAction::EndProcess => self.kill_selected(),
+                ToolbarAction::EndProcess => self.end_selected(Ending::Close),
                 ToolbarAction::NewTask => self.open_run_box(),
                 ToolbarAction::Refresh => self.refresh(),
                 ToolbarAction::ToggleView => self.toggle_view_mode(),
@@ -2270,14 +2260,14 @@ impl ProcessExplorerState {
         // needed it. Left here it was a write with no reader -- the shape
         // gate 52 exists to find, in the same commit that removed its uses.
         match action {
-            // The same three controls again, reached from the right-click
-            // menu rather than the toolbar. Repairing `kill_selected` alone
-            // would have left this pair saying "Killed X" two lines away --
-            // `scripts/find-claimed-acts.py` is what caught them, having been
-            // written for this exact defect an hour earlier.
-            ContextAction::Kill => self.signal_pid(target_pid, libcall::SIGKILL, "kill"),
-            ContextAction::Pause => self.signal_pid(target_pid, libcall::SIGSTOP, "pause"),
-            ContextAction::Resume => self.signal_pid(target_pid, libcall::SIGCONT, "resume"),
+            // The same controls as the toolbar's and the keys', reached from
+            // the right-click menu: the same functions, so the two doors say
+            // the same thing.
+            ContextAction::End(ending) => self.end_pid(target_pid, ending),
+            ContextAction::Pause => self.signal_pid(target_pid, processctl::SIGSTOP, "pause"),
+            ContextAction::Resume => {
+                self.signal_pid(target_pid, processctl::SIGCONT, "resume");
+            }
             ContextAction::ChangePriority => {
                 // Not wired, on purpose. libc's `setpriority` ignores the pid
                 // it is given and renices the caller, so this would
@@ -2583,7 +2573,7 @@ impl ProcessExplorerState {
                         tree,
                         r.x + 8.0,
                         r.y + 6.0,
-                        "End Process",
+                        "End Task",
                         // Derived from the fill under it, not guessed. White
                         // happens to work on this red and would not on a
                         // paler one -- and the user can choose the palette, so
@@ -3695,7 +3685,7 @@ impl ProcessExplorerState {
                 tree.fill_rect(menu.x + 1.0, iy, menu_w - 2.0, item_h, self.palette.blue);
             }
 
-            let text_color = if *action == ContextAction::Kill {
+            let text_color = if *action == ContextAction::End(Ending::Force) {
                 self.palette.red
             } else {
                 self.palette.text
@@ -5360,7 +5350,10 @@ mod tests {
             "control: the starting status must differ from the one a bad resume would write, or this assertion cannot fail"
         );
         for act in [
-            ProcessExplorerState::kill_selected,
+            (|s: &mut ProcessExplorerState| s.end_selected(Ending::Close))
+                as fn(&mut ProcessExplorerState),
+            |s| s.end_selected(Ending::End),
+            |s| s.end_selected(Ending::Force),
             ProcessExplorerState::pause_selected,
             ProcessExplorerState::resume_selected,
         ] {
@@ -5379,7 +5372,9 @@ mod tests {
         }
 
         for action in [
-            ContextAction::Kill,
+            ContextAction::End(Ending::Close),
+            ContextAction::End(Ending::End),
+            ContextAction::End(Ending::Force),
             ContextAction::Pause,
             ContextAction::Resume,
         ] {
@@ -5392,67 +5387,109 @@ mod tests {
         }
     }
 
-    /// The message is what the kernel said, and the failures are told apart.
-    ///
-    /// Tested through `signal_outcome` rather than through a real `kill`,
-    /// because on this host the signalling arm is `cfg(unix)` and every call
-    /// answers `ENOSYS` -- so a test that went through `send` could exercise
-    /// exactly one of these branches and would report full coverage of a
-    /// mapping it had never run.
-    ///
-    /// They are separate messages on purpose. `ESRCH` and `EPERM` are the two
-    /// most useful things the kernel can say -- it is already gone, you are
-    /// not allowed -- and the operator's next action differs completely
-    /// between them. A manager that folds them into one "could not signal"
-    /// throws away the only part of the answer that was actionable.
-    #[test]
-    fn a_signal_is_reported_as_what_the_kernel_said() {
-        let cases: [(Result<(), i32>, &str, &str); 6] = [
-            (
-                Ok(()),
-                "Sent kill to editor (PID 203)",
-                "an accepted signal",
-            ),
-            (
-                Err(libcall::ESRCH),
-                "already gone",
-                "a process that exited first",
-            ),
-            (
-                Err(libcall::EPERM),
-                "Not permitted",
-                "a process not ours to signal",
-            ),
-            (
-                Err(libcall::ENOSYS),
-                "cannot signal processes",
-                "a system without signals",
-            ),
-            (
-                Err(libcall::EINVAL),
-                "not a process this can signal",
-                "a pid that is not one",
-            ),
-            (Err(4242), "error 4242", "an errno with no name here"),
-        ];
-        for (result, expected, what) in cases {
-            let msg = ProcessExplorerState::signal_outcome("editor", 203, "kill", result);
-            assert!(
-                msg.contains(expected),
-                "{what}: expected {expected:?} in {msg:?}"
-            );
-            assert!(
-                msg.contains("editor") && msg.contains("203"),
-                "{what}: the message does not name the process: {msg:?}"
-            );
-        }
+    /// An explorer whose processes are closed, ended and signalled through a
+    /// system that records what it was asked and does nothing, with the row
+    /// at the top selected; that row's PID answers requests when `answers`.
+    fn on_a_fake_system(
+        answers: bool,
+    ) -> (ProcessExplorerState, &'static procstop::fake::Fake, u32) {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        state.selected_index = Some(0);
+        let pid = state.processes[state.visible_indices[0]].pid;
+        let answering: Vec<i32> = if answers {
+            vec![i32::try_from(pid).unwrap()]
+        } else {
+            Vec::new()
+        };
+        let sys: &'static procstop::fake::Fake =
+            Box::leak(Box::new(procstop::fake::fake(&answering, &[])));
+        state.stopper = sys;
+        (state, sys, pid)
+    }
 
-        // The one wording that must never appear: a past-tense claim that the
-        // process died. `Ok` means the signal was accepted, nothing more.
-        let ok = ProcessExplorerState::signal_outcome("editor", 203, "kill", Ok(()));
+    /// **Three ways to end a program, as the operator decided** (B-Q22,
+    /// design-decisions 1072): Delete and End Task ask it to close -- it may
+    /// ask to save first -- Shift+Delete ends it without asking, and the
+    /// menu's Force End sends `SIGKILL`. They all sent `SIGKILL`, so a
+    /// program this ended never got to save anything.
+    #[test]
+    fn a_program_is_closed_ended_or_forced_as_asked() {
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let (mut state, sys, pid) = on_a_fake_system(true);
+        let p = i32::try_from(pid).unwrap();
+        state.handle_event(&key(Key::Delete, Modifiers::NONE));
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("close", p, 0)),
+            "Delete did not ask it to close"
+        );
+        sys.did.borrow_mut().clear();
+        let (button, _) = toolbar_buttons()[0];
+        state.handle_toolbar_click(button.x + 4.0, button.y + 4.0);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("close", p, 0)),
+            "End Task did not ask it to close"
+        );
+        state.handle_event(&key(Key::Delete, Modifiers::shift()));
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("terminate", p, 0)),
+            "Shift+Delete did not ask it to end"
+        );
+        state.execute_context_action(ContextAction::End(Ending::Force), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, procstop::SIGKILL)),
+            "Force End did not send SIGKILL"
+        );
+        state.execute_context_action(ContextAction::Pause, pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, processctl::SIGSTOP))
+        );
+        state.execute_context_action(ContextAction::Resume, pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, processctl::SIGCONT))
+        );
+    }
+
+    /// **A program that cannot be asked to close says how to end it**, and is
+    /// sent nothing; ended without asking, it is sent `SIGTERM`.
+    #[test]
+    fn a_program_that_cannot_be_asked_says_how_to_end_it() {
+        let (mut state, sys, pid) = on_a_fake_system(false);
+        let p = i32::try_from(pid).unwrap();
+        state.end_selected(Ending::Close);
         assert!(
-            !ok.starts_with("Killed") && !ok.contains("has been"),
-            "claimed the process died, when all that happened was a signal: {ok}"
+            state
+                .status_message
+                .ends_with("cannot be asked to close -- End Without Asking stops it"),
+            "{}",
+            state.status_message
+        );
+        assert!(
+            !sys.did
+                .borrow()
+                .iter()
+                .any(|&(_, _, sig)| sig == procstop::SIGTERM || sig == procstop::SIGKILL),
+            "a close sent a signal: {:?}",
+            sys.did.borrow()
+        );
+        state.end_selected(Ending::End);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("kill", p, procstop::SIGTERM))
         );
     }
 
@@ -5477,8 +5514,17 @@ mod tests {
 
         for (act, action) in [
             (
-                ProcessExplorerState::kill_selected as fn(&mut ProcessExplorerState),
-                ContextAction::Kill,
+                (|s: &mut ProcessExplorerState| s.end_selected(Ending::Close))
+                    as fn(&mut ProcessExplorerState),
+                ContextAction::End(Ending::Close),
+            ),
+            (
+                |s| s.end_selected(Ending::End),
+                ContextAction::End(Ending::End),
+            ),
+            (
+                |s| s.end_selected(Ending::Force),
+                ContextAction::End(Ending::Force),
             ),
             (ProcessExplorerState::pause_selected, ContextAction::Pause),
             (ProcessExplorerState::resume_selected, ContextAction::Resume),

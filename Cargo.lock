@@ -3279,6 +3279,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "processctl"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "procstop",
+]
+
+[[package]]
 name = "procexplorer"
 version = "0.1.0"
 dependencies = [
@@ -3288,7 +3296,9 @@ dependencies = [
  "libcall",
  "oswindow",
  "pathtext",
+ "processctl",
  "procinfo",
+ "procstop",
  "quoting",
  "textline",
 ]
@@ -4342,11 +4352,13 @@ name = "sysmonitor"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
- "libcall",
  "oswindow",
  "pathtext",
+ "processctl",
  "procinfo",
+ "procstop",
  "quoting",
  "textline",
 ]

@@ -4,13 +4,18 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS System Monitor — graphical dashboard for CPU, memory, disk, network, and process monitoring"
 [dependencies]
+# The filter box's right-click menu: Cut, Copy, Paste, Delete, Select all.
+fieldmenu = { path = "../fieldmenu" }
 pathtext = { path = "../pathtext" }
 # Text from outside -- a name, a path, what the kernel reports -- shown by its
 # bytes, as escapes where it is not printable text, never lossily.
 quoting = { path = "../../userspace/quoting" }
-# `kill(2)` is stateful and therefore reachable only through the C ABI,
-# per design-decisions 768. `libcall` is that door.
-libcall = { path = "../../libcall" }
+# What it does to a process -- close, end without asking, force, stop,
+# continue -- and the line it says about it, shared with
+# `apps/procexplorer` (design-decisions 1072).
+processctl = { path = "../processctl" }
+# The system those are asked of, `procstop::System::SINGLE`.
+procstop = { path = "../../userspace/procstop" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -25,6 +30,10 @@ procinfo = { path = "../../procinfo" }
 # Whether a key is plain, a Ctrl chord or typing: a key held with Alt or the
 # Windows key is not the monitor's, and AltGr is not Ctrl.
 textline = { path = "../textline" }
+
+[dev-dependencies]
+# A system that records what it is asked and does nothing.
+procstop = { path = "../../userspace/procstop", features = ["fake"] }
 
 [lints]
 workspace = true

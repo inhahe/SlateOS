@@ -1,0 +1,19 @@
+[package]
+name = "processctl"
+version = "0.1.0"
+edition = "2024"
+description = "What a task manager does to a process it picked -- close it, end it without asking, force it to end, stop it, continue it -- and the line it says about what happened."
+
+[dependencies]
+# How SlateOS stops a process: asked through its lifecycle endpoint when it
+# answers, signalled when it does not (design-decisions 1072).
+procstop = { path = "../../userspace/procstop" }
+# `kill(2)` for the two signals no request means, stop and continue, through
+# the C ABI (design-decisions 768).
+libcall = { path = "../../libcall" }
+
+[dev-dependencies]
+procstop = { path = "../../userspace/procstop", features = ["fake"] }
+
+[lints]
+workspace = true

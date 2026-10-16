@@ -74,12 +74,15 @@ MUTATIONS = [
     # program's is handing the editor the key as it came -- chord and all.
     (
         "the filter's editor is given the key without its chord",
-        '            &mut self.filter_editor,\n            key,\n',
+        '        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n',
+        '        textline::apply_key_on_clipboard(\n'
         '            &mut self.filter_editor,\n'
         '            &KeyEvent {\n'
         '                modifiers: Modifiers::NONE,\n'
         '                ..key.clone()\n'
-        '            },\n',
+        '            },\n'
+        '            FILTER_TEXT_SIZE,\n'
+        '        );\n',
         ['a_chord_is_neither_a_monitor_key_nor_typing'],
     ),
 ]
@@ -135,23 +138,15 @@ MUTATIONS += [
     ),
     (
         "the filter's editor is not reloaded",
-        "        if self.filter_editor.text() != self.filter_text {\n"
-        "            self.filter_editor.set_text(&self.filter_text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
+        "        self.sync_filter_editor();\n"
+        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
+        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
         [EDITS],
     ),
     (
         "the filter holds any length",
         'filter_editor: textline::field_holding("", FILTER_CAPACITY),',
         'filter_editor: textline::field_holding("", usize::MAX),',
-        [EDITS],
-    ),
-    (
-        "a cut takes nothing to the clipboard",
-        "            self.filter_clipboard = copied;\n",
-        "            let _ = copied;\n",
         [EDITS],
     ),
     (
@@ -251,6 +246,94 @@ MUTATIONS += [
         "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
         "",
         [MODAL],
+    ),
+]
+
+# Three ways to end a program -- close, end without asking, force -- through
+# apps/processctl, as lane B's request asks (2026-10-16).
+ASKED = "a_program_is_closed_ended_or_forced_as_asked"
+CANNOT = "a_program_that_cannot_be_asked_says_how_to_end_it"
+
+MUTATIONS += [
+    (
+        "Delete forces rather than asks",
+        "                self.end_selected(Ending::Close);\n                EventResult::Consumed\n            }\n            Key::Delete if key.modifiers == Modifiers::shift() => {\n",
+        "                self.end_selected(Ending::Force);\n                EventResult::Consumed\n            }\n            Key::Delete if key.modifiers == Modifiers::shift() => {\n",
+        [ASKED],
+    ),
+    (
+        "Shift+Delete ends nothing",
+        "            Key::Delete if key.modifiers == Modifiers::shift() => {\n                self.end_selected(Ending::End);\n                EventResult::Consumed\n            }\n",
+        "",
+        [ASKED],
+    ),
+    (
+        "every ending in the menu forces",
+        "            ContextAction::End(ending) => self.end_pid(target_pid, ending),\n",
+        "            ContextAction::End(_) => self.end_pid(target_pid, Ending::Force),\n",
+        [ASKED],
+    ),
+    (
+        "a process is ended through the real system, whatever was given",
+        "        let sent = processctl::end(self.stopper, pid, ending);\n",
+        "        let sent = processctl::end(&SYSTEM, pid, ending);\n",
+        [ASKED, CANNOT],
+    ),
+    (
+        "an ending says nothing of what was done",
+        "        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);\n",
+        "        drop(sent);\n",
+        [CANNOT],
+    ),
+    (
+        "a signal goes through the real system, whatever was given",
+        "        let sent = processctl::signal(self.stopper, pid, sig);\n",
+        "        let sent = processctl::signal(&SYSTEM, pid, sig);\n",
+        [ASKED],
+    ),
+    (
+        "the menu's stop continues",
+        "            ContextAction::Stop => self.signal_pid(target_pid, processctl::SIGSTOP, \"stop\"),\n",
+        "            ContextAction::Stop => self.signal_pid(target_pid, processctl::SIGCONT, \"stop\"),\n",
+        [ASKED],
+    ),
+]
+
+# The filter box on the program's clipboard, with a right-click menu
+# (2026-10-16).
+F_MENU = "the_filter_boxs_right_click_menu_edits_the_filter"
+EDITS_LIKE_A_FIELD = "the_filter_edits_like_a_field_and_takes_any_letter"
+
+MUTATIONS += [
+    (
+        "a right press opens no filter menu",
+        "                if self.open_field_menu(mx, my) {\n                    return EventResult::Consumed;\n                }\n",
+        "",
+        [F_MENU],
+    ),
+    (
+        "the keys reach the filter through its menu",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [F_MENU],
+    ),
+    (
+        "a row chosen does nothing to the filter",
+        "        if self.filter_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "        if false {\n",
+        [F_MENU],
+    ),
+    (
+        "the filter's right-click leaves the keyboard where it was",
+        "        self.context_menu = None;\n        self.filter_focused = true;\n",
+        "        self.context_menu = None;\n",
+        [F_MENU],
+    ),
+    (
+        "the filter keeps a clipboard of its own",
+        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
+        "        textline::apply_key(&mut self.filter_editor, key, \"\", FILTER_TEXT_SIZE);\n",
+        [EDITS_LIKE_A_FIELD],
     ),
 ]
 

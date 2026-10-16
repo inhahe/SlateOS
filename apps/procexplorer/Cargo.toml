@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Process Explorer — graphical system monitor and task manager"
 [dependencies]
+# What it does to a process -- close, end without asking, force, pause,
+# resume -- and the line it says about it, shared with `apps/sysmonitor`
+# (design-decisions 1072).
+processctl = { path = "../processctl" }
+# The system those are asked of, `procstop::System::SINGLE`.
+procstop = { path = "../../userspace/procstop" }
 pathtext = { path = "../pathtext" }
 # The keys that edit the New Task box's command line.
 textline = { path = "../textline" }
@@ -30,6 +36,8 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
 [dev-dependencies]
+# A system that records what it is asked and does nothing.
+procstop = { path = "../../userspace/procstop", features = ["fake"] }
 # `appearance::palette_check`, the sweep that proves this crate draws from
 # the user's palette rather than from colours of its own. Behind a feature
 # because `cfg(test)` is set only when `appearance` itself is under test.

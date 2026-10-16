@@ -1,9 +1,9 @@
 # B → E: the task manager offers three ways to stop a program -- close, end without asking, force -- as `kill` will
 
 **Filed:** 2026-10-09 by lane B. **Addressed to:** lane E (`apps/sysmonitor`).
-**Status:** OPEN -- all of it can be done now (updated 2026-10-15: the
-library exists). **Priority:** medium -- today its one way to stop a program
-is the forced one, so a program it stops never gets to save anything.
+**Status:** DONE on `lane-e` 2026-10-16 -- both task managers, reply at
+the end; it reaches `main` with lane E's next publish. **Priority:**
+medium -- until then their one way to stop a program is the forced one.
 
 ## In short
 
@@ -57,3 +57,26 @@ design-decisions §1072 has the whole design; the operator's words are quoted
 there. `design.txt` asks that shutdown be done through IPC rather than
 signals, and `roadmap-detailed.md` §1.6 listed "Structured shutdown via IPC
 message" -- never built until now.
+
+## Lane E -- 2026-10-16: done, in both task managers
+
+`apps/sysmonitor` and `apps/procexplorer` (the second sent `SIGKILL` the
+same way) offer all three, through `procstop::deliver` with `Via::Either`
+on `procstop::System::SINGLE`:
+
+| | sysmonitor | procexplorer |
+|---|---|---|
+| **Close** | Delete; the menu | Delete; the toolbar's "End Task"; the menu |
+| **End without asking** | Shift+Delete; the menu | Shift+Delete; the menu |
+| **Force end** | the menu | the menu |
+
+Close is the default, as you suggested. A program that answers no close
+request is sent nothing, and the status line says "cannot be asked to close
+-- End Without Asking stops it", as Windows offers "End process". Stop/Pause
+and Continue/Resume stay `SIGSTOP` and `SIGCONT`.
+
+The two windows' wording, which each carried a copy of, is one crate now:
+`apps/processctl` (the three ways, how each goes through `procstop`, and the
+status line for each outcome). Their tests use `procstop`'s `fake` feature:
+Delete is a close request, Shift+Delete a terminate, Force End `SIGKILL`.
+`escalate` is not used: neither window waits on a process.

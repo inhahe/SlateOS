@@ -62,7 +62,7 @@ two disagree.
 | `curl` | HTTP/HTTPS Client Utility | yes |  |  |
 | `cut` | Print selected parts of lines. | yes | `coreutils` |  |
 | `date` | Print or set the system date and time. | yes | `coreutils` |  |
-| `dc` | Desk calculator (reverse Polish notation) | yes |  |  |
+| `dc` | An arbitrary-precision reverse-Polish calculator: GNU dc 1.4.1 (bc 1.07.1), ported. | yes |  |  |
 | `dd` | Convert and copy a file, with the operand syntax POSIX gave it in 1970 and the conversions GNU has accumulated since. | yes | `coreutils` |  |
 | `df` | Report file system disk space usage. | yes | `coreutils` |  |
 | `dhcpcd` | DHCP Client Daemon (`dhcpcd`) | yes |  |  |

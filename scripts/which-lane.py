@@ -639,6 +639,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "curses-ptyrun.py",
         "cut-diff.sh",
         "date-diff.sh",
+        "dc-diff.sh",
         "dd-diff.sh",
         "df-diff.sh",
         "diff-diff.sh",

@@ -1554,6 +1554,15 @@ list moved to lane D on 2026-09-22):
   names wait on lane D
   (`requests/b-d-gzip-is-gnu-gzip-now-uncompress-in-gzcat-out.md`).
 
+- `[x]` `[B]` **GNU dc 1.4.1 (bc 1.07.1), ported** -- replacing
+  `userspace/dc`, written from scratch over `bignum`. Its arithmetic is bc's
+  own `number.c` (`userspace/bcnumber`), so the digits past a result's exact
+  value are upstream's; stdio's buffering is modelled, which `!` and the
+  "unimplemented" notes show. Held to Ubuntu's `/usr/bin/dc` by
+  `scripts/dc-diff.sh`: 1691 cases agree, one deliberate difference (file
+  names escaped in diagnostics). 2026-10-16. GNU `bc` itself, whose
+  `number.c` this already is, is the next of the pair.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

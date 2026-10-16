@@ -175,6 +175,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/curses-ptyrun.py` | Run a program on a pseudo-terminal of its own, for curses-diff.sh. |
 | `scripts/cut-diff.sh` | Differential test: our cut against GNU cut. |
 | `scripts/date-diff.sh` | Differential test: our `date` against GNU date. |
+| `scripts/dc-diff.sh` | Differential test: our dc against Ubuntu 24.04's, side by side in WSL. |
 | `scripts/dd-diff.sh` | Differential test: our dd against GNU dd. |
 | `scripts/df-diff.sh` | Differential test: our df against GNU df. |
 | `scripts/diff-diff.sh` | Differential test: our `diff` against GNU diffutils. |
@@ -592,4 +593,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_582 scripts._
+_583 scripts._

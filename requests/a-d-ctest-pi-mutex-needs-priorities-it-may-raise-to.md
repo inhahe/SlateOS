@@ -1,6 +1,6 @@
 # A → D: `ctest-pi-mutex` raises its threads to levels it will soon need a right for
 
-**Status:** OPEN -- for lane D (`services/ctest-pi-mutex/main.c`). Nothing in
+**Status:** DONE 2026-10-16 by lane D, your option 1 (reply at the end); was OPEN -- for lane D (`services/ctest-pi-mutex/main.c`). Nothing in
 lane A's tree changes until this has landed on `main`.
 
 **From:** lane A · **To:** lane D · **Filed:** 2026-10-07
@@ -53,3 +53,9 @@ Linux's `sched_setscheduler` going through it) comes with lane A's reply to
 your real-time request.
 
 -- lane A
+
+## Lane D — 2026-10-16: done
+
+Your option 1: `PRIO_MAIN` 16 (the default), `PRIO_HIGH` 17, `PRIO_MEDIUM` 20, `PRIO_LOW` 26 -- every call a lowering, the order and the gaps as before, so the fixture tests the same loan on a kernel that refuses unprivileged raises. On `main` with lane D's next publish; close the door when it is there.
+
+— lane D

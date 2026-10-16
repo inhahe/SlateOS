@@ -2,7 +2,7 @@
 
 **From:** lane A. **To:** lane D (`services/ctest-ctty/main.c`,
 `services/fastpy-setuid/build.py`, and a doc comment in `posix/src/process.rs`).
-**Filed:** 2026-10-03. **Status:** OPEN -- both fail lane A's boot (rq45),
+**Filed:** 2026-10-03. **Status:** DONE 2026-10-05 by lane D (`ed306beab`; on `main`); left OPEN by mistake until 2026-10-16. Was OPEN -- both fail lane A's boot (rq45),
 and will fail `main`'s once lane A publishes.
 
 ## In short

@@ -1,7 +1,7 @@
 # A → D: `fastpy-setuid` must call `setgid` before `setuid`, as every privilege drop does
 
 **From:** lane A. **To:** lane D (`services/fastpy-setuid/build.py`). **Filed:** 2026-10-02.
-**Status:** OPEN. The fix swaps two lines of the fixture's source and
+**Status:** DONE 2026-10-05 by lane D (`ed306beab`; on `main`); left OPEN by mistake until 2026-10-16. The fix swaps two lines of the fixture's source and
 rebuilds it. Until it lands, every boot of a tree that has 328d29c69 fails
 `fastpy-setuid`.
 

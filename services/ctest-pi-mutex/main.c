@@ -57,10 +57,17 @@
  * priority; the old priority, or a negative error. */
 #define SYS_THREAD_SET_PRIORITY 515
 
-#define PRIO_MAIN 1
-#define PRIO_HIGH 4
-#define PRIO_MEDIUM 10
-#define PRIO_LOW 20
+/* Every one a lowering from the default, 16, which needs no right on any
+ * kernel: a raise above it needs RLIMIT_NICE or the IO_REALTIME right, and
+ * levels 0-7 are the real-time band (lane A's
+ * requests/a-d-ctest-pi-mutex-needs-priorities-it-may-raise-to.md). The order
+ * and the gaps are what the test needs -- main above all, then high, medium,
+ * low -- and the scheduler's anti-starvation boost (to level 8) still lifts a
+ * starved thread above every one of them. */
+#define PRIO_MAIN 16
+#define PRIO_HIGH 17
+#define PRIO_MEDIUM 20
+#define PRIO_LOW 26
 
 #define MAX_MEDIUM 8
 

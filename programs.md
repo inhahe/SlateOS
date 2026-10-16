@@ -112,7 +112,7 @@ two disagree.
 | `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
 | `hardlink` | File deduplication utility. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
-| `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |
+| `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `hd` |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
 | `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname`, `domainname`, `nisdomainname`, `ypdomainname` |
 | `hostnamectl` | Query and set the system hostname and related settings. | yes |  |  |
@@ -135,10 +135,10 @@ two disagree.
 | `join` | Pair up the lines of two sorted files that share a field. | yes | `coreutils` |  |
 | `journalctl` | Journal Log Viewer (`journalctl`) | yes |  |  |
 | `jq` | Slate OS JSON processor | yes |  |  |
-| `kill` | Send a signal to a process: procps-ng 4.0.4's `kill.c`, ported, as Ubuntu ships it at `/usr/bin/kill`. | yes | `coreutils` | `killall` |
+| `kill` | Send a signal to a process: procps-ng 4.0.4's `kill.c`, ported, as Ubuntu ships it at `/usr/bin/kill`. | yes | `coreutils` |  |
 | `killall` | Send a signal to processes by name: psmisc 23.7's, ported. | yes | `coreutils` |  |
 | `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
-| `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
+| `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb` |
 | `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
 | `ldd` | Shared Library Dependency Lister | yes |  |  |
@@ -274,7 +274,7 @@ two disagree.
 | `sysctl` | Read and write kernel parameters at run time: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
-| `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
+| `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
 | `systemd-cat` | `systemd-cat`: systemd 255's (`src/journal/cat.c`), ported. | yes | `coreutils` |  |
 | `tabs` | `tabs`: ncurses 6.4's (`progs/tabs.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tac` | Write each file to standard output, last record first. | yes | `coreutils` |  |
@@ -291,12 +291,12 @@ two disagree.
 | `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
 | `top` | Display the system's tasks, a screen at a time, below a summary of the system: procps-ng 4.0.4's `top`, ported. | yes | `coreutils` |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
-| `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |
+| `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tr` | Translate, squeeze, and/or delete bytes. | yes | `coreutils` |  |
 | `traceroute` | Network Traceroute Utility | yes |  |  |
 | `true` | Do nothing, successfully. | yes | `coreutils` |  |
 | `truncate` | Shrink or extend the size of a file to the specified size. | yes | `coreutils` |  |
-| `tset` | `tset`, and `reset`: ncurses 6.4's (`progs/tset.c`, 20240113), ported. | yes | `coreutils` |  |
+| `tset` | `tset`, and `reset`: ncurses 6.4's (`progs/tset.c`, 20240113), ported. | yes | `coreutils` | `reset` |
 | `tsort` | Order a set of items so that every recorded "before" holds. | yes | `coreutils` |  |
 | `tty` | Print the file name of the terminal connected to standard input. | yes | `coreutils` |  |
 | `udevd` | Device Manager Daemon (udevd / udevadm) | yes |  |  |

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Build every program the userland workspace makes, for SlateOS's /bin.
+"""Build every program the workspace makes for SlateOS's /bin, graphical ones included.
 
 They are what the disk image's /bin is staged from. The operator's answer to B-Q21 (design-decisions §1053): every program that
 builds goes on the image. `scripts/create-ext4-rootfs.sh` stages them all
 except what `scripts/rootfs-bin-kept-off.txt` keeps off, and this builds them
--- every binary target of every package under `userspace/`, as
-`cargo metadata` lists them, for `x86_64-slateos` (design-decisions §1164).
+-- every binary target of every package under `userspace/`, `gui/`, `apps/`
+and `init/` (`PROGRAM_TREES`), as `cargo metadata` lists them, for
+`x86_64-slateos` (design-decisions §1164). The last three are the desktop,
+the applications and the login manager, which until 2026-10-16 were built
+for SlateOS by nothing (lane F's
+requests/f-d-the-image-carries-no-graphical-program.md).
 
     python scripts/build-userland.py              # build them all
     python scripts/build-userland.py --list       # NAME<TAB>PACKAGE, one a line
@@ -101,8 +105,17 @@ def metadata() -> dict:
     return json.loads(out)
 
 
+#: The trees whose programs go on the image: the command-line userland, and the
+#: graphical programs -- the desktop and toolkit, the applications, and the
+#: login manager and service bus (lane F's
+#: requests/f-d-the-image-carries-no-graphical-program.md). Not `kernel/`, whose
+#: binary is the kernel, nor `services/`, whose programs are staged by blocks of
+#: the recipe's own when they are ready to run.
+PROGRAM_TREES = ("userspace/", "gui/", "apps/", "init/")
+
+
 def programs(meta: dict) -> list[Program]:
-    """Every binary target of every package under `userspace/`, sorted.
+    """Every binary target of every package under `PROGRAM_TREES`, sorted.
 
     A target with `required-features` is left out: the default build does not
     make it, so it is not a program that builds."""
@@ -110,7 +123,7 @@ def programs(meta: dict) -> list[Program]:
     found: set[Program] = set()
     for package in meta["packages"]:
         manifest = package["manifest_path"].replace("\\", "/")
-        if not manifest.startswith(root + "userspace/"):
+        if not any(manifest.startswith(root + tree) for tree in PROGRAM_TREES):
             continue
         for target in package["targets"]:
             if "bin" in target["kind"] and not target.get("required-features"):
@@ -241,15 +254,24 @@ def self_test() -> int:
         package("libcall", "userspace\\libcall", ("libcall", ["lib"], {})),
         package("gated", "userspace\\gated", ("gated", ["bin"], {"required-features": ["x"]})),
         package("viewer", "apps\\viewer", ("viewer", ["bin"], {})),
+        package("desktop", "gui\\desktop", ("desktop", ["bin"], {})),
+        package("loginmgr", "init\\loginmgr", ("loginmgr", ["bin"], {})),
+        package("dyndns", "services\\dyndns", ("dyndns", ["bin"], {})),
+        package("kernel", "kernel", ("kernel", ["bin"], {})),
         # A directory that only starts like userspace/ is not under it.
         package("lookalike", "userspace-tools\\lookalike", ("lookalike", ["bin"], {})),
     ]}
-    progs = programs(meta)
-    check("programs are every userspace bin target, sorted",
-          progs == [Program("cat", "coreutils"), Program("kill", "coreutils"),
-                    Program("kill", "kill")])
+    every = programs(meta)
+    check("programs are every bin target of userspace, gui, apps and init, sorted",
+          every == [Program("cat", "coreutils"), Program("desktop", "desktop"),
+                    Program("kill", "coreutils"), Program("kill", "kill"),
+                    Program("loginmgr", "loginmgr"), Program("viewer", "viewer")])
     check("...not a library, nor one needing a feature, nor another tree's",
-          not {p.name for p in progs} & {"coreutils", "libcall", "gated", "viewer", "lookalike"})
+          not {p.name for p in every}
+          & {"coreutils", "libcall", "gated", "lookalike", "dyndns", "kernel"})
+    # The rest of the checks build the userland's three; the other trees'
+    # programs are built by the same commands.
+    progs = [p for p in every if p.package in ("coreutils", "kill")]
 
     check("a name two packages build ships as its namesake package's",
           chosen_producers(progs) == {"kill": "kill"})

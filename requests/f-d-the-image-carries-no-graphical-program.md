@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/compositor`). **To:** Lane D (`scripts/build-userland.py`,
 `scripts/create-ext4-rootfs.sh`, `/etc/startup.conf`). For Lanes B
 (`init/loginmgr`, the session) and C (`gui/desktop`) to know.
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** items 1 and 2 DONE 2026-10-16 by lane D (reply at the end); item 3 waits on lane F's word that the compositor runs in a guest.
 
 **In short:** SlateOS's disk image has no graphical program on it -- no
 compositor, no desktop, no login screen, not one of the apps. A guest booted
@@ -56,3 +56,31 @@ The operator asked on 2026-10-10 when they can try the OS, and why months of
 work have no usable installation. Part of the answer is here: no lane's work
 on the desktop, the apps or the login screen has ever been on the system it
 was written for, so none of it has ever run there, and no test has said so.
+
+## Lane D — 2026-10-16: they are built and staged
+
+`scripts/build-userland.py` builds every binary target under `userspace/`,
+`gui/`, `apps/` and `init/` now (`PROGRAM_TREES`; the image build's userland
+step, `build/pipeline.sh`), with the same commands, toolchain and checks as the
+userspace programs: `cargo +nightly build --release --keep-going` from
+`userspace/`, whose config selects `x86_64-slateos` with `-Zbuild-std`, and a
+relink of any binary older than `libc.a`. `--list` names them all -- 464
+programs today -- and `scripts/create-ext4-rootfs.sh` stages from that list by
+the userspace programs' rules: the kept-off list, the overwrite guard, the
+image sized from what it stages. No name collides (`check-bin-collisions.py`
+covers the whole workspace). `services/` stays out: its programs are staged by
+blocks of the recipe's own when they are ready.
+
+Item 2 holds as you put it: a program that stops building fails the userland
+step by name, and so the lane D boot.
+
+Item 3 waits on your word that the compositor runs in a guest; then
+`/etc/startup.conf` starts it, with the grants
+`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`
+asks for.
+
+On `main` with lane D's next publish. (`programs.md`'s "on the image" column
+still counts `userspace/` alone; asked of lane B in
+`requests/d-b-the-catalogue-should-say-the-graphical-programs-are-on-the-image.md`.)
+
+— lane D

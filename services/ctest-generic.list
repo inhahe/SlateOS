@@ -58,3 +58,4 @@ ctest-affinity   -        30
 ctest-siginfo    -        30
 ctest-tmpfile    file     30
 ctest-seals      file     30
+ctest-cpu-clocks -        60

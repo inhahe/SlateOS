@@ -1634,25 +1634,13 @@ pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, value: usize) -> 
 /// * `EFAULT` — `clock_id` is NULL.  glibc has no such check and faults, and
 ///   POSIX leaves it undefined; reporting it is strictly more useful than a
 ///   crash and cannot be confused with a real clock id.
-/// * `ENOENT` — the thread exists but has no CPU-time clock.  POSIX
-///   documents exactly this errno for `pthread_getcpuclockid`: "the system
-///   does not support CPU-time clocks for the specified thread."
 ///
-/// # Which threads have a clock
-///
-/// Only the calling thread.  `clock_gettime(CLOCK_THREAD_CPUTIME_ID, …)`
-/// reads *the caller's* clock, so handing that same id back for a peer would
-/// produce a number that looks like the peer's CPU time and is in fact the
-/// caller's — a silent wrong answer, which is worse than a refusal.  Linux
-/// avoids this by encoding the tid into the clock id
-/// (`CPUCLOCK_PERTHREAD_MASK`) and decoding it in the kernel; until
-/// `clock_gettime` can do that decoding, `ENOENT` is the truthful answer for
-/// a peer.
-///
-/// Note that even for the calling thread our `CLOCK_THREAD_CPUTIME_ID` is
-/// currently the monotonic clock rather than accumulated CPU time — a
-/// pre-existing approximation documented on `crate::time::clock_gettime`,
-/// not one this function introduces.
+/// The id is glibc's, computed from the thread's kernel id
+/// (`MAKE_THREAD_CPUCLOCK(tid, CPUCLOCK_SCHED)`), which a `pthread_t` here
+/// is; the kernel decodes it in `clock_gettime`, so it reads that thread's
+/// processor time, whichever thread asks. The caller's own is its tid's too,
+/// not `CLOCK_THREAD_CPUTIME_ID`, as in glibc. Until 2026-10-16 this was
+/// `ENOENT` for any other thread, there being no clock to name it by.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_getcpuclockid(
     thread: PthreadT,
@@ -1664,16 +1652,26 @@ pub extern "C" fn pthread_getcpuclockid(
     if clock_id.is_null() {
         return errno::EFAULT;
     }
-    if thread != pthread_self() {
-        return errno::ENOENT;
-    }
+    let Some(id) = thread_cpu_clock(thread) else {
+        return errno::ESRCH;
+    };
     // SAFETY: clock_id is non-null (checked above).  Written unaligned
     // because the caller's storage need only meet the C ABI's alignment for
     // `clockid_t`, which Rust's `write` would additionally assume.
     unsafe {
-        core::ptr::write_unaligned(clock_id, crate::time::CLOCK_THREAD_CPUTIME_ID);
+        core::ptr::write_unaligned(clock_id, id);
     }
     0
+}
+
+/// The CPU-time clock id of `thread`, whose `pthread_t` is its kernel id;
+/// `None` for a value no kernel id can be.
+fn thread_cpu_clock(thread: PthreadT) -> Option<crate::types::ClockidT> {
+    let tid = crate::types::PidT::try_from(thread).ok()?;
+    Some(crate::time::make_thread_cpuclock(
+        tid,
+        crate::time::CPUCLOCK_SCHED,
+    ))
 }
 
 /// Threads of this process that have not ended: the initial thread, plus
@@ -6363,14 +6361,23 @@ mod tests {
         assert_eq!(pthread_kill(initial, 0), 0);
     }
 
-    /// `pthread_getcpuclockid` must validate the thread before the
-    /// output pointer (a stale id is the caller's real bug), and must
-    /// hand back the *thread* CPU clock for the caller itself.
+    /// A thread's clock id is glibc's, built from its kernel id, for any
+    /// thread -- not `CLOCK_THREAD_CPUTIME_ID`, which would read whoever
+    /// asks; and the caller's is its own id's.
     #[test]
-    fn pthread_getcpuclockid_self_yields_thread_cputime_clock() {
-        let mut clk: crate::types::ClockidT = -1;
-        assert_eq!(pthread_getcpuclockid(pthread_self(), &raw mut clk), 0);
-        assert_eq!(clk, crate::time::CLOCK_THREAD_CPUTIME_ID);
+    fn pthread_getcpuclockid_names_the_thread_by_its_id() {
+        assert_eq!(thread_cpu_clock(1234), Some((!1234 << 3) | 6));
+        assert_eq!(thread_cpu_clock(1), Some(-10));
+        assert_eq!(thread_cpu_clock(u64::MAX - 37), None);
+        // A host's `pthread_self` is no kernel id (the host has no
+        // `SYS_TASK_ID`), so the answer is whatever `thread_cpu_clock` makes
+        // of it.
+        let mut clk: crate::types::ClockidT = 99;
+        let ret = pthread_getcpuclockid(pthread_self(), &raw mut clk);
+        match thread_cpu_clock(pthread_self()) {
+            Some(id) => assert_eq!((ret, clk), (0, id)),
+            None => assert_eq!((ret, clk), (errno::ESRCH, 99)),
+        }
     }
 
     #[test]

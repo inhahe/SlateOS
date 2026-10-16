@@ -1190,6 +1190,21 @@ pub const MEMORY_LOCK_ALL: u64 = 2;
 /// [`SYS_MEMORY_LOCK`] operation: unlock every mapping, `munlockall()`.
 pub const MEMORY_UNLOCK_ALL: u64 = 3;
 
+/// `SYS_CPU_CLOCK(op, clockid, ...)` -- the CPU-time clocks, on lane A's
+/// kernel since 2026-10-08 (`requests/a-d-cpu-time-clocks-have-a-native-call-now.md`):
+/// how much processor time a process or one of its threads has used.
+/// `clockid` is Linux's -- 2, 3, or the negative ids `clock_getcpuclockid`
+/// and `pthread_getcpuclockid` make -- and the answers are Linux's errnos as
+/// `-errno`; any other clock is `-EINVAL`.
+pub const SYS_CPU_CLOCK: u64 = 1156;
+/// [`SYS_CPU_CLOCK`] operation: the clock's value, in nanoseconds.
+pub const CPU_CLOCK_GETTIME: u64 = 0;
+/// [`SYS_CPU_CLOCK`] operation: its resolution, in nanoseconds.
+pub const CPU_CLOCK_GETRES: u64 = 1;
+/// [`SYS_CPU_CLOCK`] operation: `clock_nanosleep` -- `arg2` the flags,
+/// `arg3` the request, `arg4` where the time left goes (or 0).
+pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
+
 /// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
 /// off; does not return on success. Needs the `POWER_OFF` right on a
 /// class-wide `Process` capability (`PermissionDenied`); `NotSupported`, the

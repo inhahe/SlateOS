@@ -48,15 +48,10 @@ use crate::types::*;
 pub const CLOCK_REALTIME: ClockidT = 0;
 /// Monotonic clock (does not set wall time, cannot go backward).
 pub const CLOCK_MONOTONIC: ClockidT = 1;
-/// Process-wide CPU-time clock.
-///
-/// Programs use this to measure their own CPU usage.  We map it to
-/// CLOCK_MONOTONIC since we don't have per-process CPU accounting yet.
+/// The calling process's CPU-time clock: the processor time all its threads
+/// have used, the exited ones included, to the nanosecond (`SYS_CPU_CLOCK`).
 pub const CLOCK_PROCESS_CPUTIME_ID: ClockidT = 2;
-/// Thread-specific CPU-time clock.
-///
-/// We map it to CLOCK_MONOTONIC (single-threaded, no per-thread
-/// accounting yet).
+/// The calling thread's CPU-time clock: the processor time it has used.
 pub const CLOCK_THREAD_CPUTIME_ID: ClockidT = 3;
 /// Like CLOCK_MONOTONIC but provides raw hardware time without NTP
 /// adjustments.  We use the same monotonic source for all clocks.
@@ -206,14 +201,35 @@ pub extern "C" fn usleep(usec: u32) -> i32 {
 
 /// Get time from a specific clock.
 ///
-/// All supported clock IDs (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`,
-/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`,
-/// `CLOCK_MONOTONIC_RAW`, `CLOCK_*_COARSE`, `CLOCK_BOOTTIME`)
-/// currently map to the same underlying monotonic clock.
+/// `CLOCK_REALTIME` and its coarse twin read the wall clock; the CPU-time
+/// clocks -- `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`, and the
+/// ids `clock_getcpuclockid` and `pthread_getcpuclockid` make -- the
+/// processor time used, through `SYS_CPU_CLOCK`; every other clock the
+/// monotonic one.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
+    // A CPU-time clock is the kernel's to check and to read, and Linux reads
+    // it before it copies the answer out, so a NULL `tp` is EFAULT only for a
+    // clock that exists.
+    if is_cpu_clock(clk_id) {
+        let ns = match cpu_clock(CPU_CLOCK_GETTIME, clk_id) {
+            Ok(ns) => ns,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        };
+        if tp.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        // SAFETY: `tp` is non-null, and the caller's contract makes it a
+        // writable `timespec`; written unaligned, as a C caller's may not be.
+        unsafe { core::ptr::write_unaligned(tp, ns_to_timespec(ns)) };
+        return 0;
+    }
     // Linux validation order (kernel/time/posix-timers.c
     // SYSCALL_DEFINE2(clock_gettime, ...)):
     //
@@ -397,11 +413,154 @@ fn is_settable_clock(clk_id: ClockidT) -> bool {
     clk_id == CLOCK_REALTIME
 }
 
+// ---------------------------------------------------------------------------
+// CPU-time clocks
+// ---------------------------------------------------------------------------
+//
+// How much processor time a process, or one of its threads, has used: the
+// kernel measures each thread's run time at every context switch and answers
+// through `SYS_CPU_CLOCK`, which takes Linux's clock ids and answers Linux's
+// errnos (`requests/a-d-cpu-time-clocks-have-a-native-call-now.md`). The two
+// ids every program knows, `CLOCK_PROCESS_CPUTIME_ID` and
+// `CLOCK_THREAD_CPUTIME_ID`, are the caller's; any other process's or
+// thread's clock is a negative id, built as Linux's
+// `include/linux/posix-timers_types.h` builds it, which the kernel decodes.
+
+/// A CPU-time clock id's kind, in its low two bits: user plus system time
+/// sampled at the tick (`CPUCLOCK_PROF`, 0), user time so sampled
+/// (`CPUCLOCK_VIRT`, 1), or the precise run time (`CPUCLOCK_SCHED`, 2), which
+/// is what `CLOCK_PROCESS_CPUTIME_ID` and `CLOCK_THREAD_CPUTIME_ID` read.
+pub(crate) const CPUCLOCK_SCHED: ClockidT = 2;
+/// A CPU-time clock id's bit for "a thread's clock, not a process's".
+const CPUCLOCK_PERTHREAD_MASK: ClockidT = 4;
+/// The low three bits of a negative clock id that names a clock by file
+/// descriptor (`CLOCKFD`, Linux's dynamic clocks), which is no CPU-time
+/// clock: `SYS_CPU_CLOCK` refuses it.
+const CLOCKFD: ClockidT = 3;
+/// The mask [`CLOCKFD`] is tested under.
+const CLOCKFD_MASK: ClockidT = 7;
+
+/// `MAKE_PROCESS_CPUCLOCK(pid, clock)`: the id of process `pid`'s CPU-time
+/// clock of kind `clock` (0 being the caller), as glibc and Linux build it --
+/// the pid complemented, shifted past the three kind bits.
+pub(crate) const fn make_process_cpuclock(pid: PidT, clock: ClockidT) -> ClockidT {
+    (!pid).wrapping_shl(3) | clock
+}
+
+/// `MAKE_THREAD_CPUCLOCK(tid, clock)`: thread `tid`'s clock of kind `clock`.
+pub(crate) const fn make_thread_cpuclock(tid: PidT, clock: ClockidT) -> ClockidT {
+    make_process_cpuclock(tid, clock | CPUCLOCK_PERTHREAD_MASK)
+}
+
+/// Is `clk_id` one `SYS_CPU_CLOCK` answers for: the caller's two CPU-time
+/// clocks, or a negative id -- another process's or thread's clock, or a
+/// [`CLOCKFD`] one, which the kernel refuses as Linux does a descriptor that
+/// is no clock's.
+fn is_cpu_clock(clk_id: ClockidT) -> bool {
+    clk_id == CLOCK_PROCESS_CPUTIME_ID || clk_id == CLOCK_THREAD_CPUTIME_ID || clk_id < 0
+}
+
+/// Is `clk_id` a negative id naming a clock by file descriptor.
+fn is_clockfd(clk_id: ClockidT) -> bool {
+    clk_id < 0 && clk_id & CLOCKFD_MASK == CLOCKFD
+}
+
+/// One `SYS_CPU_CLOCK` question, `op` ([`CPU_CLOCK_GETTIME`] or
+/// [`CPU_CLOCK_GETRES`]) about clock `clk_id`: the nanoseconds the kernel
+/// answers, or the errno it refuses with.
+///
+/// A kernel without the call answers that it has no such call, which is
+/// `EINVAL` here -- "no such clock" -- rather than the boot-relative time
+/// these clocks gave until 2026-10-16, which looked like processor time and
+/// was not.
+fn cpu_clock(op: u64, clk_id: ClockidT) -> Result<u64, i32> {
+    #[cfg(target_os = "none")]
+    let ret = syscall2(SYS_CPU_CLOCK, op, u64::from(clk_id.cast_unsigned()));
+    #[cfg(not(target_os = "none"))]
+    let ret = host_cpu_clock::answer(op, clk_id);
+    cpu_clock_answer(ret)
+}
+
+/// [`cpu_clock`]'s reading of the kernel's answer `ret`: nanoseconds, a
+/// negated Linux errno, or the native "no such call".
+fn cpu_clock_answer(ret: i64) -> Result<u64, i32> {
+    if ret == errno::native::NO_SUCH_SYSCALL {
+        return Err(errno::EINVAL);
+    }
+    u64::try_from(ret).map_err(|_| i32::try_from(ret.unsigned_abs()).unwrap_or(errno::EINVAL))
+}
+
+/// Nanoseconds as a `timespec`.
+fn ns_to_timespec(ns: u64) -> Timespec {
+    Timespec {
+        // Below 2^64 / 10^9, so it fits.
+        tv_sec: TimeT::try_from(ns / 1_000_000_000).unwrap_or(TimeT::MAX),
+        // Below 10^9, so it fits.
+        tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
+    }
+}
+
+/// A host build's stand-in for `SYS_CPU_CLOCK`, so that `cargo test`
+/// exercises the library's half -- which ids it sends, how it reads the
+/// answers, the checks it makes first. The host's processor time is not
+/// within `std`'s reach, so the value read is the host's monotonic clock;
+/// whether the kernel measures processor time is the kernel's own
+/// self-test's to show, and `services/ctest-cpu-clocks`'.
+#[cfg(not(target_os = "none"))]
+mod host_cpu_clock {
+    use super::{CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID, ClockidT};
+    use super::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME, is_clockfd};
+
+    /// The answer the kernel would give: the caller's own clocks and those
+    /// of id 0 are readable, a thread's or a process's of any other id is
+    /// gone (`-EINVAL`), as is one of no kind (3, `CPUCLOCK_MAX`), a
+    /// `CLOCKFD` id, and an unknown `op`.
+    pub(super) fn answer(op: u64, clk_id: ClockidT) -> i64 {
+        let einval = i64::from(crate::errno::EINVAL).wrapping_neg();
+        let own = clk_id == CLOCK_PROCESS_CPUTIME_ID
+            || clk_id == CLOCK_THREAD_CPUTIME_ID
+            || (clk_id < 0 && !is_clockfd(clk_id) && clk_id & 3 != 3 && who(clk_id) == 0);
+        if !own {
+            return einval;
+        }
+        match op {
+            CPU_CLOCK_GETTIME => crate::syscall::syscall0(crate::syscall::SYS_CLOCK_MONOTONIC),
+            CPU_CLOCK_GETRES => 1,
+            _ => einval,
+        }
+    }
+
+    /// The process or thread id a negative clock id names (Linux's
+    /// `CPUCLOCK_PID`), whichever of the two it is.
+    fn who(clk_id: ClockidT) -> ClockidT {
+        !clk_id.wrapping_shr(3)
+    }
+}
+
 /// Get the resolution of a clock.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
+    // A CPU-time clock's resolution is the kernel's: a nanosecond for the
+    // precise run time, a tick for the sampled kinds. The clock is checked
+    // whether or not `res` asks for the answer, which is how
+    // `clock_getcpuclockid` tells a live pid from a gone one.
+    if is_cpu_clock(clk_id) {
+        let ns = match cpu_clock(CPU_CLOCK_GETRES, clk_id) {
+            Ok(ns) => ns,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        };
+        if !res.is_null() {
+            // SAFETY: `res` is non-null, and the caller's contract makes it
+            // a writable `timespec`; written unaligned, as in clock_gettime.
+            unsafe { core::ptr::write_unaligned(res, ns_to_timespec(ns)) };
+        }
+        return 0;
+    }
     if !is_valid_clock(clk_id) {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -465,6 +624,20 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 /// positive on the "permission denied" path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
+    // Another process's or thread's CPU-time clock has a `clock_set` in
+    // Linux -- one that refuses: `posix_cpu_clock_set` answers EINVAL for a
+    // clock that names nothing and EPERM for one that does. Its `tp` is
+    // copied in first, so a NULL one is EFAULT. (The caller's own two CPU
+    // clocks have no `clock_set`, and are refused as read-only below.)
+    if clk_id < 0 {
+        if tp.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        let named = !is_clockfd(clk_id) && cpu_clock(CPU_CLOCK_GETRES, clk_id).is_ok();
+        errno::set_errno(if named { errno::EPERM } else { errno::EINVAL });
+        return -1;
+    }
     // 1. Unknown clock → EINVAL.  Linux's clockid_to_kclock runs
     //    before the get_timespec64 user-copy step.
     if !is_valid_clock(clk_id) {
@@ -610,6 +783,39 @@ pub extern "C" fn clock_nanosleep(
     // calling thread's CPU clock itself, before any other check.
     if clk_id == CLOCK_THREAD_CPUTIME_ID {
         return errno::EINVAL;
+    }
+    // Any other CPU-time clock sleeps in the kernel, which alone sees it
+    // advance (`CPU_CLOCK_NANOSLEEP`). Linux's order: a clock named by
+    // descriptor has no `nsleep`, then the request is copied in and checked,
+    // then the clock (`-EINVAL` for one that names nothing, or the caller's
+    // own thread's, which could never advance while it sleeps).
+    if is_cpu_clock(clk_id) {
+        if is_clockfd(clk_id) {
+            return errno::EOPNOTSUPP;
+        }
+        if request.is_null() {
+            return errno::EFAULT;
+        }
+        // SAFETY: `request` is non-null, and the caller's contract makes it a
+        // readable `timespec`; read unaligned, as a C caller's may not be.
+        let req = unsafe { core::ptr::read_unaligned(request) };
+        if req.tv_sec < 0 || !valid_nanoseconds(req.tv_nsec) {
+            return errno::EINVAL;
+        }
+        // The kernel writes the time left through `remain` itself, for a
+        // relative sleep a signal ended, as Linux's does.
+        let ret = syscall5(
+            SYS_CPU_CLOCK,
+            CPU_CLOCK_NANOSLEEP,
+            u64::from(clk_id.cast_unsigned()),
+            u64::from((flags & TIMER_ABSTIME).cast_unsigned()),
+            request as u64,
+            remain as u64,
+        );
+        return match cpu_clock_answer(ret) {
+            Ok(_) => 0,
+            Err(e) => e,
+        };
     }
     // Linux 6.6 (kernel/time/posix-timers.c:1373): an unknown clock, then a
     // clock that cannot be slept on -- `CLOCK_MONOTONIC_RAW` and the two
@@ -1625,23 +1831,23 @@ fn mon_full(mon: i32) -> &'static [u8] {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static CLOCKS_PER_SEC: i64 = 1_000_000;
 
-/// Return an approximation of CPU time used by the process.
-///
-/// Returns microseconds elapsed since an arbitrary point (we use
-/// `CLOCK_MONOTONIC` as a proxy since we don't track per-process
-/// CPU time yet).  Returns -1 on failure.
+/// The processor time the calling process has used, in `CLOCKS_PER_SEC`
+/// units (microseconds): `CLOCK_PROCESS_CPUTIME_ID`, as glibc's `clock` reads
+/// it, and -1 if that clock cannot be read. Until 2026-10-16 this was the
+/// time since boot, so a program comparing its CPU time with the time that
+/// passed saw the two equal.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn clock() -> i64 {
     let mut ts = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    if clock_gettime(CLOCK_MONOTONIC, &raw mut ts) != 0 {
+    if clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &raw mut ts) != 0 {
         return -1;
     }
-    // Convert to microseconds (CLOCKS_PER_SEC = 1_000_000).
-    ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000
+    ts.tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(ts.tv_nsec / 1_000)
 }
 
 // ---------------------------------------------------------------------------
@@ -3098,27 +3304,29 @@ pub extern "C" fn stime(t: *const TimeT) -> i32 {
     settimeofday(&raw const tv, core::ptr::null())
 }
 
-/// The CPU-time clock of process `pid`, into `*clock_id`; the error number
-/// on failure, as POSIX has it return. The calling process's own clock is
-/// `CLOCK_PROCESS_CPUTIME_ID`. Another process's CPU time is not something
-/// this system can read -- `clock_gettime` has no clock for it -- so an
-/// existing other process is `EPERM` (the error POSIX gives for "may not
-/// access that clock") rather than a clock id every later call would refuse,
-/// and one that does not exist is `ESRCH`.
+/// The CPU-time clock of process `pid` (0 the caller), into `*clock_id`; the
+/// error number on failure, as POSIX has it return, `errno` untouched.
+///
+/// glibc's: the id is computed from the pid (`MAKE_PROCESS_CPUCLOCK(pid,
+/// CPUCLOCK_SCHED)`, so the caller's is that of pid 0, not
+/// `CLOCK_PROCESS_CPUTIME_ID`), and asking the kernel for its resolution
+/// checks it -- `EINVAL` there means no such process, `ESRCH`. Any process's
+/// clock may be read, as on Linux. `EFAULT` for a NULL `clock_id`, where
+/// glibc's writes through it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getcpuclockid(pid: PidT, clock_id: *mut ClockidT) -> i32 {
-    if pid == 0 || pid == crate::process::getpid() {
-        // SAFETY: NULL or the caller's `clockid_t`.
-        let Some(out) = (unsafe { clock_id.as_mut() }) else {
-            return errno::EFAULT;
-        };
-        *out = CLOCK_PROCESS_CPUTIME_ID;
-        return 0;
+    let pidclock = make_process_cpuclock(pid, CPUCLOCK_SCHED);
+    match cpu_clock(CPU_CLOCK_GETRES, pidclock) {
+        Ok(_) => {}
+        Err(errno::EINVAL) => return errno::ESRCH,
+        Err(e) => return e,
     }
-    let saved = errno::get_errno();
-    let exists = crate::signal::kill(pid, 0) == 0 || errno::get_errno() == errno::EPERM;
-    errno::set_errno(saved);
-    if exists { errno::EPERM } else { errno::ESRCH }
+    // SAFETY: NULL or the caller's `clockid_t`.
+    let Some(out) = (unsafe { clock_id.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = pidclock;
+    0
 }
 
 #[cfg(test)]
@@ -3161,12 +3369,146 @@ mod tests {
         }
     }
 
+    /// glibc's id for the caller's clock is pid 0's, `(~0 << 3) | 2`, not
+    /// `CLOCK_PROCESS_CPUTIME_ID`, and it reads as a clock.
     #[test]
-    fn clock_getcpuclockid_of_self_is_the_process_clock() {
-        let mut id: ClockidT = -1;
+    fn clock_getcpuclockid_of_self_is_pid_zeros_clock() {
+        let mut id: ClockidT = 99;
         assert_eq!(clock_getcpuclockid(0, &raw mut id), 0);
-        assert_eq!(id, CLOCK_PROCESS_CPUTIME_ID);
+        assert_eq!(id, -6);
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        assert_eq!(clock_gettime(id, &raw mut ts), 0);
+        assert!(ts.tv_sec >= 0 && valid_nanoseconds(ts.tv_nsec), "{ts:?}");
         assert_eq!(clock_getcpuclockid(0, core::ptr::null_mut()), errno::EFAULT);
+    }
+
+    /// A pid the kernel answers `EINVAL` for is no process: `ESRCH`, and
+    /// `*clock_id` untouched.
+    #[test]
+    fn clock_getcpuclockid_of_a_gone_process_is_esrch() {
+        let mut id: ClockidT = 99;
+        errno::set_errno(0);
+        assert_eq!(clock_getcpuclockid(31_337, &raw mut id), errno::ESRCH);
+        assert_eq!(id, 99);
+        assert_eq!(errno::get_errno(), 0, "errno is the return value's");
+    }
+
+    /// The ids are Linux's (`include/linux/posix-timers_types.h`), for a
+    /// process and for a thread.
+    #[test]
+    fn cpu_clock_ids_are_linuxs() {
+        assert_eq!(make_process_cpuclock(0, CPUCLOCK_SCHED), -6);
+        assert_eq!(make_process_cpuclock(1, CPUCLOCK_SCHED), -14);
+        assert_eq!(make_process_cpuclock(1234, 0), !1234 << 3);
+        assert_eq!(make_thread_cpuclock(1234, CPUCLOCK_SCHED), (!1234 << 3) | 6);
+        assert!(is_clockfd((!5 << 3) | 3));
+        assert!(!is_clockfd(make_thread_cpuclock(5, CPUCLOCK_SCHED)));
+        assert!(!is_clockfd(CLOCK_THREAD_CPUTIME_ID));
+        for id in [
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            -6,
+            (!5 << 3) | 3,
+        ] {
+            assert!(is_cpu_clock(id), "{id}");
+        }
+        for id in [CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME, 11] {
+            assert!(!is_cpu_clock(id), "{id}");
+        }
+    }
+
+    /// The kernel's answers: nanoseconds, a negated Linux errno, or -- from
+    /// a kernel without the call -- no such clock.
+    #[test]
+    fn cpu_clock_answers_are_read_as_linuxs() {
+        assert_eq!(cpu_clock_answer(0), Ok(0));
+        assert_eq!(cpu_clock_answer(1_500_000_000), Ok(1_500_000_000));
+        assert_eq!(cpu_clock_answer(-22), Err(errno::EINVAL));
+        assert_eq!(cpu_clock_answer(-1), Err(errno::EPERM));
+        assert_eq!(
+            cpu_clock_answer(errno::native::NO_SUCH_SYSCALL),
+            Err(errno::EINVAL)
+        );
+    }
+
+    /// A CPU-time clock's errors come before the copy-out, as Linux's do: a
+    /// clock naming nothing is EINVAL even with a NULL `tp`, an existing one
+    /// with a NULL `tp` EFAULT; `clock_getres` takes a NULL `res`.
+    #[test]
+    fn cpu_clock_reads_check_the_clock_before_the_pointer() {
+        let gone = make_process_cpuclock(31_337, CPUCLOCK_SCHED);
+        errno::set_errno(0);
+        assert_eq!(clock_gettime(gone, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(
+            clock_gettime(CLOCK_PROCESS_CPUTIME_ID, core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(
+            clock_getres(CLOCK_THREAD_CPUTIME_ID, core::ptr::null_mut()),
+            0
+        );
+        let mut res = Timespec {
+            tv_sec: 9,
+            tv_nsec: 9,
+        };
+        assert_eq!(clock_getres(-6, &raw mut res), 0);
+        assert_eq!((res.tv_sec, res.tv_nsec), (0, 1));
+        errno::set_errno(0);
+        assert_eq!(clock_getres(gone, &raw mut res), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `clock_settime` of another process's clock is EPERM, of one naming
+    /// nothing EINVAL, both after a NULL `tp`'s EFAULT; the caller's own two
+    /// stay read-only, EINVAL.
+    #[test]
+    fn cpu_clocks_cannot_be_set() {
+        let ts = Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        for (id, want) in [
+            (-6, errno::EPERM),
+            (make_process_cpuclock(31_337, CPUCLOCK_SCHED), errno::EINVAL),
+            ((!0 << 3) | 3, errno::EINVAL),
+            (CLOCK_PROCESS_CPUTIME_ID, errno::EINVAL),
+            (CLOCK_THREAD_CPUTIME_ID, errno::EINVAL),
+        ] {
+            errno::set_errno(0);
+            assert_eq!(clock_settime(id, &raw const ts), -1, "{id}");
+            assert_eq!(errno::get_errno(), want, "{id}");
+        }
+        errno::set_errno(0);
+        assert_eq!(clock_settime(-6, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// `clock_nanosleep` on a CPU-time clock: a clock named by descriptor
+    /// cannot sleep, then the request is checked, before the kernel is asked.
+    #[test]
+    fn cpu_clock_sleeps_check_in_linuxs_order() {
+        let bad = Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+        assert_eq!(
+            clock_nanosleep((!0 << 3) | 3, 0, core::ptr::null(), core::ptr::null_mut()),
+            errno::EOPNOTSUPP
+        );
+        assert_eq!(
+            clock_nanosleep(-6, 0, core::ptr::null(), core::ptr::null_mut()),
+            errno::EFAULT
+        );
+        assert_eq!(
+            clock_nanosleep(-6, 0, &raw const bad, core::ptr::null_mut()),
+            errno::EINVAL
+        );
     }
 
     /// Create a zeroed Tm.
@@ -5515,15 +5857,20 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
-    /// Per-error-class: negative clock_id → EINVAL.
+    /// A negative clock id is a CPU-time clock's, which Linux reads when it
+    /// names one: -7 is the caller's own process clock of user time
+    /// (`(~0 << 3) | CPUCLOCK_VIRT`), and -1, of kind 3 (`CPUCLOCK_MAX`), is
+    /// no clock at all -- EINVAL. (Every negative id was EINVAL until
+    /// 2026-10-16; Linux 6.6.87's answers, `build/d-tools/oracle-negclock.c`.)
     #[test]
     fn test_clock_gettime_negative_clock_einval_phase150() {
         let mut ts = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
+        assert_eq!(clock_gettime(-7, &raw mut ts), 0);
         crate::errno::set_errno(0);
-        let ret = clock_gettime(-7, &raw mut ts);
+        let ret = clock_gettime(-1, &raw mut ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6967,11 +7314,18 @@ mod tests {
 
     #[test]
     fn test_clock_nanosleep_negative_clock_beats_null_request_phase153() {
-        // Negative clock id (e.g., -1) is a common bug — must yield
-        // EINVAL via the clock check, not EFAULT via NULL.
+        // A negative id is a CPU-time clock's, whose `nsleep` copies the
+        // request in before it looks at the clock, so even -1 -- of no kind,
+        // no clock at all -- is EFAULT for a NULL request on Linux 6.6.87,
+        // and EINVAL for a readable one. Only a clock named by descriptor
+        // has no `nsleep`, EOPNOTSUPP ahead of everything.
         assert_eq!(
             clock_nanosleep(-1, 0, core::ptr::null(), core::ptr::null_mut()),
-            crate::errno::EINVAL
+            crate::errno::EFAULT
+        );
+        assert_eq!(
+            clock_nanosleep(-5, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EOPNOTSUPP
         );
     }
 
@@ -7931,13 +8285,17 @@ mod tests {
         );
     }
 
-    /// Ordering: negative clock id BEATS NULL tp.
+    /// Ordering: a negative clock id has a `clock_set` in Linux (the CPU-time
+    /// clocks' and the descriptor clocks'), which copies `tp` in first, so a
+    /// NULL one is EFAULT for each -- -5 is a descriptor clock's id.
     #[test]
     fn test_clock_settime_negative_clock_beats_null_tp_phase151() {
-        errno::set_errno(0);
-        let ret = clock_settime(-5, core::ptr::null());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        for id in [-5, -1, -6] {
+            errno::set_errno(0);
+            let ret = clock_settime(id, core::ptr::null());
+            assert_eq!(ret, -1, "{id}");
+            assert_eq!(errno::get_errno(), errno::EFAULT, "{id}");
+        }
     }
 
     /// Ordering: NULL tp BEATS bad timespec (no way to construct;

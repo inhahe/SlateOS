@@ -1613,7 +1613,7 @@ fn vectored(
             if is_write {
                 crate::unix_socket::sendmsg(fd, entry.handle, &msg, 0)
             } else {
-                crate::unix_socket::recvmsg(fd, entry.handle, &mut msg, 0)
+                crate::unix_socket::recv_vector(fd, entry.handle, &mut msg, 0)
             }
         };
     }

@@ -3856,6 +3856,27 @@ the flags here say only where each item stood on 2026-10-10._
   - **The choice** waits on `dotnet/runtime` running here (lane E,
     `roadmap.md`). `apps/backup` (§4.4) is SlateOS's own backup program,
     which a reimplementation would build on.
+  - [ ] **Back up a file as soon as its writer says it is done** (the
+    operator, 2026-10-16). SlateOS lets a program mark a file as being written
+    and then finalize it (§ filesystem, the "file is complete" finalizer /
+    write-in-progress signal). The port's continuous backup copies a file, or
+    makes its new version, on that finalize, rather than guessing from
+    whether the file has gone quiet. Until a finalize, it leaves alone a file
+    marked as being written. A finalize the kernel fires because the writer
+    died is backed up but kept apart, as possibly half-written.
+    - **The guessing stays, for every writer that never uses the signal:**
+      Linux programs, Windows programs under Wine, and any other program that
+      does not call the new functions. On Windows, LithicBackup copies a
+      file once it has stayed unchanged for a time that grows with its size,
+      and, for files matching chosen name patterns such as append-only logs,
+      after a longest wait even if it never settles
+      (`src/LithicBackup.Core/Models/ContinuousRules.cs`: debounce size tiers
+      and max-wait mask tiers). Those rules apply to files without the mark.
+    - **Open:** a file kept marked for hours, such as a database that stays
+      open all day, never finalizes, so it is never copied. A longest wait
+      would copy it torn. The way to a good copy is the VSS equivalent
+      (§4.10, writer coordination), which asks its writer to reach a
+      consistent state first.
 
 **Asked for on 2026-08-21:**
 

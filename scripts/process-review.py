@@ -55,8 +55,13 @@ sys.path.insert(0, str(HERE))
 import gitenv  # noqa: E402
 import selftestflag  # noqa: E402
 
-#: The operator's usage analyzer: `python -m cua report` there.
-CUA_DIR = Path(os.environ.get("CUA_DIR", "D:/visual studio projects/claude-usage-analysis"))
+#: The operator's usage analyzer: `python -m cua report` there. `CUA_DIR`, else
+#: beside the projects (where it is on a one-drive machine), else where it was
+#: first kept.
+CUA_DIR = Path(os.environ.get("CUA_DIR") or next(
+    (str(p) for p in (REPO.parent / "claude-usage-analysis",
+                      Path("D:/visual studio projects/claude-usage-analysis")) if p.is_dir()),
+    str(REPO.parent / "claude-usage-analysis")))
 #: Seconds of usage summed per fitted window: long enough that the whole
 #: points the meter reports in mean something, short enough to give many.
 FIT_WINDOW = 2 * 3600
@@ -529,7 +534,9 @@ def register(out: str) -> int:
     """Register the weekly Task Scheduler entry: Mondays 06:30, after the
     curator, from the integration tree, which is kept at main. The task
     starts in System32, so `out` is made absolute here."""
-    script = Path("E:/visual studio projects/os/scripts/process-review.py")
+    # The integration tree's copy: the main worktree, beside the shared .git.
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    script = Path(common).parent / "scripts" / "process-review.py"
     pyw = Path(sys.executable).with_name("pythonw.exe")
     cmd = f'"{pyw}" "{script}" --out "{Path(out).resolve()}" --propose'
     r = subprocess.run(["schtasks", "/create", "/f", "/tn", TASK, "/sc", "weekly", "/d", "MON",

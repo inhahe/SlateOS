@@ -32,12 +32,15 @@ import struct
 import subprocess
 import sys
 import tempfile
+import shutil
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "chrome_sdr.bin")
 CHROME = "C:/Program Files/Google/Chrome/Application/chrome.exe"
-MKVMERGE = "D:/utils/mkvtoolnix-99.0/mkvmerge.exe"
+# `MKVMERGE`, else mkvmerge on PATH, else where it was first unpacked.
+MKVMERGE = (os.environ.get("MKVMERGE") or shutil.which("mkvmerge")
+            or "D:/utils/mkvtoolnix-99.0/mkvmerge.exe")
 PATCH, COLS, ROWS = 8, 64, 32
 
 # primaries, transfer, matrix, range -- each said, as Chrome needs.

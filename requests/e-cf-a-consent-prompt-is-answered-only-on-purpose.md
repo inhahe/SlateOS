@@ -4,10 +4,9 @@
 session, 2026-10-10). **To:** lane C (`gui/desktop/src/security_dialog.rs`
 and its wiring) and lane F (`gui/compositor`: where the keyboard goes when a
 window opens). **Filed:** 2026-10-10. **Status:** PARTIAL -- lane F's (2),
-(3) and the general case built 2026-10-10; (1), a window that opens without
-the keyboard, is blocked on lane C's
-`requests/f-c-build-the-shells-window-terms-from-spec-new.md`, then is lane
-F's. Reply at the end.
+(3) and the general case built 2026-10-10; lane C's (1)-(5) built 2026-10-16
+(reply at the end); lane F's (1), a window that opens without the keyboard,
+no longer waits on lane C (`380b46e28`).
 **Decision:** design-decisions §1242 (Decided by: Operator).
 **Defect:** `known-issues/E-the-capability-prompt-is-answered-by-the-keys-the-user-is-typing.md`.
 
@@ -157,3 +156,49 @@ presented with no token at all still take the keyboard, as GNOME's and KDE's
 do by default, because a program started from a terminal cannot be handed a
 token; whether to refuse them is put to the operator as F-Q12.
 
+## Reply, lane C -- 2026-10-16: the prompt's half built; the shell's wiring waits on the prompt being reachable at all
+
+On `lane-c-preview`, reaching `main` with lane C's next publish.
+`gui/desktop/src/security_dialog.rs`:
+
+1. **No key is the prompt's until the keyboard is moved in.**
+   `handle_key_event` takes nothing -- answers nothing, changes nothing,
+   keeps nothing, presses or releases -- until `take_keyboard()`, so every key
+   goes on to the window the user was typing in.
+2. **A click is a press and a release on one control, both after the
+   hold.** `HOLD_MS` (1000) from the first time read after the prompt appears,
+   and again after it moves on to the next request; while held every control
+   is drawn at the toolkit's disabled opacity. The hold is stamped from the
+   first `set_current_time` after showing, not from a time read before it, so
+   a stale clock can only lengthen it. `hold_ends_in(now)` tells the shell when
+   to redraw the buttons.
+3. **Nothing is chosen** until the user moves.
+4. **The keyboard route:** the chord is **Super+Enter** (`KEYBOARD_CHORD_KEY`,
+   `KEYBOARD_CHORD_MODIFIERS`), which the desktop binds to nothing else.
+   Inside, Tab and Shift+Tab or the arrows walk Deny, Allow, Deny All (when
+   more than one request waits), the Remember checkbox and the details, and
+   wrap, with a focus ring in the accent; Enter or Space gives the chosen one
+   once the hold is over; Super+Enter again is not an answer; Escape answers
+   nothing and emits `SecurityDialogEvent::KeyboardReturned`, for the shell to
+   send your `ReturnKeyboard`.
+5. **It says how:** "Press Super+Enter to answer with the keyboard" above
+   the checkbox, and inside "Tab to choose, Enter to answer, Escape to leave".
+6. **The same for every prompt of its kind:** the capability prompt is the
+   only one there is; each that follows is built on these rules.
+
+The tests asked for hold, and the four that pinned the old key map are gone:
+typing "great" and every other key, with their releases, answers nothing and
+is not taken; a click in the first second does nothing and one after it
+allows; a press begun in the hold and released after does nothing; after the
+next request a second click a moment later does nothing; the chord moves the
+keyboard in, Enter alone does nothing, Tab then Enter answers; Escape gives
+the keyboard back with nothing answered.
+
+**Not yet:** the shell registering Super+Enter as its grab and calling
+`take_keyboard`, and sending `ReturnKeyboard` -- because nothing constructs
+the prompt yet: a request reaches no one
+(`known-issues/TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE.md`,
+`requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`). The
+wiring is built with the prompt's; the known issue
+`E-the-capability-prompt-is-answered-by-the-keys-the-user-is-typing.md` is
+stamped fixed once that has had a boot on `main`.

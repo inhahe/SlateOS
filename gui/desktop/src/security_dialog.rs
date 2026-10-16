@@ -45,7 +45,11 @@
 //!     created_at_ms: 1234567890,
 //! });
 //!
-//! // Forward events while visible:
+//! // Each frame, before anything else -- the hold below is measured on it:
+//! dialog.set_current_time(now_ms);
+//!
+//! // Forward events while visible; keys only reach it once the user moved
+//! // the keyboard in with the chord:
 //! dialog.handle_key_event(&key_event);
 //! dialog.handle_mouse_event(&mouse_event);
 //!
@@ -58,14 +62,39 @@
 //!         SecurityDialogEvent::Approved(id) => { /* call approve(id) */ }
 //!         SecurityDialogEvent::Denied(id) => { /* call deny(id) */ }
 //!         SecurityDialogEvent::DeniedAll => { /* deny all pending */ }
+//!         SecurityDialogEvent::KeyboardReturned => { /* ReturnKeyboard */ }
+//!         SecurityDialogEvent::RememberToggled(..) => {}
 //!     }
 //! }
 //! ```
+//!
+//! # Answered only on purpose
+//!
+//! The prompt appears when a program asks, which may be in the middle of the
+//! user typing -- and the program asking is often the one they are typing
+//! into, so it can time its request. So, by the operator's rule
+//! (design-decisions 1242):
+//!
+//! - **No key answers it, changes it, or is kept by it** until the user has
+//!   moved the keyboard in on purpose, with [`KEYBOARD_CHORD_LABEL`] -- a
+//!   Super chord no program receives and typing never produces -- which the
+//!   shell turns into [`SecurityDialog::take_keyboard`]. Until then
+//!   [`SecurityDialog::handle_key_event`] takes nothing, and every key goes
+//!   on to the window the user was typing in.
+//! - **A click answers it, but not one already on its way:** for
+//!   [`HOLD_MS`] after it appears, and again after it moves on to the next
+//!   request (whose buttons are where the last one's were), nothing in it
+//!   answers, and it is drawn held back. A click counts when the control was
+//!   both pressed and released after that, on the same control.
+//! - **Nothing is chosen in advance.** Inside, Tab and Shift+Tab or the
+//!   arrows move among its controls -- Deny first -- from none; Enter or Space
+//!   gives the one chosen, after the hold as a click does; Escape gives the
+//!   keyboard back, answering nothing ([`SecurityDialogEvent::KeyboardReturned`]).
+//! - **It says how**: its text names the chord.
 
 use appearance::{Palette, Surface, readable_on};
-#[cfg(test)]
-use guitk::event::Modifiers;
-use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::disabled::DISABLED_OPACITY;
+use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -129,6 +158,35 @@ const MAX_QUEUE_DISPLAY: usize = 10;
 const MAX_REASON_DISPLAY: usize = 200;
 /// Timeout display threshold (seconds remaining that triggers warning color).
 const TIMEOUT_WARN_SECS: u64 = 10;
+
+/// How long the prompt answers nothing after it appears, and after it moves
+/// on to the next request: design-decisions 1242's one second, which a click
+/// already on its way -- a double-click, a run of clicks a program asked for
+/// where it knows Allow will be -- does not outlast.
+pub const HOLD_MS: u64 = 1000;
+
+/// The key of the chord that moves the keyboard into the prompt, with
+/// [`KEYBOARD_CHORD_MODIFIERS`]: Super+Enter, which the desktop uses for
+/// nothing else. A Super chord is the compositor's to keep for the desktop
+/// (design-decisions 565), so no program receives it and typing never
+/// produces it. The shell registers it and calls
+/// [`SecurityDialog::take_keyboard`] when it is pressed.
+pub const KEYBOARD_CHORD_KEY: Key = Key::Enter;
+
+/// The modifiers of [`KEYBOARD_CHORD_KEY`]'s chord: Super alone.
+pub const KEYBOARD_CHORD_MODIFIERS: Modifiers = Modifiers {
+    shift: false,
+    ctrl: false,
+    alt: false,
+    super_key: true,
+};
+
+/// The chord as the prompt names it to the user.
+pub const KEYBOARD_CHORD_LABEL: &str = "Super+Enter";
+
+/// What the prompt says about the keyboard, outside it and inside.
+const KEYBOARD_HINT: &str = "Press Super+Enter to answer with the keyboard";
+const KEYBOARD_HINT_INSIDE: &str = "Tab to choose, Enter to answer, Escape to leave";
 
 // ============================================================================
 // Resource types (mirrors kernel CapRequest ResourceType)
@@ -342,18 +400,26 @@ pub enum SecurityDialogEvent {
     DeniedAll,
     /// User toggled "Remember this decision" for the current request.
     RememberToggled(u64, bool),
+    /// The user left the prompt with Escape, answering nothing: give the
+    /// keyboard back to the window it came from (the compositor's
+    /// `ShellControlAction::ReturnKeyboard`). The prompt stays on screen.
+    KeyboardReturned,
 }
 
 // ============================================================================
 // Button identifiers
 // ============================================================================
 
+/// The prompt's controls: what a click lands on, and what the keyboard
+/// moves among once it is inside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonId {
     Allow,
     Deny,
     Details,
     DenyAll,
+    /// The "Remember this decision" checkbox.
+    Remember,
 }
 
 // ============================================================================
@@ -385,6 +451,20 @@ pub struct SecurityDialog {
     current_time_ms: u64,
     /// Decision history for "remember" feature.
     remembered_decisions: Vec<RememberedDecision>,
+    /// Whether the user moved the keyboard into the prompt on purpose
+    /// ([`take_keyboard`](Self::take_keyboard)). Until then no key is the
+    /// prompt's.
+    keyboard_inside: bool,
+    /// The control the keyboard is on, inside: none until the user moves.
+    chosen: Option<ButtonId>,
+    /// When the prompt starts answering: [`HOLD_MS`] after the first
+    /// [`set_current_time`](Self::set_current_time) since it appeared or moved
+    /// on. `None` until that time is known, which holds it -- a stale clock
+    /// read at showing could only shorten the hold, never lengthen it.
+    answers_from_ms: Option<u64>,
+    /// The control a press began on after the hold: a release on the same
+    /// control answers.
+    pressed: Option<ButtonId>,
 }
 
 /// A remembered allow/deny decision for auto-responding to future requests.
@@ -452,6 +532,10 @@ impl SecurityDialog {
             screen_height: 1080.0,
             current_time_ms: 0,
             remembered_decisions: Vec::new(),
+            keyboard_inside: false,
+            chosen: None,
+            answers_from_ms: None,
+            pressed: None,
         }
     }
 
@@ -461,9 +545,64 @@ impl SecurityDialog {
         self.screen_height = height;
     }
 
-    /// Update the current monotonic time (call each frame).
+    /// Update the current monotonic time: each frame, before its events. The
+    /// first time read after the prompt appears, or moves on to the next
+    /// request, starts its [`HOLD_MS`].
     pub fn set_current_time(&mut self, time_ms: u64) {
         self.current_time_ms = time_ms;
+        if self.visible && self.answers_from_ms.is_none() {
+            self.answers_from_ms = Some(time_ms.saturating_add(HOLD_MS));
+        }
+    }
+
+    /// Whether the prompt is holding its answers back: within [`HOLD_MS`] of
+    /// appearing or moving on, or before the time since is known.
+    fn held(&self) -> bool {
+        self.answers_from_ms
+            .is_none_or(|from| self.current_time_ms < from)
+    }
+
+    /// How long until the prompt answers clicks, in milliseconds from
+    /// `now_ms`, for an owner that sleeps while nothing moves: it redraws the
+    /// buttons then. `None` when it is hidden or answering already.
+    #[must_use]
+    pub fn hold_ends_in(&self, now_ms: u64) -> Option<u64> {
+        if !self.visible {
+            return None;
+        }
+        match self.answers_from_ms {
+            None => Some(HOLD_MS),
+            Some(from) => from.checked_sub(now_ms).filter(|wait| *wait > 0),
+        }
+    }
+
+    /// Move the keyboard into the prompt: the user pressed
+    /// [`KEYBOARD_CHORD_LABEL`]. Nothing is chosen; Tab or an arrow moves to
+    /// an answer. Returns whether there was a prompt to move into.
+    pub fn take_keyboard(&mut self) -> bool {
+        if !self.visible {
+            return false;
+        }
+        self.keyboard_inside = true;
+        self.chosen = None;
+        true
+    }
+
+    /// Whether the keyboard is in the prompt, moved there on purpose.
+    #[must_use]
+    pub fn has_keyboard(&self) -> bool {
+        self.visible && self.keyboard_inside
+    }
+
+    /// The prompt as it opens, or as it moves on to the next request: nothing
+    /// expanded, ticked, hovered, chosen or pressed, and held again.
+    fn start_afresh(&mut self) {
+        self.details_expanded = false;
+        self.remember = false;
+        self.hovered_button = None;
+        self.chosen = None;
+        self.pressed = None;
+        self.answers_from_ms = None;
     }
 
     /// Push a new capability request onto the queue.
@@ -486,9 +625,9 @@ impl SecurityDialog {
         self.queue.push(request);
         if !self.visible {
             self.visible = true;
-            self.details_expanded = false;
-            self.remember = false;
-            self.hovered_button = None;
+            // It never takes the keyboard by itself.
+            self.keyboard_inside = false;
+            self.start_afresh();
         }
     }
 
@@ -584,18 +723,72 @@ impl SecurityDialog {
         }
         self.events.push(SecurityDialogEvent::DeniedAll);
         self.queue.clear();
-        self.visible = false;
+        self.hide();
     }
 
-    /// After processing a request, either show the next one or hide.
+    /// After processing a request, either show the next one or hide. The
+    /// next is held back again: its buttons are where the last one's were.
     fn advance_or_hide(&mut self) {
         if self.queue.is_empty() {
-            self.visible = false;
+            self.hide();
         } else {
-            // Reset UI state for the next request
-            self.details_expanded = false;
-            self.remember = false;
-            self.hovered_button = None;
+            self.start_afresh();
+        }
+    }
+
+    /// Close the prompt. The keyboard goes back where it came from by the
+    /// compositor's rule for a closing window (design-decisions 1384).
+    fn hide(&mut self) {
+        self.visible = false;
+        self.keyboard_inside = false;
+        self.start_afresh();
+    }
+
+    /// The controls the keyboard moves among, in order: the answers first,
+    /// Deny before Allow, then the rest.
+    fn controls(&self) -> Vec<ButtonId> {
+        let mut order = vec![ButtonId::Deny, ButtonId::Allow];
+        if self.queue.len() > 1 {
+            order.push(ButtonId::DenyAll);
+        }
+        order.extend([ButtonId::Remember, ButtonId::Details]);
+        order
+    }
+
+    /// Move the keyboard's choice one control forwards, or backwards: from
+    /// none, to the first or the last.
+    fn move_choice(&mut self, forwards: bool) {
+        let order = self.controls();
+        let at = self
+            .chosen
+            .and_then(|chosen| order.iter().position(|c| *c == chosen));
+        let next = match (at, forwards) {
+            (None, true) => Some(0),
+            (None, false) => order.len().checked_sub(1),
+            (Some(i), true) => Some(if i.saturating_add(1) >= order.len() {
+                0
+            } else {
+                i.saturating_add(1)
+            }),
+            (Some(i), false) => Some(i.checked_sub(1).unwrap_or(order.len().saturating_sub(1))),
+        };
+        self.chosen = next.and_then(|i| order.get(i).copied());
+    }
+
+    /// Do what `control` does: answer, or toggle the checkbox or the details.
+    fn activate(&mut self, control: ButtonId) {
+        match control {
+            ButtonId::Allow => self.allow_current(),
+            ButtonId::Deny => self.deny_current(),
+            ButtonId::DenyAll => self.deny_all(),
+            ButtonId::Details => self.details_expanded = !self.details_expanded,
+            ButtonId::Remember => {
+                self.remember = !self.remember;
+                if let Some(id) = self.current_request().map(|request| request.id) {
+                    self.events
+                        .push(SecurityDialogEvent::RememberToggled(id, self.remember));
+                }
+            }
         }
     }
 
@@ -603,64 +796,43 @@ impl SecurityDialog {
     // Input handling
     // ========================================================================
 
-    /// Handle a keyboard event. Returns true if the event was consumed.
+    /// Handle a keyboard event. Returns whether the prompt took it.
+    ///
+    /// **Nothing, until the keyboard is inside** ([`take_keyboard`]): every
+    /// key the user is typing -- Enter, Escape, a letter, their releases --
+    /// goes on to the window they are typing in. Inside, every key is the
+    /// prompt's: Tab and Shift+Tab or the arrows move the choice, Enter or
+    /// Space gives it once the hold is over, Escape leaves, answering
+    /// nothing; the rest do nothing.
+    ///
+    /// [`take_keyboard`]: Self::take_keyboard
     pub fn handle_key_event(&mut self, event: &KeyEvent) -> bool {
-        if !self.visible {
+        if !self.has_keyboard() {
             return false;
         }
-
-        match event.key {
-            // Enter = Allow (focused action)
-            Key::Enter => {
-                self.allow_current();
-                true
-            }
-            // Escape = Deny
-            Key::Escape => {
-                self.deny_current();
-                true
-            }
-            // D = Deny, A = Allow (keyboard shortcuts)
-            Key::A if !event.modifiers.ctrl => {
-                self.allow_current();
-                true
-            }
-            Key::D if !event.modifiers.ctrl => {
-                self.deny_current();
-                true
-            }
-            // Ctrl+D = Deny All
-            Key::D if event.modifiers.ctrl => {
-                self.deny_all();
-                true
-            }
-            // Space = toggle details
-            Key::Space => {
-                self.details_expanded = !self.details_expanded;
-                true
-            }
-            // R = toggle remember
-            Key::R if !event.modifiers.ctrl => {
-                self.remember = !self.remember;
-                if let Some(request) = self.current_request() {
-                    let id = request.id;
-                    self.events
-                        .push(SecurityDialogEvent::RememberToggled(id, self.remember));
-                }
-                true
-            }
-            // Tab = cycle hovered button
-            Key::Tab => {
-                self.hovered_button = match self.hovered_button {
-                    None | Some(ButtonId::DenyAll) => Some(ButtonId::Allow),
-                    Some(ButtonId::Allow) => Some(ButtonId::Deny),
-                    Some(ButtonId::Deny) => Some(ButtonId::Details),
-                    Some(ButtonId::Details) => Some(ButtonId::DenyAll),
-                };
-                true
-            }
-            _ => true, // Consume all keys while visible (modal)
+        if !event.pressed {
+            return true;
         }
+        let m = event.modifiers;
+        // Enter with Super is the chord itself, pressed again: not an answer.
+        let plain = !m.ctrl && !m.alt && !m.super_key;
+        match event.key {
+            Key::Escape if plain => {
+                self.keyboard_inside = false;
+                self.chosen = None;
+                self.events.push(SecurityDialogEvent::KeyboardReturned);
+            }
+            Key::Tab if plain => self.move_choice(!m.shift),
+            Key::Right | Key::Down if plain => self.move_choice(true),
+            Key::Left | Key::Up if plain => self.move_choice(false),
+            Key::Enter | Key::Space if plain && !m.shift => {
+                if let Some(control) = self.chosen.filter(|_| !self.held()) {
+                    self.activate(control);
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Handle a mouse event. Returns true if the event was consumed.
@@ -676,39 +848,35 @@ impl SecurityDialog {
 
         match event.kind {
             MouseEventKind::Move => {
-                // Hit-test buttons
                 self.hovered_button = self.hit_test_button(local_x, local_y);
-                true
             }
+            // A click is a press and a release on one control, both after
+            // the hold: a press made during it is not finished by a release
+            // after it.
             MouseEventKind::Press(MouseButton::Left) => {
-                // Check button clicks
-                if let Some(button) = self.hit_test_button(local_x, local_y) {
-                    match button {
-                        ButtonId::Allow => self.allow_current(),
-                        ButtonId::Deny => self.deny_current(),
-                        ButtonId::Details => {
-                            self.details_expanded = !self.details_expanded;
-                        }
-                        ButtonId::DenyAll => self.deny_all(),
-                    }
-                    return true;
-                }
-
-                // Check "remember" checkbox click
-                if self.hit_test_remember(local_x, local_y) {
-                    self.remember = !self.remember;
-                    if let Some(request) = self.current_request() {
-                        let id = request.id;
-                        self.events
-                            .push(SecurityDialogEvent::RememberToggled(id, self.remember));
-                    }
-                    return true;
-                }
-
-                true // Consume click even if not on a button (modal)
+                self.pressed = if self.held() {
+                    None
+                } else {
+                    self.control_at(local_x, local_y)
+                };
             }
-            _ => true, // Consume all mouse events while visible (modal)
+            MouseEventKind::Release(MouseButton::Left) => {
+                let pressed = self.pressed.take();
+                let here = self.control_at(local_x, local_y);
+                if let Some(control) = here.filter(|c| pressed == Some(*c) && !self.held()) {
+                    self.activate(control);
+                }
+            }
+            _ => {}
         }
+        // Every mouse event is the prompt's while it is up: it is modal.
+        true
+    }
+
+    /// The control at `(x, y)`, in the dialog's own coordinates.
+    fn control_at(&self, x: f32, y: f32) -> Option<ButtonId> {
+        self.hit_test_button(x, y)
+            .or_else(|| self.hit_test_remember(x, y).then_some(ButtonId::Remember))
     }
 
     /// Calculate the dynamic dialog height based on whether details are expanded.
@@ -1016,11 +1184,19 @@ impl SecurityDialog {
         } else {
             "Show details"
         };
-        let details_color = if self.hovered_button == Some(ButtonId::Details) {
-            p.accent
-        } else {
-            p.subtext0
-        };
+        let held = self.held();
+        let details_color =
+            self.as_held(if self.hovered_button == Some(ButtonId::Details) && !held {
+                p.accent
+            } else {
+                p.subtext0
+            });
+        self.push_focus_ring(
+            p,
+            &mut cmds,
+            ButtonId::Details,
+            (dx + PADDING, details_y - 2.0, 100.0, 18.0),
+        );
         cmds.push(RenderCommand::Text {
             x: dx + PADDING,
             y: details_y,
@@ -1097,20 +1273,25 @@ impl SecurityDialog {
                 max_width: Some(panel_w - dp * 2.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            ty += 16.0;
-
-            // Keyboard shortcuts reminder
-            cmds.push(RenderCommand::Text {
-                x: dx + PADDING + dp,
-                y: ty,
-                text: "Keys: A=Allow  D=Deny  Ctrl+D=Deny All  Space=Details  R=Remember".into(),
-                font_size: DETAIL_FONT_SIZE,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_w - dp * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
         }
+
+        // --- How to answer with the keyboard ---
+        let hint_y = dy + dh - PADDING - BUTTON_HEIGHT - 28.0 - 22.0;
+        cmds.push(RenderCommand::Text {
+            x: dx + PADDING,
+            y: hint_y,
+            text: if self.keyboard_inside {
+                KEYBOARD_HINT_INSIDE
+            } else {
+                KEYBOARD_HINT
+            }
+            .into(),
+            font_size: DETAIL_FONT_SIZE,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(dw - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         // --- Remember checkbox: the toolkit's ---
         let checkbox_y = dy + dh - PADDING - BUTTON_HEIGHT - 28.0;
@@ -1124,73 +1305,89 @@ impl SecurityDialog {
             } else {
                 guitk::checkbox::CheckState::Unchecked
             },
-            guitk::checkbox::State::default(),
-            0.0,
+            guitk::checkbox::State {
+                hovered: false,
+                focused: self.keyboard_inside && self.chosen == Some(ButtonId::Remember),
+                disabled: held,
+            },
+            2.0,
         );
 
         // --- Action buttons ---
         let btn_y = dy + dh - PADDING - BUTTON_HEIGHT;
 
+        // While held, no button shows a hover, and every one is drawn at the
+        // toolkit's disabled opacity: it answers nothing yet.
+        let lit = |button: ButtonId| self.hovered_button == Some(button) && !held;
+
         // Deny All (only when queue > 1)
         if self.queue.len() > 1 {
-            let deny_all_color = if self.hovered_button == Some(ButtonId::DenyAll) {
+            let deny_all_color = if lit(ButtonId::DenyAll) {
                 p.surface2
             } else {
                 p.surface1
             };
+            self.push_focus_ring(
+                p,
+                &mut cmds,
+                ButtonId::DenyAll,
+                (dx + PADDING, btn_y, 90.0, BUTTON_HEIGHT),
+            );
             self.render_button(
                 &mut cmds,
                 dx + PADDING,
                 btn_y,
                 90.0,
                 &format!("Deny All ({})", self.queue.len()),
-                deny_all_color,
-                p.red,
+                self.as_held(deny_all_color),
+                self.as_held(p.red),
             );
         }
 
         // Deny button
         let deny_x = dx + dw - PADDING - BUTTON_WIDTH * 2.0 - BUTTON_SPACING;
-        let deny_bg = if self.hovered_button == Some(ButtonId::Deny) {
-            p.red
+        let (deny_bg, deny_fg) = if lit(ButtonId::Deny) {
+            (p.red, readable_on(p.red))
         } else {
-            p.surface1
+            (p.surface1, p.red)
         };
-        let deny_fg = if self.hovered_button == Some(ButtonId::Deny) {
-            readable_on(p.red)
-        } else {
-            p.red
-        };
+        self.push_focus_ring(
+            p,
+            &mut cmds,
+            ButtonId::Deny,
+            (deny_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
         self.render_button(
             &mut cmds,
             deny_x,
             btn_y,
             BUTTON_WIDTH,
             "Deny",
-            deny_bg,
-            deny_fg,
+            self.as_held(deny_bg),
+            self.as_held(deny_fg),
         );
 
         // Allow button
         let allow_x = dx + dw - PADDING - BUTTON_WIDTH;
-        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {
-            p.green
+        let (allow_bg, allow_fg) = if lit(ButtonId::Allow) {
+            (p.green, readable_on(p.green))
         } else {
-            p.surface1
+            (p.surface1, p.green)
         };
-        let allow_fg = if self.hovered_button == Some(ButtonId::Allow) {
-            readable_on(p.green)
-        } else {
-            p.green
-        };
+        self.push_focus_ring(
+            p,
+            &mut cmds,
+            ButtonId::Allow,
+            (allow_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
         self.render_button(
             &mut cmds,
             allow_x,
             btn_y,
             BUTTON_WIDTH,
             "Allow",
-            allow_bg,
-            allow_fg,
+            self.as_held(allow_bg),
+            self.as_held(allow_fg),
         );
 
         // --- Queue indicator ---
@@ -1214,6 +1411,44 @@ impl SecurityDialog {
     // ========================================================================
     // Render helpers
     // ========================================================================
+
+    /// `color` as the prompt draws a control while it is held: at the
+    /// toolkit's disabled opacity, as anything that cannot be used is.
+    fn as_held(&self, color: guitk::Color) -> guitk::Color {
+        if !self.held() {
+            return color;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an alpha times a fraction of one, rounded: within 0..=255"
+        )]
+        let alpha = (f32::from(color.a) * DISABLED_OPACITY).round() as u8;
+        guitk::theme::with_alpha(color, alpha)
+    }
+
+    /// A ring in the accent round `control`'s box `(x, y, width, height)`,
+    /// when the keyboard is inside and on it.
+    fn push_focus_ring(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        control: ButtonId,
+        (x, y, width, height): (f32, f32, f32, f32),
+    ) {
+        if !(self.keyboard_inside && self.chosen == Some(control)) {
+            return;
+        }
+        cmds.push(RenderCommand::StrokeRect {
+            x: x - 3.0,
+            y: y - 3.0,
+            width: width + 6.0,
+            height: height + 6.0,
+            color: p.accent,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(BUTTON_RADIUS + 3.0),
+        });
+    }
 
     /// Render a shield icon with a letter inside it.
     fn render_shield_icon(
@@ -1582,6 +1817,8 @@ mod tests {
         let p = Palette::for_mode(false);
         let mut dialog = SecurityDialog::new();
         dialog.push_request(sample_request(7));
+        dialog.set_current_time(0);
+        dialog.set_current_time(HOLD_MS);
         let well = dialog
             .render(&p)
             .into_iter()
@@ -1602,14 +1839,9 @@ mod tests {
                 _ => None,
             })
             .expect("the checkbox's box is drawn");
-        let press = |x: f32, y: f32| MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        };
         let mid_y = well.1 + guitk::checkbox::SIZE / 2.0;
 
-        assert!(dialog.handle_mouse_event(&press(well.0 + 7.0, mid_y)));
+        click(&mut dialog, (well.0 + 7.0, mid_y));
         assert!(dialog.remember, "a click on the box ticks it");
         assert!(
             dialog
@@ -1618,11 +1850,11 @@ mod tests {
         );
 
         let label_end = well.0 + guitk::checkbox::width(REMEMBER_LABEL) - 2.0;
-        dialog.handle_mouse_event(&press(label_end, mid_y));
+        click(&mut dialog, (label_end, mid_y));
         assert!(!dialog.remember, "a click on the label's end unticks it");
 
         let past = well.0 + guitk::checkbox::width(REMEMBER_LABEL) + 40.0;
-        dialog.handle_mouse_event(&press(past, mid_y));
+        click(&mut dialog, (past, mid_y));
         assert!(
             !dialog.remember,
             "a click past the label is not the checkbox's"
@@ -1785,162 +2017,328 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_keyboard_allow() {
-        let mut dialog = SecurityDialog::new();
-        dialog.push_request(sample_request(1));
+    // --- answered only on purpose (design-decisions 1242) ---
 
-        let event = KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
-        };
-        assert!(dialog.handle_key_event(&event));
-        let events = dialog.drain_events();
-        assert_eq!(events[0], SecurityDialogEvent::Approved(1));
+    /// A dialog showing `requests`, its hold over: time 10 s read once as it
+    /// appeared, then 11 s.
+    fn answering(requests: u64) -> SecurityDialog {
+        let mut dialog = SecurityDialog::new();
+        for id in 1..=requests {
+            dialog.push_request(sample_request(id));
+        }
+        dialog.set_current_time(10_000);
+        dialog.set_current_time(10_000 + HOLD_MS);
+        dialog
     }
 
-    #[test]
-    fn test_keyboard_deny() {
-        let mut dialog = SecurityDialog::new();
-        dialog.push_request(sample_request(1));
-
-        let event = KeyEvent {
-            key: Key::Escape,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
+    fn key(key: Key, modifiers: Modifiers, pressed: bool) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed,
+            modifiers,
             text: String::new(),
-        };
-        assert!(dialog.handle_key_event(&event));
-        let events = dialog.drain_events();
-        assert_eq!(events[0], SecurityDialogEvent::Denied(1));
+        }
     }
 
-    #[test]
-    fn test_keyboard_deny_all() {
-        let mut dialog = SecurityDialog::new();
-        dialog.push_request(sample_request(1));
-        dialog.push_request(sample_request(2));
-
-        let event = KeyEvent {
-            key: Key::D,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: true,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
-        };
-        assert!(dialog.handle_key_event(&event));
-        let events = dialog.drain_events();
-        assert!(events.contains(&SecurityDialogEvent::DeniedAll));
+    fn press(k: Key) -> KeyEvent {
+        key(k, Modifiers::NONE, true)
     }
 
-    #[test]
-    fn test_keyboard_toggle_details() {
-        let mut dialog = SecurityDialog::new();
-        dialog.push_request(sample_request(1));
-        assert!(!dialog.details_expanded);
-
-        let event = KeyEvent {
-            key: Key::Space,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
+    /// The middle of `button`, on the screen.
+    fn centre_of(dialog: &SecurityDialog, button: ButtonId) -> (f32, f32) {
+        let h = dialog.dialog_height();
+        let btn_y = h - PADDING - BUTTON_HEIGHT / 2.0;
+        let allow_x = DIALOG_WIDTH - PADDING - BUTTON_WIDTH;
+        let local = match button {
+            ButtonId::Allow => (allow_x + BUTTON_WIDTH / 2.0, btn_y),
+            ButtonId::Deny => (allow_x - BUTTON_SPACING - BUTTON_WIDTH / 2.0, btn_y),
+            ButtonId::DenyAll => (PADDING + 45.0, btn_y),
+            other => panic!("no centre for {other:?}"),
         };
-        dialog.handle_key_event(&event);
-        assert!(dialog.details_expanded);
-
-        dialog.handle_key_event(&event);
-        assert!(!dialog.details_expanded);
+        assert_eq!(dialog.hit_test_button(local.0, local.1), Some(button));
+        (
+            local.0 + (dialog.screen_width - DIALOG_WIDTH) / 2.0,
+            local.1 + (dialog.screen_height - h) / 2.0,
+        )
     }
 
-    #[test]
-    fn test_keyboard_toggle_remember() {
-        let mut dialog = SecurityDialog::new();
-        dialog.push_request(sample_request(1));
-        assert!(!dialog.remember);
-
-        let event = KeyEvent {
-            key: Key::R,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
-        };
-        dialog.handle_key_event(&event);
-        assert!(dialog.remember);
+    fn mouse(kind: MouseEventKind, (x, y): (f32, f32)) -> MouseEvent {
+        MouseEvent { x, y, kind }
     }
 
-    #[test]
-    fn test_keyboard_not_consumed_when_hidden() {
-        let dialog = SecurityDialog::new();
-        let event = KeyEvent {
-            key: Key::Enter,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
-        };
-        // Can't call on immutable ref; need mutable
-        let mut dialog = dialog;
-        assert!(!dialog.handle_key_event(&event));
+    /// A press and a release at `at`, at the dialog's current time.
+    fn click(dialog: &mut SecurityDialog, at: (f32, f32)) {
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Press(MouseButton::Left), at));
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Release(MouseButton::Left), at));
     }
 
+    /// **No key the user was typing answers the prompt, changes it, or is
+    /// kept by it**: every one goes on to the window they were typing in.
+    /// "great" is the word that, under the old keys, granted the access --
+    /// R ticked Remember and A allowed.
     #[test]
-    fn test_tab_cycles_buttons() {
+    fn typing_answers_nothing_and_is_kept_by_nothing() {
+        let mut dialog = answering(2);
+        let mut keys: Vec<KeyEvent> = [
+            Key::G,
+            Key::R,
+            Key::E,
+            Key::A,
+            Key::T,
+            Key::Enter,
+            Key::Escape,
+            Key::D,
+            Key::Space,
+            Key::Tab,
+            Key::Down,
+            Key::Up,
+        ]
+        .into_iter()
+        .flat_map(|k| {
+            [
+                key(k, Modifiers::NONE, true),
+                key(k, Modifiers::NONE, false),
+            ]
+        })
+        .collect();
+        keys.push(key(Key::D, Modifiers::ctrl(), true));
+        for event in &keys {
+            assert!(!dialog.handle_key_event(event), "{:?} was taken", event.key);
+        }
+        assert!(dialog.drain_events().is_empty(), "something was answered");
+        assert!(dialog.is_visible());
+        assert_eq!(dialog.pending_count(), 2);
+        assert!(!dialog.remember && !dialog.details_expanded);
+    }
+
+    /// **A click answers it -- but not in its first second**, and it is drawn
+    /// held back meanwhile.
+    #[test]
+    fn a_click_in_the_first_second_does_nothing_and_after_it_answers() {
         let mut dialog = SecurityDialog::new();
         dialog.push_request(sample_request(1));
+        let allow = centre_of(&dialog, ButtonId::Allow);
+        click(&mut dialog, allow);
+        assert!(dialog.drain_events().is_empty(), "before any time was read");
 
-        let tab = KeyEvent {
-            key: Key::Tab,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                super_key: false,
-            },
-            text: String::new(),
+        dialog.set_current_time(10_000);
+        assert_eq!(dialog.hold_ends_in(10_000), Some(HOLD_MS));
+        dialog.set_current_time(10_000 + HOLD_MS - 1);
+        click(&mut dialog, allow);
+        assert!(dialog.drain_events().is_empty(), "within the second");
+        assert_eq!(dialog.hold_ends_in(10_000 + HOLD_MS - 1), Some(1));
+
+        dialog.set_current_time(10_000 + HOLD_MS);
+        assert_eq!(dialog.hold_ends_in(10_000 + HOLD_MS), None);
+        click(&mut dialog, allow);
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Approved(1)]);
+    }
+
+    /// **A press made during the hold is not finished by a release after
+    /// it**, and a press and release must be on the same control.
+    #[test]
+    fn a_press_begun_during_the_hold_is_not_finished_after_it() {
+        let mut dialog = SecurityDialog::new();
+        dialog.push_request(sample_request(1));
+        dialog.set_current_time(10_000);
+        let allow = centre_of(&dialog, ButtonId::Allow);
+        let deny = centre_of(&dialog, ButtonId::Deny);
+
+        dialog.set_current_time(10_000 + HOLD_MS - 100);
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Press(MouseButton::Left), allow));
+        dialog.set_current_time(10_000 + HOLD_MS + 100);
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Release(MouseButton::Left), allow));
+        assert!(dialog.drain_events().is_empty());
+
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Press(MouseButton::Left), deny));
+        dialog.handle_mouse_event(&mouse(MouseEventKind::Release(MouseButton::Left), allow));
+        assert!(
+            dialog.drain_events().is_empty(),
+            "pressed on Deny, let go on Allow"
+        );
+
+        click(&mut dialog, deny);
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Denied(1)]);
+    }
+
+    /// **The next request is held again**: its buttons are where the last
+    /// one's were, so a second click a moment later answers nothing.
+    #[test]
+    fn the_next_request_is_held_again() {
+        let mut dialog = answering(2);
+        let allow = centre_of(&dialog, ButtonId::Allow);
+        click(&mut dialog, allow);
+        assert!(
+            dialog
+                .drain_events()
+                .contains(&SecurityDialogEvent::Approved(1))
+        );
+        let allow = centre_of(&dialog, ButtonId::Allow);
+        click(&mut dialog, allow);
+        assert!(dialog.drain_events().is_empty(), "the same moment");
+
+        dialog.set_current_time(20_000);
+        dialog.set_current_time(20_000 + HOLD_MS / 2);
+        click(&mut dialog, allow);
+        assert!(dialog.drain_events().is_empty(), "half a second on");
+        dialog.set_current_time(20_000 + HOLD_MS);
+        click(&mut dialog, allow);
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Approved(2)]);
+    }
+
+    /// **The chord moves the keyboard in, with nothing chosen**: Enter alone
+    /// does nothing; Tab, or an arrow, then Enter answers -- Deny first.
+    #[test]
+    fn the_chord_moves_the_keyboard_in_with_nothing_chosen() {
+        let mut dialog = answering(1);
+        assert!(dialog.take_keyboard());
+        assert!(dialog.has_keyboard());
+        assert!(dialog.handle_key_event(&press(Key::Enter)));
+        assert!(dialog.handle_key_event(&press(Key::Space)));
+        assert!(dialog.drain_events().is_empty(), "nothing was chosen");
+
+        assert!(dialog.handle_key_event(&press(Key::Tab)));
+        assert_eq!(dialog.chosen, Some(ButtonId::Deny));
+        dialog.handle_key_event(&press(Key::Enter));
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Denied(1)]);
+        assert!(!dialog.is_visible() && !dialog.has_keyboard());
+
+        let mut dialog = answering(1);
+        dialog.take_keyboard();
+        dialog.handle_key_event(&press(Key::Right));
+        dialog.handle_key_event(&press(Key::Right));
+        assert_eq!(dialog.chosen, Some(ButtonId::Allow));
+        dialog.handle_key_event(&press(Key::Space));
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Approved(1)]);
+    }
+
+    /// **Tab, Shift+Tab and the arrows walk every control and wrap**: the
+    /// answers first, Deny All among them when more than one request waits,
+    /// then the checkbox and the details.
+    #[test]
+    fn the_keys_inside_walk_every_control() {
+        let mut dialog = answering(2);
+        dialog.take_keyboard();
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            dialog.handle_key_event(&press(Key::Tab));
+            seen.push(dialog.chosen.expect("a choice"));
+        }
+        assert_eq!(
+            seen,
+            [
+                ButtonId::Deny,
+                ButtonId::Allow,
+                ButtonId::DenyAll,
+                ButtonId::Remember,
+                ButtonId::Details,
+                ButtonId::Deny,
+            ]
+        );
+        dialog.handle_key_event(&key(Key::Tab, Modifiers::shift(), true));
+        assert_eq!(dialog.chosen, Some(ButtonId::Details), "back round");
+        dialog.handle_key_event(&press(Key::Up));
+        assert_eq!(dialog.chosen, Some(ButtonId::Remember));
+        dialog.handle_key_event(&press(Key::Enter));
+        assert!(dialog.remember, "Enter on the checkbox ticks it");
+        assert_eq!(
+            dialog.drain_events(),
+            [SecurityDialogEvent::RememberToggled(1, true)]
+        );
+
+        let mut fresh = answering(1);
+        fresh.take_keyboard();
+        fresh.handle_key_event(&press(Key::Left));
+        assert_eq!(
+            fresh.chosen,
+            Some(ButtonId::Details),
+            "from none, back is the last"
+        );
+    }
+
+    /// **The keys inside wait out the hold as a click does**, and the chord
+    /// pressed again inside is not an answer.
+    #[test]
+    fn keys_inside_wait_for_the_hold_and_the_chord_is_no_answer() {
+        let mut dialog = SecurityDialog::new();
+        dialog.push_request(sample_request(1));
+        dialog.set_current_time(10_000);
+        dialog.take_keyboard();
+        dialog.handle_key_event(&press(Key::Tab));
+        dialog.handle_key_event(&press(Key::Enter));
+        assert!(dialog.drain_events().is_empty(), "within the second");
+
+        dialog.set_current_time(10_000 + HOLD_MS);
+        dialog.handle_key_event(&key(KEYBOARD_CHORD_KEY, KEYBOARD_CHORD_MODIFIERS, true));
+        assert!(
+            dialog.drain_events().is_empty(),
+            "the chord again is not Enter"
+        );
+        dialog.handle_key_event(&press(Key::Enter));
+        assert_eq!(dialog.drain_events(), [SecurityDialogEvent::Denied(1)]);
+    }
+
+    /// **Escape gives the keyboard back, answering nothing**, and the prompt
+    /// stays; keys after it are the window's again.
+    #[test]
+    fn escape_gives_the_keyboard_back_and_answers_nothing() {
+        let mut dialog = answering(1);
+        dialog.take_keyboard();
+        dialog.handle_key_event(&press(Key::Tab));
+        assert!(dialog.handle_key_event(&press(Key::Escape)));
+        assert_eq!(
+            dialog.drain_events(),
+            [SecurityDialogEvent::KeyboardReturned]
+        );
+        assert!(dialog.is_visible() && !dialog.has_keyboard());
+        assert_eq!(dialog.chosen, None);
+        assert!(!dialog.handle_key_event(&press(Key::Enter)));
+        assert!(dialog.drain_events().is_empty());
+        assert!(
+            !SecurityDialog::new().take_keyboard(),
+            "no prompt, nothing to move into"
+        );
+    }
+
+    /// **The prompt names the chord** -- and, inside, the keys that work
+    /// there; and while it is held its buttons are drawn at the disabled
+    /// opacity, after it in full.
+    #[test]
+    fn the_prompt_names_the_chord_and_draws_its_hold() {
+        let p = Palette::for_mode(false);
+        let texts = |dialog: &SecurityDialog| -> Vec<(String, u8)> {
+            dialog
+                .render(&p)
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } => Some((text, color.a)),
+                    _ => None,
+                })
+                .collect()
         };
+        let alpha_of = |found: &[(String, u8)], wanted: &str| {
+            found
+                .iter()
+                .find(|(t, _)| t == wanted)
+                .map(|(_, a)| *a)
+                .unwrap_or_else(|| panic!("{wanted:?} is not drawn"))
+        };
+        let mut dialog = SecurityDialog::new();
+        dialog.push_request(sample_request(1));
+        dialog.set_current_time(10_000);
+        let held = texts(&dialog);
+        assert!(held.iter().any(|(t, _)| t.contains(KEYBOARD_CHORD_LABEL)));
+        assert!(alpha_of(&held, "Allow") < 255, "held back");
 
-        assert_eq!(dialog.hovered_button, None);
-        dialog.handle_key_event(&tab);
-        assert_eq!(dialog.hovered_button, Some(ButtonId::Allow));
-        dialog.handle_key_event(&tab);
-        assert_eq!(dialog.hovered_button, Some(ButtonId::Deny));
-        dialog.handle_key_event(&tab);
-        assert_eq!(dialog.hovered_button, Some(ButtonId::Details));
-        dialog.handle_key_event(&tab);
-        assert_eq!(dialog.hovered_button, Some(ButtonId::DenyAll));
-        dialog.handle_key_event(&tab);
-        assert_eq!(dialog.hovered_button, Some(ButtonId::Allow)); // wraps
+        dialog.set_current_time(10_000 + HOLD_MS);
+        let open = texts(&dialog);
+        assert_eq!(alpha_of(&open, "Allow"), 255);
+        dialog.take_keyboard();
+        assert!(
+            texts(&dialog)
+                .iter()
+                .any(|(t, _)| t == KEYBOARD_HINT_INSIDE)
+        );
     }
 
     #[test]

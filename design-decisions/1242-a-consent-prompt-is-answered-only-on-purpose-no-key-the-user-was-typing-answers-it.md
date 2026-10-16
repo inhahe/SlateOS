@@ -120,3 +120,11 @@ until it is fixed.
 
 **Reversal:** the rule is the operator's. Changing the one-second hold, the
 chord, or the keys inside the prompt is lane C's, recorded here.
+
+**Lane C's choices, 2026-10-16** (`gui/desktop/src/security_dialog.rs`):
+the chord is **Super+Enter**, which the desktop binds to nothing else; the
+hold is one second from the first time the shell reads after the prompt
+appears or moves on, so a clock read before it can only lengthen the hold;
+inside, the keyboard walks Deny, Allow, Deny All (when more than one request
+waits), the Remember checkbox and the details, Deny first and none chosen
+at the start; Super+Enter pressed again inside is not an answer.

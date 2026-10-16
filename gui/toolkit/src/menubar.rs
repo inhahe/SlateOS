@@ -3,7 +3,9 @@
 //! Renders a horizontal bar of top-level labels. Clicking a label opens a
 //! dropdown menu; moving between labels while open performs hot-tracking.
 //! Supports action items, separators, submenus, check items, keyboard
-//! mnemonics (`&File` underlines **F**), and keyboard accelerator display.
+//! mnemonics (`&File` underlines **F**), and keyboard accelerator display. A
+//! greyed row says why it is greyed while the pointer rests on it, as a
+//! context menu's does ([`MenuBar::explain`]).
 //!
 //! Uses the Catppuccin Mocha dark theme, consistent with `menu.rs`. It shows
 //! tools its titles and its open menus' rows ([`MenuBarPart`]).
@@ -26,6 +28,7 @@ pub use accessible::MenuBarPart;
 // ─── Re-export the shared item-id type from the context-menu module ────────
 
 pub use crate::menu::MenuItemId;
+use crate::menu::Tooltip;
 
 // ─── Catppuccin Mocha palette ──────────────────────────────────────────────
 
@@ -573,6 +576,22 @@ pub struct MenuBar {
     /// mouse move. The width depends only on the entries, which change only in
     /// [`Self::set_items`], so it is computed exactly where they do.
     dropdown_widths: Vec<f32>,
+    /// Why a greyed row is greyed, by the row's id, as the bar's owner says
+    /// ([`explain`](Self::explain)). Kept across [`set_items`](Self::set_items):
+    /// ids name rows, not positions, and a program rebuilding its rows to grey
+    /// or ungrey them keeps saying the same things.
+    reasons: Vec<(MenuItemId, String)>,
+    /// The greyed row the pointer rests on, when it has a reason to show.
+    resting: Option<Resting>,
+}
+
+/// The pointer resting on a greyed row that has a reason, in any open panel:
+/// which row, where the pointer came to rest, and -- once [`MenuBar::tick`]
+/// has seen it, which is when the wait starts -- the tooltip saying it.
+struct Resting {
+    id: MenuItemId,
+    at: (f32, f32),
+    tooltip: Option<Tooltip>,
 }
 
 impl MenuBar {
@@ -593,6 +612,8 @@ impl MenuBar {
             events: Vec::new(),
             label_metrics,
             dropdown_widths,
+            reasons: Vec::new(),
+            resting: None,
         }
     }
 
@@ -631,11 +652,137 @@ impl MenuBar {
         self.dropdown_hover = None;
         self.dropdown_scroll = 0.0;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// Drain all pending events.
     pub fn drain_events(&mut self) -> Vec<MenuBarEvent> {
         core::mem::take(&mut self.events)
+    }
+
+    // ── Why a row is greyed ─────────────────────────────────────────────
+
+    /// Say why the row `id` is greyed, to be shown while the pointer rests on
+    /// it, as [`ContextMenu::explain`](crate::menu::ContextMenu::explain)
+    /// does for a context menu. Shown only while the row *is* greyed, so a
+    /// reason can be given whatever the row's state, and saying it again
+    /// replaces what was said. A row in a submenu is explained here too.
+    ///
+    /// Shown by a bar whose owner lets time pass ([`tick`](Self::tick)); one
+    /// that never does shows no reasons and behaves as it always did.
+    pub fn explain(&mut self, id: MenuItemId, why: impl Into<String>) {
+        let why = why.into();
+        match self.reasons.iter_mut().find(|(said, _)| *said == id) {
+            Some((_, reason)) => *reason = why,
+            None => self.reasons.push((id, why)),
+        }
+    }
+
+    /// What [`explain`](Self::explain) was told for the row `id`.
+    #[must_use]
+    pub fn reason(&self, id: MenuItemId) -> Option<&str> {
+        self.reasons
+            .iter()
+            .find(|(said, _)| *said == id)
+            .map(|(_, why)| why.as_str())
+    }
+
+    /// Let time pass, at `now_ms`: the reason a greyed row gives appears once
+    /// the pointer has rested on the row for the toolkit's tooltip delay,
+    /// counted from the first `tick` after it came to rest. Returns whether a
+    /// reason appeared now -- the moment to repaint.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        let viewport = self.viewport;
+        let why = self
+            .resting
+            .as_ref()
+            .and_then(|resting| self.reason(resting.id))
+            .map(str::to_owned);
+        let (Some(resting), Some(why)) = (self.resting.as_mut(), why) else {
+            return false;
+        };
+        let at = resting.at;
+        let tooltip = resting.tooltip.get_or_insert_with(|| {
+            let mut tooltip = Tooltip::new(&why);
+            tooltip.start_hover(at.0, at.1, now_ms, viewport);
+            tooltip
+        });
+        let was = tooltip.is_visible();
+        tooltip.tick(now_ms);
+        !was && tooltip.is_visible()
+    }
+
+    /// How long until a reason appears, in milliseconds from `now_ms` --
+    /// `Some(0)` when the pointer has come to rest on a greyed row and no
+    /// [`tick`](Self::tick) has started the wait yet -- or `None` when none is
+    /// waiting. For an owner that sleeps while nothing moves: a deadline with
+    /// no wake-up behind it never comes.
+    #[must_use]
+    pub fn due_in(&self, now_ms: u64) -> Option<u64> {
+        self.resting
+            .as_ref()
+            .and_then(|resting| match &resting.tooltip {
+                Some(tooltip) => tooltip.due_in(now_ms),
+                None => Some(0),
+            })
+    }
+
+    /// The reason showing now, if one is: the greyed row's the pointer rests
+    /// on, in the open dropdown or a submenu open from it.
+    #[must_use]
+    pub fn showing_reason(&self) -> Option<&str> {
+        self.resting
+            .as_ref()
+            .filter(|resting| resting.tooltip.as_ref().is_some_and(Tooltip::is_visible))
+            .and_then(|resting| self.reason(resting.id))
+    }
+
+    /// The greyed row the pointer at `(mx, my)` is over that has a reason,
+    /// in whichever open panel is on top there; `None` anywhere else.
+    fn explained_row_at(&self, mx: f32, my: f32) -> Option<MenuItemId> {
+        let top_idx = self.open_index?;
+        let children = children_of(&self.items, top_idx);
+        let entry = match self
+            .open_submenu
+            .as_deref()
+            .and_then(|sub| entry_in_submenu_chain(children, sub, mx, my, self.viewport))
+        {
+            Some(in_submenu) => in_submenu,
+            None => {
+                let panel = self.dropdown_panel(top_idx);
+                if !panel.contains(mx, my) {
+                    return None;
+                }
+                panel
+                    .index_at(children, my)
+                    .and_then(|i| children.get(i))
+                    .cloned()
+            }
+        };
+        match entry? {
+            MenuBarEntry::Action {
+                id, enabled: false, ..
+            } if self.reason(id).is_some() => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The pointer is at `(x, y)` over the explained greyed row `row`, or over
+    /// none: resting on one begins the wait for its reason -- unless it was
+    /// resting there already, when the wait goes on -- and anywhere else ends
+    /// it, the reason hidden with it.
+    fn rest_on(&mut self, row: Option<MenuItemId>, x: f32, y: f32) {
+        match row {
+            Some(id) if self.resting.as_ref().is_some_and(|resting| resting.id == id) => {}
+            Some(id) => {
+                self.resting = Some(Resting {
+                    id,
+                    at: (x, y),
+                    tooltip: None,
+                });
+            }
+            None => self.resting = None,
+        }
     }
 
     // ── Mouse handling ──────────────────────────────────────────────────
@@ -662,6 +809,18 @@ impl MenuBar {
     ///
     /// [`wheel::pixels`]: crate::wheel::pixels
     fn on_mouse_scroll(&mut self, mx: f32, my: f32, dy: f32) -> EventResult {
+        let result = self.scroll_panels(mx, my, dy);
+        if result == EventResult::Consumed {
+            // The rows moved under a pointer that did not: a reason waiting,
+            // or showing, would now be about some other row. The next move
+            // finds the row it is over.
+            self.resting = None;
+        }
+        result
+    }
+
+    /// Send `dy` to whichever open panel the pointer is over.
+    fn scroll_panels(&mut self, mx: f32, my: f32, dy: f32) -> EventResult {
         let Some(top_idx) = self.open_index else {
             return EventResult::Ignored;
         };
@@ -753,6 +912,17 @@ impl MenuBar {
     }
 
     fn on_mouse_move(&mut self, mx: f32, my: f32) -> EventResult {
+        let result = self.track_hover(mx, my);
+        // After the hover, which may have opened or closed a panel: the row
+        // is looked for in the panels as they now are.
+        let row = self.explained_row_at(mx, my);
+        self.rest_on(row, mx, my);
+        result
+    }
+
+    /// The hover a pointer move makes: hot-tracking across the titles, the
+    /// highlighted row, and the submenus that open and close with it.
+    fn track_hover(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Hot-tracking across top-level labels. ---
         if (0.0..scaled(BAR_HEIGHT)).contains(&my) {
             if self.is_open()
@@ -813,6 +983,19 @@ impl MenuBar {
 
     /// Handle a keyboard event.
     pub fn handle_key_event(&mut self, event: &KeyEvent, viewport: (f32, f32)) -> EventResult {
+        let result = self.key(event, viewport);
+        // A key can open, close or scroll a panel under a pointer that stays
+        // where it was: a reason stays only while its row is still the one
+        // under it.
+        if let Some(resting) = &self.resting
+            && self.explained_row_at(resting.at.0, resting.at.1) != Some(resting.id)
+        {
+            self.resting = None;
+        }
+        result
+    }
+
+    fn key(&mut self, event: &KeyEvent, viewport: (f32, f32)) -> EventResult {
         self.viewport = viewport;
         if !event.pressed {
             return EventResult::Ignored;
@@ -1049,6 +1232,15 @@ impl MenuBar {
             self.render_dropdown(palette, &mut cmds, top_idx);
         }
 
+        // Over everything, why the greyed row the pointer rests on is greyed.
+        if let Some(Resting {
+            tooltip: Some(tooltip),
+            ..
+        }) = &self.resting
+        {
+            cmds.extend(tooltip.render(palette));
+        }
+
         cmds
     }
 
@@ -1122,6 +1314,7 @@ impl MenuBar {
         // scrolled must not open the next one part-way down its own list.
         self.dropdown_scroll = 0.0;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// Activate an entry in the primary dropdown.
@@ -1422,6 +1615,33 @@ fn hover_in_submenu_chain(
     }
 
     false
+}
+
+/// The row under `(mx, my)` in the submenu chain, deepest panel first as the
+/// other walkers go: `None` when the pointer is over none of the chain's
+/// panels, `Some(None)` over one of them but on no row (a separator, the
+/// padding), and `Some(Some(entry))` on a row. `parent_entries` means what it
+/// does in [`click_in_submenu_chain`].
+fn entry_in_submenu_chain(
+    parent_entries: &[MenuBarEntry],
+    sub: &OpenSubmenu,
+    mx: f32,
+    my: f32,
+    viewport: (f32, f32),
+) -> Option<Option<MenuBarEntry>> {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+    if let Some(found) = sub
+        .child
+        .as_deref()
+        .and_then(|child| entry_in_submenu_chain(&entries, child, mx, my, viewport))
+    {
+        return Some(found);
+    }
+    let panel = submenu_panel(&entries, sub, viewport);
+    if !panel.contains(mx, my) {
+        return None;
+    }
+    Some(panel.index_at(&entries, my).and_then(|i| entries.get(i)).cloned())
 }
 
 /// Send `dy` wheel notches to whichever panel of the chain the pointer is over.
@@ -3658,5 +3878,167 @@ mod tests {
         assert_eq!(bar.open_index, Some(2));
         bar.handle_key_event(&press(Key::Right), SCREEN);
         assert_eq!(bar.open_index, Some(0), "and Right comes back round");
+    }
+
+    // ── Why a greyed row is greyed ──────────────────────────────────────
+
+    /// `make_bar` with File open and "Save As..." (row 4, id 4) greyed and
+    /// explained.
+    fn explained_bar() -> MenuBar {
+        let mut bar = make_bar();
+        bar.explain(4, "Nothing has been saved yet");
+        open_first_dropdown(&mut bar);
+        bar
+    }
+
+    /// A point inside row `index` of the open top-level dropdown.
+    fn on_row(bar: &MenuBar, index: usize) -> (f32, f32) {
+        let top_idx = bar.open_index.expect("a dropdown is open");
+        let panel = bar.dropdown_panel(top_idx);
+        let top = panel
+            .row_top(children_of(&bar.items, top_idx), index)
+            .expect("the row is on screen");
+        (panel.x + 10.0, top + 2.0)
+    }
+
+    fn move_to(bar: &mut MenuBar, (x, y): (f32, f32)) {
+        bar.handle_mouse_event(&mouse_move(x, y), SCREEN);
+    }
+
+    fn texts(commands: &[RenderCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A greyed row on the bar says why, once the pointer has rested on
+    /// it** for the tooltip delay -- counted from the first tick after it came
+    /// to rest, which `due_in` asks for at once -- drawn over the dropdown, as
+    /// a context menu's greyed row does.
+    #[test]
+    fn a_greyed_row_on_the_bar_says_why_once_the_pointer_rests_on_it() {
+        let mut bar = explained_bar();
+        assert_eq!(bar.reason(4), Some("Nothing has been saved yet"));
+        assert_eq!(bar.due_in(0), None, "nothing rests on a row");
+
+        let at = on_row(&bar, 4);
+        move_to(&mut bar, at);
+        assert_eq!(bar.due_in(1000), Some(0), "the wait starts at the next tick");
+        assert!(!bar.tick(1000));
+        let delay = bar.due_in(1000).expect("waiting");
+        assert!(delay > 0);
+        assert_eq!(bar.showing_reason(), None);
+
+        assert!(bar.tick(1000 + delay), "the reason appeared");
+        assert_eq!(bar.showing_reason(), Some("Nothing has been saved yet"));
+        assert_eq!(bar.due_in(1000 + delay), None, "showing is not waiting");
+        assert!(!bar.tick(1000 + delay + 100), "it appears once");
+        let palette = Palette::for_mode(false);
+        assert!(texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned()));
+
+        // Moving within the row keeps it; leaving the row hides it.
+        move_to(&mut bar, (at.0 + 5.0, at.1));
+        assert_eq!(bar.showing_reason(), Some("Nothing has been saved yet"));
+        let first = on_row(&bar, 0);
+        move_to(&mut bar, first);
+        assert_eq!(bar.showing_reason(), None);
+        assert_eq!(bar.due_in(1000 + delay), None);
+        assert!(!texts(&bar.render(&palette, 800)).contains(&"Nothing has been saved yet".to_owned()));
+    }
+
+    /// **Only a greyed row with a reason says anything**: a row that can be
+    /// chosen is not explained, whatever it was told, and a greyed row no one
+    /// explained shows nothing.
+    #[test]
+    fn only_a_greyed_row_on_the_bar_with_a_reason_says_anything() {
+        let mut bar = make_bar();
+        bar.explain(1, "New is on");
+        open_first_dropdown(&mut bar);
+        for row in [0, 4] {
+            let at = on_row(&bar, row);
+            move_to(&mut bar, at);
+            assert_eq!(bar.due_in(0), None, "row {row}");
+            assert!(!bar.tick(10_000));
+            assert_eq!(bar.showing_reason(), None);
+        }
+    }
+
+    /// **The wait ends when the row is no longer under the pointer**: the
+    /// pointer going up to the titles, the rows scrolling under it, or the
+    /// bar closing. A key that leaves the row where it was keeps it; saying
+    /// why again replaces what was said, and holds across new rows.
+    #[test]
+    fn the_bars_wait_ends_when_the_row_is_no_longer_under_the_pointer() {
+        let mut bar = explained_bar();
+        let at = on_row(&bar, 4);
+
+        move_to(&mut bar, at);
+        move_to(&mut bar, (5.0, BAR_HEIGHT / 2.0));
+        assert_eq!(bar.due_in(0), None, "the pointer went up to the titles");
+
+        move_to(&mut bar, at);
+        assert_eq!(
+            bar.handle_mouse_event(&wheel(at.0, at.1, 1.0), SCREEN),
+            EventResult::Consumed
+        );
+        assert_eq!(bar.due_in(0), None, "the rows moved under the pointer");
+
+        move_to(&mut bar, at);
+        bar.handle_key_event(&press(Key::Down), SCREEN);
+        assert_eq!(bar.due_in(0), Some(0), "a key that moves the highlight leaves the row");
+        bar.handle_key_event(&press(Key::Escape), SCREEN);
+        assert!(!bar.is_open());
+        assert_eq!(bar.due_in(0), None, "the bar closed");
+        assert!(!bar.tick(10_000));
+
+        bar.explain(4, "Save it first");
+        bar.set_items(make_bar().items);
+        assert_eq!(bar.reason(4), Some("Save it first"), "reasons name rows, not positions");
+    }
+
+    /// **A greyed row in a submenu of the bar is explained too.**
+    #[test]
+    fn a_greyed_row_in_a_submenu_of_the_bar_says_why() {
+        let mut bar = MenuBar::new(vec![MenuBarItem {
+            label: "&Edit".to_string(),
+            children: vec![MenuBarEntry::SubMenu {
+                label: "Paste Special".to_string(),
+                children: vec![
+                    MenuBarEntry::Action {
+                        label: "As Text".to_string(),
+                        shortcut: None,
+                        enabled: true,
+                        id: 51,
+                    },
+                    MenuBarEntry::Action {
+                        label: "As Picture".to_string(),
+                        shortcut: None,
+                        enabled: false,
+                        id: 52,
+                    },
+                ],
+            }],
+        }]);
+        bar.explain(52, "What was copied is not a picture");
+        open_first_dropdown(&mut bar);
+        let paste_special = on_row(&bar, 0);
+        move_to(&mut bar, paste_special);
+        let at = {
+            let sub = bar.open_submenu.as_deref().expect("hovering opened the submenu");
+            let entries = resolve_submenu_entries(children_of(&bar.items, 0), sub);
+            let panel = submenu_panel(&entries, sub, SCREEN);
+            let top = panel.row_top(&entries, 1).expect("the row is on screen");
+            (panel.x + 10.0, top + 2.0)
+        };
+        move_to(&mut bar, at);
+        assert_eq!(bar.due_in(0), Some(0));
+        bar.tick(0);
+        let delay = bar.due_in(0).expect("waiting");
+        assert!(bar.tick(delay));
+        assert_eq!(bar.showing_reason(), Some("What was copied is not a picture"));
     }
 }

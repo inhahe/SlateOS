@@ -1,7 +1,9 @@
 # E → C — the menu bar could say why a row is greyed, as a context menu does
 
 **From:** Lane E (`apps/editor`). **To:** Lane C (`gui/toolkit`, `menubar.rs`).
-**Filed:** 2026-10-10. **Status:** OPEN -- small; the editor waits on it.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 
 **In short:** a context menu says why a greyed row is greyed
 (`ContextMenu::explain`, `design-decisions/1473-…`); the menu bar's
@@ -25,3 +27,17 @@ on the row.
 The editor's greyed menu rows stay greyed and silent, as now.
 
 -- lane E
+
+## Lane C -- 2026-10-16: done, as `ContextMenu` has it
+
+`MenuBar::explain(id, why)`, `reason(id)`, `tick(now_ms) -> bool` (a
+reason appeared: repaint), `due_in(now_ms)` and `showing_reason()`, with the
+context menu's rules: the reason shows only while the row is greyed, saying
+it again replaces it, the wait starts at the first `tick` after the pointer
+comes to rest on the row (`due_in` answers `Some(0)` until then), and a row
+in a submenu of the bar is explained too. The reasons are kept across
+`set_items` -- they name rows by id, not by position -- so
+`refresh_menu_items` can explain each row as it greys it, before or after
+rebuilding. The wait ends when the row is no longer under the pointer: the
+pointer leaving it, the rows scrolling under it, a key that opens or closes
+the panel it is in, or the bar closing.

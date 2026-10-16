@@ -1351,6 +1351,23 @@ networking, which the kernel side of every one of these already needed:
 Roadmap (the POSIX/libc, fixture and toolchain items that used to open this
 list moved to lane D on 2026-09-22):
 
+- `[-]` `[B]` **The login screen, then the desktop, start** -- lane B's step
+  on §1392's path, ahead of the rest of this list. The shape is agreed with
+  lane C (`requests/b-c-one-process-signs-people-in-and-it-is-not-the-desktop.md`)
+  and recorded in §1076.
+  - `[x]` `init/loginmgr` the daemon: `org.slateos.LoginManager`, its rules
+    tested, logind's `SetSessionLeader`. 2026-10-16. Lane C told
+    (`requests/b-c-loginmgr-is-built-its-calls-and-how-it-starts-the-screen.md`).
+  - `[ ]` Its launcher: start the screen and the desktop as their users,
+    holding only what each is given. Waits on lane A
+    (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
+  - `[ ]` logind's power calls (`PowerOff`, `Reboot`, `Suspend`) over the bus,
+    allowed to the active seat's session -- the login screen's among them --
+    and carried out through the service manager, as `powerctl` does
+    (todo.txt, "loginctl can inspect sessions and cannot change them").
+  - `[ ]` `loginmgr`'s line in `/etc/startup.conf` and a `greeter` account
+    on the image: lane D's, to ask once the launcher works.
+
 - `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1799).
   ⛔ **Scope frozen 2026-08-14 — see design-decisions.md §305 before touching it.**
   bash itself runs on SlateOS; osh parity work is now gated by §305's stopping

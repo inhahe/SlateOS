@@ -68,7 +68,10 @@ cd "$BUILD" || exit 1
 # The programs, removed and linked again: make relinks only what is missing
 # or older than its inputs, and libc.a is not among them; and a link that
 # fails must not leave the last run's program to be installed as this one's.
-for p in xgcc xg++ cpp cc1 cc1plus collect2 gcov gcov-dump gcov-tool; do
+# lto-wrapper too: install-gcc installs it (into usr/libexec/gcc/) even with
+# --disable-lto, and left out it shipped linked against an older libc.a than
+# everything beside it (Fable's review of lane D's round 202).
+for p in xgcc xg++ cpp cc1 cc1plus collect2 lto-wrapper gcov gcov-dump gcov-tool; do
     rm -f "gcc/$p"
 done
 slate_resume_if_killed "$WORK/relink.log" make -j"$JOBS" all-gcc

@@ -2462,23 +2462,47 @@ fi
 # refused here rather than found at boot: three blank-separated fields, a
 # fixture with a services/<name>/build.py, a grant of `-` or `file`, and
 # 1 to 600 seconds.
+#
+# A fourth field, `needs=<path>`, names what the fixture runs on the image
+# (`usr/bin/gcc`, relative to its root): when this image was built without it
+# -- a worktree that never built that port's spike -- the fixture is left off
+# the staged list, with a warning, rather than run to fail every boot made
+# from that worktree. The rung reads the three fields; the staged list has no
+# fourth.
 GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
 if [ -f "$GENERIC_LIST" ]; then
     _bad=0
     _listed=0
+    _left_off=0
+    _staged_list="$STAGE/tests/ctest-generic.list"
+    : > "$_staged_list"
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%%#*}"
         # Fields by `read`, not `set --`, which would take the script's own
         # arguments; and no glob is expanded.
-        _name="" _grant="" _secs="" _more=""
-        read -r _name _grant _secs _more <<<"$_line" || true
+        _name="" _grant="" _secs="" _needs="" _more=""
+        read -r _name _grant _secs _needs _more <<<"$_line" || true
         if [ -z "$_name" ]; then
             continue
         fi
         if [ -z "$_secs" ] || [ -n "$_more" ]; then
-            echo "[rootfs] ERROR: ctest-generic.list: '$_line' is not <name> <grants> <seconds>"
+            echo "[rootfs] ERROR: ctest-generic.list: '$_line' is not <name> <grants> <seconds> [needs=<path>]"
             _bad=1
             continue
+        fi
+        _needed=""
+        if [ -n "$_needs" ]; then
+            _needed="${_needs#needs=}"
+            case "$_needs:$_needed" in
+                needs=*:/*|needs=*:*..*|needs=:*|needs=*:) _needed_ok=0 ;;
+                needs=*) _needed_ok=1 ;;
+                *) _needed_ok=0 ;;
+            esac
+            if [ "$_needed_ok" -ne 1 ]; then
+                echo "[rootfs] ERROR: ctest-generic.list: $_name's '$_needs' is not needs=<a path under the image's root>"
+                _bad=1
+                continue
+            fi
         fi
         if [ ! -f "$ROOT_DIR/services/$_name/build.py" ]; then
             echo "[rootfs] ERROR: ctest-generic.list names $_name, which has no services/$_name/build.py"
@@ -2515,14 +2539,19 @@ if [ -f "$GENERIC_LIST" ]; then
             echo "[rootfs] ERROR: ctest-generic.list: $_name's '$_secs' seconds is not 1 to 600"
             _bad=1
         fi
+        if [ -n "$_needed" ] && [ ! -e "$STAGE/$_needed" ]; then
+            echo "[rootfs] WARNING: ctest-generic.list: $_name left off the rung -- the image has no /$_needed"
+            _left_off=$((_left_off + 1))
+            continue
+        fi
+        printf '%s %s %s\n' "$_name" "$_grant" "$_secs" >> "$_staged_list"
         _listed=$((_listed + 1))
     done < "$GENERIC_LIST"
     if [ "$_bad" -ne 0 ]; then
         echo "[rootfs] ERROR: services/ctest-generic.list is malformed; the image is not written"
         exit 1
     fi
-    cp "$GENERIC_LIST" "$STAGE/tests/ctest-generic.list"
-    echo "[rootfs] staged ctest-generic.list: $_listed fixture(s) for the kernel's generic rung"
+    echo "[rootfs] staged ctest-generic.list: $_listed fixture(s) for the kernel's generic rung, $_left_off left off for a tool this image lacks"
 fi
 
 # Same rule for bash (flagged further up, enforced here so that both artifact

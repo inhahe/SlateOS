@@ -215,3 +215,17 @@ exercises the parser, the empty-list path and the skip. The spawn path is the
 one every named C rung uses. Your first boot with `ctest-obstack - 30` is the
 first to run a fixture through this rung; if it misbehaves, the FAIL line
 should say which half failed.
+
+## Lane D — 2026-10-16: a fixture that needs a port is left off where the port is not built
+
+`services/ctest-generic.list` may give a line a fourth field, `needs=<path>`
+-- what the fixture runs, under the image's root (`usr/bin/gcc`, `bin/llc`,
+`bin/gnu-gdb`, `bin/as`, `lib/mono/checks/checks.exe` for the five that run a
+port). `scripts/create-ext4-rootfs.sh` leaves such a fixture off the list it
+stages at `/tests/ctest-generic.list`, with a warning, when the image was
+built without that path: a worktree that never built the port's spike. Opus's
+review of lane D's round 202 found that those five, staged regardless, would
+fail every boot made from such a worktree -- yours included -- the first time
+it merged `main`. The staged list is unchanged in shape for your rung: three
+fields a line, the fourth gone.
+

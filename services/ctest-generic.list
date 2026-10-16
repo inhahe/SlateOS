@@ -16,6 +16,13 @@
 #             e.g. "file,creds"
 #   seconds   how long it may take, from spawn to exit: 1 to 600
 #
+# and a fourth, for a fixture that runs a port only some worktrees build:
+#
+#   needs=<path>  what it runs, relative to the image's root: an image built
+#             without it leaves the fixture off the staged list, with a
+#             warning, rather than run it to fail every boot made from that
+#             worktree (Opus's review of lane D's round 202)
+#
 # A fixture goes on only after it has passed in a lane D boot: none of
 # another lane's boots should meet one of these failing for the first time.
 #
@@ -31,7 +38,7 @@ ctest-pthread    -        120
 ctest-stdio      file     60
 ctest-sysvipc    -        30
 ctest-ucontext   -        30
-ctest-llvm-tools file     600
+ctest-llvm-tools file     600  needs=bin/llc
 ctest-sigpipe    -        30
 ctest-rusage     -        60
 ctest-pi-mutex   -        60
@@ -41,10 +48,10 @@ ctest-resuid     creds    30
 ctest-groups     file,creds 30
 ctest-fallocate  file     30
 ctest-string     -        60
-ctest-gdb-runs   file     300
-ctest-mono-runs  file     300
-ctest-binutils-runs file     300
-ctest-gcc-runs   file     600
+ctest-gdb-runs   file     300  needs=bin/gnu-gdb
+ctest-mono-runs  file     300  needs=lib/mono/checks/checks.exe
+ctest-binutils-runs file     300  needs=bin/as
+ctest-gcc-runs   file     600  needs=usr/bin/gcc
 ctest-unix-socket file     60
 ctest-shared-anon -        30
 ctest-cloexec-exec file     30

@@ -419,6 +419,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[encrypt] Running self-test...");
 
+    // Every encryption draws its nonce from the random-number generator.
+    // Unseeded, the tests below would stop on that rather than on what they
+    // test: it is reported as the test's failure, not a panic.
+    generate_nonce()?;
+
     test_chacha20_basic();
     test_hmac_sha256();
     test_encrypt_decrypt();

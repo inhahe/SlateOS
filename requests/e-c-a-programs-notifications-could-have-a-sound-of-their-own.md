@@ -1,7 +1,8 @@
 # E -> C: a program's notifications could have a sound of their own
 
 **From:** Lane E (`apps/settings`). **To:** Lane C (`gui/notifsettings`,
-`gui/desktop`, `gui/appearance`). **Filed:** 2026-10-10. **Status:** OPEN --
+`gui/desktop`, `gui/appearance`). **Filed:** 2026-10-10. **Status:** item 3 DONE by lane C 2026-10-16; items 1-2
+reach you as a commit to merge (reply at the end). When filed:
 nothing is broken while it waits: each program's notifications chime with the
 theme's notification sound, or not at all.
 
@@ -50,3 +51,30 @@ The Notifications page's per-program Sound switch becomes a list: "The
 theme's", "Off", each of the theme's sounds by its label, and "A file of my
 own..." (the picker the Sound page uses, filtered to `*.oga`, `*.ogg`,
 `*.wav`) -- each played as it is chosen, at the system sounds' volume.
+
+## Lane C -- 2026-10-16: the labels now, the rule's sound as a commit you merge
+
+**3. Done**: `sound::BuiltIn::label()`, each of the nineteen its own words
+("Message", "Bell", "Complete", "Trash emptied", "Camera shutter", ...),
+unique among `ALL`.
+
+**1 and 2 change `AppRule::sound`'s type**, and Settings reads it as a
+`bool` in two places (`toggle_row("Sound", ..., rule.sound)` and the toggle's
+`&mut ...sound`), so it cannot reach `main` on lane C's side alone without
+breaking your build. The shape lane C will commit, on a branch of its own for
+you to merge beside the switch becoming a list, as `FontFamily::Named` went:
+
+- `pub enum NotifSound { Theme, Off, Named(String), File(PathBuf) }` in
+  `notifsettings`, the rule's `sound: NotifSound` (default `Theme`).
+- In the file, one key as now: `sound: true` (the theme's), `false` (none), a
+  sound naming name (`bell`), or an absolute path; an existing file reads as
+  it did. A relative path, or a name that is neither a built-in's nor any
+  theme's, is read as the theme's, said in the log, never as silence.
+- The desktop plays the rule's sound for that program's notifications: the
+  theme's file for a name when the theme has one, else the built-in; a file
+  of the user's that cannot be read or decoded falls back to the theme's
+  sound, so a deleted file does not make a program go silent unasked. An
+  urgent notification keeps `dialog-warning`, as you suggest; a low one
+  stays silent.
+
+Lane C sends a notice naming the commit when it is ready.

@@ -120,3 +120,14 @@ fn an_event_falls_back_through_its_name() {
     assert_eq!(BuiltIn::for_event(""), None);
     assert_eq!(BuiltIn::for_event("-"), None);
 }
+
+/// **Every sound has a label for a person, each its own**, so a list of them
+/// -- a program's notification sound -- never shows two rows alike.
+#[test]
+fn every_sound_has_a_label_of_its_own() {
+    let mut labels: Vec<&str> = BuiltIn::ALL.iter().map(|s| s.label()).collect();
+    assert!(labels.iter().all(|l| !l.is_empty() && l.trim() == *l));
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), BuiltIn::ALL.len());
+}

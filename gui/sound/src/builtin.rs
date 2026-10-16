@@ -142,6 +142,34 @@ impl BuiltIn {
         }
     }
 
+    /// What the sound is called to a person choosing one -- a program's
+    /// notification sound in a list of them, say -- in the words of what it
+    /// is for. Each is unique among [`ALL`](Self::ALL).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::Information => "Information",
+            Self::Question => "Question",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+            Self::Bell => "Bell",
+            Self::Complete => "Complete",
+            Self::TrashEmpty => "Trash emptied",
+            Self::ScreenCapture => "Camera shutter",
+            Self::DeviceAdded => "Device connected",
+            Self::DeviceRemoved => "Device removed",
+            Self::Login => "Sign in",
+            Self::Logout => "Sign out",
+            Self::PowerPlug => "Power connected",
+            Self::PowerUnplug => "Power disconnected",
+            Self::BatteryLow => "Battery low",
+            Self::VolumeChange => "Volume tick",
+            Self::NetworkConnected => "Network connected",
+            Self::NetworkLost => "Network lost",
+        }
+    }
+
     /// The built-in sound for the event `name` -- a sound naming
     /// specification name -- or for the name cut at its last hyphen, and so
     /// on; `None` if no cut of it has one.

@@ -45,7 +45,10 @@ when nothing needed fixing -- to go in its message's last paragraph, beside
 `--check` reads them. A commit published to `main` that changes code must lie in
 some record's range, at a tier at least its own, with a report on this machine
 for each review the tier runs (Fable's may be `unavailable`: when its allowance
-is spent the Opus review stands alone). The commits after the reviewed tip up to
+is spent the Opus review stands alone). A report counts only if the review in it
+finished, which is when it ends with `/code-review`'s findings array: a reviewer
+that cannot review exits 0 all the same, saying why instead (out of credit, at
+its session limit, cut off at its output limit). The commits after the reviewed tip up to
 and including the record's own are the follow-up fixes, which are not reviewed
 again. `--stats` reads the records to say whether the effort level code is
 written at shows in how much its reviews find. That level is read from the
@@ -165,9 +168,8 @@ RUNS = {"xhigh": (("opus", "xhigh"),), "max": (("opus", "max"), ("fable", "xhigh
 #: the allowance is spent (`claude-global.md`).
 OPTIONAL_RUNS = {("fable", "xhigh")}
 
-#: Fable's own words when it cannot review: its limit, or the usage credits a
-#: `claude -p` session cannot accept.
-FABLE_REFUSED = re.compile(r"fable limit reached|usage credits", re.I)
+#: A fenced ```json block, the form `/code-review` ends a finished review with.
+JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)^[ \t]*```", re.M | re.S)
 
 #: Commits committed before this day were reviewed and recorded in prose,
 #: which `--check` cannot read; they are not checked.
@@ -401,6 +403,10 @@ def record_problems(r: Record, reports: Path, cwd: str | Path | None) -> list[st
         elif not (reports / report).is_file():
             out.append(f"{r.sha[:10]}: its record names a report this machine does not "
                        f"have: {report}")
+        elif findings_of((reports / report).read_text(encoding="utf-8",
+                                                      errors="replace")) is None:
+            out.append(f"{r.sha[:10]}: its record names a report that holds no finished "
+                       f"review: {report}")
     return out
 
 
@@ -456,6 +462,36 @@ def review_commands(base: str, tip: str, tier: str) -> list[tuple[str, str, list
     return [(model, level, [claude, "-p", "--model", model,
                             f"/code-review {level} commits {base}..{tip}"])
             for model, level in RUNS[tier]]
+
+
+def findings_of(said: str) -> list | None:
+    """The findings a reviewer's output ends with -- the last ```json block
+    that holds a list, `[]` when it found nothing -- or None when it holds no
+    such block, which means it did not finish a review.
+
+    The test is positive on purpose. A reviewer that could not review still
+    exits 0, with a message in place of a review: "Credit balance is too
+    low", "You've hit your session limit", a reply cut off at the output
+    limit. The next failure will have a message nobody has seen yet."""
+    found = None
+    for m in JSON_BLOCK.finditer(said):
+        try:
+            value = json.loads(m.group(1))
+        except ValueError:
+            continue
+        if isinstance(value, list):
+            found = value
+    return found
+
+
+def why_not_reviewed(said: str) -> str:
+    """The reviewer's last words before it exited, which is where its own
+    error is: what to tell the user. What follows `run-timeout.py`'s exit line
+    is the reviewer's stderr -- start-up warnings, not the reason."""
+    said = said.split("[run-timeout] child exited", 1)[0]
+    lines = [ln.strip() for ln in said.splitlines()
+             if ln.strip() and not ln.startswith("[run-timeout]")]
+    return lines[-1][:200] if lines else "it printed nothing"
 
 
 def run_review(argv: list[str], cwd: Path, report: Path, header: str) -> tuple[int, str]:
@@ -776,17 +812,20 @@ def review(rng: str, remote: str, dry_run: bool, qemu_wait: int, written_at: str
                       f"started: {dt.datetime.now().isoformat(timespec='seconds')}\n")
             print(f"review-batch: {model} at {level} -- started", flush=True)
             code, said = run_review(argv, scratch, report, header)
-            if (model, level) in OPTIONAL_RUNS and (code != 0 or FABLE_REFUSED.search(said)):
+            findings = findings_of(said) if code == 0 else None
+            if findings is None and (model, level) in OPTIONAL_RUNS:
                 runs.append(f"{model}-{level} unavailable")
-                print(f"review-batch: {model} at {level} did not review (exit {code}); the "
-                      f"record says so -- see {report}. If it was not its limit, run the "
-                      "batch again later.", flush=True)
-            elif code != 0:
-                print(f"review-batch: {model} at {level} FAILED (exit {code}); see {report}")
+                print(f"review-batch: {model} at {level} did not review (exit {code}: "
+                      f"{why_not_reviewed(said)}); the record says so -- see {report}. If "
+                      "it was not its limit, run the batch again later.", flush=True)
+            elif findings is None:
+                print(f"review-batch: {model} at {level} FAILED (exit {code}: "
+                      f"{why_not_reviewed(said)}); no record -- see {report}", flush=True)
                 return 1
             else:
                 runs.append(f"{model}-{level} {name}")
-                print(f"review-batch: {model} at {level} -- done; report {report}", flush=True)
+                print(f"review-batch: {model} at {level} -- done, {len(findings)} "
+                      f"finding(s); report {report}", flush=True)
                 print(said[-6000:], flush=True)
         # The record first: the reviews are done and paid for, and nothing
         # the mutation round does may lose it.
@@ -931,6 +970,27 @@ def self_test() -> int:
     expect("rm -rf in a hook", tier("scripts/hooks/pre-push", ['rm -rf "$wt"']), "max")
     expect("Remove-Item", tier("scripts/x.ps1", ["Remove-Item -Recurse $p"]), "max")
     expect("a word inside another", tier("apps/x.rs", ["let unsafety = 1;"]), "xhigh")
+
+    # A review counts only if it ends with its findings array. Every failure
+    # seen so far exits 0 with a message instead.
+    tick = "`" * 3
+    finding = '[{"file": "a.rs", "line": 3, "summary": "off by one"}]'
+    expect("no findings", findings_of(f"Looks fine.\n\n{tick}json\n[]\n{tick}\n"), [])
+    expect("one finding", len(findings_of(f"x\n{tick}json\n{finding}\n{tick}\n") or []), 1)
+    expect("the last array wins", findings_of(
+        f"{tick}json\n{finding}\n{tick}\nthen\n{tick}json\n[]\n{tick}\n"), [])
+    expect("an object is not the findings", findings_of(f"{tick}json\n{{}}\n{tick}\n"), None)
+    expect("broken JSON is not the findings", findings_of(f"{tick}json\n[1,\n{tick}\n"), None)
+    for failed in ("Credit balance is too low",
+                   "You've hit your session limit · resets 1:10pm (America/New_York)",
+                   "API Error: Claude's response exceeded the 64000 output token maximum.",
+                   "Fable limit reached", ""):
+        expect(f"not a review: {failed[:30]!r}", findings_of(failed), None)
+    expect("why it did not review", why_not_reviewed(
+        "[run-timeout] launching\nYou've hit your session limit\n"
+        "[run-timeout] child exited: PASS\nIgnoring 11 permissions.allow entries\n"
+        "claude.ai connectors are disabled\n"),
+        "You've hit your session limit")
     expect("inside existing unsafe",
            tier("apps/x.rs", ["    p.add(i + 1)"], ["unsafe fn f(p: *const u8) {"]), "max")
     expect("unsafe nearby, nothing added", tier("apps/x.rs", [], ["unsafe fn f() {"]), "xhigh")
@@ -964,8 +1024,8 @@ def self_test() -> int:
             run("commit", "-q", "-m", msg, date=date)
             return run("rev-parse", "HEAD")
 
-        def report(name: str) -> str:
-            (reports / name).write_text("ok", encoding="utf-8", newline="\n")
+        def report(name: str, said: str = "Review done.\n\n```json\n[]\n```\n") -> str:
+            (reports / name).write_text(said, encoding="utf-8", newline="\n")
             return name
 
         def record(base: str, tip: str, tier: str, runs: str, extra: str = "") -> str:
@@ -1010,6 +1070,10 @@ def self_test() -> int:
         (reports / "r2.md").unlink()
         status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
         expect("a missing report is named", any("r2.md" in p for p in problems), True)
+        report("r2.md", "exit status: 0\n\nCredit balance is too low\n")
+        status, problems = check([rec_m], "origin", cwd=repo, reports=reports)
+        expect("a report of a review that never ran is refused",
+               any("r2.md" in p and "no finished review" in p for p in problems), True)
         report("r2.md")
 
         later = commit("apps/d.rs", "fn d() {}", "new work")

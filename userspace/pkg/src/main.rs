@@ -60,6 +60,22 @@ const DEFAULT_REPO: &str = "https://repo.slateos.org/stable";
 /// Config file location.
 const CONFIG_PATH: &str = "/etc/pkg.conf";
 
+/// The root of the system pkg manages: `/`, or the directory `--root` names
+/// -- a system that is not the running one, as an installer fills, or a
+/// test's scratch directory. Its state, its configuration and every file it
+/// installs are found under it, and its hooks run inside it. Set once, by
+/// `main`, before anything is read.
+static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// `path`, absolute on the system pkg manages, where it is found: under
+/// `--root`'s directory, or as it is.
+fn under_root(path: &str) -> PathBuf {
+    match ROOT.get() {
+        Some(root) => root.join(path.trim_start_matches('/')),
+        None => PathBuf::from(path),
+    }
+}
+
 // ============================================================================
 // SHA-256
 // ============================================================================
@@ -538,11 +554,15 @@ impl PkgConfig {
     /// Load configuration from the config file, falling back to the default
     /// single repository if the file doesn't exist or can't be parsed.
     fn load() -> Self {
-        if let Ok(text) = fs::read_to_string(CONFIG_PATH) {
+        let path = under_root(CONFIG_PATH);
+        if let Ok(text) = fs::read_to_string(&path) {
             if let Some(config) = Self::parse(&text) {
                 return config;
             }
-            eprintln!("pkg: warning: failed to parse {CONFIG_PATH}, using defaults");
+            eprintln!(
+                "pkg: warning: failed to parse {}, using defaults",
+                path.display()
+            );
         }
         Self::default()
     }
@@ -656,10 +676,11 @@ impl PkgConfig {
 
     /// Save configuration to the config file.
     fn save(&self) -> io::Result<()> {
-        if let Some(parent) = Path::new(CONFIG_PATH).parent() {
+        let path = under_root(CONFIG_PATH);
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(CONFIG_PATH, self.serialize())
+        fs::write(path, self.serialize())
     }
 
     /// Get all enabled repositories sorted by priority (lower first).
@@ -850,7 +871,7 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = Path::new(&file.dst);
+            let dst = &under_root(&file.dst);
             match self.deploy_hardlink(&file.hash, dst) {
                 Ok(()) => {
                     stats.deployed += 1;
@@ -914,7 +935,7 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = Path::new(&file.dst);
+            let dst = &under_root(&file.dst);
 
             // Check if this is a config file that might be user-modified
             if conffile_set.contains(file.dst.as_str())
@@ -975,7 +996,7 @@ impl ContentStore {
     fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
         let mut removed = 0u64;
         for (dst_path, _hash) in file_hashes {
-            let dst = Path::new(dst_path);
+            let dst = &under_root(dst_path);
             if dst.exists() {
                 if fs::remove_file(dst).is_ok() {
                     removed += 1;
@@ -1201,16 +1222,16 @@ struct PackageDb {
 
 impl PackageDb {
     fn new() -> Self {
-        let cas = ContentStore::new(Path::new(CAS_DIR));
+        let cas = ContentStore::new(&under_root(CAS_DIR));
         Self {
             cas,
-            gen_dir: PathBuf::from(GEN_DIR),
-            repo_dir: PathBuf::from(REPO_DIR),
+            gen_dir: under_root(GEN_DIR),
+            repo_dir: under_root(REPO_DIR),
         }
     }
 
     fn ensure_dirs(&self) {
-        let _ = fs::create_dir_all(PKG_ROOT);
+        let _ = fs::create_dir_all(under_root(PKG_ROOT));
         self.cas.ensure_dirs();
         let _ = fs::create_dir_all(&self.gen_dir);
         let _ = fs::create_dir_all(&self.repo_dir);
@@ -1478,7 +1499,8 @@ impl TransactionLog {
         );
 
         // Ensure parent directory exists
-        if let Some(parent) = Path::new(TX_LOG_PATH).parent() {
+        let log = under_root(TX_LOG_PATH);
+        if let Some(parent) = log.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
@@ -1486,14 +1508,14 @@ impl TransactionLog {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(TX_LOG_PATH)?;
+            .open(&log)?;
         io::Write::write_all(&mut file, line.as_bytes())?;
         Ok(())
     }
 
     /// Read the transaction log.
     fn read_all() -> io::Result<Vec<Transaction>> {
-        let text = match fs::read_to_string(TX_LOG_PATH) {
+        let text = match fs::read_to_string(under_root(TX_LOG_PATH)) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
@@ -1748,11 +1770,30 @@ impl PackageHooks {
 
         use std::process::Command;
 
-        match Command::new(command)
-            .arg(pkg_name)
-            .arg(pkg_version)
-            .status()
-        {
+        let mut cmd = Command::new(command);
+        cmd.arg(pkg_name).arg(pkg_version);
+        // Under `--root`, the hook is the other system's and runs inside it,
+        // as `rpm --root`'s scriptlets do: changed into it, at its `/`.
+        #[cfg(unix)]
+        if let Some(root) = ROOT.get() {
+            use std::os::unix::process::CommandExt;
+            let Ok(root) = std::ffi::CString::new(quoting::os_bytes(root.as_os_str()).into_owned())
+            else {
+                return Err(format!("{}: the root cannot be named", quoteaf_os(command)));
+            };
+            // SAFETY: the closure runs in the child between `fork` and
+            // `exec`. pkg is single-threaded, so no lock another thread held
+            // at the fork can be met there; it makes two calls and builds
+            // nothing that outlives it.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libcall::process::change_root(&root).map_err(io::Error::from_raw_os_error)?;
+                    std::env::set_current_dir("/")
+                });
+            }
+        }
+
+        match cmd.status() {
             Ok(status) => {
                 if status.success() {
                     Ok(true)
@@ -2093,7 +2134,8 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                 eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
                 eprintln!(
                     "pkg: manually run: echo {} > {}/current",
-                    new_gen.id, GEN_DIR
+                    new_gen.id,
+                    db.gen_dir.display()
                 );
                 process::exit(1);
             }
@@ -3019,7 +3061,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         let mut removed_stale = 0u64;
         for (old_dst, _) in &old_file_hashes {
             if !new_dsts.contains(old_dst.as_str()) {
-                let dst = Path::new(old_dst);
+                let dst = &under_root(old_dst);
                 if dst.exists() {
                     if fs::remove_file(dst).is_ok() {
                         removed_stale += 1;
@@ -4056,7 +4098,8 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
                 eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
                 eprintln!(
                     "pkg: manually run: echo {} > {}/current",
-                    new_gen.id, GEN_DIR
+                    new_gen.id,
+                    db.gen_dir.display()
                 );
                 process::exit(1);
             }
@@ -5045,7 +5088,11 @@ fn print_usage() {
     println!(
         "pkg — Slate OS package manager
 
-Usage: pkg <command> [options] [arguments]
+Usage: pkg [--root <dir>] <command> [options] [arguments]
+
+  --root <dir>           Manage the system under <dir> -- its packages, its
+                         configuration and its files -- not the running one.
+                         Hooks run inside it.
 
 Commands:
   install <pkg>...       Install packages (names from repo, or local .pkg files)
@@ -5153,8 +5200,37 @@ Package Manifest Format:
 // Main
 // ============================================================================
 
+/// `--root DIR` or `--root=DIR` at the front of `args`: the directory, and
+/// the arguments after it. `Err` names what is wrong with it.
+fn take_root(args: &[String]) -> Result<(Option<PathBuf>, &[String]), &'static str> {
+    match args.split_first() {
+        Some((first, rest)) if first == "--root" => match rest.split_first() {
+            Some((dir, rest)) if !dir.is_empty() => Ok((Some(PathBuf::from(dir)), rest)),
+            _ => Err("--root requires a directory"),
+        },
+        Some((first, rest)) => match first.strip_prefix("--root=") {
+            Some("") => Err("--root requires a directory"),
+            Some(dir) => Ok((Some(PathBuf::from(dir)), rest)),
+            None => Ok((None, args)),
+        },
+        None => Ok((None, args)),
+    }
+}
+
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let all: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<String> = match take_root(&all) {
+        Ok((root, rest)) => {
+            if let Some(root) = root {
+                let _ = ROOT.set(root);
+            }
+            rest.to_vec()
+        }
+        Err(why) => {
+            eprintln!("pkg: {why}");
+            process::exit(1);
+        }
+    };
 
     if args.is_empty() {
         print_usage();
@@ -5765,6 +5841,29 @@ mod tests {
             font_status(Some((&listed.version, None)), &listed, family),
             "[installed]"
         );
+    }
+
+    #[test]
+    fn the_root_comes_first_in_either_spelling() {
+        let words = |w: &[&str]| w.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let args = words(&["--root", "/mnt/t", "list"]);
+        let (root, rest) = take_root(&args).unwrap();
+        assert_eq!(
+            (root.as_deref(), rest),
+            (Some(Path::new("/mnt/t")), &args[2..])
+        );
+        let args = words(&["--root=/mnt/t", "list", "--root"]);
+        let (root, rest) = take_root(&args).unwrap();
+        assert_eq!(
+            (root.as_deref(), rest),
+            (Some(Path::new("/mnt/t")), &args[1..])
+        );
+        let args = words(&["list", "--root", "x"]);
+        assert_eq!(take_root(&args).unwrap(), (None, &args[..]));
+        assert!(take_root(&words(&["--root"])).is_err());
+        assert!(take_root(&words(&["--root", ""])).is_err());
+        assert!(take_root(&words(&["--root="])).is_err());
+        assert_eq!(take_root(&[]).unwrap(), (None, &[][..]));
     }
 
     #[test]

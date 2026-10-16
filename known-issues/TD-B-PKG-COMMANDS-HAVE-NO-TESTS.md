@@ -1,6 +1,7 @@
 ## TD-B-PKG-COMMANDS-HAVE-NO-TESTS (lane B, 2026-10-15)
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-b (2026-10-16, `pkg --root` and
+`userspace/pkg/tests/cli.rs`), awaiting a boot on main
 
 **In short:** `pkg`'s commands -- `main`'s dispatch, `pkg pack`, `pkg info`,
 `pkg search --font`, the usage text -- are run by no test. `pkg` keeps its

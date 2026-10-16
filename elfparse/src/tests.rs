@@ -208,6 +208,63 @@ fn no_program_headers_is_a_valid_file_with_nothing_to_load() {
 }
 
 #[test]
+fn no_program_headers_needs_no_program_header_size() {
+    // With no program headers, their entry size is not looked at: linkers
+    // write 0 there.
+    let mut data = file(ET_DYN, 0, ELFOSABI_SYSV, &[], &[]);
+    data[54..56].copy_from_slice(&0u16.to_le_bytes());
+    assert!(ElfFile::parse(&data).is_ok());
+}
+
+#[test]
+fn a_program_header_table_may_end_the_file() {
+    let data = file(ET_DYN, 0, ELFOSABI_SYSV, &[segment(PT_NOTE, 0, 0, 4)], &[]);
+    assert_eq!(data.len(), payload_at(1) as usize);
+    assert!(ElfFile::parse(&data).is_ok());
+}
+
+#[test]
+fn each_permission_bit_is_read_alone() {
+    let at = payload_at(1);
+    let one = |flags: u32| {
+        let data = file(
+            ET_EXEC,
+            0x40_0000,
+            0,
+            &[load(at, 0x40_0000, 16, flags)],
+            &[0; 16],
+        );
+        let s = ElfFile::parse(&data)
+            .unwrap()
+            .loadable_segments()
+            .unwrap()
+            .next()
+            .unwrap();
+        (s.readable, s.writable, s.executable)
+    };
+    assert_eq!(one(PF_R), (true, false, false));
+    assert_eq!(one(PF_W), (false, true, false));
+    assert_eq!(one(PF_X), (false, false, true));
+    assert_eq!(one(0), (false, false, false));
+}
+
+#[test]
+fn every_error_says_what_it_is() {
+    assert_eq!(
+        format!("{}", ElfError::Malformed),
+        "malformed or unsupported ELF file"
+    );
+    assert_eq!(
+        format!("{}", ElfError::AddressOverflow),
+        "load bias overflows the address space"
+    );
+    assert_eq!(
+        format!("{}", ElfError::BadAlignment),
+        "alignment is not a power of two"
+    );
+}
+
+#[test]
 fn every_segment_check_refuses() {
     let at = payload_at(1);
     let with = |ph: Ph| {

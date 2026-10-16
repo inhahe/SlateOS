@@ -1205,12 +1205,14 @@ impl SwapState {
     ///
     /// # Errors
     ///
-    /// `WouldBlock` when an area refused the page, or could not get the
-    /// memory to keep it, and none after it took it: not this page, not now,
-    /// though another may be kept -- one that shrinks further, or one of
-    /// zeros, which the compressed tier keeps in nothing. `OutOfMemory` when
-    /// every area is full, or when there is no scratch yet. A backend's own
-    /// error otherwise, its slot given back.
+    /// `WouldBlock` when an area refused the page (the compressed tier, for a
+    /// page it cannot shrink) and none after it took it: not this page, though
+    /// another may be kept. `OutOfMemory` when an area that would have kept
+    /// it could not get the memory to and none after it took it -- a page that
+    /// shrinks further, or one of zeros, which the compressed tier keeps in
+    /// nothing, may still be kept -- or when every area is full, or there is
+    /// no scratch yet: those two found before the page is copied or
+    /// compressed. A backend's own error otherwise, its slot given back.
     ///
     /// # Safety
     ///
@@ -1220,6 +1222,14 @@ impl SwapState {
             devices, scratch, ..
         } = self;
         let scratch = scratch.as_mut().ok_or(KernelError::OutOfMemory)?;
+        // Every area full: answered before the page is copied and compressed
+        // for nothing.
+        if !devices
+            .iter()
+            .any(|d| !d.draining && d.slots.free_count() > 0)
+        {
+            return Err(KernelError::OutOfMemory);
+        }
         // SAFETY: the caller's; `scratch.page` is FRAME_SIZE bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(page, scratch.page.as_mut_ptr(), FRAME_SIZE);
@@ -1249,7 +1259,7 @@ impl SwapState {
                 }
             }
         }
-        Err(if short || refused {
+        Err(if refused && !short {
             KernelError::WouldBlock
         } else {
             KernelError::OutOfMemory
@@ -1412,6 +1422,10 @@ pub fn register_reclaimable(pml4_phys: u64, vaddr: u64, flags: PageFlags) {
     });
     state.active_count = state.active_count.saturating_add(1);
 }
+
+/// Victims in a row a reclaim pass may fail to keep for want of memory before
+/// it ends ([`try_reclaim`]).
+const SHORT_IN_A_ROW: u32 = 8;
 
 /// Unregister a page from the reclaimable set.
 ///
@@ -1723,6 +1737,11 @@ pub fn try_reclaim(target: usize) -> usize {
         crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE).unwrap_or(4) as usize;
     let batch_size = if batch_size == 0 { 1 } else { batch_size };
     let mut batch_count = 0usize;
+    // Victims in a row that could not be kept for want of memory (or room):
+    // the pass goes on past a few, since the next may be one of zeros, kept
+    // in nothing, and ends at `SHORT_IN_A_ROW`, rather than compress every
+    // victim on the list for nothing while memory is short.
+    let mut short_in_a_row = 0u32;
 
     // Now swap out each victim, yielding the CPU after each batch
     // to prevent swap I/O from monopolizing the CPU and making the
@@ -1735,11 +1754,17 @@ pub fn try_reclaim(target: usize) -> usize {
             Ok(_entry) => {
                 reclaimed += 1;
                 batch_count += 1;
-                // Mark the entry inactive (it's now in swap, not memory).
-                let mut state = lock_no_reclaim(&RECLAIM);
-                if let Some(e) = state.pages.get_mut(idx) {
-                    e.active = false;
-                    state.active_count = state.active_count.saturating_sub(1);
+                short_in_a_row = 0;
+                // Mark the entry inactive (it's now in swap, not memory). The
+                // guard ends here, before any yield below: a holder of RECLAIM
+                // must not be switched out, and its mark is its CPU's
+                // (`LOCK_DEPTH`).
+                {
+                    let mut state = lock_no_reclaim(&RECLAIM);
+                    if let Some(e) = state.pages.get_mut(idx) {
+                        e.active = false;
+                        state.active_count = state.active_count.saturating_sub(1);
+                    }
                 }
                 // OPT: Yield the CPU after every batch_size pages to let
                 // other tasks run.  Without this, a swap storm (many pages
@@ -1754,13 +1779,19 @@ pub fn try_reclaim(target: usize) -> usize {
             // In use right now (its address space's page-table lock was held,
             // or its entries changed after they were read), or refused by the
             // area it would have gone to (the compressed tier, for a page that
-            // does not shrink or whose bytes it could not get the memory for):
-            // not a failure, just not this time. It stays on the list.
+            // does not shrink): not a failure, just not this time. It stays
+            // on the list.
             Err(KernelError::WouldBlock) => {}
-            // Every area full (or none at all), or no scratch to store the
-            // page through: the next victim fares no better, so the pass
-            // ends. The frame stays on the list.
-            Err(KernelError::OutOfMemory) => break,
+            // No memory to keep it with, or every area full (or none at all),
+            // or no scratch: it stays on the list, and after a few in a row
+            // the pass ends (`short_in_a_row`). Every area full is found
+            // before any work, so those few cost nothing.
+            Err(KernelError::OutOfMemory) => {
+                short_in_a_row = short_in_a_row.saturating_add(1);
+                if short_in_a_row >= SHORT_IN_A_ROW {
+                    break;
+                }
+            }
             Err(KernelError::NotSupported) => {
                 // A frame of a kind that is not swapped (shared memory, or a
                 // group split across frames by a partial copy-on-write break:

@@ -208,6 +208,9 @@ pub struct Frame<T> {
     /// trimmed to the clip that was in force. Later entries are painted on
     /// top, so [`Frame::hit_test`] reads this back to front.
     hits: Vec<(T, Rect)>,
+    /// Controls drawn greyed, each box in window coordinates and trimmed as a
+    /// hit's is, with why it is greyed, in paint order ([`Frame::greyed`]).
+    greyed: Vec<(Rect, String)>,
     /// The clip stack, each entry already intersected with its parent.
     clips: Vec<Rect>,
     /// The individual translations pushed, kept so a pop can undo exactly the
@@ -244,6 +247,7 @@ impl<T> Frame<T> {
         Self {
             tree: RenderTree::new(),
             hits: Vec::new(),
+            greyed: Vec::new(),
             clips: Vec::new(),
             translations: Vec::new(),
             offset: (0.0, 0.0),
@@ -367,6 +371,30 @@ impl<T> Frame<T> {
         self.hits.push((target, visible));
     }
 
+    /// Record that a control was drawn greyed over `rect`, for `why`: the box
+    /// a program says why a control is greyed over while the pointer rests
+    /// there ([`WhyDisabled`](crate::disabled::WhyDisabled)), for one whose
+    /// greyed controls are not among its [`hits`](Self::hits) -- a greyed
+    /// button that lets a click fall through to what is behind it.
+    ///
+    /// Not a click target: [`hit_test`](Self::hit_test) never answers it.
+    /// `rect` is moved and trimmed as [`hit`](Self::hit)'s is, and dropped
+    /// when none of it is visible; [`discard_hits`](Self::discard_hits)
+    /// forgets these too, a modal over them covering them.
+    pub fn greyed(&mut self, rect: Rect, why: &str) {
+        let Some(visible) = self.visible_part(rect) else {
+            return;
+        };
+        self.greyed.push((visible, why.to_owned()));
+    }
+
+    /// The boxes [`greyed`](Self::greyed) recorded this frame, each with why,
+    /// in paint order.
+    #[must_use]
+    pub fn greyed_boxes(&self) -> &[(Rect, String)] {
+        &self.greyed
+    }
+
     /// How much of `rect` a viewer could actually see, or `None` for none of
     /// it.
     ///
@@ -412,9 +440,11 @@ impl<T> Frame<T> {
     /// dialog only looks in front.
     ///
     /// Call it immediately before drawing the modal, so the modal's own targets
-    /// are recorded after it and survive.
+    /// are recorded after it and survive. The [`greyed`](Self::greyed) boxes go
+    /// with the targets: nothing under the modal says why it is greyed.
     pub fn discard_hits(&mut self) {
         self.hits.clear();
+        self.greyed.clear();
     }
 
     /// The topmost target at `(x, y)` in window coordinates, or `None` for
@@ -802,6 +832,37 @@ mod tests {
         assert_eq!(frame.commands().len(), 1, "the drawing must survive");
         assert_eq!(frame.hit_test(5.0, 5.0), None, "covered by the modal");
         assert_eq!(frame.hit_test(25.0, 25.0), Some(T::B));
+    }
+
+    /// **A greyed control's box is where it is drawn, and why, but takes no
+    /// click**: moved by the translation and trimmed to the clip as a hit
+    /// is, dropped when clipped away, and gone under a modal.
+    #[test]
+    fn a_greyed_box_is_recorded_where_it_is_drawn_and_takes_no_click() {
+        let mut frame: Frame<T> = Frame::new(100.0, 100.0);
+        frame.hit(T::A, Rect::new(0.0, 0.0, 100.0, 100.0));
+        frame.translate(10.0, 20.0);
+        frame.clip(Rect::new(0.0, 0.0, 30.0, 30.0));
+        frame.greyed(Rect::new(20.0, 20.0, 20.0, 20.0), "No move to take back");
+        frame.greyed(Rect::new(50.0, 50.0, 5.0, 5.0), "clipped away");
+        frame.unclip();
+        frame.untranslate();
+
+        assert_eq!(
+            frame.greyed_boxes(),
+            [(
+                Rect::new(30.0, 40.0, 10.0, 10.0),
+                "No move to take back".to_owned()
+            )]
+        );
+        assert_eq!(
+            frame.hit_test(35.0, 45.0),
+            Some(T::A),
+            "the click falls through"
+        );
+
+        frame.discard_hits();
+        assert!(frame.greyed_boxes().is_empty(), "a modal covers it");
     }
 
     #[test]

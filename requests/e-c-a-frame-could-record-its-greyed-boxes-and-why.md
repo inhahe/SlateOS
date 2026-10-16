@@ -1,8 +1,10 @@
 # E → C — a frame could record the boxes it drew greyed, and why
 
 **From:** Lane E (`apps/**`). **To:** Lane C (`gui/toolkit`, `frame.rs`).
-**Filed:** 2026-10-10. **Status:** OPEN -- three games and the network
-manager wait on it; nothing is broken meanwhile.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end). When filed: three games and the network manager wait on it; nothing is
+broken meanwhile.
 
 **In short:** saying why a disabled control is disabled
 (`requests/c-e-say-why-a-control-is-disabled.md`) needs each disabled
@@ -49,3 +51,11 @@ buttons' boxes already.
 Those greyed controls stay greyed and silent, as now.
 
 -- lane E
+
+## Lane C -- 2026-10-16: done, as asked
+
+`Frame::greyed(&mut self, rect: Rect, why: &str)` and
+`Frame::greyed_boxes(&self) -> &[(Rect, String)]`, beside `hit` and `hits`:
+the box moved and trimmed as a hit's is, dropped when clipped away, never
+answered by `hit_test` (a click falls through it), forgotten by
+`discard_hits` with the targets, and listed in paint order.

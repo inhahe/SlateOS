@@ -129,6 +129,8 @@ import io
 import os
 import re
 import sys
+import tempfile
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -372,29 +374,69 @@ def strip_comments(text):
     return NL.join(out)
 
 
-def is_test_file(rel):
-    """Whether this whole file is test code by virtue of where it sits.
+def crate_dir(rel, root=ROOT):
+    """The crate the file `rel` (relative to `root`, `/`-separated) is in --
+    the nearest directory above it holding a `Cargo.toml` -- relative to
+    `root`, or `None` for a file in no crate."""
+    parts = rel.split("/")[:-1]
+    while parts:
+        if os.path.isfile(os.path.join(root, *parts, "Cargo.toml")):
+            return "/".join(parts)
+        parts.pop()
+    return None
+
+
+# The test files of each crate a run has asked about, by (root, crate): each
+# crate's sources are read once for it, not once per file.
+_TEST_FILES = {}
+
+
+def crate_test_files(crate, root=ROOT):
+    """The files under `crate`'s `src/` that a build compiles only for its
+    tests, relative to `root`, as `rustlex.test_module_files` finds them."""
+    key = (root, crate)
+    if key not in _TEST_FILES:
+        texts = {}
+        for dirpath, _dirnames, filenames in os.walk(os.path.join(root, *crate.split("/"), "src")):
+            for f in filenames:
+                if f.endswith(".rs"):
+                    full = os.path.join(dirpath, f)
+                    texts[Path(full)] = io.open(full, encoding="utf-8", errors="replace").read()
+        _TEST_FILES[key] = {
+            os.path.relpath(str(p), root).replace(os.sep, "/")
+            for p in rustlex.test_module_files(texts)
+        }
+    return _TEST_FILES[key]
+
+
+def is_test_file(rel, root=ROOT):
+    """Whether the whole file `rel` (relative to `root`, `/`-separated) is
+    test code by virtue of where it sits.
 
     A test module does not have to be `#[cfg(test)] mod tests { ... }` inside
     the file it tests. It can equally be `#[cfg(test)] mod tests;` beside a
     `tests.rs`, and then the attribute is in the PARENT -- the test file itself
     contains no `#[cfg(test)]` at all, so a scanner that looks only inside it
-    reads the entire module as production code.
+    reads the entire module as production code. `gui/desktop/src/session/
+    tests.rs` is declared exactly that way.
 
-    That is not hypothetical: `gui/desktop/src/session/tests.rs` is declared
-    exactly that way, and every lossy decode in it was being reported as a
-    live defect.
-
-    The rule is the same one `scripts/check-config-turn-guards.py` already
-    uses, and it is deliberately the same rule rather than a second opinion --
-    two checkers disagreeing about what counts as test code is how one of them
-    ends up trusted for an answer the other would have given differently.
+    So the declarations decide, as cargo reads them, through
+    `rustlex.test_module_files` -- the one answer every gate shares, so that
+    no two checkers disagree about what counts as test code -- and a file of
+    the crate's `tests/` or `benches/`, which cargo builds only as test and
+    bench targets, is test code too. A file's name decides nothing: a test
+    module need not be called `tests`, and a `tests.rs` nothing gates is
+    compiled into the program.
     """
-    parts = rel.replace(os.sep, "/").split("/")
-    return parts[-1] == "tests.rs" or "tests" in parts[:-1]
+    crate = crate_dir(rel, root)
+    if crate is None:
+        return False
+    if rel[len(crate) + 1:].split("/")[0] in ("tests", "benches"):
+        return True
+    return rel in crate_test_files(crate, root)
 
 
-def production_part(text, rel=None):
+def production_part(text, rel=None, root=ROOT):
     """`text` up to its test module, and the line it was cut at.
 
     `rel` is the file's path, needed because a file can be test code without
@@ -428,7 +470,7 @@ def production_part(text, rel=None):
     The second return value is kept for the callers that unpack it, and is
     always `None` now: there is no cut to report the line of.
     """
-    if rel is not None and is_test_file(rel):
+    if rel is not None and is_test_file(rel, root):
         return "", 1
     live, _ = rustlex.live_code(text)
     return live, None
@@ -654,16 +696,41 @@ def selftest():
     # asked -- a correct predicate nothing consults reads exactly like no
     # predicate at all.
     body = "fn f() {" + NL + "    let p = x.to_string_lossy();" + NL + "}"
-    ck(production_part(body, "gui/desktop/src/session/tests.rs")[0] == "",
-       "a `tests.rs` is entirely test code, whatever it contains")
-    ck(production_part(body, "apps/x/tests/helper.rs")[0] == "",
-       "a file under a `tests/` directory likewise")
-    ck(production_part(body, "apps/x/src/main.rs")[0] == body,
-       "an ordinary source file is still production")
-    ck(production_part(body, "apps/x/src/attestations.rs")[0] == body,
-       "a name merely CONTAINING `tests` is not a test file")
-    ck(is_test_file("a/tests.rs") and not is_test_file("a/tests.rs.bak"),
-       "the rule matches the file name, not a prefix of it")
+    with tempfile.TemporaryDirectory() as tmp:
+        crate = os.path.join(tmp, "apps", "x")
+        tree = {
+            "Cargo.toml": "",
+            "src/main.rs": NL.join(["mod live;", "mod attestations;",
+                                    "#[cfg(test)]", "mod checks;",
+                                    "#[cfg(test)]", "mod tests;", body]),
+            "src/live.rs": "mod tests;",
+            "src/live/tests.rs": body,
+            "src/attestations.rs": body,
+            "src/checks.rs": body,
+            "src/tests.rs": body,
+            "tests/helper.rs": body,
+        }
+        for name, text in tree.items():
+            path = os.path.join(crate, *name.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with io.open(path, "w", encoding="utf-8", newline="") as out:
+                out.write(text)
+
+        def prod(name):
+            return production_part(body, "apps/x/" + name, root=tmp)[0]
+
+        ck(prod("src/tests.rs") == "",
+           "a module declared under cfg(test) is entirely test code, whatever it contains")
+        ck(prod("src/checks.rs") == "",
+           "and so is one called anything else")
+        ck(prod("src/live/tests.rs") == body,
+           "a `tests.rs` nothing gates is compiled into the program")
+        ck(prod("tests/helper.rs") == "",
+           "a file of the crate's `tests/` is a test target's")
+        ck(prod("src/attestations.rs") == body,
+           "an ordinary module is still production")
+        ck(production_part(body, "elsewhere/loose.rs", root=tmp)[0] == body,
+           "control: a file in no crate is read whole")
 
     # A plain value conversion is the thing this exists to find.
     ck(kinds("fn f() {" + NL + "    let p = x.to_string_lossy();" + NL + "}") == ["VALUE"],

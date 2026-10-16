@@ -3301,11 +3301,6 @@ mod tests {
         assert_eq!(view.scroll_offset, 3, "an ordinary notch still works after");
     }
 
-    /// `RichTextView` scrolls in pixels, and a notch is three *lines* of them.
-    ///
-    /// Its handler said `-dy * 3.0` under a comment reading "Scroll 3 lines per
-    /// notch" — three *pixels*, about a sixth of a line, so a detent moved the
-    /// text by less than the height of the glyphs on it.
     /// A key press, with Ctrl held or not.
     fn key_event(key: Key, ctrl: bool) -> Event {
         Event::Key(KeyEvent {
@@ -3374,6 +3369,11 @@ mod tests {
         }
     }
 
+    /// `RichTextView` scrolls in pixels, and a notch is three *lines* of them.
+    ///
+    /// Its handler said `-dy * 3.0` under a comment reading "Scroll 3 lines per
+    /// notch" — three *pixels*, about a sixth of a line, so a detent moved the
+    /// text by less than the height of the glyphs on it.
     #[test]
     fn one_wheel_notch_moves_three_lines_of_rich_text() {
         let mut view = rich_view(400.0, 160.0);

@@ -2019,32 +2019,6 @@ impl ColorPickerDialog {
     }
 }
 
-/// Where each part of the dialog sits, for one size of dialog.
-///
-/// `render` worked the layout out as it drew, and each of the five hit-test
-/// methods worked the same chain of constants out again to decide what a click
-/// had landed on. Six derivations of one layout stay in agreement only while
-/// nobody edits one of them — and two of them had already drifted apart:
-///
-/// - The preset palette's column count is a function of the dialog's width.
-///   The hit-test had no width to work from, so it guessed one from the
-///   picker's intrinsic size. Render the dialog at any other width and the
-///   grid you clicked was not the grid that was drawn, so a click landed on a
-///   different colour than the one under the pointer — further out the wider
-///   the dialog, and off the palette entirely at the extremes.
-/// - The recent-colours row sits below the palette, so it inherited the same
-///   error, displaced by however many rows the two column counts differed by.
-///
-/// Computing it once, from the size the dialog is actually being drawn at,
-/// is what makes the click and the pixel refer to the same thing. It is also
-/// why [`ColorPickerDialog::handle_mouse`] takes the dialog's size: a widget
-/// that lays out against a width cannot hit-test without one.
-/// Note that there is no `height` field. The height *is* used -- `button_y` is
-/// measured back from it, so the button strip sits at the bottom of whatever
-/// the dialog was given -- but it is used during construction and never again,
-/// so storing a copy earned nothing. Found by removing this file's
-/// `#![allow(dead_code)]`, which had been suppressing the "never read"
-/// warning.
 /// Where the hex field is, for a hex row whose label starts at `(x, y)` in a
 /// column `width` wide: after the "Hex:" label, to the column's end. One
 /// rectangle for the drawing and the click.
@@ -2070,6 +2044,33 @@ const CANCEL_LABEL: &str = "Cancel";
 /// The dialog's title.
 const DIALOG_TITLE: &str = "Color Picker";
 
+/// Where each part of the dialog sits, for one size of dialog.
+///
+/// `render` worked the layout out as it drew, and each of the five hit-test
+/// methods worked the same chain of constants out again to decide what a click
+/// had landed on. Six derivations of one layout stay in agreement only while
+/// nobody edits one of them — and two of them had already drifted apart:
+///
+/// - The preset palette's column count is a function of the dialog's width.
+///   The hit-test had no width to work from, so it guessed one from the
+///   picker's intrinsic size. Render the dialog at any other width and the
+///   grid you clicked was not the grid that was drawn, so a click landed on a
+///   different colour than the one under the pointer — further out the wider
+///   the dialog, and off the palette entirely at the extremes.
+/// - The recent-colours row sits below the palette, so it inherited the same
+///   error, displaced by however many rows the two column counts differed by.
+///
+/// Computing it once, from the size the dialog is actually being drawn at,
+/// is what makes the click and the pixel refer to the same thing. It is also
+/// why [`ColorPickerDialog::handle_mouse`] takes the dialog's size: a widget
+/// that lays out against a width cannot hit-test without one.
+///
+/// Note that there is no `height` field. The height *is* used -- `button_y` is
+/// measured back from it, so the button strip sits at the bottom of whatever
+/// the dialog was given -- but it is used during construction and never again,
+/// so storing a copy earned nothing. Found by removing this file's
+/// `#![allow(dead_code)]`, which had been suppressing the "never read"
+/// warning.
 struct DialogLayout {
     width: f32,
     /// Top-left corner of the saturation/value square, and its side.

@@ -1733,9 +1733,16 @@ mod tests {
         let palette = Palette::for_mode(false);
         assert_eq!(showing.render(&palette), why.render(&palette));
 
-        assert!(waiting.tick(1000 + DELAY), "the copy's wait ends on its own");
+        assert!(
+            waiting.tick(1000 + DELAY),
+            "the copy's wait ends on its own"
+        );
         why.pointer_left();
-        assert_eq!(showing.showing(), Some("The file is read-only"), "copies are apart");
+        assert_eq!(
+            showing.showing(),
+            Some("The file is read-only"),
+            "copies are apart"
+        );
     }
 
     /// **Another control's reason takes its own wait, and leaving every

@@ -1565,7 +1565,6 @@ fn row_index_of(rows: &[Row], offset: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// A filled rectangle.
 /// The colour runs of a row: `selected` stretches in `selected_ink`, the rest
 /// of the `colored` stretches in theirs, and everything else in `ink`. Both
 /// lists are sorted and none of their stretches overlap another in the same
@@ -1615,6 +1614,7 @@ fn color_runs(
     spans
 }
 
+/// A filled rectangle.
 fn fill(r: Rect, color: Color) -> RenderCommand {
     RenderCommand::FillRect {
         x: r.x,

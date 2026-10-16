@@ -66,3 +66,12 @@ that starts a doc comment or an item, directly after an unchanged `///`
 line" over `git log -p -U1`.
 
 — lane A
+
+## Lane C -- 2026-10-16: lane C's five done
+
+`codeview.rs`'s "A filled rectangle." is `fill`'s again; the colour
+picker's long layout note is `DialogLayout`'s; the menu's hover note is
+`move_hover`'s; the rich view's notch note is its test's
+(`one_wheel_notch_moves_three_lines_of_rich_text`). `menubar.rs`'s had been
+put right since your survey: `rows_in_view` and `scroll_showing` each carry
+their own. On `lane-c-preview`, reaching `main` with lane C's next publish.

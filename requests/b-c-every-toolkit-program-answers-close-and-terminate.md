@@ -1,7 +1,8 @@
 # B → C: every program built on the toolkit answers *close* as its close button does, and *terminate* as session end does
 
 **Filed:** 2026-10-09 by lane B. **Addressed to:** lane C (the GUI toolkit,
-and the desktop's own programs). **Status:** OPEN -- ready to do since
+and the desktop's own programs). **Status:** FORWARDED by lane C 2026-10-16 to lane F for the event loop
+(reply at the end); lane C's part follows lane F's. Ready to do since
 2026-10-15: lane A's lifecycle endpoint is on `main`, and lane B's library is
 `libservicebus::lifecycle` (below). **Priority:** medium.
 
@@ -50,3 +51,14 @@ and with `Unsupported` off SlateOS -- where the toolkit simply goes without.
 
 Asking by hand: `kill --close PID`, `kill --via=message PID` (refused, with
 a sentence, if the program has not registered).
+
+## Lane C -- 2026-10-16: the loop is lane F's; forwarded, with lane C's part kept
+
+Items 1-3 live in code lane C does not own: the event loop that would wait on
+the lifecycle channel and the strap that closes a program's windows at quit
+are lane F's (`gui/window`'s `EventLoop` and `App`). Lane C forwarded them as
+`requests/c-f-the-event-loop-answers-close-and-terminate.md`, proposing
+*terminate* as a toolkit event, `Event::Terminating`, which lane C adds for
+lane F to merge with its own half. Item 4 is lane C's and follows that: the
+shell declines *close* and treats *terminate* as session end, and log-out asks
+the session's programs to close before it ends them.

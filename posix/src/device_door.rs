@@ -38,9 +38,11 @@
 //! device class as the pty's ends are, so a dispatch site that forgets one is
 //! a non-exhaustive `match`. A PCM handle is the process's: closed at its
 //! exit, one more holder at its `fork`, waitable through `SYS_WAIT_MULTIPLE`
-//! (kind 22). The control device keeps nothing per open; its handle is
-//! always 1. A `dup` shares the handle, as it shares an open file
-//! description. The path a descriptor was opened by is kept, as a file's is,
+//! (kind 22). The control device keeps nothing per open; the kernel's handle
+//! for it is always 1, so its descriptors keep a number of each open's own
+//! in the table instead ([`table_handle`]), and every call is given 1. A
+//! `dup` shares the handle, as it shares an open file description, and so
+//! its status flags, which two opens do not. The path a descriptor was opened by is kept, as a file's is,
 //! so that `fstat` can say which node it is and `/proc/self/fd` can name it;
 //! opening that name again opens the device again, as Linux's reopen does.
 //!
@@ -169,7 +171,7 @@ pub(crate) fn open(resolved: &[u8], flags: i32) -> Option<i32> {
     };
     // What `F_GETFL` reports, as a file's open keeps it.
     let stored = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_SYNC);
-    let Some(fd) = fdtable::alloc_fd_with_flags(kind, handle, stored) else {
+    let Some(fd) = fdtable::alloc_fd_with_flags(kind, table_handle(kind, handle), stored) else {
         // The handle was made for this call and no descriptor holds it: let
         // it go, as its last close would. Its answer cannot change EMFILE.
         let _ = close(kind, handle);
@@ -252,7 +254,14 @@ fn transfer(entry: &FdEntry, nr: u64, buf: u64, len: usize) -> isize {
     };
     let flags = call_flags(entry);
     let ret = crate::interrupt::restarting(crate::interrupt::Restart::IfAsked, || {
-        syscall5(nr, kind, entry.handle, buf, len as u64, flags)
+        syscall5(
+            nr,
+            kind,
+            kernel_handle(entry.kind, entry.handle),
+            buf,
+            len as u64,
+            flags,
+        )
     });
     match answer(ret) {
         Ok(n) => isize::try_from(n).unwrap_or(isize::MAX),
@@ -278,7 +287,7 @@ pub(crate) fn ioctl(entry: &FdEntry, request: u64, arg: *mut u8) -> i32 {
         syscall5(
             crate::syscall::SYS_DEVICE_IOCTL,
             kind,
-            entry.handle,
+            kernel_handle(entry.kind, entry.handle),
             request & 0xFFFF_FFFF,
             arg as u64,
             flags,
@@ -300,6 +309,7 @@ pub(crate) fn close(kind: HandleKind, handle: u64) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+    let handle = kernel_handle(kind, handle);
     match answer(syscall2(crate::syscall::SYS_DEVICE_CLOSE, door, handle)) {
         Ok(_) => 0,
         Err(e) => {
@@ -316,7 +326,47 @@ pub(crate) fn release(kind: HandleKind, handle: u64) {
     if let Some(door) = door_kind(kind) {
         // Discarded by design: an evicted descriptor's close has no caller
         // to tell, on Linux as here.
-        let _ = syscall2(crate::syscall::SYS_DEVICE_CLOSE, door, handle);
+        let _ = syscall2(
+            crate::syscall::SYS_DEVICE_CLOSE,
+            door,
+            kernel_handle(kind, handle),
+        );
+    }
+}
+
+/// The kernel's handle for the control device: the same for every open.
+const CONTROL_HANDLE: u64 = 1;
+
+/// The mark a control descriptor's handle in the table carries, above any
+/// number of opens a process could make.
+const CONTROL_OPEN: u64 = 1 << 62;
+
+/// Opens of the control device this process has made: each one's number.
+static CONTROL_OPENS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The handle the descriptor table keeps for a device the kernel answered
+/// `handle` for: a PCM's own, and for the control device -- whose handle is 1
+/// for every open -- a number of this open's own, so that two opens are two
+/// open file descriptions to the table, as on Linux: `O_NONBLOCK` set on one
+/// does not reach the other (`fdtable::set_status_flags` sets it for every
+/// descriptor of the same handle). Until 2026-10-16 they shared it (Opus's
+/// review of lane D's round 202).
+fn table_handle(kind: HandleKind, handle: u64) -> u64 {
+    if kind == HandleKind::DeviceControl {
+        let n = CONTROL_OPENS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        CONTROL_OPEN | (n & (CONTROL_OPEN - 1))
+    } else {
+        handle
+    }
+}
+
+/// The kernel's handle for a descriptor table entry's (or for one the kernel
+/// gave): a PCM's own, the control device's always [`CONTROL_HANDLE`].
+fn kernel_handle(kind: HandleKind, handle: u64) -> u64 {
+    if kind == HandleKind::DeviceControl {
+        CONTROL_HANDLE
+    } else {
+        handle
     }
 }
 
@@ -356,12 +406,24 @@ pub(crate) fn readiness(kind: HandleKind, handle: u64) -> (bool, bool, bool, boo
         0,
     );
     if ret < 0 {
-        // The kernel could not say: the handle is gone or was never ours.
-        // Readable and in error, so a caller blocked on it is released
-        // rather than parked on a device that cannot answer.
-        return (true, false, true, true);
+        return wait_failed(ret);
     }
     readiness_of(item.revents)
+}
+
+/// `poll`'s view of a PCM the kernel's wait refused, its answer `ret`.
+fn wait_failed(ret: i64) -> (bool, bool, bool, bool) {
+    if ret == errno::native::INVALID_ARGUMENT || ret == errno::native::NOT_SUPPORTED {
+        // A kernel that cannot wait on this kind of handle: ready both ways,
+        // so that the caller tries the transfer and gets the device's own
+        // answer, rather than a permanent error on a device that works
+        // (Fable's review of lane D's round 202).
+        return (true, true, false, false);
+    }
+    // The handle is gone or was never ours. Readable and in error, so a
+    // caller blocked on it is released rather than parked on a device that
+    // cannot answer.
+    (true, false, true, true)
 }
 
 /// `(readable, writable, hangup, error)` from a `poll` revents word.
@@ -388,6 +450,53 @@ pub(crate) fn stat_of(path: &[u8]) -> Option<(u32, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wait the kernel cannot make on a PCM leaves it ready, so the
+    /// transfer answers for the device; a handle gone is hung up and in error.
+    #[test]
+    fn a_wait_the_kernel_cannot_make_is_no_error_on_the_device() {
+        assert_eq!(
+            wait_failed(errno::native::INVALID_ARGUMENT),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            wait_failed(errno::native::NOT_SUPPORTED),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            wait_failed(errno::native::BAD_HANDLE),
+            (true, false, true, true)
+        );
+    }
+
+    /// Two opens of the control device are two open file descriptions to the
+    /// table -- `O_NONBLOCK` set on one stays off the other -- while every
+    /// call is given the kernel's handle, 1. A PCM's handle is its own.
+    #[test]
+    fn each_control_open_is_its_own_description() {
+        let a = table_handle(HandleKind::DeviceControl, CONTROL_HANDLE);
+        let b = table_handle(HandleKind::DeviceControl, CONTROL_HANDLE);
+        assert_ne!(a, b);
+        assert_ne!(a & CONTROL_OPEN, 0);
+        assert_eq!(kernel_handle(HandleKind::DeviceControl, a), CONTROL_HANDLE);
+        assert_eq!(kernel_handle(HandleKind::DeviceControl, b), CONTROL_HANDLE);
+        assert_eq!(table_handle(HandleKind::DevicePcm, 7), 7);
+        assert_eq!(kernel_handle(HandleKind::DevicePcm, 7), 7);
+
+        let fa = fdtable::alloc_fd_with_flags(HandleKind::DeviceControl, a, O_RDWR)
+            .expect("a descriptor");
+        let fb = fdtable::alloc_fd_with_flags(HandleKind::DeviceControl, b, O_RDWR)
+            .expect("a descriptor");
+        assert!(fdtable::set_status_flags(
+            fa,
+            O_RDWR | crate::fcntl::O_NONBLOCK
+        ));
+        let flags_of = |fd| fdtable::get_fd(fd).map(|e| e.status_flags);
+        assert_eq!(flags_of(fa), Some(O_RDWR | crate::fcntl::O_NONBLOCK));
+        assert_eq!(flags_of(fb), Some(O_RDWR), "the other open is untouched");
+        let _ = fdtable::close_fd(fa);
+        let _ = fdtable::close_fd(fb);
+    }
 
     /// The three nodes, their kinds and Linux's numbers; nothing else.
     #[test]

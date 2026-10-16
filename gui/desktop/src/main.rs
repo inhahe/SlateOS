@@ -239,7 +239,10 @@ fn main() -> ExitCode {
 /// programs by path, and on a development host most of those paths do not
 /// exist. Saying so is the difference between "this desktop cannot start
 /// anything" and "that entry is wrong", and only the second is actionable.
-fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
+fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>)
+where
+    <T as guiremote::Transport>::Error: std::fmt::Display,
+{
     for launch in session.take_launches() {
         // `args`, not a path with spaces in it. `SCREENSHOT_COMMAND` was
         // "/usr/bin/screenshot --fullscreen" until 2026-09-17 and arrived here
@@ -256,6 +259,16 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
         // right-click menu -- and otherwise where the desktop is.
         if let Some(dir) = &launch.dir {
             command.current_dir(dir);
+        }
+        // The user's click, handed on: the program's first window may take
+        // the keyboard because the user asked for it (design-decisions 1386).
+        // Without a token -- a broken connection, the one failure -- it starts
+        // all the same, and opens as a program started without one does.
+        if let Err(e) = session.events_mut().vouch_for(&mut command) {
+            eprintln!(
+                "desktop: no activation token for {}: {e}",
+                launch.display_line()
+            );
         }
         if let Err(e) = command.spawn() {
             eprintln!("desktop: cannot start {}: {e}", launch.display_line());

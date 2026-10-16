@@ -5005,8 +5005,11 @@ fn chrome(
     layer: Layer,
     blur_behind: BlurKind,
 ) -> Spec {
+    // The fields the shell sets, and the rest from `Spec::new`: a field the
+    // window library adds then takes its default -- today's behaviour --
+    // rather than stopping the shell compiling until it is named here
+    // (`requests/f-c-build-the-shells-window-terms-from-spec-new.md`).
     Spec {
-        title: title.to_owned(),
         // One id for all the shell's surfaces, not one each: they are windows
         // of a single program, and saying so is exactly what an app id is
         // for. Nothing reads it today — the shell's own chrome sits outside
@@ -5016,17 +5019,13 @@ fn chrome(
         // tool to group windows by program would show it as so many unrelated
         // strangers.
         app_id: "slateos-shell".to_owned(),
-        width,
-        height,
         position: Some(at),
         resizable: false,
         decorations: false,
         transparent: true,
-        input_transparent: false,
-        min_size: None,
-        max_size: None,
         layer,
         blur_behind,
+        ..Spec::new(title, width, height)
     }
 }
 

@@ -11,13 +11,11 @@
 //!
 //! This module owns the **network registry and IPAM** — the naming, the
 //! subnet/gateway bookkeeping, and conflict-free address allocation/release.
-//! It deliberately does **not** yet stand up a shared layer-2 bridge that lets
-//! two containers on the same network reach each other directly; each container
-//! still gets its existing veth-to-host link (host and external connectivity
-//! via NAT). Cross-container L2 connectivity over a shared bridge is a tracked
-//! follow-up (see `known-issues.md`). Nothing here claims reachability it does
-//! not provide: `inspect` reports only the subnet, gateway, and the addresses
-//! actually allocated.
+//! The traffic is `net`'s: each named network has one `net::bridge`, which
+//! switches frames between its members' veth host-ends, so containers on the
+//! same network reach each other directly, and reach the host and the outside
+//! through it and NAT. `inspect` reports the subnet, the gateway, and the
+//! addresses actually allocated.
 //!
 //! The value delivered now is real: named grouping plus **automatic,
 //! conflict-free IP assignment**. Before this, `oci run --net IP` required the

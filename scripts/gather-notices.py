@@ -28,7 +28,9 @@ notice the source tree carries, from three places:
 * **Vendored Rust crates.** A Cargo package whose root holds `LICENSE*`,
   `COPYING*`, `NOTICE*` or `UNLICENSE*` files is someone else's code (this
   project's own crates carry none). Its `Cargo.toml` names it, versions it and
-  gives its licence; those files are its texts. No manifest is needed.
+  gives its licence; those files are its texts. No manifest is needed. The
+  repository's root is the one exception: its licence is this project's own
+  terms, not a third party's notice, and is not in this bundle.
 
 * **crates.io libraries.** Every registry package in `Cargo.lock`, read from
   cargo's registry cache -- which the build that uses them has already filled.
@@ -281,12 +283,19 @@ def _crate_notice(directory: Path, licence_files: list[str], origin: str, where:
 
 
 def gather_tree(root: Path) -> list[Notice]:
-    """Manifests and vendored crates, in walk order."""
+    """Manifests and vendored crates, in walk order.
+
+    The walk's root is never taken for a vendored crate: it is this project,
+    whose licence is its own terms, not a third party's notice, and whose
+    `Cargo.toml` is the workspace's. Any other directory with a licence file
+    and a `Cargo.toml` is still someone else's code -- a vendored upstream that
+    is a virtual workspace included, which raises below rather than being
+    skipped, since its notice must not quietly go missing."""
     notices = []
     for directory, filenames in walk(root):
         if directory.name == "licenses" and MANIFEST in filenames:
             notices.extend(from_manifest(directory / MANIFEST, root))
-        if "Cargo.toml" in filenames:
+        if "Cargo.toml" in filenames and directory != root:
             licence_files = [f for f in filenames if LICENCE_FILE.match(f)]
             if licence_files:
                 origin = directory.relative_to(root).as_posix()
@@ -506,6 +515,10 @@ def build_fixture(base: Path) -> tuple[Path, Path]:
     # One of this project's own crates: no licence files, so no notice.
     (root / "gui" / "ours").mkdir(parents=True)
     (root / "gui" / "ours" / "Cargo.toml").write_bytes(('[package]\nname = "ours"\nversion = "0.1.0"\n').encode("utf-8"))
+    # This project's own licence, beside the workspace manifest: its own terms,
+    # never a vendored crate's notice.
+    (root / "Cargo.toml").write_bytes(b'[workspace]\nmembers = ["gui/codec", "gui/ours"]\n')
+    (root / "LICENSE").write_bytes(b"MIT License, the project's own\n")
     # Build output is never walked, even when it holds a vendored copy.
     (root / "target" / "x").mkdir(parents=True)
     (root / "target" / "x" / "Cargo.toml").write_bytes(('[package]\nname = "junk"\nversion = "1.0.0"\n').encode("utf-8"))
@@ -641,6 +654,17 @@ def self_test() -> int:
         (root / "vendor" / "cfg-if" / "Cargo.toml").write_bytes((
             '[package]\nname = "cfg-if"\nversion = "1.0.5"\n').encode("utf-8"))
         raises(lambda: gather(root, home), "names no licence", "a vendored crate that names no licence")
+        (root / "vendor" / "cfg-if" / "Cargo.toml").write_bytes((
+            '[package]\nname = "cfg-if"\nversion = "1.0.5"\nlicense = "MIT OR Apache-2.0"\n').encode("utf-8"))
+
+        # Only the walk's root is the project: a vendored upstream that is a
+        # virtual workspace, its licence at the top, is still refused.
+        upstream = root / "vendor" / "upstream"
+        upstream.mkdir()
+        (upstream / "Cargo.toml").write_bytes(b'[workspace]\nmembers = ["core"]\n')
+        (upstream / "LICENSE").write_bytes(b"upstream text\n")
+        raises(lambda: gather(root, home), "vendor/upstream/Cargo.toml: Cargo.toml gives no plain name",
+               "a vendored virtual workspace with a licence")
 
     if failures:
         print("gather-notices self-test: FAILED")

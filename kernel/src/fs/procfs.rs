@@ -2604,13 +2604,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         let page = reader_page_size();
         let page_kb = page / 1024;
         let as_bytes = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
-        let kb = as_bytes.div_ceil(page).saturating_mul(page_kb);
+        let kb = pages_of(as_bytes, page).saturating_mul(page_kb);
         let _ = writeln!(s, "VmSize:\t{kb} kB");
         // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
         // `mm->locked_vm`. Absent until 2026-10-07.
-        let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
-            .div_ceil(page)
-            .saturating_mul(page_kb);
+        let locked_kb =
+            pages_of(crate::mm::mlock::locked_bytes(proc_id), page).saturating_mul(page_kb);
         let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
         let _ = writeln!(s, "VmRSS:\t{kb} kB");
     }
@@ -3092,7 +3091,7 @@ fn build_pid_stat(
     // exactly as Linux does for kernel threads.  Threads share the owning
     // process's address space, so this is a process-wide charge.
     let vsize = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
-    let rss_pages = vsize.checked_div(reader_page_size()).unwrap_or(0);
+    let rss_pages = pages_of(vsize, reader_page_size());
 
     // rsslim: RLIMIT_RSS hard limit (resource index 5).  Default unlimited.
     let rsslim = crate::proc::pcb::get_rlimit(proc_id, 5)
@@ -4162,8 +4161,7 @@ fn gen_pid_statm(task_id: u64) -> KernelResult<Vec<u8>> {
     // statm only applies to processes (which carry the AS charge), not
     // bare scheduler tasks.
     let as_bytes = crate::proc::pcb::linux_as_used(task_id).ok_or(KernelError::NotFound)?;
-    // Rounded up, so that a partial page still counts as one.
-    let pages = as_bytes.div_ceil(reader_page_size());
+    let pages = pages_of(as_bytes, reader_page_size());
     // size resident shared text lib data dt
     let text = format!("{pages} {pages} 0 0 0 0 0\n");
     Ok(text.into_bytes())
@@ -14216,6 +14214,13 @@ fn reader_page_size() -> u64 {
     }
 }
 
+/// `bytes` in pages of `page` bytes, a part page counting as one: how every
+/// count of pages in `/proc` is made from a charge in bytes, so that `stat`,
+/// `statm` and `status` give one size for the same memory.
+fn pages_of(bytes: u64, page: u64) -> u64 {
+    bytes.div_ceil(page.max(1))
+}
+
 /// Whether task `task_id` has a directory in the `/proc` listing: a process's
 /// main thread (whose id is the process's) and a kernel task (no process).
 fn is_listed_at_root(task_id: u64) -> bool {
@@ -18124,6 +18129,12 @@ pub fn self_test() -> KernelResult<()> {
             "[procfs]   FAIL: a native reader is answered in {}-byte pages",
             reader_page_size()
         );
+        return Err(KernelError::InternalError);
+    }
+    // And one rounding for them all: a charge of five 4 KiB pages is two
+    // native pages wherever it is counted (`stat` once said one).
+    if pages_of(20_480, 16384) != 2 || pages_of(16384, 16384) != 1 || pages_of(0, 16384) != 0 {
+        serial_println!("[procfs]   FAIL: a part page is not counted as a page");
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   page counts in the reader's page size (native: 16 KiB) OK");

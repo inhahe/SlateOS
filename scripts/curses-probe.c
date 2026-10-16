@@ -15,7 +15,10 @@
  *
  * Besides the curses calls: "winch ROWS COLS" sets the size of the terminal
  * on standard output and raises SIGWINCH; "suspend", "interrupt" and
- * "terminate" raise SIGTSTP, SIGINT and SIGTERM.
+ * "terminate" raise SIGTSTP, SIGINT and SIGTERM; "tty" prints the modes of
+ * the terminal on standard input -- c_iflag, c_oflag, c_cflag and c_lflag in
+ * hexadecimal, then VMIN and VTIME -- or "tty -1" when it is no terminal;
+ * and "tab3" sets that terminal to expand tabs itself, as `stty tab3`.
  */
 #define _XOPEN_SOURCE_EXTENDED 1
 #include <curses.h>
@@ -25,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <wchar.h>
 
 static size_t unescape (const char *s, char *out)
@@ -261,6 +265,40 @@ int main (int argc, char **argv)
         say (cmd, cbreak ());
       else if (!strcmp (cmd, "nocbreak"))
         say (cmd, nocbreak ());
+      else if (!strcmp (cmd, "def_shell_mode"))
+        say (cmd, def_shell_mode ());
+      else if (!strcmp (cmd, "def_prog_mode"))
+        say (cmd, def_prog_mode ());
+      else if (!strcmp (cmd, "reset_shell_mode"))
+        say (cmd, reset_shell_mode ());
+      else if (!strcmp (cmd, "reset_prog_mode"))
+        say (cmd, reset_prog_mode ());
+      else if (!strcmp (cmd, "idlok"))
+        say (cmd, idlok (stdscr, N () != 0));
+      else if (!strcmp (cmd, "idcok"))
+        { idcok (stdscr, N () != 0); say (cmd, 0); }
+      else if (!strcmp (cmd, "tty"))
+        {
+          struct termios t;
+          if (tcgetattr (0, &t))
+            fprintf (stderr, "tty -1\n");
+          else
+            fprintf (stderr, "tty %lx %lx %lx %lx %d %d\n",
+                     (unsigned long) t.c_iflag, (unsigned long) t.c_oflag,
+                     (unsigned long) t.c_cflag, (unsigned long) t.c_lflag,
+                     t.c_cc[VMIN], t.c_cc[VTIME]);
+        }
+      else if (!strcmp (cmd, "tab3"))
+        {
+          struct termios t;
+          int rc = tcgetattr (0, &t);
+          if (!rc)
+            {
+              t.c_oflag = (t.c_oflag & ~TABDLY) | TAB3;
+              rc = tcsetattr (0, TCSANOW, &t);
+            }
+          say (cmd, rc ? -1 : 0);
+        }
       else if (!strcmp (cmd, "beep"))
         say (cmd, beep ());
       else if (!strcmp (cmd, "has_colors"))

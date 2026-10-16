@@ -18,9 +18,13 @@
 # database has and in each locale the case names: everything written to
 # standard output -- the bytes a terminal would be sent -- byte for byte;
 # what every call returned, as each probe prints it on standard error; and
-# the exit status. Standard output is a file, not a terminal, so neither side
-# has terminal modes to set (they fail alike, which the return values
-# show), and the speed is 0, so nothing is padded with time.
+# the exit status. Most cases run twice. Once with standard output a file,
+# not a terminal: neither side has terminal modes to set (they fail alike,
+# which the return values show), and the speed is 0, so nothing is padded
+# with time. And once on a pseudo-terminal (`scripts/curses-ptyrun.py`),
+# whose modes the library sets and whose speed pads. A few run a third time
+# with standard output a file and standard error the terminal, where curses
+# looks for the terminal's modes.
 #
 # The environment is emptied for each run (`env -i`) and only what a case
 # names is set, so that neither side sees `LINES`, `COLUMNS`,
@@ -79,9 +83,11 @@ done
 # And terminal types no database here holds, made for the capabilities they
 # have and the ones above do not: a magic-cookie glitch (`xmc`), colours that
 # will not combine with some attributes (`ncv`, reverse among them), colours
-# defined by hue, lightness and saturation (`hls`), and direct colour (`RGB`,
-# 2^24 colours). `tic` compiles them into a directory of the harness's own,
-# which both sides are pointed at with `TERMINFO`.
+# defined by hue, lightness and saturation (`hls`), direct colour (`RGB`,
+# 2^24 colours), no cursor addressing but a home-down (`cup` gone, `ll`), no
+# way to end every attribute at once (`sgr0` and `sgr` gone), and an `RGB`
+# string that names no bits. `tic` compiles them into a directory of the
+# harness's own, which both sides are pointed at with `TERMINFO`.
 synth=$DIFF_TMP/terminfo
 mkdir -p "$synth"
 cat > "$DIFF_TMP/synth.ti" <<'EOF'
@@ -101,8 +107,14 @@ slate-direct|direct colour,
 	setab=\E[48;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
 	setaf=\E[38;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
 	use=xterm,
+slate-nocup|cursor movement by steps only and a home-down,
+	cup@, ll=\E[24H, use=vt100,
+slate-nosgr0|attributes ended one at a time,
+	sgr0@, sgr@, use=vt100,
+slate-rgb0|an RGB string that gives each colour no bits,
+	RGB=0/0/0, use=xterm-256color,
 EOF
-SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct'
+SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0'
 if ! tic -x -o "$synth" "$DIFF_TMP/synth.ti" 2> "$DIFF_TMP/synth.err"; then
   echo "curses-diff: tic could not compile the made-up terminal types:" >&2
   cat "$DIFF_TMP/synth.err" >&2
@@ -119,7 +131,11 @@ mkdir -p "$work"
 # run SIDE PROG TERM LOCALE MODE ENV... -- SCRIPT: one probe run, its output
 # in $work/SIDE.{out,err}. MODE `file` writes to a file; `pty` to a
 # pseudo-terminal of the size an environment entry `PTY=ROWSxCOLS` gives
-# (24x80 without one), which is not passed on to the probe.
+# (24x80 without one), which is not passed on to the probe; `ttyerr` to a
+# file from a program whose standard input and error are that terminal --
+# output redirected from a program run on one, where curses finds the
+# terminal's modes on standard error -- and what reached the terminal is
+# compared with what the probe printed.
 run() {
   local side=$1 prog=$2 term=$3 loc=$4 mode=$5
   shift 5
@@ -138,6 +154,15 @@ run() {
       timeout 30 python3 "$root/scripts/curses-ptyrun.py" "${size%x*}" "${size#*x}" \
       "$work/$side.out" "$work/$side.err" "$prog" "$1" < /dev/null
     local rc=$?
+    [ "$rc" = 0 ] || echo "runner $rc" >> "$work/$side.err"
+  elif [ "$mode" = ttyerr ]; then
+    rm -f "$work/$side.out" "$work/$side.exit"
+    env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
+      timeout 30 python3 "$root/scripts/curses-ptyrun.py" --tty-stderr \
+      --stdout "$work/$side.out" "${size%x*}" "${size#*x}" \
+      "$work/$side.err" "$work/$side.exit" "$prog" "$1" < /dev/null
+    local rc=$?
+    cat "$work/$side.exit" >> "$work/$side.err"
     [ "$rc" = 0 ] || echo "runner $rc" >> "$work/$side.err"
   else
     env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
@@ -180,12 +205,15 @@ check() {
 # scenario NAME LOCALES [ENV...]: the script on standard input, run under
 # every terminal type in each of LOCALES (space-separated), writing both to
 # a file and to a terminal -- or only to a terminal when the first ENV is
-# `pty-only`.
+# `pty-only`, and in all three modes of `run` when it is `all-modes`.
 scenario() {
   local name=$1 locales=$2 modes='file pty'
   shift 2
   if [ "${1:-}" = pty-only ]; then
     modes=pty
+    shift
+  elif [ "${1:-}" = all-modes ]; then
+    modes='file pty ttyerr'
     shift
   fi
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
@@ -896,6 +924,199 @@ initscr
 mvaddstr 1 1 never shown
 terminate
 EOF
+
+# Calls made before there is a screen.
+scenario before-initscr 'C' <<'EOF'
+doupdate
+refresh
+endwin
+initscr
+doupdate
+endwin
+EOF
+
+# The terminal's modes as each call leaves them, kept and restored -- on a
+# terminal, with output redirected from one, and with none.
+scenario terminal-modes 'C' all-modes <<'EOF'
+use_env 0
+tty
+initscr
+tty
+def_shell_mode
+def_prog_mode
+cbreak
+tty
+nocbreak
+tty
+noecho
+nonl
+tty
+echo
+nl
+reset_shell_mode
+tty
+reset_prog_mode
+tty
+mvaddstr 0 0 modes
+refresh
+endwin
+tty
+EOF
+
+# Moves a tab is the cheapest way to make, on a terminal that keeps tabs as
+# they are and on one that expands them itself, where curses must not use
+# them.
+tab_script='use_env 0
+initscr
+mvaddstr 0 0 a
+mvaddstr 0 8 b
+mvaddstr 0 16 c
+mvaddstr 1 1 d
+mvaddstr 1 24 e
+mvaddstr 2 7 f
+mvaddstr 2 40 g
+refresh
+mvaddstr 3 2 h
+move 3 16
+refresh
+endwin'
+scenario tab-stops 'C' <<< "$tab_script"
+scenario tab-stops-expanded 'C' pty-only <<< "tab3
+$tab_script"
+
+# Characters a one-byte locale has no width for, put on the screen through
+# the wide calls: those at 160 and above are written as they are there, the
+# rest made blanks.
+scenario wide-calls-one-byte-locale 'C' <<'EOF'
+use_env 0
+initscr
+mvaddnwstr 0 0 -1 \xc2\xa0\xc2\xa1\xc2\x9f\xc3\xbf
+refresh
+endwin
+EOF
+
+# Runs of one character, which a terminal with `rep` may send as one --
+# but not a line-drawing character past the table's end, nor a character
+# past a byte.
+scenario repeats 'C' <<'EOF'
+use_env 0
+initscr
+attrset 400000
+mvaddnwstr 0 0 -1 \xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80
+attrset 0
+mvaddnwstr 1 0 -1 \xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80
+mvaddstr 2 0 xxxxxxxxxxxxxxxxxxxx
+refresh
+endwin
+EOF
+
+# Two pairs that show the same colours: changing one for the other changes
+# nothing on the screen.
+scenario same-colours 'C' <<'EOF'
+use_env 0
+initscr
+start_color
+init_pair 1 1 2
+init_pair 2 1 2
+init_pair 3 1 3
+attrset 100
+mvaddstr 0 0 same colours
+mvaddstr 1 0 other colours
+refresh
+attrset 200
+mvaddstr 0 0 same colours
+attrset 300
+mvaddstr 1 0 other colours
+refresh
+endwin
+EOF
+
+# Lines changed in their middle or cut short, which a terminal may redo by
+# inserting and deleting characters (`ich`, `dch`, `smir`), by clearing the
+# start or the end of the line (`el1`, `el`), or by writing them again --
+# by amounts on either side of what each costs, and around wide characters.
+scenario line-edits 'C C.UTF-8' <<'EOF'
+use_env 0
+initscr
+mvaddstr 0 0 the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 the quick brown fox jumps over the lazy dog
+mvaddstr 3 0 the quick brown fox jumps over the lazy dog
+mvaddstr 4 0 abcdefghij
+mvaddstr 5 0 abcdefghij
+mvaddstr 6 0 abcdefghij
+mvaddstr 7 0 abcdefghij
+mvaddstr 8 0 abcdefghij
+mvaddstr 9 0 abcdefghij
+mvaddstr 10 0 abcdefghij
+mvaddstr 11 0 abcdefghij
+mvaddstr 12 0 abcdefghij
+mvaddstr 13 0 abcdefghij
+mvaddstr 14 0 abcdefghij
+mvaddstr 15 0 abcdefghij
+mvaddnwstr 16 0 -1 日本語のテキスト
+mvaddnwstr 17 0 -1 ab日本語cd
+mvaddnwstr 18 0 -1 日本語
+mvaddnwstr 19 4 -1 x日本
+refresh
+mvaddstr 0 0 the quick brown fox XYZ jumps over the lazy dog
+mvaddstr 1 0 the quick fox jumps over the lazy dog
+clrtoeol
+mvaddstr 2 0 he quick brown fox jumps over the lazy dog
+clrtoeol
+mvaddstr 3 0 Xthe quick brown fox jumps over the lazy dog
+mvaddstr 4 0 abcdeX
+clrtoeol
+mvaddstr 5 0 abcdeXg
+clrtoeol
+mvaddstr 6 0 abcdeXgh
+clrtoeol
+mvaddstr 7 0 abcdeXghi
+mvaddstr 8 0  abcdefghij
+mvaddstr 9 0   abcdefghij
+mvaddstr 10 0    abcdefghij
+mvaddstr 11 0     abcdefghij
+mvaddstr 12 0      abcdefghij
+mvaddstr 13 0       abcdefghij
+mvaddstr 14 0        abcdefghij
+mvaddstr 15 0 abXcdefghij
+mvaddnwstr 16 0 -1 X日本語のテキスト
+mvaddnwstr 17 0 -1 ab中日本語cd
+mvaddnwstr 18 0 -1 X日本語
+mvaddnwstr 19 0 -1 日本x日本
+refresh
+endwin
+EOF
+
+# Lines moved down within a region that starts at the top of the screen and
+# ends above its bottom.
+scenario scrolling-down-from-the-top 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  shifted 0 23 0;   echo refresh
+  shifted 0 10 -1;  echo refresh
+  shifted 0 12 -2;  echo refresh
+  echo 'endwin'
+)
+
+# Scrolling by deleting and inserting lines, which an update may do only
+# after `idlok` -- on a terminal without a scrolling region, and one by one
+# or several at a time.
+scenario scrolling-by-lines 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  echo 'idlok 1'
+  echo 'idcok 0'
+  shifted 0 23 0;   echo refresh
+  shifted 5 15 1;   echo refresh
+  shifted 5 15 -1;  echo refresh
+  shifted 3 20 3;   echo refresh
+  shifted 3 20 -4;  echo refresh
+  shifted 0 23 1;   echo refresh
+  echo 'idlok 0'
+  shifted 5 15 1;   echo refresh
+  echo 'endwin'
+)
 
 # Terminal types the database has no entry for, and none at all.
 printf 'initscr\nrefresh\nendwin\n' > "$DIFF_TMP/missing.script"

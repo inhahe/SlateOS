@@ -283,6 +283,44 @@ fn main() {
             b"noecho" => say(name, rc(curses::noecho())),
             b"cbreak" => say(name, rc(curses::cbreak())),
             b"nocbreak" => say(name, rc(curses::nocbreak())),
+            b"def_shell_mode" => say(name, rc(curses::def_shell_mode())),
+            b"def_prog_mode" => say(name, rc(curses::def_prog_mode())),
+            b"reset_shell_mode" => say(name, rc(curses::reset_shell_mode())),
+            b"reset_prog_mode" => say(name, rc(curses::reset_prog_mode())),
+            b"idlok" => say(name, rc(curses::idlok(line.n() != 0))),
+            b"idcok" => {
+                curses::idcok(line.n() != 0);
+                say(name, 0);
+            }
+            // The modes of the terminal on standard input, as the C probe
+            // prints them.
+            b"tty" => {
+                let shown = match libcall::termios::get_attr(0) {
+                    Ok(t) => {
+                        let cc = |i: usize| t.c_cc.get(i).copied().unwrap_or(0);
+                        format!(
+                            "tty {:x} {:x} {:x} {:x} {} {}\n",
+                            t.c_iflag,
+                            t.c_oflag,
+                            t.c_cflag,
+                            t.c_lflag,
+                            cc(libcall::termios::VMIN),
+                            cc(libcall::termios::VTIME)
+                        )
+                    }
+                    Err(_) => "tty -1\n".to_owned(),
+                };
+                let _ = std::io::stderr().write_all(shown.as_bytes());
+            }
+            // That terminal set to expand tabs itself, as `stty tab3`.
+            b"tab3" => {
+                use libcall::termios as tc;
+                let set = tc::get_attr(0).and_then(|mut t| {
+                    t.c_oflag = (t.c_oflag & !tc::TABDLY) | tc::TAB3;
+                    tc::set_attr(0, tc::TCSANOW, &t)
+                });
+                say(name, rc(set.is_ok()));
+            }
             b"beep" => say(name, rc(curses::beep())),
             b"has_colors" => say(name, i32::from(curses::has_colors())),
             b"can_change_color" => say(name, i32::from(curses::can_change_color())),

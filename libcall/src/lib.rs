@@ -69,6 +69,7 @@ pub mod crypt;
 pub mod env;
 pub mod epoll;
 pub mod fd;
+pub mod file;
 pub mod glob;
 pub mod inotify;
 pub mod locale;

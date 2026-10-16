@@ -79,6 +79,24 @@ pub fn local_now() -> Result<Local, i32> {
     {
         // SAFETY: a null argument asks `time` only for its result.
         let now = unsafe { sys::time(core::ptr::null_mut()) };
+        local_at(now)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(ENOSYS)
+    }
+}
+
+/// `localtime_r (&t)`: the time `t` seconds after the epoch, in the local
+/// zone (`TZ`, `/etc/localtime`) as the C library reads it.
+///
+/// # Errors
+///
+/// `EOVERFLOW` from `localtime_r`, for a year past what `int` holds;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn local_at(t: i64) -> Result<Local, i32> {
+    #[cfg(unix)]
+    {
         let mut tm = sys::Tm {
             tm_sec: 0,
             tm_min: 0,
@@ -94,7 +112,7 @@ pub fn local_now() -> Result<Local, i32> {
         };
         // SAFETY: both pointers are to locals of the C library's layout,
         // alive across the call, which writes `tm` and keeps neither.
-        if unsafe { sys::localtime_r(&raw const now, &raw mut tm) }.is_null() {
+        if unsafe { sys::localtime_r(&raw const t, &raw mut tm) }.is_null() {
             return Err(last_errno());
         }
         Ok(Local {
@@ -109,6 +127,7 @@ pub fn local_now() -> Result<Local, i32> {
     }
     #[cfg(not(unix))]
     {
+        let _ = t;
         Err(ENOSYS)
     }
 }
@@ -201,6 +220,27 @@ mod tests {
     fn off_unix_it_declines() {
         assert_eq!(since_boot(), Err(ENOSYS));
         assert_eq!(local_now(), Err(ENOSYS));
+        assert_eq!(local_at(0), Err(ENOSYS));
+    }
+
+    /// The real library: a given time, broken down. The epoch is the last
+    /// day of 1969 or the first of 1970 in every zone there is; a day later
+    /// is the next day of the month either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_given_time_is_broken_down() {
+        let epoch = local_at(0).unwrap();
+        assert!(
+            matches!(
+                (epoch.year, epoch.mon, epoch.mday),
+                (69, 11, 31) | (70, 0, 1)
+            ),
+            "{epoch:?}"
+        );
+        let next = local_at(86_400).unwrap();
+        assert_eq!((next.hour, next.min), (epoch.hour, epoch.min));
+        assert_ne!(next.mday, epoch.mday);
+        assert!(local_at(i64::MAX).is_err());
     }
 
     /// The real library: now, broken down, every field in its range.
